@@ -1,0 +1,14 @@
+{
+  "name": "taskbridge-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "smoke:pi": "node scripts/pi-rpc-smoke.mjs",
+    "check": "node --check src/server.mjs && node --check src/task-manager.mjs && node --check src/pi-rpc.mjs && node --check src/git.mjs && node --check src/runtime-manager.mjs"
+  }
+}

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111318" />
+  <title>TaskBridge MVP</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <strong>TaskBridge</strong>
+      <span class="muted">Pi remote control MVP</span>
+    </div>
+    <div id="pcState" class="pill">checking…</div>
+  </header>
+
+  <main>
+    <section class="card compose">
+      <label>Проект</label>
+      <select id="project"></select>
+
+      <label>Исполнитель</label>
+      <select disabled>
+        <option>Pi / configured model</option>
+      </select>
+
+      <label>Задача</label>
+      <textarea id="prompt" rows="6" placeholder="Например: изучи проект, найди причину failing test, исправь и запусти тесты."></textarea>
+
+      <label class="fileButton">
+        <input id="files" type="file" multiple />
+        + Добавить файлы
+      </label>
+      <div id="fileList" class="muted small"></div>
+
+      <button id="run" class="primary">RUN</button>
+      <div id="createError" class="error"></div>
+    </section>
+
+    <section class="card">
+      <div class="sectionTitle">
+        <strong>Задачи</strong>
+        <button id="refresh" class="ghost">Обновить</button>
+      </div>
+      <div id="tasks" class="tasks"></div>
+    </section>
+
+    <section id="detail" class="card hidden">
+      <div class="sectionTitle">
+        <div>
+          <strong id="taskTitle">Task</strong>
+          <div id="taskProject" class="muted small"></div>
+        </div>
+        <span id="taskStatus" class="pill"></span>
+      </div>
+
+      <div class="grid">
+        <div><span class="muted">Current</span><strong id="current">—</strong></div>
+        <div><span class="muted">Workspace</span><strong id="workspace">—</strong></div>
+        <div><span class="muted">Last usage</span><strong id="usage">—</strong></div>
+        <div><span class="muted">Compaction</span><strong id="compaction">—</strong></div>
+      </div>
+
+      <div class="actions">
+        <button id="stop" class="danger">STOP</button>
+        <button id="compact" class="ghost">COMPACT</button>
+        <button id="piState" class="ghost">PI STATE</button>
+      </div>
+
+      <label>Инструкция во время/после работы</label>
+      <div class="inline">
+        <input id="followup" placeholder="Например: не меняй публичный API" />
+        <button id="sendFollowup">SEND</button>
+      </div>
+
+      <h3>Pi output</h3>
+      <pre id="assistant">—</pre>
+
+      <h3>Live events</h3>
+      <div id="events" class="events"></div>
+
+      <h3>Artifacts</h3>
+      <div id="artifacts" class="artifacts muted">—</div>
+
+      <details>
+        <summary>Последний Pi state</summary>
+        <pre id="stateJson">—</pre>
+      </details>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

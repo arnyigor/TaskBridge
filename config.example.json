@@ -1,0 +1,36 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8787,
+    "maxBodyMb": 25
+  },
+  "pi": {
+    "command": "pi",
+    "args": [],
+    "persistSessions": true,
+    "projectTrust": "approve",
+    "abortTimeoutMs": 10000
+  },
+  "localRuntime": {
+    "healthUrl": "http://127.0.0.1:8080/health",
+    "managed": {
+      "enabled": false,
+      "command": "",
+      "args": [],
+      "cwd": ""
+    }
+  },
+  "workspace": {
+    "requireCleanSource": true,
+    "useGitWorktreeByDefault": true
+  },
+  "projects": [
+    {
+      "id": "example-project",
+      "name": "Example project (edit config.json)",
+      "path": "C:\\path\\to\\your\\git-project",
+      "useWorktree": true,
+      "verification": []
+    }
+  ]
+}
