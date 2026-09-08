@@ -187,7 +187,7 @@ function appendSystemNote(text) {
   const note = document.createElement('div');
   note.className = 'systemNote';
   note.textContent = text;
-  $('msgsInner').insertBefore(note, $('msgsInner').firstChild);
+  $('msgsInner').append(note);
   scrollBottom();
 }
 
