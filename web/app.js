@@ -13,6 +13,7 @@ let lastSentText = '';
 let errorShownForTask = null;
 let baselineAssistantLen = 0;  // cumulative-text offset where the current bot turn starts
 let baselineThinkingLen = 0;
+let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 8s
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -119,23 +120,64 @@ function scheduleTextUpdate() {
   textUpdateTimer = setTimeout(() => { textUpdateTimer = null; updateText(); }, 120);
 }
 
-function appendToolChip(label, state) {
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+
+function toolNameOf(label) {
+  const m = label.match(/^tool(?: done)?:\s*([^\s—]+)/);
+  return m ? m[1] : label.slice(0, 24);
+}
+
+function toolIcon(state) {
+  return state === 'run' ? '…' : state === 'error' ? '✕' : '✓';
+}
+
+function appendToolChip(label, state, frame) {
   if (!liveTurn) return;
-  const chip = document.createElement('div');
-  chip.className = `tool ${state}`;
-  chip.textContent = label;
-  liveTurn.body.insertBefore(chip, liveTurn.meta);
-  if (state === 'run') lastToolChip = chip;
+  const details = document.createElement('details');
+  details.className = `tool ${state}`;
+  const summary = document.createElement('summary');
+  const name = toolNameOf(label);
+  summary.dataset.tool = name;
+  summary.textContent = `${toolIcon(state)} ${name}`;
+  const body = document.createElement('div');
+  body.className = 'tool-body';
+  body.textContent = label;
+  details.append(summary, body);
+  const imagePath = frame?.args?.path || frame?.args?.file_path || frame?.args?.filePath;
+  if (imagePath && IMAGE_EXT_RE.test(imagePath)) details.dataset.imagePath = imagePath;
+  liveTurn.body.insertBefore(details, liveTurn.meta);
+  if (state === 'run') lastToolChip = details;
   scrollBottom();
 }
 
-function markToolDone(label) {
-  if (lastToolChip) {
-    lastToolChip.classList.remove('run');
-    if (/error/i.test(label)) lastToolChip.classList.add('error');
-    lastToolChip.textContent = label;
+function appendInlineImage(relPath) {
+  if (!liveTurn || !selectedTaskId) return;
+  const url = `/api/tasks/${selectedTaskId}/workspace-file?path=${encodeURIComponent(relPath)}`;
+  const link = document.createElement('a');
+  link.href = url;
+  link.target = '_blank';
+  link.className = 'chatImage';
+  link.title = relPath;
+  const img = document.createElement('img');
+  img.src = url;
+  img.alt = relPath;
+  img.loading = 'lazy';
+  link.append(img);
+  liveTurn.body.insertBefore(link, liveTurn.meta);
+  scrollBottom();
+}
+
+function markToolDone(label, frame) {
+  const chip = lastToolChip;
+  if (chip) {
+    chip.classList.remove('run');
+    const isError = /error/i.test(label);
+    chip.classList.add(isError ? 'error' : 'done');
+    const summary = chip.querySelector('summary');
+    summary.textContent = `${toolIcon(isError ? 'error' : 'done')} ${summary.dataset.tool}`;
+    if (!isError && chip.dataset.imagePath) appendInlineImage(chip.dataset.imagePath);
   } else {
-    appendToolChip(label, /error/i.test(label) ? 'error' : 'done');
+    appendToolChip(label, /error/i.test(label) ? 'error' : 'done', frame);
   }
   lastToolChip = null;
 }
@@ -250,12 +292,24 @@ async function sendContinueMessage(taskId, text, opts = {}) {
   lastSentText = text;
   errorShownForTask = null;
   if (fresh) {
-    baselineAssistantLen = liveText.length;
-    baselineThinkingLen = liveThinking.length;
+    // authoritative snapshot from the server — a locally-buffered liveText can lag
+    // behind by up to one debounce tick and would leak trailing prior-turn text
+    try {
+      const current = await api(`/api/tasks/${taskId}`);
+      baselineAssistantLen = (current.assistantText || '').length;
+      baselineThinkingLen = (current.thinkingText || '').length;
+    } catch {
+      baselineAssistantLen = liveText.length;
+      baselineThinkingLen = liveThinking.length;
+    }
   }
   liveThinking = '';
   liveText = '';
   lastToolChip = null;
+  if (fresh) await checkPcState();
+  if (fresh && modelBusy === true) {
+    appendSystemNote('Модель сейчас занята другим запросом — сообщение встанет в очередь и обработается, когда она освободится.');
+  }
   appendBotTurn();
   try {
     await api(`/api/tasks/${taskId}/message`, {
@@ -274,6 +328,10 @@ async function sendContinueMessage(taskId, text, opts = {}) {
         await loadTasks();
         await selectTask(task.id);
         appendSystemNote('Прежняя сессия Pi потеряна (сервер перезапускался) — начата новая с тем же сообщением.');
+        await checkPcState();
+        if (modelBusy === true) {
+          appendSystemNote('Модель сейчас занята другим запросом — сообщение встанет в очередь и обработается, когда она освободится.');
+        }
         return;
       } catch (err2) {
         showTurnError(err2.message, () => sendContinueMessage(taskId, text, { fresh: false }));
@@ -312,8 +370,8 @@ async function selectTask(id) {
     const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=500`);
     for (const e of events) {
       const pt = e.data?.pi?.type;
-      if (pt === 'tool_execution_start') appendToolChip(e.message, 'run');
-      else if (pt === 'tool_execution_end') markToolDone(e.message);
+      if (pt === 'tool_execution_start') appendToolChip(e.message, 'run', e.data.pi);
+      else if (pt === 'tool_execution_end') markToolDone(e.message, e.data.pi);
     }
   } catch {}
 
@@ -333,8 +391,8 @@ function onStreamEvent(e) {
     else if (d?.type === 'text_delta') { liveText += d.delta || ''; scheduleTextUpdate(); }
     return;
   }
-  if (pt === 'tool_execution_start') { appendToolChip(ev.message, 'run'); return; }
-  if (pt === 'tool_execution_end') { markToolDone(ev.message); return; }
+  if (pt === 'tool_execution_start') { appendToolChip(ev.message, 'run', ev.data.pi); return; }
+  if (pt === 'tool_execution_end') { markToolDone(ev.message, ev.data.pi); return; }
   if (ev.type === 'STATUS' || ev.type.startsWith('TASK_') || pt === 'compaction_end') refreshTask();
 }
 
@@ -468,7 +526,7 @@ $('files').addEventListener('change', renderFileList);
 const promptEl = $('prompt');
 promptEl.addEventListener('input', () => {
   promptEl.style.height = 'auto';
-  promptEl.style.height = `${Math.min(promptEl.scrollHeight, 180)}px`;
+  promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
 });
 promptEl.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey) {
@@ -518,6 +576,10 @@ $('form').addEventListener('submit', async (e) => {
       $('fileList').textContent = '';
       await loadTasks();
       await selectTask(task.id);
+      await checkPcState();
+      if (modelBusy === true) {
+        appendSystemNote('Модель сейчас занята другим запросом — сообщение встанет в очередь и обработается, когда она освободится.');
+      }
     }
   } catch (err) {
     $('createError').textContent = err.message;
@@ -549,7 +611,10 @@ $('compact').onclick = async () => {
   try {
     const r = await api(`/api/tasks/${selectedTaskId}/compact`, { method: 'POST', body: JSON.stringify({ instructions }) });
     alert(`Compaction завершён. Before: ${r.result?.tokensBefore ?? '?'}; after: ${r.result?.estimatedTokensAfter ?? '?'}`);
-  } catch (e) { alert(e.message); }
+  } catch (e) {
+    if (/too small|nothing to compact/i.test(e.message)) alert('Пока нечего сжимать — контекст ещё маленький.');
+    else alert(e.message);
+  }
 };
 
 $('autoCompaction').onclick = async () => {
@@ -576,13 +641,14 @@ $('sendFollowup').onclick = async () => {
   finally { $('sendFollowup').disabled = false; }
 };
 
-$('piState').onclick = async () => {
-  if (!selectedTaskId) return;
+$('stateDetails').addEventListener('toggle', async () => {
+  if (!$('stateDetails').open || !selectedTaskId) return;
+  $('stateJson').textContent = 'Загрузка…';
   try {
     const r = await api(`/api/tasks/${selectedTaskId}/state`);
     $('stateJson').textContent = JSON.stringify(r.state, null, 2);
   } catch (e) { $('stateJson').textContent = e.message; }
-};
+});
 
 /* ---------------- markdown (regex, no deps) ---------------- */
 
@@ -648,13 +714,20 @@ async function checkPcState() {
   const el = $('pcState');
   try {
     const info = await api('/api/info');
-    el.textContent = '● ONLINE';
-    el.classList.remove('err');
-    el.classList.add('ok');
+    modelBusy = info.modelBusy;
+    el.classList.remove('err', 'ok', 'run');
+    if (modelBusy === true) {
+      el.textContent = '● МОДЕЛЬ ЗАНЯТА';
+      el.classList.add('run');
+    } else {
+      el.textContent = '● ONLINE';
+      el.classList.add('ok');
+    }
     el.title = (info.addresses || []).map((x) => x.url).join('\n');
   } catch {
+    modelBusy = null;
     el.textContent = 'OFFLINE';
-    el.classList.remove('ok');
+    el.classList.remove('ok', 'run');
     el.classList.add('err');
     el.title = '';
   }
@@ -662,7 +735,7 @@ async function checkPcState() {
 
 async function init() {
   await checkPcState();
-  setInterval(checkPcState, 8000);
+  setInterval(checkPcState, 4000);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') checkPcState();
   });

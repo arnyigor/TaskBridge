@@ -21,6 +21,23 @@ export class RuntimeManager {
     }
   }
 
+  // /health returns ok even while the single -np N slot is busy generating a
+  // response for another request; /slots is the only way to see that.
+  async getBusyStatus() {
+    const url = this.config.healthUrl;
+    if (!url) return { unknown: true };
+    try {
+      const slotsUrl = url.replace(/\/health$/, '/slots');
+      const res = await fetch(slotsUrl, { signal: AbortSignal.timeout(1500) });
+      if (!res.ok) return { unknown: true };
+      const slots = await res.json();
+      if (!Array.isArray(slots) || !slots.length) return { unknown: true };
+      return { unknown: false, busy: slots.every((s) => s.is_processing) };
+    } catch {
+      return { unknown: true };
+    }
+  }
+
   async ensureRunning(onLog = () => {}) {
     if (await this.isReady()) {
       this.state = this.proc ? 'MANAGED_RUNNING' : 'EXTERNAL_RUNNING';

@@ -99,7 +99,13 @@ function contentType(file) {
     '.css': 'text/css; charset=utf-8',
     '.json': 'application/json; charset=utf-8',
     '.webmanifest': 'application/manifest+json; charset=utf-8',
-    '.svg': 'image/svg+xml'
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp'
   }[ext] || 'application/octet-stream';
 }
 
@@ -135,10 +141,12 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && pathname === '/api/info') {
+      const busy = await manager.runtimeManager.getBusyStatus();
       return json(res, 200, {
         name: 'TaskBridge MVP',
         version: '0.1.0',
-        addresses: lanAddresses(Number(config.server?.port || 8787))
+        addresses: lanAddresses(Number(config.server?.port || 8787)),
+        modelBusy: busy.unknown ? null : busy.busy
       });
     }
 
@@ -234,6 +242,27 @@ const server = http.createServer(async (req, res) => {
         res.end(data);
       } catch {
         errorJson(res, 404, Object.assign(new Error('Artifact not found'), { code: 'NOT_FOUND' }));
+      }
+      return;
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace-file$/);
+    if (req.method === 'GET' && match) {
+      const task = manager.getTask(match[1]);
+      if (!task || !task.workspacePath) {
+        return errorJson(res, 404, Object.assign(new Error('Task or workspace not found'), { code: 'NOT_FOUND' }));
+      }
+      const root = path.resolve(task.workspacePath);
+      const target = path.resolve(root, String(url.searchParams.get('path') || ''));
+      if (target !== root && !target.startsWith(root + path.sep)) {
+        return errorJson(res, 400, Object.assign(new Error('Path escapes workspace'), { code: 'INPUT_INVALID' }));
+      }
+      try {
+        const data = await fs.readFile(target);
+        res.writeHead(200, { 'content-type': contentType(target), 'cache-control': 'no-cache' });
+        res.end(data);
+      } catch {
+        errorJson(res, 404, Object.assign(new Error('File not found'), { code: 'NOT_FOUND' }));
       }
       return;
     }

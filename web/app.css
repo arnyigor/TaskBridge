@@ -237,16 +237,42 @@ body {
 .tool {
   font-family: var(--mono);
   font-size: 11px;
-  color: var(--muted);
   border-left: 2px solid var(--border-strong);
   background: var(--surface-2);
-  padding: 5px 9px;
   border-radius: 0 6px 6px 0;
   max-width: 100%;
+}
+.tool summary {
+  color: var(--muted);
+  padding: 5px 9px;
+  cursor: pointer;
+  list-style: none;
   overflow-wrap: anywhere;
 }
-.tool.run { color: var(--accent); border-left-color: var(--accent); }
-.tool.error { color: var(--danger); border-left-color: var(--danger); }
+.tool summary::-webkit-details-marker { display: none; }
+.tool.run summary { color: var(--accent); }
+.tool.run { border-left-color: var(--accent); }
+.tool.error summary { color: var(--danger); }
+.tool.error { border-left-color: var(--danger); }
+.tool .tool-body {
+  padding: 6px 9px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chatImage {
+  display: block;
+  max-width: 100%;
+}
+.chatImage img {
+  max-width: 100%;
+  max-height: 320px;
+  border-radius: var(--radius-s);
+  border: 1px solid var(--border);
+  display: block;
+}
 
 .meta { font-size: 11px; color: var(--muted); padding: 0 2px; }
 
@@ -353,8 +379,8 @@ body {
   font-size: 13.5px;
   line-height: 1.45;
   outline: none;
-  max-height: 180px;
-  min-height: 42px;
+  max-height: 240px;
+  min-height: 64px;
 }
 .composer textarea:focus { border-color: var(--accent); }
 

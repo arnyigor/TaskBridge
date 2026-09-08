@@ -90,14 +90,13 @@
         <div class="actions">
           <button id="compact" class="wide" type="button">COMPACT</button>
           <button id="autoCompaction" class="wide" type="button">AUTO: —</button>
-          <button id="piState" class="wide" type="button">PI STATE</button>
         </div>
 
         <label class="fieldLabel">Artifacts</label>
         <div id="artifacts" class="artifacts muted">—</div>
 
-        <details>
-          <summary>Последний Pi state</summary>
+        <details id="stateDetails">
+          <summary>Debug: состояние Pi (JSON)</summary>
           <pre id="stateJson">—</pre>
         </details>
       </div>
