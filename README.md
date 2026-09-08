@@ -38,7 +38,7 @@
 ## Что намеренно НЕ входит
 
 - SQLite (для PoC используется файловое persistent-хранилище);
-- полноценное восстановление живой Pi session после restart TaskBridge;
+- подключение к прежнему OS-процессу Pi (вместо этого запускается новый процесс с сохранённой сессией);
 - Claude Code / Codex direct adapters;
 - AUTO / маленькая dispatcher LLM;
 - KMP Android app;
@@ -445,10 +445,10 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 # 16. Известные ограничения
 
 1. Task store пока файловый, не SQLite.
-2. После restart TaskBridge существующая живая Pi RPC process/session не reattach'ится.
-3. TaskBridge помечает оборванные active tasks как `FAILED_RECOVERY`.
+2. После restart TaskBridge при следующем сообщении запускается новый Pi-процесс с тем же файлом сессии. Если файла Pi нет, история восстанавливается из событий TaskBridge, включая результаты инструментов.
+3. TaskBridge помечает оборванные active tasks как `FAILED` с кодом `FAILED_RECOVERY`; их можно продолжить новым сообщением.
 4. Одновременно рассчитан на одну активную inference-задачу.
-5. Follow-up после restart недоступен для старой Pi process.
+5. Follow-up после restart сохраняет ID сессии и историю; автоматического повторного выполнения оборванного запроса нет.
 6. Upload предназначен для небольших файлов.
 7. Нет automatic worktree cleanup.
 8. `diff.patch` не содержит содержимое новых untracked файлов; они перечисляются в `git-status.txt`.

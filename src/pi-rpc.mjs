@@ -27,6 +27,7 @@ export class PiRpcSession extends EventEmitter {
       cwd,
       sessionDir,
       sessionName,
+      sessionFile,
       persistSessions = true,
       projectTrust = 'approve'
     } = this.options;
@@ -37,7 +38,10 @@ export class PiRpcSession extends EventEmitter {
     if (projectTrust === 'approve') piArgs.push('--approve');
     if (projectTrust === 'deny') piArgs.push('--no-approve');
 
-    if (persistSessions && sessionDir) {
+    if (sessionFile) {
+      piArgs.push('--session', path.resolve(sessionFile));
+      if (sessionDir) piArgs.push('--session-dir', path.resolve(sessionDir));
+    } else if (persistSessions && sessionDir) {
       piArgs.push('--session-dir', path.resolve(sessionDir));
       if (sessionName) piArgs.push('--name', sessionName);
     } else {

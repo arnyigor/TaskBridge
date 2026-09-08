@@ -7,18 +7,14 @@ let refreshTimer = null;
 let liveTurn = null;        // { body, md, meta } of the current bot turn
 let liveThinking = '';
 let liveText = '';
-let lastToolChip = null;
 let nearBottom = true;
 let textUpdateTimer = null;
-let lastSentText = '';
-let errorShownForTask = null;
 let chatState = null;
 let selectionVersion = 0;
 let refreshingVersion = null;
 let turnNodes = new Map();
 let liveActive = false;
-let sending = false;
-let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 8s
+let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 4s
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -126,39 +122,10 @@ function updateText() {
   scrollBottom();
 }
 
-function scheduleTextUpdate() {
-  if (textUpdateTimer) return;
-  textUpdateTimer = setTimeout(() => { textUpdateTimer = null; updateText(); }, 120);
-}
-
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
-
-function toolNameOf(label) {
-  const m = label.match(/^tool(?: done)?:\s*([^\s—]+)/);
-  return m ? m[1] : label.slice(0, 24);
-}
 
 function toolIcon(state) {
   return state === 'run' ? '…' : state === 'error' ? '✕' : '✓';
-}
-
-function appendToolChip(label, state, frame) {
-  if (!liveTurn) return;
-  const details = document.createElement('details');
-  details.className = `tool ${state}`;
-  const summary = document.createElement('summary');
-  const name = toolNameOf(label);
-  summary.dataset.tool = name;
-  summary.textContent = `${toolIcon(state)} ${name}`;
-  const body = document.createElement('div');
-  body.className = 'tool-body';
-  body.textContent = label;
-  details.append(summary, body);
-  const imagePath = frame?.args?.path || frame?.args?.file_path || frame?.args?.filePath;
-  if (imagePath && IMAGE_EXT_RE.test(imagePath)) details.dataset.imagePath = imagePath;
-  liveTurn.body.insertBefore(details, liveTurn.meta);
-  if (state === 'run') lastToolChip = details;
-  scrollBottom();
 }
 
 function appendInlineImage(relPath) {
@@ -178,43 +145,12 @@ function appendInlineImage(relPath) {
   scrollBottom();
 }
 
-function markToolDone(label, frame) {
-  const chip = lastToolChip;
-  if (chip) {
-    chip.classList.remove('run');
-    const isError = /error/i.test(label);
-    chip.classList.add(isError ? 'error' : 'done');
-    const summary = chip.querySelector('summary');
-    summary.textContent = `${toolIcon(isError ? 'error' : 'done')} ${summary.dataset.tool}`;
-    if (!isError && chip.dataset.imagePath) appendInlineImage(chip.dataset.imagePath);
-  } else {
-    appendToolChip(label, /error/i.test(label) ? 'error' : 'done', frame);
-  }
-  lastToolChip = null;
-}
-
 function appendSystemNote(text) {
   hideEmptyState();
   const note = document.createElement('div');
   note.className = 'systemNote';
   note.textContent = text;
   $('msgsInner').append(note);
-  scrollBottom();
-}
-
-function showTurnError(message, onRetry) {
-  if (!liveTurn) return;
-  liveTurn.md.innerHTML = '';
-  const box = document.createElement('div');
-  box.className = 'turnError';
-  const text = document.createElement('div');
-  text.textContent = message || 'Модель не отвечает.';
-  const retry = document.createElement('button');
-  retry.type = 'button';
-  retry.textContent = 'Повторить';
-  retry.onclick = onRetry;
-  box.append(text, retry);
-  liveTurn.md.append(box);
   scrollBottom();
 }
 
@@ -239,7 +175,7 @@ function renderContext(t) {
   }
 
   const autoBtn = $('autoCompaction');
-  if (t.autoCompactionEnabled == null) {
+  if (t.autoCompactionEnabled == null || t.sessionAvailable === false) {
     autoBtn.textContent = 'AUTO: —';
     autoBtn.disabled = true;
   } else {
@@ -247,14 +183,6 @@ function renderContext(t) {
     autoBtn.disabled = false;
     autoBtn.dataset.enabled = String(t.autoCompactionEnabled);
   }
-}
-
-function setMeta(t) {
-  if (!liveTurn) return;
-  const parts = [t.status];
-  if (t.status === 'RUNNING' && t.current) parts.push(t.current);
-  if (t.lastUsage?.totalTokens != null) parts.push(`${t.lastUsage.totalTokens} tok`);
-  liveTurn.meta.textContent = parts.join(' · ');
 }
 
 function scrollBottom() {
@@ -393,7 +321,7 @@ function renderTaskDetails(t) {
   const c = t.compaction || {};
   $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
   $('stopButton').disabled = !ACTIVE_STATUSES.has(t.status) || t.status === 'CANCELLING';
-  $('compact').disabled = ACTIVE_STATUSES.has(t.status);
+  $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;
 }
 
 async function selectTask(id) {
@@ -571,7 +499,6 @@ promptEl.addEventListener('keydown', (event) => {
 });
 
 function setBusy(busy) {
-  sending = busy;
   $('sendButton').disabled = busy;
   $('project').disabled = busy;
 }
@@ -767,7 +694,7 @@ async function checkPcState() {
 }
 
 async function init() {
-  await checkPcState();
+  checkPcState();
   setInterval(checkPcState, 4000);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') checkPcState();

@@ -5,6 +5,7 @@ import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, runVerification } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
+import { restoreSessionFile } from './session-history.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -135,7 +136,8 @@ export class TaskManager extends EventEmitter {
 
   #publicTask(task) {
     const { _incomingFiles, _modelError, ...safe } = task;
-    return safe;
+    const runtime = this.runtimes.get(task.id);
+    return { ...safe, sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed)) };
   }
 
   async #pump() {
@@ -175,10 +177,15 @@ export class TaskManager extends EventEmitter {
 
       const pi = await this.#createPi(task);
       await this.#captureModelInfo(task, pi);
+      if (task.status === 'CANCELLED' || this.deleted.has(task.id) || this.runtimes.get(task.id)?.cancelRequested) {
+        await pi.killTree();
+        return;
+      }
       const settled = this.#waitForSettle(task.id, 12 * 60 * 60 * 1000);
       settled.catch(() => {});
       try {
         await this.#setStatus(task, 'RUNNING', 'Pi starting');
+        if (task.status === 'CANCELLED' || this.runtimes.get(task.id)?.cancelRequested) { this.#resolveSettle(task.id); return; }
         await pi.prompt(this.#buildPrompt(task));
         await settled;
       } catch (error) {
@@ -236,7 +243,7 @@ export class TaskManager extends EventEmitter {
     return `${task.prompt}${attachmentNote}\n\nWork only inside the current working directory. At the end, summarize what you changed and what checks you ran.`;
   }
 
-  async #createPi(task) {
+  async #createPi(task, sessionFile) {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
     const pi = new PiRpcSession({
       command: this.config.pi?.command || 'pi',
@@ -244,6 +251,7 @@ export class TaskManager extends EventEmitter {
       cwd: task.workspacePath,
       sessionDir,
       sessionName: `task-${task.id}`,
+      sessionFile,
       persistSessions: this.config.pi?.persistSessions !== false,
       projectTrust: this.config.pi?.projectTrust || 'approve'
     });
@@ -289,8 +297,9 @@ export class TaskManager extends EventEmitter {
   async #captureModelInfo(task, pi) {
     try {
       const state = await pi.getState();
+      if (state?.sessionFile) task.piSessionFile = state.sessionFile;
       task.model = state?.model
-        ? { id: state.model.id, contextWindow: state.model.contextWindow ?? null, maxTokens: state.model.maxTokens ?? null }
+        ? { id: state.model.id, provider: state.model.provider, contextWindow: state.model.contextWindow ?? null, maxTokens: state.model.maxTokens ?? null }
         : null;
       task.autoCompactionEnabled = state?.autoCompactionEnabled ?? null;
       await this.store.save(this.#publicTask(task));
@@ -299,9 +308,11 @@ export class TaskManager extends EventEmitter {
 
   async setAutoCompaction(id, enabled) {
     const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    // Keep the preference for the next process too; opening history need not
+    // start a model process just to change this setting.
     const runtime = this.runtimes.get(id);
-    if (!task || !runtime) throw Object.assign(new Error('Pi session not found'), { code: 'NOT_FOUND' });
-    await runtime.pi.setAutoCompaction(Boolean(enabled));
+    if (runtime && !runtime.pi.closed) await runtime.pi.setAutoCompaction(Boolean(enabled));
     task.autoCompactionEnabled = Boolean(enabled);
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
@@ -486,6 +497,7 @@ export class TaskManager extends EventEmitter {
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
     if (!runtime) {
       task.status = 'CANCELLED';
+      task.current = 'Cancelled';
       this.queue = this.queue.filter(x => x !== id);
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
@@ -513,13 +525,12 @@ export class TaskManager extends EventEmitter {
 
   async #message(id, text, mode, files) {
     const task = this.tasks.get(id);
-    const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-    if (!runtime || runtime.pi.closed) throw Object.assign(new Error('Процесс Pi этой сессии завершён. История сохранена; для нового запроса откройте новую сессию.'), { code: 'SESSION_UNAVAILABLE' });
     if (this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
     const userText = String(text || '').trim();
     if (!userText) throw Object.assign(new Error('message is required'), { code: 'INPUT_INVALID' });
     if (!(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
+    const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState();
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
@@ -567,12 +578,43 @@ export class TaskManager extends EventEmitter {
   }
 
   async compact(id, instructions = '') {
+    return this.#admit(() => this.#compact(id, instructions));
+  }
+
+  async #compact(id, instructions) {
     const task = this.tasks.get(id);
-    const runtime = this.runtimes.get(id);
-    if (!task || !runtime) throw Object.assign(new Error('Pi session not found'), { code: 'NOT_FOUND' });
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    const runtime = await this.#ensureSession(task);
+    if (this.activeTaskId || (await runtime.pi.getState())?.isStreaming) throw Object.assign(new Error('Дождитесь завершения ответа перед сжатием контекста.'), { code: 'BUSY' });
+    if ((await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом.'), { code: 'MODEL_BUSY' });
     await this.#event(task, 'COMPACT_REQUESTED', 'Manual compaction requested');
     const response = await runtime.pi.compact(String(instructions || ''));
     return response.data || null;
+  }
+
+  async #ensureSession(task) {
+    const current = this.runtimes.get(task.id);
+    if (current && !current.pi.closed) return current;
+    if ((await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+    if (!task.workspacePath) {
+      Object.assign(task, await this.#prepareWorkspace(task));
+    }
+    await fs.access(task.workspacePath);
+    const sessionFile = await restoreSessionFile(task, this.store, this.dataRoot);
+    const autoCompaction = task.autoCompactionEnabled;
+    const pi = await this.#createPi(task, sessionFile);
+    try {
+      await pi.getState();
+      if (autoCompaction != null) await pi.setAutoCompaction(autoCompaction);
+      await this.#captureModelInfo(task, pi);
+      task.piSessionFile = sessionFile;
+      await this.#event(task, 'SESSION_RESTORED', 'Сессия Pi восстановлена с сохранённой историей.');
+      return this.runtimes.get(task.id);
+    } catch (error) {
+      await pi.killTree().catch(() => {});
+      this.runtimes.delete(task.id);
+      throw error;
+    }
   }
 
   async state(id) {

@@ -40,52 +40,52 @@ export class TaskStore {
     const dir = this.taskDir(task.id);
     const text = JSON.stringify(task, null, 2);
     return this.#write(task.id, async () => {
-    await fsp.mkdir(dir, { recursive: true });
-    const tmp = path.join(dir, 'task.json.tmp');
-    const target = path.join(dir, 'task.json');
-    await fsp.writeFile(tmp, text, 'utf8');
-    await fsp.rename(tmp, target);
+      await fsp.mkdir(dir, { recursive: true });
+      const tmp = path.join(dir, 'task.json.tmp');
+      const target = path.join(dir, 'task.json');
+      await fsp.writeFile(tmp, text, 'utf8');
+      await fsp.rename(tmp, target);
     });
   }
 
   async appendEvent(id, event) {
     const dir = this.taskDir(id);
     return this.#write(id, async () => {
-    await fsp.mkdir(dir, { recursive: true });
-    const file = path.join(dir, 'events.jsonl');
-    if (!this.sequences.has(id)) {
-      const text = await fsp.readFile(file, 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; });
-      let seq = 0;
-      for (const line of text.split(/\r?\n/).filter(Boolean)) {
-        seq += 1;
-        try { seq = Math.max(seq, Number(JSON.parse(line).seq) || 0); } catch {}
+      await fsp.mkdir(dir, { recursive: true });
+      const file = path.join(dir, 'events.jsonl');
+      if (!this.sequences.has(id)) {
+        const text = await fsp.readFile(file, 'utf8').catch(e => { if (e.code === 'ENOENT') return ''; throw e; });
+        let seq = 0;
+        for (const line of text.split(/\r?\n/).filter(Boolean)) {
+          seq += 1;
+          try { seq = Math.max(seq, Number(JSON.parse(line).seq) || 0); } catch {}
+        }
+        if (text && !text.endsWith('\n')) await fsp.appendFile(file, '\n');
+        this.sequences.set(id, seq);
       }
-      if (text && !text.endsWith('\n')) await fsp.appendFile(file, '\n');
-      this.sequences.set(id, seq);
-    }
-    event.seq = this.sequences.get(id) + 1;
-    await fsp.appendFile(file, JSON.stringify(event) + '\n', 'utf8');
-    this.sequences.set(id, event.seq);
-    return event;
+      event.seq = this.sequences.get(id) + 1;
+      await fsp.appendFile(file, JSON.stringify(event) + '\n', 'utf8');
+      this.sequences.set(id, event.seq);
+      return event;
     });
   }
 
   async appendRaw(id, name, content) {
     const dir = path.join(this.taskDir(id), 'artifacts');
     return this.#write(id, async () => {
-    await fsp.mkdir(dir, { recursive: true });
-    await fsp.appendFile(path.join(dir, path.basename(name)), content, 'utf8');
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.appendFile(path.join(dir, path.basename(name)), content, 'utf8');
     });
   }
 
   async writeArtifact(id, name, content) {
     const dir = path.join(this.taskDir(id), 'artifacts');
     return this.#write(id, async () => {
-    await fsp.mkdir(dir, { recursive: true });
-    const safe = path.basename(name);
-    const target = path.join(dir, safe);
-    await fsp.writeFile(target, content);
-    return target;
+      await fsp.mkdir(dir, { recursive: true });
+      const safe = path.basename(name);
+      const target = path.join(dir, safe);
+      await fsp.writeFile(target, content);
+      return target;
     });
   }
 

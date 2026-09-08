@@ -272,12 +272,18 @@ const server = http.createServer(async (req, res) => {
       if (!task || !task.workspacePath) {
         return errorJson(res, 404, Object.assign(new Error('Task or workspace not found'), { code: 'NOT_FOUND' }));
       }
-      const root = path.resolve(task.workspacePath);
-      const target = path.resolve(root, String(url.searchParams.get('path') || ''));
-      if (target !== root && !target.startsWith(root + path.sep)) {
+      const root = await fs.realpath(task.workspacePath);
+      const requested = path.resolve(root, String(url.searchParams.get('path') || ''));
+      const relative = path.relative(root, requested);
+      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
         return errorJson(res, 400, Object.assign(new Error('Path escapes workspace'), { code: 'INPUT_INVALID' }));
       }
       try {
+        const target = await fs.realpath(requested);
+        const realRelative = path.relative(root, target);
+        if (realRelative === '..' || realRelative.startsWith('..' + path.sep) || path.isAbsolute(realRelative)) {
+          return errorJson(res, 400, Object.assign(new Error('Path escapes workspace'), { code: 'INPUT_INVALID' }));
+        }
         const data = await fs.readFile(target);
         res.writeHead(200, { 'content-type': contentType(target), 'cache-control': 'no-cache' });
         res.end(data);
