@@ -24,7 +24,7 @@
 
   <div class="subheader" id="subheader">
     <span id="continueBadge" class="pill hidden"></span>
-    <button id="newTaskButton" type="button" class="hidden">+ Новая задача</button>
+    <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
   </div>
 
   <main class="main">
@@ -33,22 +33,22 @@
       <div class="msgs" id="msgs">
         <div class="msgs-inner" id="msgsInner">
           <div class="empty" id="emptyState">
-            Выбери задачу из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.
+            Выбери сессию из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.
           </div>
         </div>
       </div>
 
       <div class="composer-wrap">
         <div class="composer-top">
-          <select id="project" title="Проект" aria-label="Проект"></select>
+          <select id="project" title="Проект" aria-label="Проект" class="hidden"></select>
           <label class="fileButton" title="Прикрепить файлы">
-            <input id="files" type="file" multiple />+ файлы
+            <input id="files" type="file" multiple accept="*/*" />+ файлы
           </label>
           <span id="fileList" class="muted small"></span>
         </div>
         <form class="composer" id="form">
           <textarea id="prompt" rows="1" maxlength="8000"
-            placeholder="Задача для Pi. Enter — запустить, Shift+Enter — перенос строки."></textarea>
+            placeholder="Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки."></textarea>
           <button id="stopButton" class="stop" type="button" disabled aria-label="Остановить">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
           </button>
@@ -64,7 +64,7 @@
     <aside class="panel">
       <details class="tasksSpoiler" id="tasksSpoiler">
         <summary>
-          <h2>Задачи</h2>
+          <h2>Сессии</h2>
           <button id="refresh" type="button">Обновить</button>
         </summary>
         <div id="tasks" class="tasks"></div>
@@ -76,9 +76,10 @@
           <div class="r"><span>Статус</span><b id="taskStatus">—</b></div>
           <div class="r"><span>Current</span><b id="current">—</b></div>
           <div class="r"><span>Workspace</span><b id="workspace">—</b></div>
-          <div class="r"><span>Usage</span><b id="usage">—</b></div>
+          <div class="r"><span>Context</span><b id="usage">—</b></div>
           <div class="r"><span>Compaction</span><b id="compaction">—</b></div>
         </div>
+        <div id="contextBar" class="contextBar hidden"><div id="contextBarFill" class="contextBarFill"></div></div>
 
         <label class="fieldLabel" for="followup">Инструкция во время/после работы</label>
         <div class="inline">
@@ -88,6 +89,7 @@
 
         <div class="actions">
           <button id="compact" class="wide" type="button">COMPACT</button>
+          <button id="autoCompaction" class="wide" type="button">AUTO: —</button>
           <button id="piState" class="wide" type="button">PI STATE</button>
         </div>
 

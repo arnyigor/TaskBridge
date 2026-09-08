@@ -61,12 +61,9 @@ export class TaskManager extends EventEmitter {
   }
 
   listProjects() {
-    return [
-      { id: '__scratch__', name: 'Scratch workspace', scratch: true },
-      ...Array.from(this.projects.values()).map(({ id, name, path: projectPath, useWorktree }) => ({
-        id, name, path: projectPath, useWorktree: useWorktree !== false
-      }))
-    ];
+    return Array.from(this.projects.values()).map(({ id, name, path: projectPath, useWorktree }) => ({
+      id, name, path: projectPath, useWorktree: useWorktree !== false
+    }));
   }
 
   listTasks() {
@@ -104,6 +101,8 @@ export class TaskManager extends EventEmitter {
       git: null,
       compaction: { count: 0, last: null },
       lastUsage: null,
+      model: null,
+      autoCompactionEnabled: null,
       files: (input.files || []).map((f) => ({ name: safeFileName(f.name), size: Number(f.size || 0) }))
     };
 
@@ -150,6 +149,7 @@ export class TaskManager extends EventEmitter {
       await this.#event(task, 'RUNTIME_READY', `Local runtime: ${runtimeInfo.state}`);
 
       const pi = await this.#createPi(task);
+      await this.#captureModelInfo(task, pi);
       const settled = this.#waitForSettle(task.id, 12 * 60 * 60 * 1000);
       await this.#setStatus(task, 'RUNNING', 'Pi starting');
       await pi.prompt(this.#buildPrompt(task));
@@ -180,17 +180,22 @@ export class TaskManager extends EventEmitter {
       prepared = await prepareProjectWorkspace(project, task.id, this.dataRoot, this.config.workspace || {});
     }
 
-    const files = task._incomingFiles || [];
-    if (files.length) {
-      const inputDir = path.join(prepared.workspacePath, '.taskbridge-input');
-      await fs.mkdir(inputDir, { recursive: true });
-      for (const file of files) {
-        const name = safeFileName(file.name);
-        const buf = Buffer.from(String(file.base64 || ''), 'base64');
-        await fs.writeFile(path.join(inputDir, name), buf);
-      }
-    }
+    await this.#writeIncomingFiles(prepared.workspacePath, task._incomingFiles || []);
     return prepared;
+  }
+
+  async #writeIncomingFiles(workspacePath, files) {
+    if (!files?.length) return [];
+    const inputDir = path.join(workspacePath, '.taskbridge-input');
+    await fs.mkdir(inputDir, { recursive: true });
+    const names = [];
+    for (const file of files) {
+      const name = safeFileName(file.name);
+      const buf = Buffer.from(String(file.base64 || ''), 'base64');
+      await fs.writeFile(path.join(inputDir, name), buf);
+      names.push(name);
+    }
+    return names;
   }
 
   #buildPrompt(task) {
@@ -241,6 +246,28 @@ export class TaskManager extends EventEmitter {
 
     await pi.start();
     return pi;
+  }
+
+  async #captureModelInfo(task, pi) {
+    try {
+      const state = await pi.getState();
+      task.model = state?.model
+        ? { id: state.model.id, contextWindow: state.model.contextWindow ?? null, maxTokens: state.model.maxTokens ?? null }
+        : null;
+      task.autoCompactionEnabled = state?.autoCompactionEnabled ?? null;
+      await this.store.save(this.#publicTask(task));
+    } catch {}
+  }
+
+  async setAutoCompaction(id, enabled) {
+    const task = this.tasks.get(id);
+    const runtime = this.runtimes.get(id);
+    if (!task || !runtime) throw Object.assign(new Error('Pi session not found'), { code: 'NOT_FOUND' });
+    await runtime.pi.setAutoCompaction(Boolean(enabled));
+    task.autoCompactionEnabled = Boolean(enabled);
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    return this.#publicTask(task);
   }
 
   async #handlePiEvent(task, frame) {
@@ -412,18 +439,23 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  async message(id, text, mode = 'auto') {
+  async message(id, text, mode = 'auto', files = []) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
     if (!task || !runtime) throw Object.assign(new Error('Pi session not found (TaskBridge restart or task has no live session)'), { code: 'NOT_FOUND' });
     if (this.activeTaskId && this.activeTaskId !== id) {
       throw Object.assign(new Error(`Another task is active: ${this.activeTaskId}`), { code: 'BUSY' });
     }
-    const message = String(text || '').trim();
+    let message = String(text || '').trim();
     if (!message) throw Object.assign(new Error('message is required'), { code: 'INPUT_INVALID' });
 
     if (!(await this.runtimeManager.isReady())) {
       throw Object.assign(new Error('Локальная модель недоступна (выгружена или не отвечает)'), { code: 'LOCAL_RUNTIME_FAILED' });
+    }
+
+    const attachedNames = await this.#writeIncomingFiles(task.workspacePath, files);
+    if (attachedNames.length) {
+      message += `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attachedNames.map((n) => `- ${n}`).join('\n')}`;
     }
 
     const state = await runtime.pi.getState().catch(() => null);

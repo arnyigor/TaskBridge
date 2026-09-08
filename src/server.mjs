@@ -201,7 +201,13 @@ const server = http.createServer(async (req, res) => {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/message$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto'));
+      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || []));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/auto-compaction$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setAutoCompaction(match[1], body.enabled));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/compact$/);

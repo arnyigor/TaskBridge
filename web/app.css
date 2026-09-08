@@ -131,6 +131,17 @@ body {
   border-radius: var(--radius-m);
 }
 
+.systemNote {
+  align-self: center;
+  font-size: 11.5px;
+  color: var(--warn);
+  background: rgba(251, 191, 36, 0.08);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: 999px;
+  padding: 6px 14px;
+  text-align: center;
+}
+
 .turn { display: flex; gap: 10px; align-items: flex-start; }
 .turn.me { justify-content: flex-end; }
 .turn .av {
@@ -306,6 +317,29 @@ body {
 .fileButton:hover { color: var(--text); border-color: var(--accent); }
 .fileButton input { display: none; }
 
+.fileChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 6px 4px 10px;
+  margin: 2px 4px 2px 0;
+}
+.fileChip button {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 4px;
+  font-size: 11px;
+  border-radius: 50%;
+  line-height: 1;
+}
+.fileChip button:hover { color: var(--danger); background: rgba(251, 113, 133, 0.14); }
+
 .composer { display: flex; align-items: flex-end; gap: 8px; }
 .composer textarea {
   flex: 1;
@@ -441,6 +475,21 @@ button:disabled { opacity: .4; cursor: default; }
 .session .r { min-width: 0; }
 .session .r span { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
 .session .r b { display: block; font-size: 12px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+
+.contextBar {
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+}
+.contextBarFill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width .2s ease, background-color .2s ease;
+}
+.contextBarFill.warn { background: var(--warn); }
+.contextBarFill.danger { background: var(--danger); }
 
 .fieldLabel { font-size: 11.5px; color: var(--muted); }
 .inline { display: flex; gap: 8px; }

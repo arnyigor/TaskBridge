@@ -140,6 +140,15 @@ function markToolDone(label) {
   lastToolChip = null;
 }
 
+function appendSystemNote(text) {
+  hideEmptyState();
+  const note = document.createElement('div');
+  note.className = 'systemNote';
+  note.textContent = text;
+  $('msgsInner').insertBefore(note, $('msgsInner').firstChild);
+  scrollBottom();
+}
+
 function showTurnError(message, onRetry) {
   if (!liveTurn) return;
   liveTurn.md.innerHTML = '';
@@ -154,6 +163,37 @@ function showTurnError(message, onRetry) {
   box.append(text, retry);
   liveTurn.md.append(box);
   scrollBottom();
+}
+
+function renderContext(t) {
+  const used = t.lastUsage?.totalTokens;
+  const windowSize = t.model?.contextWindow;
+  const bar = $('contextBar');
+  const fill = $('contextBarFill');
+  if (used == null) {
+    $('usage').textContent = '—';
+    bar.classList.add('hidden');
+  } else if (windowSize) {
+    const pct = Math.min(100, Math.round((used / windowSize) * 100));
+    $('usage').textContent = `${used.toLocaleString('ru-RU')} / ${windowSize.toLocaleString('ru-RU')} (${pct}%)`;
+    bar.classList.remove('hidden');
+    fill.style.width = `${pct}%`;
+    fill.classList.toggle('warn', pct >= 60 && pct < 85);
+    fill.classList.toggle('danger', pct >= 85);
+  } else {
+    $('usage').textContent = `${used.toLocaleString('ru-RU')} ток.`;
+    bar.classList.add('hidden');
+  }
+
+  const autoBtn = $('autoCompaction');
+  if (t.autoCompactionEnabled == null) {
+    autoBtn.textContent = 'AUTO: —';
+    autoBtn.disabled = true;
+  } else {
+    autoBtn.textContent = t.autoCompactionEnabled ? 'AUTO: ON' : 'AUTO: OFF';
+    autoBtn.disabled = false;
+    autoBtn.dataset.enabled = String(t.autoCompactionEnabled);
+  }
 }
 
 function setMeta(t) {
@@ -178,15 +218,13 @@ $('msgs').addEventListener('scroll', () => {
 
 function setComposerMode(taskId) {
   const continuing = Boolean(taskId);
-  $('project').disabled = continuing;
-  $('files').disabled = continuing;
   $('newTaskButton').classList.toggle('hidden', !continuing);
   const badge = $('continueBadge');
   badge.classList.toggle('hidden', !continuing);
-  if (continuing) badge.textContent = `Продолжение задачи ${taskId}`;
+  if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
   promptEl.placeholder = continuing
-    ? 'Сообщение продолжит текущую задачу. Enter — отправить, Shift+Enter — перенос строки.'
-    : 'Задача для Pi. Enter — запустить, Shift+Enter — перенос строки.';
+    ? 'Сообщение продолжит текущую сессию. Enter — отправить, Shift+Enter — перенос строки.'
+    : 'Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки.';
 }
 
 function startNewTask() {
@@ -200,7 +238,7 @@ function startNewTask() {
   liveText = '';
   errorShownForTask = null;
   $('detail').classList.add('hidden');
-  $('msgsInner').innerHTML = '<div class="empty" id="emptyState">Выбери задачу из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.</div>';
+  $('msgsInner').innerHTML = '<div class="empty" id="emptyState">Выбери сессию из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.</div>';
   document.querySelectorAll('.taskRow.active').forEach((row) => row.classList.remove('active'));
   setComposerMode(null);
   promptEl.focus();
@@ -208,6 +246,7 @@ function startNewTask() {
 
 async function sendContinueMessage(taskId, text, opts = {}) {
   const fresh = opts.fresh !== false;
+  const files = opts.files || [];
   lastSentText = text;
   errorShownForTask = null;
   if (fresh) {
@@ -221,7 +260,7 @@ async function sendContinueMessage(taskId, text, opts = {}) {
   try {
     await api(`/api/tasks/${taskId}/message`, {
       method: 'POST',
-      body: JSON.stringify({ text, mode: 'auto' })
+      body: JSON.stringify({ text, mode: 'auto', files })
     });
     await refreshTask();
   } catch (err) {
@@ -234,6 +273,7 @@ async function sendContinueMessage(taskId, text, opts = {}) {
         });
         await loadTasks();
         await selectTask(task.id);
+        appendSystemNote('Прежняя сессия Pi потеряна (сервер перезапускался) — начата новая с тем же сообщением.');
         return;
       } catch (err2) {
         showTurnError(err2.message, () => sendContinueMessage(taskId, text, { fresh: false }));
@@ -314,7 +354,7 @@ async function refreshTask() {
     $('taskStatus').textContent = t.status;
     $('current').textContent = t.current || '—';
     $('workspace').textContent = t.workspacePath || '—';
-    $('usage').textContent = t.lastUsage?.totalTokens != null ? `${t.lastUsage.totalTokens} tok` : '—';
+    renderContext(t);
     const c = t.compaction || {};
     $('compaction').textContent = c.last
       ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}`
@@ -345,7 +385,7 @@ function pillClass(status) {
 }
 
 async function deleteTask(id) {
-  if (!confirm('Удалить задачу без возможности восстановления?')) return;
+  if (!confirm('Удалить сессию без возможности восстановления?')) return;
   try {
     await api(`/api/tasks/${id}`, { method: 'DELETE' });
     if (selectedTaskId === id) startNewTask();
@@ -359,13 +399,13 @@ async function loadTasks() {
   const tasks = await api('/api/tasks');
   $('tasks').innerHTML = tasks.length ? tasks.map((t) => `
     <div class="taskRow ${t.id === selectedTaskId ? 'active' : ''}" data-id="${t.id}">
-      <button class="t-delete" type="button" data-delete-id="${t.id}" title="Удалить задачу" aria-label="Удалить задачу">✕</button>
+      <button class="t-delete" type="button" data-delete-id="${t.id}" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
       <div class="t-prompt">${escapeHtml(t.prompt)}</div>
       <div class="t-sub">
         <span class="pill ${pillClass(t.status)}">${escapeHtml(t.status)}</span>
         <span class="t-time">${new Date(t.createdAt).toLocaleString()}</span>
       </div>
-    </div>`).join('') : '<div class="none">Пока нет задач.</div>';
+    </div>`).join('') : '<div class="none">Пока нет сессий.</div>';
   document.querySelectorAll('.taskRow').forEach((row) => {
     row.onclick = () => selectTask(row.dataset.id);
   });
@@ -405,9 +445,25 @@ async function filesPayload() {
   return result;
 }
 
-$('files').addEventListener('change', () => {
-  $('fileList').textContent = Array.from($('files').files || []).map((f) => `${f.name} (${Math.round(f.size / 1024)} KB)`).join(', ');
-});
+function renderFileList() {
+  const files = Array.from($('files').files || []);
+  $('fileList').innerHTML = files.map((f, i) => `
+    <span class="fileChip">${escapeHtml(f.name)} (${Math.round(f.size / 1024)} KB)
+      <button type="button" data-remove-file="${i}" aria-label="Убрать файл">✕</button>
+    </span>`).join('');
+  $('fileList').querySelectorAll('[data-remove-file]').forEach((btn) => {
+    btn.onclick = () => removeFile(Number(btn.dataset.removeFile));
+  });
+}
+
+function removeFile(index) {
+  const dt = new DataTransfer();
+  Array.from($('files').files || []).forEach((f, i) => { if (i !== index) dt.items.add(f); });
+  $('files').files = dt.files;
+  renderFileList();
+}
+
+$('files').addEventListener('change', renderFileList);
 
 const promptEl = $('prompt');
 promptEl.addEventListener('input', () => {
@@ -443,7 +499,10 @@ $('form').addEventListener('submit', async (e) => {
       appendUserTurn(prompt);
       promptEl.value = '';
       promptEl.style.height = 'auto';
-      await sendContinueMessage(selectedTaskId, prompt);
+      const files = await filesPayload();
+      $('files').value = '';
+      $('fileList').textContent = '';
+      await sendContinueMessage(selectedTaskId, prompt, { files });
     } else {
       const task = await api('/api/tasks', {
         method: 'POST',
@@ -491,6 +550,19 @@ $('compact').onclick = async () => {
     const r = await api(`/api/tasks/${selectedTaskId}/compact`, { method: 'POST', body: JSON.stringify({ instructions }) });
     alert(`Compaction завершён. Before: ${r.result?.tokensBefore ?? '?'}; after: ${r.result?.estimatedTokensAfter ?? '?'}`);
   } catch (e) { alert(e.message); }
+};
+
+$('autoCompaction').onclick = async () => {
+  if (!selectedTaskId) return;
+  const next = $('autoCompaction').dataset.enabled !== 'true';
+  $('autoCompaction').disabled = true;
+  try {
+    await api(`/api/tasks/${selectedTaskId}/auto-compaction`, { method: 'POST', body: JSON.stringify({ enabled: next }) });
+    await refreshTask();
+  } catch (e) {
+    alert(e.message);
+    $('autoCompaction').disabled = false;
+  }
 };
 
 $('sendFollowup').onclick = async () => {
