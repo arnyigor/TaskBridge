@@ -3,93 +3,103 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#111318" />
-  <title>TaskBridge MVP</title>
+  <meta name="theme-color" content="#080b14" />
+  <title>TaskBridge</title>
   <link rel="manifest" href="/manifest.webmanifest" />
   <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
-  <header>
-    <div>
-      <strong>TaskBridge</strong>
-      <span class="muted">Pi remote control MVP</span>
+  <header class="top">
+    <div class="brand">
+      <div class="av" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L14 9 L21 12 L14 15 L12 22 L10 15 L3 12 L10 9 Z"/></svg>
+      </div>
+      <div>
+        <div class="n">TaskBridge</div>
+        <div class="s">Pi remote control · live events</div>
+      </div>
     </div>
     <div id="pcState" class="pill">checking…</div>
   </header>
 
-  <main>
-    <section class="card compose">
-      <label>Проект</label>
-      <select id="project"></select>
+  <div class="subheader" id="subheader">
+    <span id="continueBadge" class="pill hidden"></span>
+    <button id="newTaskButton" type="button" class="hidden">+ Новая задача</button>
+  </div>
 
-      <label>Исполнитель</label>
-      <select disabled>
-        <option>Pi / configured model</option>
-      </select>
-
-      <label>Задача</label>
-      <textarea id="prompt" rows="6" placeholder="Например: изучи проект, найди причину failing test, исправь и запусти тесты."></textarea>
-
-      <label class="fileButton">
-        <input id="files" type="file" multiple />
-        + Добавить файлы
-      </label>
-      <div id="fileList" class="muted small"></div>
-
-      <button id="run" class="primary">RUN</button>
-      <div id="createError" class="error"></div>
-    </section>
-
-    <section class="card">
-      <div class="sectionTitle">
-        <strong>Задачи</strong>
-        <button id="refresh" class="ghost">Обновить</button>
-      </div>
-      <div id="tasks" class="tasks"></div>
-    </section>
-
-    <section id="detail" class="card hidden">
-      <div class="sectionTitle">
-        <div>
-          <strong id="taskTitle">Task</strong>
-          <div id="taskProject" class="muted small"></div>
+  <main class="main">
+    <!-- Chat: live stream of the selected task -->
+    <section class="chat">
+      <div class="msgs" id="msgs">
+        <div class="msgs-inner" id="msgsInner">
+          <div class="empty" id="emptyState">
+            Выбери задачу из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.
+          </div>
         </div>
-        <span id="taskStatus" class="pill"></span>
       </div>
 
-      <div class="grid">
-        <div><span class="muted">Current</span><strong id="current">—</strong></div>
-        <div><span class="muted">Workspace</span><strong id="workspace">—</strong></div>
-        <div><span class="muted">Last usage</span><strong id="usage">—</strong></div>
-        <div><span class="muted">Compaction</span><strong id="compaction">—</strong></div>
+      <div class="composer-wrap">
+        <div class="composer-top">
+          <select id="project" title="Проект" aria-label="Проект"></select>
+          <label class="fileButton" title="Прикрепить файлы">
+            <input id="files" type="file" multiple />+ файлы
+          </label>
+          <span id="fileList" class="muted small"></span>
+        </div>
+        <form class="composer" id="form">
+          <textarea id="prompt" rows="1" maxlength="8000"
+            placeholder="Задача для Pi. Enter — запустить, Shift+Enter — перенос строки."></textarea>
+          <button id="stopButton" class="stop" type="button" disabled aria-label="Остановить">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          </button>
+          <button id="sendButton" class="send" type="submit" aria-label="Запустить">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </form>
+        <div class="hint" id="createError">Enter — запустить, Shift+Enter — перенос строки</div>
       </div>
-
-      <div class="actions">
-        <button id="stop" class="danger">STOP</button>
-        <button id="compact" class="ghost">COMPACT</button>
-        <button id="piState" class="ghost">PI STATE</button>
-      </div>
-
-      <label>Инструкция во время/после работы</label>
-      <div class="inline">
-        <input id="followup" placeholder="Например: не меняй публичный API" />
-        <button id="sendFollowup">SEND</button>
-      </div>
-
-      <h3>Pi output</h3>
-      <pre id="assistant">—</pre>
-
-      <h3>Live events</h3>
-      <div id="events" class="events"></div>
-
-      <h3>Artifacts</h3>
-      <div id="artifacts" class="artifacts muted">—</div>
-
-      <details>
-        <summary>Последний Pi state</summary>
-        <pre id="stateJson">—</pre>
-      </details>
     </section>
+
+    <!-- Side panel: tasks + details -->
+    <aside class="panel">
+      <details class="tasksSpoiler" id="tasksSpoiler">
+        <summary>
+          <h2>Задачи</h2>
+          <button id="refresh" type="button">Обновить</button>
+        </summary>
+        <div id="tasks" class="tasks"></div>
+      </details>
+
+      <div id="detail" class="detail hidden">
+        <div class="session">
+          <div class="r"><span>ID</span><b id="taskTitle">—</b></div>
+          <div class="r"><span>Статус</span><b id="taskStatus">—</b></div>
+          <div class="r"><span>Current</span><b id="current">—</b></div>
+          <div class="r"><span>Workspace</span><b id="workspace">—</b></div>
+          <div class="r"><span>Usage</span><b id="usage">—</b></div>
+          <div class="r"><span>Compaction</span><b id="compaction">—</b></div>
+        </div>
+
+        <label class="fieldLabel" for="followup">Инструкция во время/после работы</label>
+        <div class="inline">
+          <input id="followup" placeholder="Например: не меняй публичный API" />
+          <button id="sendFollowup" type="button">SEND</button>
+        </div>
+
+        <div class="actions">
+          <button id="compact" class="wide" type="button">COMPACT</button>
+          <button id="piState" class="wide" type="button">PI STATE</button>
+        </div>
+
+        <label class="fieldLabel">Artifacts</label>
+        <div id="artifacts" class="artifacts muted">—</div>
+
+        <details>
+          <summary>Последний Pi state</summary>
+          <pre id="stateJson">—</pre>
+        </details>
+      </div>
+    </aside>
   </main>
 
   <script type="module" src="/app.js"></script>

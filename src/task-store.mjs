@@ -49,6 +49,10 @@ export class TaskStore {
     return target;
   }
 
+  async remove(id) {
+    await fsp.rm(this.taskDir(id), { recursive: true, force: true });
+  }
+
   async read(id) {
     const text = await fsp.readFile(path.join(this.taskDir(id), 'task.json'), 'utf8');
     return JSON.parse(text);

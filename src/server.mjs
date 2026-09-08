@@ -161,6 +161,10 @@ const server = http.createServer(async (req, res) => {
       const task = manager.getTask(match[1]);
       return task ? json(res, 200, task) : errorJson(res, 404, Object.assign(new Error('Task not found'), { code: 'NOT_FOUND' }));
     }
+    if (req.method === 'DELETE' && match) {
+      await manager.deleteTask(match[1]);
+      return json(res, 200, { ok: true });
+    }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
     if (req.method === 'GET' && match) {

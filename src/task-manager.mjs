@@ -378,6 +378,21 @@ export class TaskManager extends EventEmitter {
     await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
   }
 
+  async deleteTask(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Task not found'), { code: 'NOT_FOUND' });
+    const runtime = this.runtimes.get(id);
+    if (runtime) {
+      await runtime.pi.killTree().catch(() => {});
+      this.runtimes.delete(id);
+    }
+    if (this.activeTaskId === id) this.activeTaskId = null;
+    this.queue = this.queue.filter((x) => x !== id);
+    this.tasks.delete(id);
+    await this.store.remove(id);
+    this.#pump();
+  }
+
   async cancel(id) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
@@ -406,6 +421,10 @@ export class TaskManager extends EventEmitter {
     }
     const message = String(text || '').trim();
     if (!message) throw Object.assign(new Error('message is required'), { code: 'INPUT_INVALID' });
+
+    if (!(await this.runtimeManager.isReady())) {
+      throw Object.assign(new Error('Локальная модель недоступна (выгружена или не отвечает)'), { code: 'LOCAL_RUNTIME_FAILED' });
+    }
 
     const state = await runtime.pi.getState().catch(() => null);
     await this.#event(task, 'USER_MESSAGE', message, { mode });
