@@ -366,6 +366,17 @@ body {
 }
 .fileChip button:hover { color: var(--danger); background: rgba(251, 113, 133, 0.14); }
 
+.attachedFiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  justify-content: flex-end;
+}
+.attachedFiles .fileChip {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.18);
+}
+
 .composer { display: flex; align-items: flex-end; gap: 8px; }
 .composer textarea {
   flex: 1;

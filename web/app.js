@@ -1,3 +1,4 @@
+import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 const $ = (id) => document.getElementById(id);
 
 let selectedTaskId = null;
@@ -11,8 +12,12 @@ let nearBottom = true;
 let textUpdateTimer = null;
 let lastSentText = '';
 let errorShownForTask = null;
-let baselineAssistantLen = 0;  // cumulative-text offset where the current bot turn starts
-let baselineThinkingLen = 0;
+let chatState = null;
+let selectionVersion = 0;
+let refreshingVersion = null;
+let turnNodes = new Map();
+let liveActive = false;
+let sending = false;
 let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 8s
 
 async function api(path, options = {}) {
@@ -40,7 +45,7 @@ function botAvatar() {
   return av;
 }
 
-function appendUserTurn(text) {
+function appendUserTurn(text, files = []) {
   hideEmptyState();
   const turn = document.createElement('div');
   turn.className = 'turn me';
@@ -50,6 +55,12 @@ function appendUserTurn(text) {
   bubble.className = 'msg s-me';
   bubble.textContent = text;
   body.append(bubble);
+  if (files.length) {
+    const list = document.createElement('div');
+    list.className = 'attachedFiles';
+    list.innerHTML = files.map((f) => `<span class="fileChip">📎 ${escapeHtml(f.name)}</span>`).join('');
+    body.append(list);
+  }
   turn.append(body);
   $('msgsInner').append(turn);
   scrollBottom();
@@ -84,7 +95,7 @@ function appendBotTurn() {
   body.append(bubble, meta);
   turn.append(body);
   $('msgsInner').append(turn);
-  liveTurn = { body, md, meta };
+  liveTurn = { body, md, meta, turn }; 
   updateThinking();
   updateText();
   scrollBottom();
@@ -111,7 +122,7 @@ const TYPING_HTML = '<div class="typing"><i></i><i></i><i></i></div>';
 function updateText() {
   if (!liveTurn) return;
   const text = liveText.trim();
-  liveTurn.md.innerHTML = text ? renderMarkdown(text) : TYPING_HTML;
+  liveTurn.md.innerHTML = text ? renderMarkdown(text) : (liveActive ? TYPING_HTML : '<span class="muted">Ответ не был получен.</span>');
   scrollBottom();
 }
 
@@ -269,163 +280,184 @@ function setComposerMode(taskId) {
     : 'Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки.';
 }
 
-function startNewTask() {
-  selectedTaskId = null;
+function resetSelection(id) {
+  selectionVersion += 1;
+  selectedTaskId = id;
   if (source) source.close();
   source = null;
-  if (refreshTimer) clearInterval(refreshTimer);
+  clearInterval(refreshTimer);
+  clearTimeout(textUpdateTimer);
+  refreshTimer = null;
+  textUpdateTimer = null;
+  chatState = null;
+  turnNodes = new Map();
   liveTurn = null;
-  lastToolChip = null;
-  liveThinking = '';
-  liveText = '';
-  errorShownForTask = null;
-  $('detail').classList.add('hidden');
-  $('msgsInner').innerHTML = '<div class="empty" id="emptyState">Выбери сессию из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.</div>';
-  document.querySelectorAll('.taskRow.active').forEach((row) => row.classList.remove('active'));
-  setComposerMode(null);
+  liveThinking = liveText = '';
+  nearBottom = true;
+  $('stopButton').disabled = true;
+  $('compact').disabled = true;
+  $('autoCompaction').disabled = true;
+  $('detail').classList.toggle('hidden', !id);
+  $('msgsInner').innerHTML = '';
+  for (const field of ['taskTitle', 'taskStatus', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'stateJson']) $(field).textContent = '—';
+  $('contextBar').classList.add('hidden');
+  $('createError').textContent = '';
+  setComposerMode(id);
+  return selectionVersion;
+}
+
+function startNewTask() {
+  resetSelection(null);
+  $('msgsInner').innerHTML = '<div class="empty" id="emptyState">Выбери сессию из списка или создай новую.</div>';
+  document.querySelectorAll('.taskRow.active').forEach(row => row.classList.remove('active'));
   promptEl.focus();
 }
 
-async function sendContinueMessage(taskId, text, opts = {}) {
-  const fresh = opts.fresh !== false;
-  const files = opts.files || [];
-  lastSentText = text;
-  errorShownForTask = null;
-  if (fresh) {
-    // authoritative snapshot from the server — a locally-buffered liveText can lag
-    // behind by up to one debounce tick and would leak trailing prior-turn text
-    try {
-      const current = await api(`/api/tasks/${taskId}`);
-      baselineAssistantLen = (current.assistantText || '').length;
-      baselineThinkingLen = (current.thinkingText || '').length;
-    } catch {
-      baselineAssistantLen = liveText.length;
-      baselineThinkingLen = liveThinking.length;
+function renderChat() {
+  if (!chatState) return;
+  for (const turn of chatState.turns) {
+    let node = turnNodes.get(turn.id);
+    if (!node) {
+      if (turn.role === 'user') {
+        appendUserTurn(turn.text, turn.files);
+        turnNodes.set(turn.id, {});
+        continue;
+      }
+      if (turn.role === 'note') {
+        appendSystemNote(turn.text);
+        turnNodes.set(turn.id, {});
+        continue;
+      }
+      liveText = liveThinking = '';
+      liveActive = false;
+      appendBotTurn();
+      node = { ...liveTurn, tools: new Map() };
+      turnNodes.set(turn.id, node);
     }
-  }
-  liveThinking = '';
-  liveText = '';
-  lastToolChip = null;
-  if (fresh) await checkPcState();
-  if (fresh && modelBusy === true) {
-    appendSystemNote('Модель сейчас занята другим запросом — сообщение встанет в очередь и обработается, когда она освободится.');
-  }
-  appendBotTurn();
-  try {
-    await api(`/api/tasks/${taskId}/message`, {
-      method: 'POST',
-      body: JSON.stringify({ text, mode: 'auto', files })
-    });
-    await refreshTask();
-  } catch (err) {
-    if (/NOT_FOUND/.test(err.message)) {
-      try {
-        const original = await api(`/api/tasks/${taskId}`);
-        const task = await api('/api/tasks', {
-          method: 'POST',
-          body: JSON.stringify({ projectId: original.projectId, prompt: text, files: [] })
-        });
-        await loadTasks();
-        await selectTask(task.id);
-        appendSystemNote('Прежняя сессия Pi потеряна (сервер перезапускался) — начата новая с тем же сообщением.');
-        await checkPcState();
-        if (modelBusy === true) {
-          appendSystemNote('Модель сейчас занята другим запросом — сообщение встанет в очередь и обработается, когда она освободится.');
-        }
-        return;
-      } catch (err2) {
-        showTurnError(err2.message, () => sendContinueMessage(taskId, text, { fresh: false }));
-        return;
+    if (turn.role !== 'assistant') continue;
+    liveTurn = node;
+    liveText = turn.text;
+    liveThinking = turn.thinking;
+    liveActive = turn.active;
+    if (node.text !== turn.text || node.active !== turn.active || node.error !== turn.error) {
+      updateText();
+      if (turn.error) {
+        const error = document.createElement('div');
+        error.className = 'turnError';
+        error.textContent = turn.error;
+        node.md.append(error);
+      }
+      node.text = turn.text;
+      node.active = turn.active;
+      node.error = turn.error;
+    }
+    if (node.thinking !== turn.thinking) {
+      updateThinking();
+      node.thinking = turn.thinking;
+    }
+    for (const tool of turn.tools) {
+      let chip = node.tools.get(tool.id);
+      if (!chip) {
+        chip = document.createElement('details');
+        const summary = document.createElement('summary');
+        const body = document.createElement('div');
+        body.className = 'tool-body';
+        body.textContent = tool.label;
+        chip.append(summary, body);
+        node.body.insertBefore(chip, node.meta);
+        node.tools.set(tool.id, chip);
+      }
+      chip.className = `tool ${tool.state}`;
+      chip.querySelector('summary').textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
+      if (tool.state === 'done' && tool.imagePath && IMAGE_EXT_RE.test(tool.imagePath) && !chip.dataset.imageShown) {
+        appendInlineImage(tool.imagePath);
+        chip.dataset.imageShown = 'true';
       }
     }
-    errorShownForTask = taskId;
-    showTurnError(err.message, () => sendContinueMessage(taskId, text, { fresh: false }));
+    node.meta.textContent = turn.status || '';
   }
+  scrollBottom();
+}
+
+function applyEvents(events) {
+  for (const event of events) chatState.apply(event);
+  renderChat();
+}
+
+function renderTaskDetails(t) {
+  $('taskTitle').textContent = t.id;
+  $('taskStatus').textContent = t.status;
+  $('current').textContent = t.current || '—';
+  $('workspace').textContent = t.workspacePath || '—';
+  renderContext(t);
+  const c = t.compaction || {};
+  $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
+  $('stopButton').disabled = !ACTIVE_STATUSES.has(t.status) || t.status === 'CANCELLING';
+  $('compact').disabled = ACTIVE_STATUSES.has(t.status);
 }
 
 async function selectTask(id) {
-  selectedTaskId = id;
-  if (source) source.close();
-  $('detail').classList.remove('hidden');
-  $('msgsInner').innerHTML = '';
-  liveTurn = null;
-  lastToolChip = null;
-  liveThinking = '';
-  liveText = '';
-  nearBottom = true;
-  errorShownForTask = null;
-  baselineAssistantLen = 0;
-  baselineThinkingLen = 0;
-  setComposerMode(id);
-
+  const version = resetSelection(id);
   try {
+    const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=0`);
     const t = await api(`/api/tasks/${encodeURIComponent(id)}`);
-    appendUserTurn(t.prompt);
-    appendBotTurn();
-    if (t.thinkingText) { liveThinking = t.thinkingText; updateThinking(); }
-    if (t.assistantText) { liveText = t.assistantText; updateText(); }
-    setMeta(t);
-
-    // tool chips from history
-    const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=500`);
-    for (const e of events) {
-      const pt = e.data?.pi?.type;
-      if (pt === 'tool_execution_start') appendToolChip(e.message, 'run', e.data.pi);
-      else if (pt === 'tool_execution_end') markToolDone(e.message, e.data.pi);
-    }
-  } catch {}
-
-  source = new EventSource(`/api/tasks/${encodeURIComponent(id)}/stream`);
-  source.onmessage = onStreamEvent;
-  if (refreshTimer) clearInterval(refreshTimer);
-  refreshTimer = setInterval(refreshTask, 2000);
-}
-
-function onStreamEvent(e) {
-  let ev;
-  try { ev = JSON.parse(e.data); } catch { return; }
-  const pt = ev.data?.pi?.type;
-  if (pt === 'message_update') {
-    const d = ev.data.pi.assistantMessageEvent;
-    if (d?.type === 'thinking_delta') { liveThinking += d.delta || ''; updateThinking(); }
-    else if (d?.type === 'text_delta') { liveText += d.delta || ''; scheduleTextUpdate(); }
-    return;
+    if (version !== selectionVersion) return;
+    chatState = new ChatState(t);
+    applyEvents(events);
+    chatState.snapshot(t, true);
+    renderChat();
+    renderTaskDetails(t);
+    source = new EventSource(`/api/tasks/${encodeURIComponent(id)}/stream?after=${chatState.cursor}`);
+    source.onmessage = e => {
+      if (version !== selectionVersion) return;
+      let event;
+      try { event = JSON.parse(e.data); } catch { return; }
+      if (chatState.apply(event)) {
+        if (!textUpdateTimer) textUpdateTimer = setTimeout(() => { textUpdateTimer = null; if (version === selectionVersion) renderChat(); }, 80);
+        if (event.type === 'STATUS' || event.type.startsWith('TASK_')) refreshTask();
+      }
+    };
+    source.onerror = () => { if (version === selectionVersion) refreshTask(); };
+    refreshTimer = setInterval(refreshTask, 2000);
+    await loadArtifacts();
+  } catch (error) {
+    if (version !== selectionVersion) return;
+    $('createError').textContent = `Не удалось загрузить сессию: ${error.message}`;
+    $('createError').classList.add('error');
   }
-  if (pt === 'tool_execution_start') { appendToolChip(ev.message, 'run', ev.data.pi); return; }
-  if (pt === 'tool_execution_end') { markToolDone(ev.message, ev.data.pi); return; }
-  if (ev.type === 'STATUS' || ev.type.startsWith('TASK_') || pt === 'compaction_end') refreshTask();
 }
 
 async function refreshTask() {
-  if (!selectedTaskId) return;
+  if (!selectedTaskId || !chatState || refreshingVersion === selectionVersion) return;
+  const id = selectedTaskId;
+  const version = selectionVersion;
+  const initialCursor = chatState.cursor;
+  refreshingVersion = version;
   try {
-    const t = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}`);
-    // server fields are cumulative over the whole task — only the slice past
-    // this turn's baseline belongs to the turn currently rendering
-    const thinkingNow = (t.thinkingText || '').slice(baselineThinkingLen);
-    const textNow = (t.assistantText || '').slice(baselineAssistantLen);
-    if (thinkingNow !== liveThinking) { liveThinking = thinkingNow; updateThinking(); }
-    if (textNow !== liveText) { liveText = textNow; updateText(); }
-    setMeta(t);
-
-    $('taskTitle').textContent = t.id;
-    $('taskStatus').textContent = t.status;
-    $('current').textContent = t.current || '—';
-    $('workspace').textContent = t.workspacePath || '—';
-    renderContext(t);
-    const c = t.compaction || {};
-    $('compaction').textContent = c.last
-      ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}`
-      : String(c.count || 0);
-    $('stopButton').disabled = t.status !== 'RUNNING';
-    if (['FAILED', 'CANCELLED'].includes(t.status) && !liveText.trim() && errorShownForTask !== selectedTaskId) {
-      errorShownForTask = selectedTaskId;
-      const taskId = selectedTaskId;
-      showTurnError(t.error || 'Модель не отвечает.', () => sendContinueMessage(taskId, lastSentText || t.prompt, { fresh: false }));
-    }
+    // Fetch metadata first, then all events that may have arrived while it loaded.
+    const t = await api(`/api/tasks/${encodeURIComponent(id)}`);
+    const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=0&after=${chatState.cursor}`);
+    if (version !== selectionVersion) return;
+    applyEvents(events);
+    // A stale metadata response must not stop a newer streaming event.
+    if (chatState.cursor === initialCursor) chatState.snapshot(t);
+    renderChat();
+    renderTaskDetails(t);
     await loadArtifacts();
     await loadTasks();
-  } catch {}
+  } catch (error) {
+    if (version === selectionVersion) $('createError').textContent = `Связь прервана: ${error.message}`;
+  } finally {
+    if (refreshingVersion === version) refreshingVersion = null;
+  }
+}
+
+async function sendContinueMessage(taskId, text, opts = {}) {
+  const version = selectionVersion;
+  await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
+    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [] })
+  });
+  if (version === selectionVersion) await refreshTask();
 }
 
 /* ---------------- panel ---------------- */
@@ -478,8 +510,11 @@ async function loadTasks() {
 
 async function loadArtifacts() {
   if (!selectedTaskId) return;
+  const id = selectedTaskId;
+  const version = selectionVersion;
   try {
-    const list = await api(`/api/tasks/${selectedTaskId}/artifacts`);
+    const list = await api(`/api/tasks/${id}/artifacts`);
+    if (version !== selectionVersion) return;
     $('artifacts').innerHTML = list.length
       ? list.map((name) => `<a target="_blank" href="/api/tasks/${selectedTaskId}/artifacts/${encodeURIComponent(name)}">${escapeHtml(name)}</a>`).join('')
       : '—';
@@ -529,13 +564,14 @@ promptEl.addEventListener('input', () => {
   promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
 });
 promptEl.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     $('form').requestSubmit();
   }
 });
 
 function setBusy(busy) {
+  sending = busy;
   $('sendButton').disabled = busy;
   $('project').disabled = busy;
 }
@@ -553,33 +589,25 @@ $('form').addEventListener('submit', async (e) => {
   setBusy(true);
   if (isTouchDevice()) promptEl.blur();
   try {
-    if (selectedTaskId) {
-      appendUserTurn(prompt);
-      promptEl.value = '';
-      promptEl.style.height = 'auto';
-      const files = await filesPayload();
-      $('files').value = '';
-      $('fileList').textContent = '';
-      await sendContinueMessage(selectedTaskId, prompt, { files });
+    const taskId = selectedTaskId;
+    const version = selectionVersion;
+    const files = await filesPayload();
+    if (taskId) {
+      await sendContinueMessage(taskId, prompt, { files });
     } else {
       const task = await api('/api/tasks', {
-        method: 'POST',
-        body: JSON.stringify({
-          projectId: $('project').value,
-          prompt,
-          files: await filesPayload()
-        })
+        method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files })
       });
+      if (version === selectionVersion) {
+        await loadTasks();
+        await selectTask(task.id);
+      }
+    }
+    if (promptEl.value.trim() === prompt) {
       promptEl.value = '';
       promptEl.style.height = 'auto';
       $('files').value = '';
       $('fileList').textContent = '';
-      await loadTasks();
-      await selectTask(task.id);
-      await checkPcState();
-      if (modelBusy === true) {
-        appendSystemNote('Модель сейчас занята другим запросом — сообщение встанет в очередь и обработается, когда она освободится.');
-      }
     }
   } catch (err) {
     $('createError').textContent = err.message;
@@ -635,7 +663,7 @@ $('sendFollowup').onclick = async () => {
   if (!selectedTaskId || !text) return;
   $('sendFollowup').disabled = true;
   try {
-    await api(`/api/tasks/${selectedTaskId}/message`, { method: 'POST', body: JSON.stringify({ text, mode: 'auto' }) });
+    await sendContinueMessage(selectedTaskId, text);
     $('followup').value = '';
   } catch (e) { alert(e.message); }
   finally { $('sendFollowup').disabled = false; }
@@ -645,7 +673,9 @@ $('stateDetails').addEventListener('toggle', async () => {
   if (!$('stateDetails').open || !selectedTaskId) return;
   $('stateJson').textContent = 'Загрузка…';
   try {
-    const r = await api(`/api/tasks/${selectedTaskId}/state`);
+    const id = selectedTaskId;
+    const r = await api(`/api/tasks/${id}/state`);
+    if (id !== selectedTaskId) return;
     $('stateJson').textContent = JSON.stringify(r.state, null, 2);
   } catch (e) { $('stateJson').textContent = e.message; }
 });
@@ -716,7 +746,10 @@ async function checkPcState() {
     const info = await api('/api/info');
     modelBusy = info.modelBusy;
     el.classList.remove('err', 'ok', 'run');
-    if (modelBusy === true) {
+    if (info.modelReady === false) {
+      el.textContent = '● МОДЕЛЬ НЕДОСТУПНА';
+      el.classList.add('err');
+    } else if (modelBusy === true) {
       el.textContent = '● МОДЕЛЬ ЗАНЯТА';
       el.classList.add('run');
     } else {

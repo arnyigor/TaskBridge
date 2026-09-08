@@ -21,26 +21,35 @@ await manager.init();
 
 const sseClients = new Map();
 
-function addSseClient(taskId, res) {
+function addSseClient(taskId, res, cursor = 0) {
+  const client = { res, cursor, pending: [], replaying: true };
   if (!sseClients.has(taskId)) sseClients.set(taskId, new Set());
-  sseClients.get(taskId).add(res);
-  res.on('close', () => sseClients.get(taskId)?.delete(res));
+  sseClients.get(taskId).add(client);
+  res.on('close', () => sseClients.get(taskId)?.delete(client));
+  return client;
 }
 
 function sendSse(res, event) {
-  res.write(`data: ${JSON.stringify(event)}\n\n`);
+  res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
+}
+
+function deliver(client, event) {
+  if (event.seq <= client.cursor) return;
+  sendSse(client.res, event);
+  client.cursor = event.seq;
 }
 
 manager.on('task-event', (event) => {
-  for (const res of sseClients.get(event.taskId) || []) {
-    try { sendSse(res, event); } catch {}
+  for (const client of sseClients.get(event.taskId) || []) {
+    if (client.replaying) client.pending.push(event);
+    else try { deliver(client, event); } catch {}
   }
 });
 
 setInterval(() => {
   for (const clients of sseClients.values()) {
-    for (const res of clients) {
-      try { res.write(': heartbeat\n\n'); } catch {}
+    for (const client of clients) {
+      try { client.res.write(': heartbeat\n\n'); } catch {}
     }
   }
 }, 15000).unref();
@@ -96,6 +105,7 @@ function contentType(file) {
   return {
     '.html': 'text/html; charset=utf-8',
     '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
     '.css': 'text/css; charset=utf-8',
     '.json': 'application/json; charset=utf-8',
     '.webmanifest': 'application/manifest+json; charset=utf-8',
@@ -133,20 +143,20 @@ async function listArtifacts(taskId) {
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  const pathname = decodeURIComponent(url.pathname);
-
   try {
+    const pathname = decodeURIComponent(url.pathname);
     if (req.method === 'GET' && pathname === '/api/health') {
       return json(res, 200, { status: 'ok' });
     }
 
     if (req.method === 'GET' && pathname === '/api/info') {
-      const busy = await manager.runtimeManager.getBusyStatus();
+      const [busy, modelReady] = await Promise.all([manager.runtimeManager.getBusyStatus(), manager.runtimeManager.isReady()]);
       return json(res, 200, {
         name: 'TaskBridge MVP',
         version: '0.1.0',
         addresses: lanAddresses(Number(config.server?.port || 8787)),
-        modelBusy: busy.unknown ? null : busy.busy
+        modelBusy: busy.unknown ? null : busy.busy,
+        modelReady
       });
     }
 
@@ -176,13 +186,16 @@ const server = http.createServer(async (req, res) => {
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
     if (req.method === 'GET' && match) {
-      return json(res, 200, await store.readEvents(match[1], Number(url.searchParams.get('limit') || 500)));
+      if (!manager.getTask(match[1])) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
+      return json(res, 200, await store.readEvents(match[1], Number(url.searchParams.get('limit') ?? 500), Number(url.searchParams.get('after') ?? 0)));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/);
     if (req.method === 'GET' && match) {
       const task = manager.getTask(match[1]);
       if (!task) return errorJson(res, 404, Object.assign(new Error('Task not found'), { code: 'NOT_FOUND' }));
+      const after = Number(req.headers['last-event-id'] || url.searchParams.get('after') || 0);
+      if (!Number.isSafeInteger(after) || after < 0) throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
       res.writeHead(200, {
         'content-type': 'text/event-stream; charset=utf-8',
         'cache-control': 'no-cache',
@@ -190,9 +203,16 @@ const server = http.createServer(async (req, res) => {
         'x-accel-buffering': 'no'
       });
       res.write('retry: 1500\n\n');
-      const history = await store.readEvents(match[1], 100);
-      for (const event of history) sendSse(res, event);
-      addSseClient(match[1], res);
+      // Register before reading disk: concurrent live events are buffered until
+      // replay is complete, closing the gap between history and subscription.
+      const client = addSseClient(match[1], res, after);
+      try {
+        const history = await store.readEvents(match[1], 0, after);
+        for (const event of history) deliver(client, event);
+        for (const event of client.pending.sort((a, b) => a.seq - b.seq)) deliver(client, event);
+        client.pending = [];
+        client.replaying = false;
+      } catch { res.end(); }
       return;
     }
 
@@ -273,7 +293,7 @@ const server = http.createServer(async (req, res) => {
     console.error(error);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
       : ['INPUT_INVALID', 'PROJECT_DIRTY'].includes(error.code) ? 400
-      : error.code === 'BUSY' ? 409
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE'].includes(error.code) ? 409
       : error.code === 'NOT_FOUND' ? 404
       : 500;
     errorJson(res, status, error);

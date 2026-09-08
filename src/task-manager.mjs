@@ -43,13 +43,16 @@ export class TaskManager extends EventEmitter {
     this.runtimes = new Map();
     this.queue = [];
     this.activeTaskId = null;
+    this.admitting = false;
+    this.deleted = new Set();
+    this.eventWrites = new Map();
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
   }
 
   async init() {
     const previous = await this.store.list();
     for (const task of previous) {
-      if (['PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
+      if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
         task.status = 'FAILED';
         task.errorCode = 'FAILED_RECOVERY';
         task.error = 'TaskBridge restarted while this task was active.';
@@ -67,17 +70,32 @@ export class TaskManager extends EventEmitter {
   }
 
   listTasks() {
-    return Array.from(this.tasks.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return Array.from(this.tasks.values()).map(t => this.#publicTask(t)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   getTask(id) {
-    return this.tasks.get(id) || null;
+    const task = this.tasks.get(id);
+    return task ? this.#publicTask(task) : null;
+  }
+
+  async #admit(action) {
+    if (this.admitting) throw Object.assign(new Error('Другой запрос ещё отправляется. Повторите позже.'), { code: 'BUSY' });
+    this.admitting = true;
+    try { return await action(); } finally { this.admitting = false; }
   }
 
   async createTask(input) {
+    return this.#admit(() => this.#createTask(input));
+  }
+
+  async #createTask(input) {
+    if (this.activeTaskId) throw Object.assign(new Error('Модель уже выполняет другую сессию.'), { code: 'MODEL_BUSY' });
+    const busy = await this.runtimeManager.getBusyStatus();
+    if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+    if (!this.config.localRuntime?.managed?.enabled && !(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
     const prompt = String(input.prompt || '').trim();
     if (!prompt) throw Object.assign(new Error('prompt is required'), { code: 'INPUT_INVALID' });
-    const projectId = String(input.projectId || '__scratch__');
+    const projectId = String(input.projectId || this.projects.keys().next().value || '');
     if (projectId !== '__scratch__' && !this.projects.has(projectId)) {
       throw Object.assign(new Error(`Unknown project: ${projectId}`), { code: 'PROJECT_NOT_FOUND' });
     }
@@ -116,7 +134,7 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, ...safe } = task;
+    const { _incomingFiles, _modelError, ...safe } = task;
     return safe;
   }
 
@@ -138,6 +156,7 @@ export class TaskManager extends EventEmitter {
     try {
       await this.#setStatus(task, 'PREPARING', 'Preparing workspace');
       const prepared = await this.#prepareWorkspace(task);
+      if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
       Object.assign(task, prepared);
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'WORKSPACE_READY', `Workspace: ${task.workspacePath}`);
@@ -146,22 +165,34 @@ export class TaskManager extends EventEmitter {
       const runtimeInfo = await this.runtimeManager.ensureRunning((text) => {
         this.store.appendRaw(task.id, 'runtime.log', text).catch(() => {});
       });
+      if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
       await this.#event(task, 'RUNTIME_READY', `Local runtime: ${runtimeInfo.state}`);
+
+      const busy = await this.runtimeManager.getBusyStatus();
+      if (busy.busy === true) {
+        throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+      }
 
       const pi = await this.#createPi(task);
       await this.#captureModelInfo(task, pi);
       const settled = this.#waitForSettle(task.id, 12 * 60 * 60 * 1000);
-      await this.#setStatus(task, 'RUNNING', 'Pi starting');
-      await pi.prompt(this.#buildPrompt(task));
-      await settled;
+      settled.catch(() => {});
+      try {
+        await this.#setStatus(task, 'RUNNING', 'Pi starting');
+        await pi.prompt(this.#buildPrompt(task));
+        await settled;
+      } catch (error) {
+        this.#resolveSettle(task.id);
+        throw error;
+      }
 
       const runtime = this.runtimes.get(task.id);
-      if (task.status === 'CANCELLED') {
+      if (task.status === 'CANCELLED' || this.deleted.has(task.id)) {
         return;
       }
       if (runtime?.cancelRequested) {
         await this.#finalizeCancelled(task);
-      } else {
+      } else if (task.status !== 'FAILED') {
         await this.#verifyAndFinalize(task);
       }
     } catch (error) {
@@ -227,9 +258,10 @@ export class TaskManager extends EventEmitter {
     this.runtimes.set(task.id, runtime);
 
     pi.on('event', (frame) => {
+      if (this.deleted.has(task.id)) return;
       runtime.eventChain = runtime.eventChain
         .then(() => this.#handlePiEvent(task, frame))
-        .catch((error) => console.error('[TaskBridge] Pi event handling failed:', error));
+        .catch(async (error) => { await this.#fail(task, error); this.#resolveSettle(task.id); });
     });
     pi.on('stderr', (text) => {
       this.store.appendRaw(task.id, 'pi.stderr.log', text).catch(() => {});
@@ -238,9 +270,15 @@ export class TaskManager extends EventEmitter {
     pi.on('protocol_error', (data) => {
       this.#event(task, 'PI_PROTOCOL_ERROR', data.error, { line: data.line?.slice(0, 2000) }).catch(() => {});
     });
+    pi.on('error', error => {
+      runtime.eventChain = runtime.eventChain.then(() => this.#fail(task, error)).finally(() => this.#resolveSettle(task.id));
+      runtime.eventChain.catch(() => {});
+    });
     pi.on('close', ({ code, signal }) => {
+      if (this.deleted.has(task.id) || runtime.cancelRequested) { this.#resolveSettle(task.id); return; }
       if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) {
-        this.#fail(task, Object.assign(new Error(`Pi process exited unexpectedly: code=${code}, signal=${signal}`), { code: 'PI_SESSION_FAILED' })).catch(() => {});
+        runtime.eventChain = runtime.eventChain.then(() => this.#fail(task, Object.assign(new Error(`Pi process exited unexpectedly: code=${code}, signal=${signal}`), { code: 'PI_SESSION_FAILED' }))).finally(() => this.#resolveSettle(task.id));
+        runtime.eventChain.catch(() => {});
       }
     });
 
@@ -271,6 +309,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #handlePiEvent(task, frame) {
+    if (this.deleted.has(task.id)) return;
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
 
     if (frame.type === 'message_update') {
@@ -280,13 +319,13 @@ export class TaskManager extends EventEmitter {
         task.thinkingText += delta.delta || '';
         task.current = `Pi is thinking… (${task.thinkingText.length} chars)`;
       }
-      if (frame.usage) task.lastUsage = frame.usage;
+      if (frame.usage?.totalTokens > 0) task.lastUsage = frame.usage;
     }
     if (frame.type === 'tool_execution_start') {
       const arg = frame.args?.command || frame.args?.path || frame.args?.file_path || '';
       task.current = `${frame.toolName || 'tool'}${arg ? `: ${String(arg).slice(0, 160)}` : ''}`;
     }
-    if (frame.type === 'compaction_end' && frame.result) {
+    if (['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result) {
       task.compaction.count += 1;
       task.compaction.last = {
         reason: frame.reason,
@@ -301,7 +340,11 @@ export class TaskManager extends EventEmitter {
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
     }
-    if (frame.type === 'message_end' || frame.type === 'compaction_end') {
+    if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      if (frame.message.usage?.totalTokens > 0) task.lastUsage = frame.message.usage;
+      if (frame.message.stopReason === 'error') task._modelError = frame.message.errorMessage || 'Модель завершила ответ с ошибкой.';
+    }
+    if (frame.type === 'message_end' || frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
     }
@@ -334,6 +377,8 @@ export class TaskManager extends EventEmitter {
   }
 
   async #verifyAndFinalize(task) {
+    if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
+    if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }));
     const runtime = this.runtimes.get(task.id);
     if (runtime?.verifying) return;
     if (runtime) runtime.verifying = true;
@@ -354,6 +399,7 @@ export class TaskManager extends EventEmitter {
         const text = `\n$ ${result.command}\n${result.stdout || ''}\n${result.stderr || ''}\n`;
         this.store.appendRaw(task.id, 'verification.log', text).catch(() => {});
       });
+      if (this.deleted.has(task.id) || task.status === 'CANCELLED' || runtime?.cancelRequested) return;
       task.verification = verification;
 
       const failed = verification.some((x) => !x.ok);
@@ -392,6 +438,15 @@ export class TaskManager extends EventEmitter {
   }
 
   async #finalizeCancelled(task) {
+    const runtime = this.runtimes.get(task.id);
+    if (runtime?.cancelFinalizing) return runtime.cancelFinalizing;
+    const pending = this.#writeCancelled(task);
+    if (runtime) runtime.cancelFinalizing = pending;
+    return pending;
+  }
+
+  async #writeCancelled(task) {
+    if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
     const gitState = task.workspacePath ? await collectGitState(task.workspacePath).catch(() => null) : null;
     if (gitState) {
       task.git = { isGit: gitState.isGit, status: gitState.status, changedFiles: gitState.changedFiles };
@@ -409,8 +464,12 @@ export class TaskManager extends EventEmitter {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Task not found'), { code: 'NOT_FOUND' });
     const runtime = this.runtimes.get(id);
+    this.deleted.add(id);
     if (runtime) {
+      runtime.cancelRequested = true;
+      this.#resolveSettle(id);
       await runtime.pi.killTree().catch(() => {});
+      await runtime.eventChain.catch(() => {});
       this.runtimes.delete(id);
     }
     if (this.activeTaskId === id) this.activeTaskId = null;
@@ -423,7 +482,15 @@ export class TaskManager extends EventEmitter {
   async cancel(id) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
-    if (!task || !runtime) throw Object.assign(new Error('Active Pi session not found'), { code: 'NOT_FOUND' });
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
+    if (!runtime) {
+      task.status = 'CANCELLED';
+      this.queue = this.queue.filter(x => x !== id);
+      await this.store.save(this.#publicTask(task));
+      await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
+      return this.#publicTask(task);
+    }
     runtime.cancelRequested = true;
     await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
     try {
@@ -432,6 +499,7 @@ export class TaskManager extends EventEmitter {
       await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`);
       await runtime.pi.killTree();
     }
+    await runtime.eventChain.catch(() => {});
     this.#resolveSettle(id);
     await this.#finalizeCancelled(task);
     if (this.activeTaskId === id) this.activeTaskId = null;
@@ -440,51 +508,61 @@ export class TaskManager extends EventEmitter {
   }
 
   async message(id, text, mode = 'auto', files = []) {
+    return this.#admit(() => this.#message(id, text, mode, files));
+  }
+
+  async #message(id, text, mode, files) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
-    if (!task || !runtime) throw Object.assign(new Error('Pi session not found (TaskBridge restart or task has no live session)'), { code: 'NOT_FOUND' });
-    if (this.activeTaskId && this.activeTaskId !== id) {
-      throw Object.assign(new Error(`Another task is active: ${this.activeTaskId}`), { code: 'BUSY' });
-    }
-    let message = String(text || '').trim();
-    if (!message) throw Object.assign(new Error('message is required'), { code: 'INPUT_INVALID' });
-
-    if (!(await this.runtimeManager.isReady())) {
-      throw Object.assign(new Error('Локальная модель недоступна (выгружена или не отвечает)'), { code: 'LOCAL_RUNTIME_FAILED' });
-    }
-
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    if (!runtime || runtime.pi.closed) throw Object.assign(new Error('Процесс Pi этой сессии завершён. История сохранена; для нового запроса откройте новую сессию.'), { code: 'SESSION_UNAVAILABLE' });
+    if (this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
+    const userText = String(text || '').trim();
+    if (!userText) throw Object.assign(new Error('message is required'), { code: 'INPUT_INVALID' });
+    if (!(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
+    const state = await runtime.pi.getState();
+    const streaming = Boolean(state?.isStreaming);
+    if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
+    if (!streaming && (await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     const attachedNames = await this.#writeIncomingFiles(task.workspacePath, files);
-    if (attachedNames.length) {
-      message += `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attachedNames.map((n) => `- ${n}`).join('\n')}`;
+    const message = userText + (attachedNames.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attachedNames.map(n => `- ${n}`).join('\n')}` : '');
+    const effectiveMode = mode === 'auto' ? (streaming ? 'steer' : 'prompt') : mode;
+    // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
+    // are persisted. A rejected RPC must not create a phantom user turn.
+    await runtime.eventChain;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    runtime.eventChain = runtime.eventChain.then(() => gate);
+    let settled;
+    if (!streaming) {
+      this.activeTaskId = id;
+      runtime.cancelRequested = false;
+      runtime.cancelFinalizing = null;
+      settled = this.#waitForSettle(id, 12 * 60 * 60 * 1000);
+      settled.catch(() => {});
     }
-
-    const state = await runtime.pi.getState().catch(() => null);
-    await this.#event(task, 'USER_MESSAGE', message, { mode });
-
-    // If Pi is already running, AUTO becomes a steering message and the existing run owns verification.
-    if (state?.isStreaming || task.status === 'RUNNING') {
-      await runtime.pi.sendFollowUp(message, mode);
-      return this.#publicTask(task);
-    }
-
-    this.activeTaskId = id;
-    runtime.cancelRequested = false;
-    const settled = this.#waitForSettle(id, 12 * 60 * 60 * 1000);
-    await runtime.pi.sendFollowUp(message, mode);
-    await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
-
-    (async () => {
-      try {
-        await settled;
-        if (task.status !== 'CANCELLED' && !runtime.cancelRequested) await this.#verifyAndFinalize(task);
-      } catch (error) {
-        await this.#fail(task, error);
-      } finally {
+    try {
+      if (effectiveMode === 'prompt') await runtime.pi.prompt(message);
+      else await runtime.pi.sendFollowUp(message, effectiveMode);
+      task.error = task.errorCode = task._modelError = null;
+      await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: files.map((f, i) => ({ name: attachedNames[i], size: Number(f.size || 0) })) });
+      if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
+    } catch (error) {
+      if (!streaming) {
+        this.#resolveSettle(id);
         if (this.activeTaskId === id) this.activeTaskId = null;
-        this.#pump();
       }
-    })();
-
+      throw error;
+    } finally { release(); }
+    if (!streaming) {
+      (async () => {
+        try {
+          await settled;
+          if (!runtime.cancelRequested && !['CANCELLED', 'FAILED'].includes(task.status)) await this.#verifyAndFinalize(task);
+        } catch (error) { await this.#fail(task, error); }
+        finally { if (this.activeTaskId === id) this.activeTaskId = null; this.#pump(); }
+      })().catch(error => console.error(error));
+    }
     return this.#publicTask(task);
   }
 
@@ -504,6 +582,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #setStatus(task, status, current) {
+    if (this.deleted.has(task.id)) return;
     task.status = status;
     task.current = current;
     task.updatedAt = now();
@@ -512,7 +591,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #fail(task, error) {
-    if (task.status === 'CANCELLED') return;
+    if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
     task.status = 'FAILED';
     task.errorCode = error.code || 'INTERNAL_ERROR';
     task.error = error.message || String(error);
@@ -524,6 +603,16 @@ export class TaskManager extends EventEmitter {
   }
 
   async #event(task, type, message, data = {}, persistTask = true) {
+    if (this.deleted.has(task.id)) return;
+    const next = (this.eventWrites.get(task.id) || Promise.resolve()).then(() => this.#recordEvent(task, type, message, data, persistTask));
+    const settled = next.catch(() => {});
+    this.eventWrites.set(task.id, settled);
+    settled.then(() => { if (this.eventWrites.get(task.id) === settled) this.eventWrites.delete(task.id); });
+    return next;
+  }
+
+  async #recordEvent(task, type, message, data, persistTask) {
+    if (this.deleted.has(task.id)) return;
     const event = { at: now(), taskId: task.id, type, message, data };
     await this.store.appendEvent(task.id, event);
     if (persistTask) {
