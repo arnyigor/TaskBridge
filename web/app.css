@@ -658,9 +658,21 @@ button:disabled { opacity: .4; cursor: default; }
   border: 1px solid var(--border);
   border-radius: var(--radius-l);
   padding: 14px;
+  flex-shrink: 0;
+}
+.detail summary {
+  cursor: pointer;
+  list-style: none;
+}
+.detail summary::-webkit-details-marker { display: none; }
+.detail summary h2 { margin: 0; font-size: 14px; letter-spacing: 0.3px; }
+.detail summary h2::before { content: '▸ '; color: var(--muted); }
+.detail[open] summary h2::before { content: '▾ '; }
+.detailBody {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  margin-top: 10px;
 }
 .session {
   display: grid;
@@ -749,7 +761,12 @@ pre {
 /* Only .msgs and .panel scroll internally, at every width — the page itself
    never scrolls, so a long chat history doesn't grow the whole document. */
 @media (max-width: 900px) {
-  .main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 38vh); padding: 12px; gap: 12px; }
+  /* auto (not minmax(0,38vh)) sizes the panel row to its actual content —
+     minmax's max is a growable ceiling under default align-content:stretch,
+     so with two collapsed <details> it was still stretching to the full
+     38vh and squeezing .chat down to a sliver, regardless of content. */
+  .main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; align-content: start; padding: 12px; gap: 12px; }
+  .panel { max-height: 42vh; }
   .top { padding: 12px 14px; }
   .brand .s { display: none; }
 }

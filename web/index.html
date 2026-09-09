@@ -175,43 +175,46 @@
         <div id="tasks" class="tasks"></div>
       </details>
 
-      <div id="detail" class="detail hidden">
-        <div class="session">
-          <div class="r taskNameRow">
-            <span>Название</span>
-            <b id="taskTitle">—</b>
-            <button id="renameButton" type="button" title="Переименовать" aria-label="Переименовать сессию">✎</button>
+      <details id="detail" class="detail hidden">
+        <summary><h2>Детали сессии</h2></summary>
+        <div class="detailBody">
+          <div class="session">
+            <div class="r taskNameRow">
+              <span>Название</span>
+              <b id="taskTitle">—</b>
+              <button id="renameButton" type="button" title="Переименовать" aria-label="Переименовать сессию">✎</button>
+            </div>
+            <div class="r"><span>Статус</span><b id="taskStatus">—</b></div>
+            <div class="r"><span>Current</span><b id="current">—</b></div>
+            <div class="r"><span>Workspace</span><b id="workspace">—</b></div>
+            <div class="r"><span>Context</span><b id="usage">—</b></div>
+            <div class="r"><span>Compaction</span><b id="compaction">—</b></div>
           </div>
-          <div class="r"><span>Статус</span><b id="taskStatus">—</b></div>
-          <div class="r"><span>Current</span><b id="current">—</b></div>
-          <div class="r"><span>Workspace</span><b id="workspace">—</b></div>
-          <div class="r"><span>Context</span><b id="usage">—</b></div>
-          <div class="r"><span>Compaction</span><b id="compaction">—</b></div>
+          <div id="contextBar" class="contextBar hidden"><div id="contextBarFill" class="contextBarFill"></div></div>
+
+          <label class="fieldLabel" for="followup">Инструкция во время/после работы</label>
+          <div class="inline">
+            <input id="followup" placeholder="Например: не меняй публичный API" />
+            <button id="sendFollowup" type="button">SEND</button>
+          </div>
+
+          <div class="actions">
+            <button id="compact" class="wide" type="button">COMPACT</button>
+            <button id="autoCompaction" class="wide" type="button">AUTO: —</button>
+          </div>
+
+          <label class="fieldLabel">Файлы агента</label>
+          <div id="outputFiles" class="fileCards muted">—</div>
+
+          <label class="fieldLabel">Artifacts</label>
+          <div id="artifacts" class="artifacts muted">—</div>
+
+          <details id="stateDetails">
+            <summary>Debug: состояние Pi (JSON)</summary>
+            <pre id="stateJson">—</pre>
+          </details>
         </div>
-        <div id="contextBar" class="contextBar hidden"><div id="contextBarFill" class="contextBarFill"></div></div>
-
-        <label class="fieldLabel" for="followup">Инструкция во время/после работы</label>
-        <div class="inline">
-          <input id="followup" placeholder="Например: не меняй публичный API" />
-          <button id="sendFollowup" type="button">SEND</button>
-        </div>
-
-        <div class="actions">
-          <button id="compact" class="wide" type="button">COMPACT</button>
-          <button id="autoCompaction" class="wide" type="button">AUTO: —</button>
-        </div>
-
-        <label class="fieldLabel">Файлы агента</label>
-        <div id="outputFiles" class="fileCards muted">—</div>
-
-        <label class="fieldLabel">Artifacts</label>
-        <div id="artifacts" class="artifacts muted">—</div>
-
-        <details id="stateDetails">
-          <summary>Debug: состояние Pi (JSON)</summary>
-          <pre id="stateJson">—</pre>
-        </details>
-      </div>
+      </details>
     </aside>
   </main>
 
