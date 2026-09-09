@@ -1,5 +1,9 @@
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
+import { marked } from './vendor/marked.js';
+import DOMPurify from './vendor/purify.mjs';
 const $ = (id) => document.getElementById(id);
+
+marked.setOptions({ gfm: true, breaks: true });
 
 let selectedTaskId = null;
 let source = null;
@@ -44,6 +48,36 @@ function botAvatar() {
   return av;
 }
 
+const IMAGE_MIME_RE = /^image\//;
+
+function fileUrl(taskId, fileId, download) {
+  return `/api/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileId)}${download ? '?download=1' : ''}`;
+}
+
+function fileCard(file, taskId) {
+  const card = document.createElement('span');
+  card.className = 'fileChip';
+  const open = document.createElement('a');
+  open.href = fileUrl(taskId, file.id, false);
+  open.target = '_blank';
+  open.rel = 'noopener';
+  open.textContent = `📎 ${file.name}`;
+  const download = document.createElement('a');
+  download.href = fileUrl(taskId, file.id, true);
+  download.textContent = '⭳';
+  download.title = 'Скачать';
+  download.setAttribute('aria-label', `Скачать ${file.name}`);
+  card.append(open, download);
+  return card;
+}
+
+function renderOutputFiles(files) {
+  const el = $('outputFiles');
+  el.innerHTML = '';
+  if (!files.length || !selectedTaskId) { el.textContent = '—'; return; }
+  for (const f of files) el.append(fileCard(f, selectedTaskId));
+}
+
 function appendUserTurn(text, files = []) {
   hideEmptyState();
   const turn = document.createElement('div');
@@ -54,10 +88,10 @@ function appendUserTurn(text, files = []) {
   bubble.className = 'msg s-me';
   bubble.textContent = text;
   body.append(bubble);
-  if (files.length) {
+  if (files.length && selectedTaskId) {
     const list = document.createElement('div');
     list.className = 'attachedFiles';
-    list.innerHTML = files.map((f) => `<span class="fileChip">📎 ${escapeHtml(f.name)}</span>`).join('');
+    for (const f of files) list.append(f.id ? fileCard(f, selectedTaskId) : Object.assign(document.createElement('span'), { className: 'fileChip', textContent: `📎 ${f.name}` }));
     body.append(list);
   }
   turn.append(body);
@@ -121,7 +155,8 @@ const TYPING_HTML = '<div class="typing"><i></i><i></i><i></i></div>';
 function updateText() {
   if (!liveTurn) return;
   const text = liveText.trim();
-  liveTurn.md.innerHTML = text ? renderMarkdown(text) : (liveActive ? TYPING_HTML : '<span class="muted">Ответ не был получен.</span>');
+  if (text) renderMarkdown(liveTurn.md, text);
+  else liveTurn.md.innerHTML = liveActive ? TYPING_HTML : '<span class="muted">Ответ не был получен.</span>';
   scrollBottom();
 }
 
@@ -231,7 +266,7 @@ function resetSelection(id) {
   $('autoCompaction').disabled = true;
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
-  for (const field of ['taskTitle', 'taskStatus', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'stateJson']) $(field).textContent = '—';
+  for (const field of ['taskTitle', 'taskStatus', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson']) $(field).textContent = '—';
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
   setComposerMode(id);
@@ -323,6 +358,7 @@ function renderTaskDetails(t) {
   $('workspace').textContent = t.workspacePath || '—';
   if ([...$('project').options].some(o => o.value === t.projectId)) $('project').value = t.projectId;
   renderContext(t);
+  renderOutputFiles(t.outputFiles || []);
   const c = t.compaction || {};
   $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
   $('stopButton').disabled = !ACTIVE_STATUSES.has(t.status) || t.status === 'CANCELLING';
@@ -422,6 +458,11 @@ async function deleteTask(id) {
   }
 }
 
+function projectName(id) {
+  if (id === '__scratch__') return 'Без проекта';
+  return projects.find(p => p.id === id)?.name || id;
+}
+
 async function loadTasks() {
   const tasks = await api('/api/tasks');
   $('tasks').innerHTML = tasks.length ? tasks.map((t) => `
@@ -430,6 +471,7 @@ async function loadTasks() {
       <div class="t-prompt">${escapeHtml(t.prompt)}</div>
       <div class="t-sub">
         <span class="pill ${pillClass(t.status)}">${escapeHtml(t.status)}</span>
+        <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
         <span class="t-time">${new Date(t.createdAt).toLocaleString()}</span>
       </div>
     </div>`).join('') : '<div class="none">Пока нет сессий.</div>';
@@ -618,56 +660,39 @@ $('stateDetails').addEventListener('toggle', async () => {
 
 /* ---------------- markdown (regex, no deps) ---------------- */
 
-function renderInline(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '<em>$1</em>');
+function isExternalUrl(value) {
+  return /^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('//');
 }
 
-function extractListTail(lines, itemPattern) {
-  let i = lines.length;
-  while (i > 0 && itemPattern.test(lines[i - 1].trim())) i--;
-  if (i === lines.length) return null;
-  return {
-    tag: itemPattern.source.startsWith('^\\d') ? 'ol' : 'ul',
-    intro: lines.slice(0, i),
-    items: lines.slice(i).map((line) => line.trim().replace(itemPattern, '')),
-  };
+function workspaceFileUrl(relativePath, download) {
+  if (!selectedTaskId) return null;
+  return `/api/tasks/${encodeURIComponent(selectedTaskId)}/workspace-file?path=${encodeURIComponent(relativePath)}${download ? '&download=1' : ''}`;
 }
 
-function renderMarkdown(text) {
-  const codeBlocks = [];
-  const withPlaceholders = text.replace(/```[a-zA-Z0-9_-]*\n([\s\S]*?)```/g, (_match, code) => {
-    codeBlocks.push(`<pre><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`);
-    return `\u0000${codeBlocks.length - 1}\u0000`;
-  });
+// Bare relative paths in model-authored Markdown are meaningless to the
+// browser (resolved against the page URL, not the workspace) and absolute
+// same-origin paths could otherwise be pointed at internal API routes.
+function rewriteMarkdownLinks(container) {
+  for (const a of container.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href');
+    if (!href || href.startsWith('#')) continue;
+    if (isExternalUrl(href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; continue; }
+    if (href.startsWith('/')) { a.removeAttribute('href'); continue; }
+    const url = workspaceFileUrl(href, true);
+    if (url) { a.href = url; a.target = '_blank'; a.rel = 'noopener'; } else a.removeAttribute('href');
+  }
+  for (const img of container.querySelectorAll('img[src]')) {
+    const src = img.getAttribute('src');
+    if (!src || isExternalUrl(src) || src.startsWith('/')) continue;
+    const url = workspaceFileUrl(src, false);
+    if (url) img.src = url;
+    img.loading = 'lazy';
+  }
+}
 
-  return withPlaceholders
-    .split(/\n{2,}/)
-    .map((block) => {
-      const placeholder = block.trim().match(/^\u0000(\d+)\u0000$/);
-      if (placeholder) return codeBlocks[Number(placeholder[1])];
-
-      let lines = block.split('\n').filter((line) => line.length > 0);
-      let heading = '';
-      const headingMatch = lines[0] && lines[0].match(/^(#{1,6})\s+(.*)$/);
-      if (headingMatch) {
-        const level = Math.min(headingMatch[1].length + 2, 6);
-        heading = `<h${level}>${renderInline(headingMatch[2])}</h${level}>`;
-        lines = lines.slice(1);
-      }
-      if (!lines.length) return heading;
-
-      const list = extractListTail(lines, /^[-*]\s+/) || extractListTail(lines, /^\d+\.\s+/);
-      if (list) {
-        const intro = list.intro.length ? `<p>${list.intro.map(renderInline).join('<br>')}</p>` : '';
-        const items = list.items.map((line) => `<li>${renderInline(line)}</li>`).join('');
-        return `${heading}${intro}<${list.tag}>${items}</${list.tag}>`;
-      }
-      return `${heading}<p>${lines.map(renderInline).join('<br>')}</p>`;
-    })
-    .join('');
+function renderMarkdown(container, text) {
+  container.innerHTML = DOMPurify.sanitize(marked.parse(text));
+  rewriteMarkdownLinks(container);
 }
 
 function escapeHtml(value) {

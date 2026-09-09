@@ -85,8 +85,10 @@ async function ui() {
       else body = tasks[path.pathname.split('/')[3]];
       return { ok: true, json: async () => body };
     }, alert() {}, confirm: () => true,
+    marked: { setOptions() {}, parse: text => text },
+    DOMPurify: { sanitize: html => html },
   });
-  const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/, '').replace(/init\(\);\s*$/, '');
+  const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
   vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage};', context);
   return { ...context.testing, document, streams, tasks, setFetchHook: hook => { fetchHook = hook; } };
 }
