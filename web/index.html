@@ -32,6 +32,8 @@
   </header>
 
   <div class="subheader" id="subheader">
+    <select id="project" title="Проект" aria-label="Проект"></select>
+    <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
     <span id="continueBadge" class="pill hidden"></span>
     <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
     <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
@@ -139,8 +141,6 @@
 
       <div class="composer-wrap">
         <div class="composer-top">
-          <select id="project" title="Проект" aria-label="Проект"></select>
-          <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
           <label class="fileButton" title="Прикрепить файлы">
             <input id="files" type="file" multiple accept="*/*" />+ файлы
           </label>

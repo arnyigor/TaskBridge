@@ -442,9 +442,7 @@ body {
   flex-wrap: wrap;
   margin-bottom: 8px;
 }
-.composer-top select {
-  flex: 1;
-  min-width: 140px;
+#project {
   background: #0d1220;
   color: var(--text);
   border: 1px solid var(--border-strong);
@@ -453,7 +451,7 @@ body {
   font-size: 12.5px;
   outline: none;
 }
-.composer-top select:focus { border-color: var(--accent); }
+#project:focus { border-color: var(--accent); }
 .fileButton {
   display: inline-block;
   font-size: 12px;
