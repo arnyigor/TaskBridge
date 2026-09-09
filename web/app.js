@@ -912,7 +912,9 @@ $('resumeSessionButton').onclick = async () => {
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'sessionPickerItem';
-      button.innerHTML = `<span class="name">${escapeHtml(session.name)}</span><span class="meta">${new Date(session.mtime).toLocaleString()}${session.existingTaskId ? ' · уже открыта в TaskBridge' : ''}</span>`;
+      const primary = session.preview || session.name;
+      const secondary = session.preview && session.preview !== session.name ? session.name : null;
+      button.innerHTML = `<span class="name">${escapeHtml(primary)}</span>${secondary ? `<span class="meta">${escapeHtml(secondary)}</span>` : ''}<span class="meta">${new Date(session.mtime).toLocaleString()}${session.existingTaskId ? ' · уже открыта в TaskBridge' : ''}</span>`;
       button.onclick = () => importSession(projectId, session);
       $('sessionPickerList').append(button);
     }

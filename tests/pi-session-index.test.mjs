@@ -52,6 +52,21 @@ test('listing excludes malformed, oversized, obsolete and unrelated headers', as
   await assert.rejects(readPiSession(f.file, f.root), /different project/);
 });
 
+test('listing previews the first user message and truncates long text without extra reads', async t => {
+  const f = await fixture(t);
+  await f.write([message('a', null, 'Первое сообщение из сессии'), message('b', 'a', 'ответ', 'assistant')]);
+  const long = path.join(f.sessions, 'long.jsonl');
+  await fs.writeFile(long, [f.header, message('a', null, 'x'.repeat(300))].map(e => JSON.stringify(e)).join('\n') + '\n');
+  const noUser = path.join(f.sessions, 'no-user.jsonl');
+  await fs.writeFile(noUser, [f.header, message('a', null, 'только ассистент', 'assistant')].map(e => JSON.stringify(e)).join('\n') + '\n');
+
+  const sessions = await listPiSessions({ path: f.project }, [f.sessions]);
+  const byName = name => sessions.find(s => path.basename(s.file) === name);
+  assert.equal(byName('история.jsonl').preview, 'Первое сообщение из сессии');
+  assert.equal(byName('long.jsonl').preview.length, 160);
+  assert.equal(byName('no-user.jsonl').preview, null);
+});
+
 test('reader preserves all entries but displays only the selected parent branch including tool data', async t => {
   const f = await fixture(t);
   const entries = [message('a', null, 'start'), message('old', 'a', 'abandoned answer', 'assistant'),

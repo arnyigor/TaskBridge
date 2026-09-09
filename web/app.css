@@ -39,8 +39,9 @@ body {
 .top {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   background: rgba(10, 13, 24, 0.7);
@@ -49,7 +50,7 @@ body {
   top: 0;
   z-index: 10;
 }
-.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; flex-shrink: 0; }
 .brand .av {
   width: 34px; height: 34px;
   border-radius: 10px;
@@ -64,7 +65,7 @@ body {
 .brand .s { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
 
 
-.headerActions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.headerActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .runtimeControl { display: flex; align-items: center; gap: 6px; }
 .runtimeControl select {
   background: #0d1220;
@@ -732,4 +733,8 @@ pre {
   .composer-wrap { padding: 8px 10px 10px; }
   .panel { gap: 10px; }
   .session { grid-template-columns: 1fr; }
+
+  .headerActions { flex-basis: 100%; justify-content: flex-start; }
+  .runtimeControl select { max-width: 84px; }
+  #pairButton, #notifyButton { padding: 6px 8px; font-size: 11px; }
 }

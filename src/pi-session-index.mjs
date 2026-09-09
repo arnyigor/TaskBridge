@@ -68,6 +68,32 @@ async function readHeader(handle, projectPath) {
   return validateHeader(JSON.parse(buffer.subarray(0, length).toString('utf8').replace(/^\uFEFF/, '')), projectPath);
 }
 
+const PREVIEW_MAX_CHARS = 160;
+
+function previewText(message) {
+  const text = typeof message.content === 'string' ? message.content : (message.content || []).filter(x => x.type === 'text').map(x => x.text || '').join('');
+  return text.trim().slice(0, PREVIEW_MAX_CHARS) || null;
+}
+
+// Reuses the single bounded read already done for the header (no extra I/O):
+// a session's first user message almost always falls within that same chunk.
+async function readHeaderAndPreview(handle, projectPath) {
+  const buffer = Buffer.alloc(MAX_HEADER_BYTES + 1);
+  const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+  const text = buffer.subarray(0, bytesRead).toString('utf8').replace(/^\uFEFF/, '');
+  const lines = text.split('\n');
+  if (Buffer.byteLength(lines[0] ?? '', 'utf8') > MAX_HEADER_BYTES) throw new Error('Pi session header is too large');
+  const header = await validateHeader(JSON.parse(lines[0] ?? ''), projectPath);
+  let preview = null;
+  for (let i = 1; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    let entry;
+    try { entry = JSON.parse(lines[i]); } catch { break; } // torn line at the chunk boundary
+    if (entry.type === 'message' && entry.message?.role === 'user') { preview = previewText(entry.message); break; }
+  }
+  return { header, preview };
+}
+
 /** Bounded header-only discovery. `file` is internal; expose `key` to clients. */
 export async function listPiSessions(project, roots) {
   const projectPath = await canonical(project.path);
@@ -92,14 +118,14 @@ export async function listPiSessions(project, roots) {
         let handle;
         try {
           handle = await openSession(file);
-          const header = await readHeader(handle, projectPath);
+          const { header, preview } = await readHeaderAndPreview(handle, projectPath);
           const resolved = await fs.realpath(file);
           const identity = comparable(resolved);
           if (seen.has(identity)) continue;
           seen.add(identity);
           const stat = await handle.stat();
           results.push({ key: crypto.createHash('sha256').update(identity).digest('hex'), file: resolved,
-            id: header.id, cwd: header.cwd, mtime: stat.mtime.toISOString(),
+            id: header.id, cwd: header.cwd, mtime: stat.mtime.toISOString(), preview,
             name: typeof header.name === 'string' ? header.name : path.basename(file, path.extname(file)) });
         } catch { /* Malformed, unrelated, inaccessible and concurrently removed files are not candidates. */ }
         finally { await handle?.close(); }
