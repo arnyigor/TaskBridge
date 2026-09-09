@@ -894,7 +894,7 @@ $('notifyButton').onclick = async () => {
   // than localhost, so a phone opening TaskBridge over LAN IP may never see
   // the permission prompt at all — requestPermission then just resolves to
   // 'denied' without the browser ever asking.
-  if (permission !== 'granted') alert('Браузер не разрешил уведомления. Если TaskBridge открыт по обычному http:// (не localhost) — это ограничение браузера, а не TaskBridge: без HTTPS уведомления на телефоне работать не будут.');
+  if (permission !== 'granted') alert('Не получилось включить уведомления.\n\nПричина: браузер разрешает уведомления только для сайтов с https:// или для localhost. TaskBridge сейчас открыт по обычному http://, поэтому браузер даже не показал запрос на разрешение — это ограничение браузера, а не TaskBridge.\n\nЧтобы уведомления заработали, нужно включить HTTPS для TaskBridge.');
 };
 
 /* ---------------- native Pi sessions ---------------- */
