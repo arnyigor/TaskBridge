@@ -11,6 +11,7 @@ import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
 import { chooseEngine } from './dispatcher.mjs';
+import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -67,7 +68,17 @@ export class TaskManager extends EventEmitter {
   async init() {
     await this.uploads.cleanup().catch(() => {});
     const previous = await this.store.list();
+    let trimmed = 0;
     for (const task of previous) {
+      // One-time shrink of records written before text was bounded.
+      const assistantText = tailText(task.assistantText, TEXT_TAIL);
+      const thinkingText = tailText(task.thinkingText, THINKING_TAIL);
+      if (assistantText !== task.assistantText || thinkingText !== task.thinkingText) {
+        task.assistantText = assistantText;
+        task.thinkingText = thinkingText;
+        await this.store.save(task).catch(() => {});
+        trimmed++;
+      }
       if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
         task.status = 'FAILED';
         task.errorCode = 'FAILED_RECOVERY';
@@ -77,6 +88,30 @@ export class TaskManager extends EventEmitter {
       }
       this.tasks.set(task.id, task);
     }
+    if (trimmed) await this.store.vacuum().catch(() => {});
+    await this.#sweepOrphans();
+  }
+
+  // Directories left behind by a crash or by an older version that did not clean
+  // up on delete. Only entries whose id is unknown to the store are touched.
+  async #sweepOrphans() {
+    for (const area of ['pi-sessions', 'workspaces', 'worktrees']) {
+      const root = path.join(this.dataRoot, area);
+      const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+      for (const entry of entries) {
+        if (!entry.isDirectory() || this.tasks.has(entry.name)) continue;
+        await fs.rm(path.join(root, entry.name), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  }
+
+  // Never recurse outside the given root, even if a task carries a bogus path.
+  async #removeInside(root, target) {
+    const resolvedRoot = path.resolve(root);
+    const resolvedTarget = path.resolve(target);
+    const relative = path.relative(resolvedRoot, resolvedTarget);
+    if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return;
+    await fs.rm(resolvedTarget, { recursive: true, force: true }).catch(() => {});
   }
 
   listProjects() {
@@ -197,7 +232,12 @@ export class TaskManager extends EventEmitter {
   #publicTask(task) {
     const { _incomingFiles, _modelError, _baseline, _nativeLease, _uploadToken, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
-    return { ...safe, sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed)) };
+    return {
+      ...safe,
+      assistantText: tailText(safe.assistantText, TEXT_TAIL),
+      thinkingText: tailText(safe.thinkingText, THINKING_TAIL),
+      sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed))
+    };
   }
 
   async #pump() {
@@ -382,9 +422,9 @@ export class TaskManager extends EventEmitter {
 
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
-      if (delta?.type === 'text_delta') task.assistantText += delta.delta || '';
+      if (delta?.type === 'text_delta') task.assistantText = appendTail(task.assistantText, delta.delta, TEXT_TAIL);
       if (delta?.type === 'thinking_delta') {
-        task.thinkingText += delta.delta || '';
+        task.thinkingText = appendTail(task.thinkingText, delta.delta, THINKING_TAIL);
         task.current = `Pi is thinking… (${task.thinkingText.length} chars)`;
       }
       if (frame.usage?.totalTokens > 0) task.lastUsage = frame.usage;
@@ -418,6 +458,10 @@ export class TaskManager extends EventEmitter {
     }
 
     await this.#event(task, 'PI_EVENT', summarizePiEvent(frame), { pi: frame }, false);
+
+    if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      await this.store.pruneStreamingDeltas(task.id).catch(() => {});
+    }
 
     if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
   }
@@ -552,7 +596,12 @@ export class TaskManager extends EventEmitter {
     if (task._nativeLease) await task._nativeLease().catch(() => {});
     if (task.worktree && task.workspacePath && task.sourcePath) {
       await removeWorktree(task.workspacePath, task.sourcePath, path.join(this.dataRoot, 'worktrees')).catch(() => {});
+    } else if (task.workspacePath) {
+      // Attachments were copied into the project workspace; drop this task's copy.
+      await this.#removeInside(task.workspacePath, path.join(task.workspacePath, '.taskbridge-input', task.id));
     }
+    await this.#removeInside(path.join(this.dataRoot, 'pi-sessions'), path.join(this.dataRoot, 'pi-sessions', task.id));
+    await this.#removeInside(path.join(this.dataRoot, 'workspaces'), path.join(this.dataRoot, 'workspaces', task.id));
     await this.store.remove(id);
     this.#pump();
   }

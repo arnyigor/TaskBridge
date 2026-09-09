@@ -106,11 +106,11 @@ export async function parseMultipart(req, boundary, options = {}) {
       if (!sink) throw fail('INPUT_INVALID', 'Не удалось начать приём файла.');
     }
     const limit = isFile ? maxFileBytes : maxFieldBytes;
-    const write = chunk => {
+    const write = async chunk => {
       if (!chunk.length) return;
       size += chunk.length;
       if (size > limit) throw fail('BODY_TOO_LARGE', `Файл ${filename || name} превышает лимит.`);
-      if (sink) sink.write(chunk);
+      if (sink) await sink.write(chunk);
       else chunks.push(chunk);
     };
 
@@ -120,18 +120,18 @@ export async function parseMultipart(req, boundary, options = {}) {
     while (true) {
       const index = buffer.indexOf(separator);
       if (index !== -1) {
-        write(buffer.subarray(0, index));
+        await write(buffer.subarray(0, index));
         buffer = buffer.subarray(index + separator.length);
         closed = true;
         break;
       }
       const keep = separator.length - 1;
       if (buffer.length > keep) {
-        write(buffer.subarray(0, buffer.length - keep));
+        await write(buffer.subarray(0, buffer.length - keep));
         buffer = buffer.subarray(buffer.length - keep);
       }
       if (!await fill()) {
-        write(buffer);
+        await write(buffer);
         buffer = Buffer.alloc(0);
         break;
       }

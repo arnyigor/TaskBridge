@@ -53,8 +53,38 @@ export class TaskStore {
     // A second TaskBridge instance (or a test fixture) must wait for the writer
     // instead of failing immediately with SQLITE_BUSY.
     this.db.exec('PRAGMA busy_timeout = 5000;');
+    // Enforce task/event integrity; must be set outside any transaction.
+    this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    this.#migrateSchema();
     this.#importLegacy();
+  }
+
+  // user_version 0 is either a fresh database or one created before events had a
+  // foreign key. Rebuild the table once, dropping rows whose task is gone.
+  #migrateSchema() {
+    const version = Number(this.db.prepare('PRAGMA user_version').get().user_version || 0);
+    if (version >= 1) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.exec(`
+        CREATE TABLE events_new (
+          task_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          payload TEXT NOT NULL,
+          PRIMARY KEY (task_id, seq),
+          FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+        ) WITHOUT ROWID
+      `);
+      this.db.exec('INSERT INTO events_new (task_id, seq, payload) SELECT task_id, seq, payload FROM events WHERE task_id IN (SELECT id FROM tasks)');
+      this.db.exec('DROP TABLE events');
+      this.db.exec('ALTER TABLE events_new RENAME TO events');
+      this.db.exec('PRAGMA user_version = 1');
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* transaction already aborted */ }
+      throw error;
+    }
   }
 
   taskDir(id) {
@@ -69,6 +99,12 @@ export class TaskStore {
   close() {
     if (!this.db) return;
     try { this.db.close(); } finally { this.db = null; }
+  }
+
+  // Reclaims space freed by pruning/trimming. VACUUM needs exclusive access, so
+  // callers only do this at startup before any task is admitted.
+  async vacuum() {
+    this.db.exec('VACUUM');
   }
 
   #meta(key) {
@@ -93,10 +129,10 @@ export class TaskStore {
       const id = entry.name;
       const dir = path.join(this.root, id);
       const task = readJsonSync(path.join(dir, 'task.json'));
-      if (task && typeof task === 'object') {
-        const created = String(task.createdAt || '');
-        insertTask.run(id, created, String(task.updatedAt || created), JSON.stringify({ ...task, id }));
-      }
+      // Events cannot exist without their task row once the foreign key is on.
+      if (!task || typeof task !== 'object') continue;
+      const created = String(task.createdAt || '');
+      insertTask.run(id, created, String(task.updatedAt || created), JSON.stringify({ ...task, id }));
       let text = '';
       try { text = fs.readFileSync(path.join(dir, 'events.jsonl'), 'utf8'); } catch { /* no legacy events */ }
       let seq = 0;
@@ -200,8 +236,15 @@ export class TaskStore {
     const dir = this.taskDir(id);
     this.removed.add(id);
     await this.fileWrites.get(id);
-    this.db.prepare('DELETE FROM events WHERE task_id = ?').run(id);
-    this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+    // The events foreign key cascades from the task row in one transaction.
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('DELETE FROM tasks WHERE id = ?').run(id);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* transaction already aborted */ }
+      throw error;
+    }
     await fsp.rm(dir, { recursive: true, force: true });
   }
 
@@ -228,5 +271,41 @@ export class TaskStore {
     const rows = this.db.prepare('SELECT seq, payload FROM events WHERE task_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?').all(id, after, limit);
     rows.reverse();
     return rows.map(toEvent);
+  }
+
+  // Bounded-memory scan for recovery; readEvents(id, 0) would materialize the
+  // whole history at once for a very long session.
+  async *iterateEvents(id, after = 0, page = 2000) {
+    this.taskDir(id);
+    let cursor = after;
+    while (true) {
+      const rows = this.db.prepare('SELECT seq, payload FROM events WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?').all(id, cursor, page);
+      if (!rows.length) return;
+      for (const row of rows) {
+        const event = { ...JSON.parse(row.payload), seq: Number(row.seq) };
+        cursor = event.seq;
+        yield event;
+      }
+      if (rows.length < page) return;
+    }
+  }
+
+  // Drops message_update rows already superseded by a later message_end, mirroring
+  // event-trim at write time so a long session does not accumulate megabytes of
+  // dead deltas. Deltas after the last message_end (still in progress) are kept.
+  async pruneStreamingDeltas(id) {
+    this.taskDir(id);
+    const lastEnd = Number(this.db.prepare(`
+      SELECT COALESCE(MAX(seq), 0) AS seq FROM events
+      WHERE task_id = ? AND json_extract(payload, '$.type') = 'PI_EVENT'
+        AND json_extract(payload, '$.data.pi.type') = 'message_end'
+    `).get(id).seq);
+    if (!lastEnd) return 0;
+    const info = this.db.prepare(`
+      DELETE FROM events WHERE task_id = ? AND seq < ?
+        AND json_extract(payload, '$.type') = 'PI_EVENT'
+        AND json_extract(payload, '$.data.pi.type') = 'message_update'
+    `).run(id, lastEnd);
+    return Number(info.changes || 0);
   }
 }

@@ -3,6 +3,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { listPiSessions, readPiSession } from './pi-session-index.mjs';
+import { TEXT_TAIL, THINKING_TAIL, appendTail } from './text-tail.mjs';
 
 const fail = (message, code = 'INPUT_INVALID') => Object.assign(new Error(message), { code });
 const timestamp = value => Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : new Date().toISOString();
@@ -104,8 +105,8 @@ export class NativeSessionService {
         }
         if (message.role === 'assistant') {
           frame({ type: 'message_start', message }, at);
-          task.assistantText += messageText(message);
-          task.thinkingText += (Array.isArray(message.content) ? message.content : []).filter(x => x.type === 'thinking').map(x => x.thinking || '').join('');
+          task.assistantText = appendTail(task.assistantText, messageText(message), TEXT_TAIL);
+          task.thinkingText = appendTail(task.thinkingText, (Array.isArray(message.content) ? message.content : []).filter(x => x.type === 'thinking').map(x => x.thinking || '').join(''), THINKING_TAIL);
           if (message.usage) task.lastUsage = message.usage;
           if (message.model) task.model = { id: message.model, provider: message.provider || null, contextWindow: null, maxTokens: null };
         }

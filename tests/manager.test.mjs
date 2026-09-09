@@ -92,6 +92,48 @@ test('repeated cancellation produces one terminal event', async t => {
   assert.equal((await f.store.readEvents('a', 0)).filter(x => x.type === 'TASK_CANCELLED').length, 1);
 });
 
+test('deleting a task removes its scratch workspace, pi-sessions and workspace input copy', async t => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-cleanup-data-'));
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-cleanup-ws-'));
+  const store = new TaskStore(dataRoot);
+  t.after(async () => {
+    store.close();
+    await fs.rm(dataRoot, { recursive: true, force: true });
+    await fs.rm(scratch, { recursive: true, force: true });
+  });
+  const manager = new TaskManager({ projects: [] }, dataRoot, store);
+  await fs.mkdir(path.join(dataRoot, 'pi-sessions', 'a'), { recursive: true });
+  await fs.mkdir(path.join(dataRoot, 'workspaces', 'a'), { recursive: true });
+  await fs.mkdir(path.join(scratch, '.taskbridge-input', 'a', 'file-1'), { recursive: true });
+  await fs.writeFile(path.join(scratch, '.taskbridge-input', 'a', 'file-1', 'x.txt'), 'x');
+  const task = { id: 'a', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'SUCCEEDED', workspacePath: scratch, files: [], attachments: [], outputFiles: [] };
+  await store.create(task);
+  manager.tasks.set('a', task);
+  await manager.deleteTask('a');
+  const exists = value => fs.access(value).then(() => true, () => false);
+  assert.equal(await exists(path.join(dataRoot, 'pi-sessions', 'a')), false);
+  assert.equal(await exists(path.join(dataRoot, 'workspaces', 'a')), false);
+  assert.equal(await exists(path.join(scratch, '.taskbridge-input', 'a')), false);
+  assert.equal(await exists(path.join(dataRoot, 'tasks', 'a')), false);
+});
+
+test('startup sweeps orphaned pi-sessions and workspaces for unknown task ids', async t => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-sweep-data-'));
+  const store = new TaskStore(dataRoot);
+  t.after(async () => { store.close(); await fs.rm(dataRoot, { recursive: true, force: true }); });
+  await fs.mkdir(path.join(dataRoot, 'pi-sessions', 'orphan'), { recursive: true });
+  await fs.mkdir(path.join(dataRoot, 'workspaces', 'orphan'), { recursive: true });
+  const task = { id: 'kept', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'SUCCEEDED' };
+  await store.create(task);
+  await fs.mkdir(path.join(dataRoot, 'pi-sessions', 'kept'), { recursive: true });
+  const manager = new TaskManager({ projects: [] }, dataRoot, store);
+  await manager.init();
+  const exists = value => fs.access(value).then(() => true, () => false);
+  assert.equal(await exists(path.join(dataRoot, 'pi-sessions', 'orphan')), false);
+  assert.equal(await exists(path.join(dataRoot, 'workspaces', 'orphan')), false);
+  assert.equal(await exists(path.join(dataRoot, 'pi-sessions', 'kept')), true);
+});
+
 test('server recovery terminates persisted queued sessions too', async t => {
   const f = await fixture(t);
   await f.store.save({ ...f.task, status: 'QUEUED' });

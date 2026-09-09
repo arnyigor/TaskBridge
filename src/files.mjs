@@ -6,7 +6,7 @@ import crypto from 'node:crypto';
 
 const invalid = message => Object.assign(new Error(message), { code: 'INPUT_INVALID' });
 const forbidden = () => Object.assign(new Error('Этот файл недоступен для выдачи.'), { code: 'FILE_FORBIDDEN' });
-export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, uploadFileBytes: 64 * 1024 * 1024, uploadBytes: 128 * 1024 * 1024, outputBytes: 256 * 1024 * 1024 };
+export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, uploadFileBytes: 64 * 1024 * 1024, uploadBytes: 128 * 1024 * 1024, outputBytes: 256 * 1024 * 1024, outputTotalBytes: 512 * 1024 * 1024 };
 const skippedDirs = new Set(['.git', '.pi', '.taskbridge-input', 'node_modules', 'data', '.gradle', '.idea']);
 
 export function isPrivatePath(value) {
@@ -138,17 +138,23 @@ export async function captureOutputs(task, taskDir, baseline) {
   if (!baseline) return { files: [], warnings: [] };
   const after = await snapshotWorkspace(task.workspacePath);
   const files = [], warnings = [];
+  let totalBytes = 0;
   if (baseline.truncated || after.truncated) warnings.push('Рабочая папка слишком велика: список результатов может быть неполным.');
   await fs.mkdir(path.join(taskDir, 'files'), { recursive: true });
   for (const [name, stat] of after.files) {
     const before = baseline.files.get(name);
     if (before && before.size === stat.size && before.mtimeMs === stat.mtimeMs) continue;
-    if (files.length >= 100 || stat.size > FILE_LIMITS.outputBytes) { warnings.push(`Файл ${name} не сохранён: превышен лимит результатов.`); continue; }
+    if (files.length >= 100 || stat.size > FILE_LIMITS.outputBytes || totalBytes + stat.size > FILE_LIMITS.outputTotalBytes) {
+      warnings.push(`Файл ${name} не сохранён: превышен лимит результатов.`);
+      continue;
+    }
     const id = crypto.randomUUID();
     try {
       const source = await containedFile(task.workspacePath, name);
       await fs.copyFile(source, path.join(taskDir, 'files', id));
-      files.push({ id, name: path.basename(name), path: name, size: (await fs.stat(path.join(taskDir, 'files', id))).size, mimeType: contentType(name), direction: 'output', createdAt: new Date().toISOString() });
+      const size = (await fs.stat(path.join(taskDir, 'files', id))).size;
+      totalBytes += size;
+      files.push({ id, name: path.basename(name), path: name, size, mimeType: contentType(name), direction: 'output', createdAt: new Date().toISOString() });
     } catch (error) { warnings.push(`Не удалось сохранить ${name}: ${error.message}`); }
   }
   return { files, warnings };

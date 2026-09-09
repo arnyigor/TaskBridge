@@ -62,6 +62,49 @@ test('legacy file store is imported once, with torn tail lines skipped', async t
   assert.equal((await reloaded.readEvents('a', 0)).length, 3);
 });
 
+test('superseded streaming deltas are pruned, in-progress ones are kept', async t => {
+  const { open } = await fixture(t);
+  const store = open();
+  await store.create({ id: 'a' });
+  const frame = pi => ({ type: 'PI_EVENT', data: { pi } });
+  await store.appendEvent('a', frame({ type: 'message_start', message: { role: 'assistant' } }));
+  await store.appendEvent('a', frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'A' } }));
+  await store.appendEvent('a', frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'B' } }));
+  await store.appendEvent('a', frame({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'AB' }] } }));
+  await store.appendEvent('a', frame({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'C' } }));
+  assert.equal(await store.pruneStreamingDeltas('a'), 2);
+  assert.deepEqual((await store.readEvents('a', 0)).map(e => e.data.pi.type), ['message_start', 'message_end', 'message_update']);
+});
+
+test('deleting a task cascades events and the foreign key blocks orphan writes', async t => {
+  const { open } = await fixture(t);
+  const first = open();
+  await first.create({ id: 'a' });
+  await first.appendEvent('a', { type: 'X' });
+  await first.remove('a');
+  assert.deepEqual(await first.readEvents('a', 0), []);
+  // A second connection has no in-memory tombstone, so only the FK stops it.
+  const second = open();
+  await assert.rejects(second.appendEvent('a', { type: 'Y' }));
+  assert.deepEqual(await second.readEvents('a', 0), []);
+});
+
+test('a pre-foreign-key database is migrated and orphan events are dropped', async t => {
+  const { root, open } = await fixture(t);
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(path.join(root, 'taskbridge.db'));
+  legacy.exec('CREATE TABLE tasks (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, data TEXT NOT NULL)');
+  legacy.exec('CREATE TABLE events (task_id TEXT NOT NULL, seq INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY (task_id, seq)) WITHOUT ROWID');
+  legacy.prepare('INSERT INTO tasks (id, created_at, updated_at, data) VALUES (?, ?, ?, ?)').run('a', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', JSON.stringify({ id: 'a', createdAt: '2026-01-01T00:00:00.000Z' }));
+  legacy.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run('a', 1, JSON.stringify({ type: 'X', seq: 1 }));
+  legacy.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run('ghost', 1, JSON.stringify({ type: 'Y', seq: 1 }));
+  legacy.close();
+  const store = open();
+  assert.deepEqual((await store.readEvents('a', 0)).map(e => e.type), ['X']);
+  assert.equal(Number(store.db.prepare('PRAGMA user_version').get().user_version), 1);
+  assert.equal(Number(store.db.prepare('SELECT COUNT(*) AS n FROM events').get().n), 1);
+});
+
 test('removed sessions cannot be recreated by late writes and traversal is rejected', async t => {
   const { open } = await fixture(t);
   const store = open();

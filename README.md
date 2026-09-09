@@ -168,7 +168,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   74 теста на node:test
+├─ tests/                   84 теста на node:test
 ├─ scripts/
 │  └─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 ├─ docs/                    ТЗ, ревью и планы
@@ -381,6 +381,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 data/
 ├─ taskbridge.db            SQLite: задачи (tasks) и события (events)
 ├─ taskbridge.db-wal/-shm   WAL-журнал SQLite
+├─ taskbridge.lock          признак запущенного экземпляра (pid)
 ├─ tasks/<task-id>/
 │  ├─ files/                вложения
 │  └─ artifacts/
@@ -408,13 +409,19 @@ data/
 
 | Таблица | Содержимое |
 | --- | --- |
-| `tasks` | `id`, `created_at`, `updated_at` + `data` (полный JSON задачи) |
-| `events` | `task_id`, `seq`, `payload` (полный JSON события), PK `(task_id, seq)` |
+| `tasks` | `id`, `created_at`, `updated_at` + `data` (JSON задачи с ограниченным хвостом текста) |
+| `events` | `task_id`, `seq`, `payload` (JSON события), PK `(task_id, seq)`, FK → `tasks(id) ON DELETE CASCADE` |
 | `meta` | служебные отметки, в том числе факт миграции |
 
 - Полный JSON в колонках `data`/`payload` сохраняет контракт HTTP API неизменным при эволюции полей.
 - `seq` монотонен в пределах задачи и выдаётся атомарно, поэтому SSE-курсоры (`Last-Event-ID`) не ломаются при конкурентной записи.
+- `assistantText`/`thinkingText` в задаче — только хвост (64 КБ / 16 КБ); полная история живёт в событиях и нативной сессии Pi. Старые записи ужимаются один раз при старте + `VACUUM`.
+- Стриминговые дельты (`message_update`), уже закрытые `message_end`, удаляются при записи — длинная сессия не копит мегабайты мёртвых событий.
+- FK с `ON DELETE CASCADE` + удаление в транзакции — удаление задачи и её событий атомарно, осиротевшие события невозможны.
+- Схема версионируется через `PRAGMA user_version`; старые базы без FK пересобираются один раз при старте.
 - Файлы (вложения, артефакты, worktree, Pi-сессии) остаются на диске — в БД только метаданные и события.
+- При удалении задачи удаляются также её worktree, `.taskbridge-input/<id>`, `data/pi-sessions/<id>` и `data/workspaces/<id>`; при старте подчищаются сироты.
+- Один экземпляр на data-каталог: `data/taskbridge.lock` с pid, устаревший lock мёртвого процесса перехватывается.
 - При первом запуске на старой установке `data/tasks/<id>/task.json` и `events.jsonl` автоматически импортируются один раз (отметка в `meta`), битые хвостовые строки пропускаются.
 
 ---
@@ -548,7 +555,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 74 теста на node:test
+npm test          # 84 теста на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 
@@ -563,8 +570,9 @@ npm run check     # синтаксическая проверка основны
 3. Одновременно рассчитан на одну активную inference-задачу.
 4. Apply меняет рабочее дерево без коммита; проверки source-репозитория можно снять через `force`.
 5. Verification commands доверенные и читаются из локального `config.json`.
-6. Claude Code и Codex как отдельные runner'ы пока не подключены.
-7. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
+6. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
+7. Claude Code и Codex как отдельные runner'ы пока не подключены.
+8. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
 
 ---
 

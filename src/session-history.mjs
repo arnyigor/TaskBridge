@@ -28,13 +28,17 @@ export async function restoreSessionFile(task, store, dataRoot) {
     } catch { /* Recover from TaskBridge events below when no Pi session is usable. */ }
   }
 
-  const events = await store.readEvents(task.id, 0);
+  // Scan twice with a bounded-memory iterator: the first pass only decides
+  // whether the events already carry Pi user frames.
+  let hasPiUsers = false;
+  for await (const event of store.iterateEvents(task.id)) {
+    if (event.data?.pi?.message?.role === 'user') { hasPiUsers = true; break; }
+  }
   const messages = [];
-  const hasPiUsers = events.some(e => e.data?.pi?.message?.role === 'user');
   const userMessage = (text, timestamp) => ({ role: 'user', content: [{ type: 'text', text }], timestamp: Date.parse(timestamp) || Date.now() });
   if (!hasPiUsers) messages.push(userMessage(task.prompt, task.createdAt));
   let pendingUser = null;
-  for (const event of events) {
+  for await (const event of store.iterateEvents(task.id)) {
     const frame = event.data?.pi;
     if (!hasPiUsers && event.type === 'USER_MESSAGE') messages.push(userMessage(event.message, event.at));
     if (frame?.type === 'message_start' && frame.message?.role === 'user') pendingUser = frame.message;

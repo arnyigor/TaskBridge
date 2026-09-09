@@ -51,10 +51,18 @@ export class UploadStore {
         onFile: async ({ filename, contentType: mime }) => {
           const id = crypto.randomUUID();
           const stream = createWriteStream(path.join(dir, id), { flags: 'wx' });
+          // Errors are surfaced through the write/end callbacks; the listener
+          // only prevents an unhandled 'error' event from crashing the server.
+          stream.on('error', () => {});
           streams.add(stream);
           const descriptor = { id, name: safeUploadName(filename), size: 0, mimeType: mime || contentType(filename) };
           return {
-            write: chunk => stream.write(chunk),
+            // Awaiting the callback applies backpressure instead of buffering
+            // the whole file in the WriteStream when the disk is slower than
+            // the network.
+            write: chunk => new Promise((resolve, reject) => {
+              stream.write(chunk, error => (error ? reject(error) : resolve()));
+            }),
             end: size => new Promise((resolve, reject) => {
               descriptor.size = size;
               stream.end(error => {
@@ -89,6 +97,10 @@ export class UploadStore {
   // name/size/mime are ignored, so a forged ref cannot point outside the token.
   async resolve(token, refs) {
     const { dir, files } = await this.#load(token);
+    // A task can wait in the queue longer than the TTL; keep the staging
+    // directory alive as soon as it is actually referenced.
+    const now = new Date();
+    await fs.utimes(dir, now, now).catch(() => {});
     return refs.map(ref => {
       const entry = files.find(file => file.id === ref?.id);
       if (!entry) throw fail('INPUT_INVALID', 'Файл загрузки не найден.');

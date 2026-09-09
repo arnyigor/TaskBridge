@@ -17,6 +17,7 @@ import { ensureTlsCert } from './tls.mjs';
 import { trimStreamingDeltas } from './event-trim.mjs';
 import { windowByTurns } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
+import { acquireInstanceLock } from './instance-lock.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -42,6 +43,14 @@ const build = await (async () => {
 
 const config = await loadConfig(rootDir);
 await fs.mkdir(dataRoot, { recursive: true });
+let instanceLock;
+try {
+  instanceLock = acquireInstanceLock(dataRoot);
+} catch (error) {
+  console.error(`\n${error.message}\n`);
+  process.exit(1);
+}
+process.on('exit', () => instanceLock.release());
 const store = new TaskStore(dataRoot);
 const manager = new TaskManager(config, dataRoot, store);
 await manager.init();
