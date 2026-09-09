@@ -11,6 +11,8 @@ import {
   mergeCloudConfig,
   nextSteps,
   parseDeployUrl,
+  parseLatestProductionUrl,
+  gitRemoteUrl,
   REQUIRED_ENV_VARS,
   REQUIRED_IGNORES,
   verifyVercelIgnore
@@ -108,6 +110,33 @@ test('parseDeployUrl picks the production URL from CLI output', () => {
   assert.equal(parseDeployUrl('Production: https://tb-abc123.vercel.app [2s]'), 'https://tb-abc123.vercel.app');
   assert.equal(parseDeployUrl('Inspect: https://vercel.com/x\nPreview: https://tb-git-main.vercel.app\nProduction: https://tb.vercel.app'), 'https://tb.vercel.app');
   assert.equal(parseDeployUrl('nothing here'), null);
+});
+
+test('deploy: false plans env vars only (Git integration mode)', () => {
+  const credentials = generateCredentials({ machineId: 'm1' });
+  const plan = buildDeployPlan({ projectName: 'tb', credentials, databaseUrl: 'postgres://x', deploy: false });
+  assert.equal(plan.deploy, false);
+  assert.ok(!plan.steps.some(step => step.id === 'deploy'), 'no CLI deploy step in Git mode');
+  assert.ok(plan.steps.some(step => step.id === 'env:POSTGRES_URL'));
+});
+
+test('parseLatestProductionUrl picks the newest deployment from vercel ls', () => {
+  const output = [
+    'Vercel CLI 46.0.1',
+    'Age   Project  Deployment                                        Status',
+    '2m    tb       https://tb-abc123.vercel.app                      Ready',
+    '1d    tb       https://tb-old999.vercel.app                      Ready'
+  ].join(String.fromCharCode(10));
+  assert.equal(parseLatestProductionUrl(output), 'https://tb-abc123.vercel.app');
+  assert.equal(parseLatestProductionUrl('no deployments'), null);
+});
+
+test('gitRemoteUrl normalizes ssh and https remotes', () => {
+  assert.equal(gitRemoteUrl('git@github.com:owner/repo.git'), 'https://github.com/owner/repo');
+  assert.equal(gitRemoteUrl('git@github.com:owner/repo'), 'https://github.com/owner/repo');
+  assert.equal(gitRemoteUrl('https://github.com/owner/repo.git'), 'https://github.com/owner/repo.git');
+  assert.equal(gitRemoteUrl(''), null);
+  assert.equal(gitRemoteUrl('not a url'), null);
 });
 
 test('classifyHealth detects the silent memory-store fallback', () => {

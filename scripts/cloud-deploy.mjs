@@ -9,13 +9,15 @@ import { generateCredentials, cloudEnvVars } from '../cloud/lib/credentials.mjs'
 import {
   buildDeployPlan,
   classifyHealth,
+  gitRemoteUrl,
   maskCommandArgs,
   mergeCloudConfig,
   nextSteps,
   parseDeployUrl,
-  REQUIRED_ENV_VARS,
-  verifyVercelIgnore
+  parseLatestProductionUrl,
+  REQUIRED_ENV_VARS
 } from '../cloud/lib/deploy.mjs';
+import { auditUploadSet, formatAudit } from '../cloud/lib/upload-set.mjs';
 
 // One-command Vercel deployment for the cloud transport (§74, §92).
 //
@@ -58,7 +60,12 @@ const options = {
   writeConfig: has('write-config'),
   dryRun: has('dry-run'),
   json: has('json'),
-  skipVerify: has('skip-verify')
+  skipVerify: has('skip-verify'),
+  // Git integration: connect the repository, let the push trigger the deploy.
+  gitConnect: has('git'),
+  gitUrl: arg('git', null),
+  noDeploy: has('no-deploy') || has('git'),
+  redeploy: has('redeploy')
 };
 
 const log = (...args) => console.log(...args);
@@ -156,18 +163,24 @@ async function main() {
     log(`    logged in as ${whoami.stdout.trim()}`);
   }
 
-  // 0b. .vercelignore -------------------------------------------------------
+  // 0b. Secret audit --------------------------------------------------------
   // A CLI deployment uploads the working directory and ignores .gitignore, so
-  // config.json (machine secret) and data/ (task database) must be excluded.
+  // the real upload set is computed and checked for secrets/task data.
   const ignoreText = await fs.readFile(path.join(ROOT, '.vercelignore'), 'utf8').catch(() => null);
-  const ignore = verifyVercelIgnore(ignoreText);
-  if (!ignore.ok) {
-    const message = ignoreText === null
-      ? '.vercelignore is missing.'
-      : `.vercelignore does not exclude: ${ignore.missing.join(', ')}.`;
-    return fail(`${message} A CLI deployment would upload local state/secrets (config.json, data/). Restore it from the repository or add the missing lines.`);
+  const audit = await auditUploadSet({ root: ROOT, vercelIgnoreText: ignoreText });
+  log(`    secret audit: ${formatAudit(audit).split(String.fromCharCode(10)).join('; ')}`);
+  if (!audit.ok) {
+    const message = [
+      ...(audit.coverage.ok ? [] : [`.vercelignore does not exclude: ${audit.coverage.missing.join(', ')}`]),
+      ...audit.findings.map(finding => `${finding.path} (${finding.rule})`)
+    ].join(', ');
+    if (options.noDeploy) {
+      warn(`! secret audit failed: ${message}`);
+      warn('! not deploying from here, but fix .vercelignore before any CLI deploy.');
+    } else {
+      return fail(`secret audit failed: ${message}. A CLI deploy would upload local state/secrets. Fix .vercelignore or run "npm run check:secrets".`);
+    }
   }
-  log(`    .vercelignore covers ${ignore.lines.length} local paths`);
 
   // 1. Credentials ----------------------------------------------------------
   const credentials = generateCredentials({
@@ -187,7 +200,8 @@ async function main() {
     credentials,
     databaseUrl: options.databaseUrl,
     allowMemoryStore: options.allowMemoryStore,
-    writeConfig: options.writeConfig
+    writeConfig: options.writeConfig,
+    deploy: !options.noDeploy
   });
 
   // A project that already carries a database does not need --database-url.
@@ -204,6 +218,13 @@ async function main() {
     for (const blocker of plan.blockers) warn(`✖ would refuse to deploy: ${blocker}`);
     log('\nDry run — commands that would run:');
     for (const item of plan.steps) log(`  vercel ${maskCommandArgs(item.args).join(' ')}${item.stdin ? '   (value via stdin)' : ''}`);
+    if (options.gitConnect) {
+      const remoteResult = await run('git', ['remote', 'get-url', 'origin']);
+      const remote = options.gitUrl ?? gitRemoteUrl(remoteResult.stdout);
+      log(`  vercel git connect ${remote ?? '<repo-url>'}     (then push to deploy production)`);
+    }
+    if (options.redeploy) log('  vercel ls --environment production --yes && vercel redeploy <latest-url>');
+    if (options.noDeploy && !options.gitConnect) log('  (no deploy: --no-deploy — set env vars only)');
     log('\nRe-run without --dry-run to execute.');
     if (plan.blockers.length) process.exitCode = 1;
     return;
@@ -244,7 +265,7 @@ async function main() {
   // 4. Verify ---------------------------------------------------------------
   let health = null;
   if (!options.skipVerify) {
-    step(total + 1, total + 1, `Verifying ${url}/api/health`);
+    step(++done, total + 1, `Verifying ${url}/api/health`);
     for (let attempt = 1; attempt <= 6; attempt++) {
       try {
         const response = await fetch(`${url}/api/health`, { headers: { accept: 'application/json' } });
@@ -270,7 +291,7 @@ async function main() {
 
   // 5. Local config ---------------------------------------------------------
   if (options.writeConfig) {
-    step(total + 2, total + 2, 'Writing config.json');
+    step(++done, total + 1, 'Writing config.json');
     await writeLocalConfig({ cloud: { ...credentials.cloudConfig, url } });
   }
 

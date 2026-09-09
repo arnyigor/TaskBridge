@@ -403,9 +403,10 @@ this behind the ☁ button. Environment variables always win and are reported in
 ## Testing
 
 ```powershell
-npm test            # all suites, including cloud
-npm run test:cloud  # only tests/cloud-*.test.mjs
-npm run stress      # bounded stress/soak suite
+npm test                # all suites, including cloud
+npm run test:cloud      # only tests/cloud-*.test.mjs
+npm run stress          # bounded stress/soak suite
+npm run check:secrets   # no secret can leave the machine (deploy set + git)
 ```
 
 The stress suite runs bounded versions in CI and scales up through environment

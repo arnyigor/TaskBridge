@@ -182,11 +182,12 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   174 теста на node:test
+├─ tests/                   188 тестов на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  ├─ cloud-secrets.mjs     генерация токенов/секретов (npm run cloud:secrets)
 │  ├─ cloud-deploy.mjs      автодеплой на Vercel (npm run cloud:deploy)
+│  ├─ check-secrets.mjs     аудит утечек (npm run check:secrets)
 │  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
@@ -542,7 +543,10 @@ IP, VPN и без длительных Vercel-запросов. Локальны
 Деплой одной командой: `npm run cloud:deploy -- --project <name> --database-url "postgres://…"`
 (генерирует креды, ставит env в Vercel, деплоит, проверяет `/api/health` и что
 хранилище durable). GitHub для этого не нужен: CLI деплоит локальный каталог;
-Git-интеграция нужна только для автодеплоя по push. Только секреты: `npm run cloud:secrets -- --url https://<project>.vercel.app`.
+для автодеплоя по push добавьте `--git` (подключит репозиторий и не будет
+деплоить вручную). Перед деплоем/пушем: `npm run check:secrets` — проверяет, что
+секреты и локальные данные не попадут ни в `vercel deploy` (он не читает
+`.gitignore`), ни в коммит. Только секреты: `npm run cloud:secrets -- --url https://<project>.vercel.app`.
 Полная пошаговая инструкция (ручной путь через дашборд, диагностика, ротация) —
 [`docs/cloud-deploy-vercel.md`](docs/cloud-deploy-vercel.md).
 

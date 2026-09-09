@@ -20,6 +20,61 @@ export function verifyVercelIgnore(text) {
   return { ok: missing.length === 0, missing, lines };
 }
 
+// Paths that must never be uploaded to a deployment, regardless of how the
+// deploy is triggered. This is checked against the real file list, not against
+// the .vercelignore file, so a mistake there cannot silently leak a secret.
+const SENSITIVE_RULES = [
+  { rule: 'local config (machine secret)', test: p => p === 'config.json' || p.startsWith('config.json.') || p === 'config.local.json' },
+  { rule: 'env files', test: p => p === '.env' || p.startsWith('.env.') || p.endsWith('.env') },
+  { rule: 'local task data', test: p => p === 'data' || p.startsWith('data/') },
+  { rule: 'cloud database', test: p => p === 'cloud/data' || p.startsWith('cloud/data/') },
+  { rule: 'artifacts (full tool logs)', test: p => p === 'artifacts' || p.startsWith('artifacts/') },
+  { rule: 'local database file', test: p => /\.(db|sqlite|sqlite3)(-(wal|shm))?$/.test(p) },
+  { rule: 'key material', test: p => /(^|\/)(id_rsa|id_ed25519|\.npmrc|\.netrc)$/.test(p) || /\.(pem|key|p12|pfx)$/.test(p) },
+  { rule: 'git metadata', test: p => p === '.git' || p.startsWith('.git/') },
+  { rule: 'vercel metadata', test: p => p === '.vercel' || p.startsWith('.vercel/') }
+];
+
+// Directories that are never uploaded and never need to be walked.
+export const SKIPPED_DIRS = ['node_modules', '.git', '.vercel', '.idea'];
+
+export function normalizeRelativePath(value) {
+  return String(value ?? '').replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+}
+
+export function isSensitivePath(relativePath) {
+  const path = normalizeRelativePath(relativePath);
+  if (!path) return null;
+  return SENSITIVE_RULES.find(({ test }) => test(path))?.rule ?? null;
+}
+
+export function findSensitivePaths(paths) {
+  const findings = [];
+  for (const path of paths) {
+    const rule = isSensitivePath(path);
+    if (rule) findings.push({ path: normalizeRelativePath(path), rule });
+  }
+  return findings;
+}
+
+// Minimal matcher for the .vercelignore syntax we use (exact paths, `dir/`
+// prefixes and simple `*` globs) — enough to compute the real upload set
+// without pulling a dependency.
+export function matchesIgnore(relativePath, ignoreLines) {
+  const path = normalizeRelativePath(relativePath);
+  for (const raw of ignoreLines) {
+    const entry = normalizeRelativePath(raw);
+    if (!entry) continue;
+    if (entry.includes('*')) {
+      const pattern = `^${entry.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`;
+      if (new RegExp(pattern).test(path)) return true;
+      continue;
+    }
+    if (path === entry || path.startsWith(`${entry}/`)) return true;
+  }
+  return false;
+}
+
 // Vars that must exist for the store to survive a serverless invocation.
 export const DURABILITY_ENV_VARS = ['POSTGRES_URL', 'DATABASE_URL', 'POSTGRES_PRISMA_URL', 'TASKBRIDGE_CLOUD_STORE'];
 
@@ -57,7 +112,8 @@ export function buildDeployPlan({
   credentials = null,
   databaseUrl = null,
   allowMemoryStore = false,
-  writeConfig = false
+  writeConfig = false,
+  deploy = true
 } = {}) {
   const blockers = [];
   const warnings = [];
@@ -91,9 +147,11 @@ export function buildDeployPlan({
   for (const command of buildEnvVarCommands(vars, { environment, scope, token })) {
     steps.push({ id: `env:${command.name}`, description: `Set ${command.name} (${environment})`, args: command.args, stdin: command.stdin, secret: true });
   }
-  steps.push({ id: 'deploy', description: 'Deploy to production', args: vercelArgs(['deploy', '--prod', '--yes'], { scope, token }) });
+  if (deploy) {
+    steps.push({ id: 'deploy', description: 'Deploy to production', args: vercelArgs(['deploy', '--prod', '--yes'], { scope, token }) });
+  }
 
-  return { steps, blockers, warnings, envVars: vars, writeConfig };
+  return { steps, blockers, warnings, envVars: vars, writeConfig, deploy };
 }
 
 export function parseDeployUrl(output) {
@@ -102,6 +160,23 @@ export function parseDeployUrl(output) {
   if (!urls?.length) return null;
   // The last production URL printed is the deployment that just finished.
   return urls[urls.length - 1];
+}
+
+// `vercel ls` lists the newest deployment first, so the first URL is the one to
+// redeploy after changing an environment variable on a Git-connected project.
+export function parseLatestProductionUrl(output) {
+  const text = String(output ?? '');
+  const urls = text.match(/https:\/\/[A-Za-z0-9._-]+\.vercel\.app/g);
+  return urls?.[0] ?? null;
+}
+
+export function gitRemoteUrl(output) {
+  const text = String(output ?? '').trim();
+  if (!text) return null;
+  if (/^https?:\/\//.test(text)) return text;
+  // git@github.com:owner/repo.git → https://github.com/owner/repo.git
+  const ssh = /^git@([^:]+):(.+?)(?:\.git)?$/.exec(text);
+  return ssh ? `https://${ssh[1]}/${ssh[2]}` : null;
 }
 
 export function classifyHealth(body) {
