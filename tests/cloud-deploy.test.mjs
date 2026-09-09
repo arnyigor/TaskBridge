@@ -11,7 +11,9 @@ import {
   mergeCloudConfig,
   nextSteps,
   parseDeployUrl,
-  REQUIRED_ENV_VARS
+  REQUIRED_ENV_VARS,
+  REQUIRED_IGNORES,
+  verifyVercelIgnore
 } from '../cloud/lib/deploy.mjs';
 import { resolveStoreTarget } from '../cloud/lib/store.mjs';
 
@@ -139,6 +141,26 @@ test('nextSteps mentions the token, the machine and /debug/cloud', () => {
   assert.match(lines, /tb_user_x/);
   assert.match(lines, /m1/);
   assert.match(lines, /debug\/cloud/);
+});
+
+test('verifyVercelIgnore requires local secrets and state to be excluded', async () => {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+  // The repository must ship a .vercelignore that covers the local secrets and
+  // state, because `vercel deploy` ignores .gitignore.
+  const actual = await fs.readFile(path.join(root, '.vercelignore'), 'utf8');
+  const checked = verifyVercelIgnore(actual);
+  assert.equal(checked.ok, true);
+  assert.deepEqual(checked.missing, []);
+  assert.ok(checked.lines.includes("config.json") && checked.lines.includes("data/"));
+  const missing = verifyVercelIgnore(['config.json', '# comment', ''].join(String.fromCharCode(10)));
+  assert.equal(missing.ok, false);
+  assert.deepEqual(missing.missing, ['data/', 'cloud/data/']);
+  assert.equal(verifyVercelIgnore(null).ok, false);
+  assert.deepEqual(verifyVercelIgnore('').missing, REQUIRED_IGNORES);
 });
 
 test('a Vercel Postgres URL is what makes the store durable', () => {

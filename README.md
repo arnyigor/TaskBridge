@@ -173,6 +173,7 @@ Taskbridge/
 │  └─ web/                  PWA: задачи, стриминг, tool-карточки, STOP
 │     └─ event-reducer.mjs  чистая логика применения событий (тестируемая)
 ├─ api/index.mjs            Vercel-энтрипоинт (реэкспорт cloud/api)
+├─ .vercelignore            исключает config.json/data из CLI-деплоя
 ├─ vercel.json              конфиг Vercel (outputDirectory: cloud/web)
 ├─ web/
 │  ├─ index.html            разметка UI
@@ -540,7 +541,8 @@ IP, VPN и без длительных Vercel-запросов. Локальны
 
 Деплой одной командой: `npm run cloud:deploy -- --project <name> --database-url "postgres://…"`
 (генерирует креды, ставит env в Vercel, деплоит, проверяет `/api/health` и что
-хранилище durable). Только секреты: `npm run cloud:secrets -- --url https://<project>.vercel.app`.
+хранилище durable). GitHub для этого не нужен: CLI деплоит локальный каталог;
+Git-интеграция нужна только для автодеплоя по push. Только секреты: `npm run cloud:secrets -- --url https://<project>.vercel.app`.
 Полная пошаговая инструкция (ручной путь через дашборд, диагностика, ротация) —
 [`docs/cloud-deploy-vercel.md`](docs/cloud-deploy-vercel.md).
 

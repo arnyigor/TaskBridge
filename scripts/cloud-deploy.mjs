@@ -13,7 +13,8 @@ import {
   mergeCloudConfig,
   nextSteps,
   parseDeployUrl,
-  REQUIRED_ENV_VARS
+  REQUIRED_ENV_VARS,
+  verifyVercelIgnore
 } from '../cloud/lib/deploy.mjs';
 
 // One-command Vercel deployment for the cloud transport (§74, §92).
@@ -154,6 +155,19 @@ async function main() {
     }
     log(`    logged in as ${whoami.stdout.trim()}`);
   }
+
+  // 0b. .vercelignore -------------------------------------------------------
+  // A CLI deployment uploads the working directory and ignores .gitignore, so
+  // config.json (machine secret) and data/ (task database) must be excluded.
+  const ignoreText = await fs.readFile(path.join(ROOT, '.vercelignore'), 'utf8').catch(() => null);
+  const ignore = verifyVercelIgnore(ignoreText);
+  if (!ignore.ok) {
+    const message = ignoreText === null
+      ? '.vercelignore is missing.'
+      : `.vercelignore does not exclude: ${ignore.missing.join(', ')}.`;
+    return fail(`${message} A CLI deployment would upload local state/secrets (config.json, data/). Restore it from the repository or add the missing lines.`);
+  }
+  log(`    .vercelignore covers ${ignore.lines.length} local paths`);
 
   // 1. Credentials ----------------------------------------------------------
   const credentials = generateCredentials({

@@ -1,0 +1,12 @@
+# Files excluded from `vercel deploy` (the CLI does NOT read .gitignore).
+#
+# Everything listed here is local runtime state or a secret and must never be
+# uploaded to a deployment. Code the cloud function needs — api/, cloud/,
+# src/domain/, src/cloud/, package.json — must stay out of this list.
+config.json
+config.json.bak-*
+data/
+artifacts/
+cloud/data/
+.vercel/
+.idea/

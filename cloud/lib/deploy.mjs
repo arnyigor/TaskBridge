@@ -6,6 +6,20 @@
 
 export const REQUIRED_ENV_VARS = ['TASKBRIDGE_CLOUD_USER_TOKEN', 'TASKBRIDGE_CLOUD_USER_ID', 'TASKBRIDGE_CLOUD_MACHINES'];
 
+// `vercel deploy` uploads the working directory and does not read .gitignore, so
+// these paths must be excluded explicitly or a machine secret / task database
+// would end up inside a deployment.
+export const REQUIRED_IGNORES = ['config.json', 'data/', 'cloud/data/'];
+
+export function verifyVercelIgnore(text) {
+  const lines = String(text ?? '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => line && !line.startsWith('#'));
+  const missing = REQUIRED_IGNORES.filter(entry => !lines.includes(entry));
+  return { ok: missing.length === 0, missing, lines };
+}
+
 // Vars that must exist for the store to survive a serverless invocation.
 export const DURABILITY_ENV_VARS = ['POSTGRES_URL', 'DATABASE_URL', 'POSTGRES_PRISMA_URL', 'TASKBRIDGE_CLOUD_STORE'];
 
