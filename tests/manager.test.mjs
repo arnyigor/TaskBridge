@@ -33,6 +33,20 @@ test('busy model rejects new sessions and follow-ups before writing history or a
   await assert.rejects(fs.access(path.join(f.root, '.taskbridge-input')));
 });
 
+test('registerProject persists to config.projects and rejects a duplicate id; removeProject removes both and rejects an unknown id', async t => {
+  const f = await fixture(t);
+  f.manager.registerProject({ id: 'q', name: 'Q', path: '/tmp/q', useWorktree: false, verification: [] });
+  assert.ok(f.manager.projects.has('q'));
+  assert.ok(f.manager.config.projects.some(p => p.id === 'q'));
+  assert.throws(() => f.manager.registerProject({ id: 'q', name: 'dup', path: '/tmp/x' }), { code: 'INPUT_INVALID' });
+
+  f.manager.removeProject('q');
+  assert.ok(!f.manager.projects.has('q'));
+  assert.ok(!f.manager.config.projects.some(p => p.id === 'q'));
+  assert.ok(f.manager.projects.has('p')); // the original fixture project is untouched
+  assert.throws(() => f.manager.removeProject('q'), { code: 'NOT_FOUND' });
+});
+
 test('RPC failure leaves no phantom message, active reservation, or settle timer', async t => {
   const f = await fixture(t);
   f.pi.prompt = async () => { throw new Error('RPC rejected'); };

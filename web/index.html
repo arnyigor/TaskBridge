@@ -36,6 +36,7 @@
     <div class="subheader" id="subheader">
       <select id="project" title="Проект" aria-label="Проект"></select>
       <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
+      <button id="manageProjectsButton" type="button" class="small" title="Удалить проекты">🗑 Проекты</button>
       <span id="continueBadge" class="pill hidden"></span>
       <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
       <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
@@ -92,13 +93,22 @@
     </div>
   </div>
 
+  <div id="manageProjectsOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Проекты</h2>
+      <p class="muted small">Удаление убирает проект только из списка TaskBridge — папка на диске не трогается, старые сессии этого проекта продолжают работать.</p>
+      <div id="manageProjectsList" class="sessionPickerList"></div>
+      <button id="manageProjectsClose" type="button">Закрыть</button>
+    </div>
+  </div>
+
   <div id="helpOverlay" class="authGate hidden">
     <div class="authCard wide helpCard">
       <h2>Как устроен TaskBridge</h2>
       <div class="helpBody">
         <h3>Проекты и сессии</h3>
         <p>Проект — это папка с кодом, зарегистрированная в настройках сервера (в файле <code>config.json</code>). Сессия (задача) — это один разговор с Pi внутри проекта: сообщение, ответы, инструменты, файлы. Если проект всего один, выбор проекта не показывается — он подставляется сам. «Без проекта» — временная рабочая папка, которая не привязана к твоему коду; используй её для разовых экспериментов.</p>
-        <p>Кнопка «+ проект» рядом с выбором проекта открывает выбор папки прямо с телефона — но только внутри заранее разрешённых корневых директорий (<code>projectBrowser.roots</code> в <code>config.json</code>), а не по всему диску. Выбранная папка сразу и навсегда сохраняется как новый проект.</p>
+        <p>Кнопка «+ проект» рядом с выбором проекта открывает выбор папки прямо с телефона — но только внутри заранее разрешённых корневых директорий (<code>projectBrowser.roots</code> в <code>config.json</code>), а не по всему диску. Выбранная папка сразу и навсегда сохраняется как новый проект. Кнопка «🗑 Проекты» удаляет проект из списка TaskBridge — сама папка и уже созданные в ней сессии не трогаются.</p>
 
         <h3>Как это работает</h3>
         <p>TaskBridge — это веб-интерфейс к Pi (коммандному ИИ-агенту), который крутится на компьютере. Телефон и компьютер видят один и тот же список сессий, потому что оба просто открывают один и тот же сервер в браузере — сессия не привязана к устройству, с которого её создали.</p>

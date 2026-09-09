@@ -80,6 +80,15 @@ export class TaskManager extends EventEmitter {
     this.config.projects = [...(this.config.projects || []), project];
   }
 
+  // Only removes the registration, never the folder on disk. Existing tasks
+  // for this project keep working (they already have their own
+  // workspacePath); only creating a *new* task under this id stops working.
+  removeProject(id) {
+    if (!this.projects.has(id)) throw Object.assign(new Error('Проект не найден.'), { code: 'NOT_FOUND' });
+    this.projects.delete(id);
+    this.config.projects = (this.config.projects || []).filter(p => p.id !== id);
+  }
+
   listTasks() {
     return Array.from(this.tasks.values()).map(t => this.#publicTask(t)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }

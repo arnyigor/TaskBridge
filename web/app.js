@@ -1120,6 +1120,42 @@ $('projectBrowserSelect').onclick = async () => {
   } catch (err) { alert(err.message); }
 };
 
+/* ---------------- manage projects ---------------- */
+
+function renderManageProjectsList() {
+  $('manageProjectsList').innerHTML = '';
+  if (!projects.length) { $('manageProjectsList').textContent = 'Проектов нет.'; return; }
+  for (const p of projects) {
+    const row = document.createElement('div');
+    row.className = 'projectRow';
+    const info = document.createElement('div');
+    info.className = 'projectRowInfo';
+    info.innerHTML = `<span class="name">${escapeHtml(p.name)}</span><span class="meta">${escapeHtml(p.path)}</span>`;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'projectRowDelete';
+    del.textContent = '✕';
+    del.title = 'Удалить проект';
+    del.setAttribute('aria-label', `Удалить проект ${p.name}`);
+    del.onclick = async () => {
+      if (!confirm(`Удалить проект «${p.name}» из TaskBridge? Папка на диске не удаляется, старые сессии продолжат работать.`)) return;
+      try {
+        await api(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+        await loadProjects();
+        renderManageProjectsList();
+      } catch (err) { alert(err.message); }
+    };
+    row.append(info, del);
+    $('manageProjectsList').append(row);
+  }
+}
+
+$('manageProjectsButton').onclick = () => {
+  $('manageProjectsOverlay').classList.remove('hidden');
+  renderManageProjectsList();
+};
+$('manageProjectsClose').onclick = () => $('manageProjectsOverlay').classList.add('hidden');
+
 /* ---------------- native Pi sessions ---------------- */
 
 $('resumeSessionButton').onclick = async () => {

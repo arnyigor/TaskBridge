@@ -202,6 +202,27 @@ body {
 .sessionPickerItem .name { font-size: 13px; font-weight: 600; }
 .sessionPickerItem .meta { font-size: 11px; color: var(--muted); padding: 0; }
 
+.projectRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  padding: 10px 12px;
+}
+.projectRow .projectRowInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.projectRow .name { font-size: 13px; font-weight: 600; }
+.projectRow .meta { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectRow .projectRowDelete {
+  flex-shrink: 0;
+  border: 1px solid rgba(251, 113, 133, 0.4);
+  background: transparent;
+  color: var(--danger);
+  padding: 6px 10px;
+}
+.projectRow .projectRowDelete:hover { background: rgba(251, 113, 133, 0.14); }
+
 /* ---------- layout ---------- */
 .main {
   flex: 1;

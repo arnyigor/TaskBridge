@@ -216,6 +216,13 @@ async function handleRequest(req, res) {
       return json(res, 200, manager.listProjects());
     }
 
+    const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
+    if (req.method === 'DELETE' && projectMatch) {
+      manager.removeProject(projectMatch[1]);
+      await saveConfig(rootDir, config);
+      return json(res, 200, { ok: true });
+    }
+
     if (req.method === 'GET' && pathname === '/api/project-browser') {
       return json(res, 200, await listDirectory(config, url.searchParams.get('path')));
     }
