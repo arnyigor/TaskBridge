@@ -38,7 +38,15 @@ export class NativeSessionService {
   async list(projectId) {
     const project = this.project(projectId);
     const sessions = await listPiSessions(project, this.roots(project));
-    return Promise.all(sessions.map(async ({ file, ...session }) => ({ ...session, existingTaskId: await this.existing({ ...session, file }) })));
+    return Promise.all(sessions.map(async ({ file, ...session }) => {
+      const existingTaskId = await this.existing({ ...session, file });
+      // The raw first message includes TaskBridge's own prompt wrapper
+      // ("Work only inside the current working directory...") for sessions
+      // it created itself; the task's own clean prompt reads far better.
+      const existingTask = existingTaskId ? this.manager.tasks.get(existingTaskId) : null;
+      const preview = existingTask ? (existingTask.title || existingTask.prompt) : session.preview;
+      return { ...session, preview, existingTaskId };
+    }));
   }
 
   // TaskManager serializes admission so simultaneous browser requests cannot
