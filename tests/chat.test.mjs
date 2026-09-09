@@ -75,6 +75,7 @@ async function ui() {
   const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES,
     setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
+    DataTransfer: class { items = { add: (file) => this.files.push(file) }; files = []; },
     fetch: async (url, options) => {
       if (fetchHook) { const intercepted = await fetchHook(url, options); if (intercepted) return intercepted; }
       const path = new URL(url, 'http://localhost');
@@ -118,7 +119,7 @@ test('DOM: a slow history response cannot replace a newer selected chat', async 
   await app.selectTask('b');
   release();
   await first;
-  assert.equal(app.document.getElementById('taskTitle').textContent, 'b');
+  assert.equal(app.document.getElementById('taskTitle').textContent, 'Другой чат');
   assert.equal(app.streams.length, 1);
   assert.match(app.streams[0].url, /\/b\/stream/);
 });

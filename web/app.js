@@ -20,6 +20,24 @@ let turnNodes = new Map();
 let liveActive = false;
 let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 4s
 
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch {
+    // navigator.clipboard requires a secure context; TaskBridge is served
+    // over plain HTTP on the LAN, so phones fall back to execCommand.
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.append(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch { ok = false; }
+    ta.remove();
+    return ok;
+  }
+}
+
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
@@ -125,10 +143,19 @@ function appendBotTurn() {
   bubble.append(md);
   const meta = document.createElement('div');
   meta.className = 'meta';
-  body.append(bubble, meta);
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'copyBtn';
+  copyBtn.textContent = '📋';
+  copyBtn.title = 'Скопировать ответ';
+  copyBtn.setAttribute('aria-label', 'Скопировать ответ');
+  const metaRow = document.createElement('div');
+  metaRow.className = 'metaRow';
+  metaRow.append(meta, copyBtn);
+  body.append(bubble, metaRow);
   turn.append(body);
   $('msgsInner').append(turn);
-  liveTurn = { body, md, meta, turn }; 
+  liveTurn = { body, md, meta, metaRow, copyBtn, turn };
   updateThinking();
   updateText();
   scrollBottom();
@@ -179,7 +206,7 @@ function appendInlineImage(relPath) {
   img.alt = relPath;
   img.loading = 'lazy';
   link.append(img);
-  liveTurn.body.insertBefore(link, liveTurn.meta);
+  liveTurn.body.insertBefore(link, liveTurn.metaRow);
   scrollBottom();
 }
 
@@ -247,7 +274,28 @@ function setComposerMode(taskId) {
     : 'Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки.';
 }
 
+const drafts = new Map(); // taskId | '__new__' -> { text, files: File[] }
+
+function saveDraft(key) {
+  const text = promptEl.value;
+  const files = Array.from($('files').files || []);
+  if (!text && !files.length) drafts.delete(key);
+  else drafts.set(key, { text, files });
+}
+
+function restoreDraft(key) {
+  const draft = drafts.get(key);
+  promptEl.value = draft?.text || '';
+  promptEl.style.height = 'auto';
+  promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
+  const dt = new DataTransfer();
+  for (const file of draft?.files || []) dt.items.add(file);
+  $('files').files = dt.files;
+  renderFileList();
+}
+
 function resetSelection(id) {
+  saveDraft(selectedTaskId || '__new__');
   selectionVersion += 1;
   selectedTaskId = id;
   if (source) source.close();
@@ -270,6 +318,7 @@ function resetSelection(id) {
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
   setComposerMode(id);
+  restoreDraft(id || '__new__');
   return selectionVersion;
 }
 
@@ -308,6 +357,7 @@ function renderChat() {
     liveActive = turn.active;
     if (node.text !== turn.text || node.active !== turn.active || node.error !== turn.error) {
       updateText();
+      node.copyBtn.onclick = () => copyText(turn.text);
       if (turn.error) {
         const error = document.createElement('div');
         error.className = 'turnError';
@@ -331,7 +381,7 @@ function renderChat() {
         body.className = 'tool-body';
         body.textContent = tool.label;
         chip.append(summary, body);
-        node.body.insertBefore(chip, node.meta);
+        node.body.insertBefore(chip, node.metaRow);
         node.tools.set(tool.id, chip);
       }
       chip.className = `tool ${tool.state}`;
@@ -351,8 +401,21 @@ function applyEvents(events) {
   renderChat();
 }
 
+const lastNotifiedStatus = new Map();
+
+// Only fires on a transition actually observed live (the map has no entry
+// on first render of a task, e.g. one already finished when selected).
+function maybeNotify(t) {
+  const previous = lastNotifiedStatus.get(t.id);
+  lastNotifiedStatus.set(t.id, t.status);
+  if (!previous || previous === t.status || ACTIVE_STATUSES.has(t.status) || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const title = t.status === 'SUCCEEDED' ? 'Готово' : t.status === 'FAILED' ? 'Ошибка' : 'Остановлено';
+  try { new Notification(`TaskBridge: ${title}`, { body: (t.title || t.prompt || '').slice(0, 120), tag: t.id }); } catch {}
+}
+
 function renderTaskDetails(t) {
-  $('taskTitle').textContent = t.id;
+  maybeNotify(t);
+  $('taskTitle').textContent = t.title || t.prompt || t.id;
   $('taskStatus').textContent = t.status;
   $('current').textContent = t.current || '—';
   $('workspace').textContent = t.workspacePath || '—';
@@ -465,6 +528,7 @@ function projectName(id) {
 
 let lastTasks = [];
 let taskFilterProjectId = 'all';
+let taskSearchQuery = '';
 
 function renderTaskFilter() {
   const options = ['<option value="all">Все проекты</option>']
@@ -475,17 +539,19 @@ function renderTaskFilter() {
 }
 
 function renderTaskList() {
-  const tasks = taskFilterProjectId === 'all' ? lastTasks : lastTasks.filter(t => t.projectId === taskFilterProjectId);
+  $('taskCount').textContent = lastTasks.length ? `(${lastTasks.length})` : '';
+  let tasks = taskFilterProjectId === 'all' ? lastTasks : lastTasks.filter(t => t.projectId === taskFilterProjectId);
+  if (taskSearchQuery) tasks = tasks.filter(t => (t.title || t.prompt || '').toLowerCase().includes(taskSearchQuery));
   $('tasks').innerHTML = tasks.length ? tasks.map((t) => `
     <div class="taskRow ${t.id === selectedTaskId ? 'active' : ''}" data-id="${t.id}">
       <button class="t-delete" type="button" data-delete-id="${t.id}" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
-      <div class="t-prompt">${escapeHtml(t.prompt)}</div>
+      <div class="t-prompt">${escapeHtml(t.title || t.prompt)}</div>
       <div class="t-sub">
         <span class="pill ${pillClass(t.status)}">${escapeHtml(t.status)}</span>
         <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
         <span class="t-time">${new Date(t.createdAt).toLocaleString()}</span>
       </div>
-    </div>`).join('') : `<div class="none">${lastTasks.length ? 'Нет сессий для этого проекта.' : 'Пока нет сессий.'}</div>`;
+    </div>`).join('') : `<div class="none">${lastTasks.length ? 'Ничего не найдено.' : 'Пока нет сессий.'}</div>`;
   document.querySelectorAll('.taskRow').forEach((row) => {
     row.onclick = () => selectTask(row.dataset.id);
   });
@@ -499,6 +565,11 @@ function renderTaskList() {
 
 $('taskProjectFilter').addEventListener('change', () => {
   taskFilterProjectId = $('taskProjectFilter').value;
+  renderTaskList();
+});
+
+$('taskSearch').addEventListener('input', () => {
+  taskSearchQuery = $('taskSearch').value.trim().toLowerCase();
   renderTaskList();
 });
 
@@ -592,22 +663,30 @@ $('form').addEventListener('submit', async (e) => {
     const taskId = selectedTaskId;
     const version = selectionVersion;
     const files = await filesPayload();
+    const draftKey = taskId || '__new__';
+    const clearComposer = () => {
+      drafts.delete(draftKey);
+      if (promptEl.value.trim() === prompt) {
+        promptEl.value = '';
+        promptEl.style.height = 'auto';
+        $('files').value = '';
+        $('fileList').textContent = '';
+      }
+    };
     if (taskId) {
       await sendContinueMessage(taskId, prompt, { files });
+      clearComposer();
     } else {
       const task = await api('/api/tasks', {
         method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files })
       });
+      // Clear before selectTask() runs resetSelection(), which would
+      // otherwise capture this just-sent text as a stale "new task" draft.
+      clearComposer();
       if (version === selectionVersion) {
         await loadTasks();
         await selectTask(task.id);
       }
-    }
-    if (promptEl.value.trim() === prompt) {
-      promptEl.value = '';
-      promptEl.style.height = 'auto';
-      $('files').value = '';
-      $('fileList').textContent = '';
     }
   } catch (err) {
     $('createError').textContent = err.message;
@@ -631,6 +710,17 @@ $('stopButton').onclick = async () => {
 };
 
 $('refresh').onclick = () => loadTasks();
+
+$('renameButton').onclick = async () => {
+  if (!selectedTaskId) return;
+  const current = $('taskTitle').textContent;
+  const next = prompt('Название сессии (пусто — вернуть исходный текст задачи):', current === '—' ? '' : current);
+  if (next === null) return;
+  try {
+    await api(`/api/tasks/${selectedTaskId}`, { method: 'PATCH', body: JSON.stringify({ title: next }) });
+    await refreshTask();
+  } catch (e) { alert(e.message); }
+};
 
 $('compact').onclick = async () => {
   if (!selectedTaskId) return;
@@ -712,9 +802,25 @@ function rewriteMarkdownLinks(container) {
   }
 }
 
+function addCodeCopyButtons(container) {
+  for (const pre of container.querySelectorAll('pre')) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'codeCopyBtn';
+    btn.textContent = 'Копировать';
+    btn.onclick = async () => {
+      const ok = await copyText(pre.textContent);
+      btn.textContent = ok ? 'Скопировано' : 'Ошибка';
+      setTimeout(() => { btn.textContent = 'Копировать'; }, 1500);
+    };
+    pre.append(btn);
+  }
+}
+
 function renderMarkdown(container, text) {
   container.innerHTML = DOMPurify.sanitize(marked.parse(text));
   rewriteMarkdownLinks(container);
+  addCodeCopyButtons(container);
 }
 
 function escapeHtml(value) {
@@ -770,6 +876,25 @@ $('pairButton').onclick = async () => {
     $('pairingOverlay').classList.remove('hidden');
     $('pairingClose').onclick = () => { clearInterval(timer); $('pairingOverlay').classList.add('hidden'); };
   } catch (err) { alert(err.message); }
+};
+
+/* ---------------- notifications ---------------- */
+
+function updateNotifyButton() {
+  if (!('Notification' in window)) { $('notifyButton').classList.add('hidden'); return; }
+  $('notifyButton').classList.remove('hidden');
+  $('notifyButton').textContent = Notification.permission === 'granted' ? '🔔 Уведомления вкл.' : '🔔 Уведомления';
+}
+
+$('notifyButton').onclick = async () => {
+  if (!('Notification' in window)) return;
+  const permission = await Notification.requestPermission();
+  updateNotifyButton();
+  // Chrome blocks the Notification API entirely on plain HTTP origins other
+  // than localhost, so a phone opening TaskBridge over LAN IP may never see
+  // the permission prompt at all — requestPermission then just resolves to
+  // 'denied' without the browser ever asking.
+  if (permission !== 'granted') alert('Браузер не разрешил уведомления. Если TaskBridge открыт по обычному http:// (не localhost) — это ограничение браузера, а не TaskBridge: без HTTPS уведомления на телефоне работать не будут.');
 };
 
 /* ---------------- native Pi sessions ---------------- */
@@ -892,6 +1017,7 @@ async function loadAll() {
 }
 
 async function init() {
+  updateNotifyButton();
   checkPcState();
   setInterval(checkPcState, 4000);
   document.addEventListener('visibilitychange', () => {

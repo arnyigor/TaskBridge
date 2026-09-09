@@ -355,7 +355,33 @@ body {
   display: block;
 }
 
-.meta { font-size: 11px; color: var(--muted); padding: 0 2px; }
+.metaRow { display: flex; align-items: center; gap: 6px; width: 100%; }
+.meta { font-size: 11px; color: var(--muted); padding: 0 2px; flex: 1; min-width: 0; }
+.copyBtn {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  padding: 2px 5px;
+  font-size: 12px;
+  border-radius: 6px;
+  line-height: 1;
+}
+.copyBtn:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); }
+.md pre { position: relative; }
+.codeCopyBtn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 10.5px;
+  padding: 3px 7px;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-strong);
+  color: var(--muted);
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+.md pre:hover .codeCopyBtn { opacity: 1; }
 
 /* inline turn error + retry */
 .turnError {
@@ -537,7 +563,7 @@ button:disabled { opacity: .4; cursor: default; }
 .tasksSpoiler summary h2::before { content: '▸ '; color: var(--muted); }
 .tasksSpoiler[open] summary h2::before { content: '▾ '; }
 .tasksSpoiler summary button { font-size: 11.5px; padding: 6px 10px; }
-#taskProjectFilter {
+#taskProjectFilter, #taskSearch {
   width: 100%;
   margin-bottom: 10px;
   background: #0d1220;
@@ -547,7 +573,9 @@ button:disabled { opacity: .4; cursor: default; }
   padding: 7px 10px;
   font-size: 12px;
   outline: none;
+  font-family: inherit;
 }
+#taskSearch:focus, #taskProjectFilter:focus { border-color: var(--accent); }
 
 .tasks { display: flex; flex-direction: column; gap: 8px; }
 .taskRow {
@@ -615,6 +643,10 @@ button:disabled { opacity: .4; cursor: default; }
 .session .r { min-width: 0; }
 .session .r span { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
 .session .r b { display: block; font-size: 12px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+.session .r.taskNameRow { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+.session .r.taskNameRow span { flex-shrink: 0; }
+.session .r.taskNameRow b { flex: 1; min-width: 0; margin-top: 0; }
+.session .r.taskNameRow button { flex-shrink: 0; padding: 3px 7px; font-size: 12px; }
 
 .contextBar {
   height: 5px;

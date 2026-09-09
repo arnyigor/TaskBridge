@@ -25,6 +25,7 @@
         <button id="runtimeStart" type="button" class="small">Запустить</button>
       </div>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
+      <button id="notifyButton" type="button" class="small hidden">🔔 Уведомления</button>
       <div id="pcState" class="pill">checking…</div>
     </div>
   </header>
@@ -102,16 +103,21 @@
     <aside class="panel">
       <details class="tasksSpoiler" id="tasksSpoiler">
         <summary>
-          <h2>Сессии</h2>
+          <h2>Сессии <span id="taskCount" class="muted small"></span></h2>
           <button id="refresh" type="button">Обновить</button>
         </summary>
+        <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
         <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>
         <div id="tasks" class="tasks"></div>
       </details>
 
       <div id="detail" class="detail hidden">
         <div class="session">
-          <div class="r"><span>ID</span><b id="taskTitle">—</b></div>
+          <div class="r taskNameRow">
+            <span>Название</span>
+            <b id="taskTitle">—</b>
+            <button id="renameButton" type="button" title="Переименовать" aria-label="Переименовать сессию">✎</button>
+          </div>
           <div class="r"><span>Статус</span><b id="taskStatus">—</b></div>
           <div class="r"><span>Current</span><b id="current">—</b></div>
           <div class="r"><span>Workspace</span><b id="workspace">—</b></div>
