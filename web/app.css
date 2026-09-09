@@ -32,7 +32,9 @@ body {
     var(--bg);
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 /* ---------- header ---------- */
@@ -91,13 +93,27 @@ body {
 .pill.run { color: var(--accent); border-color: rgba(167, 139, 250, 0.45); }
 
 /* ---------- subheader ---------- */
+.controlsSpoiler {
+  border-bottom: 1px solid var(--border);
+  background: rgba(10, 13, 24, 0.5);
+  flex-shrink: 0;
+}
+.controlsSpoiler summary {
+  padding: 10px 20px;
+  cursor: pointer;
+  list-style: none;
+}
+.controlsSpoiler summary::-webkit-details-marker { display: none; }
+.controlsSpoiler summary h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.3px; }
+.controlsSpoiler summary h2::before { content: '▸ '; color: var(--muted); }
+.controlsSpoiler[open] summary h2::before { content: '▾ '; }
 .subheader {
   display: flex;
   align-items: center;
   justify-content: center;
   flex-wrap: wrap;
   gap: 10px;
-  padding: 10px 20px;
+  padding: 0 20px 12px;
 }
 .subheader #newTaskButton { font-size: 11.5px; padding: 6px 12px; flex-shrink: 0; }
 .subheader #continueBadge { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
@@ -730,17 +746,16 @@ pre {
 .small { font-size: 11.5px; }
 
 /* ---------- responsive ---------- */
+/* Only .msgs and .panel scroll internally, at every width — the page itself
+   never scrolls, so a long chat history doesn't grow the whole document. */
 @media (max-width: 900px) {
-  body { height: auto; min-height: 100vh; overflow: visible; }
-  .main { grid-template-columns: 1fr; padding: 12px; gap: 12px; }
-  .chat { min-height: 62vh; }
-  .msgs { overflow: visible; }
+  .main { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) minmax(0, 38vh); padding: 12px; gap: 12px; }
   .top { padding: 12px 14px; }
   .brand .s { display: none; }
 }
 @media (max-width: 480px) {
   .main { padding: 8px; gap: 10px; }
-  .chat { min-height: 58vh; border-radius: var(--radius-m); }
+  .chat { border-radius: var(--radius-m); }
   .msgs { padding: 12px 10px 6px; }
   .turn .body { max-width: 92%; }
   .composer-wrap { padding: 8px 10px 10px; }

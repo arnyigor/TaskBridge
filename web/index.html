@@ -31,13 +31,17 @@
     </div>
   </header>
 
-  <div class="subheader" id="subheader">
-    <select id="project" title="Проект" aria-label="Проект"></select>
-    <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
-    <span id="continueBadge" class="pill hidden"></span>
-    <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
-    <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
-  </div>
+  <details class="controlsSpoiler" id="controlsSpoiler">
+    <summary><h2>Проект и сессии</h2></summary>
+    <div class="subheader" id="subheader">
+      <select id="project" title="Проект" aria-label="Проект"></select>
+      <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
+      <span id="continueBadge" class="pill hidden"></span>
+      <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
+      <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
+      <button id="refresh" type="button" class="small">Обновить список</button>
+    </div>
+  </details>
 
   <div id="authGate" class="authGate hidden">
     <div class="authCard">
@@ -165,7 +169,6 @@
       <details class="tasksSpoiler" id="tasksSpoiler">
         <summary>
           <h2>Сессии <span id="taskCount" class="muted small"></span></h2>
-          <button id="refresh" type="button">Обновить</button>
         </summary>
         <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
         <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>

@@ -393,17 +393,27 @@ function renderChat() {
         body.className = 'tool-body';
         body.textContent = tool.label;
         chip.append(summary, body);
+        chip._summary = summary;
         node.body.insertBefore(chip, node.metaRow);
         node.tools.set(tool.id, chip);
       }
-      chip.className = `tool ${tool.state}`;
-      chip.querySelector('summary').textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
+      // A settled turn's tools never change again; skipping the write (not
+      // just re-computing it) avoids forcing style recalc on every poll once
+      // history gets long — the actual source of the reported UI lag.
+      if (chip._state !== tool.state) {
+        chip.className = `tool ${tool.state}`;
+        chip._summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
+        chip._state = tool.state;
+      }
       if (tool.state === 'done' && tool.imagePath && IMAGE_EXT_RE.test(tool.imagePath) && !chip.dataset.imageShown) {
         appendInlineImage(tool.imagePath);
         chip.dataset.imageShown = 'true';
       }
     }
-    node.meta.textContent = turn.status || '';
+    if (node.status !== turn.status) {
+      node.meta.textContent = turn.status || '';
+      node.status = turn.status;
+    }
   }
   scrollBottom();
 }
