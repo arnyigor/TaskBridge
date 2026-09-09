@@ -540,6 +540,8 @@ IP, VPN и без длительных Vercel-запросов. Локальны
                                 └── TaskBridge (исходящие соединения) → Pi
 ```
 
+Текущее состояние работ и что проверено — [`docs/cloud-transport-status.md`](docs/cloud-transport-status.md).
+
 Деплой одной командой: `npm run cloud:deploy -- --project <name> --database-url "postgres://…"`
 (генерирует креды, ставит env в Vercel, деплоит, проверяет `/api/health` и что
 хранилище durable). GitHub для этого не нужен: CLI деплоит локальный каталог;
