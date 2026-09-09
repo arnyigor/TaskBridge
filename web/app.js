@@ -262,10 +262,18 @@ $('msgs').addEventListener('scroll', () => {
 
 /* ---------------- task selection / stream ---------------- */
 
+// renderTaskDetails() forces #project to show whichever task is open (it's
+// disabled then, purely informational). Restoring the user's own choice for
+// *new* tasks here keeps that from silently overwriting it every 2s poll.
+let newTaskProjectId = null;
+
 function setComposerMode(taskId) {
   const continuing = Boolean(taskId);
   $('newTaskButton').classList.toggle('hidden', !continuing);
   $('project').disabled = continuing;
+  if (!continuing && newTaskProjectId && [...$('project').options].some(o => o.value === newTaskProjectId)) {
+    $('project').value = newTaskProjectId;
+  }
   const badge = $('continueBadge');
   badge.classList.toggle('hidden', !continuing);
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
@@ -273,6 +281,10 @@ function setComposerMode(taskId) {
     ? 'Сообщение продолжит текущую сессию. Enter — отправить, Shift+Enter — перенос строки.'
     : 'Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки.';
 }
+
+$('project').addEventListener('change', () => {
+  if (!selectedTaskId) newTaskProjectId = $('project').value;
+});
 
 const drafts = new Map(); // taskId | '__new__' -> { text, files: File[] }
 
@@ -944,6 +956,7 @@ $('projectBrowserSelect').onclick = async () => {
     $('projectBrowserOverlay').classList.add('hidden');
     await loadProjects();
     $('project').value = project.id;
+    if (!selectedTaskId) newTaskProjectId = project.id;
   } catch (err) { alert(err.message); }
 };
 
