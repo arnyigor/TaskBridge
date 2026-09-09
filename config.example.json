@@ -5,6 +5,10 @@
     "maxBodyMb": 25,
     "auth": {
       "enabled": false
+    },
+    "https": {
+      "enabled": false,
+      "port": 8443
     }
   },
   "pi": {

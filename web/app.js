@@ -983,6 +983,8 @@ async function checkPcState() {
   loadRuntimeStatus();
   try {
     const info = await api('/api/info');
+    $('buildInfo').textContent = info.build?.commit ? `· ${info.build.commit}` : '';
+    $('buildInfo').title = info.build?.date ? `Собрано: ${new Date(info.build.date).toLocaleString('ru-RU')}` : '';
     modelBusy = info.modelBusy;
     el.classList.remove('err', 'ok', 'run');
     if (info.modelReady === false) {

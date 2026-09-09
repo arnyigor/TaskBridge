@@ -1,7 +1,10 @@
 import http from 'node:http';
+import https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { TaskStore } from './task-store.mjs';
@@ -9,12 +12,26 @@ import { TaskManager } from './task-manager.mjs';
 import { AccessControl } from './auth.mjs';
 import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
+import { ensureTlsCert } from './tls.mjs';
 
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const webDir = path.join(rootDir, 'web');
 const dataRoot = path.join(rootDir, 'data');
+
+// Identifies exactly which commit this running process was started from, so
+// a stale-vs-fresh deploy is visible in the UI instead of guessed at.
+const build = await (async () => {
+  try {
+    const { stdout } = await execFileAsync('git', ['log', '-1', '--format=%h %cI'], { cwd: rootDir, windowsHide: true });
+    const [commit, date] = stdout.trim().split(' ');
+    return { commit: commit || null, date: date || null };
+  } catch {
+    return { commit: null, date: null };
+  }
+})();
 
 const config = await loadConfig(rootDir);
 await fs.mkdir(dataRoot, { recursive: true });
@@ -24,6 +41,7 @@ await manager.init();
 const access = new AccessControl(config.server?.auth, dataRoot);
 await access.init();
 const runtimeControl = new RuntimeControl(manager.runtimeManager, manager);
+const httpsConfig = config.server?.https || {};
 
 const sseClients = new Map();
 
@@ -94,12 +112,12 @@ async function readJson(req) {
   return text ? JSON.parse(text) : {};
 }
 
-function lanAddresses(port) {
+function lanAddresses(port, scheme = 'http') {
   const out = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
     for (const addr of list || []) {
       if (addr.family === 'IPv4' && !addr.internal) {
-        out.push({ interface: name, ip: addr.address, url: `http://${addr.address}:${port}` });
+        out.push({ interface: name, ip: addr.address, url: `${scheme}://${addr.address}:${port}` });
       }
     }
   }
@@ -128,7 +146,7 @@ async function listArtifacts(taskId) {
   return entries.filter((e) => e.isFile()).map((e) => e.name);
 }
 
-const server = http.createServer(async (req, res) => {
+async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://localhost');
   try {
     res.setHeader('x-content-type-options', 'nosniff');
@@ -171,7 +189,11 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         name: 'TaskBridge MVP',
         version: '0.1.0',
-        addresses: lanAddresses(Number(config.server?.port || 8787)),
+        build,
+        addresses: [
+          ...lanAddresses(Number(config.server?.port || 8787)),
+          ...(httpsConfig.enabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])
+        ],
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
         fileLimits: FILE_LIMITS
@@ -318,13 +340,28 @@ const server = http.createServer(async (req, res) => {
       : 500;
     errorJson(res, status, error);
   }
-});
+}
 
 const host = config.server?.host || '0.0.0.0';
 const port = Number(config.server?.port || 8787);
+const server = http.createServer(handleRequest);
 server.listen(port, host, () => {
   console.log(`\nTaskBridge MVP listening on ${host}:${port}`);
   console.log(`Local: http://127.0.0.1:${port}`);
   for (const item of lanAddresses(port)) console.log(`LAN (${item.interface}): ${item.url}`);
   console.log(access.enabled ? '\nPairing enabled. Open localhost and click «Подключить телефон» for a code.\n' : '\nPairing disabled by configuration.\n');
 });
+
+if (httpsConfig.enabled) {
+  const httpsPort = Number(httpsConfig.port || 8443);
+  try {
+    const { key, cert, certPath } = await ensureTlsCert(dataRoot);
+    https.createServer({ key, cert }, handleRequest).listen(httpsPort, host, () => {
+      console.log(`HTTPS listening on ${host}:${httpsPort} (self-signed cert: ${certPath})`);
+      for (const item of lanAddresses(httpsPort, 'https')) console.log(`LAN HTTPS (${item.interface}): ${item.url}`);
+      console.log('Self-signed certificate: the browser will warn "not secure" once per device until you accept it.\n');
+    });
+  } catch (error) {
+    console.error(`HTTPS disabled: failed to prepare certificate (${error.message}). Is 'openssl' on PATH?`);
+  }
+}

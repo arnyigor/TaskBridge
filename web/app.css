@@ -60,6 +60,7 @@ body {
   flex-shrink: 0;
 }
 .brand .n { font-weight: 700; font-size: 15px; letter-spacing: 0.2px; }
+.buildInfo { font-family: var(--mono); font-weight: 400; font-size: 10.5px; color: var(--muted); vertical-align: middle; }
 .brand .s { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
 
 
