@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
+import { TaskStore } from '../src/task-store.mjs';
 import { ChatState } from '../web/chat-state.mjs';
 
 async function terminal(api, id) {
@@ -46,6 +47,26 @@ test('multipart upload streams files into the task workspace and discards stagin
   assert.equal(Buffer.from(await served.arrayBuffer()).toString('utf8'), 'привет upload\n');
   // The staging directory is removed once the task owns the files.
   assert.deepEqual(await fs.readdir(path.join(root, 'data', 'uploads')).catch(() => []), []);
+});
+
+test('events requests are capped by server.maxEventsPerRequest', { timeout: 20000 }, async t => {
+  const fixture = await startFixture(undefined, { server: { maxEventsPerRequest: 5 } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'cap' });
+  let task = null;
+  for (let i = 0; i < 150; i++) {
+    task = await api(`/api/tasks/${created.id}`);
+    if (['SUCCEEDED', 'FAILED'].includes(task.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  // Count the real rows through a second connection to the same database.
+  const store = new TaskStore(path.join(root, 'data'));
+  const total = Number(store.db.prepare('SELECT COUNT(*) AS n FROM events WHERE task_id = ?').get(created.id).n);
+  store.close();
+  assert.ok(total > 5, `expected more than 5 stored events, got ${total}`);
+  const capped = await api(`/api/tasks/${created.id}/events?limit=0`);
+  assert.ok(capped.length > 0 && capped.length <= 5, `capped length ${capped.length}`);
 });
 
 test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compact, cancel, deletion', { timeout: 20000 }, async t => {

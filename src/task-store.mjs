@@ -40,19 +40,26 @@ function readJsonSync(file) {
 }
 
 export class TaskStore {
-  constructor(dataRoot) {
+  constructor(dataRoot, options = {}) {
     this.root = path.join(dataRoot, 'tasks');
     this.dbPath = path.join(dataRoot, 'taskbridge.db');
     this.removed = new Set();
     this.fileWrites = new Map();
+    // NORMAL is the default WAL trade-off; FULL costs a sync per commit but
+    // survives a power loss without losing the last transaction.
+    const synchronous = String(options.synchronous || 'NORMAL').toUpperCase();
+    this.synchronous = ['NORMAL', 'FULL'].includes(synchronous) ? synchronous : 'NORMAL';
+    this.busyTimeoutMs = Number.isSafeInteger(options.busyTimeoutMs)
+      ? Math.min(Math.max(options.busyTimeoutMs, 0), 60000)
+      : 5000;
     fs.mkdirSync(this.root, { recursive: true });
     this.db = new DatabaseSync(this.dbPath);
     // WAL keeps readers (SSE replay, list) from blocking the streaming writer.
     this.db.exec('PRAGMA journal_mode = WAL;');
-    this.db.exec('PRAGMA synchronous = NORMAL;');
+    this.db.exec(`PRAGMA synchronous = ${this.synchronous};`);
     // A second TaskBridge instance (or a test fixture) must wait for the writer
     // instead of failing immediately with SQLITE_BUSY.
-    this.db.exec('PRAGMA busy_timeout = 5000;');
+    this.db.exec(`PRAGMA busy_timeout = ${this.busyTimeoutMs};`);
     // Enforce task/event integrity; must be set outside any transaction.
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
@@ -105,6 +112,19 @@ export class TaskStore {
   // callers only do this at startup before any task is admitted.
   async vacuum() {
     this.db.exec('VACUUM');
+  }
+
+  // Consistent snapshot while the server keeps running (VACUUM INTO). The target
+  // must not exist, so callers use a unique file name.
+  async backup(target) {
+    const file = path.resolve(target);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    this.db.exec(`VACUUM INTO '${file.replaceAll("'", "''")}'`);
+    return file;
+  }
+
+  async checkpoint() {
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
   }
 
   #meta(key) {

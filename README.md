@@ -168,9 +168,10 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   84 теста на node:test
+├─ tests/                   87 тестов на node:test
 ├─ scripts/
-│  └─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
+│  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
+│  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
 ├─ start.cmd                запуск на Windows
@@ -316,6 +317,9 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `server.host` / `server.port` | адрес и порт HTTP-сервера (по умолчанию `0.0.0.0:8787`) |
 | `server.maxBodyMb` | максимальный размер JSON-тела запроса |
 | `server.maxUploadMb` | лимит одного файла при потоковой загрузке (суммарно — 2×) |
+| `server.maxEventsPerRequest` | потолок событий на один HTTP-запрос (по умолчанию 20000) |
+| `server.sqlite.synchronous` | `NORMAL` (быстро) или `FULL` (выживает жёсткое отключение) |
+| `server.sqlite.busyTimeoutMs` | сколько ждать занятую БД (по умолчанию 5000) |
 | `server.auth.enabled` | включить pairing-авторизацию |
 | `server.https.enabled` / `port` | self-signed HTTPS для LAN |
 | `pi.command` / `pi.args` | как запускать Pi |
@@ -382,6 +386,7 @@ data/
 ├─ taskbridge.db            SQLite: задачи (tasks) и события (events)
 ├─ taskbridge.db-wal/-shm   WAL-журнал SQLite
 ├─ taskbridge.lock          признак запущенного экземпляра (pid)
+├─ backups/                 снимки БД от `npm run backup`
 ├─ tasks/<task-id>/
 │  ├─ files/                вложения
 │  └─ artifacts/
@@ -419,6 +424,8 @@ data/
 - Стриминговые дельты (`message_update`), уже закрытые `message_end`, удаляются при записи — длинная сессия не копит мегабайты мёртвых событий.
 - FK с `ON DELETE CASCADE` + удаление в транзакции — удаление задачи и её событий атомарно, осиротевшие события невозможны.
 - Схема версионируется через `PRAGMA user_version`; старые базы без FK пересобираются один раз при старте.
+- Снимок БД: `npm run backup` → `data/backups/taskbridge-<timestamp>.db` (`VACUUM INTO`, сервер можно не останавливать), хранятся последние 5. При закрытии и в бэкапе WAL схлопывается (`wal_checkpoint(TRUNCATE)`).
+- `PRAGMA synchronous`/`busy_timeout` настраиваются в `server.sqlite`.
 - Файлы (вложения, артефакты, worktree, Pi-сессии) остаются на диске — в БД только метаданные и события.
 - При удалении задачи удаляются также её worktree, `.taskbridge-input/<id>`, `data/pi-sessions/<id>` и `data/workspaces/<id>`; при старте подчищаются сироты.
 - Один экземпляр на data-каталог: `data/taskbridge.lock` с pid, устаревший lock мёртвого процесса перехватывается.
@@ -555,7 +562,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 84 теста на node:test
+npm test          # 87 тестов на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 
@@ -570,9 +577,10 @@ npm run check     # синтаксическая проверка основны
 3. Одновременно рассчитан на одну активную inference-задачу.
 4. Apply меняет рабочее дерево без коммита; проверки source-репозитория можно снять через `force`.
 5. Verification commands доверенные и читаются из локального `config.json`.
-6. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
-7. Claude Code и Codex как отдельные runner'ы пока не подключены.
-8. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
+6. Один HTTP-запрос отдаёт не более `server.maxEventsPerRequest` событий (по умолчанию 20000); более старая история — через `?tail`/`?before`.
+7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
+8. Claude Code и Codex как отдельные runner'ы пока не подключены.
+9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
 
 ---
 

@@ -51,7 +51,10 @@ try {
   process.exit(1);
 }
 process.on('exit', () => instanceLock.release());
-const store = new TaskStore(dataRoot);
+const store = new TaskStore(dataRoot, {
+  synchronous: config.server?.sqlite?.synchronous,
+  busyTimeoutMs: config.server?.sqlite?.busyTimeoutMs
+});
 const manager = new TaskManager(config, dataRoot, store);
 await manager.init();
 
@@ -67,6 +70,10 @@ manager.runtimeSwitcher = profileId => runtimeControl.restart(profileId);
 const httpsConfig = config.server?.https || {};
 
 const sseClients = new Map();
+
+// A single request must not materialize an unbounded history in memory. Older
+// pages are reached with ?tail/?before; this is the hard ceiling per request.
+const maxEventsPerRequest = Math.min(Math.max(Number(config.server?.maxEventsPerRequest || 20000), 1), 200000);
 
 function addSseClient(taskId, res, cursor = 0) {
   const client = { res, cursor, pending: [], replaying: true };
@@ -295,7 +302,10 @@ async function handleRequest(req, res) {
       if (!manager.getTask(match[1])) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
       const after = Number(url.searchParams.get('after') ?? 0);
       if (!Number.isSafeInteger(after) || after < 0) throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
-      const events = trimStreamingDeltas(await store.readEvents(match[1], 0, after));
+      const requested = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 500;
+      if (!Number.isSafeInteger(requested) || requested < 0) throw Object.assign(new Error('Invalid event limit'), { code: 'INPUT_INVALID' });
+      const limit = requested === 0 ? maxEventsPerRequest : Math.min(requested, maxEventsPerRequest);
+      const events = trimStreamingDeltas(await store.readEvents(match[1], limit, after));
       // tail: turn-aligned windowing for paginated history load (see
       // event-window.mjs). Without it, behaves exactly as before — full or
       // limit-sliced history, always used by refreshTask()'s small
@@ -307,8 +317,7 @@ async function handleRequest(req, res) {
         if (before != null && (!Number.isSafeInteger(before) || before < 0)) throw Object.assign(new Error('Invalid before cursor'), { code: 'INPUT_INVALID' });
         return json(res, 200, windowByTurns(events, tail, before));
       }
-      const limit = Number(url.searchParams.get('limit') ?? 500);
-      return json(res, 200, limit ? events.slice(-limit) : events);
+      return json(res, 200, events);
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/);
@@ -328,7 +337,7 @@ async function handleRequest(req, res) {
       // replay is complete, closing the gap between history and subscription.
       const client = addSseClient(match[1], res, after);
       try {
-        const history = await store.readEvents(match[1], 0, after);
+        const history = await store.readEvents(match[1], maxEventsPerRequest, after);
         for (const event of history) deliver(client, event);
         for (const event of client.pending.sort((a, b) => a.seq - b.seq)) deliver(client, event);
         client.pending = [];

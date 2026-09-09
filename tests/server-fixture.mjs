@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
-export async function startFixture(port) {
+export async function startFixture(port, overrides = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-http-test-'));
   const repo = fileURLToPath(new URL('..', import.meta.url));
   await fs.cp(path.join(repo, 'src'), path.join(root, 'src'), { recursive: true });
@@ -20,7 +20,13 @@ export async function startFixture(port) {
     port = probe.address().port;
     await new Promise(resolve => probe.close(resolve));
   }
-  await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({ server: { host: '127.0.0.1', port }, pi: { command, projectTrust: 'deny' }, localRuntime: {}, projects: [{ id: 'fixture', name: 'Тестовая сессия', path: root, useWorktree: false }] }));
+  await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({
+    server: { host: '127.0.0.1', port, ...(overrides.server || {}) },
+    pi: { command, projectTrust: 'deny' },
+    localRuntime: {},
+    projects: [{ id: 'fixture', name: 'Тестовая сессия', path: root, useWorktree: false }],
+    ...(overrides.root || {})
+  }));
   let logs = '';
   const launch = () => {
     const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
