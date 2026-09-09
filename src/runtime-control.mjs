@@ -157,10 +157,15 @@ export class RuntimeControl {
     return { identity, endpoint };
   }
 
+  publicProfiles() {
+    return this.profiles().filter(p => p.enabled !== false && p.command).map(({ id, name }) => ({ id, name: name || id }));
+  }
+
   async status() {
     const status = await this.runtime.getStatus();
     const error = this.lastError?.message || status.error || null;
-    if (this.operation) return { ...status, error, state: 'RESTARTING', canRestart: false, externalRestartReason: 'Модель перезапускается.' };
+    const profiles = this.publicProfiles();
+    if (this.operation) return { ...status, error, state: 'RESTARTING', canRestart: false, externalRestartReason: 'Модель перезапускается.', profiles };
     let externalRestartReason = null;
     try {
       this.target();
@@ -168,7 +173,7 @@ export class RuntimeControl {
       await this.assertIdle();
       if (!this.runtime.proc && await this.runtime.isReady()) await this.identifyExternal();
     } catch (error) { externalRestartReason = error.message; }
-    return { ...status, error, canRestart: !externalRestartReason, externalRestartReason };
+    return { ...status, error, canRestart: !externalRestartReason, externalRestartReason, profiles };
   }
 
   restart(profileId) {

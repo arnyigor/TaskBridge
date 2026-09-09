@@ -761,10 +761,54 @@ async function importSession(projectId, session) {
   } catch (err) { alert(err.message); }
 }
 
+/* ---------------- model runtime ---------------- */
+
+let runtimeBusy = false;
+
+function renderRuntimeStatus(status) {
+  const select = $('runtimeProfile');
+  const options = status.profiles || [];
+  $('runtimeControl').classList.toggle('hidden', options.length === 0);
+  if (!options.length) return;
+  const nextIds = options.map(p => p.id).join(',');
+  if ([...select.options].map(o => o.value).join(',') !== nextIds) {
+    const previous = select.value;
+    select.innerHTML = options.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+    if (options.some(p => p.id === previous)) select.value = previous;
+  }
+  if (status.profileId && options.some(p => p.id === status.profileId)) select.value = status.profileId;
+
+  const button = $('runtimeStart');
+  const starting = ['STARTING', 'RESTARTING'].includes(status.state);
+  const running = ['MANAGED_RUNNING', 'EXTERNAL_RUNNING'].includes(status.state);
+  button.textContent = starting ? (status.state === 'RESTARTING' ? 'Перезапуск…' : 'Запуск…') : running ? 'Перезапустить' : 'Запустить';
+  button.disabled = runtimeBusy || starting || (running && status.canRestart === false);
+  button.title = running && status.canRestart === false ? (status.externalRestartReason || '') : '';
+  select.disabled = button.disabled && running;
+}
+
+async function loadRuntimeStatus() {
+  try { renderRuntimeStatus(await api('/api/runtime')); }
+  catch { $('runtimeControl').classList.add('hidden'); }
+}
+
+$('runtimeStart').onclick = async () => {
+  const profileId = $('runtimeProfile').value;
+  const restarting = $('runtimeStart').textContent === 'Перезапустить';
+  runtimeBusy = true;
+  $('runtimeStart').disabled = true;
+  $('runtimeStart').textContent = restarting ? 'Перезапуск…' : 'Запуск…';
+  try {
+    await api(restarting ? '/api/runtime/restart' : '/api/runtime/start', { method: 'POST', body: JSON.stringify({ profileId }) });
+  } catch (err) { alert(err.message); }
+  finally { runtimeBusy = false; await loadRuntimeStatus(); }
+};
+
 /* ---------------- init ---------------- */
 
 async function checkPcState() {
   const el = $('pcState');
+  loadRuntimeStatus();
   try {
     const info = await api('/api/info');
     modelBusy = info.modelBusy;
