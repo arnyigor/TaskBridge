@@ -483,13 +483,6 @@ body {
   padding: 10px 12px 12px;
   background: rgba(10, 13, 24, 0.5);
 }
-.composer-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-bottom: 8px;
-}
 #project {
   background: #0d1220;
   color: var(--text);
@@ -500,18 +493,23 @@ body {
   outline: none;
 }
 #project:focus { border-color: var(--accent); }
-.fileButton {
-  display: inline-block;
-  font-size: 12px;
-  color: var(--muted);
-  border: 1px dashed var(--border-strong);
+.composerActions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+.composerSendRow { display: flex; gap: 6px; }
+.fileIconButton {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
   border-radius: var(--radius-s);
-  padding: 7px 10px;
+  border: 1px dashed var(--border-strong);
+  color: var(--muted);
   cursor: pointer;
-  white-space: nowrap;
 }
-.fileButton:hover { color: var(--text); border-color: var(--accent); }
-.fileButton input { display: none; }
+.fileIconButton:hover { color: var(--text); border-color: var(--accent); }
+.fileIconButton input { display: none; }
+#fileList:empty { display: none; }
+#fileList { display: block; margin-bottom: 6px; }
 
 .fileChip {
   display: inline-flex;
@@ -565,13 +563,13 @@ body {
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-m);
-  padding: 10px 12px;
+  padding: 7px 12px;
   font: inherit;
   font-size: 13.5px;
-  line-height: 1.45;
+  line-height: 1.4;
   outline: none;
-  max-height: 240px;
-  min-height: 64px;
+  max-height: 200px;
+  min-height: 32px;
 }
 .composer textarea:focus { border-color: var(--accent); }
 
