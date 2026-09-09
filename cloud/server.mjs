@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { openStore } from './lib/store.mjs';
+import { openStore, resolveStoreTarget } from './lib/store.mjs';
 import { CloudAuth, loadAuthConfig } from './lib/auth.mjs';
 import { createRouter } from './lib/router.mjs';
 import { errorBody } from './lib/errors.mjs';
@@ -16,7 +16,12 @@ const webDir = path.join(__dirname, 'web');
 
 const PORT = Number(process.env.CLOUD_PORT || 8788);
 const HOST = process.env.CLOUD_HOST || '0.0.0.0';
-const STORE_TARGET = process.env.CLOUD_STORE || `sqlite:${path.join(__dirname, 'data', 'taskbridge-cloud.db')}`;
+// Explicit CLOUD_STORE wins; otherwise a configured Postgres URL is used, and
+// a local run falls back to SQLite (a serverless deployment must not).
+const STORE_TARGET = process.env.CLOUD_STORE
+  || (resolveStoreTarget(process.env) !== 'memory:'
+    ? resolveStoreTarget(process.env)
+    : `sqlite:${path.join(__dirname, 'data', 'taskbridge-cloud.db')}`);
 
 function log(level, entry) {
   const line = JSON.stringify({ level, at: new Date().toISOString(), ...entry });

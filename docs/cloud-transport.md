@@ -120,13 +120,106 @@ processed command seq and the last poll error. It never returns the secret.
   auth plus machine-scoped credentials and rate limiting.
 * `cloud/server.mjs` — local/self-hosted host with static PWA files and an SSE
   fast path.
-* `cloud/api/index.mjs` + `cloud/vercel.json` — Vercel entry point (project root
-  must be `cloud/`).
+* `cloud/lib/store-postgres.mjs` — Postgres adapter (required on serverless).
+* `api/index.mjs` + `vercel.json` — Vercel entry point and project config
+  (project root = repository root, static output = `cloud/web`).
 * `cloud/web/` — installable PWA: machine dashboard, task list/creation, live
   conversation, tool cards, activity log, STOP / follow-up / compact / approvals,
   connection indicators, replay after reconnect.
 
-Run it locally:
+## Deploying (Vercel + Postgres)
+
+Step by step, from zero to a working phone client.
+
+### 1. Generate the secrets
+
+```powershell
+npm run cloud:secrets -- --url https://<your-project>.vercel.app
+```
+
+It prints (nothing is written to disk):
+
+* `TASKBRIDGE_CLOUD_USER_TOKEN` — what you paste into the PWA;
+* `TASKBRIDGE_CLOUD_MACHINES` — the machine id + secret the cloud accepts;
+* the matching `config.json` `cloud` block for this machine.
+
+Keep the machine secret out of git; `config.json` is git-ignored already.
+
+### 2. Create the Vercel project
+
+1. Import the repository. **Root Directory: repository root** (not `cloud/`) —
+   the router imports shared protocol helpers from `src/domain/`.
+2. Framework preset: **Other**. Build command: leave empty (`npm install` is
+   enough; `pg` is an optional dependency and is installed by default).
+   Output directory comes from `vercel.json` (`cloud/web`).
+3. Add a database: **Vercel Postgres** or Neon. It sets `POSTGRES_URL`.
+4. Environment variables (Production + Preview):
+
+```env
+TASKBRIDGE_CLOUD_USER_TOKEN=<from step 1>
+TASKBRIDGE_CLOUD_USER_ID=owner
+TASKBRIDGE_CLOUD_MACHINES=[{"id":"home-pc-xxxx","secret":"…","ownerId":"owner","displayName":"…"}]
+POSTGRES_URL=<set automatically by the database integration>
+```
+
+`POSTGRES_URL` (or `DATABASE_URL` / `TASKBRIDGE_CLOUD_STORE=postgres://…`) is
+what makes the store durable. Without it the function falls back to an
+in-memory store, which loses every task on the next invocation — the health
+endpoint still answers, so this is easy to miss.
+
+5. Deploy, then check:
+
+```powershell
+curl https://<your-project>.vercel.app/api/health
+# {"status":"ok","protocolVersion":1,"machines":0}
+```
+
+### 3. Point this machine at it
+
+Either through the UI (**☁ → адрес, ID машины, секрет → Проверить соединение →
+Сохранить**) or in `config.json`:
+
+```jsonc
+"cloud": {
+  "enabled": true,
+  "url": "https://<your-project>.vercel.app",
+  "machineId": "home-pc-xxxx",
+  "machineSecret": "…"
+}
+```
+
+Restart TaskBridge (`start.cmd`). Logs show `cloud transport enabled`, and
+`GET /debug/cloud` shows `connected: true`.
+
+### 4. Open it on the phone
+
+Open `https://<your-project>.vercel.app`, paste the user token, then "Add to
+Home Screen" for the PWA. The machine appears under **Machines** within a
+heartbeat (~20 s).
+
+### 5. Verify the acceptance path
+
+1. Create a task from the phone → it starts locally and streams back.
+2. Close the browser mid-task, reopen → the transcript is reconstructed.
+3. Disconnect the workstation's network → Pi keeps running; reconnect → the
+   backlog uploads.
+4. Press **STOP** → the local task is aborted.
+5. Enable `approvals.enabled` → a destructive tool call waits for your answer.
+
+### Rotating a secret
+
+Re-run `npm run cloud:secrets`, replace the secret in the Vercel variable and in
+the local config, restart TaskBridge. The old secret stops working immediately.
+
+### Limits to know
+
+* No WebSocket/SSE on Vercel: the client polls (1.5 s while a task runs). The
+  local `cloud/server.mjs` does expose SSE.
+* Vercel functions cap at 30 s (`maxDuration`); that is fine because no request
+  is ever held open for a task, an approval or a stream.
+* Cold starts add ~1 s to the first request; heartbeats keep the machine warm.
+
+### Running the cloud locally instead
 
 ```powershell
 $env:TASKBRIDGE_CLOUD_USER_TOKEN="…"
@@ -134,10 +227,8 @@ $env:TASKBRIDGE_CLOUD_MACHINES='[{"id":"home-pc-01","secret":"…","ownerId":"ow
 npm run cloud            # http://127.0.0.1:8788  (sqlite in cloud/data/)
 ```
 
-`CLOUD_STORE=memory:` runs without a database; `CLOUD_PORT` changes the port.
-The Vercel function reads `TASKBRIDGE_CLOUD_STORE` (with `CLOUD_STORE` as a
-fallback) and defaults to `memory:` — which is *not* durable, so a serverless
-deployment must point it at a persistent adapter.
+`CLOUD_STORE=memory:` runs without a database; `CLOUD_STORE=postgres://…` uses
+Postgres; `CLOUD_PORT` changes the port.
 
 ### API
 
@@ -331,9 +422,11 @@ STOP).
 1. **No WebSocket fast path.** Polling is authoritative and correct; SSE is an
    optional latency improvement on the dev server. A WebSocket/SSE fast path for
    Vercel is Phase 2 (`§112`) and must not be added before replay semantics work.
-2. **No Postgres adapter.** `SqliteStore` covers single-node deployments. Vercel's
-   filesystem is ephemeral, so a serverless deployment needs a Postgres adapter
-   implementing the same `store` interface (`cloud/lib/store.mjs`).
+2. **Postgres adapter is not verified against a live server here.** It is
+   implemented to the same interface and covered by
+   `tests/cloud-postgres.test.mjs`, which runs only when
+   `TASKBRIDGE_TEST_DATABASE_URL` points at a throw-away database. Run it once
+   against your Vercel/Neon database before trusting a deployment.
 3. **HMAC raw-body signature.** In the Vercel adapter the body is re-serialized
    from `req.body`; if exact-byte HMAC verification matters, send the raw body
    or use bearer mode.

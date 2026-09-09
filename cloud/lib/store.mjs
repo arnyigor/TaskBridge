@@ -380,5 +380,21 @@ export class SqliteStore {
 export async function openStore(target = 'memory:') {
   if (!target || target === 'memory:' || target === 'memory') return new MemoryStore().init();
   if (target.startsWith('sqlite:')) return SqliteStore.open(path.resolve(target.slice('sqlite:'.length)));
+  // A serverless deployment must use a persistent store (§74): any Postgres
+  // connection string is accepted directly.
+  if (/^postgres(ql)?:\/\//i.test(target)) {
+    const { PostgresStore } = await import('./store-postgres.mjs');
+    return PostgresStore.open(target);
+  }
   throw new Error(`Unsupported cloud store target: ${target}`);
+}
+
+// Resolves the configured target, falling back to the conventional Vercel
+// Postgres variables before memory (which is not durable).
+export function resolveStoreTarget(env = process.env) {
+  return env.TASKBRIDGE_CLOUD_STORE
+    || env.POSTGRES_URL
+    || env.POSTGRES_PRISMA_URL
+    || env.DATABASE_URL
+    || 'memory:';
 }

@@ -167,11 +167,13 @@ Taskbridge/
 │  └─ cloud/                CloudWorker, outbox, heartbeat, dispatcher, approvals
 ├─ pi-extension/            Pi-расширение: подтверждение опасных tool-вызовов
 ├─ cloud/                   облачный control plane (Vercel-совместимый)
-│  ├─ lib/                  роутер API, auth, store (memory/sqlite), errors, ids
+│  ├─ lib/                  роутер API, auth, store (memory/sqlite/postgres), errors, ids
 │  ├─ api/index.mjs         Vercel function (общий роутер)
 │  ├─ server.mjs            локальный хост облака + SSE
 │  └─ web/                  PWA: задачи, стриминг, tool-карточки, STOP
 │     └─ event-reducer.mjs  чистая логика применения событий (тестируемая)
+├─ api/index.mjs            Vercel-энтрипоинт (реэкспорт cloud/api)
+├─ vercel.json              конфиг Vercel (outputDirectory: cloud/web)
 ├─ web/
 │  ├─ index.html            разметка UI
 │  ├─ app.js                логика UI, SSE, рендер чата
@@ -179,9 +181,10 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   159 тестов на node:test
+├─ tests/                   161 тест на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
+│  ├─ cloud-secrets.mjs     генерация токенов/секретов (npm run cloud:secrets)
 │  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
@@ -534,6 +537,11 @@ IP, VPN и без длительных Vercel-запросов. Локальны
                                 └── TaskBridge (исходящие соединения) → Pi
 ```
 
+Деплой: `npm run cloud:secrets -- --url https://<project>.vercel.app` печатает
+готовые переменные окружения; Vercel-проект создаётся с **root = корень репозитория**
+и Postgres (`POSTGRES_URL`) — пошаговая инструкция в
+[`docs/cloud-transport.md`](docs/cloud-transport.md#deploying-vercel--postgres).
+
 Режимы (`Tech_next_version.md` §6): **local-only** (по умолчанию, облако не нужно),
 **cloud-only** (только исходящие соединения машины) и **hybrid** (LAN и облако
 одновременно видят одни и те же задачи).
@@ -658,7 +666,7 @@ npm run check       # синтаксическая проверка основн
 7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
 8. Claude Code и Codex как отдельные runner'ы пока не подключены.
 9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
-10. Cloud transport: WebSocket-фастпас не реализован (polling корректен и обязателен, SSE есть на локальном хосте облака); serverless-деплой требует Postgres-адаптера вместо `SqliteStore`.
+10. Cloud transport: WebSocket-фастпас не реализован (polling корректен и обязателен, SSE есть на локальном хосте облака); Postgres-адаптер для serverless есть, но не проверен на живом сервере (`TASKBRIDGE_TEST_DATABASE_URL=postgres://… npm run test:cloud`).
 11. Подтверждения инструментов включаются опцией `approvals.enabled`; расширение передаётся Pi через `--extension` (не ставится глобально). Длительный soak-прогон (30+ минут) запускается вручную через `TASKBRIDGE_STRESS_SECONDS`.
 
 ---
@@ -669,7 +677,7 @@ npm run check       # синтаксическая проверка основн
 1. ClaudeCodeRunner
 2. CodexRunner
 3. KMP Android client
-4. WebSocket/SSE fast path + Postgres adapter для Vercel
+4. WebSocket/SSE fast path для Vercel
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.

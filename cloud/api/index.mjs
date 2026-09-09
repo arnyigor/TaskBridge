@@ -1,11 +1,11 @@
-import { openStore } from '../lib/store.mjs';
+import { openStore, resolveStoreTarget } from '../lib/store.mjs';
 import { CloudAuth, loadAuthConfig } from '../lib/auth.mjs';
 import { createRouter } from '../lib/router.mjs';
 import { errorBody } from '../lib/errors.mjs';
 
-// Vercel serverless entry point. It only adapts the request/response shape and
-// delegates to the shared router, so a deployment cannot drift from the tested
-// API contract (§74, §92).
+// Vercel serverless entry point (re-exported by the root api/index.mjs). It only
+// adapts the request/response shape and delegates to the shared router, so a
+// deployment cannot drift from the tested API contract (§74, §92).
 //
 // Required environment variables:
 //   TASKBRIDGE_CLOUD_STORE    sqlite:/var/task/data/cloud.db is NOT durable on
@@ -22,7 +22,7 @@ let cached = null;
 
 async function getService() {
   if (cached) return cached;
-  const storeTarget = process.env.TASKBRIDGE_CLOUD_STORE || process.env.CLOUD_STORE || 'memory:';
+  const storeTarget = process.env.TASKBRIDGE_CLOUD_STORE || process.env.CLOUD_STORE || resolveStoreTarget(process.env);
   const store = await openStore(storeTarget);
   const auth = new CloudAuth(loadAuthConfig(process.env));
   const router = createRouter({
