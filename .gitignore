@@ -3,3 +3,4 @@ data/*
 !data/.gitkeep
 .taskbridge-input/
 node_modules/
+launch.txt
