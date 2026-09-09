@@ -114,6 +114,14 @@ export class TaskManager extends EventEmitter {
     await fs.rm(resolvedTarget, { recursive: true, force: true }).catch(() => {});
   }
 
+  #validateTaskId(value) {
+    const id = String(value || '').trim();
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      throw Object.assign(new Error('Идентификатор задачи содержит недопустимые символы.'), { code: 'INPUT_INVALID' });
+    }
+    return id;
+  }
+
   listProjects() {
     return Array.from(this.projects.values()).map(({ id, name, path: projectPath, useWorktree }) => ({
       id, name, path: projectPath, useWorktree: useWorktree !== false
@@ -166,6 +174,10 @@ export class TaskManager extends EventEmitter {
 
   async #createTask(input) {
     if (this.activeTaskId) throw Object.assign(new Error('Модель уже выполняет другую сессию.'), { code: 'MODEL_BUSY' });
+    // Cloud START_TASK carries the cloud task id so both sides agree on it;
+    // local tasks keep generating a short id of their own.
+    const id = input.id == null ? null : this.#validateTaskId(input.id);
+    if (id && this.tasks.has(id)) throw Object.assign(new Error(`Task already exists: ${id}`), { code: 'TASK_ALREADY_FINISHED' });
     const busy = await this.runtimeManager.getBusyStatus();
     if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!this.config.localRuntime?.managed?.enabled && !(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
@@ -179,7 +191,7 @@ export class TaskManager extends EventEmitter {
     }
 
     const task = {
-      id: shortId(),
+      id: id || shortId(),
       createdAt: now(),
       updatedAt: now(),
       status: 'QUEUED',

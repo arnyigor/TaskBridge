@@ -18,6 +18,8 @@ import { trimStreamingDeltas } from './event-trim.mjs';
 import { windowByTurns } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
+import { resolveCloudConfig, validateCloudConfig } from './cloud/cloud-config.mjs';
+import { CloudWorker } from './cloud/cloud-worker.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -60,7 +62,11 @@ await manager.init();
 
 // Checkpoint and close SQLite cleanly on Ctrl+C instead of leaving a WAL tail.
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => { try { store.close(); } catch {} process.exit(0); });
+  process.on(signal, () => {
+    try { cloudWorker?.stop(); } catch {}
+    try { store.close(); } catch {}
+    process.exit(0);
+  });
 }
 const access = new AccessControl(config.server?.auth, dataRoot);
 await access.init();
@@ -68,6 +74,33 @@ const runtimeControl = new RuntimeControl(manager.runtimeManager, manager);
 // AUTO dispatcher switches the managed model profile by restarting the runtime.
 manager.runtimeSwitcher = profileId => runtimeControl.restart(profileId);
 const httpsConfig = config.server?.https || {};
+
+// Optional cloud control plane (§6, §11, §90). Local-only mode is the default
+// and must keep working with no Vercel dependency at all.
+const cloudConfig = resolveCloudConfig(config, process.env, { dataRoot });
+const cloudCheck = validateCloudConfig(cloudConfig);
+let cloudWorker = null;
+if (cloudConfig.enabled && cloudCheck.ok) {
+  const aliases = {};
+  for (const project of config.projects || []) {
+    const alias = String(project.id || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+    if (alias && project.path) aliases[alias] = project.path;
+  }
+  cloudWorker = new CloudWorker({
+    config: cloudConfig,
+    manager,
+    store,
+    dataRoot,
+    version: build.version,
+    aliases
+  });
+  cloudWorker.start().catch((error) => {
+    console.error(`[TaskBridge] cloud transport failed to start: ${error.message}`);
+  });
+  console.log(`[TaskBridge] cloud transport enabled: ${cloudConfig.url} as ${cloudConfig.machineId}`);
+} else if (cloudConfig.enabled && !cloudCheck.ok) {
+  console.error(`[TaskBridge] cloud transport disabled: ${cloudCheck.problems.join('; ')}`);
+}
 
 const sseClients = new Map();
 
@@ -204,6 +237,13 @@ async function handleRequest(req, res) {
       if (!access.enabled || !access.local(req)) return errorJson(res, 403, new Error('Код доступен только на компьютере через localhost.'));
       return json(res, 200, access.pairing());
     }
+    if (req.method === 'GET' && pathname === '/debug/cloud') {
+      // Diagnostics only (§88). Never returns the machine secret.
+      access.require(req);
+      if (!cloudWorker) return json(res, 200, { enabled: false, reason: cloudCheck.ok ? 'Cloud transport is disabled by configuration.' : cloudCheck.problems });
+      return json(res, 200, await cloudWorker.status());
+    }
+
     if (req.method === 'GET' && pathname === '/api/health') {
       return json(res, 200, { status: 'ok' });
     }

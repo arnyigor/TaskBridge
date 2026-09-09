@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<base href="/web/">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>TaskBridge Remote</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">TaskBridge <span>Remote</span></div>
+  <div class="conn" id="conn">
+    <span class="dot" data-k="cloud" title="Cloud">Cloud</span>
+    <span class="dot" data-k="machine" title="Machine">Machine</span>
+    <span class="dot" data-k="realtime" title="Realtime">Realtime</span>
+    <span class="dot" data-k="task" title="Task">Task</span>
+  </div>
+  <button id="logout" class="ghost" hidden>Sign out</button>
+</header>
+
+<main>
+  <section id="login" class="card">
+    <h1>Connect</h1>
+    <p class="muted">Paste the access token configured on the cloud side (TASKBRIDGE_CLOUD_USER_TOKEN).</p>
+    <form id="login-form">
+      <input id="token" type="password" autocomplete="current-password" placeholder="Access token" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <p id="login-error" class="error" hidden></p>
+  </section>
+
+  <section id="app" hidden>
+    <div class="layout">
+      <aside class="col">
+        <div class="card">
+          <h2>Machines</h2>
+          <ul id="machines" class="list"></ul>
+        </div>
+        <div class="card">
+          <h2>New task</h2>
+          <form id="create-form">
+            <label>Machine
+              <select id="machine-select" required></select>
+            </label>
+            <label>Project id
+              <input id="project-id" placeholder="taskbridge" required>
+            </label>
+            <label>Prompt
+              <textarea id="prompt" rows="4" placeholder="Inspect the current implementation and fix the failing tests." required></textarea>
+            </label>
+            <label class="row"><input id="worktree" type="checkbox" checked> Use git worktree</label>
+            <button type="submit">Start task</button>
+          </form>
+        </div>
+        <div class="card">
+          <h2>Tasks</h2>
+          <ul id="tasks" class="list"></ul>
+        </div>
+      </aside>
+
+      <section class="col grow">
+        <div class="card" id="task-head" hidden>
+          <div class="task-head">
+            <div>
+              <h2 id="task-title">Task</h2>
+              <div class="muted" id="task-meta"></div>
+            </div>
+            <div class="controls">
+              <button id="stop" class="danger">STOP</button>
+              <button id="compact" class="ghost">Compact</button>
+            </div>
+          </div>
+          <div class="status-line" id="task-status"></div>
+        </div>
+
+        <div class="card" id="task-body" hidden>
+          <div id="approvals"></div>
+          <h3>Conversation</h3>
+          <div id="transcript" class="transcript"></div>
+          <h3>Tools</h3>
+          <div id="tools" class="tools"></div>
+          <h3>Activity</h3>
+          <div id="activity" class="activity"></div>
+          <form id="follow-form" class="composer">
+            <textarea id="follow" rows="2" placeholder="Follow-up instruction…"></textarea>
+            <button type="submit">Send</button>
+          </form>
+        </div>
+      </section>
+    </div>
+  </section>
+</main>
+
+<p id="toast" class="toast" hidden></p>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -41,6 +41,7 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 - [Применение изменений и очистка](#применение-изменений-и-очистка)
 - [STOP, follow-up, compact, Pi state](#stop-follow-up-compact-pi-state)
 - [Файлы с телефона](#файлы-с-телефона)
+- [Cloud transport (remote access)](#cloud-transport-remote-access)
 - [Local Runtime Manager](#local-runtime-manager)
 - [AUTO dispatcher](#auto-dispatcher)
 - [Engine health](#engine-health)
@@ -160,7 +161,16 @@ Taskbridge/
 │  ├─ project-browser.mjs   браузер папок для регистрации проектов
 │  ├─ auth.mjs              pairing-код, cookie, rate limit
 │  ├─ tls.mjs               self-signed сертификат для LAN HTTPS
-│  └─ config.mjs            загрузка/сохранение config.json
+│  ├─ config.mjs            загрузка/сохранение config.json
+│  ├─ domain/               протокол: TaskEvent, CloudCommand, machine state
+│  ├─ events/               EventMux, sequence, нормализация, snapshot'ы
+│  └─ cloud/                CloudWorker, outbox, heartbeat, dispatcher, approvals
+├─ cloud/                   облачный control plane (Vercel-совместимый)
+│  ├─ lib/                  роутер API, auth, store (memory/sqlite), errors, ids
+│  ├─ api/index.mjs         Vercel function (общий роутер)
+│  ├─ server.mjs            локальный хост облака + SSE
+│  └─ web/                  PWA: задачи, стриминг, tool-карточки, STOP
+│     └─ event-reducer.mjs  чистая логика применения событий (тестируемая)
 ├─ web/
 │  ├─ index.html            разметка UI
 │  ├─ app.js                логика UI, SSE, рендер чата
@@ -168,7 +178,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   87 тестов на node:test
+├─ tests/                   136 тестов на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  └─ backup.mjs            снимок БД (npm run backup)
@@ -509,6 +519,62 @@ Multipart — CORS-«простой» content-type, поэтому запрос 
 
 ---
 
+## Cloud transport (remote access)
+
+Опциональный облачный control plane: удалённое управление и наблюдение за
+локальными задачами Pi с телефона через интернет — без port forwarding, публичного
+IP, VPN и без длительных Vercel-запросов. Локальный runtime остаётся единственным
+исполнителем, облако — только транспорт, аутентификация и durable-хранилище.
+
+```text
+Телефон / PWA ──HTTPS/SSE──► Vercel (или npm run cloud)
+                                ▲               │ команды
+                         события│               ▼
+                                └── TaskBridge (исходящие соединения) → Pi
+```
+
+Режимы (`Tech_next_version.md` §6): **local-only** (по умолчанию, облако не нужно),
+**cloud-only** (только исходящие соединения машины) и **hybrid** (LAN и облако
+одновременно видят одни и те же задачи).
+
+Что реализовано локально: нормализованные `TaskEvent` со строго монотонным `seq`
+(сохраняется между restart'ами), `EventMux`, батчинг дельт с coalescing,
+приоритеты событий, durable outbox с backpressure, heartbeat, polling команд,
+идемпотентность `commandId`, reconnect с backoff 1s→30s, reconcile при старте,
+redaction секретов и путей, approval-инфраструктура, диагностика `/debug/cloud`.
+
+Что реализовано в облаке: аутентификация пользователя и машины, реестр машин,
+задачи и их состояния, очередь команд с приоритетами, durable-события с
+дедупликацией `(taskId, seq)`/`eventId`, replay `?after=`, approvals, retention,
+PWA с живым стримингом ответа, tool-карточками, STOP / follow-up / compact и
+индикаторами Cloud / Machine / Realtime / Task.
+
+Включение — в `config.json`:
+
+```jsonc
+"cloud": {
+  "enabled": true,
+  "url": "https://taskbridge.example.app",
+  "machineId": "home-pc-01",
+  "machineSecret": "<secret>"
+}
+```
+
+или переменными окружения `TASKBRIDGE_CLOUD_ENABLED`, `TASKBRIDGE_CLOUD_URL`,
+`TASKBRIDGE_MACHINE_ID`, `TASKBRIDGE_MACHINE_SECRET` (перекрывают config.json).
+Запуск облака локально: `npm run cloud` (по умолчанию sqlite в `cloud/data/`).
+
+Гарантии: закрытый браузер, обрыв интернета на телефоне или на рабочей станции,
+падение облака и новый деплой Vercel не теряют вывод — клиент хранит
+`lastReceivedSeq` и дозабирает события, а машина копит их в outbox. Задача может
+идти часами: ни один HTTP-запрос не удерживается открытым.
+
+Полная документация, API и список известных пробелов (WebSocket-фастпас,
+Postgres-адаптер, автоматический перехват approvals в Pi) — в
+[`docs/cloud-transport.md`](docs/cloud-transport.md).
+
+---
+
 ## Local Runtime Manager
 
 По умолчанию проверяется `http://127.0.0.1:8080/health`. Если сервер уже работает — статус `EXTERNAL_RUNNING`, и TaskBridge его не останавливает.
@@ -562,11 +628,12 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 87 тестов на node:test
-npm run check     # синтаксическая проверка основных файлов
+npm test            # 136 тестов на node:test
+npm run test:cloud  # только тесты облачного транспорта
+npm run check       # синтаксическая проверка основных файлов
 ```
 
-Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата.
+Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP.
 
 ---
 
@@ -581,6 +648,7 @@ npm run check     # синтаксическая проверка основны
 7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
 8. Claude Code и Codex как отдельные runner'ы пока не подключены.
 9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
+10. Cloud transport: перехват approvals в Pi RPC ещё не подключён (инфраструктура и команды готовы); WebSocket-фастпас не реализован (polling корректен и обязателен); serverless-деплой требует Postgres-адаптера вместо `SqliteStore`.
 
 ---
 
@@ -590,6 +658,8 @@ npm run check     # синтаксическая проверка основны
 1. ClaudeCodeRunner
 2. CodexRunner
 3. KMP Android client
+4. WebSocket/SSE fast path + Postgres adapter для Vercel
+5. Перехват tool-approvals в Pi RPC
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.

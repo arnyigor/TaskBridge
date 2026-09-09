@@ -157,3 +157,15 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal((await api('/api/tasks')).length, 0);
 });
+
+test('/debug/cloud reports a disabled transport and local mode keeps working', { timeout: 20000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { cloud: { enabled: true, url: 'not-a-url' } } });
+  t.after(() => fixture.close());
+  const status = await fixture.api('/debug/cloud');
+  assert.equal(status.enabled, false);
+  assert.match(status.reason.join(' '), /TASKBRIDGE_CLOUD_URL/);
+  // Local-only behaviour is untouched by a misconfigured cloud transport.
+  const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'local only' });
+  const task = await terminal(fixture.api, created.id);
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+});

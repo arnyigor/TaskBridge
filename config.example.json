@@ -61,6 +61,26 @@
     "requireCleanSource": true,
     "useGitWorktreeByDefault": true
   },
+  "cloud": {
+    "enabled": false,
+    "url": "",
+    "machineId": "",
+    "machineSecret": "",
+    "machineDisplayName": "",
+    "authMode": "bearer",
+    "realtime": false,
+    "eventFlushMs": 75,
+    "eventBatchMax": 100,
+    "eventBatchMaxKb": 256,
+    "heartbeatSeconds": 20,
+    "idlePollSeconds": 5,
+    "activePollSeconds": 1,
+    "maxOutboxMb": 100,
+    "redactPaths": true,
+    "approvalTimeoutMinutes": 1440,
+    "approvalTimeoutPolicy": "KEEP_WAITING",
+    "coalesceDeltas": true
+  },
   "projectBrowser": {
     "roots": []
   },

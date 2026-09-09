@@ -4,3 +4,4 @@ data/*
 .taskbridge-input/
 node_modules/
 launch.txt
+cloud/data/

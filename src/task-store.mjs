@@ -135,6 +135,16 @@ export class TaskStore {
     this.db.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value);
   }
 
+  // Public meta access for components that need durable cursors outside the
+  // task document itself (cloud event sequence, processed command ids).
+  getMeta(key) {
+    return this.#meta(String(key));
+  }
+
+  setMeta(key, value) {
+    this.#setMeta(String(key), String(value));
+  }
+
   // One-time import of the pre-SQLite layout (data/tasks/<id>/task.json and
   // events.jsonl). The marker keeps deleted sessions from being resurrected by
   // the stale files still on disk after a later remove().
