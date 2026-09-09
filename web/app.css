@@ -77,6 +77,9 @@ body {
   padding: 5px 8px;
   font-size: 11.5px;
   outline: none;
+  /* Keep the profile picker narrow so the header stays on one row. */
+  max-width: 96px;
+  text-overflow: ellipsis;
 }
 
 .pill {
@@ -90,6 +93,31 @@ body {
 }
 .pill.ok { color: var(--success); border-color: rgba(85, 230, 165, 0.4); }
 .pill.err { color: var(--danger); border-color: rgba(251, 113, 133, 0.4); }
+
+.iconButton {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  font-size: 13px;
+  border-radius: var(--radius-s);
+}
+#notifyButton.granted { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); }
+
+.statusDot {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--muted);
+  border: 1px solid var(--border-strong);
+  cursor: help;
+}
+.statusDot.ok { background: var(--success); border-color: var(--success); box-shadow: 0 0 6px rgba(85, 230, 165, 0.6); }
+.statusDot.err { background: var(--danger); border-color: var(--danger); }
+.statusDot.run { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 6px rgba(167, 139, 250, 0.6); }
 .pill.run { color: var(--accent); border-color: rgba(167, 139, 250, 0.45); }
 
 /* ---------- subheader ---------- */
@@ -284,18 +312,19 @@ body {
 
 .turn { display: flex; gap: 10px; align-items: flex-start; }
 .turn.me { justify-content: flex-end; }
-.turn .av {
-  width: 30px; height: 30px;
-  border-radius: 9px;
+/* Без левой колонки с аватаркой ответ Pi занимает почти всю ширину чата;
+   маленький значок «✦» переехал внутрь, в строку статуса под пузырём. */
+.botBadge {
+  width: 18px; height: 18px;
+  border-radius: 6px;
   display: grid; place-items: center;
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid rgba(167, 139, 250, 0.35);
   flex-shrink: 0;
-  margin-top: 2px;
 }
-.turn .body { display: flex; flex-direction: column; gap: 6px; max-width: min(82%, 640px); min-width: 0; }
-.turn.me .body { align-items: flex-end; }
+.turn .body { display: flex; flex-direction: column; gap: 6px; max-width: min(96%, 760px); min-width: 0; }
+.turn.me .body { align-items: flex-end; max-width: min(82%, 640px); }
 
 .msg {
   padding: 10px 13px;
@@ -493,8 +522,14 @@ body {
   outline: none;
 }
 #project:focus { border-color: var(--accent); }
-.composerActions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+.composerActions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .composerSendRow { display: flex; gap: 6px; }
+/* Одна главная кнопка на одно место: пока Pi свободен — «Отправить»,
+   пока работает — «Стоп». Скрепка стоит в том же ряду, поэтому композер
+   не бывает выше одной строки кнопок. */
+#stopButton { display: none; }
+.composerActions:has(#stopButton:not(:disabled)) #stopButton { display: grid; }
+.composerActions:has(#stopButton:not(:disabled)) #sendButton { display: none; }
 .fileIconButton {
   width: 26px;
   height: 26px;
@@ -796,12 +831,12 @@ pre {
   .main { padding: 8px; gap: 10px; }
   .chat { border-radius: var(--radius-m); }
   .msgs { padding: 12px 10px 6px; }
-  .turn .body { max-width: 92%; }
+  .turn .body { max-width: 96%; }
   .composer-wrap { padding: 8px 10px 10px; }
   .panel { gap: 10px; }
   .session { grid-template-columns: 1fr; }
 
   .headerActions { flex-basis: 100%; justify-content: flex-start; }
   .runtimeControl select { max-width: 84px; }
-  #pairButton, #notifyButton { padding: 6px 8px; font-size: 11px; }
+  #pairButton { padding: 6px 8px; font-size: 11px; }
 }

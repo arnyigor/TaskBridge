@@ -64,12 +64,13 @@ function hideEmptyState() {
   if (e) e.remove();
 }
 
-function botAvatar() {
-  const av = document.createElement('div');
-  av.className = 'av';
-  av.setAttribute('aria-hidden', 'true');
-  av.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L14 9 L21 12 L14 15 L12 22 L10 15 L3 12 L10 9 Z"/></svg>';
-  return av;
+function botBadge() {
+  const badge = document.createElement('div');
+  badge.className = 'botBadge';
+  badge.title = 'Ответ Pi';
+  badge.setAttribute('aria-label', 'Ответ Pi');
+  badge.innerHTML = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L14 9 L21 12 L14 15 L12 22 L10 15 L3 12 L10 9 Z"/></svg>';
+  return badge;
 }
 
 const IMAGE_MIME_RE = /^image\//;
@@ -139,7 +140,6 @@ function appendBotTurn() {
   hideEmptyState();
   const turn = document.createElement('div');
   turn.className = 'turn';
-  turn.append(botAvatar());
   const body = document.createElement('div');
   body.className = 'body';
   const bubble = document.createElement('div');
@@ -157,7 +157,7 @@ function appendBotTurn() {
   copyBtn.setAttribute('aria-label', 'Скопировать ответ');
   const metaRow = document.createElement('div');
   metaRow.className = 'metaRow';
-  metaRow.append(meta, copyBtn);
+  metaRow.append(botBadge(), meta, copyBtn);
   body.append(bubble, metaRow);
   turn.append(body);
   $('msgsInner').append(turn);
@@ -441,7 +441,6 @@ function applyEvents(events) {
 function renderSettledTurn(turn, before) {
   const wrap = document.createElement('div');
   wrap.className = 'turn';
-  wrap.append(botAvatar());
   const body = document.createElement('div');
   body.className = 'body';
   const bubble = document.createElement('div');
@@ -460,7 +459,7 @@ function renderSettledTurn(turn, before) {
   copyBtn.onclick = () => copyText(turn.text);
   const metaRow = document.createElement('div');
   metaRow.className = 'metaRow';
-  metaRow.append(meta, copyBtn);
+  metaRow.append(botBadge(), meta, copyBtn);
   body.append(bubble, metaRow);
   wrap.append(body);
 
@@ -576,7 +575,7 @@ const lastNotifiedStatus = new Map();
 function maybeNotify(t) {
   const previous = lastNotifiedStatus.get(t.id);
   lastNotifiedStatus.set(t.id, t.status);
-  if (!previous || previous === t.status || ACTIVE_STATUSES.has(t.status) || !('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!previous || previous === t.status || ACTIVE_STATUSES.has(t.status) || !notifyEnabled()) return;
   const title = t.status === 'SUCCEEDED' ? 'Готово' : t.status === 'FAILED' ? 'Ошибка' : 'Остановлено';
   try { new Notification(`TaskBridge: ${title}`, { body: (t.title || t.prompt || '').slice(0, 120), tag: t.id }); } catch {}
 }
@@ -1055,15 +1054,41 @@ $('pairButton').onclick = async () => {
 
 /* ---------------- notifications ---------------- */
 
+// The browser never lets a page revoke its own notification permission, so the
+// on/off switch lives in TaskBridge itself: permission may be granted, but we
+// only fire notifications while this flag is not 'off'.
+const NOTIFY_KEY = 'tb.notifyEnabled';
+
+function notifyEnabled() {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return false;
+  return localStorage.getItem(NOTIFY_KEY) !== 'off';
+}
+
 function updateNotifyButton() {
-  if (!('Notification' in window)) { $('notifyButton').classList.add('hidden'); return; }
-  $('notifyButton').classList.remove('hidden');
-  $('notifyButton').textContent = Notification.permission === 'granted' ? '🔔 Уведомления вкл.' : '🔔 Уведомления';
+  const button = $('notifyButton');
+  if (!('Notification' in window)) { button.classList.add('hidden'); return; }
+  button.classList.remove('hidden');
+  const enabled = notifyEnabled();
+  button.textContent = '🔔';
+  button.classList.toggle('granted', enabled);
+  const title = enabled
+    ? 'Уведомления включены — нажмите, чтобы выключить'
+    : Notification.permission === 'granted'
+      ? 'Уведомления выключены — нажмите, чтобы включить'
+      : 'Включить уведомления';
+  button.title = title;
+  button.setAttribute('aria-label', title);
 }
 
 $('notifyButton').onclick = async () => {
   if (!('Notification' in window)) return;
+  if (Notification.permission === 'granted') {
+    localStorage.setItem(NOTIFY_KEY, notifyEnabled() ? 'off' : 'on');
+    updateNotifyButton();
+    return;
+  }
   const permission = await Notification.requestPermission();
+  if (permission === 'granted') localStorage.setItem(NOTIFY_KEY, 'on');
   updateNotifyButton();
   // Chrome blocks the Notification API entirely on plain HTTP origins other
   // than localhost, so a phone opening TaskBridge over LAN IP may never see
@@ -1220,9 +1245,16 @@ function renderRuntimeStatus(status) {
   const button = $('runtimeStart');
   const starting = ['STARTING', 'RESTARTING'].includes(status.state);
   const running = ['MANAGED_RUNNING', 'EXTERNAL_RUNNING'].includes(status.state);
-  button.textContent = starting ? (status.state === 'RESTARTING' ? 'Перезапуск…' : 'Запуск…') : running ? 'Перезапустить' : 'Запустить';
+  const canRestart = !(running && status.canRestart === false);
+  button.dataset.action = running && canRestart ? 'restart' : 'start';
+  button.textContent = starting ? (status.state === 'RESTARTING' ? '⟳' : '…') : running ? '⟳' : '▶';
   button.disabled = runtimeBusy || starting || (running && status.canRestart === false);
-  button.title = running && status.canRestart === false ? (status.externalRestartReason || '') : '';
+  button.title = starting
+    ? (status.state === 'RESTARTING' ? 'Перезапуск…' : 'Запуск…')
+    : running
+      ? (canRestart ? 'Перезапустить модель' : (status.externalRestartReason || 'Модель запущена извне — перезапуск недоступен'))
+      : 'Запустить модель';
+  button.setAttribute('aria-label', button.title);
   select.disabled = button.disabled && running;
 }
 
@@ -1233,10 +1265,10 @@ async function loadRuntimeStatus() {
 
 $('runtimeStart').onclick = async () => {
   const profileId = $('runtimeProfile').value;
-  const restarting = $('runtimeStart').textContent === 'Перезапустить';
+  const restarting = $('runtimeStart').dataset.action === 'restart';
   runtimeBusy = true;
   $('runtimeStart').disabled = true;
-  $('runtimeStart').textContent = restarting ? 'Перезапуск…' : 'Запуск…';
+  $('runtimeStart').textContent = restarting ? '⟳' : '…';
   try {
     await api(restarting ? '/api/runtime/restart' : '/api/runtime/start', { method: 'POST', body: JSON.stringify({ profileId }) });
   } catch (err) { alert(err.message); }
@@ -1258,23 +1290,26 @@ async function checkPcState() {
     $('buildInfo').title = buildDetails;
     modelBusy = info.modelBusy;
     el.classList.remove('err', 'ok', 'run');
+    let label;
     if (info.modelReady === false) {
-      el.textContent = '● МОДЕЛЬ НЕДОСТУПНА';
+      label = 'Модель недоступна';
       el.classList.add('err');
     } else if (modelBusy === true) {
-      el.textContent = '● МОДЕЛЬ ЗАНЯТА';
+      label = 'Модель занята';
       el.classList.add('run');
     } else {
-      el.textContent = '● ONLINE';
+      label = 'Модель онлайн';
       el.classList.add('ok');
     }
-    el.title = (info.addresses || []).map((x) => x.url).join('\n');
+    const addresses = (info.addresses || []).map((x) => x.url).join('\n');
+    el.title = addresses ? `${label}\n${addresses}` : label;
+    el.setAttribute('aria-label', label);
   } catch {
     modelBusy = null;
-    el.textContent = 'OFFLINE';
     el.classList.remove('ok', 'run');
     el.classList.add('err');
-    el.title = '';
+    el.title = 'Нет связи с сервером';
+    el.setAttribute('aria-label', 'Нет связи с сервером');
   }
 }
 
