@@ -32,7 +32,7 @@
   </header>
 
   <details class="controlsSpoiler" id="controlsSpoiler">
-    <summary><h2>Проект и сессии</h2></summary>
+    <summary><h2>Проект и сессии <span id="taskCount" class="muted small"></span></h2></summary>
     <div class="subheader" id="subheader">
       <select id="project" title="Проект" aria-label="Проект"></select>
       <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
@@ -40,6 +40,11 @@
       <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
       <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
       <button id="refresh" type="button" class="small">Обновить список</button>
+    </div>
+    <div class="taskListArea">
+      <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
+      <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>
+      <div id="tasks" class="tasks"></div>
     </div>
   </details>
 
@@ -166,15 +171,6 @@
 
     <!-- Side panel: tasks + details -->
     <aside class="panel">
-      <details class="tasksSpoiler" id="tasksSpoiler">
-        <summary>
-          <h2>Сессии <span id="taskCount" class="muted small"></span></h2>
-        </summary>
-        <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
-        <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>
-        <div id="tasks" class="tasks"></div>
-      </details>
-
       <details id="detail" class="detail hidden">
         <summary><h2>Детали сессии</h2></summary>
         <div class="detailBody">

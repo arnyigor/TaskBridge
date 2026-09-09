@@ -581,19 +581,11 @@ button:disabled { opacity: .4; cursor: default; }
   min-height: 0;
   overflow-y: auto;
 }
-.tasksSpoiler summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  cursor: pointer;
-  list-style: none;
-  margin-bottom: 10px;
+.taskListArea {
+  padding: 0 20px 14px;
+  max-height: 50vh;
+  overflow-y: auto;
 }
-.tasksSpoiler summary::-webkit-details-marker { display: none; }
-.tasksSpoiler summary h2 { margin: 0; font-size: 14px; letter-spacing: 0.3px; }
-.tasksSpoiler summary h2::before { content: '▸ '; color: var(--muted); }
-.tasksSpoiler[open] summary h2::before { content: '▾ '; }
-.tasksSpoiler summary button { font-size: 11.5px; padding: 6px 10px; }
 #taskProjectFilter, #taskSearch {
   width: 100%;
   margin-bottom: 10px;
