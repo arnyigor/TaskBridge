@@ -17,6 +17,10 @@ import {
 import { findSensitivePaths, isSensitivePath, matchesIgnore } from '../cloud/lib/deploy.mjs';
 
 const execFileAsync = promisify(execFile);
+
+// Built at runtime so this file never contains a secret-shaped literal (the
+// audit under test would otherwise flag its own fixture).
+const FAKE_SECRET = 'tb_machine_' + 'L3AKEDf1xtureV4lue'.repeat(2);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'check-secrets.mjs');
 
@@ -130,9 +134,9 @@ test('check-secrets fails on a fixture where a secret is committed and uploadabl
   const root = await tempDir(t);
   await write(root, '.gitignore', 'data/*\n');
   await write(root, 'src/server.mjs');
-  await write(root, 'config.json', JSON.stringify({ cloud: { machineSecret: 'tb_machine_LEAKED_VALUE_1234567890ABCDEFGH' } }));
+  await write(root, 'config.json', JSON.stringify({ cloud: { machineSecret: FAKE_SECRET } }));
   await write(root, 'data/tasks.db');
-  await write(root, 'notes.md', 'token: tb_machine_LEAKED_VALUE_1234567890ABCDEFGH\n');
+  await write(root, 'notes.md', `token: ${FAKE_SECRET}`);
   await write(root, 'deploy/id_rsa', 'private');
 
   await git(root, ['init', '-q']);
@@ -153,7 +157,7 @@ test('check-secrets fails on a fixture where a secret is committed and uploadabl
   assert.match(output, /tracked file contains a machine secret/);
   assert.match(output, /\.gitignore/);
   // The audit must never print the secret itself.
-  assert.ok(!output.includes('tb_machine_LEAKED_VALUE_1234567890ABCDEFGH'), 'the audit must not echo the secret');
+  assert.ok(!output.includes(FAKE_SECRET), 'the audit must not echo the secret');
 });
 
 test('check-secrets passes a fixture where everything is excluded', async t => {
@@ -161,7 +165,7 @@ test('check-secrets passes a fixture where everything is excluded', async t => {
   await write(root, '.gitignore', 'config.json\ndata/\ncloud/data/\n');
   await write(root, '.vercelignore', 'config.json\ndata/\ncloud/data/\n');
   await write(root, 'src/server.mjs');
-  await write(root, 'config.json', JSON.stringify({ cloud: { machineSecret: 'tb_machine_FIXTURE_VALUE_1234567890' } }));
+  await write(root, 'config.json', JSON.stringify({ cloud: { machineSecret: FAKE_SECRET } }));
   await write(root, 'data/tasks.db');
 
   await git(root, ['init', '-q']);
