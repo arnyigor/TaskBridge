@@ -19,12 +19,50 @@
         <div class="s">Pi remote control · live events</div>
       </div>
     </div>
-    <div id="pcState" class="pill">checking…</div>
+    <div class="headerActions">
+      <div id="runtimeControl" class="runtimeControl hidden">
+        <select id="runtimeProfile" title="Профиль модели" aria-label="Профиль модели"></select>
+        <button id="runtimeStart" type="button" class="small">Запустить</button>
+      </div>
+      <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
+      <div id="pcState" class="pill">checking…</div>
+    </div>
   </header>
 
   <div class="subheader" id="subheader">
     <span id="continueBadge" class="pill hidden"></span>
+    <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
     <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
+  </div>
+
+  <div id="authGate" class="authGate hidden">
+    <div class="authCard">
+      <h2>Подключение к TaskBridge</h2>
+      <p class="muted small">Введите код, показанный на компьютере (кнопка «Подключить телефон»).</p>
+      <form id="authForm">
+        <input id="authCode" inputmode="numeric" autocomplete="one-time-code" placeholder="8-значный код" maxlength="8" />
+        <button type="submit">Подключиться</button>
+      </form>
+      <div id="authError" class="hint error"></div>
+    </div>
+  </div>
+
+  <div id="pairingOverlay" class="authGate hidden">
+    <div class="authCard">
+      <h2>Код для телефона</h2>
+      <div id="pairingCode" class="pairingCode">—</div>
+      <p class="muted small" id="pairingExpiry"></p>
+      <button id="pairingClose" type="button">Закрыть</button>
+    </div>
+  </div>
+
+  <div id="sessionPickerOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Сессии Pi проекта</h2>
+      <p class="muted small">Найденные на диске сессии Pi для выбранного проекта. Перед подключением закройте эту сессию в терминале, если она там открыта.</p>
+      <div id="sessionPickerList" class="sessionPickerList">Загрузка…</div>
+      <button id="sessionPickerClose" type="button">Закрыть</button>
+    </div>
   </div>
 
   <main class="main">
@@ -40,7 +78,7 @@
 
       <div class="composer-wrap">
         <div class="composer-top">
-          <select id="project" title="Проект" aria-label="Проект" class="hidden"></select>
+          <select id="project" title="Проект" aria-label="Проект"></select>
           <label class="fileButton" title="Прикрепить файлы">
             <input id="files" type="file" multiple accept="*/*" />+ файлы
           </label>

@@ -63,6 +63,18 @@ body {
 .brand .s { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
 
 
+.headerActions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.runtimeControl { display: flex; align-items: center; gap: 6px; }
+.runtimeControl select {
+  background: #0d1220;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 5px 8px;
+  font-size: 11.5px;
+  outline: none;
+}
+
 .pill {
   font-size: 11.5px;
   padding: 5px 11px;
@@ -81,18 +93,81 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 10px;
-  padding: 0 20px;
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height .15s ease, padding .15s ease;
-}
-.subheader:has(#continueBadge:not(.hidden)) {
-  max-height: 48px;
   padding: 10px 20px;
 }
 .subheader #newTaskButton { font-size: 11.5px; padding: 6px 12px; flex-shrink: 0; }
 .subheader #continueBadge { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
+.subheader button.small { font-size: 11.5px; padding: 6px 12px; }
+
+/* ---------- modal overlays ---------- */
+.authGate {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(4, 6, 12, 0.72);
+  backdrop-filter: blur(4px);
+}
+.authCard {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-l);
+  padding: 20px;
+  width: 100%;
+  max-width: 340px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.authCard.wide { max-width: 520px; }
+.authCard h2 { margin: 0; font-size: 16px; }
+.authCard form { display: flex; gap: 8px; }
+.authCard input {
+  flex: 1;
+  min-width: 0;
+  background: #0d1220;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 15px;
+  letter-spacing: 1px;
+  outline: none;
+}
+.authCard input:focus { border-color: var(--accent); }
+.pairingCode {
+  font-family: var(--mono);
+  font-size: 28px;
+  letter-spacing: 4px;
+  text-align: center;
+  padding: 10px;
+  background: var(--surface-2);
+  border-radius: var(--radius-m);
+  border: 1px solid var(--border);
+}
+.sessionPickerList { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
+.sessionPickerItem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  padding: 10px 12px;
+  cursor: pointer;
+  font: inherit;
+  color: var(--text);
+}
+.sessionPickerItem:hover { border-color: var(--accent); }
+.sessionPickerItem .name { font-size: 13px; font-weight: 600; }
+.sessionPickerItem .meta { font-size: 11px; color: var(--muted); padding: 0; }
 
 /* ---------- layout ---------- */
 .main {

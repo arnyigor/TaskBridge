@@ -22,7 +22,10 @@ async function api(path, options = {}) {
     headers: { 'content-type': 'application/json', ...(options.headers || {}) }
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(`${body.code || res.status}: ${body.error || res.statusText}`);
+  if (!res.ok) {
+    if (body.code === 'AUTH_REQUIRED') showAuthGate();
+    throw new Error(`${body.code || res.status}: ${body.error || res.statusText}`);
+  }
   return body;
 }
 
@@ -200,6 +203,7 @@ $('msgs').addEventListener('scroll', () => {
 function setComposerMode(taskId) {
   const continuing = Boolean(taskId);
   $('newTaskButton').classList.toggle('hidden', !continuing);
+  $('project').disabled = continuing;
   const badge = $('continueBadge');
   badge.classList.toggle('hidden', !continuing);
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
@@ -317,6 +321,7 @@ function renderTaskDetails(t) {
   $('taskStatus').textContent = t.status;
   $('current').textContent = t.current || '—';
   $('workspace').textContent = t.workspacePath || '—';
+  if ([...$('project').options].some(o => o.value === t.projectId)) $('project').value = t.projectId;
   renderContext(t);
   const c = t.compaction || {};
   $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
@@ -390,9 +395,13 @@ async function sendContinueMessage(taskId, text, opts = {}) {
 
 /* ---------------- panel ---------------- */
 
+let projects = [];
+
 async function loadProjects() {
-  const projects = await api('/api/projects');
-  $('project').innerHTML = projects.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`).join('');
+  projects = await api('/api/projects');
+  const options = projects.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`);
+  options.push(`<option value="__scratch__">Без проекта (временная папка)</option>`);
+  $('project').innerHTML = options.join('');
 }
 
 function pillClass(status) {
@@ -500,7 +509,7 @@ promptEl.addEventListener('keydown', (event) => {
 
 function setBusy(busy) {
   $('sendButton').disabled = busy;
-  $('project').disabled = busy;
+  $('project').disabled = busy || Boolean(selectedTaskId);
 }
 
 function isTouchDevice() {
@@ -665,6 +674,93 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[ch]));
 }
 
+/* ---------------- auth ---------------- */
+
+let authGateShown = false;
+function showAuthGate() {
+  if (authGateShown) return;
+  authGateShown = true;
+  $('authGate').classList.remove('hidden');
+}
+function hideAuthGate() {
+  authGateShown = false;
+  $('authGate').classList.add('hidden');
+  $('authCode').value = '';
+  $('authError').textContent = '';
+}
+
+$('authForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const code = $('authCode').value.trim();
+  if (!code) return;
+  $('authError').textContent = '';
+  try {
+    const res = await fetch('/api/auth/pair', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || 'Неверный код');
+    hideAuthGate();
+    await loadAll();
+  } catch (err) { $('authError').textContent = err.message; }
+});
+
+async function checkAuth() {
+  const info = await api('/api/auth');
+  $('pairButton').classList.toggle('hidden', !(info.enabled && info.local));
+  if (info.enabled && !info.authenticated) { showAuthGate(); return false; }
+  return true;
+}
+
+$('pairButton').onclick = async () => {
+  try {
+    const pairing = await api('/api/auth/pairing');
+    $('pairingCode').textContent = pairing.code.replace(/(\d{4})(\d{4})/, '$1 $2');
+    const update = () => {
+      const left = Math.max(0, Math.round((pairing.expiresAt - Date.now()) / 1000));
+      $('pairingExpiry').textContent = left ? `Действует ещё ${left} с.` : 'Код истёк, откройте заново.';
+    };
+    update();
+    const timer = setInterval(update, 1000);
+    $('pairingOverlay').classList.remove('hidden');
+    $('pairingClose').onclick = () => { clearInterval(timer); $('pairingOverlay').classList.add('hidden'); };
+  } catch (err) { alert(err.message); }
+};
+
+/* ---------------- native Pi sessions ---------------- */
+
+$('resumeSessionButton').onclick = async () => {
+  const projectId = $('project').value;
+  if (!projectId || projectId === '__scratch__') { alert('Выберите проект, у которого есть сессии Pi.'); return; }
+  $('sessionPickerOverlay').classList.remove('hidden');
+  $('sessionPickerList').textContent = 'Загрузка…';
+  try {
+    const sessions = await api(`/api/projects/${encodeURIComponent(projectId)}/pi-sessions`);
+    if (!sessions.length) { $('sessionPickerList').textContent = 'Сессии Pi для этого проекта не найдены.'; return; }
+    $('sessionPickerList').innerHTML = '';
+    for (const session of sessions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'sessionPickerItem';
+      button.innerHTML = `<span class="name">${escapeHtml(session.name)}</span><span class="meta">${new Date(session.mtime).toLocaleString()}${session.existingTaskId ? ' · уже открыта в TaskBridge' : ''}</span>`;
+      button.onclick = () => importSession(projectId, session);
+      $('sessionPickerList').append(button);
+    }
+  } catch (err) { $('sessionPickerList').textContent = err.message; }
+};
+
+$('sessionPickerClose').onclick = () => $('sessionPickerOverlay').classList.add('hidden');
+
+async function importSession(projectId, session) {
+  if (!session.existingTaskId && !confirm('Эта сессия Pi должна быть закрыта в терминале на компьютере. Продолжить?')) return;
+  try {
+    const task = await api('/api/tasks/from-session', {
+      method: 'POST', body: JSON.stringify({ projectId, sessionKey: session.key, confirmedClosed: true })
+    });
+    $('sessionPickerOverlay').classList.add('hidden');
+    await loadTasks();
+    await selectTask(task.id);
+  } catch (err) { alert(err.message); }
+}
+
 /* ---------------- init ---------------- */
 
 async function checkPcState() {
@@ -693,12 +789,7 @@ async function checkPcState() {
   }
 }
 
-async function init() {
-  checkPcState();
-  setInterval(checkPcState, 4000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') checkPcState();
-  });
+async function loadAll() {
   try {
     await loadProjects();
     const tasks = await loadTasks();
@@ -707,6 +798,15 @@ async function init() {
     $('createError').textContent = e.message;
     $('createError').classList.add('error');
   }
+}
+
+async function init() {
+  checkPcState();
+  setInterval(checkPcState, 4000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkPcState();
+  });
+  if (await checkAuth()) await loadAll();
 }
 
 init();
