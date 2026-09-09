@@ -124,6 +124,23 @@ export class TaskStore {
     return Number(this.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE task_id = ?').get(id).seq);
   }
 
+  // Allocate the next cursor and insert under one write transaction. BEGIN
+  // IMMEDIATE takes the write lock up front, so a second process waits on
+  // busy_timeout instead of racing MAX(seq) and colliding on the primary key.
+  #appendRow(id, event) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const seq = this.#nextSeq(id);
+      event.seq = seq; // callers emit the same object, which must carry its cursor
+      this.db.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run(id, seq, JSON.stringify(event));
+      this.db.exec('COMMIT');
+      return seq;
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* transaction already aborted */ }
+      throw error;
+    }
+  }
+
   // Serializes file-backed artifact writes per task. Database writes are
   // synchronous, so call order already defines their order.
   #fileWrite(id, action) {
@@ -155,11 +172,7 @@ export class TaskStore {
   async appendEvent(id, event) {
     if (this.removed.has(id)) throw notFound();
     const dir = this.taskDir(id);
-    // Read the cursor and insert without awaiting in between: Node is
-    // single-threaded, so concurrent appendEvent calls keep call order.
-    const seq = this.#nextSeq(id);
-    event.seq = seq; // callers emit the same object, which must carry its cursor
-    this.db.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run(id, seq, JSON.stringify(event));
+    this.#appendRow(id, event);
     await fsp.mkdir(dir, { recursive: true }).catch(() => {});
     return event;
   }

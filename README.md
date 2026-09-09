@@ -159,7 +159,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   59 тестов на node:test
+├─ tests/                   60 тестов на node:test
 ├─ scripts/
 │  └─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 ├─ docs/                    ТЗ, ревью и планы
