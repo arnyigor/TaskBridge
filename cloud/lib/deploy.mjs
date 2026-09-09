@@ -111,6 +111,7 @@ export function buildDeployPlan({
   token = null,
   credentials = null,
   databaseUrl = null,
+  databaseEnv = null,
   allowMemoryStore = false,
   writeConfig = false,
   deploy = true
@@ -131,12 +132,12 @@ export function buildDeployPlan({
       }
     : {};
 
-  if (!databaseUrl && !allowMemoryStore) {
+  if (!databaseUrl && !databaseEnv && !allowMemoryStore) {
     blockers.push(
       'No Postgres URL. Pass --database-url postgres://… (or --database-env POSTGRES_URL if the project already has one). '
       + 'Without a durable store every task is lost between invocations; pass --allow-memory-store only for a throwaway demo.'
     );
-  } else if (!databaseUrl) {
+  } else if (!databaseUrl && !databaseEnv) {
     warnings.push('Deploying with an in-memory store: tasks will not survive the next invocation.');
   }
 
@@ -151,7 +152,7 @@ export function buildDeployPlan({
     steps.push({ id: 'deploy', description: 'Deploy to production', args: vercelArgs(['deploy', '--prod', '--yes'], { scope, token }) });
   }
 
-  return { steps, blockers, warnings, envVars: vars, writeConfig, deploy };
+  return { steps, blockers, warnings, envVars: vars, writeConfig, deploy, databaseEnv };
 }
 
 export function parseDeployUrl(output) {

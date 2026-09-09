@@ -199,6 +199,7 @@ async function main() {
     token: options.token,
     credentials,
     databaseUrl: options.databaseUrl,
+    databaseEnv: options.databaseEnv,
     allowMemoryStore: options.allowMemoryStore,
     writeConfig: options.writeConfig,
     deploy: !options.noDeploy

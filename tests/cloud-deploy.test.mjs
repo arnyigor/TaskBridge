@@ -56,6 +56,14 @@ test('buildDeployPlan refuses a deploy without a durable store', () => {
   assert.equal(allowed.blockers.length, 0);
   assert.match(allowed.warnings.join(' '), /in-memory store/);
 
+  // A database injected by a Vercel/Neon integration counts as durable: the
+  // script does not set it, so it must not block the deploy either.
+  const viaEnv = buildDeployPlan({ projectName: 'tb', credentials, databaseEnv: 'DATABASE_URL' });
+  assert.deepEqual(viaEnv.blockers, []);
+  assert.deepEqual(viaEnv.warnings, []);
+  assert.equal(viaEnv.envVars.POSTGRES_URL, undefined);
+  assert.equal(viaEnv.databaseEnv, 'DATABASE_URL');
+
   const withDb = buildDeployPlan({ projectName: 'tb', credentials, databaseUrl: 'postgres://user:pass@host/db' });
   assert.deepEqual(withDb.blockers, []);
   assert.deepEqual(withDb.warnings, []);
