@@ -38,6 +38,54 @@ test('multi-turn replay, duplicate delivery and terminal status preserve exact a
   assert.equal(state.turns[2].files[0].name, 'photo.png');
 });
 
+test('seedInitial:false starts with no synthetic first turn, and the first real USER_MESSAGE bootstraps current', () => {
+  const state = new ChatState(task(), { seedInitial: false });
+  assert.deepEqual(state.turns, []);
+  const events = history();
+  for (const event of events.slice(4)) state.apply(event); // starts at the seq-5 USER_MESSAGE boundary
+  assert.equal(state.turns[0].role, 'user');
+  assert.equal(state.turns[0].text, 'Второй вопрос');
+  const bots = state.turns.filter(x => x.role === 'assistant');
+  assert.deepEqual(bots.map(x => x.text), ['Второй ответ']);
+});
+
+test('prependOlder splices reconstructed older turns onto the front without touching live tail state', () => {
+  const events = history();
+  const tail = new ChatState(task(), { seedInitial: false });
+  for (const event of events.slice(4)) tail.apply(event);
+  const liveTurnBefore = tail.current;
+  const cursorBefore = tail.cursor;
+
+  const prepended = tail.prependOlder(task(), events.slice(0, 4), true);
+
+  assert.equal(prepended.length, 2);
+  assert.equal(tail.turns.length, 4); // [older user, older bot, newer user, newer bot]
+  assert.equal(tail.turns[0].role, 'user');
+  assert.equal(tail.turns[0].text, 'Первый вопрос');
+  assert.equal(tail.turns[1].text, 'Первый ответ');
+  assert.equal(tail.turns[2].text, 'Второй вопрос');
+  assert.equal(tail.turns[3].text, 'Второй ответ');
+  // Prepending older history must never disturb the reducer's idea of "now".
+  assert.equal(tail.current, liveTurnBefore);
+  assert.equal(tail.cursor, cursorBefore);
+
+  // A genuinely new live event afterward still lands on the same
+  // (already-known) live turn, proving prepend didn't fork reducer state.
+  tail.apply({ taskId: 'a', seq: 13, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: '!' } } } });
+  assert.equal(tail.turns[3].text, 'Второй ответ!');
+});
+
+test('prependOlder with reachedStart:false does not synthesize a task.prompt turn', () => {
+  // A batch that itself starts at a real USER_MESSAGE boundary (as
+  // windowByTurns always guarantees for reachedStart:false) must not get a
+  // synthetic task.prompt turn prepended ahead of it.
+  const events = history();
+  const state = new ChatState(task(), { seedInitial: false });
+  state.prependOlder(task(), events.slice(4), false);
+  assert.equal(state.turns[0].text, 'Второй вопрос');
+  assert.equal(state.turns.filter(x => x.text === task().prompt).length, 0);
+});
+
 test('completed empty/cancelled replies and unfinished tools stop animating', () => {
   const state = new ChatState(task());
   state.apply({ seq: 1, type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolName: 'read', toolCallId: 'x' } } });
@@ -81,7 +129,14 @@ async function ui() {
       const path = new URL(url, 'http://localhost');
       let body;
       if (path.pathname === '/api/tasks') body = Object.values(tasks);
-      else if (path.pathname.endsWith('/events')) body = history(path.pathname.split('/')[3]).filter(x => x.seq > Number(path.searchParams.get('after') || 0));
+      else if (path.pathname.endsWith('/events')) {
+        const all = history(path.pathname.split('/')[3]).filter(x => x.seq > Number(path.searchParams.get('after') || 0));
+        // The fixture's history is small enough to always fit in one page,
+        // so a tail request always "reaches start" — real pagination is
+        // covered separately in tests/event-window.test.mjs and the
+        // prependOlder tests above.
+        body = path.searchParams.has('tail') ? { events: all, reachedStart: true } : all;
+      }
       else if (path.pathname.endsWith('/artifacts')) body = [];
       else body = tasks[path.pathname.split('/')[3]];
       return { ok: true, json: async () => body };

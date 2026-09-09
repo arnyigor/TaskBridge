@@ -3,7 +3,12 @@ export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUN
 // Both disk replay and live delivery use the same reducer. Polling never replaces
 // a turn with slices of the session-wide accumulated text.
 export class ChatState {
-  constructor(task) {
+  // seedInitial: false when constructing from a paginated *tail* window that
+  // doesn't reach the task's original prompt — that first turn has no
+  // USER_MESSAGE event of its own (only follow-ups and imported sessions get
+  // one), so it can only be synthesized here, and only once the window
+  // actually reaches back that far.
+  constructor(task, { seedInitial = true } = {}) {
     this.taskId = task.id;
     this.cursor = 0;
     this.turns = [];
@@ -12,7 +17,19 @@ export class ChatState {
     this.messageTurn = null;
     this.messageOpen = false;
     this.executionTurn = null;
-    this.addUser(task.prompt, task.files || [], 'initial');
+    if (seedInitial) this.addUser(task.prompt, task.files || [], 'initial');
+  }
+
+  // Replays an older, already-settled batch of events in an isolated scratch
+  // reducer and splices the resulting turns onto the front of this one.
+  // Never touches this.current/messageTurn/executionTurn/cursor — those track
+  // the live tail, which a history-backfill must never disturb.
+  prependOlder(task, events, reachedStart) {
+    const scratch = new ChatState(task, { seedInitial: reachedStart });
+    for (const event of events) scratch.apply(event);
+    this.turns.unshift(...scratch.turns);
+    for (const [id, tool] of scratch.tools) if (!this.tools.has(id)) this.tools.set(id, tool);
+    return scratch.turns;
   }
 
   addUser(text, files, id) {

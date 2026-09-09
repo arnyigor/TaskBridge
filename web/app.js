@@ -20,6 +20,12 @@ let turnNodes = new Map();
 let liveActive = false;
 let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 4s
 
+const HISTORY_PAGE_TURNS = 20;
+let currentTask = null;
+let reachedHistoryStart = true;
+let oldestLoadedSeq = null;
+let loadingOlder = false;
+
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); return true; }
   catch {
@@ -96,7 +102,7 @@ function renderOutputFiles(files) {
   for (const f of files) el.append(fileCard(f, selectedTaskId));
 }
 
-function appendUserTurn(text, files = []) {
+function appendUserTurn(text, files = [], before = null) {
   hideEmptyState();
   const turn = document.createElement('div');
   turn.className = 'turn me';
@@ -113,8 +119,8 @@ function appendUserTurn(text, files = []) {
     body.append(list);
   }
   turn.append(body);
-  $('msgsInner').append(turn);
-  scrollBottom();
+  $('msgsInner').insertBefore(turn, before);
+  if (!before) scrollBottom();
 }
 
 function reasoningEl(text) {
@@ -210,13 +216,13 @@ function appendInlineImage(relPath) {
   scrollBottom();
 }
 
-function appendSystemNote(text) {
+function appendSystemNote(text, before = null) {
   hideEmptyState();
   const note = document.createElement('div');
   note.className = 'systemNote';
   note.textContent = text;
-  $('msgsInner').append(note);
-  scrollBottom();
+  $('msgsInner').insertBefore(note, before);
+  if (!before) scrollBottom();
 }
 
 function renderContext(t) {
@@ -321,6 +327,10 @@ function resetSelection(id) {
   liveTurn = null;
   liveThinking = liveText = '';
   nearBottom = true;
+  currentTask = null;
+  reachedHistoryStart = true;
+  oldestLoadedSeq = null;
+  loadingOlder = false;
   $('stopButton').disabled = true;
   $('compact').disabled = true;
   $('autoCompaction').disabled = true;
@@ -423,6 +433,142 @@ function applyEvents(events) {
   renderChat();
 }
 
+// Builds a complete, already-settled bot turn in one shot for history
+// backfill (prependOlder). Deliberately does not touch liveTurn/liveText/etc
+// — those track the live tail, which a backfill must never disturb — so this
+// duplicates a little of renderChat()'s per-turn construction rather than
+// reusing it through shared globals.
+function renderSettledTurn(turn, before) {
+  const wrap = document.createElement('div');
+  wrap.className = 'turn';
+  wrap.append(botAvatar());
+  const body = document.createElement('div');
+  body.className = 'body';
+  const bubble = document.createElement('div');
+  bubble.className = 'msg s-bot';
+  const md = document.createElement('div');
+  md.className = 'md';
+  bubble.append(md);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const copyBtn = document.createElement('button');
+  copyBtn.type = 'button';
+  copyBtn.className = 'copyBtn';
+  copyBtn.textContent = '📋';
+  copyBtn.title = 'Скопировать ответ';
+  copyBtn.setAttribute('aria-label', 'Скопировать ответ');
+  copyBtn.onclick = () => copyText(turn.text);
+  const metaRow = document.createElement('div');
+  metaRow.className = 'metaRow';
+  metaRow.append(meta, copyBtn);
+  body.append(bubble, metaRow);
+  wrap.append(body);
+
+  if (turn.thinking) body.insertBefore(reasoningEl(turn.thinking), body.firstChild);
+  const text = (turn.text || '').trim();
+  if (text) renderMarkdown(md, text);
+  else md.innerHTML = '<span class="muted">Ответ не был получен.</span>';
+  if (turn.error) {
+    const error = document.createElement('div');
+    error.className = 'turnError';
+    error.textContent = turn.error;
+    md.append(error);
+  }
+
+  const tools = new Map();
+  for (const tool of turn.tools) {
+    const chip = document.createElement('details');
+    const summary = document.createElement('summary');
+    const toolBody = document.createElement('div');
+    toolBody.className = 'tool-body';
+    toolBody.textContent = tool.label;
+    chip.append(summary, toolBody);
+    chip.className = `tool ${tool.state}`;
+    summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
+    chip._summary = summary;
+    chip._state = tool.state;
+    body.insertBefore(chip, metaRow);
+    tools.set(tool.id, chip);
+    if (tool.state === 'done' && tool.imagePath && IMAGE_EXT_RE.test(tool.imagePath) && selectedTaskId) {
+      const url = `/api/tasks/${selectedTaskId}/workspace-file?path=${encodeURIComponent(tool.imagePath)}`;
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.className = 'chatImage';
+      link.title = tool.imagePath;
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = tool.imagePath;
+      img.loading = 'lazy';
+      link.append(img);
+      body.insertBefore(link, metaRow);
+      chip.dataset.imageShown = 'true';
+    }
+  }
+  meta.textContent = turn.status || '';
+
+  $('msgsInner').insertBefore(wrap, before);
+  return { body, md, meta, metaRow, copyBtn, tools, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
+}
+
+function renderPrependedTurns(turns) {
+  // The "load older" button (if present) must stay the topmost element, so
+  // newly-backfilled turns are inserted right after it, not above it.
+  const loadOlderBtn = document.getElementById('loadOlderButton');
+  const reference = loadOlderBtn ? loadOlderBtn.nextSibling : $('msgsInner').firstChild;
+  for (const turn of turns) {
+    if (turnNodes.has(turn.id)) continue;
+    if (turn.role === 'user') { appendUserTurn(turn.text, turn.files, reference); turnNodes.set(turn.id, {}); continue; }
+    if (turn.role === 'note') { appendSystemNote(turn.text, reference); turnNodes.set(turn.id, {}); continue; }
+    turnNodes.set(turn.id, renderSettledTurn(turn, reference));
+  }
+}
+
+function renderLoadOlderIndicator() {
+  const existing = document.getElementById('loadOlderButton');
+  if (reachedHistoryStart) { existing?.remove(); return; }
+  if (existing) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'loadOlderButton';
+  btn.className = 'loadOlderButton';
+  btn.textContent = 'Показать более раннюю историю';
+  btn.onclick = loadOlderHistory;
+  $('msgsInner').insertBefore(btn, $('msgsInner').firstChild);
+}
+
+async function loadOlderHistory() {
+  if (loadingOlder || reachedHistoryStart || !selectedTaskId || !currentTask) return;
+  const id = selectedTaskId;
+  const version = selectionVersion;
+  loadingOlder = true;
+  const btn = document.getElementById('loadOlderButton');
+  if (btn) { btn.disabled = true; btn.textContent = 'Загрузка…'; }
+  try {
+    const { events, reachedStart } = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}&before=${oldestLoadedSeq}`);
+    if (version !== selectionVersion) return;
+    const msgsEl = $('msgs');
+    const prevScrollHeight = msgsEl.scrollHeight;
+    const prevScrollTop = msgsEl.scrollTop;
+    const prepended = chatState.prependOlder(currentTask, events, reachedStart);
+    reachedHistoryStart = reachedStart;
+    if (events.length) oldestLoadedSeq = events[0].seq;
+    renderPrependedTurns(prepended);
+    renderLoadOlderIndicator();
+    // Keep whatever was on screen in place instead of jumping as content
+    // grows above it.
+    msgsEl.scrollTop = prevScrollTop + (msgsEl.scrollHeight - prevScrollHeight);
+  } catch (error) {
+    if (version === selectionVersion) { $('createError').textContent = `Не удалось загрузить историю: ${error.message}`; $('createError').classList.add('error'); }
+  } finally {
+    loadingOlder = false;
+    if (version === selectionVersion) {
+      const b = document.getElementById('loadOlderButton');
+      if (b) { b.disabled = false; b.textContent = 'Показать более раннюю историю'; }
+    }
+  }
+}
+
 const lastNotifiedStatus = new Map();
 
 // Only fires on a transition actually observed live (the map has no entry
@@ -453,11 +599,15 @@ function renderTaskDetails(t) {
 async function selectTask(id) {
   const version = resetSelection(id);
   try {
-    const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=0`);
+    const initial = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}`);
     const t = await api(`/api/tasks/${encodeURIComponent(id)}`);
     if (version !== selectionVersion) return;
-    chatState = new ChatState(t);
-    applyEvents(events);
+    currentTask = t;
+    reachedHistoryStart = initial.reachedStart;
+    oldestLoadedSeq = initial.events.length ? initial.events[0].seq : null;
+    chatState = new ChatState(t, { seedInitial: initial.reachedStart });
+    applyEvents(initial.events);
+    renderLoadOlderIndicator();
     chatState.snapshot(t, true);
     renderChat();
     renderTaskDetails(t);

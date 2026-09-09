@@ -15,6 +15,7 @@ import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs'
 import { RuntimeControl } from './runtime-control.mjs';
 import { ensureTlsCert } from './tls.mjs';
 import { trimStreamingDeltas } from './event-trim.mjs';
+import { windowByTurns } from './event-window.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -257,8 +258,22 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
     if (req.method === 'GET' && match) {
       if (!manager.getTask(match[1])) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
-      const events = await store.readEvents(match[1], Number(url.searchParams.get('limit') ?? 500), Number(url.searchParams.get('after') ?? 0));
-      return json(res, 200, trimStreamingDeltas(events));
+      const after = Number(url.searchParams.get('after') ?? 0);
+      if (!Number.isSafeInteger(after) || after < 0) throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
+      const events = trimStreamingDeltas(await store.readEvents(match[1], 0, after));
+      // tail: turn-aligned windowing for paginated history load (see
+      // event-window.mjs). Without it, behaves exactly as before — full or
+      // limit-sliced history, always used by refreshTask()'s small
+      // after-cursor catch-up polls, which don't need windowing.
+      if (url.searchParams.has('tail')) {
+        const tail = Number(url.searchParams.get('tail'));
+        const before = url.searchParams.has('before') ? Number(url.searchParams.get('before')) : null;
+        if (!Number.isSafeInteger(tail) || tail <= 0) throw Object.assign(new Error('Invalid tail count'), { code: 'INPUT_INVALID' });
+        if (before != null && (!Number.isSafeInteger(before) || before < 0)) throw Object.assign(new Error('Invalid before cursor'), { code: 'INPUT_INVALID' });
+        return json(res, 200, windowByTurns(events, tail, before));
+      }
+      const limit = Number(url.searchParams.get('limit') ?? 500);
+      return json(res, 200, limit ? events.slice(-limit) : events);
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/);
