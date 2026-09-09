@@ -537,6 +537,17 @@ button:disabled { opacity: .4; cursor: default; }
 .tasksSpoiler summary h2::before { content: '▸ '; color: var(--muted); }
 .tasksSpoiler[open] summary h2::before { content: '▾ '; }
 .tasksSpoiler summary button { font-size: 11.5px; padding: 6px 10px; }
+#taskProjectFilter {
+  width: 100%;
+  margin-bottom: 10px;
+  background: #0d1220;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 7px 10px;
+  font-size: 12px;
+  outline: none;
+}
 
 .tasks { display: flex; flex-direction: column; gap: 8px; }
 .taskRow {

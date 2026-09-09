@@ -463,8 +463,19 @@ function projectName(id) {
   return projects.find(p => p.id === id)?.name || id;
 }
 
-async function loadTasks() {
-  const tasks = await api('/api/tasks');
+let lastTasks = [];
+let taskFilterProjectId = 'all';
+
+function renderTaskFilter() {
+  const options = ['<option value="all">Все проекты</option>']
+    .concat(projects.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`))
+    .concat(['<option value="__scratch__">Без проекта</option>']);
+  $('taskProjectFilter').innerHTML = options.join('');
+  $('taskProjectFilter').value = taskFilterProjectId;
+}
+
+function renderTaskList() {
+  const tasks = taskFilterProjectId === 'all' ? lastTasks : lastTasks.filter(t => t.projectId === taskFilterProjectId);
   $('tasks').innerHTML = tasks.length ? tasks.map((t) => `
     <div class="taskRow ${t.id === selectedTaskId ? 'active' : ''}" data-id="${t.id}">
       <button class="t-delete" type="button" data-delete-id="${t.id}" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
@@ -474,7 +485,7 @@ async function loadTasks() {
         <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
         <span class="t-time">${new Date(t.createdAt).toLocaleString()}</span>
       </div>
-    </div>`).join('') : '<div class="none">Пока нет сессий.</div>';
+    </div>`).join('') : `<div class="none">${lastTasks.length ? 'Нет сессий для этого проекта.' : 'Пока нет сессий.'}</div>`;
   document.querySelectorAll('.taskRow').forEach((row) => {
     row.onclick = () => selectTask(row.dataset.id);
   });
@@ -484,7 +495,18 @@ async function loadTasks() {
       deleteTask(btn.dataset.deleteId);
     };
   });
-  return tasks;
+}
+
+$('taskProjectFilter').addEventListener('change', () => {
+  taskFilterProjectId = $('taskProjectFilter').value;
+  renderTaskList();
+});
+
+async function loadTasks() {
+  lastTasks = await api('/api/tasks');
+  renderTaskFilter();
+  renderTaskList();
+  return lastTasks;
 }
 
 async function loadArtifacts() {
@@ -775,7 +797,7 @@ $('resumeSessionButton').onclick = async () => {
 $('sessionPickerClose').onclick = () => $('sessionPickerOverlay').classList.add('hidden');
 
 async function importSession(projectId, session) {
-  if (!session.existingTaskId && !confirm('Эта сессия Pi должна быть закрыта в терминале на компьютере. Продолжить?')) return;
+  if (!session.existingTaskId && !confirm('TaskBridge не может проверить, открыта ли эта сессия в терминале. Если процесс pi там ещё работает — закройте его сейчас: при одновременной записи с двух сторон файл сессии может испортиться. Сессия точно закрыта?')) return;
   try {
     const task = await api('/api/tasks/from-session', {
       method: 'POST', body: JSON.stringify({ projectId, sessionKey: session.key, confirmedClosed: true })
