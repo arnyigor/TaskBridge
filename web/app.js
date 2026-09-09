@@ -310,6 +310,7 @@ function restoreDraft(key) {
   for (const file of draft?.files || []) dt.items.add(file);
   $('files').files = dt.files;
   renderFileList();
+  updateClearButton();
 }
 
 function resetSelection(id) {
@@ -803,6 +804,7 @@ function renderFileList() {
   $('fileList').querySelectorAll('[data-remove-file]').forEach((btn) => {
     btn.onclick = () => removeFile(Number(btn.dataset.removeFile));
   });
+  updateClearButton();
 }
 
 function removeFile(index) {
@@ -815,9 +817,29 @@ function removeFile(index) {
 $('files').addEventListener('change', renderFileList);
 
 const promptEl = $('prompt');
+
+function updateClearButton() {
+  const hasText = Boolean(promptEl.value.trim());
+  const hasFiles = ($('files').files || []).length > 0;
+  $('clearPrompt').classList.toggle('hidden', !hasText && !hasFiles);
+}
+
+function clearComposerInput() {
+  promptEl.value = '';
+  promptEl.style.height = 'auto';
+  $('files').value = '';
+  $('fileList').textContent = '';
+  drafts.delete(selectedTaskId || '__new__');
+  updateClearButton();
+  promptEl.focus();
+}
+
+$('clearPrompt').onclick = clearComposerInput;
+
 promptEl.addEventListener('input', () => {
   promptEl.style.height = 'auto';
   promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
+  updateClearButton();
 });
 promptEl.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -838,7 +860,9 @@ function isTouchDevice() {
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = promptEl.value.trim();
-  if (!prompt || $('sendButton').disabled) return;
+  const attached = Array.from($('files').files || []);
+  // A file without text is a valid message; the server substitutes a title.
+  if ((!prompt && !attached.length) || $('sendButton').disabled) return;
   $('createError').textContent = '';
   $('createError').classList.remove('error');
   setBusy(true);
@@ -856,6 +880,7 @@ $('form').addEventListener('submit', async (e) => {
         $('files').value = '';
         $('fileList').textContent = '';
       }
+      updateClearButton();
     };
     if (taskId) {
       await sendContinueMessage(taskId, prompt, { files, uploadToken });

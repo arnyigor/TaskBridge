@@ -15,6 +15,22 @@ async function terminal(api, id) {
   throw new Error('Task did not finish');
 }
 
+test('a task can be created from files alone, without text', { timeout: 20000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: '', files: [{ name: 'note.txt', size: 1, base64: 'eA==' }] });
+  assert.equal(created.prompt, 'Прикреплённые файлы');
+  let task = null;
+  for (let i = 0; i < 150; i++) {
+    task = await api(`/api/tasks/${created.id}`);
+    if (['SUCCEEDED', 'FAILED'].includes(task.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+  assert.equal(task.attachments.length, 1);
+});
+
 test('multipart upload streams files into the task workspace and discards staging', { timeout: 20000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
