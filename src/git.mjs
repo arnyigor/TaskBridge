@@ -25,10 +25,11 @@ export async function prepareProjectWorkspace(project, taskId, dataRoot, default
 
   const useWorktree = project.useWorktree ?? defaults.useGitWorktreeByDefault ?? true;
   if (!useWorktree) {
-    return { workspacePath: sourcePath, sourcePath, worktree: false };
+    return { workspacePath: sourcePath, sourcePath, worktree: false, baseCommit: null };
   }
 
   const root = (await git(['rev-parse', '--show-toplevel'], sourcePath)).stdout.trim();
+  const baseCommit = (await git(['rev-parse', '--verify', 'HEAD'], root)).stdout.trim();
   const requireClean = project.requireCleanSource ?? defaults.requireCleanSource ?? true;
   if (requireClean) {
     const dirty = (await git(['status', '--porcelain'], root)).stdout.trim();
@@ -54,7 +55,44 @@ export async function prepareProjectWorkspace(project, taskId, dataRoot, default
   }
 
   await git(['worktree', 'add', '--detach', worktreePath, 'HEAD'], root, 120000);
-  return { workspacePath: worktreePath, sourcePath: root, worktree: true };
+  return { workspacePath: worktreePath, sourcePath: root, worktree: true, baseCommit };
+}
+
+// Applies a TaskBridge result patch to the source checkout. --check runs first
+// so a conflicting patch fails before anything on disk is touched.
+export async function applyTaskPatch(sourcePath, patch) {
+  if (typeof patch !== 'string' || !patch.trim()) return { empty: true, files: [] };
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-apply-'));
+  const file = path.join(temporary, 'change.patch');
+  try {
+    await fs.writeFile(file, patch, 'utf8');
+    await git(['apply', '--check', '--whitespace=nowarn', file], sourcePath);
+    const numstat = (await git(['apply', '--numstat', file], sourcePath)).stdout;
+    const files = numstat.split('\n').filter(Boolean).map(line => line.split('\t').slice(2).join('\t')).filter(Boolean);
+    await git(['apply', '--whitespace=nowarn', file], sourcePath);
+    return { empty: false, files };
+  } finally {
+    await fs.rm(temporary, { recursive: true, force: true });
+  }
+}
+
+// Only removes directories that really are TaskBridge worktrees under dataRoot,
+// never an arbitrary workspace path a task might point at.
+export async function removeWorktree(workspacePath, sourcePath, worktreeRoot) {
+  if (typeof workspacePath !== 'string' || !workspacePath) {
+    throw Object.assign(new Error('Not a TaskBridge worktree'), { code: 'INPUT_INVALID' });
+  }
+  const root = path.resolve(worktreeRoot);
+  const target = path.resolve(workspacePath);
+  const relative = path.relative(root, target);
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+    throw Object.assign(new Error('Not a TaskBridge worktree'), { code: 'INPUT_INVALID' });
+  }
+  if (sourcePath) {
+    await git(['worktree', 'remove', '--force', target], sourcePath).catch(() => null);
+    await git(['worktree', 'prune'], sourcePath).catch(() => null);
+  }
+  await fs.rm(target, { recursive: true, force: true });
 }
 
 export async function createScratchWorkspace(taskId, dataRoot) {

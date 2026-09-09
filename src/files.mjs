@@ -1,12 +1,12 @@
 import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, constants as fsConstants } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
 const invalid = message => Object.assign(new Error(message), { code: 'INPUT_INVALID' });
 const forbidden = () => Object.assign(new Error('Этот файл недоступен для выдачи.'), { code: 'FILE_FORBIDDEN' });
-export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, outputBytes: 256 * 1024 * 1024 };
+export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, uploadFileBytes: 64 * 1024 * 1024, uploadBytes: 128 * 1024 * 1024, outputBytes: 256 * 1024 * 1024 };
 const skippedDirs = new Set(['.git', '.pi', '.taskbridge-input', 'node_modules', 'data', '.gradle', '.idea']);
 
 export function isPrivatePath(value) {
@@ -35,8 +35,23 @@ export function validateFiles(files = [], limits = FILE_LIMITS) {
   });
 }
 
+// Streaming uploads are resolved by the UploadStore and then validated here:
+// the client only supplies ids, so name/size/mime come from what was written.
+export function validateUploadRefs(refs, resolved, limits = FILE_LIMITS) {
+  if (!Array.isArray(refs) || refs.length > limits.count) throw invalid(`Можно прикрепить до ${limits.count} файлов.`);
+  let total = 0;
+  return resolved.map(file => {
+    if (!file || typeof file.name !== 'string' || !file.name || file.name.length > 180) throw invalid('Недопустимое имя файла.');
+    if (!Number.isSafeInteger(file.size) || file.size < 0) throw invalid(`Размер файла ${file.name} неизвестен.`);
+    if (file.size > limits.uploadFileBytes) throw Object.assign(invalid(`Файл ${file.name} превышает ${limits.uploadFileBytes / 1048576} МиБ.`), { code: 'BODY_TOO_LARGE' });
+    total += file.size;
+    if (total > limits.uploadBytes) throw Object.assign(invalid(`Суммарный размер файлов превышает ${limits.uploadBytes / 1048576} МиБ.`), { code: 'BODY_TOO_LARGE' });
+    return file;
+  });
+}
+
 export function metadata(file) {
-  const { bytes, ...rest } = file;
+  const { bytes, sourcePath, ...rest } = file;
   return rest;
 }
 
@@ -72,8 +87,15 @@ export async function stageFiles(task, taskDir, files) {
       const directory = await makeInputDirectory(task.workspacePath, task.id, file.id);
       const item = { ...metadata(file), direction: 'input', path: path.relative(task.workspacePath, path.join(directory, file.name)).replaceAll('\\', '/') };
       staged.push(item);
-      await fs.writeFile(path.join(taskDir, 'files', file.id), file.bytes, { flag: 'wx' });
-      await fs.writeFile(path.join(directory, file.name), file.bytes, { flag: 'wx' });
+      if (file.sourcePath) {
+        // Uploaded file: copy it into the task and the workspace, then the
+        // staging directory is discarded by the caller.
+        await fs.copyFile(file.sourcePath, path.join(taskDir, 'files', file.id), fsConstants.COPYFILE_EXCL);
+        await fs.copyFile(file.sourcePath, path.join(directory, file.name), fsConstants.COPYFILE_EXCL);
+      } else {
+        await fs.writeFile(path.join(taskDir, 'files', file.id), file.bytes, { flag: 'wx' });
+        await fs.writeFile(path.join(directory, file.name), file.bytes, { flag: 'wx' });
+      }
     }
     return staged;
   } catch (error) { await rollbackFiles(task, taskDir, staged); throw error; }

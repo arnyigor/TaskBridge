@@ -38,9 +38,12 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 - [HTTP API](#http-api)
 - [Данные и артефакты](#данные-и-артефакты)
 - [Git worktree](#git-worktree)
+- [Применение изменений и очистка](#применение-изменений-и-очистка)
 - [STOP, follow-up, compact, Pi state](#stop-follow-up-compact-pi-state)
 - [Файлы с телефона](#файлы-с-телефона)
 - [Local Runtime Manager](#local-runtime-manager)
+- [AUTO dispatcher](#auto-dispatcher)
+- [Engine health](#engine-health)
 - [Безопасность](#безопасность)
 - [Тесты](#тесты)
 - [Известные ограничения](#известные-ограничения)
@@ -80,10 +83,12 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 ### Инфраструктура
 
 - persistent-хранилище задач и событий в SQLite (встроенный `node:sqlite`, без нативных зависимостей);
+- потоковая загрузка файлов (multipart, без base64);
 - `git status`, `git diff`, `diff.patch`;
-- изолированный `git worktree` на задачу;
+- изолированный `git worktree` на задачу, применение результата и очистка worktree;
 - project-specific verification commands;
 - проверка здоровья локального llama.cpp endpoint и managed-запуск профилей `text` / `vision`;
+- AUTO-выбор профиля модели под задачу и классификация ошибок движка (quota / rate limit / context);
 - опциональная авторизация по pairing-коду и self-signed HTTPS для LAN.
 
 ---
@@ -139,6 +144,10 @@ Taskbridge/
 │  ├─ task-manager.mjs      жизненный цикл задач, очередь, сообщения, Pi-сессии
 │  ├─ pi-rpc.mjs            запуск Pi и JSONL RPC-клиент
 │  ├─ task-store.mjs        SQLite-хранилище задач и событий
+│  ├─ multipart.mjs         потоковый парсер multipart/form-data
+│  ├─ uploads.mjs           стейджинг загрузок с TTL
+│  ├─ engine.mjs            классификация ошибок провайдера (quota/rate limit/context)
+│  ├─ dispatcher.mjs        AUTO-выбор профиля модели
 │  ├─ session-history.mjs   восстановление истории после restart
 │  ├─ native-sessions.mjs   импорт существующих Pi-сессий
 │  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
@@ -159,7 +168,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   60 тестов на node:test
+├─ tests/                   74 теста на node:test
 ├─ scripts/
 │  └─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 ├─ docs/                    ТЗ, ревью и планы
@@ -306,6 +315,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | --- | --- |
 | `server.host` / `server.port` | адрес и порт HTTP-сервера (по умолчанию `0.0.0.0:8787`) |
 | `server.maxBodyMb` | максимальный размер JSON-тела запроса |
+| `server.maxUploadMb` | лимит одного файла при потоковой загрузке (суммарно — 2×) |
 | `server.auth.enabled` | включить pairing-авторизацию |
 | `server.https.enabled` / `port` | self-signed HTTPS для LAN |
 | `pi.command` / `pi.args` | как запускать Pi |
@@ -316,6 +326,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `localRuntime.healthUrl` | health-check локальной модели |
 | `localRuntime.profiles` | профили запуска (`text`, `vision`, …) |
 | `localRuntime.managed` | управляемый запуск llama.cpp |
+| `localRuntime.auto.enabled` | AUTO-выбор профиля под задачу (vision при картинках) |
 | `workspace.requireCleanSource` | запрещать старт на dirty source repository |
 | `workspace.useGitWorktreeByDefault` | изолировать задачу в worktree |
 | `projectBrowser.roots` | корни, которые видит браузер папок |
@@ -335,7 +346,8 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `GET` | `/api/auth` | статус авторизации |
 | `POST` | `/api/auth/pair` | вход по pairing-коду |
 | `GET` | `/api/auth/pairing` | текущий код (только с localhost) |
-| `GET` | `/api/info` | имя, build, адреса, готовность модели, лимиты файлов |
+| `GET` | `/api/info` | имя, build, адреса, готовность модели, engine health, лимиты файлов |
+| `POST` | `/api/uploads` | потоковая multipart-загрузка файлов |
 | `GET` | `/api/projects` | список проектов |
 | `DELETE` | `/api/projects/:id` | удалить проект |
 | `GET` | `/api/project-browser` | список папок в разрешённых корнях |
@@ -356,6 +368,8 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `GET` | `/api/tasks/:id/artifacts/:name` | скачать артефакт |
 | `GET` | `/api/tasks/:id/files/:id` | скачать вложение |
 | `GET` | `/api/tasks/:id/workspace-file?path=` | файл из workspace |
+| `POST` | `/api/tasks/:id/apply` | применить `diff.patch` к исходному проекту |
+| `DELETE` | `/api/tasks/:id/worktree` | удалить worktree задачи |
 | `GET` | `/api/runtime` | статус локальной модели |
 | `POST` | `/api/runtime/start` / `restart` | запустить/перезапустить профиль |
 
@@ -377,8 +391,10 @@ data/
 │     ├─ pi-events.jsonl
 │     ├─ pi.stderr.log      (если был stderr)
 │     ├─ verification.log   (если настроена verification)
+│     ├─ apply.log          (если изменения применялись)
 │     └─ runtime.log        (если TaskBridge запускал runtime)
 ├─ worktrees/<task-id>/     изолированный checkout
+├─ uploads/<token>/         стейджинг потоковых загрузок (удаляется/TTL)
 ├─ pi-sessions/             сессии Pi
 ├─ server-auth.json         секрет pairing (если auth включён)
 └─ tls/                     self-signed сертификаты
@@ -424,6 +440,12 @@ Dirty source repository по умолчанию блокируется:
 
 Для теста проверку можно отключить, но это не рекомендуется.
 
+### Применение изменений и очистка
+
+- `POST /api/tasks/:id/apply` применяет `diff.patch` к исходному checkout. По умолчанию требует чистый source и тот же HEAD, что при создании worktree (`PROJECT_DIRTY` / `SOURCE_MOVED`); `{"force": true}` снимает проверки. `git apply --check` выполняется до записи, поэтому конфликт ничего не портит.
+- `DELETE /api/tasks/:id/worktree` закрывает idle-сессию Pi и удаляет worktree (`git worktree remove --force` + `prune`); удаление задачи тоже чистит её worktree.
+- Apply меняет только рабочее дерево, коммит не создаётся.
+
 ---
 
 ## STOP, follow-up, compact, Pi state
@@ -458,13 +480,18 @@ RPC `get_state`: текущая модель, thinking level, `isStreaming`, `is
 
 ## Файлы с телефона
 
-В PoC upload идёт как base64 внутри JSON, поэтому предназначен для небольших файлов; для больших ZIP/проектов механизм не подходит. Лимит тела:
+Файлы загружаются потоково через `POST /api/uploads` (`multipart/form-data`, без base64), поэтому размер ограничен не JSON-телом, а лимитами загрузки. UI отправляет файлы этим запросом, получает `{ token, files: [{ id, name, size, mimeType }] }` и передаёт только `id` в `POST /api/tasks` или `/api/tasks/:id/message` вместе с `uploadToken`. Клиентские имя/размер не принимаются на веру — они берутся из того, что реально записано на диск.
 
-```json
-"server": { "maxBodyMb": 25 }
-```
+| Лимит | По умолчанию | Где |
+| --- | --- | --- |
+| Файлов за раз | 10 | `FILE_LIMITS.count` |
+| Размер одного файла | 64 MiB | `server.maxUploadMb` |
+| Суммарно | 128 MiB | 2× `server.maxUploadMb` |
+| JSON-тело (inline base64) | 25 MiB | `server.maxBodyMb` |
 
-Base64 добавляет ~33% объёма, поэтому реальный предел вложений меньше заявленного. Production-версия должна перейти на streaming multipart upload.
+Стейджинг лежит в `data/uploads/<token>/` и удаляется после того, как файл попал в задачу, либо по TTL (1 час) для заброшенных загрузок. Встроенный base64 всё ещё принимается для совместимости, но ограничен `server.maxBodyMb`.
+
+Multipart — CORS-«простой» content-type, поэтому запрос дополнительно требует заголовок `x-taskbridge-upload: 1`: кросс-сайтовый `<form>` его выставить не может без preflight, который сервер не разрешает.
 
 ---
 
@@ -488,6 +515,19 @@ Base64 добавляет ~33% объёма, поэтому реальный п�
 
 Для первой проверки лучше оставить свой llama-server уже запущенным. Профили `text` / `vision` задаются в `localRuntime.profiles` и переключаются из UI.
 
+### AUTO dispatcher
+
+При `localRuntime.auto.enabled = true` профиль выбирается на задачу:
+
+- во вложениях есть изображения и задан `auto.visionProfile` → vision-профиль;
+- иначе `auto.textProfile` / `defaultProfile`.
+
+Выбор и причина сохраняются в `task.engine`, переключение видно событием `ENGINE_SWITCH`. Если нужный профиль не загружен, managed-runtime перезапускается на него через тот же безопасный RuntimeControl (только когда `managed.enabled` и модель не занята).
+
+### Engine health
+
+`GET /api/info` возвращает `engine`: `reachable`, `model`, `contextWindow`, `slots` — из llama.cpp `/props` и `/slots`; поля опциональны и отсутствуют у серверов, которые их не отдают. Ошибки провайдера классифицируются в стабильные коды: `QUOTA_EXCEEDED`, `RATE_LIMITED`, `CONTEXT_OVERFLOW`, `ENGINE_AUTH`, `MODEL_UNAVAILABLE`, `ENGINE_OVERLOADED`, `ENGINE_UNREACHABLE`; у задачи появляются `retryable` и `retryAfterMs` (разбирается из текста вида «retry after 30s»).
+
 ---
 
 ## Безопасность
@@ -508,11 +548,11 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 60 тестов на node:test
+npm test          # 74 теста на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 
-Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, git/worktree, project browser, лимиты и traversal, auth, UI-состояние чата.
+Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата.
 
 ---
 
@@ -521,25 +561,19 @@ npm run check     # синтаксическая проверка основны
 1. После restart при следующем сообщении запускается новый Pi-процесс с тем же файлом сессии; если файла Pi нет, история восстанавливается из событий TaskBridge.
 2. Оборванные active tasks помечаются `FAILED` с кодом `FAILED_RECOVERY`; их можно продолжить новым сообщением.
 3. Одновременно рассчитан на одну активную inference-задачу.
-4. Upload предназначен для небольших файлов (base64 в JSON).
-5. Нет автоматической очистки worktree.
-6. `diff.patch` не содержит содержимое новых untracked файлов; они перечисляются в `git-status.txt`.
-7. Verification commands доверенные и читаются из локального `config.json`.
-8. Claude Code и Codex как отдельные runner'ы пока не подключены.
-9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
+4. Apply меняет рабочее дерево без коммита; проверки source-репозитория можно снять через `force`.
+5. Verification commands доверенные и читаются из локального `config.json`.
+6. Claude Code и Codex как отдельные runner'ы пока не подключены.
+7. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
 
 ---
 
 ## Roadmap
 
 ```text
-1. multipart streaming upload
-2. worktree cleanup / apply
-3. ClaudeCodeRunner
-4. CodexRunner
-5. engine health / quota mapping
-6. AUTO dispatcher
-7. KMP Android client
+1. ClaudeCodeRunner
+2. CodexRunner
+3. KMP Android client
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.

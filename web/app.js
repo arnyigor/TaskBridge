@@ -336,7 +336,8 @@ function resetSelection(id) {
   $('autoCompaction').disabled = true;
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
-  for (const field of ['taskTitle', 'taskStatus', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson']) $(field).textContent = '—';
+  for (const field of ['taskTitle', 'taskStatus', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
+  $('worktreeActions').classList.add('hidden');
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
   setComposerMode(id);
@@ -593,6 +594,14 @@ function renderTaskDetails(t) {
   $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
   $('stopButton').disabled = !ACTIVE_STATUSES.has(t.status) || t.status === 'CANCELLING';
   $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;
+  const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(t.status);
+  const isWorktree = Boolean(t.worktree);
+  $('worktreeActions').classList.toggle('hidden', !isWorktree && !t.worktreeRemovedAt);
+  $('applyChanges').disabled = !(isWorktree && t.sourcePath && terminal && (t.git?.changedFiles?.length || t.applied));
+  $('cleanupWorktree').disabled = !(isWorktree && t.workspacePath && terminal);
+  $('applyInfo').textContent = t.applied
+    ? `Применено ${new Date(t.applied.at).toLocaleString('ru-RU')}${t.applied.forced ? ' (force)' : ''}: ${t.applied.files.length} файл(ов)`
+    : t.worktreeRemovedAt ? `Worktree удалён ${new Date(t.worktreeRemovedAt).toLocaleString('ru-RU')}` : '';
 }
 
 async function selectTask(id) {
@@ -658,7 +667,7 @@ async function refreshTask() {
 async function sendContinueMessage(taskId, text, opts = {}) {
   const version = selectionVersion;
   await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
-    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [] })
+    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null })
   });
   if (version === selectionVersion) await refreshTask();
 }
@@ -769,19 +778,20 @@ async function loadArtifacts() {
 
 /* ---------------- composer / actions ---------------- */
 
-async function filesPayload() {
+async function uploadSelectedFiles() {
   const files = Array.from($('files').files || []);
-  const result = [];
-  for (const file of files) {
-    const base64 = await new Promise((resolve, reject) => {
-      const r = new FileReader();
-      r.onerror = () => reject(r.error);
-      r.onload = () => resolve(String(r.result).split(',')[1] || '');
-      r.readAsDataURL(file);
-    });
-    result.push({ name: file.name, size: file.size, base64 });
+  if (!files.length) return { files: [], uploadToken: null };
+  const form = new FormData();
+  for (const file of files) form.append('files', file, file.name);
+  // No content-type header: the browser sets the multipart boundary itself.
+  // The custom header is a CSRF guard (see AccessControl.checkOrigin).
+  const res = await fetch('/api/uploads', { method: 'POST', headers: { 'x-taskbridge-upload': '1' }, body: form });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (body.code === 'AUTH_REQUIRED') showAuthGate();
+    throw new Error(`${body.code || res.status}: ${body.error || res.statusText}`);
   }
-  return result;
+  return { files: (body.files || []).map((file) => ({ id: file.id })), uploadToken: body.token };
 }
 
 function renderFileList() {
@@ -836,7 +846,7 @@ $('form').addEventListener('submit', async (e) => {
   try {
     const taskId = selectedTaskId;
     const version = selectionVersion;
-    const files = await filesPayload();
+    const { files, uploadToken } = await uploadSelectedFiles();
     const draftKey = taskId || '__new__';
     const clearComposer = () => {
       drafts.delete(draftKey);
@@ -848,11 +858,11 @@ $('form').addEventListener('submit', async (e) => {
       }
     };
     if (taskId) {
-      await sendContinueMessage(taskId, prompt, { files });
+      await sendContinueMessage(taskId, prompt, { files, uploadToken });
       clearComposer();
     } else {
       const task = await api('/api/tasks', {
-        method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files })
+        method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files, uploadToken })
       });
       // Clear before selectTask() runs resetSelection(), which would
       // otherwise capture this just-sent text as a stale "new task" draft.
@@ -919,6 +929,32 @@ $('autoCompaction').onclick = async () => {
   } catch (e) {
     alert(e.message);
     $('autoCompaction').disabled = false;
+  }
+};
+
+$('applyChanges').onclick = async () => {
+  if (!selectedTaskId) return;
+  if (!confirm('Применить изменения этой сессии к исходному проекту?')) return;
+  $('applyChanges').disabled = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/apply`, { method: 'POST', body: JSON.stringify({}) });
+    await refreshTask();
+  } catch (error) {
+    alert(error.message);
+    await refreshTask();
+  }
+};
+
+$('cleanupWorktree').onclick = async () => {
+  if (!selectedTaskId) return;
+  if (!confirm('Удалить рабочую копию (worktree)? Незакоммиченные изменения в ней будут потеряны.')) return;
+  $('cleanupWorktree').disabled = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/worktree`, { method: 'DELETE' });
+    await refreshTask();
+  } catch (error) {
+    alert(error.message);
+    await refreshTask();
   }
 };
 
@@ -1302,7 +1338,11 @@ async function checkPcState() {
       el.classList.add('ok');
     }
     const addresses = (info.addresses || []).map((x) => x.url).join('\n');
-    el.title = addresses ? `${label}\n${addresses}` : label;
+    const engine = info.engine || {};
+    const engineLine = engine.reachable
+      ? [engine.model, engine.contextWindow ? `ctx ${engine.contextWindow}` : null, engine.slots ? `slots ${engine.slots.busy}/${engine.slots.total}` : null].filter(Boolean).join(' · ')
+      : null;
+    el.title = [label, engineLine, addresses].filter(Boolean).join('\n');
     el.setAttribute('aria-label', label);
   } catch {
     modelBusy = null;

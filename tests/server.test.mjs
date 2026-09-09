@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
 import { ChatState } from '../web/chat-state.mjs';
 
@@ -12,6 +14,40 @@ async function terminal(api, id) {
   throw new Error('Task did not finish');
 }
 
+test('multipart upload streams files into the task workspace and discards staging', { timeout: 20000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, base, root } = fixture;
+  const form = new FormData();
+  form.append('files', new Blob([Buffer.from('привет upload\n')]), 'заметка.txt');
+  form.append('files', new Blob([Buffer.from([0, 1, 2, 255, 0])]), 'data.bin');
+  const response = await fetch(`${base}/api/uploads`, { method: 'POST', headers: { 'x-taskbridge-upload': '1' }, body: form });
+  assert.equal(response.status, 201, fixture.logs());
+  const upload = await response.json();
+  assert.equal(upload.files.length, 2);
+  assert.equal(upload.files[0].name, 'заметка.txt');
+  assert.equal(upload.files[0].size, Buffer.byteLength('привет upload\n'));
+  assert.match(upload.token, /^[a-f0-9-]{36}$/);
+  const created = await api('/api/tasks', {
+    projectId: 'fixture', prompt: 'with upload',
+    files: upload.files.map(file => ({ id: file.id })), uploadToken: upload.token
+  });
+  let task = null;
+  for (let i = 0; i < 150; i++) {
+    task = await api(`/api/tasks/${created.id}`);
+    if (['SUCCEEDED', 'FAILED'].includes(task.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+  assert.equal(task.attachments.length, 2);
+  assert.ok(task.attachments.every(file => file.path.startsWith('.taskbridge-input/')));
+  const note = task.attachments.find(file => file.name === 'заметка.txt');
+  const served = await fetch(`${base}/api/tasks/${created.id}/files/${note.id}`);
+  assert.equal(Buffer.from(await served.arrayBuffer()).toString('utf8'), 'привет upload\n');
+  // The staging directory is removed once the task owns the files.
+  assert.deepEqual(await fs.readdir(path.join(root, 'data', 'uploads')).catch(() => []), []);
+});
+
 test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compact, cancel, deletion', { timeout: 20000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
@@ -20,6 +56,7 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   const id = created.id;
   let task = await terminal(api, id);
   assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+  assert.deepEqual(task.engine, { profileId: null, auto: false, reason: null });
   assert.equal(task.lastUsage.totalTokens, 1100);
   await api(`/api/tasks/${id}/message`, { text: 'continue', files: [{ name: 'sample.txt', size: 1, base64: 'eA==' }] });
   task = await terminal(api, id);
@@ -60,6 +97,11 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   assert.equal((await api(`/api/tasks/${id}/events?limit=0`)).filter(x => x.type === 'USER_MESSAGE').length, 3);
   await api(`/api/tasks/${id}/auto-compaction`, { enabled: false });
   assert.equal((await api(`/api/tasks/${id}`)).autoCompactionEnabled, false);
+  // The fixture project runs without a worktree, so both git actions must be refused.
+  const info = await api('/api/info');
+  assert.equal(info.engine.configured, false);
+  await assert.rejects(api(`/api/tasks/${id}/apply`, {}), /worktree/);
+  await assert.rejects(api(`/api/tasks/${id}/worktree`, undefined, 'DELETE'), /worktree/);
   await api(`/api/tasks/${id}/compact`, {});
   await new Promise(resolve => setTimeout(resolve, 80));
   assert.equal((await api(`/api/tasks/${id}`)).compaction.count, 1);

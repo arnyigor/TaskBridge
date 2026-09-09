@@ -10,7 +10,7 @@
     "test": "node --test tests/*.test.mjs",
     "start": "node src/server.mjs",
     "smoke:pi": "node scripts/pi-rpc-smoke.mjs",
-    "check": "node --check src/server.mjs && node --check src/task-manager.mjs && node --check src/pi-rpc.mjs && node --check src/git.mjs && node --check src/runtime-manager.mjs && node --check src/task-store.mjs && node --check web/app.js && node --check web/chat-state.mjs"
+    "check": "node --check src/server.mjs && node --check src/task-manager.mjs && node --check src/pi-rpc.mjs && node --check src/git.mjs && node --check src/runtime-manager.mjs && node --check src/task-store.mjs && node --check src/multipart.mjs && node --check src/uploads.mjs && node --check src/engine.mjs && node --check src/dispatcher.mjs && node --check web/app.js && node --check web/chat-state.mjs"
   },
   "devDependencies": {
     "linkedom": "^0.18.13"

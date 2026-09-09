@@ -3,11 +3,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
-import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, runVerification } from './git.mjs';
+import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile } from './session-history.mjs';
-import { validateFiles, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
+import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
+import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
+import { classifyEngineError } from './engine.mjs';
+import { chooseEngine } from './dispatcher.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -52,9 +55,17 @@ export class TaskManager extends EventEmitter {
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
     this.nativeSessions = new NativeSessionService(this);
     this.runtimeChanging = false;
+    // Injected by the server; lets AUTO restart the managed runtime when the
+    // chosen profile differs from the one currently loaded.
+    this.runtimeSwitcher = null;
+    const uploadMb = Number(config.server?.maxUploadMb || 0);
+    this.uploads = new UploadStore(dataRoot, uploadMb > 0
+      ? { maxFileBytes: uploadMb * 1048576, maxTotalBytes: uploadMb * 2 * 1048576 }
+      : {});
   }
 
   async init() {
+    await this.uploads.cleanup().catch(() => {});
     const previous = await this.store.list();
     for (const task of previous) {
       if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
@@ -108,14 +119,25 @@ export class TaskManager extends EventEmitter {
     return this.#admit(() => this.#createTask(input));
   }
 
+  async #resolveFiles(items, token) {
+    if (!Array.isArray(items) || !items.length) return [];
+    const inline = items.filter(item => item && typeof item.base64 === 'string');
+    const refs = items.filter(item => item && !item.base64 && item.id);
+    if (inline.length && refs.length) throw Object.assign(new Error('Нельзя смешивать встроенные и загруженные файлы в одном запросе.'), { code: 'INPUT_INVALID' });
+    if (!refs.length) return validateFiles(items);
+    if (!token) throw Object.assign(new Error('Не указан идентификатор загрузки.'), { code: 'INPUT_INVALID' });
+    return validateUploadRefs(refs, await this.uploads.resolve(token, refs));
+  }
+
   async #createTask(input) {
     if (this.activeTaskId) throw Object.assign(new Error('Модель уже выполняет другую сессию.'), { code: 'MODEL_BUSY' });
     const busy = await this.runtimeManager.getBusyStatus();
     if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!this.config.localRuntime?.managed?.enabled && !(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
-    const incomingFiles = validateFiles(input.files || []);
+    const incomingFiles = await this.#resolveFiles(input.files || [], input.uploadToken);
     const prompt = String(input.prompt || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!prompt) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
+    const engine = chooseEngine(this.config.localRuntime || {}, { files: incomingFiles, prompt });
     const projectId = String(input.projectId || this.projects.keys().next().value || '');
     if (projectId !== '__scratch__' && !this.projects.has(projectId)) {
       throw Object.assign(new Error(`Unknown project: ${projectId}`), { code: 'PROJECT_NOT_FOUND' });
@@ -136,6 +158,7 @@ export class TaskManager extends EventEmitter {
       thinkingText: '',
       error: null,
       errorCode: null,
+      engine,
       verification: null,
       git: null,
       compaction: { count: 0, last: null },
@@ -150,6 +173,7 @@ export class TaskManager extends EventEmitter {
     await this.store.create(task);
     this.tasks.set(task.id, task);
     task._incomingFiles = incomingFiles;
+    task._uploadToken = input.uploadToken;
     this.queue.push(task.id);
     await this.#event(task, 'TASK_QUEUED', 'Task queued');
     this.#pump();
@@ -171,7 +195,7 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, _modelError, _baseline, _nativeLease, ...safe } = task;
+    const { _incomingFiles, _modelError, _baseline, _nativeLease, _uploadToken, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return { ...safe, sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed)) };
   }
@@ -200,9 +224,17 @@ export class TaskManager extends EventEmitter {
       await this.#event(task, 'WORKSPACE_READY', `Workspace: ${task.workspacePath}`);
 
       await this.#setStatus(task, 'PREFLIGHT', 'Checking local model runtime');
+      const profileId = task.engine?.profileId || undefined;
+      if (profileId && task.engine?.auto && this.config.localRuntime?.auto?.enabled === true && this.runtimeSwitcher) {
+        const active = this.runtimeManager.activeProfileId;
+        if (active && active !== profileId) {
+          await this.#event(task, 'ENGINE_SWITCH', `AUTO: ${active} → ${profileId} (${task.engine.reason})`);
+          await this.runtimeSwitcher(profileId);
+        }
+      }
       const runtimeInfo = await this.runtimeManager.ensureRunning((text) => {
         this.store.appendRaw(task.id, 'runtime.log', text).catch(() => {});
-      });
+      }, profileId);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
       await this.#event(task, 'RUNTIME_READY', `Local runtime: ${runtimeInfo.state}`);
 
@@ -257,6 +289,7 @@ export class TaskManager extends EventEmitter {
 
     const files = await stageFiles({ ...task, ...prepared }, this.store.taskDir(task.id), task._incomingFiles || []);
     if (files.length) { task.files = files; task.attachments = [...(task.attachments || []), ...files]; }
+    if (task._uploadToken) { await this.uploads.discard(task._uploadToken).catch(() => {}); delete task._uploadToken; }
     return prepared;
   }
 
@@ -446,6 +479,7 @@ export class TaskManager extends EventEmitter {
       task.status = failed ? 'FAILED' : 'SUCCEEDED';
       task.errorCode = failed ? 'VERIFICATION_FAILED' : null;
       task.error = failed ? 'One or more verification commands failed.' : null;
+      if (!failed) { task.retryable = null; task.retryAfterMs = null; }
       task.current = failed ? 'Verification failed' : 'Done';
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
@@ -516,8 +550,73 @@ export class TaskManager extends EventEmitter {
     this.queue = this.queue.filter((x) => x !== id);
     this.tasks.delete(id);
     if (task._nativeLease) await task._nativeLease().catch(() => {});
+    if (task.worktree && task.workspacePath && task.sourcePath) {
+      await removeWorktree(task.workspacePath, task.sourcePath, path.join(this.dataRoot, 'worktrees')).catch(() => {});
+    }
     await this.store.remove(id);
     this.#pump();
+  }
+
+  // Applies this task's result patch to the source checkout. Refuses when the
+  // source is dirty or has moved since the worktree was created, unless forced.
+  async applyTask(id, { force = false } = {}) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    if (!task.worktree || !task.sourcePath) {
+      throw Object.assign(new Error('Применять изменения можно только к задачам в git worktree.'), { code: 'INPUT_INVALID' });
+    }
+    if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) {
+      throw Object.assign(new Error('Дождитесь завершения задачи.'), { code: 'BUSY' });
+    }
+    const runtime = this.runtimes.get(id);
+    if (runtime && !runtime.pi.closed) {
+      const state = await runtime.pi.getState().catch(() => null);
+      if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Pi ещё работает. Дождитесь завершения.'), { code: 'BUSY' });
+    }
+    const patch = await fs.readFile(path.join(this.store.taskDir(id), 'artifacts', 'diff.patch'), 'utf8').catch(() => '');
+    if (!patch.trim()) throw Object.assign(new Error('Нет изменений для применения.'), { code: 'NOTHING_TO_APPLY' });
+    if (!force) {
+      const dirty = (await git(['status', '--porcelain'], task.sourcePath)).stdout.trim();
+      if (dirty) throw Object.assign(new Error('В исходном проекте есть незакоммиченные изменения.'), { code: 'PROJECT_DIRTY' });
+      if (task.baseCommit) {
+        const head = (await git(['rev-parse', 'HEAD'], task.sourcePath)).stdout.trim();
+        if (head !== task.baseCommit) throw Object.assign(new Error('Ветка исходного проекта изменилась после создания worktree.'), { code: 'SOURCE_MOVED' });
+      }
+    }
+    const result = await applyTaskPatch(task.sourcePath, patch);
+    const changed = (await collectGitState(task.sourcePath)).changedFiles;
+    task.applied = { at: now(), files: changed, forced: Boolean(force) };
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.store.writeArtifact(id, 'apply.log', `Applied ${result.files.length} file(s) at ${task.applied.at}${force ? ' (forced)' : ''}\n${result.files.join('\n')}\n`);
+    await this.#event(task, 'CHANGES_APPLIED', `Изменения применены к ${task.sourcePath}`, { files: changed, forced: Boolean(force) });
+    return this.#publicTask(task);
+  }
+
+  async cleanupWorktree(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    if (!task.worktree) throw Object.assign(new Error('У этой задачи нет worktree.'), { code: 'INPUT_INVALID' });
+    if (!task.workspacePath) throw Object.assign(new Error('Worktree уже удалён.'), { code: 'INPUT_INVALID' });
+    if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
+      throw Object.assign(new Error('Дождитесь завершения задачи.'), { code: 'BUSY' });
+    }
+    const runtime = this.runtimes.get(id);
+    if (runtime && !runtime.pi.closed) {
+      const state = await runtime.pi.getState().catch(() => null);
+      if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Pi ещё работает. Дождитесь завершения.'), { code: 'BUSY' });
+      // The worktree is Pi's cwd: close the session before deleting it, or a
+      // later follow-up would resume into a missing directory.
+      await runtime.pi.killTree().catch(() => {});
+      this.runtimes.delete(id);
+    }
+    await removeWorktree(task.workspacePath, task.sourcePath, path.join(this.dataRoot, 'worktrees'));
+    task.worktreeRemovedAt = now();
+    task.workspacePath = null;
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'WORKTREE_REMOVED', 'Worktree удалён.');
+    return this.#publicTask(task);
   }
 
   async cancel(id) {
@@ -549,15 +648,15 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  async message(id, text, mode = 'auto', files = []) {
-    return this.#admit(() => this.#message(id, text, mode, files));
+  async message(id, text, mode = 'auto', files = [], uploadToken = null) {
+    return this.#admit(() => this.#message(id, text, mode, files, uploadToken));
   }
 
-  async #message(id, text, mode, files) {
+  async #message(id, text, mode, files, uploadToken) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     if (this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
-    const incomingFiles = validateFiles(files);
+    const incomingFiles = await this.#resolveFiles(files, uploadToken);
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
     if (!['auto', 'prompt', 'steer', 'follow_up'].includes(mode)) throw Object.assign(new Error('Неизвестный режим сообщения.'), { code: 'INPUT_INVALID' });
@@ -569,6 +668,7 @@ export class TaskManager extends EventEmitter {
     if (!streaming && (await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
     const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
+    if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
     const message = userText + (attached.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
     const effectiveMode = mode === 'auto' ? (streaming ? 'steer' : 'prompt') : mode;
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
@@ -591,6 +691,7 @@ export class TaskManager extends EventEmitter {
       else await runtime.pi.sendFollowUp(message, effectiveMode);
       accepted = true;
       task.error = task.errorCode = task._modelError = null;
+      task.retryable = task.retryAfterMs = null;
       task.attachments = [...(task.attachments || []), ...attached];
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
@@ -673,8 +774,12 @@ export class TaskManager extends EventEmitter {
 
   async #fail(task, error) {
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
+    const classified = classifyEngineError(error) || classifyEngineError(task._modelError);
+    const explicit = error?.code && !['MODEL_ERROR', 'INTERNAL_ERROR'].includes(error.code) ? error.code : null;
     task.status = 'FAILED';
-    task.errorCode = error.code || 'INTERNAL_ERROR';
+    task.errorCode = explicit || classified?.code || error?.code || 'INTERNAL_ERROR';
+    task.retryable = classified ? classified.retryable : null;
+    task.retryAfterMs = classified?.retryAfterMs ?? null;
     task.error = error.message || String(error);
     task.current = 'Failed';
     task.updatedAt = now();

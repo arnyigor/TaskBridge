@@ -64,7 +64,15 @@ export class AccessControl {
       try { origin = new URL(req.headers.origin); } catch { throw fail('Недопустимый Origin.', 'ORIGIN_FORBIDDEN'); }
       if (!['http:', 'https:'].includes(origin.protocol) || origin.host !== req.headers.host) throw fail('Запрос с другого сайта запрещён.', 'ORIGIN_FORBIDDEN');
     }
-    if (['POST', 'PUT', 'PATCH'].includes(req.method) && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) throw fail('Требуется JSON-запрос.', 'INPUT_INVALID');
+    if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+      const type = req.headers['content-type'] || '';
+      const isJson = /^application\/json(?:;|$)/i.test(type);
+      // multipart/form-data is a CORS-"simple" content type, so a cross-origin
+      // form could send it without a preflight. Require a custom header that
+      // such a form cannot set without a preflight the server never allows.
+      const isUpload = /^multipart\/form-data(?:;|$)/i.test(type) && req.headers['x-taskbridge-upload'] === '1';
+      if (!isJson && !isUpload) throw fail('Требуется JSON-запрос.', 'INPUT_INVALID');
+    }
   }
 
   pair(req, res, code) {

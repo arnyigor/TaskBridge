@@ -3,6 +3,7 @@
     "host": "0.0.0.0",
     "port": 8787,
     "maxBodyMb": 25,
+    "maxUploadMb": 64,
     "auth": {
       "enabled": false
     },
@@ -21,6 +22,11 @@
   "localRuntime": {
     "healthUrl": "http://127.0.0.1:8080/health",
     "defaultProfile": "text",
+    "auto": {
+      "enabled": false,
+      "visionProfile": "vision",
+      "textProfile": "text"
+    },
     "profiles": [
       {
         "id": "text",

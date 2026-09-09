@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { TaskStore } from '../src/task-store.mjs';
 import { TaskManager } from '../src/task-manager.mjs';
+import { prepareProjectWorkspace, collectGitState, git } from '../src/git.mjs';
 
 async function fixture(t, streaming = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-manager-test-'));
@@ -96,4 +97,46 @@ test('server recovery terminates persisted queued sessions too', async t => {
   await f.store.save({ ...f.task, status: 'QUEUED' });
   await f.manager.init();
   assert.equal(f.manager.getTask('a').errorCode, 'FAILED_RECOVERY');
+});
+
+test('applyTask applies the result patch to a clean source, then cleanup removes the worktree', async t => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-apply-data-'));
+  const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-apply-repo-'));
+  const store = new TaskStore(dataRoot);
+  t.after(async () => {
+    store.close();
+    await fs.rm(dataRoot, { recursive: true, force: true });
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+  await git(['init', repo], os.tmpdir());
+  await git(['config', 'user.name', 'Test'], repo);
+  await git(['config', 'user.email', 'test@example.invalid'], repo);
+  await git(['config', 'core.autocrlf', 'false'], repo);
+  await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+  await git(['add', '.'], repo);
+  await git(['commit', '-m', 'Base'], repo);
+
+  const prepared = await prepareProjectWorkspace({ path: repo, useWorktree: true }, 'w', dataRoot);
+  await fs.writeFile(path.join(prepared.workspacePath, 'base.txt'), 'base\nchanged\n');
+  const state = await collectGitState(prepared.workspacePath);
+
+  const manager = new TaskManager({ projects: [{ id: 'p', path: repo, useWorktree: true }] }, dataRoot, store);
+  const task = {
+    id: 'w', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'SUCCEEDED',
+    worktree: true, sourcePath: repo, workspacePath: prepared.workspacePath, baseCommit: prepared.baseCommit,
+    projectId: 'p', prompt: 'edit', files: [], attachments: [], outputFiles: []
+  };
+  await store.create(task);
+  await store.writeArtifact('w', 'diff.patch', state.diff);
+  manager.tasks.set('w', task);
+
+  const applied = await manager.applyTask('w');
+  assert.deepEqual(applied.applied.files, ['base.txt']);
+  assert.equal(await fs.readFile(path.join(repo, 'base.txt'), 'utf8'), 'base\nchanged\n');
+  // A dirty source now blocks another apply unless it is forced.
+  await assert.rejects(manager.applyTask('w'), { code: 'PROJECT_DIRTY' });
+  await manager.cleanupWorktree('w');
+  await assert.rejects(fs.access(prepared.workspacePath));
+  assert.equal(manager.getTask('w').workspacePath, null);
+  await assert.rejects(manager.cleanupWorktree('w'), { code: 'INPUT_INVALID' });
 });

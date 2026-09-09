@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { git, collectGitState, prepareProjectWorkspace } from '../src/git.mjs';
+import { git, collectGitState, prepareProjectWorkspace, applyTaskPatch, removeWorktree } from '../src/git.mjs';
 
 async function repository(t, { unborn = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-git-test-'));
@@ -115,4 +115,32 @@ test('worktree creation rejects traversal and existing directories without delet
   const created = await prepareProjectWorkspace({ path: repo }, 'new-task', data);
   assert.equal(created.worktree, true);
   assert.equal((await git(['rev-parse', 'HEAD'], created.workspacePath)).stdout, (await git(['rev-parse', 'HEAD'], repo)).stdout);
+});
+
+test('result patch applies to the source checkout and the worktree can be removed', async t => {
+  const repo = await repository(t);
+  await fs.writeFile(path.join(repo, 'file.txt'), 'base\n');
+  await git(['add', '.'], repo);
+  await git(['commit', '-m', 'Base'], repo);
+  const data = path.join(repo, '.git', 'taskbridge-data');
+  const created = await prepareProjectWorkspace({ path: repo }, 'task-apply', data);
+  assert.equal(created.baseCommit, (await git(['rev-parse', 'HEAD'], repo)).stdout.trim());
+  await fs.writeFile(path.join(created.workspacePath, 'file.txt'), 'base\nchanged\n');
+  await fs.writeFile(path.join(created.workspacePath, 'new.txt'), 'new file\n');
+  const state = await collectGitState(created.workspacePath);
+  const result = await applyTaskPatch(repo, state.diff);
+  assert.deepEqual(new Set(result.files), new Set(['file.txt', 'new.txt']));
+  assert.equal(await fs.readFile(path.join(repo, 'file.txt'), 'utf8'), 'base\nchanged\n');
+  assert.equal(await fs.readFile(path.join(repo, 'new.txt'), 'utf8'), 'new file\n');
+  // A patch that no longer applies must fail before touching the checkout.
+  await assert.rejects(applyTaskPatch(repo, state.diff));
+  await removeWorktree(created.workspacePath, repo, path.join(data, 'worktrees'));
+  await assert.rejects(fs.access(created.workspacePath));
+  assert.doesNotMatch((await git(['worktree', 'list'], repo)).stdout, /task-apply/);
+});
+
+test('worktree removal refuses paths outside the worktree root', async t => {
+  const repo = await repository(t);
+  const data = path.join(repo, '.git', 'taskbridge-data');
+  await assert.rejects(removeWorktree(repo, repo, path.join(data, 'worktrees')), { code: 'INPUT_INVALID' });
 });

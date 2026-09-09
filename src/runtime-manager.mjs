@@ -10,6 +10,7 @@ export class RuntimeManager {
     this.state = 'STOPPED';
     this.activeProfileId = null;
     this.lastError = null;
+    this.engineCache = null;
   }
 
   async isReady() {
@@ -45,6 +46,39 @@ export class RuntimeManager {
     const profiles = Array.isArray(configured) ? configured : Object.entries(configured || {}).map(([id, profile]) => ({ ...profile, id }));
     const id = profileId || this.config.defaultProfile || profiles[0]?.id;
     return profiles.find(p => p.id === id) || null;
+  }
+
+  // Engine health for the UI. /props and /slots are llama.cpp endpoints; other
+  // OpenAI-compatible servers may not expose them, so every field is optional.
+  async getEngineInfo() {
+    const url = this.config.healthUrl;
+    if (!url) return { configured: false, reachable: false, state: this.state };
+    if (this.engineCache && Date.now() - this.engineCache.at < 3000) return this.engineCache.value;
+    const base = url.replace(/\/health$/, '');
+    const load = async pathname => {
+      try {
+        const res = await fetch(base + pathname, { signal: AbortSignal.timeout(1500) });
+        return res.ok ? await res.json() : null;
+      } catch { return null; }
+    };
+    let value;
+    if (await this.isReady()) {
+      const [props, slots] = await Promise.all([load('/props'), load('/slots')]);
+      value = {
+        configured: true,
+        reachable: true,
+        state: this.state,
+        model: props?.model_path ? path.basename(props.model_path) : null,
+        contextWindow: props?.default_generation_settings?.n_ctx ?? props?.n_ctx ?? null,
+        slots: Array.isArray(slots)
+          ? { total: slots.length, busy: slots.filter(slot => slot?.is_processing).length }
+          : null
+      };
+    } else {
+      value = { configured: true, reachable: false, state: this.state, error: this.lastError };
+    }
+    this.engineCache = { at: Date.now(), value };
+    return value;
   }
 
   async getStatus() {

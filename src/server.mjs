@@ -16,6 +16,7 @@ import { RuntimeControl } from './runtime-control.mjs';
 import { ensureTlsCert } from './tls.mjs';
 import { trimStreamingDeltas } from './event-trim.mjs';
 import { windowByTurns } from './event-window.mjs';
+import { multipartBoundary } from './multipart.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -52,6 +53,8 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 const access = new AccessControl(config.server?.auth, dataRoot);
 await access.init();
 const runtimeControl = new RuntimeControl(manager.runtimeManager, manager);
+// AUTO dispatcher switches the managed model profile by restarting the runtime.
+manager.runtimeSwitcher = profileId => runtimeControl.restart(profileId);
 const httpsConfig = config.server?.https || {};
 
 const sseClients = new Map();
@@ -88,6 +91,9 @@ setInterval(() => {
     }
   }
 }, 15000).unref();
+
+// Abandoned uploads are only referenced by a token the client may never use.
+setInterval(() => manager.uploads.cleanup().catch(() => {}), 30 * 60 * 1000).unref();
 
 function json(res, status, body) {
   const text = JSON.stringify(body, null, 2);
@@ -203,7 +209,7 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === 'GET' && pathname === '/api/info') {
-      const [busy, modelReady] = await Promise.all([manager.runtimeManager.getBusyStatus(), manager.runtimeManager.isReady()]);
+      const [busy, modelReady, engine] = await Promise.all([manager.runtimeManager.getBusyStatus(), manager.runtimeManager.isReady(), manager.runtimeManager.getEngineInfo()]);
       return json(res, 200, {
         name: 'TaskBridge MVP',
         build,
@@ -213,12 +219,20 @@ async function handleRequest(req, res) {
         ],
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
+        engine,
         fileLimits: FILE_LIMITS
       });
     }
 
     if (req.method === 'GET' && pathname === '/api/projects') {
       return json(res, 200, manager.listProjects());
+    }
+
+    if (req.method === 'POST' && pathname === '/api/uploads') {
+      const boundary = multipartBoundary(req.headers['content-type']);
+      if (!boundary) throw Object.assign(new Error('Ожидается multipart/form-data с boundary.'), { code: 'INPUT_INVALID' });
+      const token = manager.uploads.newToken();
+      return json(res, 201, await manager.uploads.receive(req, boundary, token));
     }
 
     const projectMatch = pathname.match(/^\/api\/projects\/([^/]+)$/);
@@ -327,7 +341,7 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/message$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || []));
+      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/auto-compaction$/);
@@ -341,6 +355,15 @@ async function handleRequest(req, res) {
       const body = await readJson(req);
       return json(res, 200, { result: await manager.compact(match[1], body.instructions || '') });
     }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/apply$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req).catch(() => ({}));
+      return json(res, 200, await manager.applyTask(match[1], { force: body.force === true }));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/worktree$/);
+    if (req.method === 'DELETE' && match) return json(res, 200, await manager.cleanupWorktree(match[1]));
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts$/);
     if (req.method === 'GET' && match) {
@@ -385,7 +408,7 @@ async function handleRequest(req, res) {
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
       : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED'].includes(error.code) ? 400
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE'].includes(error.code) ? 409
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429
