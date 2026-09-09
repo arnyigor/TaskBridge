@@ -20,6 +20,11 @@ let turnNodes = new Map();
 let liveActive = false;
 let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 4s
 
+// Interactive tool approvals (§52–§55). The Pi extension asks TaskBridge before
+// a risky tool call; the request stays pending until an operator answers here
+// or from the remote PWA.
+let pendingApprovals = new Map();
+
 const HISTORY_PAGE_TURNS = 20;
 let currentTask = null;
 let reachedHistoryStart = true;
@@ -324,6 +329,8 @@ function resetSelection(id) {
   refreshTimer = null;
   textUpdateTimer = null;
   chatState = null;
+  pendingApprovals = new Map();
+  renderApprovals();
   turnNodes = new Map();
   liveTurn = null;
   liveThinking = liveText = '';
@@ -431,8 +438,66 @@ function renderChat() {
 }
 
 function applyEvents(events) {
-  for (const event of events) chatState.apply(event);
+  let approvalsChanged = false;
+  for (const event of events) {
+    chatState.apply(event);
+    if (event.type === 'APPROVAL_REQUIRED' && event.data?.approvalId) {
+      pendingApprovals.set(event.data.approvalId, { ...event.data, status: 'PENDING' });
+      approvalsChanged = true;
+    }
+    if (event.type === 'APPROVAL_RESOLVED' && event.data?.approvalId) {
+      const record = pendingApprovals.get(event.data.approvalId);
+      if (record) record.status = event.data.decision === 'DENY' ? 'DENIED' : 'APPROVED';
+      approvalsChanged = true;
+    }
+  }
   renderChat();
+  if (approvalsChanged) renderApprovals();
+}
+
+function renderApprovals() {
+  const banner = $('approvalBanner');
+  const pending = [...pendingApprovals.values()].filter(approval => approval.status === 'PENDING');
+  banner.textContent = '';
+  banner.classList.toggle('hidden', pending.length === 0);
+  for (const approval of pending) {
+    const card = document.createElement('div');
+    card.className = 'approvalCard';
+    const title = document.createElement('b');
+    title.textContent = `Требуется подтверждение: ${approval.toolName || 'инструмент'} (${approval.risk || 'риск не определён'})`;
+    card.append(title);
+    const detail = document.createElement('code');
+    detail.textContent = String(approval.detail || JSON.stringify(approval.args || {})).slice(0, 400);
+    card.append(detail);
+    const actions = document.createElement('div');
+    actions.className = 'approvalActions';
+    for (const [label, decision] of [['Разрешить один раз', 'ALLOW_ONCE'], ['Запретить', 'DENY']]) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = decision === 'DENY' ? 'small danger' : 'small';
+      button.textContent = label;
+      button.onclick = () => resolveApproval(approval.approvalId, decision, button);
+      actions.append(button);
+    }
+    card.append(actions);
+    banner.append(card);
+  }
+}
+
+async function resolveApproval(approvalId, decision, button) {
+  if (!selectedTaskId) return;
+  button.disabled = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/approvals/${encodeURIComponent(approvalId)}`, {
+      method: 'POST', body: JSON.stringify({ decision })
+    });
+    const record = pendingApprovals.get(approvalId);
+    if (record) record.status = decision === 'DENY' ? 'DENIED' : 'APPROVED';
+    renderApprovals();
+  } catch (error) {
+    button.disabled = false;
+    $('createError').textContent = `Не удалось ответить на запрос подтверждения: ${error.message}`;
+  }
 }
 
 // Builds a complete, already-settled bot turn in one shot for history
@@ -615,6 +680,13 @@ async function selectTask(id) {
     reachedHistoryStart = initial.reachedStart;
     oldestLoadedSeq = initial.events.length ? initial.events[0].seq : null;
     chatState = new ChatState(t, { seedInitial: initial.reachedStart });
+    // A pending approval from before this page load must still be answerable.
+    try {
+      for (const approval of await api(`/api/tasks/${encodeURIComponent(id)}/approvals`)) {
+        if (approval.status === 'PENDING') pendingApprovals.set(approval.approvalId, approval);
+      }
+      renderApprovals();
+    } catch { /* approvals are optional */ }
     applyEvents(initial.events);
     renderLoadOlderIndicator();
     chatState.snapshot(t, true);
@@ -1273,6 +1345,80 @@ $('sessionPickerClose').onclick = () => $('sessionPickerOverlay').classList.add(
 
 $('helpButton').onclick = () => $('helpOverlay').classList.remove('hidden');
 $('helpClose').onclick = () => $('helpOverlay').classList.add('hidden');
+
+/* ---------------- cloud settings (§91) ---------------- */
+
+function setCloudStatus(text, isError = false) {
+  const node = $('cloudStatus');
+  node.textContent = text;
+  node.classList.toggle('error', isError);
+}
+
+async function openCloudSettings() {
+  $('cloudOverlay').classList.remove('hidden');
+  setCloudStatus('Загрузка…');
+  try {
+    const config = await api('/api/cloud/config');
+    $('cloudEnabled').checked = config.enabled;
+    $('cloudUrl').value = config.saved.url || config.url || '';
+    $('cloudMachineId').value = config.saved.machineId || config.machineId || '';
+    $('cloudMachineName').value = config.saved.machineDisplayName || config.machineDisplayName || '';
+    $('cloudRedact').checked = config.redactPaths !== false;
+    $('cloudSecret').value = '';
+    $('cloudSecret').placeholder = config.saved.hasSecret || config.hasSecret
+      ? `сохранён (${config.secretFingerprint || '••••'}) — оставьте пустым, чтобы не менять`
+      : 'секрет не задан';
+    const notes = [];
+    if (config.envLocked?.length) notes.push(`переменные окружения перекрывают: ${config.envLocked.join(', ')}`);
+    if (!config.enabled) notes.push('облако выключено');
+    setCloudStatus(notes.join(' · ') || 'Готово');
+  } catch (error) {
+    setCloudStatus(`Не удалось прочитать настройки: ${error.message}`, true);
+  }
+}
+
+$('cloudButton').onclick = openCloudSettings;
+$('cloudClose').onclick = () => $('cloudOverlay').classList.add('hidden');
+
+$('cloudTest').onclick = async () => {
+  setCloudStatus('Проверяю соединение…');
+  try {
+    const result = await api('/api/cloud/test', {
+      method: 'POST',
+      body: JSON.stringify({
+        url: $('cloudUrl').value.trim(),
+        machineId: $('cloudMachineId').value.trim(),
+        machineSecret: $('cloudSecret').value
+      })
+    });
+    if (result.ok) setCloudStatus(`Соединение работает: ${result.url} (${result.machineId})`);
+    else setCloudStatus(`Не получилось: ${(result.problems || []).join('; ') || `${result.error?.code}: ${result.error?.message}`}`, true);
+  } catch (error) {
+    setCloudStatus(`Не получилось: ${error.message}`, true);
+  }
+};
+
+$('cloudForm').onsubmit = async (event) => {
+  event.preventDefault();
+  setCloudStatus('Сохраняю…');
+  try {
+    const result = await api('/api/cloud/config', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: $('cloudEnabled').checked,
+        url: $('cloudUrl').value.trim(),
+        machineId: $('cloudMachineId').value.trim(),
+        machineDisplayName: $('cloudMachineName').value.trim(),
+        redactPaths: $('cloudRedact').checked,
+        machineSecret: $('cloudSecret').value || undefined
+      })
+    });
+    $('cloudSecret').value = '';
+    setCloudStatus(result.enabled ? `Сохранено. Транспорт запущен: ${result.url}` : 'Сохранено. Облачный транспорт выключен.');
+  } catch (error) {
+    setCloudStatus(`Не сохранено: ${error.message}`, true);
+  }
+};
 
 async function importSession(projectId, session) {
   if (!session.existingTaskId && !confirm('TaskBridge не может проверить, открыта ли эта сессия в терминале. Если процесс pi там ещё работает — закройте его сейчас: при одновременной записи с двух сторон файл сессии может испортиться. Сессия точно закрыта?')) return;

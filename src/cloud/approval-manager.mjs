@@ -29,6 +29,7 @@ export class ApprovalManager extends EventEmitter {
     this.clearTimer = clearTimer;
     this.pendingApprovals = new Map();
     this.resolved = new Set();
+    this.history = new Map();
     this.stats = { requested: 0, allowed: 0, denied: 0, timedOut: 0 };
   }
 
@@ -78,8 +79,17 @@ export class ApprovalManager extends EventEmitter {
     if (decision === 'ALLOW_ONCE') this.stats.allowed += 1;
     else this.stats.denied += 1;
     record.resolve(decision);
+    this.history.set(id, this.#public(record));
+    if (this.history.size > 500) this.history.delete(this.history.keys().next().value);
     this.emit('resolved', { ...this.#public(record), ...extra });
     return true;
+  }
+
+  // Pending or already-resolved record, so a polling client can learn the final
+  // decision without keeping a request open (§56).
+  get(id) {
+    const record = this.pendingApprovals.get(id) || this.history.get(id);
+    return record ? this.#public(record) : null;
   }
 
   isPending(id) {

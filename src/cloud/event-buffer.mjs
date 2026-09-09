@@ -20,9 +20,11 @@ export class EventBuffer extends EventEmitter {
     coalesce = true,
     now = () => Date.now(),
     setTimer = setTimeout,
-    clearTimer = clearTimeout
+    clearTimer = clearTimeout,
+    metrics = null
   } = {}) {
     super();
+    this.metrics = metrics;
     this.flushMs = flushMs;
     this.maxEvents = maxEvents;
     this.maxBytes = maxBytes;
@@ -46,6 +48,7 @@ export class EventBuffer extends EventEmitter {
     this.pending.push(event);
     this.bytes += Buffer.byteLength(JSON.stringify(event), 'utf8');
     this.stats.pushed += 1;
+    this.metrics?.set('cloud_buffer_pending_events', this.pending.length);
     if (isHighPriorityEvent(event.type)) this.#schedule(0);
     else this.#schedule(this.flushMs);
   }
@@ -96,7 +99,11 @@ export class EventBuffer extends EventEmitter {
 
     this.stats.flushed += events.length;
     this.stats.batches += batches.length;
-    for (const batch of batches) this.emit('flush', batch);
+    this.metrics?.set('cloud_buffer_pending_events', 0);
+    for (const batch of batches) {
+      this.metrics?.observe('cloud_event_batch_size', batch.length);
+      this.emit('flush', batch);
+    }
     return batches;
   }
 

@@ -6,8 +6,9 @@ import { EventEmitter } from 'node:events';
 export const DEFAULT_BACKOFF_MS = [1000, 2000, 4000, 8000, 15000, 30000];
 
 export class ReconnectManager extends EventEmitter {
-  constructor({ backoffMs = DEFAULT_BACKOFF_MS, maxDelayMs = 30000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  constructor({ backoffMs = DEFAULT_BACKOFF_MS, maxDelayMs = 30000, setTimer = setTimeout, clearTimer = clearTimeout, metrics = null } = {}) {
     super();
+    this.metrics = metrics;
     this.backoff = backoffMs.map(value => Math.min(value, maxDelayMs));
     this.maxDelayMs = maxDelayMs;
     this.setTimer = setTimer;
@@ -35,6 +36,7 @@ export class ReconnectManager extends EventEmitter {
     this.connected = false;
     if (wasConnected) {
       this.reconnects += 1;
+      this.metrics?.increment('realtime_reconnect_count');
       this.emit('disconnected', reason);
     }
   }

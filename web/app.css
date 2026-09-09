@@ -860,3 +860,30 @@ pre {
   .runtimeControl select { max-width: 84px; }
   #pairButton { padding: 6px 8px; font-size: 11px; }
 }
+
+/* Interactive tool approvals (§52–§55) */
+.approvalBanner { display: grid; gap: 8px; padding: 8px 12px; }
+.approvalCard {
+  border: 1px solid #b8860b;
+  background: rgba(184, 134, 11, 0.12);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+}
+.approvalCard code {
+  display: block;
+  font-size: 12px;
+  word-break: break-all;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 6px 8px;
+  border-radius: 6px;
+}
+.approvalActions { display: flex; gap: 8px; }
+.approvalActions .danger { border-color: #b23; color: #ffb3b3; }
+
+/* Cloud settings (§91) */
+.cloudRow { display: flex; align-items: center; gap: 8px; }
+.cloudRow input[type="checkbox"] { width: auto; margin: 0; }
+.cloudActions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+#cloudStatus { margin-top: 8px; }

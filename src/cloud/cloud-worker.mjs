@@ -10,17 +10,17 @@ import { EventUploader } from './event-uploader.mjs';
 import { ReconnectManager } from './reconnect-manager.mjs';
 import { Heartbeat } from './heartbeat.mjs';
 import { CommandDispatcher, CommandLedger } from './command-dispatcher.mjs';
-import { ApprovalManager } from './approval-manager.mjs';
 import { CloudTransport, LocalTransport, CompositeTransport } from './cloud-transport.mjs';
 import { compareCommands } from '../domain/cloud-command.mjs';
 import { isTerminalState } from '../domain/task-event.mjs';
 import { secretFingerprint } from './machine-auth.mjs';
+import { Metrics } from '../metrics.mjs';
 
 // CloudWorker is the local half of the cloud transport (§8, §18, §19, §20,
 // §71–§73, §114). It owns nothing that TaskManager needs: the local runtime
 // keeps working exactly as before if this worker is disabled or fails.
 
-const RUNNING_LOCAL_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING']);
+const RUNNING_LOCAL_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING']);
 
 function defaultLogger(level, entry) {
   const line = JSON.stringify({ level, at: new Date().toISOString(), ...entry });
@@ -56,7 +56,8 @@ export class CloudWorker {
       fetchImpl,
       logger
     });
-    this.reconnect = new ReconnectManager({ maxDelayMs: config.maxRetryDelayMs, setTimer, clearTimer });
+    this.metrics = new Metrics();
+    this.reconnect = new ReconnectManager({ maxDelayMs: config.maxRetryDelayMs, setTimer, clearTimer, metrics: this.metrics });
     this.outbox = new CloudOutbox({
       dir: path.join(dataRoot, 'cloud-outbox'),
       maxBytes: config.maxOutboxMb * 1024 * 1024,
@@ -66,10 +67,11 @@ export class CloudWorker {
     this.mux = new EventMux({
       machineId: config.machineId,
       sequence: this.sequence,
-      normalizer: new EventNormalizer(),
+      normalizer: new EventNormalizer({ toolOutput: config.toolOutput }),
       snapshotPolicy: new SnapshotPolicy(),
       aliases,
       redactPaths: config.redactPaths,
+      largePayloadBytes: Math.max(1024, Math.floor(Number(config.toolOutput?.maxFullMb ?? 4) * 1048576)),
       logger
     });
     this.buffer = new EventBuffer({
@@ -78,9 +80,10 @@ export class CloudWorker {
       maxBytes: config.eventBatchMaxKb * 1024,
       coalesce: config.coalesceDeltas,
       setTimer,
-      clearTimer
+      clearTimer,
+      metrics: this.metrics
     });
-    this.uploader = new EventUploader({ client: this.client, outbox: this.outbox, reconnect: this.reconnect, logger, maxRetryDelayMs: config.maxRetryDelayMs });
+    this.uploader = new EventUploader({ client: this.client, outbox: this.outbox, reconnect: this.reconnect, logger, maxRetryDelayMs: config.maxRetryDelayMs, metrics: this.metrics });
     this.transport = new CloudTransport({ buffer: this.buffer, uploader: this.uploader, reconnect: this.reconnect, sequence: this.sequence, machineId: config.machineId, logger });
     this.localTransport = new LocalTransport({ logger });
     this.transports = new CompositeTransport([this.localTransport, this.transport]);
@@ -91,19 +94,16 @@ export class CloudWorker {
       logger,
       protocolVersion: config.protocolVersion,
       setTimer,
-      clearTimer
+      clearTimer,
+      metrics: this.metrics
     });
-    this.approvals = new ApprovalManager({
-      timeoutMinutes: config.approvalTimeoutMinutes,
-      timeoutPolicy: config.approvalTimeoutPolicy,
-      setTimer,
-      clearTimer
-    });
+    // Approvals are owned by TaskManager (shared with the local UI); the cloud
+    // path only forwards APPROVAL_RESPONSE commands into it.
     this.dispatcher = new CommandDispatcher({
       manager,
-      approvals: this.approvals,
       ledger: new CommandLedger({ store }),
-      logger
+      logger,
+      metrics: this.metrics
     });
 
     this.mux.addTransport(this.transport);
@@ -111,23 +111,6 @@ export class CloudWorker {
     this.transport.onCommand(command => this.dispatcher.handle(command));
     this.heartbeat.on('sent', payload => { this.lastHeartbeatAt = payload.timestamp; this.reconnect.markConnected(); });
     this.heartbeat.on('failed', () => this.reconnect.markDisconnected('heartbeat_failed'));
-    this.approvals.on('requested', approval => {
-      this.mux.publishLocal(approval.taskId, 'approval_required', {
-        approvalId: approval.approvalId,
-        toolCallId: approval.toolCallId,
-        toolName: approval.toolName,
-        args: approval.args,
-        risk: approval.risk
-      });
-      this.mux.publishLocal(approval.taskId, 'task_state', { status: 'WAITING_USER', current: `Approval required: ${approval.toolName || 'tool'}` });
-    });
-    this.approvals.on('resolved', approval => {
-      this.mux.publishLocal(approval.taskId, 'approval_resolved', {
-        approvalId: approval.approvalId,
-        decision: approval.decision,
-        status: approval.status
-      });
-    });
   }
 
   get enabled() { return this.config.enabled === true; }
@@ -159,7 +142,6 @@ export class CloudWorker {
     this.running = false;
     if (this.pollTimer != null) { this.clearTimer(this.pollTimer); this.pollTimer = null; }
     this.heartbeat.stop();
-    this.approvals.stop();
     await this.transports.stop().catch(() => {});
     this.mux.detach();
     this.logger('info', { component: 'CloudWorker', event: 'stopped' });
@@ -181,7 +163,7 @@ export class CloudWorker {
         followUp: true,
         abort: true,
         compact: true,
-        approvals: true,
+        approvals: typeof this.manager.approvalEnabled === 'function' ? this.manager.approvalEnabled() : false,
         setModel: typeof this.manager.setModel === 'function',
         setThinking: typeof this.manager.setThinking === 'function',
         toolStreaming: true
@@ -227,6 +209,7 @@ export class CloudWorker {
       PREPARING: 'STARTING',
       PREFLIGHT: 'STARTING',
       RUNNING: 'RUNNING',
+      WAITING_USER: 'WAITING_USER',
       VERIFYING: 'RUNNING',
       CANCELLING: 'STOPPING',
       SUCCEEDED: 'COMPLETED',
@@ -285,8 +268,20 @@ export class CloudWorker {
     }
   }
 
+  // Local sequence vs uploaded sequence per task (§89 task_event_lag).
+  eventLag() {
+    const uploaded = this.uploader.snapshot().lastUploadedSeq;
+    const lag = {};
+    for (const [taskId, seq] of Object.entries(this.sequence.snapshot())) {
+      lag[taskId] = Math.max(0, seq - (uploaded[taskId] ?? 0));
+      this.metrics.set('task_event_lag', lag[taskId], { taskId });
+    }
+    return lag;
+  }
+
   async status() {
     const outbox = await this.outbox.stats().catch(() => null);
+    const lag = this.eventLag();
     return {
       enabled: this.enabled,
       running: this.running,
@@ -303,11 +298,13 @@ export class CloudWorker {
       pendingEvents: this.buffer.pendingCount + (outbox?.events ?? 0),
       outbox,
       lastUploadedSeq: this.uploader.snapshot().lastUploadedSeq,
+      eventLag: lag,
+      metrics: this.metrics.snapshot(),
       lastCommandSeq: this.dispatcher.lastSeq,
       reconcile: this.reconciled,
       buffer: this.buffer.snapshot(),
       dispatcher: { ...this.dispatcher.stats },
-      approvals: this.approvals.snapshot(),
+      approvals: this.manager.approvals?.snapshot?.() ?? null,
       reconnect: this.reconnect.stats()
     };
   }

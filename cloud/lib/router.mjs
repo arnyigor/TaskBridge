@@ -6,7 +6,7 @@ import { isTerminalState, isTaskState } from '../../src/domain/task-event.mjs';
 // The whole cloud API surface (§14, §17, §43, §44, §92). Framework-free so the
 // same code runs behind a Vercel function, a Node server and the tests.
 
-const USER_COMMAND_TYPES = new Set(['ABORT_TASK', 'FOLLOW_UP', 'COMPACT', 'SET_MODEL', 'SET_THINKING', 'APPROVAL_RESPONSE']);
+const USER_COMMAND_TYPES = new Set(['ABORT_TASK', 'FOLLOW_UP', 'COMPACT', 'SET_MODEL', 'SET_THINKING', 'APPROVAL_RESPONSE', 'FETCH_TOOL_OUTPUT']);
 
 // Cloud-side view of a task is a *replica*; the machine is the authority (§71).
 const TERMINAL_EVENT_STATE = {
@@ -87,6 +87,36 @@ export function createRouter({ store, auth, now = () => Date.now(), offlineAfter
       return { status: 200, body: out };
     }],
     ['GET', /^\/api\/machines\/([^/]+)$/, async ({ user, params }) => ({ status: 200, body: await machineView(params[0], user.id) })],
+
+    // Cloud-side metrics (§89). Derived from the store so they stay correct
+    // across function invocations, unlike process-local counters.
+    ['GET', /^\/api\/metrics$/, async ({ user }) => {
+      const machines = await store.listMachines(user.id);
+      const tasks = await store.listTasks(user.id, { limit: 500 });
+      const machinesByStatus = {};
+      let pendingCommands = 0;
+      for (const machine of machines) {
+        const status = heartbeatFreshness(machine, now(), offlineAfterMs);
+        machinesByStatus[status] = (machinesByStatus[status] || 0) + 1;
+        pendingCommands += (await store.listCommands(machine.id, { after: 0, limit: 500 })).filter(command => command.status === 'PENDING').length;
+      }
+      const tasksByStatus = {};
+      let eventLag = 0;
+      for (const task of tasks) {
+        tasksByStatus[task.status] = (tasksByStatus[task.status] || 0) + 1;
+        eventLag = Math.max(eventLag, Math.max(0, Number(task.lastEventSeq || 0) - (await store.lastEventSeq(task.id))));
+      }
+      return {
+        status: 200,
+        body: {
+          generatedAt: iso(),
+          machines: { total: machines.length, byStatus: machinesByStatus },
+          tasks: { total: tasks.length, byStatus: tasksByStatus },
+          commands: { pending: pendingCommands },
+          events: { maxLag: eventLag }
+        }
+      };
+    }],
 
     ['GET', /^\/api\/tasks$/, async ({ user, query }) => {
       const limit = Math.min(Math.max(Number(query.limit ?? 100), 1), 500);

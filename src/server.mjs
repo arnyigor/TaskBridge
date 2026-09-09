@@ -20,6 +20,9 @@ import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
 import { resolveCloudConfig, validateCloudConfig } from './cloud/cloud-config.mjs';
 import { CloudWorker } from './cloud/cloud-worker.mjs';
+import { CloudClient } from './cloud/cloud-client.mjs';
+import { secretFingerprint } from './cloud/machine-auth.mjs';
+import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -58,6 +61,9 @@ const store = new TaskStore(dataRoot, {
   busyTimeoutMs: config.server?.sqlite?.busyTimeoutMs
 });
 const manager = new TaskManager(config, dataRoot, store);
+// The Pi approval extension needs a loopback endpoint and its absolute path.
+manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
+manager.approvalExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-approval.js');
 await manager.init();
 
 // Checkpoint and close SQLite cleanly on Ctrl+C instead of leaving a WAL tail.
@@ -77,10 +83,25 @@ const httpsConfig = config.server?.https || {};
 
 // Optional cloud control plane (§6, §11, §90). Local-only mode is the default
 // and must keep working with no Vercel dependency at all.
-const cloudConfig = resolveCloudConfig(config, process.env, { dataRoot });
-const cloudCheck = validateCloudConfig(cloudConfig);
+let cloudConfig = resolveCloudConfig(config, process.env, { dataRoot });
+let cloudCheck = validateCloudConfig(cloudConfig);
 let cloudWorker = null;
-if (cloudConfig.enabled && cloudCheck.ok) {
+
+// Resolves the effective cloud configuration from config.json + environment,
+// validates it and (re)starts the worker. Used at boot and when the settings
+// screen saves a new configuration (§91).
+async function applyCloudConfig({ quiet = false } = {}) {
+  if (cloudWorker) {
+    await cloudWorker.stop().catch(() => {});
+    cloudWorker = null;
+  }
+  cloudConfig = resolveCloudConfig(config, process.env, { dataRoot });
+  cloudCheck = validateCloudConfig(cloudConfig);
+  if (!cloudConfig.enabled) return { enabled: false, problems: [] };
+  if (!cloudCheck.ok) {
+    console.error(`[TaskBridge] cloud transport disabled: ${cloudCheck.problems.join('; ')}`);
+    return { enabled: false, problems: cloudCheck.problems };
+  }
   const aliases = {};
   for (const project of config.projects || []) {
     const alias = String(project.id || '').toUpperCase().replace(/[^A-Z0-9]+/g, '_');
@@ -97,10 +118,10 @@ if (cloudConfig.enabled && cloudCheck.ok) {
   cloudWorker.start().catch((error) => {
     console.error(`[TaskBridge] cloud transport failed to start: ${error.message}`);
   });
-  console.log(`[TaskBridge] cloud transport enabled: ${cloudConfig.url} as ${cloudConfig.machineId}`);
-} else if (cloudConfig.enabled && !cloudCheck.ok) {
-  console.error(`[TaskBridge] cloud transport disabled: ${cloudCheck.problems.join('; ')}`);
+  if (!quiet) console.log(`[TaskBridge] cloud transport enabled: ${cloudConfig.url} as ${cloudConfig.machineId}`);
+  return { enabled: true, problems: [] };
 }
+await applyCloudConfig();
 
 const sseClients = new Map();
 
@@ -237,6 +258,101 @@ async function handleRequest(req, res) {
       if (!access.enabled || !access.local(req)) return errorJson(res, 403, new Error('Код доступен только на компьютере через localhost.'));
       return json(res, 200, access.pairing());
     }
+    // --- cloud settings screen (§91) -----------------------------------------
+    if (req.method === 'GET' && pathname === '/api/cloud/config') {
+      const saved = config.cloud || {};
+      const envLocked = ['TASKBRIDGE_CLOUD_ENABLED', 'TASKBRIDGE_CLOUD_URL', 'TASKBRIDGE_MACHINE_ID', 'TASKBRIDGE_MACHINE_SECRET']
+        .filter(key => process.env[key]);
+      return json(res, 200, {
+        enabled: cloudConfig.enabled,
+        url: cloudConfig.url,
+        machineId: cloudConfig.machineId,
+        machineDisplayName: cloudConfig.machineDisplayName || '',
+        authMode: cloudConfig.authMode,
+        hasSecret: Boolean(cloudConfig.machineSecret),
+        secretFingerprint: cloudConfig.machineSecret ? secretFingerprint(cloudConfig.machineSecret) : null,
+        realtime: cloudConfig.realtime,
+        eventFlushMs: cloudConfig.eventFlushMs,
+        eventBatchMax: cloudConfig.eventBatchMax,
+        heartbeatSeconds: cloudConfig.heartbeatSeconds,
+        idlePollSeconds: cloudConfig.idlePollSeconds,
+        activePollSeconds: cloudConfig.activePollSeconds,
+        maxOutboxMb: cloudConfig.maxOutboxMb,
+        redactPaths: cloudConfig.redactPaths,
+        protocolVersion: cloudConfig.protocolVersion,
+        envLocked,
+        saved: {
+          enabled: Boolean(saved.enabled),
+          url: saved.url || '',
+          machineId: saved.machineId || '',
+          machineDisplayName: saved.machineDisplayName || '',
+          hasSecret: Boolean(saved.machineSecret)
+        }
+      });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/cloud/config') {
+      const body = await readJson(req);
+      const next = { ...(config.cloud || {}) };
+      if ('enabled' in body) next.enabled = Boolean(body.enabled);
+      if ('url' in body) next.url = String(body.url || '').trim();
+      if ('machineId' in body) next.machineId = String(body.machineId || '').trim();
+      if ('machineDisplayName' in body) next.machineDisplayName = String(body.machineDisplayName || '').trim().slice(0, 120);
+      if ('authMode' in body && ['bearer', 'hmac'].includes(String(body.authMode))) next.authMode = String(body.authMode);
+      if ('redactPaths' in body) next.redactPaths = Boolean(body.redactPaths);
+      if (body.machineSecret) next.machineSecret = String(body.machineSecret);
+      if (body.clearSecret) delete next.machineSecret;
+
+      // Validate the candidate *before* persisting, so a typo cannot leave the
+      // machine with a cloud transport that never starts.
+      const candidate = resolveCloudConfig({ ...config, cloud: next }, process.env, { dataRoot });
+      const candidateCheck = validateCloudConfig(candidate);
+      if (!candidateCheck.ok) {
+        return errorJson(res, 400, Object.assign(new Error(candidateCheck.problems.join('; ')), { code: 'INPUT_INVALID' }));
+      }
+      config.cloud = next;
+      await saveConfig(rootDir, config);
+      const applied = await applyCloudConfig({ quiet: true });
+      return json(res, 200, { ok: true, enabled: applied.enabled, machineId: cloudConfig.machineId, url: cloudConfig.url });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/cloud/test') {
+      const body = await readJson(req);
+      const saved = config.cloud || {};
+      const candidate = resolveCloudConfig({
+        ...config,
+        cloud: {
+          ...saved,
+          enabled: true,
+          url: body.url ?? saved.url,
+          machineId: body.machineId ?? saved.machineId,
+          machineSecret: body.machineSecret || saved.machineSecret
+        }
+      }, process.env, { dataRoot });
+      const candidateCheck = validateCloudConfig(candidate);
+      if (!candidateCheck.ok) return json(res, 200, { ok: false, problems: candidateCheck.problems });
+      const client = new CloudClient({
+        baseUrl: candidate.url,
+        machineId: candidate.machineId,
+        machineSecret: candidate.machineSecret,
+        authMode: candidate.authMode,
+        protocolVersion: candidate.protocolVersion,
+        timeoutMs: 10000
+      });
+      try {
+        await client.heartbeat(buildMachineHeartbeat({
+          machineId: candidate.machineId,
+          displayName: candidate.machineDisplayName || null,
+          version: build.version,
+          status: 'ONLINE',
+          protocolVersion: candidate.protocolVersion
+        }));
+        return json(res, 200, { ok: true, machineId: candidate.machineId, url: candidate.url });
+      } catch (error) {
+        return json(res, 200, { ok: false, error: { code: error.code || 'INTERNAL_ERROR', message: error.message } });
+      }
+    }
+
     if (req.method === 'GET' && pathname === '/debug/cloud') {
       // Diagnostics only (§88). Never returns the machine secret.
       access.require(req);
@@ -244,9 +360,54 @@ async function handleRequest(req, res) {
       return json(res, 200, await cloudWorker.status());
     }
 
+    if (req.method === 'GET' && pathname === '/api/metrics') {
+      // Local metrics (§89). Prometheus text via ?format=prometheus.
+      access.require(req);
+      const prometheus = url.searchParams.get('format') === 'prometheus';
+      if (!cloudWorker) {
+        if (prometheus) {
+          res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' });
+          return res.end('# cloud transport disabled\n');
+        }
+        return json(res, 200, { enabled: false, metrics: null });
+      }
+      if (prometheus) {
+        res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' });
+        return res.end(cloudWorker.metrics.toPrometheus());
+      }
+      return json(res, 200, { enabled: true, ...cloudWorker.metrics.snapshot() });
+    }
+
     if (req.method === 'GET' && pathname === '/api/health') {
       return json(res, 200, { status: 'ok' });
     }
+
+    // --- interactive tool approvals (§52–§55) --------------------------------
+    // The Pi extension is a local process without a session cookie, so these two
+    // endpoints authenticate with the per-task approval token instead. They are
+    // handled before the cookie gate for exactly that reason.
+    let approvalMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/approval$/);
+    if (req.method === 'POST' && approvalMatch) {
+      const taskId = approvalMatch[1];
+      if (!manager.getTask(taskId)) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
+      if (!manager.checkApprovalToken(taskId, req.headers['x-taskbridge-approval'])) {
+        return errorJson(res, 403, Object.assign(new Error('Invalid approval token'), { code: 'FORBIDDEN' }));
+      }
+      const body = await readJson(req);
+      return json(res, 200, manager.beginApproval(taskId, body));
+    }
+    approvalMatch = pathname.match(/^\/api\/tasks\/([^/]+)\/approval\/([^/]+)$/);
+    if (req.method === 'GET' && approvalMatch) {
+      const taskId = approvalMatch[1];
+      if (!manager.checkApprovalToken(taskId, req.headers['x-taskbridge-approval'])) {
+        return errorJson(res, 403, Object.assign(new Error('Invalid approval token'), { code: 'FORBIDDEN' }));
+      }
+      const state = manager.approvalStatus(taskId, approvalMatch[2]);
+      return state
+        ? json(res, 200, state)
+        : errorJson(res, 404, Object.assign(new Error('Approval not found'), { code: 'NOT_FOUND' }));
+    }
+
     if (pathname.startsWith('/api/')) access.require(req);
 
     if (req.method === 'GET' && pathname === '/api/runtime') return json(res, 200, await runtimeControl.status());
@@ -408,6 +569,18 @@ async function handleRequest(req, res) {
       return json(res, 200, await manager.setAutoCompaction(match[1], body.enabled));
     }
 
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setModel(match[1], body));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/thinking$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setThinking(match[1], body.level));
+    }
+
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/compact$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
@@ -426,6 +599,31 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts$/);
     if (req.method === 'GET' && match) {
       return json(res, 200, await listArtifacts(match[1]));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/approvals$/);
+    if (req.method === 'GET' && match) {
+      if (!manager.getTask(match[1])) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
+      return json(res, 200, manager.listApprovals(match[1]));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/approvals\/([^/]+)$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      const decision = String(body.decision || '');
+      if (!['ALLOW_ONCE', 'DENY'].includes(decision)) throw Object.assign(new Error('Неизвестное решение по подтверждению.'), { code: 'INPUT_INVALID' });
+      if (!manager.resolveApproval(match[1], match[2], decision)) {
+        return errorJson(res, 404, Object.assign(new Error('Запрос подтверждения уже неактуален.'), { code: 'NOT_FOUND' }));
+      }
+      return json(res, 200, { ok: true, approvalId: match[2], decision });
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/tools\/([^/]+)\/output$/);
+    if (req.method === 'GET' && match) {
+      if (!manager.getTask(match[1])) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const maxKb = Number(url.searchParams.get('maxKb') || 0);
+      const result = await manager.fetchToolOutput(match[1], match[2], maxKb > 0 ? { maxBytes: maxKb * 1024 } : {});
+      return json(res, 200, result);
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/files(?:\/([a-f0-9-]{36}))?$/);

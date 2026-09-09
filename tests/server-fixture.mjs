@@ -11,6 +11,7 @@ export async function startFixture(port, overrides = {}) {
   const repo = fileURLToPath(new URL('..', import.meta.url));
   await fs.cp(path.join(repo, 'src'), path.join(root, 'src'), { recursive: true });
   await fs.cp(path.join(repo, 'web'), path.join(root, 'web'), { recursive: true });
+  await fs.cp(path.join(repo, 'pi-extension'), path.join(root, 'pi-extension'), { recursive: true });
   await fs.copyFile(new URL('fake-pi.mjs', import.meta.url), path.join(root, 'fake-pi.mjs'));
   const command = path.join(root, process.platform === 'win32' ? 'pi.cmd' : 'pi');
   await fs.writeFile(command, process.platform === 'win32' ? `@echo off\r\nnode "${path.join(root, 'fake-pi.mjs')}" %*\r\n` : `#!/bin/sh\nexec node '${path.join(root, 'fake-pi.mjs')}' "$@"\n`, { mode: 0o755 });

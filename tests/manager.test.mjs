@@ -182,3 +182,29 @@ test('applyTask applies the result patch to a clean source, then cleanup removes
   assert.equal(manager.getTask('w').workspacePath, null);
   await assert.rejects(manager.cleanupWorktree('w'), { code: 'INPUT_INVALID' });
 });
+
+test('setModel and setThinking drive the live Pi session and persist the result', async t => {
+  const f = await fixture(t, true);
+  const calls = [];
+  f.pi.setModel = async (provider, modelId) => { calls.push(['model', provider, modelId]); return { id: modelId, provider, contextWindow: 32000, maxTokens: 2048 }; };
+  f.pi.setThinkingLevel = async level => { calls.push(['thinking', level]); return { level }; };
+
+  const updated = await f.manager.setModel('a', { provider: 'anthropic', modelId: 'claude-sonnet-4' });
+  assert.deepEqual(updated.model, { id: 'claude-sonnet-4', provider: 'anthropic', contextWindow: 32000, maxTokens: 2048 });
+  await f.manager.setThinking('a', 'high');
+  assert.equal(f.manager.getTask('a').thinkingLevel, 'high');
+  assert.deepEqual(calls, [['model', 'anthropic', 'claude-sonnet-4'], ['thinking', 'high']]);
+  const events = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(events.includes('MODEL_CHANGED'));
+  assert.ok(events.includes('THINKING_CHANGED'));
+
+  await assert.rejects(f.manager.setModel('a', { provider: 'anthropic' }), { code: 'INPUT_INVALID' });
+  await assert.rejects(f.manager.setThinking('a', 'turbo'), { code: 'INPUT_INVALID' });
+});
+
+test('model and thinking changes require a live Pi session', async t => {
+  const f = await fixture(t, false);
+  f.pi.closed = true;
+  await assert.rejects(f.manager.setModel('a', { provider: 'p', modelId: 'm' }), { code: 'SESSION_UNAVAILABLE' });
+  await assert.rejects(f.manager.setThinking('a', 'high'), { code: 'SESSION_UNAVAILABLE' });
+});

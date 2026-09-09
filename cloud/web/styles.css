@@ -133,6 +133,8 @@ button:disabled { opacity: 0.5; cursor: default; }
 
 .approval { border: 1px solid var(--warn); border-radius: 10px; padding: 10px; margin-bottom: 10px; background: rgba(217, 161, 59, 0.08); }
 .approval .actions { display: flex; gap: 8px; margin-top: 8px; }
+.tool .actions { margin-top: 8px; }
+.tool .actions button { padding: 4px 10px; font-size: 12px; }
 
 .toast {
   position: fixed;

@@ -1,3 +1,5 @@
+import { ToolOutputWindow, DEFAULT_ROLLING_KB, DEFAULT_TAIL_KB, DEFAULT_SNAPSHOT_MS } from '../tool-output.mjs';
+
 // Translates raw Pi RPC frames and TaskBridge local events into the stable
 // cloud protocol (§23). The cloud must never depend on the exact Pi
 // implementation, so every Pi-specific field is resolved here.
@@ -33,9 +35,25 @@ function tailUtf8(text, maxBytes) {
 }
 
 export class EventNormalizer {
-  constructor({ now = () => new Date().toISOString() } = {}) {
+  constructor({ now = () => new Date().toISOString(), toolOutput = {} } = {}) {
     this.now = now;
     this.tasks = new Map();
+    this.toolOutput = {
+      rollingBytes: (toolOutput.rollingKb ?? DEFAULT_ROLLING_KB) * 1024,
+      tailBytes: (toolOutput.tailKb ?? DEFAULT_TAIL_KB) * 1024,
+      snapshotMs: toolOutput.snapshotMs ?? DEFAULT_SNAPSHOT_MS
+    };
+    this.toolWindows = new Map();
+  }
+
+  #toolWindow(taskId, toolCallId) {
+    const key = `${taskId}:${toolCallId}`;
+    let window = this.toolWindows.get(key);
+    if (!window) {
+      window = new ToolOutputWindow(this.toolOutput);
+      this.toolWindows.set(key, window);
+    }
+    return window;
   }
 
   #state(taskId) {
@@ -56,6 +74,7 @@ export class EventNormalizer {
 
   forget(taskId) {
     this.tasks.delete(taskId);
+    for (const key of [...this.toolWindows.keys()]) if (key.startsWith(`${taskId}:`)) this.toolWindows.delete(key);
   }
 
   assistantText(taskId) {
@@ -100,6 +119,17 @@ export class EventNormalizer {
         break;
       case 'COMPACT_REQUESTED':
         out.push({ type: 'compaction_started', payload: { reason: 'manual' }, timestamp: at });
+        break;
+      case 'APPROVAL_REQUIRED':
+        out.push({ type: 'approval_required', payload: data, timestamp: at });
+        break;
+      case 'APPROVAL_RESOLVED':
+        out.push({ type: 'approval_resolved', payload: data, timestamp: at });
+        break;
+      case 'TOOL_OUTPUT':
+        // Explicit "load full output" response (§38): one bounded, redacted
+        // payload instead of a permanent multi-megabyte event stream.
+        out.push({ type: 'tool_output_full', payload: data, timestamp: at });
         break;
       case 'SESSION_RESTORED':
       case 'WORKSPACE_READY':
@@ -188,6 +218,7 @@ export class EventNormalizer {
       case 'tool_execution_start': {
         const toolCallId = frame.toolCallId || `call_${state.messageIndex}_${state.toolStarts.size + 1}`;
         state.toolStarts.set(toolCallId, { toolName: frame.toolName ?? null, startedAt: at });
+        this.#toolWindow(taskId, toolCallId).reset();
         out.push({
           type: 'tool_started',
           payload: { toolCallId, toolName: frame.toolName ?? null, args: frame.args ?? {} },
@@ -197,11 +228,13 @@ export class EventNormalizer {
       }
       case 'tool_execution_update': {
         const toolCallId = frame.toolCallId || null;
-        // The protocol requires the frontend to know whether a chunk replaces
-        // or extends the current output (§35); a missing flag means delta.
-        const mode = frame.mode === 'snapshot' ? 'snapshot' : 'delta';
+        if (!toolCallId) break;
         const output = frame.output ?? frame.partialResult ?? frame.delta ?? '';
-        out.push({ type: 'tool_updated', payload: { toolCallId, mode, output }, timestamp: at });
+        // A bounded rolling window: under the limit the chunk is a delta, over
+        // it the client gets periodic snapshots and intermediate progress may
+        // be dropped (§38, §118).
+        const bounded = this.#toolWindow(taskId, toolCallId).append(output);
+        if (bounded) out.push({ type: 'tool_updated', payload: { toolCallId, ...bounded }, timestamp: at });
         break;
       }
       case 'tool_execution_end': {
@@ -210,13 +243,18 @@ export class EventNormalizer {
         state.toolStarts.delete(toolCallId);
         const durationMs = started ? Math.max(0, Date.parse(at) - Date.parse(started.startedAt)) : null;
         const isError = Boolean(frame.isError);
+        const summary = toolCallId ? this.#toolWindow(taskId, toolCallId).final() : null;
+        const bounded = summary
+          ? { tail: summary.tail, outputBytes: summary.outputBytes, truncated: summary.truncated, fullLogAvailable: summary.fullLogAvailable, localLogId: toolCallId }
+          : {};
         out.push({
           type: isError ? 'tool_failed' : 'tool_finished',
           payload: isError
-            ? { toolCallId, toolName: frame.toolName ?? started?.toolName ?? null, durationMs, error: { code: 'TOOL_ERROR', message: frame.errorMessage || frame.result?.errorMessage || 'Tool reported an error' } }
-            : { toolCallId, toolName: frame.toolName ?? started?.toolName ?? null, durationMs, exitCode: frame.exitCode ?? 0, summary: frame.summary ?? null },
+            ? { toolCallId, toolName: frame.toolName ?? started?.toolName ?? null, durationMs, ...bounded, error: { code: 'TOOL_ERROR', message: frame.errorMessage || frame.result?.errorMessage || 'Tool reported an error' } }
+            : { toolCallId, toolName: frame.toolName ?? started?.toolName ?? null, durationMs, ...bounded, exitCode: frame.exitCode ?? 0, summary: frame.summary ?? null },
           timestamp: at
         });
+        if (toolCallId) this.toolWindows.delete(`${taskId}:${toolCallId}`);
         break;
       }
       case 'compaction_start':

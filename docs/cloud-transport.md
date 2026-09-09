@@ -58,6 +58,10 @@ Browser / PWA ──HTTPS/SSE──► Vercel (or cloud/server.mjs)
 | `src/cloud/approval-manager.mjs` | Pending approvals resolved asynchronously |
 | `src/cloud/cloud-transport.mjs` | `LocalTransport` / `CloudTransport` / `CompositeTransport` |
 | `src/cloud/cloud-worker.mjs` | Wires everything: start, poll, reconcile, diagnostics |
+| `src/metrics.mjs` | Counters/gauges/observations + Prometheus export (§89) |
+| `src/tool-output.mjs` | Rolling tool-output window and bounded tail (§38) |
+| `src/approvals/policy.mjs` | Destructive-command / outside-workspace approval policy (§52) |
+| `pi-extension/taskbridge-approval.js` | Pi `tool_call` hook that blocks until an operator answers |
 
 ### Enabling it
 
@@ -146,8 +150,10 @@ Human (bearer user token)
   GET    /api/tasks/:id/events?after=&limit=
   GET    /api/tasks/:id/approvals
   POST   /api/tasks/:id/commands           { type: ABORT_TASK | FOLLOW_UP | COMPACT |
-                                             SET_MODEL | SET_THINKING | APPROVAL_RESPONSE }
+                                             SET_MODEL | SET_THINKING |
+                                             APPROVAL_RESPONSE | FETCH_TOOL_OUTPUT }
   GET    /api/machines                     GET /api/machines/:id
+  GET    /api/metrics
   GET    /api/tasks/stream?taskId=&after=&token=   (dev server SSE fast path)
 
 Machine (X-TaskBridge-Machine + bearer secret or HMAC signature)
@@ -156,6 +162,20 @@ Machine (X-TaskBridge-Machine + bearer secret or HMAC signature)
   POST   /api/bridge/commands/:id/ack      { status: ACCEPTED | REJECTED | DUPLICATE | FAILED }
   POST   /api/bridge/events                { machineId, events: [] }
   POST   /api/bridge/reconcile
+
+Local API (session cookie / LAN auth)
+  GET    /api/cloud/config                 masked effective configuration
+  POST   /api/cloud/config                 validate + persist + apply live
+  POST   /api/cloud/test                   heartbeat test, nothing saved
+  GET    /debug/cloud                      diagnostics (no secret)
+  GET    /api/metrics[?format=prometheus]
+  GET    /api/tasks/:id/approvals          pending approvals for the local UI
+  POST   /api/tasks/:id/approvals/:id      { decision: ALLOW_ONCE | DENY }
+  POST   /api/tasks/:id/approval           internal, per-task token (Pi extension)
+  GET    /api/tasks/:id/approval/:id       internal, per-task token (Pi extension)
+  GET    /api/tasks/:id/tools/:toolCallId/output[?maxKb=]
+  POST   /api/tasks/:id/model              { provider, modelId }
+  POST   /api/tasks/:id/thinking           { level }
 ```
 
 Errors use one envelope (`§93`):
@@ -163,6 +183,87 @@ Errors use one envelope (`§93`):
 ```json
 { "error": { "code": "MACHINE_OFFLINE", "message": "…", "details": {} } }
 ```
+
+## Interactive tool approvals
+
+Approvals are implemented end to end (§52–§57), not stubbed:
+
+1. `pi-extension/taskbridge-approval.js` is loaded with `pi --extension` and hooks
+   `tool_call` (Pi's blocking pre-execution hook).
+2. The extension asks the local TaskBridge (`POST /api/tasks/:id/approval`,
+   authenticated with a per-task token passed through the child process
+   environment) whether the call may proceed.
+3. TaskBridge owns the policy (`src/approvals/policy.mjs`): destructive shell
+   commands, writes outside the task workspace and any operator-defined regex
+   require approval. Benign calls are allowed instantly.
+4. A pending approval sets the task to `WAITING_USER`, emits `approval_required`
+   and waits. The operator answers from the local UI banner or the remote PWA;
+   the answer travels as a normal `APPROVAL_RESPONSE` command.
+5. `approval_resolved` is published and the task returns to `RUNNING`. Cancelling
+   the task resolves pending approvals as `DENY`, and the extension fails closed
+   if the endpoint is unreachable (`approvals.failsafe`).
+
+```jsonc
+"approvals": {
+  "enabled": false,
+  "timeoutMinutes": 1440,
+  "timeoutPolicy": "KEEP_WAITING",   // DENY | ABORT_TASK
+  "failsafe": "block",               // block | allow when TaskBridge is unreachable
+  "approveShell": true,
+  "approveOutsideWorkspace": true,
+  "approveRead": false,
+  "extraPatterns": []
+}
+```
+
+## Tool output bounding (§38)
+
+Large tool output stays local. `artifacts/tool-<toolCallId>.log` holds the full
+log; the cloud receives a rolling window (deltas under the limit, periodic
+bounded snapshots over it, intermediate progress may be dropped) and the final
+`tool_finished`/`tool_failed` event always carries a bounded `tail`,
+`fullLogAvailable`, `localLogId` and `truncated`.
+
+The remote UI shows a **Load full output** button for such tools: it sends
+`FETCH_TOOL_OUTPUT`, and the machine uploads one bounded, redacted
+`tool_output_full` event. Locally the same data is available at
+`GET /api/tasks/:id/tools/:toolCallId/output`.
+
+```jsonc
+"cloud": {
+  "toolOutput": { "rollingKb": 64, "tailKb": 64, "snapshotMs": 500, "maxFullMb": 4 }
+}
+```
+
+## Model and thinking changes (§51)
+
+`SET_MODEL` and `SET_THINKING` are real commands backed by Pi RPC
+(`set_model` / `set_thinking_level`), not rejections. They apply to a live Pi
+session, persist the result on the task and publish `MODEL_CHANGED` /
+`THINKING_CHANGED`. The local UI exposes them at
+`POST /api/tasks/:id/model` and `POST /api/tasks/:id/thinking`; the machine
+heartbeat advertises `commandCapabilities.setModel` / `setThinking` so the remote
+UI can disable controls that a build cannot honour.
+
+## Metrics (§89)
+
+* Local: `GET /api/metrics` (JSON) and `GET /api/metrics?format=prometheus`.
+  Names follow the specification: `cloud_event_upload_latency_ms`,
+  `cloud_event_batch_size`, `cloud_event_retry_count`, `cloud_outbox_size`,
+  `cloud_command_latency_ms`, `realtime_reconnect_count`, `task_event_lag`,
+  `heartbeat_failure_count`, plus `cloud_buffer_pending_events`.
+* Cloud: `GET /api/metrics` summarises machines by status, tasks by status,
+  pending commands and event lag, derived from the store (so it stays correct
+  across serverless invocations).
+
+## Local settings screen (§91)
+
+`GET /api/cloud/config` returns the effective configuration with the secret
+masked (only a 12-character fingerprint); `POST /api/cloud/config` validates the
+candidate before persisting it to `config.json` and applies it live;
+`POST /api/cloud/test` sends a heartbeat without saving anything. The UI exposes
+this behind the ☁ button. Environment variables always win and are reported in
+`envLocked`.
 
 ## Guarantees
 
@@ -176,6 +277,8 @@ Errors use one envelope (`§93`):
 | Task created while machine is offline | Command is stored as `PENDING` and delivered on the next poll (`§21`, `§84`) |
 | Task runs for hours | No Vercel request is held open; the machine polls/heartbeats |
 | Backpressure | Outbox limit drops only non-durable progress events, never lifecycle/final state (`§47`, `§118`) |
+| Huge tool output | Full log stays on the machine; only a bounded window plus an on-demand, capped slice is uploaded (`§38`) |
+| Risky tool call | Pi blocks until an operator answers locally or remotely; the answer never keeps a cloud request open (`§53`–`§56`) |
 
 ## Security
 
@@ -196,9 +299,24 @@ Errors use one envelope (`§93`):
 ```powershell
 npm test            # all suites, including cloud
 npm run test:cloud  # only tests/cloud-*.test.mjs
+npm run stress      # bounded stress/soak suite
 ```
 
-Covered: normalization and snapshots, sequence durability across restart,
+The stress suite runs bounded versions in CI and scales up through environment
+variables so a real soak is a one-liner:
+
+```powershell
+$env:TASKBRIDGE_STRESS_EVENTS="30000"   # event-rate test (default 3000)
+$env:TASKBRIDGE_STRESS_LOG_MB="100"     # large tool log (default 16)
+$env:TASKBRIDGE_STRESS_SECONDS="1800"   # 30-minute soak (default: short)
+npm run stress
+```
+
+Covered: approvals (policy, manager, command routing, and an end-to-end run
+where Pi's extension hook blocks until the operator answers), tool-output
+bounding and the on-demand full-output fetch, model/thinking changes, metrics,
+the cloud settings API, normalization and snapshots, sequence durability across
+restart,
 buffer flush/coalescing/priority/backpressure, outbox recovery and limits,
 upload retry, reconnect ramp, command idempotency, approval lifecycle, cloud API
 (auth, offline queue, machine scope, event dedupe, replay, reconcile repair,
@@ -210,21 +328,18 @@ STOP).
 
 ## Known gaps / follow-ups
 
-1. **Approvals are not intercepted yet.** `ApprovalManager`, the
-   `approval_required`/`approval_resolved` events, the `APPROVAL_RESPONSE`
-   command and the cloud approval records are implemented and tested, but the
-   Pi RPC client in this repository has no tool-approval callback, so nothing
-   calls `request()` automatically. Hooking it into the Pi tool pipeline is the
-   remaining step (Phase 2, `§112`).
-2. **No WebSocket fast path.** Polling is authoritative and correct; SSE is an
+1. **No WebSocket fast path.** Polling is authoritative and correct; SSE is an
    optional latency improvement on the dev server. A WebSocket/SSE fast path for
    Vercel is Phase 2 (`§112`) and must not be added before replay semantics work.
-3. **No Postgres adapter.** `SqliteStore` covers single-node deployments. Vercel's
+2. **No Postgres adapter.** `SqliteStore` covers single-node deployments. Vercel's
    filesystem is ephemeral, so a serverless deployment needs a Postgres adapter
    implementing the same `store` interface (`cloud/lib/store.mjs`).
-4. **HMAC raw-body signature.** In the Vercel adapter the body is re-serialized
+3. **HMAC raw-body signature.** In the Vercel adapter the body is re-serialized
    from `req.body`; if exact-byte HMAC verification matters, send the raw body
    or use bearer mode.
-5. `SET_MODEL` / `SET_THINKING` are rejected with `COMMAND_REJECTED` until Pi
-   RPC exposes runtime model/thinking changes; the frontend should disable those
-   controls based on `commandCapabilities`.
+4. **Approval interception is opt-in.** It requires `approvals.enabled` and Pi
+   loading the extension; the extension is not installed globally, it is passed
+   per process with `--extension`. Local-only setups that never enable approvals
+   behave exactly as before.
+5. **Long soak is opt-in.** CI runs bounded stress tests (see above); a 30-minute
+   or multi-hour run must be started explicitly with the environment variables.

@@ -5,8 +5,9 @@ import { buildMachineHeartbeat } from '../domain/machine-state.mjs';
 // dashboard and to decide whether a queued task can start.
 
 export class Heartbeat extends EventEmitter {
-  constructor({ client, intervalMs = 20000, stateProvider = () => ({}), logger = null, protocolVersion = 1, setTimer = setTimeout, clearTimer = clearTimeout }) {
+  constructor({ client, intervalMs = 20000, stateProvider = () => ({}), logger = null, protocolVersion = 1, setTimer = setTimeout, clearTimer = clearTimeout, metrics = null }) {
     super();
+    this.metrics = metrics;
     this.client = client;
     this.intervalMs = intervalMs;
     this.stateProvider = stateProvider;
@@ -46,6 +47,7 @@ export class Heartbeat extends EventEmitter {
     } catch (error) {
       this.stats.failures += 1;
       this.stats.lastError = error?.code || error?.message || String(error);
+      this.metrics?.increment('heartbeat_failure_count');
       this.logger?.('warn', { component: 'Heartbeat', event: 'heartbeat_failed', code: error?.code || null });
       this.emit('failed', error);
       throw error;

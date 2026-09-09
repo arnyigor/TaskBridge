@@ -85,11 +85,16 @@ test('Pi frames become normalized task events with tool lifecycle and message id
 });
 
 test('tool update declares delta versus snapshot mode', () => {
-  const normalizer = new EventNormalizer();
+  // Under the rolling window every chunk is a delta; over it the client gets a
+  // bounded snapshot instead (§35, §38).
+  const normalizer = new EventNormalizer({ toolOutput: { rollingKb: 1, tailKb: 1, snapshotMs: 0 } });
+  normalizer.normalizePiFrame('t', { type: 'tool_execution_start', toolCallId: 'c', toolName: 'bash', args: {} });
   const delta = normalizer.normalizePiFrame('t', { type: 'tool_execution_update', toolCallId: 'c', output: 'chunk' })[0];
-  const snapshot = normalizer.normalizePiFrame('t', { type: 'tool_execution_update', toolCallId: 'c', mode: 'snapshot', output: 'all' })[0];
+  const snapshot = normalizer.normalizePiFrame('t', { type: 'tool_execution_update', toolCallId: 'c', output: 'x'.repeat(2048) })[0];
   assert.equal(delta.payload.mode, 'delta');
+  assert.equal(delta.payload.truncated, false);
   assert.equal(snapshot.payload.mode, 'snapshot');
+  assert.equal(snapshot.payload.truncated, true);
 });
 
 test('local TaskManager events map onto the cloud protocol', () => {

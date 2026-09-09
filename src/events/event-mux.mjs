@@ -21,6 +21,7 @@ export class EventMux extends EventEmitter {
     snapshotPolicy = null,
     aliases = {},
     redactPaths = true,
+    largePayloadBytes = 4 * 1048576,
     logger = null,
     now = () => new Date().toISOString(),
     nowMs = () => Date.now()
@@ -32,6 +33,7 @@ export class EventMux extends EventEmitter {
     this.snapshotPolicy = snapshotPolicy || new SnapshotPolicy();
     this.aliases = buildPathAliases(aliases);
     this.redactPaths = redactPaths;
+    this.largePayloadBytes = largePayloadBytes;
     this.logger = logger;
     this.now = now;
     this.nowMs = nowMs;
@@ -91,7 +93,7 @@ export class EventMux extends EventEmitter {
         seq,
         timestamp: event.timestamp || this.now(),
         type: event.type,
-        payload: this.#sanitize(event.payload ?? {})
+        payload: this.#sanitize(event.payload ?? {}, event.type)
       };
       if (event.seqFrom != null) normalized.seqFrom = event.seqFrom;
       if (event.seqTo != null) normalized.seqTo = event.seqTo;
@@ -144,8 +146,11 @@ export class EventMux extends EventEmitter {
     };
   }
 
-  #sanitize(value) {
-    return sanitizeForCloud(value, { redactPaths: this.redactPaths, aliases: this.aliases });
+  #sanitize(value, type = null) {
+    // An explicit "load full output" payload is allowed to be larger than a
+    // normal event, but still bounded and redacted (§38, §68).
+    const maxString = type === 'tool_output_full' ? this.largePayloadBytes : undefined;
+    return sanitizeForCloud(value, { redactPaths: this.redactPaths, aliases: this.aliases, ...(maxString ? { maxString } : {}) });
   }
 
   #snapshotState(taskId) {

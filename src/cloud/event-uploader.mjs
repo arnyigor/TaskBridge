@@ -6,8 +6,9 @@ import { EventEmitter } from 'node:events';
 // retried with backoff, even across a process restart.
 
 export class EventUploader extends EventEmitter {
-  constructor({ client, outbox, reconnect, logger = null, maxRetryDelayMs = 30000 }) {
+  constructor({ client, outbox, reconnect, logger = null, maxRetryDelayMs = 30000, metrics = null }) {
     super();
+    this.metrics = metrics;
     this.client = client;
     this.outbox = outbox;
     this.reconnect = reconnect;
@@ -43,19 +44,28 @@ export class EventUploader extends EventEmitter {
     if (this.stopped) return;
     if (this.draining) return this.draining;
     this.draining = (async () => {
-      await this.pendingEnqueue.catch(() => {});
-      await this.#drain();
+      // Several passes: batches enqueued while a pass is running must still be
+      // uploaded before drain() resolves, otherwise a caller that flushes and
+      // then awaits drain would observe a partially delivered stream.
+      for (let pass = 0; pass < 100; pass++) {
+        await this.pendingEnqueue.catch(() => {});
+        const records = await this.outbox.list();
+        if (!records.length) return;
+        if (!await this.#drainRecords(records)) return; // failure: retry is scheduled
+      }
     })().finally(() => { this.draining = null; });
     return this.draining;
   }
 
-  async #drain() {
-    const records = await this.outbox.list();
-    for (const record of records) {
+  // Returns false when a batch failed (and a retry was scheduled).
+  async #drainRecords(records) {
+    for (const [index, record] of records.entries()) {
       if (this.stopped) return;
       try {
+        const startedAt = Date.now();
         await this.outbox.markSending(record);
         await this.client.uploadEvents(record.events);
+        this.metrics?.observe('cloud_event_upload_latency_ms', Date.now() - startedAt);
         await this.outbox.ack(record);
         this.reconnect.markConnected();
         this.stats.batches += 1;
@@ -63,6 +73,8 @@ export class EventUploader extends EventEmitter {
         this.stats.bytes += Buffer.byteLength(JSON.stringify(record.events), 'utf8');
         this.stats.lastUploadAt = new Date().toISOString();
         this.stats.lastError = null;
+        // O(1): how many batches are still queued behind this one.
+        this.metrics?.set('cloud_outbox_size', records.length - index - 1);
         for (const event of record.events) {
           if (event.taskId) {
             this.lastUploadedSeq[event.taskId] = Math.max(this.lastUploadedSeq[event.taskId] ?? 0, Number(event.seq) || 0);
@@ -79,6 +91,7 @@ export class EventUploader extends EventEmitter {
         await this.outbox.fail(record, error).catch(() => {});
         this.stats.failures += 1;
         this.stats.lastError = error?.code || error?.message || String(error);
+        this.metrics?.increment('cloud_event_retry_count');
         this.reconnect.markDisconnected(error?.code || 'upload_failed');
         this.logger?.('warn', {
           component: 'EventUploader',
@@ -89,9 +102,10 @@ export class EventUploader extends EventEmitter {
         });
         this.emit('failed', { record, error });
         if (error?.retryable !== false) this.reconnect.schedule(() => this.drain());
-        return;
+        return false;
       }
     }
+    return true;
   }
 
   snapshot() {

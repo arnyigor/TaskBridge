@@ -14,8 +14,15 @@ const STATE_SENDING = 'SENDING';
 const STATE_FAILED = 'FAILED_RETRY';
 
 function batchId() {
-  return `${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+  // Timestamp first, then a process-local counter: batches created in the same
+  // millisecond still sort in creation order, so replay order matches the order
+  // events were produced. The random suffix only avoids collisions with a
+  // different process writing to the same directory.
+  batchSequence += 1;
+  return `${String(Date.now()).padStart(13, '0')}-${String(batchSequence).padStart(8, '0')}-${crypto.randomBytes(3).toString('hex')}`;
 }
+
+let batchSequence = 0;
 
 export class CloudOutbox {
   constructor({ dir, maxBytes = 100 * 1024 * 1024, logger = null }) {
@@ -23,6 +30,9 @@ export class CloudOutbox {
     this.maxBytes = maxBytes;
     this.logger = logger;
     this.warned = false;
+    // Incremental byte accounting: recomputing it from disk on every enqueue
+    // would turn a high event rate into O(files) reads per batch.
+    this.bytes = 0;
   }
 
   async init() {
@@ -32,7 +42,9 @@ export class CloudOutbox {
       if (!entry.endsWith('.json')) continue;
       const file = path.join(this.dir, entry);
       const record = await this.#read(file);
-      if (record?.state === STATE_SENDING) {
+      if (!record) continue;
+      this.bytes += Buffer.byteLength(JSON.stringify(record.events), 'utf8');
+      if (record.state === STATE_SENDING) {
         record.state = STATE_PENDING;
         await this.#write(file, record);
       }
@@ -69,6 +81,7 @@ export class CloudOutbox {
       events: list
     };
     await this.#write(this.#file(id), record);
+    this.bytes += Buffer.byteLength(JSON.stringify(list), 'utf8');
     return record;
   }
 
@@ -93,6 +106,7 @@ export class CloudOutbox {
 
   async ack(record) {
     await fs.rm(record.file, { force: true }).catch(() => {});
+    this.bytes = Math.max(0, this.bytes - Buffer.byteLength(JSON.stringify(record.events), 'utf8'));
   }
 
   async fail(record, error) {
@@ -103,10 +117,10 @@ export class CloudOutbox {
     return record;
   }
 
+  // O(1): the counter is maintained by enqueue/ack/enforceLimit and seeded at
+  // init from disk.
   async sizeBytes() {
-    let total = 0;
-    for (const record of await this.list()) total += Buffer.byteLength(JSON.stringify(record.events), 'utf8');
-    return total;
+    return this.bytes;
   }
 
   async stats() {
@@ -126,7 +140,7 @@ export class CloudOutbox {
   // is hit, only non-durable progress events are removed, from the newest batch
   // backwards (the oldest state is the most valuable for replay).
   async enforceLimit() {
-    let bytes = await this.sizeBytes();
+    let bytes = this.bytes;
     if (bytes <= this.maxBytes) { this.warned = false; return 0; }
     let dropped = 0;
     const records = (await this.list()).reverse();
@@ -141,6 +155,7 @@ export class CloudOutbox {
       if (kept.length) await this.#write(record.file, record);
       else await fs.rm(record.file, { force: true }).catch(() => {});
     }
+    this.bytes = Math.max(0, bytes);
     if (dropped) {
       this.logger?.('warn', {
         component: 'CloudOutbox',

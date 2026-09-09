@@ -12,6 +12,8 @@ import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs'
 import { classifyEngineError } from './engine.mjs';
 import { chooseEngine } from './dispatcher.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
+import { ApprovalManager } from './cloud/approval-manager.mjs';
+import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -56,6 +58,22 @@ export class TaskManager extends EventEmitter {
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
     this.nativeSessions = new NativeSessionService(this);
     this.runtimeChanging = false;
+    // Tool output bounding (§38): the full log stays in the task artifacts; only
+    // a bounded window is streamed to the cloud.
+    this.toolOutput = {
+      maxFullBytes: Math.max(1024, Math.floor(Number(config.cloud?.toolOutput?.maxFullMb ?? 4) * 1048576))
+    };
+    this.toolLogs = new Map();
+    // Interactive tool approvals (§52). Owned by TaskManager so both the local
+    // UI and the cloud command path resolve the same pending request.
+    this.approvalsConfig = resolveApprovalConfig(config);
+    this.approvals = new ApprovalManager({
+      timeoutMinutes: this.approvalsConfig.timeoutMinutes,
+      timeoutPolicy: this.approvalsConfig.timeoutPolicy
+    });
+    this.approvalTokens = new Map();
+    this.approvalBaseUrl = null;          // set by the HTTP server
+    this.approvalExtensionPath = null;    // set by the HTTP server
     // Injected by the server; lets AUTO restart the managed runtime when the
     // chosen profile differs from the one currently loaded.
     this.runtimeSwitcher = null;
@@ -79,7 +97,7 @@ export class TaskManager extends EventEmitter {
         await this.store.save(task).catch(() => {});
         trimmed++;
       }
-      if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
+      if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
         task.status = 'FAILED';
         task.errorCode = 'FAILED_RECOVERY';
         task.error = 'TaskBridge restarted while this task was active.';
@@ -354,15 +372,38 @@ export class TaskManager extends EventEmitter {
 
   async #createPi(task, sessionFile) {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
+    const args = [...(this.config.pi?.args || [])];
+    let env = null;
+    if (this.approvalsConfig.enabled && this.approvalBaseUrl && this.approvalExtensionPath) {
+      // A missing extension file must not break every task: log it and continue
+      // without the gate rather than spawning Pi with a broken --extension.
+      const available = await fs.access(this.approvalExtensionPath).then(() => true, () => false);
+      if (!available) {
+        console.error(`[TaskBridge] approvals enabled but the Pi extension is missing: ${this.approvalExtensionPath}`);
+      } else {
+        const token = crypto.randomBytes(24).toString('hex');
+        this.approvalTokens.set(task.id, token);
+        args.push('-e', this.approvalExtensionPath);
+        env = {
+          TASKBRIDGE_APPROVAL_URL: this.approvalBaseUrl,
+          TASKBRIDGE_TASK_ID: task.id,
+          TASKBRIDGE_APPROVAL_TOKEN: token,
+          TASKBRIDGE_APPROVAL_FAILSAFE: this.approvalsConfig.failsafe,
+          TASKBRIDGE_APPROVAL_WAIT_MS: String(Math.max(1000, this.approvalsConfig.timeoutMinutes * 60000)),
+          TASKBRIDGE_APPROVAL_POLL_MS: '1000'
+        };
+      }
+    }
     const pi = new PiRpcSession({
       command: this.config.pi?.command || 'pi',
-      args: this.config.pi?.args || [],
+      args,
       cwd: task.workspacePath,
       sessionDir,
       sessionName: `task-${task.id}`,
       sessionFile,
       persistSessions: this.config.pi?.persistSessions !== false,
-      projectTrust: this.config.pi?.projectTrust || 'approve'
+      projectTrust: this.config.pi?.projectTrust || 'approve',
+      env
     });
 
     const runtime = {
@@ -428,6 +469,54 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
+  // Runtime model / thinking change for the active Pi session (§51). A model
+  // change requires a live process: starting one just to switch models would
+  // apply to a session the user is not looking at.
+  async setModel(id, model) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.pi.closed) {
+      throw Object.assign(new Error('Модель можно менять только у активной сессии Pi.'), { code: 'SESSION_UNAVAILABLE' });
+    }
+    if ((await runtime.pi.getState())?.isCompacting) {
+      throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
+    }
+    const provider = String(model?.provider || model?.providerId || '').trim();
+    const modelId = String(model?.modelId || model?.id || model?.model || '').trim();
+    if (!provider || !modelId) {
+      throw Object.assign(new Error('Нужны provider и modelId.'), { code: 'INPUT_INVALID' });
+    }
+    const updated = await runtime.pi.setModel(provider, modelId);
+    if (updated) {
+      task.model = { id: updated.id, provider: updated.provider, contextWindow: updated.contextWindow ?? null, maxTokens: updated.maxTokens ?? null };
+    }
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'MODEL_CHANGED', `${provider}/${modelId}`, { provider, modelId });
+    return this.#publicTask(task);
+  }
+
+  async setThinking(id, level) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.pi.closed) {
+      throw Object.assign(new Error('Уровень reasoning можно менять только у активной сессии Pi.'), { code: 'SESSION_UNAVAILABLE' });
+    }
+    const value = String(level ?? '').trim().toLowerCase();
+    const allowed = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    if (!allowed.includes(value)) {
+      throw Object.assign(new Error(`Неизвестный уровень reasoning: ${level}`), { code: 'INPUT_INVALID' });
+    }
+    await runtime.pi.setThinkingLevel(value);
+    task.thinkingLevel = value;
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'THINKING_CHANGED', value, { level: value });
+    return this.#publicTask(task);
+  }
+
   async #handlePiEvent(task, frame) {
     if (this.deleted.has(task.id)) return;
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
@@ -444,6 +533,21 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'tool_execution_start') {
       const arg = frame.args?.command || frame.args?.path || frame.args?.file_path || '';
       task.current = `${frame.toolName || 'tool'}${arg ? `: ${String(arg).slice(0, 160)}` : ''}`;
+      if (frame.toolCallId) this.toolLogs.set(`${task.id}:${frame.toolCallId}`, { name: `tool-${safeFileName(frame.toolCallId)}.log`, bytes: 0 });
+    }
+    if (frame.type === 'tool_execution_update') {
+      const chunk = frame.output ?? frame.partialResult ?? frame.delta ?? '';
+      const log = frame.toolCallId ? this.toolLogs.get(`${task.id}:${frame.toolCallId}`) : null;
+      if (log && chunk) {
+        log.bytes += Buffer.byteLength(String(chunk), 'utf8');
+        this.store.appendRaw(task.id, log.name, String(chunk)).catch(() => {});
+      }
+    }
+    if (frame.type === 'tool_execution_end' && frame.toolCallId) {
+      const key = `${task.id}:${frame.toolCallId}`;
+      const log = this.toolLogs.get(key);
+      if (log) this.store.writeArtifact(task.id, `${log.name}.meta.json`, JSON.stringify({ toolCallId: frame.toolCallId, toolName: frame.toolName ?? null, bytes: log.bytes, at: now() })).catch(() => {});
+      this.toolLogs.delete(key);
     }
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result) {
       task.compaction.count += 1;
@@ -546,6 +650,110 @@ export class TaskManager extends EventEmitter {
     }
   }
 
+  // Reads a bounded slice of a tool's local log (§38). `emit` publishes the
+  // result as a durable one-off event for the remote UI; the local endpoint
+  // calls it without emitting.
+  async fetchToolOutput(id, toolCallId, { maxBytes = this.toolOutput.maxFullBytes, emit = false } = {}) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    const name = `tool-${safeFileName(toolCallId)}.log`;
+    const file = path.join(this.store.taskDir(id), 'artifacts', name);
+    let text = '';
+    let bytes = 0;
+    try {
+      const handle = await fs.open(file, 'r');
+      try {
+        const stat = await handle.stat();
+        bytes = stat.size;
+        const limit = Math.min(Math.max(1, Number(maxBytes) || this.toolOutput.maxFullBytes), this.toolOutput.maxFullBytes);
+        // The end of the log is the useful part; the beginning is already
+        // covered by the streamed window and by the artifacts on disk.
+        const start = Math.floor(Math.max(0, stat.size - limit));
+        const buffer = Buffer.alloc(stat.size - start);
+        await handle.read(buffer, 0, buffer.length, start);
+        text = buffer.toString('utf8');
+      } finally { await handle.close(); }
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      throw Object.assign(new Error('Для этого вызова нет сохранённого вывода.'), { code: 'NOT_FOUND' });
+    }
+    const truncated = bytes > Buffer.byteLength(text, 'utf8');
+    const payload = { toolCallId, text, bytes, truncated, at: now() };
+    if (emit) await this.#event(task, 'TOOL_OUTPUT', `tool output: ${toolCallId}`, payload);
+    return payload;
+  }
+
+  // ------------------------------------------------------------ approvals ---
+
+  approvalEnabled() {
+    return this.approvalsConfig.enabled === true && Boolean(this.approvalBaseUrl);
+  }
+
+  checkApprovalToken(taskId, token) {
+    const expected = this.approvalTokens.get(taskId);
+    if (!expected || typeof token !== 'string') return false;
+    const left = Buffer.from(expected);
+    const right = Buffer.from(token);
+    if (left.length !== right.length) return false;
+    return crypto.timingSafeEqual(left, right);
+  }
+
+  // Called by the Pi extension before a tool runs. Returns an immediate verdict
+  // when the policy allows the call, otherwise registers a pending approval and
+  // returns its id (§53, §54).
+  beginApproval(taskId, { toolCallId = null, toolName = null, args = {} } = {}) {
+    const task = this.tasks.get(taskId);
+    if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    const verdict = classifyToolCall({
+      toolName,
+      input: args,
+      workspacePath: task.workspacePath,
+      config: this.approvalsConfig
+    });
+    if (!verdict) return { status: 'ALLOW_ONCE', approvalId: null, reason: 'not_required' };
+
+    const { approvalId, promise } = this.approvals.request({ taskId, toolCallId, toolName, args, risk: verdict.risk });
+    this.#event(task, 'APPROVAL_REQUIRED', `Требуется подтверждение: ${toolName || 'tool'} (${verdict.risk})`, {
+      approvalId, toolCallId, toolName, args, risk: verdict.risk, detail: verdict.detail ?? null
+    }).catch(() => {});
+    this.#setStatus(task, 'WAITING_USER', `Ожидается подтверждение: ${toolName || 'tool'}`).catch(() => {});
+
+    promise.then(({ decision }) => {
+      if (this.deleted.has(taskId)) return;
+      this.#event(task, 'APPROVAL_RESOLVED', decision === 'DENY' ? 'Подтверждение отклонено' : 'Подтверждение получено', {
+        approvalId, toolCallId, toolName, decision
+      }).catch(() => {});
+      if (!['CANCELLED', 'FAILED', 'SUCCEEDED'].includes(task.status)) {
+        this.#setStatus(task, 'RUNNING', 'Pi is working').catch(() => {});
+      }
+    }).catch(() => {});
+
+    return { status: 'PENDING', approvalId, risk: verdict.risk };
+  }
+
+  approvalStatus(taskId, approvalId) {
+    const record = this.approvals.get(approvalId);
+    if (!record || record.taskId !== taskId) return null;
+    return {
+      status: record.status,
+      approvalId,
+      risk: record.risk,
+      toolName: record.toolName,
+      decision: record.decision ?? null,
+      ...(record.status === 'DENIED' ? { reason: 'Denied by the operator' } : {})
+    };
+  }
+
+  resolveApproval(taskId, approvalId, decision) {
+    const record = this.approvals.get(approvalId);
+    if (!record || record.taskId !== taskId) return false;
+    return this.approvals.resolve(approvalId, decision);
+  }
+
+  listApprovals(taskId) {
+    return this.approvals.list().filter(approval => approval.taskId === taskId);
+  }
+
   async #writeResult(task) {
     const result = {
       taskId: task.id,
@@ -595,6 +803,8 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Task not found'), { code: 'NOT_FOUND' });
     const runtime = this.runtimes.get(id);
     this.deleted.add(id);
+    this.approvals.cancelTask(id);
+    this.approvalTokens.delete(id);
     if (runtime) {
       runtime.cancelRequested = true;
       this.#resolveSettle(id);
@@ -659,7 +869,7 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     if (!task.worktree) throw Object.assign(new Error('У этой задачи нет worktree.'), { code: 'INPUT_INVALID' });
     if (!task.workspacePath) throw Object.assign(new Error('Worktree уже удалён.'), { code: 'INPUT_INVALID' });
-    if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
+    if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
       throw Object.assign(new Error('Дождитесь завершения задачи.'), { code: 'BUSY' });
     }
     const runtime = this.runtimes.get(id);
@@ -694,6 +904,7 @@ export class TaskManager extends EventEmitter {
       return this.#publicTask(task);
     }
     runtime.cancelRequested = true;
+    this.approvals.cancelTask(id);
     await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
     try {
       await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
@@ -716,7 +927,12 @@ export class TaskManager extends EventEmitter {
   async #message(id, text, mode, files, uploadToken) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-    if (this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
+    // A task that already reached a terminal state may start a new turn even if
+    // the queue slot has not been released yet (the finalizer clears it on the
+    // next tick). Otherwise a follow-up sent right after completion — e.g. a
+    // remote FOLLOW_UP arriving with the task_finished event — would be refused.
+    const alreadyFinished = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status);
+    if (!alreadyFinished && this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
     const incomingFiles = await this.#resolveFiles(files, uploadToken);
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });

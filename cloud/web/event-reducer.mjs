@@ -139,6 +139,14 @@ export function applyEvent(state, event) {
       record.error = payload.error?.message || 'tool failed';
       break;
     }
+    case 'tool_output_full': {
+      const record = tool(state, payload.toolCallId || `tool:${seq}`, seq);
+      record.fullOutput = payload.text || '';
+      record.fullOutputBytes = payload.bytes ?? null;
+      record.fullOutputTruncated = Boolean(payload.truncated);
+      log(state, `full tool output loaded (${payload.bytes ?? 0} bytes)`);
+      break;
+    }
     case 'approval_required':
       state.approvals.set(payload.approvalId, { ...payload, status: 'PENDING' });
       log(state, `approval required: ${payload.toolName || 'tool'} (${payload.risk || 'unknown'})`);

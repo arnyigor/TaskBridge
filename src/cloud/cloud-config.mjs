@@ -23,9 +23,8 @@ const DEFAULTS = {
   requestTimeoutMs: 20000,
   maxOutboxMb: 100,
   redactPaths: true,
-  approvalTimeoutMinutes: 1440,
-  approvalTimeoutPolicy: 'KEEP_WAITING', // 'DENY' | 'ABORT_TASK'
   coalesceDeltas: true,
+  toolOutput: { rollingKb: 64, tailKb: 64, snapshotMs: 500, maxFullMb: 4 },
   logLevel: 'info'
 };
 
@@ -71,16 +70,19 @@ export function resolveCloudConfig(config = {}, env = process.env, { dataRoot = 
     requestTimeoutMs: num(env.TASKBRIDGE_CLOUD_TIMEOUT_MS ?? cloud.requestTimeoutMs, DEFAULTS.requestTimeoutMs, { min: 1000, max: 300000 }),
     maxOutboxMb: num(env.TASKBRIDGE_MAX_OUTBOX_MB ?? cloud.maxOutboxMb, DEFAULTS.maxOutboxMb, { min: 1, max: 10240 }),
     redactPaths: bool(env.TASKBRIDGE_CLOUD_REDACT_PATHS ?? cloud.redactPaths, DEFAULTS.redactPaths),
-    approvalTimeoutMinutes: num(env.TASKBRIDGE_APPROVAL_TIMEOUT_MINUTES ?? cloud.approvalTimeoutMinutes, DEFAULTS.approvalTimeoutMinutes, { min: 0, max: 525600 }),
-    approvalTimeoutPolicy: String(env.TASKBRIDGE_APPROVAL_TIMEOUT_POLICY ?? cloud.approvalTimeoutPolicy ?? DEFAULTS.approvalTimeoutPolicy).toUpperCase(),
     coalesceDeltas: bool(env.TASKBRIDGE_COALESCE_DELTAS ?? cloud.coalesceDeltas, DEFAULTS.coalesceDeltas),
+    // Tool output bounding (§38): wire window and the cap for an explicit
+    // "load full output" request.
+    toolOutput: {
+      rollingKb: num(env.TASKBRIDGE_TOOL_OUTPUT_ROLLING_KB ?? cloud.toolOutput?.rollingKb, DEFAULTS.toolOutput.rollingKb, { min: 4, max: 4096 }),
+      tailKb: num(env.TASKBRIDGE_TOOL_OUTPUT_TAIL_KB ?? cloud.toolOutput?.tailKb, DEFAULTS.toolOutput.tailKb, { min: 4, max: 4096 }),
+      snapshotMs: num(env.TASKBRIDGE_TOOL_OUTPUT_SNAPSHOT_MS ?? cloud.toolOutput?.snapshotMs, DEFAULTS.toolOutput.snapshotMs, { min: 100, max: 10000 }),
+      maxFullMb: num(env.TASKBRIDGE_TOOL_OUTPUT_MAX_MB ?? cloud.toolOutput?.maxFullMb, DEFAULTS.toolOutput.maxFullMb, { min: 0.1, max: 32 })
+    },
     logLevel: String(env.TASKBRIDGE_CLOUD_LOG_LEVEL ?? cloud.logLevel ?? DEFAULTS.logLevel).toLowerCase()
   };
   if (!resolved.machineId) resolved.machineId = defaultMachineId(dataRoot);
   if (!['bearer', 'hmac'].includes(resolved.authMode)) resolved.authMode = 'bearer';
-  if (!['KEEP_WAITING', 'DENY', 'ABORT_TASK'].includes(resolved.approvalTimeoutPolicy)) {
-    resolved.approvalTimeoutPolicy = 'KEEP_WAITING';
-  }
   return resolved;
 }
 

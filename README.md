@@ -165,6 +165,7 @@ Taskbridge/
 │  ├─ domain/               протокол: TaskEvent, CloudCommand, machine state
 │  ├─ events/               EventMux, sequence, нормализация, snapshot'ы
 │  └─ cloud/                CloudWorker, outbox, heartbeat, dispatcher, approvals
+├─ pi-extension/            Pi-расширение: подтверждение опасных tool-вызовов
 ├─ cloud/                   облачный control plane (Vercel-совместимый)
 │  ├─ lib/                  роутер API, auth, store (memory/sqlite), errors, ids
 │  ├─ api/index.mjs         Vercel function (общий роутер)
@@ -178,7 +179,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   136 тестов на node:test
+├─ tests/                   159 тестов на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  └─ backup.mjs            снимок БД (npm run backup)
@@ -541,7 +542,16 @@ IP, VPN и без длительных Vercel-запросов. Локальны
 (сохраняется между restart'ами), `EventMux`, батчинг дельт с coalescing,
 приоритеты событий, durable outbox с backpressure, heartbeat, polling команд,
 идемпотентность `commandId`, reconnect с backoff 1s→30s, reconcile при старте,
-redaction секретов и путей, approval-инфраструктура, диагностика `/debug/cloud`.
+redaction секретов и путей, метрики (`/api/metrics`, в т.ч. Prometheus), экран
+настроек облака, диагностика `/debug/cloud`.
+
+Дополнительно (Этап A): **подтверждения опасных tool-вызовов** работают
+по-настоящему — Pi-расширение блокирует `tool_call` до ответа оператора локально
+или с телефона, состояние задачи `WAITING_USER`, таймаут и fail-closed;
+**ограничение вывода инструментов** (полный лог остаётся на машине, в облако идёт
+rolling-окно и по запросу — ограниченный срез через `FETCH_TOOL_OUTPUT`);
+**SET_MODEL / SET_THINKING** через реальные RPC-команды Pi (`set_model`,
+`set_thinking_level`).
 
 Что реализовано в облаке: аутентификация пользователя и машины, реестр машин,
 задачи и их состояния, очередь команд с приоритетами, durable-события с
@@ -570,8 +580,7 @@ PWA с живым стримингом ответа, tool-карточками, 
 идти часами: ни один HTTP-запрос не удерживается открытым.
 
 Полная документация, API и список известных пробелов (WebSocket-фастпас,
-Postgres-адаптер, автоматический перехват approvals в Pi) — в
-[`docs/cloud-transport.md`](docs/cloud-transport.md).
+Postgres-адаптер) — в [`docs/cloud-transport.md`](docs/cloud-transport.md).
 
 ---
 
@@ -628,12 +637,13 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test            # 136 тестов на node:test
+npm test            # 159 тестов на node:test
 npm run test:cloud  # только тесты облачного транспорта
+npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
 npm run check       # синтаксическая проверка основных файлов
 ```
 
-Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP.
+Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals (политика, менеджер, маршрутизация и end-to-end через Pi-хук), ограничение вывода инструментов и загрузка полного лога, смена модели/reasoning, метрики, API настроек облака, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP. Стресс-набор (`npm run stress`) масштабируется переменными `TASKBRIDGE_STRESS_EVENTS`, `TASKBRIDGE_STRESS_LOG_MB`, `TASKBRIDGE_STRESS_SECONDS`.
 
 ---
 
@@ -648,7 +658,8 @@ npm run check       # синтаксическая проверка основн
 7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
 8. Claude Code и Codex как отдельные runner'ы пока не подключены.
 9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
-10. Cloud transport: перехват approvals в Pi RPC ещё не подключён (инфраструктура и команды готовы); WebSocket-фастпас не реализован (polling корректен и обязателен); serverless-деплой требует Postgres-адаптера вместо `SqliteStore`.
+10. Cloud transport: WebSocket-фастпас не реализован (polling корректен и обязателен, SSE есть на локальном хосте облака); serverless-деплой требует Postgres-адаптера вместо `SqliteStore`.
+11. Подтверждения инструментов включаются опцией `approvals.enabled`; расширение передаётся Pi через `--extension` (не ставится глобально). Длительный soak-прогон (30+ минут) запускается вручную через `TASKBRIDGE_STRESS_SECONDS`.
 
 ---
 
@@ -659,7 +670,6 @@ npm run check       # синтаксическая проверка основн
 2. CodexRunner
 3. KMP Android client
 4. WebSocket/SSE fast path + Postgres adapter для Vercel
-5. Перехват tool-approvals в Pi RPC
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.

@@ -29,7 +29,8 @@ export class PiRpcSession extends EventEmitter {
       sessionName,
       sessionFile,
       persistSessions = true,
-      projectTrust = 'approve'
+      projectTrust = 'approve',
+      env = null
     } = this.options;
 
     if (persistSessions && sessionDir) fs.mkdirSync(sessionDir, { recursive: true });
@@ -54,7 +55,8 @@ export class PiRpcSession extends EventEmitter {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      shell: process.platform === 'win32'
+      shell: process.platform === 'win32',
+      ...(env ? { env: { ...process.env, ...env } } : {})
     });
     this.proc = proc;
 
@@ -186,6 +188,18 @@ export class PiRpcSession extends EventEmitter {
       ? { type: 'compact', customInstructions }
       : { type: 'compact' };
     return this.request(cmd, 120000);
+  }
+
+  // Runtime model/thinking changes (§51). Both commands exist in Pi's RPC
+  // protocol; the response carries the new model object / nothing respectively.
+  async setModel(provider, modelId) {
+    const response = await this.request({ type: 'set_model', provider, modelId }, 60000);
+    if (response.data) this.lastState = { ...(this.lastState || {}), model: response.data };
+    return response.data || null;
+  }
+
+  async setThinkingLevel(level) {
+    return this.request({ type: 'set_thinking_level', level }, 30000);
   }
 
   async setAutoCompaction(enabled) {

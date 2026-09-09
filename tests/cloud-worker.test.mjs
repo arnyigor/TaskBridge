@@ -23,7 +23,7 @@ const ENV = {
 function createStubManager() {
   const emitter = new EventEmitter();
   const tasks = new Map();
-  const calls = { create: [], cancel: [], message: [], compact: [] };
+  const calls = { create: [], cancel: [], message: [], compact: [], setModel: [], setThinking: [] };
   const api = {
     activeTaskId: null,
     calls,
@@ -55,7 +55,9 @@ function createStubManager() {
     },
     async cancel(id) { calls.cancel.push(id); const task = tasks.get(id); if (task) { task.status = 'CANCELLED'; } api.emit({ at: new Date().toISOString(), taskId: id, type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} }); return task ?? null; },
     async message(id, text, mode) { calls.message.push({ id, text, mode }); return tasks.get(id) ?? null; },
-    async compact(id, instructions) { calls.compact.push({ id, instructions }); return { tokensBefore: 10, estimatedTokensAfter: 5 }; }
+    async compact(id, instructions) { calls.compact.push({ id, instructions }); return { tokensBefore: 10, estimatedTokensAfter: 5 }; },
+    async setModel(id, model) { calls.setModel.push({ id, model }); return tasks.get(id) ?? null; },
+    async setThinking(id, level) { calls.setThinking.push({ id, level }); return tasks.get(id) ?? null; }
   };
   return api;
 }
@@ -148,9 +150,13 @@ test('dispatcher routes commands, deduplicates redelivery and rejects unsupporte
   assert.equal((await dispatcher.handle({ commandId: 'c5', machineId: 'm', taskId: 'task_abc', seq: 5, type: 'ABORT_TASK', payload: {} })).status, 'ACCEPTED');
   assert.deepEqual(manager.calls.cancel, ['task_abc']);
 
-  const unsupported = await dispatcher.handle({ commandId: 'c6', machineId: 'm', taskId: 'task_abc', seq: 6, type: 'SET_THINKING', payload: { level: 'medium' } });
-  assert.equal(unsupported.status, 'REJECTED');
-  assert.equal(unsupported.error.code, 'COMMAND_REJECTED');
+  // Runtime model/thinking changes are supported when the manager exposes them (§51).
+  const thinking = await dispatcher.handle({ commandId: 'c6', machineId: 'm', taskId: 'task_abc', seq: 6, type: 'SET_THINKING', payload: { level: 'medium' } });
+  assert.equal(thinking.status, 'ACCEPTED');
+  assert.deepEqual(manager.calls.setThinking, [{ id: 'task_abc', level: 'medium' }]);
+  const model = await dispatcher.handle({ commandId: 'c8', machineId: 'm', taskId: 'task_abc', seq: 8, type: 'SET_MODEL', payload: { model: { provider: 'anthropic', modelId: 'sonnet' } } });
+  assert.equal(model.status, 'ACCEPTED');
+  assert.deepEqual(manager.calls.setModel, [{ id: 'task_abc', model: { provider: 'anthropic', modelId: 'sonnet' } }]);
 
   const unknownTask = await dispatcher.handle({ commandId: 'c7', machineId: 'm', taskId: 'nope', seq: 7, type: 'ABORT_TASK', payload: {} });
   assert.equal(unknownTask.error.code, 'TASK_NOT_FOUND');

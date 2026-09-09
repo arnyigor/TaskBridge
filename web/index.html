@@ -25,6 +25,7 @@
         <button id="runtimeStart" type="button" class="iconButton" title="Запустить модель" aria-label="Запустить модель">▶</button>
       </div>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
+      <button id="cloudButton" type="button" class="iconButton" title="Доступ через облако" aria-label="Настройки облака">☁</button>
       <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
       <div id="pcState" class="statusDot" title="Проверка…" aria-label="Статус модели"></div>
       <button id="helpButton" type="button" class="iconButton" title="Как это работает" aria-label="Справка">❓</button>
@@ -102,6 +103,36 @@
     </div>
   </div>
 
+  <div id="cloudOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Доступ через облако</h2>
+      <p class="muted small">Машина сама открывает исходящее соединение — порт наружу открывать не нужно. Секрет хранится только локально и никогда не отдаётся браузеру.</p>
+      <form id="cloudForm">
+        <label class="cloudRow"><input id="cloudEnabled" type="checkbox" /> Включить облачный транспорт</label>
+        <label>Адрес облака
+          <input id="cloudUrl" type="url" placeholder="https://taskbridge.example.app" autocomplete="off" />
+        </label>
+        <label>ID машины
+          <input id="cloudMachineId" type="text" placeholder="home-pc-01" autocomplete="off" />
+        </label>
+        <label>Отображаемое имя (необязательно)
+          <input id="cloudMachineName" type="text" placeholder="Main Windows Workstation" autocomplete="off" />
+        </label>
+        <label>Секрет машины
+          <input id="cloudSecret" type="password" autocomplete="new-password" placeholder="оставьте пустым, чтобы не менять" />
+        </label>
+        <label class="cloudRow"><input id="cloudRedact" type="checkbox" /> Скрывать абсолютные пути в облаке</label>
+        <div class="cloudActions">
+          <button id="cloudTest" type="button" class="small">Проверить соединение</button>
+          <button id="cloudSave" type="submit" class="small">Сохранить</button>
+          <button id="cloudClose" type="button" class="small">Закрыть</button>
+        </div>
+      </form>
+      <div id="cloudStatus" class="hint"></div>
+      <p class="muted small">Изменения вступают в силу сразу; лимиты вывода инструментов и правила подтверждений применяются после перезапуска TaskBridge.</p>
+    </div>
+  </div>
+
   <div id="helpOverlay" class="authGate hidden">
     <div class="authCard wide helpCard">
       <h2>Как устроен TaskBridge</h2>
@@ -161,6 +192,8 @@
           </div>
         </div>
       </div>
+
+      <div id="approvalBanner" class="approvalBanner hidden" aria-live="polite"></div>
 
       <div class="composer-wrap">
         <span id="fileList" class="muted small"></span>

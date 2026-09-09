@@ -63,7 +63,8 @@ function reject(code, message) {
 // This class is the only place where cloud commands turn into local actions;
 // TaskManager itself stays transport-independent.
 export class CommandDispatcher {
-  constructor({ manager, approvals = null, ledger = null, logger = null, now = () => new Date().toISOString() }) {
+  constructor({ manager, approvals = null, ledger = null, logger = null, now = () => new Date().toISOString(), metrics = null }) {
+    this.metrics = metrics;
     this.manager = manager;
     this.approvals = approvals;
     this.ledger = ledger || new CommandLedger();
@@ -91,11 +92,13 @@ export class CommandDispatcher {
     }
 
     let result;
+    const startedAt = Date.now();
     try {
       result = await this.#dispatch(command);
     } catch (error) {
       result = { status: 'FAILED', error: { code: error?.code || 'INTERNAL_ERROR', message: error?.message || String(error) } };
     }
+    this.metrics?.observe('cloud_command_latency_ms', Date.now() - startedAt, { type: command.type });
 
     if (result.status === 'ACCEPTED') {
       this.stats.accepted += 1;
@@ -122,12 +125,15 @@ export class CommandDispatcher {
 
   async #dispatch(command) {
     const { type, taskId, payload } = command;
+    // The task id travels in the envelope; approval commands also need it.
+    const scopedPayload = type === 'APPROVAL_RESPONSE' ? { ...payload, taskId } : payload;
     switch (type) {
       case 'START_TASK': return this.#startTask(command);
       case 'ABORT_TASK': return this.#abortTask(taskId);
       case 'FOLLOW_UP': return this.#followUp(taskId, payload);
       case 'COMPACT': return this.#compact(taskId, payload);
-      case 'APPROVAL_RESPONSE': return this.#approval(payload);
+      case 'APPROVAL_RESPONSE': return this.#approval(scopedPayload);
+      case 'FETCH_TOOL_OUTPUT': return this.#fetchToolOutput(taskId, payload);
       case 'SET_MODEL': return this.#setModel(taskId, payload);
       case 'SET_THINKING': return this.#setThinking(taskId, payload);
       default: return reject('COMMAND_REJECTED', `Unsupported command: ${type}`);
@@ -180,12 +186,34 @@ export class CommandDispatcher {
     return { status: 'ACCEPTED', detail: { taskId, result: result ?? null } };
   }
 
+  // Explicit "load full output" (§38): the full log stays local, only a bounded
+  // slice is uploaded, and only because the operator asked for it.
+  async #fetchToolOutput(taskId, payload) {
+    if (typeof this.manager.fetchToolOutput !== 'function') {
+      return reject('COMMAND_REJECTED', 'FETCH_TOOL_OUTPUT is not supported by this TaskBridge build');
+    }
+    if (!taskId || !this.manager.getTask(taskId)) return reject('TASK_NOT_FOUND', `Unknown task ${taskId}`);
+    const toolCallId = String(payload.toolCallId || '');
+    if (!toolCallId) return reject('COMMAND_REJECTED', 'FETCH_TOOL_OUTPUT requires toolCallId');
+    const maxBytes = payload.maxKb ? Number(payload.maxKb) * 1024 : undefined;
+    const result = await this.manager.fetchToolOutput(taskId, toolCallId, { ...(maxBytes ? { maxBytes } : {}), emit: true });
+    return { status: 'ACCEPTED', detail: { taskId, toolCallId, bytes: result.bytes, truncated: result.truncated } };
+  }
+
   async #approval(payload) {
-    if (!this.approvals) return reject('COMMAND_REJECTED', 'Approvals are not enabled on this machine');
     const approvalId = String(payload.approvalId || '');
     const decision = String(payload.decision || '');
     if (!approvalId) return reject('COMMAND_REJECTED', 'APPROVAL_RESPONSE requires approvalId');
     if (!['ALLOW_ONCE', 'DENY'].includes(decision)) return reject('COMMAND_REJECTED', `Unsupported approval decision: ${decision}`);
+    // TaskManager owns the approval state, so the local UI and the cloud command
+    // path resolve the exact same pending request.
+    if (typeof this.manager.resolveApproval === 'function') {
+      if (!this.manager.resolveApproval(payload.taskId ?? null, approvalId, decision)) {
+        return reject('APPROVAL_NOT_FOUND', `Unknown or already resolved approval ${approvalId}`);
+      }
+      return { status: 'ACCEPTED', detail: { approvalId, decision } };
+    }
+    if (!this.approvals) return reject('COMMAND_REJECTED', 'Approvals are not enabled on this machine');
     const resolved = this.approvals.resolve(approvalId, decision);
     if (!resolved) return reject('APPROVAL_NOT_FOUND', `Unknown or already resolved approval ${approvalId}`);
     return { status: 'ACCEPTED', detail: { approvalId, decision } };
@@ -196,8 +224,12 @@ export class CommandDispatcher {
       return reject('COMMAND_REJECTED', 'SET_MODEL is not supported by this TaskBridge build');
     }
     if (!taskId || !this.manager.getTask(taskId)) return reject('TASK_NOT_FOUND', `Unknown task ${taskId}`);
-    await this.manager.setModel(taskId, payload.model ?? null);
-    return { status: 'ACCEPTED', detail: { taskId, model: payload.model ?? null } };
+    // Accept the documented { model: {...} } shape and the flat { provider, modelId }.
+    const model = payload.model && typeof payload.model === 'object'
+      ? payload.model
+      : { provider: payload.provider, modelId: payload.modelId ?? payload.model };
+    await this.manager.setModel(taskId, model);
+    return { status: 'ACCEPTED', detail: { taskId, model: { provider: model.provider ?? null, modelId: model.modelId ?? null } } };
   }
 
   async #setThinking(taskId, payload) {

@@ -217,8 +217,12 @@ function renderTools() {
       const details = el('details', 'tool running');
       const summary = el('summary');
       const pre = el('pre');
-      details.append(summary, pre);
-      node = { details, summary, pre };
+      const actions = el('div', 'actions');
+      const full = el('button', 'ghost', 'Load full output');
+      full.addEventListener('click', (event) => { event.preventDefault(); loadFullOutput(toolCallId); });
+      actions.append(full);
+      details.append(summary, pre, actions);
+      node = { details, summary, pre, actions, full };
       dom.tools.set(toolCallId, node);
       container.append(details);
     }
@@ -228,14 +232,27 @@ function renderTools() {
     if (record.args) node.summary.append(el('span', 'args', JSON.stringify(record.args).slice(0, 160)));
     if (record.durationMs != null) node.summary.append(el('span', 'badge', `${(record.durationMs / 1000).toFixed(1)} s`));
     if (record.status === 'running') node.summary.append(el('span', 'badge', 'running'));
+    if (record.truncated || record.fullLogAvailable) node.summary.append(el('span', 'badge', 'truncated'));
     const extra = [
       record.output,
       record.summary ? `\n${record.summary}` : '',
       record.exitCode != null ? `\nexit ${record.exitCode}` : '',
-      record.error ? `\n${record.error}` : ''
+      record.error ? `\n${record.error}` : '',
+      record.fullOutput ? `\n--- full output${record.fullOutputTruncated ? ' (truncated)' : ''} ---\n${record.fullOutput}` : ''
     ].join('');
     node.pre.textContent = extra.trim();
+    // "Load full output" is an explicit operation: the log stays local and only
+    // a bounded slice is uploaded on request (§38).
+    const canLoad = record.fullLogAvailable && !record.fullOutput;
+    node.actions.hidden = !canLoad;
+    node.full.disabled = !canLoad;
   }
+}
+
+async function loadFullOutput(toolCallId) {
+  if (!state.taskId) return;
+  await api(`/api/tasks/${state.taskId}/commands`, { method: 'POST', body: { type: 'FETCH_TOOL_OUTPUT', payload: { toolCallId } } });
+  toast('Full output requested');
 }
 
 function renderActivity() {
