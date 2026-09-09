@@ -14,6 +14,7 @@ import { AccessControl } from './auth.mjs';
 import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
 import { ensureTlsCert } from './tls.mjs';
+import { trimStreamingDeltas } from './event-trim.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -256,7 +257,8 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
     if (req.method === 'GET' && match) {
       if (!manager.getTask(match[1])) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
-      return json(res, 200, await store.readEvents(match[1], Number(url.searchParams.get('limit') ?? 500), Number(url.searchParams.get('after') ?? 0)));
+      const events = await store.readEvents(match[1], Number(url.searchParams.get('limit') ?? 500), Number(url.searchParams.get('after') ?? 0));
+      return json(res, 200, trimStreamingDeltas(events));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/stream$/);
