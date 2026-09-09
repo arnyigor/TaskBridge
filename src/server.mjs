@@ -6,7 +6,8 @@ import fs from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from './config.mjs';
+import { loadConfig, saveConfig } from './config.mjs';
+import { listDirectory, resolveBrowsablePath } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
 import { AccessControl } from './auth.mjs';
@@ -115,6 +116,13 @@ async function readJson(req) {
   return text ? JSON.parse(text) : {};
 }
 
+function uniqueProjectId(manager, name) {
+  const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'project';
+  let id = base;
+  for (let n = 2; manager.projects.has(id); n++) id = `${base}-${n}`;
+  return id;
+}
+
 function lanAddresses(port, scheme = 'http') {
   const out = [];
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
@@ -204,6 +212,20 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/projects') {
       return json(res, 200, manager.listProjects());
+    }
+
+    if (req.method === 'GET' && pathname === '/api/project-browser') {
+      return json(res, 200, await listDirectory(config, url.searchParams.get('path')));
+    }
+    if (req.method === 'POST' && pathname === '/api/project-browser/register') {
+      const body = await readJson(req);
+      const resolved = await resolveBrowsablePath(config, body.path);
+      const name = String(body.name || path.basename(resolved)).trim().slice(0, 120) || path.basename(resolved);
+      const id = uniqueProjectId(manager, name);
+      const project = { id, name, path: resolved, useWorktree: false, verification: [] };
+      manager.registerProject(project);
+      await saveConfig(rootDir, config);
+      return json(res, 201, manager.listProjects().find(p => p.id === id));
     }
 
     const sessionsMatch = pathname.match(/^\/api\/projects\/([^/]+)\/pi-sessions$/);
@@ -333,7 +355,7 @@ async function handleRequest(req, res) {
     if (res.headersSent) { res.destroy(); return; }
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
-      : ['INPUT_INVALID', 'PROJECT_DIRTY'].includes(error.code) ? 400
+      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED'].includes(error.code) ? 400
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN'].includes(error.code) ? 403

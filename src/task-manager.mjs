@@ -74,6 +74,12 @@ export class TaskManager extends EventEmitter {
     }));
   }
 
+  registerProject(project) {
+    if (this.projects.has(project.id)) throw Object.assign(new Error('Проект с таким именем уже существует.'), { code: 'INPUT_INVALID' });
+    this.projects.set(project.id, project);
+    this.config.projects = [...(this.config.projects || []), project];
+  }
+
   listTasks() {
     return Array.from(this.tasks.values()).map(t => this.#publicTask(t)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }

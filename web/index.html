@@ -68,12 +68,26 @@
     </div>
   </div>
 
+  <div id="projectBrowserOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Выбор папки проекта</h2>
+      <p id="projectBrowserPath" class="muted small">Загрузка…</p>
+      <div id="projectBrowserList" class="sessionPickerList"></div>
+      <div class="inline">
+        <button id="projectBrowserUp" type="button" disabled>⬆ Вверх</button>
+        <button id="projectBrowserSelect" type="button" disabled>Выбрать эту папку</button>
+      </div>
+      <button id="projectBrowserClose" type="button">Закрыть</button>
+    </div>
+  </div>
+
   <div id="helpOverlay" class="authGate hidden">
     <div class="authCard wide helpCard">
       <h2>Как устроен TaskBridge</h2>
       <div class="helpBody">
         <h3>Проекты и сессии</h3>
         <p>Проект — это папка с кодом, зарегистрированная в настройках сервера (в файле <code>config.json</code>). Сессия (задача) — это один разговор с Pi внутри проекта: сообщение, ответы, инструменты, файлы. Если проект всего один, выбор проекта не показывается — он подставляется сам. «Без проекта» — временная рабочая папка, которая не привязана к твоему коду; используй её для разовых экспериментов.</p>
+        <p>Кнопка «+ проект» рядом с выбором проекта открывает выбор папки прямо с телефона — но только внутри заранее разрешённых корневых директорий (<code>projectBrowser.roots</code> в <code>config.json</code>), а не по всему диску. Выбранная папка сразу и навсегда сохраняется как новый проект.</p>
 
         <h3>Как это работает</h3>
         <p>TaskBridge — это веб-интерфейс к Pi (коммандному ИИ-агенту), который крутится на компьютере. Телефон и компьютер видят один и тот же список сессий, потому что оба просто открывают один и тот же сервер в браузере — сессия не привязана к устройству, с которого её создали.</p>
@@ -126,6 +140,7 @@
       <div class="composer-wrap">
         <div class="composer-top">
           <select id="project" title="Проект" aria-label="Проект"></select>
+          <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
           <label class="fileButton" title="Прикрепить файлы">
             <input id="files" type="file" multiple accept="*/*" />+ файлы
           </label>

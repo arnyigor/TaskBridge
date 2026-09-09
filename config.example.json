@@ -50,6 +50,9 @@
     "requireCleanSource": true,
     "useGitWorktreeByDefault": true
   },
+  "projectBrowser": {
+    "roots": []
+  },
   "projects": [
     {
       "id": "example-project",

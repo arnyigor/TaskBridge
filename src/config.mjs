@@ -15,3 +15,10 @@ export async function loadConfig(rootDir) {
     return JSON.parse(example);
   }
 }
+
+export async function saveConfig(rootDir, config) {
+  const configPath = path.join(rootDir, 'config.json');
+  const tmp = `${configPath}.tmp`;
+  await fs.writeFile(tmp, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  await fs.rename(tmp, configPath);
+}

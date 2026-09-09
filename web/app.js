@@ -900,6 +900,53 @@ $('notifyButton').onclick = async () => {
   if (permission !== 'granted') alert('Не получилось включить уведомления.\n\nПричина: браузер разрешает уведомления только для сайтов с https:// или для localhost. TaskBridge сейчас открыт по обычному http://, поэтому браузер даже не показал запрос на разрешение — это ограничение браузера, а не TaskBridge.\n\nЧтобы уведомления заработали, нужно включить HTTPS для TaskBridge.');
 };
 
+/* ---------------- project browser ---------------- */
+
+let browsedPath = null;
+
+async function loadProjectBrowser(target) {
+  $('projectBrowserSelect').disabled = true;
+  $('projectBrowserUp').disabled = true;
+  $('projectBrowserList').textContent = 'Загрузка…';
+  try {
+    const data = await api(`/api/project-browser${target ? `?path=${encodeURIComponent(target)}` : ''}`);
+    browsedPath = data.path;
+    $('projectBrowserPath').textContent = data.path || 'Выберите одну из разрешённых папок:';
+    $('projectBrowserUp').disabled = !data.parent;
+    $('projectBrowserUp').dataset.parent = data.parent || '';
+    $('projectBrowserSelect').disabled = !data.path;
+    $('projectBrowserList').innerHTML = '';
+    if (!data.entries.length) { $('projectBrowserList').textContent = 'Подпапок нет.'; return; }
+    for (const entry of data.entries) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'sessionPickerItem';
+      button.textContent = `📁 ${entry.name}`;
+      button.onclick = () => loadProjectBrowser(entry.path);
+      $('projectBrowserList').append(button);
+    }
+  } catch (err) { $('projectBrowserList').textContent = err.message; }
+}
+
+$('addProjectButton').onclick = () => {
+  $('projectBrowserOverlay').classList.remove('hidden');
+  loadProjectBrowser(null);
+};
+$('projectBrowserClose').onclick = () => $('projectBrowserOverlay').classList.add('hidden');
+$('projectBrowserUp').onclick = () => loadProjectBrowser($('projectBrowserUp').dataset.parent || null);
+$('projectBrowserSelect').onclick = async () => {
+  if (!browsedPath) return;
+  const defaultName = browsedPath.split(/[\\/]/).filter(Boolean).pop() || browsedPath;
+  const name = prompt('Название проекта:', defaultName);
+  if (name === null) return;
+  try {
+    const project = await api('/api/project-browser/register', { method: 'POST', body: JSON.stringify({ path: browsedPath, name }) });
+    $('projectBrowserOverlay').classList.add('hidden');
+    await loadProjects();
+    $('project').value = project.id;
+  } catch (err) { alert(err.message); }
+};
+
 /* ---------------- native Pi sessions ---------------- */
 
 $('resumeSessionButton').onclick = async () => {
