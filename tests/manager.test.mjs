@@ -52,7 +52,9 @@ test('accepted steering stores user text and attachment metadata separately', as
   const messages = (await f.store.readEvents('a', 0)).filter(x => x.type === 'USER_MESSAGE');
   assert.equal(messages.length, 1);
   assert.equal(messages[0].message, 'read this');
-  assert.deepEqual(messages[0].data.files, [{ name: 'file.txt', size: 1 }]);
+  assert.equal(messages[0].data.files.length, 1);
+  assert.equal(messages[0].data.files[0].name, 'file.txt');
+  assert.equal(messages[0].data.files[0].size, 1);
   assert.match(f.sent[0], /Additional files/);
 });
 

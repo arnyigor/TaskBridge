@@ -14,5 +14,9 @@
   },
   "devDependencies": {
     "linkedom": "^0.18.13"
+  },
+  "dependencies": {
+    "dompurify": "3.4.15",
+    "marked": "17.0.3"
   }
 }

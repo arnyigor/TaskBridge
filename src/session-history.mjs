@@ -1,10 +1,15 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { readPiSession } from './pi-session-index.mjs';
 
 // Pi's persisted v3 session keeps message roles, tool results and compaction
 // boundaries intact. Use it directly whenever it is available.
 export async function restoreSessionFile(task, store, dataRoot) {
+  if (task.nativeSession) {
+    await readPiSession(task.piSessionFile, task.workspacePath);
+    return task.piSessionFile;
+  }
   const dir = path.join(dataRoot, 'pi-sessions', task.id);
   await fs.mkdir(dir, { recursive: true });
   const candidates = await fs.readdir(dir, { withFileTypes: true });

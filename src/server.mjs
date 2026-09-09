@@ -6,6 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
+import { AccessControl } from './auth.mjs';
+import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs';
+import { RuntimeControl } from './runtime-control.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -18,6 +21,9 @@ await fs.mkdir(dataRoot, { recursive: true });
 const store = new TaskStore(dataRoot);
 const manager = new TaskManager(config, dataRoot, store);
 await manager.init();
+const access = new AccessControl(config.server?.auth, dataRoot);
+await access.init();
+const runtimeControl = new RuntimeControl(manager.runtimeManager, manager);
 
 const sseClients = new Map();
 
@@ -100,25 +106,6 @@ function lanAddresses(port) {
   return out;
 }
 
-function contentType(file) {
-  const ext = path.extname(file).toLowerCase();
-  return {
-    '.html': 'text/html; charset=utf-8',
-    '.js': 'text/javascript; charset=utf-8',
-    '.mjs': 'text/javascript; charset=utf-8',
-    '.css': 'text/css; charset=utf-8',
-    '.json': 'application/json; charset=utf-8',
-    '.webmanifest': 'application/manifest+json; charset=utf-8',
-    '.svg': 'image/svg+xml',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-    '.bmp': 'image/bmp'
-  }[ext] || 'application/octet-stream';
-}
-
 async function serveStatic(urlPath, res) {
   const relative = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '');
   const target = path.resolve(webDir, relative);
@@ -144,9 +131,39 @@ async function listArtifacts(taskId) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     const pathname = decodeURIComponent(url.pathname);
+    access.checkOrigin(req);
+    if (req.method === 'GET' && pathname === '/api/auth') return json(res, 200, { authenticated: access.authenticated(req), enabled: access.enabled, local: access.local(req) });
+    if (req.method === 'POST' && pathname === '/api/auth/pair') {
+      const body = await readJson(req);
+      access.pair(req, res, body.code);
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === 'GET' && pathname === '/api/auth/pairing') {
+      if (!access.enabled || !access.local(req)) return errorJson(res, 403, new Error('Код доступен только на компьютере через localhost.'));
+      return json(res, 200, access.pairing());
+    }
     if (req.method === 'GET' && pathname === '/api/health') {
       return json(res, 200, { status: 'ok' });
+    }
+    if (pathname.startsWith('/api/')) access.require(req);
+
+    if (req.method === 'GET' && pathname === '/api/runtime') return json(res, 200, await runtimeControl.status());
+    if (req.method === 'POST' && pathname === '/api/runtime/start') {
+      const { profileId } = await readJson(req);
+      if (manager.activeTaskId || manager.admitting || manager.runtimeChanging) throw Object.assign(new Error('Дождитесь завершения текущей операции.'), { code: 'MODEL_BUSY' });
+      manager.runtimeChanging = true;
+      try { await manager.runtimeManager.ensureRunning(() => {}, profileId); }
+      finally { manager.runtimeChanging = false; }
+      return json(res, 200, await runtimeControl.status());
+    }
+    if (req.method === 'POST' && pathname === '/api/runtime/restart') {
+      const { profileId } = await readJson(req);
+      await runtimeControl.restart(profileId);
+      return json(res, 200, await runtimeControl.status());
     }
 
     if (req.method === 'GET' && pathname === '/api/info') {
@@ -156,13 +173,18 @@ const server = http.createServer(async (req, res) => {
         version: '0.1.0',
         addresses: lanAddresses(Number(config.server?.port || 8787)),
         modelBusy: busy.unknown ? null : busy.busy,
-        modelReady
+        modelReady,
+        fileLimits: FILE_LIMITS
       });
     }
 
     if (req.method === 'GET' && pathname === '/api/projects') {
       return json(res, 200, manager.listProjects());
     }
+
+    const sessionsMatch = pathname.match(/^\/api\/projects\/([^/]+)\/pi-sessions$/);
+    if (req.method === 'GET' && sessionsMatch) return json(res, 200, await manager.nativeSessions.list(sessionsMatch[1]));
+    if (req.method === 'POST' && pathname === '/api/tasks/from-session') return json(res, 201, await manager.importSession(await readJson(req)));
 
     if (req.method === 'GET' && pathname === '/api/tasks') {
       return json(res, 200, manager.listTasks());
@@ -183,6 +205,7 @@ const server = http.createServer(async (req, res) => {
       await manager.deleteTask(match[1]);
       return json(res, 200, { ok: true });
     }
+    if (req.method === 'PATCH' && match) return json(res, 200, await manager.renameTask(match[1], (await readJson(req)).title));
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/events$/);
     if (req.method === 'GET' && match) {
@@ -249,58 +272,49 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, await listArtifacts(match[1]));
     }
 
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/files(?:\/([a-f0-9-]{36}))?$/);
+    if (['GET', 'HEAD'].includes(req.method) && match) {
+      const task = manager.getTask(match[1]);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const files = [...(task.attachments || []), ...(task.outputFiles || [])];
+      if (!match[2]) return json(res, 200, files);
+      const file = files.find(f => f.id === match[2]);
+      if (!file) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
+      const target = await containedFile(path.join(store.taskDir(task.id), 'files'), file.id, { allowPrivate: true });
+      await serveFile(req, res, target, file.name, url.searchParams.get('download') === '1');
+      return;
+    }
+
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts\/([^/]+)$/);
-    if (req.method === 'GET' && match) {
+    if (['GET', 'HEAD'].includes(req.method) && match) {
+      if (!manager.getTask(match[1])) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
       const name = path.basename(match[2]);
-      const target = path.join(store.taskDir(match[1]), 'artifacts', name);
-      try {
-        const data = await fs.readFile(target);
-        res.writeHead(200, {
-          'content-type': contentType(target),
-          'content-disposition': `inline; filename="${name.replaceAll('"', '')}"`
-        });
-        res.end(data);
-      } catch {
-        errorJson(res, 404, Object.assign(new Error('Artifact not found'), { code: 'NOT_FOUND' }));
-      }
+      const target = await containedFile(path.join(store.taskDir(match[1]), 'artifacts'), name);
+      await serveFile(req, res, target, name, url.searchParams.get('download') === '1');
       return;
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace-file$/);
-    if (req.method === 'GET' && match) {
+    if (['GET', 'HEAD'].includes(req.method) && match) {
       const task = manager.getTask(match[1]);
-      if (!task || !task.workspacePath) {
-        return errorJson(res, 404, Object.assign(new Error('Task or workspace not found'), { code: 'NOT_FOUND' }));
-      }
-      const root = await fs.realpath(task.workspacePath);
-      const requested = path.resolve(root, String(url.searchParams.get('path') || ''));
-      const relative = path.relative(root, requested);
-      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
-        return errorJson(res, 400, Object.assign(new Error('Path escapes workspace'), { code: 'INPUT_INVALID' }));
-      }
-      try {
-        const target = await fs.realpath(requested);
-        const realRelative = path.relative(root, target);
-        if (realRelative === '..' || realRelative.startsWith('..' + path.sep) || path.isAbsolute(realRelative)) {
-          return errorJson(res, 400, Object.assign(new Error('Path escapes workspace'), { code: 'INPUT_INVALID' }));
-        }
-        const data = await fs.readFile(target);
-        res.writeHead(200, { 'content-type': contentType(target), 'cache-control': 'no-cache' });
-        res.end(data);
-      } catch {
-        errorJson(res, 404, Object.assign(new Error('File not found'), { code: 'NOT_FOUND' }));
-      }
+      if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
+      const target = await containedFile(task.workspacePath, String(url.searchParams.get('path') || ''));
+      await serveFile(req, res, target, path.basename(target), url.searchParams.get('download') === '1');
       return;
     }
 
     if (req.method === 'GET' && await serveStatic(pathname, res)) return;
     errorJson(res, 404, Object.assign(new Error('Not found'), { code: 'NOT_FOUND' }));
   } catch (error) {
-    console.error(error);
+    if (res.headersSent) { res.destroy(); return; }
+    console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
       : ['INPUT_INVALID', 'PROJECT_DIRTY'].includes(error.code) ? 400
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE'].includes(error.code) ? 409
-      : error.code === 'NOT_FOUND' ? 404
+      : error.code === 'AUTH_REQUIRED' ? 401
+      : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN'].includes(error.code) ? 403
+      : error.code === 'RATE_LIMITED' ? 429
+      : ['NOT_FOUND', 'ENOENT'].includes(error.code) ? 404
       : 500;
     errorJson(res, status, error);
   }
@@ -312,5 +326,5 @@ server.listen(port, host, () => {
   console.log(`\nTaskBridge MVP listening on ${host}:${port}`);
   console.log(`Local: http://127.0.0.1:${port}`);
   for (const item of lanAddresses(port)) console.log(`LAN (${item.interface}): ${item.url}`);
-  console.log('\nNo login/auth is enabled in this PoC. Use only on a trusted private LAN.\n');
+  console.log(access.enabled ? '\nPairing enabled. Open localhost and click «Подключить телефон» for a code.\n' : '\nPairing disabled by configuration.\n');
 });

@@ -2,7 +2,10 @@
   "server": {
     "host": "0.0.0.0",
     "port": 8787,
-    "maxBodyMb": 25
+    "maxBodyMb": 25,
+    "auth": {
+      "enabled": false
+    }
   },
   "pi": {
     "command": "pi",
@@ -13,6 +16,25 @@
   },
   "localRuntime": {
     "healthUrl": "http://127.0.0.1:8080/health",
+    "defaultProfile": "text",
+    "profiles": [
+      {
+        "id": "text",
+        "name": "Текст",
+        "enabled": false,
+        "command": "C:\\path\\to\\llama-server.exe",
+        "args": ["-m", "C:\\path\\to\\model.gguf", "--host", "127.0.0.1", "--port", "8080"],
+        "cwd": ""
+      },
+      {
+        "id": "vision",
+        "name": "Vision",
+        "enabled": false,
+        "command": "C:\\path\\to\\llama-server.exe",
+        "args": ["-m", "C:\\path\\to\\model.gguf", "-mm", "C:\\path\\to\\mmproj.gguf", "--host", "127.0.0.1", "--port", "8080"],
+        "cwd": ""
+      }
+    ],
     "managed": {
       "enabled": false,
       "command": "",

@@ -6,6 +6,8 @@ import { PiRpcSession } from './pi-rpc.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, runVerification } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile } from './session-history.mjs';
+import { validateFiles, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
+import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -48,6 +50,8 @@ export class TaskManager extends EventEmitter {
     this.deleted = new Set();
     this.eventWrites = new Map();
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
+    this.nativeSessions = new NativeSessionService(this);
+    this.runtimeChanging = false;
   }
 
   async init() {
@@ -94,8 +98,9 @@ export class TaskManager extends EventEmitter {
     const busy = await this.runtimeManager.getBusyStatus();
     if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!this.config.localRuntime?.managed?.enabled && !(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
-    const prompt = String(input.prompt || '').trim();
-    if (!prompt) throw Object.assign(new Error('prompt is required'), { code: 'INPUT_INVALID' });
+    const incomingFiles = validateFiles(input.files || []);
+    const prompt = String(input.prompt || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
+    if (!prompt) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
     const projectId = String(input.projectId || this.projects.keys().next().value || '');
     if (projectId !== '__scratch__' && !this.projects.has(projectId)) {
       throw Object.assign(new Error(`Unknown project: ${projectId}`), { code: 'PROJECT_NOT_FOUND' });
@@ -122,20 +127,36 @@ export class TaskManager extends EventEmitter {
       lastUsage: null,
       model: null,
       autoCompactionEnabled: null,
-      files: (input.files || []).map((f) => ({ name: safeFileName(f.name), size: Number(f.size || 0) }))
+      files: incomingFiles.map(metadata),
+      attachments: [],
+      outputFiles: []
     };
 
     await this.store.create(task);
     this.tasks.set(task.id, task);
-    task._incomingFiles = input.files || [];
+    task._incomingFiles = incomingFiles;
     this.queue.push(task.id);
     await this.#event(task, 'TASK_QUEUED', 'Task queued');
     this.#pump();
     return this.#publicTask(task);
   }
 
+  async importSession(input) {
+    return this.#admit(() => this.nativeSessions.importSession(input));
+  }
+
+  async renameTask(id, title) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const name = String(title ?? '').trim().slice(0, 200);
+    task.title = name || null;
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    return this.#publicTask(task);
+  }
+
   #publicTask(task) {
-    const { _incomingFiles, _modelError, ...safe } = task;
+    const { _incomingFiles, _modelError, _baseline, _nativeLease, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return { ...safe, sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed)) };
   }
@@ -177,6 +198,7 @@ export class TaskManager extends EventEmitter {
 
       const pi = await this.#createPi(task);
       await this.#captureModelInfo(task, pi);
+      task._baseline = await snapshotWorkspace(task.workspacePath);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id) || this.runtimes.get(task.id)?.cancelRequested) {
         await pi.killTree();
         return;
@@ -218,29 +240,16 @@ export class TaskManager extends EventEmitter {
       prepared = await prepareProjectWorkspace(project, task.id, this.dataRoot, this.config.workspace || {});
     }
 
-    await this.#writeIncomingFiles(prepared.workspacePath, task._incomingFiles || []);
+    const files = await stageFiles({ ...task, ...prepared }, this.store.taskDir(task.id), task._incomingFiles || []);
+    if (files.length) { task.files = files; task.attachments = [...(task.attachments || []), ...files]; }
     return prepared;
-  }
-
-  async #writeIncomingFiles(workspacePath, files) {
-    if (!files?.length) return [];
-    const inputDir = path.join(workspacePath, '.taskbridge-input');
-    await fs.mkdir(inputDir, { recursive: true });
-    const names = [];
-    for (const file of files) {
-      const name = safeFileName(file.name);
-      const buf = Buffer.from(String(file.base64 || ''), 'base64');
-      await fs.writeFile(path.join(inputDir, name), buf);
-      names.push(name);
-    }
-    return names;
   }
 
   #buildPrompt(task) {
     const attachmentNote = task.files?.length
-      ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${task.files.map((f) => `- ${f.name}`).join('\n')}`
+      ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${task.files.map((f) => `- ${f.path || '.taskbridge-input/' + f.name}`).join('\n')}`
       : '';
-    return `${task.prompt}${attachmentNote}\n\nWork only inside the current working directory. At the end, summarize what you changed and what checks you ran.`;
+    return `${task.prompt}${attachmentNote}\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf).`;
   }
 
   async #createPi(task, sessionFile) {
@@ -412,6 +421,11 @@ export class TaskManager extends EventEmitter {
       });
       if (this.deleted.has(task.id) || task.status === 'CANCELLED' || runtime?.cancelRequested) return;
       task.verification = verification;
+      const output = await captureOutputs(task, this.store.taskDir(task.id), task._baseline);
+      task.outputFiles = [...(task.outputFiles || []), ...output.files];
+      if (output.files.length || output.warnings.length) await this.#event(task, 'OUTPUT_FILES', output.warnings.join('\n'), output);
+      delete task._baseline;
+      task.verificationStatus = commands.length ? (verification.some(x => !x.ok) ? 'FAILED' : 'PASSED') : 'NOT_CONFIGURED';
 
       const failed = verification.some((x) => !x.ok);
       task.status = failed ? 'FAILED' : 'SUCCEEDED';
@@ -486,6 +500,7 @@ export class TaskManager extends EventEmitter {
     if (this.activeTaskId === id) this.activeTaskId = null;
     this.queue = this.queue.filter((x) => x !== id);
     this.tasks.delete(id);
+    if (task._nativeLease) await task._nativeLease().catch(() => {});
     await this.store.remove(id);
     this.#pump();
   }
@@ -527,24 +542,28 @@ export class TaskManager extends EventEmitter {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     if (this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
-    const userText = String(text || '').trim();
-    if (!userText) throw Object.assign(new Error('message is required'), { code: 'INPUT_INVALID' });
-    if (!(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
+    const incomingFiles = validateFiles(files);
+    const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
+    if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
+    if (!['auto', 'prompt', 'steer', 'follow_up'].includes(mode)) throw Object.assign(new Error('Неизвестный режим сообщения.'), { code: 'INPUT_INVALID' });
+    if (!(await this.runtimeManager.isReady())) await this.runtimeManager.ensureRunning();
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState();
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
     if (!streaming && (await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
-    const attachedNames = await this.#writeIncomingFiles(task.workspacePath, files);
-    const message = userText + (attachedNames.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attachedNames.map(n => `- ${n}`).join('\n')}` : '');
+    if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
+    const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
+    const message = userText + (attached.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
     const effectiveMode = mode === 'auto' ? (streaming ? 'steer' : 'prompt') : mode;
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
     // are persisted. A rejected RPC must not create a phantom user turn.
-    await runtime.eventChain;
+    await runtime.eventChain.catch(() => {});
     let release;
     const gate = new Promise(resolve => { release = resolve; });
     runtime.eventChain = runtime.eventChain.then(() => gate);
     let settled;
+    let accepted = false;
     if (!streaming) {
       this.activeTaskId = id;
       runtime.cancelRequested = false;
@@ -555,10 +574,14 @@ export class TaskManager extends EventEmitter {
     try {
       if (effectiveMode === 'prompt') await runtime.pi.prompt(message);
       else await runtime.pi.sendFollowUp(message, effectiveMode);
+      accepted = true;
       task.error = task.errorCode = task._modelError = null;
-      await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: files.map((f, i) => ({ name: attachedNames[i], size: Number(f.size || 0) })) });
+      task.attachments = [...(task.attachments || []), ...attached];
+      await this.store.save(this.#publicTask(task));
+      await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
     } catch (error) {
+      if (!accepted) await rollbackFiles(task, this.store.taskDir(id), attached);
       if (!streaming) {
         this.#resolveSettle(id);
         if (this.activeTaskId === id) this.activeTaskId = null;
@@ -600,6 +623,7 @@ export class TaskManager extends EventEmitter {
       Object.assign(task, await this.#prepareWorkspace(task));
     }
     await fs.access(task.workspacePath);
+    if (task.nativeSession && !task._nativeLease) task._nativeLease = await acquireNativeLease(task);
     const sessionFile = await restoreSessionFile(task, this.store, this.dataRoot);
     const autoCompaction = task.autoCompactionEnabled;
     const pi = await this.#createPi(task, sessionFile);

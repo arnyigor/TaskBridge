@@ -2,14 +2,17 @@ import { execFile, exec } from 'node:child_process';
 import { promisify } from 'node:util';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
+import { isPrivatePath } from './files.mjs';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
 
-export async function git(args, cwd, timeout = 30000) {
+export async function git(args, cwd, timeout = 30000, env = {}) {
   const { stdout, stderr } = await execFileAsync('git', args, {
     cwd,
     windowsHide: true,
+    env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', ...env },
     timeout,
     maxBuffer: 20 * 1024 * 1024
   });
@@ -36,9 +39,19 @@ export async function prepareProjectWorkspace(project, taskId, dataRoot, default
     }
   }
 
-  const worktreePath = path.join(dataRoot, 'worktrees', taskId);
-  await fs.mkdir(path.dirname(worktreePath), { recursive: true });
-  await fs.rm(worktreePath, { recursive: true, force: true });
+  const worktreeRoot = path.resolve(dataRoot, 'worktrees');
+  const worktreePath = path.resolve(worktreeRoot, taskId);
+  const relative = path.relative(worktreeRoot, worktreePath);
+  if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative) || /[/\\]/.test(taskId)) {
+    throw Object.assign(new Error('Invalid worktree task id'), { code: 'INPUT_INVALID' });
+  }
+  await fs.mkdir(worktreeRoot, { recursive: true });
+  try {
+    await fs.lstat(worktreePath);
+    throw Object.assign(new Error('Worktree path already exists'), { code: 'WORKTREE_EXISTS' });
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
 
   await git(['worktree', 'add', '--detach', worktreePath, 'HEAD'], root, 120000);
   return { workspacePath: worktreePath, sourcePath: root, worktree: true };
@@ -51,19 +64,54 @@ export async function createScratchWorkspace(taskId, dataRoot) {
 }
 
 export async function collectGitState(workspacePath) {
+  let root;
   try {
-    await git(['rev-parse', '--is-inside-work-tree'], workspacePath);
+    root = (await git(['rev-parse', '--show-toplevel'], workspacePath)).stdout.trim();
   } catch {
     return { isGit: false, status: '', diff: '', changedFiles: [] };
   }
 
-  const status = (await git(['status', '--porcelain'], workspacePath)).stdout;
-  const diff = (await git(['diff', '--no-ext-diff', '--binary'], workspacePath, 120000)).stdout;
-  const changedFiles = status
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => line.slice(3).trim());
-  return { isGit: true, status, diff, changedFiles };
+  const publishable = name => !isPrivatePath(name) && !name.split('/').includes('.taskbridge-input');
+  const records = (await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], root)).stdout.split('\0');
+  const statusLines = [];
+  const displayPath = name => /[\s"\\]/.test(name) ? JSON.stringify(name) : name;
+  for (let i = 0; i < records.length && records[i]; i++) {
+    const code = records[i].slice(0, 2);
+    const name = records[i].slice(3);
+    const previous = /[RC]/.test(code) ? records[++i] : null;
+    if (publishable(name) && (!previous || publishable(previous))) {
+      statusLines.push(`${code} ${previous ? displayPath(previous) + ' -> ' : ''}${displayPath(name)}\n`);
+    }
+  }
+
+  // Build a snapshot of the working files in a disposable index. Neither the
+  // user's staged changes nor their index metadata are touched by collection.
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-git-'));
+  const indexFile = path.join(temporary, 'index');
+  const pathspecFile = path.join(temporary, 'paths');
+  const env = { GIT_INDEX_FILE: indexFile };
+  try {
+    let head;
+    try { head = (await git(['rev-parse', '--verify', 'HEAD'], root)).stdout.trim(); }
+    catch { head = null; }
+    await git(head ? ['read-tree', head] : ['read-tree', '--empty'], root, 30000, env);
+    const candidates = (await git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], root, 30000, env)).stdout
+      .split('\0').filter(name => name && publishable(name));
+    if (candidates.length) {
+      await fs.writeFile(pathspecFile, [...new Set(candidates)].map(name => `:(literal)${name}\0`).join(''));
+      await git(['add', '-A', `--pathspec-from-file=${pathspecFile}`, '--pathspec-file-nul'], root, 120000, env);
+    }
+    const baseArgs = ['diff', '--cached', ...(head ? [head] : []), '--no-ext-diff'];
+    const diff = (await git([...baseArgs, '--binary', '--no-textconv'], root, 120000, env)).stdout;
+    const changedFiles = (await git([...baseArgs, '--name-only', '--no-renames', '-z'], root, 30000, env)).stdout.split('\0').filter(Boolean);
+    return { isGit: true, status: statusLines.join(''), diff, changedFiles };
+  } finally {
+    // Only remove the known files we created; never recursively remove a repo.
+    for (const name of [indexFile, indexFile + '.lock', pathspecFile]) {
+      await fs.unlink(name).catch(error => { if (error.code !== 'ENOENT') throw error; });
+    }
+    await fs.rmdir(temporary);
+  }
 }
 
 export async function runVerification(commands, cwd, onOutput = () => {}) {
