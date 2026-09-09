@@ -501,6 +501,9 @@ async function loadProjects() {
   const options = projects.map((p) => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)}</option>`);
   options.push(`<option value="__scratch__">Без проекта (временная папка)</option>`);
   $('project').innerHTML = options.join('');
+  // A choice between one real project and "no project" isn't a choice worth
+  // showing; the select still exists (and works) for its .value, just hidden.
+  $('project').classList.toggle('hidden', projects.length <= 1);
 }
 
 function pillClass(status) {
@@ -903,6 +906,7 @@ $('resumeSessionButton').onclick = async () => {
   const projectId = $('project').value;
   if (!projectId || projectId === '__scratch__') { alert('Выберите проект, у которого есть сессии Pi.'); return; }
   $('sessionPickerOverlay').classList.remove('hidden');
+  $('sessionPickerPath').textContent = `Папка: ${projects.find(p => p.id === projectId)?.path || projectId}`;
   $('sessionPickerList').textContent = 'Загрузка…';
   try {
     const sessions = await api(`/api/projects/${encodeURIComponent(projectId)}/pi-sessions`);
@@ -922,6 +926,11 @@ $('resumeSessionButton').onclick = async () => {
 };
 
 $('sessionPickerClose').onclick = () => $('sessionPickerOverlay').classList.add('hidden');
+
+/* ---------------- help ---------------- */
+
+$('helpButton').onclick = () => $('helpOverlay').classList.remove('hidden');
+$('helpClose').onclick = () => $('helpOverlay').classList.add('hidden');
 
 async function importSession(projectId, session) {
   if (!session.existingTaskId && !confirm('TaskBridge не может проверить, открыта ли эта сессия в терминале. Если процесс pi там ещё работает — закройте его сейчас: при одновременной записи с двух сторон файл сессии может испортиться. Сессия точно закрыта?')) return;
@@ -985,8 +994,12 @@ async function checkPcState() {
   loadRuntimeStatus();
   try {
     const info = await api('/api/info');
-    $('buildInfo').textContent = info.build?.commit ? `· ${info.build.commit}` : '';
-    $('buildInfo').title = info.build?.date ? `Собрано: ${new Date(info.build.date).toLocaleString('ru-RU')}` : '';
+    $('buildInfo').textContent = info.build?.version ? `· v${info.build.version}` : '';
+    const buildDetails = [
+      info.build?.commit ? `коммит ${info.build.commit}` : null,
+      info.build?.date ? `собрано ${new Date(info.build.date).toLocaleString('ru-RU')}` : null
+    ].filter(Boolean).join(', ');
+    $('buildInfo').title = buildDetails;
     modelBusy = info.modelBusy;
     el.classList.remove('err', 'ok', 'run');
     if (info.modelReady === false) {

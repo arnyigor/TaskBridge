@@ -47,7 +47,13 @@ export class RuntimeManager {
     return profiles.find(p => p.id === id) || null;
   }
 
-  getStatus() {
+  async getStatus() {
+    // Nothing updates `state` while idle: if this process never called
+    // ensureRunning (e.g. the model was already running externally before
+    // TaskBridge started, or has since been stopped/started outside it),
+    // the cached value would be stale. Re-check live whenever we're not
+    // the ones managing a spawned process.
+    if (!this.proc) this.state = (await this.isReady()) ? 'EXTERNAL_RUNNING' : 'STOPPED';
     return { state: this.state, pid: this.proc?.pid ?? null, profileId: this.activeProfileId, error: this.lastError };
   }
 

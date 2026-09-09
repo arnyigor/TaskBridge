@@ -21,15 +21,18 @@ const rootDir = path.resolve(__dirname, '..');
 const webDir = path.join(rootDir, 'web');
 const dataRoot = path.join(rootDir, 'data');
 
-// Identifies exactly which commit this running process was started from, so
-// a stale-vs-fresh deploy is visible in the UI instead of guessed at.
+// Identifies exactly which build/commit this running process was started
+// from, so a stale-vs-fresh deploy is visible in the UI instead of guessed
+// at. version is the human-facing number (bumped by hand per release); the
+// commit is extra detail for debugging which exact code that number maps to.
 const build = await (async () => {
+  const version = await fs.readFile(path.join(rootDir, 'package.json'), 'utf8').then(text => JSON.parse(text).version, () => null);
   try {
     const { stdout } = await execFileAsync('git', ['log', '-1', '--format=%h %cI'], { cwd: rootDir, windowsHide: true });
     const [commit, date] = stdout.trim().split(' ');
-    return { commit: commit || null, date: date || null };
+    return { version, commit: commit || null, date: date || null };
   } catch {
-    return { commit: null, date: null };
+    return { version, commit: null, date: null };
   }
 })();
 
@@ -188,7 +191,6 @@ async function handleRequest(req, res) {
       const [busy, modelReady] = await Promise.all([manager.runtimeManager.getBusyStatus(), manager.runtimeManager.isReady()]);
       return json(res, 200, {
         name: 'TaskBridge MVP',
-        version: '0.1.0',
         build,
         addresses: [
           ...lanAddresses(Number(config.server?.port || 8787)),

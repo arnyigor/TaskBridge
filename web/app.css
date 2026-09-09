@@ -154,6 +154,21 @@ body {
   border: 1px solid var(--border);
 }
 .sessionPickerList { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
+.helpCard { max-width: 620px; }
+.helpBody { max-height: 65vh; overflow-y: auto; padding-right: 4px; font-size: 13px; line-height: 1.55; }
+.helpBody h3 { font-size: 13.5px; margin: 16px 0 4px; color: var(--accent); }
+.helpBody h3:first-child { margin-top: 0; }
+.helpBody p { margin: 4px 0 10px; }
+.helpBody ul { margin: 4px 0 10px; padding-left: 20px; }
+.helpBody li { margin: 3px 0; }
+.helpBody code {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: rgba(94, 231, 247, 0.1);
+  border: 1px solid rgba(94, 231, 247, 0.18);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
 .sessionPickerItem {
   display: flex;
   flex-direction: column;
