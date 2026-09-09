@@ -8,6 +8,9 @@ import os from 'node:os';
 //   npm run cloud:secrets                  # machine id + secrets
 //   npm run cloud:secrets -- --url https://taskbridge.example.app
 //   npm run cloud:secrets -- --user me@example.com
+//   npm run cloud:secrets -- --json        # machine-readable
+
+import { generateCredentials, cloudEnvVars } from '../cloud/lib/credentials.mjs';
 
 function arg(name, fallback = null) {
   const index = process.argv.indexOf(`--${name}`);
@@ -16,32 +19,37 @@ function arg(name, fallback = null) {
   return value && !value.startsWith('--') ? value : fallback;
 }
 
-const url = arg('url', 'https://taskbridge.example.app');
+const url = arg('url', 'https://<your-project>.vercel.app');
 const userEmail = arg('user', null);
-const machineId = arg('id', `home-pc-${crypto.randomBytes(2).toString('hex')}`);
-const machineName = arg('name', os.hostname().replace(/[^A-Za-z0-9 ._-]/g, '').slice(0, 40) || 'TaskBridge workstation');
-
-const userToken = `tb_user_${crypto.randomBytes(32).toString('base64url')}`;
-const machineSecret = `tb_machine_${crypto.randomBytes(32).toString('base64url')}`;
+const machineName = arg('name', null);
+const machineId = arg('id', null);
 const ownerId = arg('owner', 'owner');
 
-console.log(`# Generated ${new Date().toISOString()}\n`);
+const credentials = generateCredentials({
+  machineId: machineId || undefined,
+  machineName: machineName || undefined,
+  ownerId,
+  userEmail
+});
+
+if (process.argv.includes('--json')) {
+  console.log(JSON.stringify({
+    ...credentials,
+    cloudConfig: { ...credentials.cloudConfig, url: url === 'https://<your-project>.vercel.app' ? null : url },
+    env: cloudEnvVars(credentials)
+  }, null, 2));
+  process.exit(0);
+}
+
+console.log(`# Generated ${new Date().toISOString()} on ${os.hostname()}\n`);
 console.log('# 1. Vercel → Project → Settings → Environment Variables');
-console.log(`TASKBRIDGE_CLOUD_USER_TOKEN=${userToken}`);
-console.log(`TASKBRIDGE_CLOUD_USER_ID=${ownerId}${userEmail ? `\nTASKBRIDGE_CLOUD_USER_EMAIL=${userEmail}` : ''}`);
-console.log(`TASKBRIDGE_CLOUD_MACHINES=${JSON.stringify([{ id: machineId, secret: machineSecret, ownerId, displayName: machineName }])}`);
-console.log('POSTGRES_URL=<from Vercel Postgres / Neon, or set TASKBRIDGE_CLOUD_STORE=postgres://...>\n');
+for (const [name, value] of Object.entries(cloudEnvVars(credentials))) console.log(`${name}=${value}`);
+console.log('POSTGRES_URL=<from Vercel Postgres / Neon, or TASKBRIDGE_CLOUD_STORE=postgres://...>\n');
 
 console.log('# 2. This machine — config.json "cloud" block (or the same names as env vars)');
-console.log(JSON.stringify({
-  cloud: {
-    enabled: true,
-    url,
-    machineId,
-    machineSecret,
-    machineDisplayName: machineName
-  }
-}, null, 2));
+console.log(JSON.stringify({ cloud: { ...credentials.cloudConfig, url } }, null, 2));
 console.log('\n# 3. What you paste into the PWA "Access token" field:');
-console.log(userToken);
+console.log(credentials.userToken);
 console.log('\n# Rotate by re-running this script: change the secret in both places, then restart TaskBridge.');
+console.log('# Faster: npm run cloud:deploy -- --project <name>  (generates, sets Vercel env, deploys, verifies)');
+console.log(`# Machine secret fingerprint: ${crypto.createHash('sha256').update(credentials.machineSecret).digest('hex').slice(0, 12)}`);

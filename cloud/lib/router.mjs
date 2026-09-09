@@ -77,7 +77,18 @@ export function createRouter({ store, auth, now = () => Date.now(), offlineAfter
 
   const routes = [
     // --- health -------------------------------------------------------------
-    ['GET', /^\/api\/health$/, async () => ({ status: 200, body: { status: 'ok', protocolVersion, machines: auth.machineCount } })],
+    // `store`/`durable` are part of the contract: a serverless deployment that
+    // silently fell back to MemoryStore loses all state between invocations.
+    ['GET', /^\/api\/health$/, async () => ({
+      status: 200,
+      body: {
+        status: 'ok',
+        protocolVersion,
+        machines: auth.machineCount,
+        store: store.kind ?? 'unknown',
+        durable: (store.kind ?? 'unknown') !== 'memory'
+      }
+    })],
 
     // --- human API ----------------------------------------------------------
     ['GET', /^\/api\/machines$/, async ({ user }) => {

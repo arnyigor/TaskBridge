@@ -181,10 +181,11 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   161 тест на node:test
+├─ tests/                   174 теста на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  ├─ cloud-secrets.mjs     генерация токенов/секретов (npm run cloud:secrets)
+│  ├─ cloud-deploy.mjs      автодеплой на Vercel (npm run cloud:deploy)
 │  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
@@ -537,10 +538,11 @@ IP, VPN и без длительных Vercel-запросов. Локальны
                                 └── TaskBridge (исходящие соединения) → Pi
 ```
 
-Деплой: `npm run cloud:secrets -- --url https://<project>.vercel.app` печатает
-готовые переменные окружения; Vercel-проект создаётся с **root = корень репозитория**
-и Postgres (`POSTGRES_URL`) — пошаговая инструкция в
-[`docs/cloud-transport.md`](docs/cloud-transport.md#deploying-vercel--postgres).
+Деплой одной командой: `npm run cloud:deploy -- --project <name> --database-url "postgres://…"`
+(генерирует креды, ставит env в Vercel, деплоит, проверяет `/api/health` и что
+хранилище durable). Только секреты: `npm run cloud:secrets -- --url https://<project>.vercel.app`.
+Полная пошаговая инструкция (ручной путь через дашборд, диагностика, ротация) —
+[`docs/cloud-deploy-vercel.md`](docs/cloud-deploy-vercel.md).
 
 Режимы (`Tech_next_version.md` §6): **local-only** (по умолчанию, облако не нужно),
 **cloud-only** (только исходящие соединения машины) и **hybrid** (LAN и облако

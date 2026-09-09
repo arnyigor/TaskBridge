@@ -129,7 +129,17 @@ processed command seq and the last poll error. It never returns the secret.
 
 ## Deploying (Vercel + Postgres)
 
-Step by step, from zero to a working phone client.
+Полная пошаговая версия (автодеплой, ручной путь, диагностика, ротация) —
+[`docs/cloud-deploy-vercel.md`](cloud-deploy-vercel.md). Ниже — краткая выжимка.
+
+Одна команда (генерирует креды, ставит env, деплоит, проверяет health и durable):
+
+```powershell
+npm run cloud:deploy -- --project taskbridge-cloud --database-url "postgres://…"
+npm run cloud:deploy -- --project taskbridge-cloud --dry-run   # только показать план
+```
+
+Дальше — ручной путь, если нужен контроль над каждым шагом.
 
 ### 1. Generate the secrets
 
@@ -171,7 +181,7 @@ endpoint still answers, so this is easy to miss.
 
 ```powershell
 curl https://<your-project>.vercel.app/api/health
-# {"status":"ok","protocolVersion":1,"machines":0}
+# {"status":"ok","protocolVersion":1,"machines":0,"store":"postgres","durable":true}
 ```
 
 ### 3. Point this machine at it
@@ -233,6 +243,11 @@ Postgres; `CLOUD_PORT` changes the port.
 ### API
 
 ```text
+Public
+  GET    /api/health                       → { status, protocolVersion, machines,
+                                               store: memory|sqlite|postgres,
+                                               durable: true|false }
+
 Human (bearer user token)
   POST   /api/tasks                        → 202 { taskId, status: QUEUED, machineStatus }
   GET    /api/tasks
