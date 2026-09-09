@@ -44,6 +44,11 @@ await fs.mkdir(dataRoot, { recursive: true });
 const store = new TaskStore(dataRoot);
 const manager = new TaskManager(config, dataRoot, store);
 await manager.init();
+
+// Checkpoint and close SQLite cleanly on Ctrl+C instead of leaving a WAL tail.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => { try { store.close(); } catch {} process.exit(0); });
+}
 const access = new AccessControl(config.server?.auth, dataRoot);
 await access.init();
 const runtimeControl = new RuntimeControl(manager.runtimeManager, manager);

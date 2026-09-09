@@ -8,8 +8,8 @@ import { restoreSessionFile } from '../src/session-history.mjs';
 
 test('recovery preserves full structured messages, tool arguments and results, then reuses the native file', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-recovery-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
   const store = new TaskStore(root);
+  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
   const task = { id: 'a', prompt: 'original', createdAt: new Date().toISOString(), workspacePath: root };
   await store.create(task);
   const messages = [
@@ -30,8 +30,8 @@ test('recovery preserves full structured messages, tool arguments and results, t
 
 test('recovery can use legacy saved prompt and answer when no message frames exist', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-recovery-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
   const store = new TaskStore(root);
+  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
   const task = { id: 'a', prompt: 'remember the code 123', assistantText: 'I remember 123', workspacePath: root, model: { id: 'fixture' } };
   await store.create(task);
   const file = await restoreSessionFile(task, store, root);

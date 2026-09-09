@@ -7,12 +7,22 @@ import { TaskStore } from '../src/task-store.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-store-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  return new TaskStore(root);
+  const stores = [];
+  const open = () => {
+    const store = new TaskStore(root);
+    stores.push(store);
+    return store;
+  };
+  t.after(async () => {
+    for (const store of stores) store.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  return { root, open };
 }
 
 test('concurrent writes preserve order, metadata and contiguous event cursors', async t => {
-  const store = await fixture(t);
+  const { open } = await fixture(t);
+  const store = open();
   await store.create({ id: 'a' });
   const jobs = [];
   for (let i = 0; i < 40; i++) jobs.push(store.save({ id: 'a', value: i }), store.appendEvent('a', { value: i }));
@@ -24,21 +34,37 @@ test('concurrent writes preserve order, metadata and contiguous event cursors', 
   assert.equal((await store.readEvents('a', 0, 35)).length, 5);
 });
 
-test('legacy and torn records survive reload and append without losing valid history', async t => {
-  const store = await fixture(t);
-  await store.create({ id: 'a' });
-  await fs.writeFile(path.join(store.taskDir('a'), 'events.jsonl'), '{"message":"one"}\n{"message":"two"}\n{"torn":');
+test('tasks and events survive reopening the database', async t => {
+  const { open } = await fixture(t);
+  const first = open();
+  await first.create({ id: 'a', createdAt: '2026-01-01T00:00:00.000Z', status: 'RUNNING' });
+  await first.appendEvent('a', { type: 'STATUS', message: 'ok' });
+  first.close();
+  const second = open();
+  assert.equal((await second.read('a')).status, 'RUNNING');
+  assert.deepEqual((await second.readEvents('a', 0)).map(x => x.message), ['ok']);
+});
+
+test('legacy file store is imported once, with torn tail lines skipped', async t => {
+  const { root, open } = await fixture(t);
+  const dir = path.join(root, 'tasks', 'a');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'task.json'), JSON.stringify({ id: 'a', createdAt: '2026-01-01T00:00:00.000Z', status: 'SUCCEEDED' }));
+  await fs.writeFile(path.join(dir, 'events.jsonl'), '{"message":"one"}\n{"message":"two"}\n{"torn":');
+  const store = open();
+  assert.equal((await store.read('a')).status, 'SUCCEEDED');
   assert.deepEqual((await store.readEvents('a', 0)).map(x => x.seq), [1, 2]);
   await store.appendEvent('a', { message: 'three' });
   assert.deepEqual((await store.readEvents('a', 0)).map(x => x.message), ['one', 'two', 'three']);
-  assert.equal((await store.readEvents('a', 0, 2))[0].seq, 4);
-  const reloaded = new TaskStore(path.dirname(store.root));
-  await reloaded.appendEvent('a', { message: 'four' });
-  assert.equal((await reloaded.readEvents('a', 1))[0].seq, 5);
+  assert.equal((await store.readEvents('a', 0, 2))[0].seq, 3);
+  // Reopening must not import the same legacy files a second time.
+  const reloaded = open();
+  assert.equal((await reloaded.readEvents('a', 0)).length, 3);
 });
 
 test('removed sessions cannot be recreated by late writes and traversal is rejected', async t => {
-  const store = await fixture(t);
+  const { open } = await fixture(t);
+  const store = open();
   await store.create({ id: 'a' });
   await store.remove('a');
   await assert.rejects(store.save({ id: 'a' }), { code: 'NOT_FOUND' });

@@ -28,6 +28,7 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 
 - [Возможности](#возможности)
 - [Технологии](#технологии)
+- [Хранилище (SQLite)](#хранилище-sqlite)
 - [Архитектура](#архитектура)
 - [Структура проекта](#структура-проекта)
 - [Требования](#требования)
@@ -78,7 +79,7 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 
 ### Инфраструктура
 
-- файловое persistent-хранилище задач и событий;
+- persistent-хранилище задач и событий в SQLite (встроенный `node:sqlite`, без нативных зависимостей);
 - `git status`, `git diff`, `diff.patch`;
 - изолированный `git worktree` на задачу;
 - project-specific verification commands;
@@ -91,14 +92,14 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 
 | Слой | Что используется |
 | --- | --- |
-| Runtime | Node.js 20+, ESM (`.mjs`), без сборки и транспиляции |
+| Runtime | Node.js 22.13+, ESM (`.mjs`), без сборки и транспиляции |
 | Backend | стандартный `node:http`, `node:child_process`, `node:crypto`, `node:fs/promises` |
 | Агент | Pi CLI в режиме `--mode rpc` (JSONL over stdio) |
 | Транспорт UI | HTTP + SSE |
 | Frontend | нативный HTML/CSS/JS, PWA, без фреймворков |
 | Markdown | `marked` + `DOMPurify` (лежат в `web/vendor`, без CDN) |
 | Тесты | встроенный `node:test` + `linkedom` для DOM-тестов |
-| Хранилище | файлы JSON/JSONL на диске (SQLite пока нет) |
+| Хранилище | SQLite через встроенный `node:sqlite` (`data/taskbridge.db`, WAL) |
 
 ---
 
@@ -137,7 +138,7 @@ Taskbridge/
 │  ├─ server.mjs            HTTP-сервер, роутинг API, SSE, раздача статики
 │  ├─ task-manager.mjs      жизненный цикл задач, очередь, сообщения, Pi-сессии
 │  ├─ pi-rpc.mjs            запуск Pi и JSONL RPC-клиент
-│  ├─ task-store.mjs        файловое хранилище задач и событий
+│  ├─ task-store.mjs        SQLite-хранилище задач и событий
 │  ├─ session-history.mjs   восстановление истории после restart
 │  ├─ native-sessions.mjs   импорт существующих Pi-сессий
 │  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
@@ -172,7 +173,7 @@ Taskbridge/
 ## Требования
 
 - Windows 10/11 (основная целевая платформа);
-- Node.js 20+;
+- Node.js 22.13+ (нужен встроенный модуль `node:sqlite`);
 - Git — если проверяется Git-проект;
 - Pi CLI в `PATH`;
 - настроенный в Pi provider/model;
@@ -364,9 +365,9 @@ pi -p "Прочитай README проекта и ответь одной стр�
 
 ```text
 data/
+├─ taskbridge.db            SQLite: задачи (tasks) и события (events)
+├─ taskbridge.db-wal/-shm   WAL-журнал SQLite
 ├─ tasks/<task-id>/
-│  ├─ task.json
-│  ├─ events.jsonl
 │  ├─ files/                вложения
 │  └─ artifacts/
 │     ├─ result.md
@@ -384,6 +385,21 @@ data/
 ```
 
 Вложения, отправленные с телефона, попадают в `.taskbridge-input/` внутри workspace, а к prompt добавляется список путей.
+
+### Хранилище (SQLite)
+
+Задачи и события лежат в `data/taskbridge.db` (режим WAL, `synchronous = NORMAL`). Схема минимальна:
+
+| Таблица | Содержимое |
+| --- | --- |
+| `tasks` | `id`, `created_at`, `updated_at` + `data` (полный JSON задачи) |
+| `events` | `task_id`, `seq`, `payload` (полный JSON события), PK `(task_id, seq)` |
+| `meta` | служебные отметки, в том числе факт миграции |
+
+- Полный JSON в колонках `data`/`payload` сохраняет контракт HTTP API неизменным при эволюции полей.
+- `seq` монотонен в пределах задачи и выдаётся атомарно, поэтому SSE-курсоры (`Last-Event-ID`) не ломаются при конкурентной записи.
+- Файлы (вложения, артефакты, worktree, Pi-сессии) остаются на диске — в БД только метаданные и события.
+- При первом запуске на старой установке `data/tasks/<id>/task.json` и `events.jsonl` автоматически импортируются один раз (отметка в `meta`), битые хвостовые строки пропускаются.
 
 ---
 
@@ -492,7 +508,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 59 тестов на node:test
+npm test          # 60 тестов на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 
@@ -502,30 +518,28 @@ npm run check     # синтаксическая проверка основны
 
 ## Известные ограничения
 
-1. Task store файловый, не SQLite.
-2. После restart при следующем сообщении запускается новый Pi-процесс с тем же файлом сессии; если файла Pi нет, история восстанавливается из событий TaskBridge.
-3. Оборванные active tasks помечаются `FAILED` с кодом `FAILED_RECOVERY`; их можно продолжить новым сообщением.
-4. Одновременно рассчитан на одну активную inference-задачу.
-5. Upload предназначен для небольших файлов (base64 в JSON).
-6. Нет автоматической очистки worktree.
-7. `diff.patch` не содержит содержимое новых untracked файлов; они перечисляются в `git-status.txt`.
-8. Verification commands доверенные и читаются из локального `config.json`.
-9. Claude Code и Codex как отдельные runner'ы пока не подключены.
-10. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
+1. После restart при следующем сообщении запускается новый Pi-процесс с тем же файлом сессии; если файла Pi нет, история восстанавливается из событий TaskBridge.
+2. Оборванные active tasks помечаются `FAILED` с кодом `FAILED_RECOVERY`; их можно продолжить новым сообщением.
+3. Одновременно рассчитан на одну активную inference-задачу.
+4. Upload предназначен для небольших файлов (base64 в JSON).
+5. Нет автоматической очистки worktree.
+6. `diff.patch` не содержит содержимое новых untracked файлов; они перечисляются в `git-status.txt`.
+7. Verification commands доверенные и читаются из локального `config.json`.
+8. Claude Code и Codex как отдельные runner'ы пока не подключены.
+9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
 
 ---
 
 ## Roadmap
 
 ```text
-1. SQLite вместо файлового store
-2. multipart streaming upload
-3. worktree cleanup / apply
-4. ClaudeCodeRunner
-5. CodexRunner
-6. engine health / quota mapping
-7. AUTO dispatcher
-8. KMP Android client
+1. multipart streaming upload
+2. worktree cleanup / apply
+3. ClaudeCodeRunner
+4. CodexRunner
+5. engine health / quota mapping
+6. AUTO dispatcher
+7. KMP Android client
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.

@@ -8,8 +8,8 @@ import { TaskManager } from '../src/task-manager.mjs';
 
 async function fixture(t, streaming = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-manager-test-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
   const store = new TaskStore(root);
+  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
   const manager = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store);
   const task = { id: 'a', createdAt: new Date().toISOString(), status: streaming ? 'RUNNING' : 'SUCCEEDED', workspacePath: root, prompt: 'original', files: [], assistantText: 'saved', thinkingText: '', compaction: { count: 0 } };
   await store.create(task);
