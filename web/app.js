@@ -340,12 +340,13 @@ function resetSelection(id) {
   $('autoCompaction').disabled = true;
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
-  for (const field of ['taskTitle', 'taskStatus', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
+  for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
   $('worktreeActions').classList.add('hidden');
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
   setComposerMode(id);
   restoreDraft(id || '__new__');
+  updateModelChip();
   return selectionVersion;
 }
 
@@ -587,8 +588,12 @@ function maybeNotify(t) {
 
 function renderTaskDetails(t) {
   maybeNotify(t);
+  currentTask = t;
   $('taskTitle').textContent = t.title || t.prompt || t.id;
   $('taskStatus').textContent = t.status;
+  $('taskModel').textContent = t.model ? modelFullLabel(t.model) : (t.requestedModel ? modelFullLabel(t.requestedModel) : '—');
+  $('taskThinking').textContent = t.thinkingLevelActual || t.thinkingLevel || '—';
+  updateModelChip();
   $('current').textContent = t.current || '—';
   $('workspace').textContent = t.workspacePath || '—';
   if ([...$('project').options].some(o => o.value === t.projectId)) $('project').value = t.projectId;
@@ -892,7 +897,7 @@ $('form').addEventListener('submit', async (e) => {
       clearComposer();
     } else {
       const task = await api('/api/tasks', {
-        method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files, uploadToken })
+        method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking })
       });
       // Clear before selectTask() runs resetSelection(), which would
       // otherwise capture this just-sent text as a stale "new task" draft.
@@ -911,7 +916,10 @@ $('form').addEventListener('submit', async (e) => {
   }
 });
 
-$('newTaskButton').onclick = startNewTask;
+$('newTaskButton').onclick = () => {
+  $('controlsSpoiler').open = false;
+  startNewTask();
+};
 
 $('stopButton').onclick = async () => {
   if (!selectedTaskId) return;
@@ -1291,6 +1299,332 @@ async function importSession(projectId, session) {
   } catch (err) { alert(err.message); }
 }
 
+/* ---------------- model selection (Pi models) ---------------- */
+
+// The model list comes straight from Pi (all providers), so TaskBridge shows the
+// same set as Pi's /model. Until a session is selected, a pick is remembered as
+// the model for the next new task.
+let modelCatalog = null;
+let pendingModel = (() => {
+  try {
+    const raw = JSON.parse(localStorage.getItem('taskbridge.pendingModel') || 'null');
+    return raw && raw.provider && raw.id ? raw : null;
+  } catch { return null; }
+})();
+let pendingThinking = (() => {
+  try { return localStorage.getItem('taskbridge.pendingThinking') || null; } catch { return null; }
+})();
+
+function savePendingModel() {
+  try {
+    if (pendingModel) localStorage.setItem('taskbridge.pendingModel', JSON.stringify(pendingModel));
+    else localStorage.removeItem('taskbridge.pendingModel');
+    if (pendingThinking) localStorage.setItem('taskbridge.pendingThinking', pendingThinking);
+    else localStorage.removeItem('taskbridge.pendingThinking');
+  } catch {}
+}
+
+function modelFullLabel(model) {
+  if (!model) return '—';
+  return model.provider ? `${model.provider}/${model.id}` : String(model.id || '—');
+}
+
+function modelShortLabel(model) {
+  if (!model) return 'по умолчанию Pi';
+  return model.name || model.id || modelFullLabel(model);
+}
+
+function currentModel() {
+  if (selectedTaskId && currentTask) return currentTask.model || currentTask.requestedModel || null;
+  return pendingModel;
+}
+
+function currentThinking() {
+  if (selectedTaskId && currentTask) return currentTask.thinkingLevelActual || currentTask.thinkingLevel || null;
+  return pendingThinking;
+}
+
+function updateModelChip() {
+  const model = currentModel();
+  const chip = $('modelButton');
+  chip.textContent = `Модель: ${modelShortLabel(model)}`;
+  chip.title = model ? `${modelFullLabel(model)} — сменить` : 'Выбрать модель Pi';
+  const thinking = currentThinking();
+  $('thinkingChip').textContent = thinking ? `thinking: ${thinking}` : '';
+}
+
+function renderThinkingOptions() {
+  const select = $('modelThinking');
+  const levels = modelCatalog?.thinkingLevels || [];
+  const current = currentThinking();
+  const values = [...new Set([current, ...levels].filter(Boolean))];
+  const placeholder = selectedTaskId ? '' : '<option value="">(по умолчанию модели)</option>';
+  select.innerHTML = placeholder + values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+  select.value = current && values.includes(current) ? current : '';
+}
+
+function renderModelList() {
+  const list = $('modelList');
+  const models = modelCatalog?.models || [];
+  const query = $('modelSearch').value.trim().toLowerCase();
+  const active = currentModel();
+  const filtered = query
+    ? models.filter(m => `${m.provider}/${m.id} ${m.name || ''}`.toLowerCase().includes(query))
+    : models;
+  list.innerHTML = '';
+  if (!filtered.length) {
+    list.textContent = models.length ? 'Ничего не найдено.' : 'Pi не вернул ни одной доступной модели.';
+    return;
+  }
+  let provider = null;
+  for (const m of filtered) {
+    if (m.provider !== provider) {
+      provider = m.provider;
+      const group = document.createElement('div');
+      group.className = 'modelGroup';
+      group.textContent = provider || '—';
+      list.append(group);
+    }
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'modelItem';
+    if (active && active.provider === m.provider && active.id === m.id) item.classList.add('active');
+    const id = document.createElement('div');
+    id.className = 'modelId';
+    id.textContent = m.id;
+    const meta = document.createElement('div');
+    meta.className = 'modelMeta';
+    meta.textContent = [
+      m.name && m.name !== m.id ? m.name : null,
+      m.contextWindow ? `ctx ${m.contextWindow}` : null,
+      m.reasoning ? 'thinking' : null,
+      m.images ? 'vision' : null
+    ].filter(Boolean).join(' · ');
+    item.append(id, meta);
+    item.onclick = () => chooseModel(m);
+    list.append(item);
+  }
+}
+
+async function openModelPicker(refresh = false) {
+  $('modelPickerOverlay').classList.remove('hidden');
+  $('modelList').textContent = 'Загрузка…';
+  try {
+    modelCatalog = await api(`/api/models${refresh ? '?refresh=1' : ''}`);
+    renderThinkingOptions();
+    renderModelList();
+  } catch (error) {
+    $('modelList').textContent = `Не удалось получить список моделей: ${error.message}`;
+  }
+}
+
+async function chooseModel(model) {
+  const selection = { provider: model.provider, id: model.id };
+  if (!selectedTaskId) {
+    pendingModel = selection;
+    savePendingModel();
+    updateModelChip();
+    $('modelPickerOverlay').classList.add('hidden');
+    return;
+  }
+  const chip = $('modelButton');
+  chip.disabled = true;
+  try {
+    const updated = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/model`, { method: 'POST', body: JSON.stringify(selection) });
+    currentTask = updated;
+    renderTaskDetails(updated);
+    updateModelChip();
+    $('modelPickerOverlay').classList.add('hidden');
+    if (localEnabled && model.provider === localProviderId()) loadLocalModel(model.id);
+  } catch (error) {
+    alert(`Не удалось сменить модель: ${error.message}`);
+  } finally {
+    chip.disabled = false;
+  }
+}
+
+$('modelButton').onclick = () => openModelPicker();
+$('changeModelButton').onclick = () => openModelPicker();
+$('modelRefresh').onclick = () => openModelPicker(true);
+$('modelPickerClose').onclick = () => $('modelPickerOverlay').classList.add('hidden');
+$('modelSearch').addEventListener('input', renderModelList);
+$('modelThinking').addEventListener('change', async () => {
+  const level = $('modelThinking').value || null;
+  if (!level) {
+    if (!selectedTaskId) { pendingThinking = null; savePendingModel(); updateModelChip(); }
+    return;
+  }
+  if (!selectedTaskId) {
+    pendingThinking = level;
+    savePendingModel();
+    updateModelChip();
+    return;
+  }
+  try {
+    const updated = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/thinking`, { method: 'POST', body: JSON.stringify({ level }) });
+    currentTask = updated;
+    renderTaskDetails(updated);
+    updateModelChip();
+  } catch (error) { alert(error.message); }
+});
+
+/* ---------------- local llama.cpp router ---------------- */
+
+let localEnabled = false;
+let localStatus = null;
+let localEvents = null;
+
+function localProviderId() { return localStatus?.provider || 'llama.cpp'; }
+
+function localStatusBadge(status) {
+  const map = {
+    loaded: ['ok', 'загружена'],
+    sleeping: ['ok', 'спит'],
+    loading: ['run', 'грузится'],
+    downloading: ['run', 'качается'],
+    failed: ['err', 'ошибка'],
+    unloaded: ['', 'не загружена']
+  };
+  return map[status] || ['', status || '—'];
+}
+
+function renderLocalRouterState() {
+  const el = $('localRouterState');
+  if (!localStatus) { el.textContent = 'Загрузка…'; $('localStop').disabled = true; return; }
+  const labels = { MANAGED_RUNNING: 'работает (управляется TaskBridge)', EXTERNAL_RUNNING: 'работает (запущен извне)', STARTING: 'запускается', STOPPED: 'остановлен' };
+  el.textContent = `Router: ${labels[localStatus.state] || localStatus.state || '—'} · ${localStatus.baseUrl || ''}${localStatus.pid ? ` · pid ${localStatus.pid}` : ''}${localStatus.error ? ` · ${localStatus.error}` : ''}`;
+  $('localStop').disabled = localStatus.state !== 'MANAGED_RUNNING' || !localStatus.pid;
+  $('localStart').disabled = ['MANAGED_RUNNING', 'EXTERNAL_RUNNING', 'STARTING'].includes(localStatus.state);
+}
+
+function renderLocalModels() {
+  const list = $('localModelsList');
+  const models = localStatus?.models || [];
+  renderLocalRouterState();
+  list.innerHTML = '';
+  if (!models.length) {
+    list.textContent = localStatus?.reachable
+      ? 'Router не вернул ни одной модели (проверьте --models-preset/--models-dir).'
+      : 'Router недоступен — запустите его или проверьте localRuntime.router.';
+    return;
+  }
+  for (const m of models) {
+    const row = document.createElement('div');
+    row.className = 'localModel';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const id = document.createElement('div');
+    id.className = 'id';
+    id.textContent = m.id;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const [cls, label] = localStatusBadge(m.status);
+    const badge = document.createElement('span');
+    badge.className = `badge ${cls}`.trim();
+    badge.textContent = label;
+    meta.append(badge);
+    if (m.vision) {
+      const vision = document.createElement('span');
+      vision.className = 'badge vision';
+      vision.textContent = 'vision';
+      meta.append(vision);
+    }
+    if (m.contextWindow) {
+      const ctx = document.createElement('span');
+      ctx.className = 'muted small';
+      ctx.textContent = `ctx ${m.contextWindow}`;
+      meta.append(ctx);
+    }
+    info.append(id, meta);
+    const button = document.createElement('button');
+    button.type = 'button';
+    const loaded = m.status === 'loaded' || m.status === 'sleeping';
+    button.textContent = loaded ? 'Выгрузить' : m.status === 'loading' ? 'Отменить' : 'Загрузить';
+    button.onclick = () => (loaded || m.status === 'loading') ? unloadLocalModel(m.id) : loadLocalModel(m.id);
+    row.append(info, button);
+    list.append(row);
+  }
+}
+
+function setLocalProgress(p) {
+  $('localProgress').classList.remove('hidden');
+  $('localProgressText').textContent = `${p.message || 'Загрузка'}${p.model ? ` · ${p.model}` : ''}${p.ratio != null ? ` · ${Math.round(p.ratio * 100)}%` : ''}`;
+  $('localProgressFill').style.width = p.ratio != null ? `${Math.round(p.ratio * 100)}%` : '15%';
+}
+
+function clearLocalProgress() {
+  $('localProgress').classList.add('hidden');
+  $('localProgressFill').style.width = '0%';
+}
+
+async function refreshLocalStatus() {
+  try { localStatus = await api('/api/local'); }
+  catch { localStatus = null; }
+  renderLocalModels();
+  if (localStatus) updateLocalVisibility(localStatus.enabled);
+}
+
+function updateLocalVisibility(enabled) {
+  localEnabled = Boolean(enabled);
+  $('localModelsButton').classList.toggle('hidden', !localEnabled);
+  if (localEnabled) $('runtimeControl').classList.add('hidden');
+}
+
+async function loadLocalModel(id) {
+  const chip = $('localModelsButton');
+  const previous = chip.textContent;
+  chip.textContent = 'Локальные модели …';
+  setLocalProgress({ model: id, message: `Загрузка ${id}`, ratio: null });
+  try { await api('/api/local/load', { method: 'POST', body: JSON.stringify({ model: id }) }); }
+  catch (error) { alert(error.message); }
+  finally {
+    chip.textContent = previous;
+    clearLocalProgress();
+    await refreshLocalStatus();
+  }
+}
+
+async function unloadLocalModel(id) {
+  try { await api('/api/local/unload', { method: 'POST', body: JSON.stringify({ model: id }) }); }
+  catch (error) { alert(error.message); }
+  await refreshLocalStatus();
+}
+
+function openLocalEvents() {
+  if (localEvents) return;
+  localEvents = new EventSource('/api/local/events');
+  localEvents.onmessage = (e) => {
+    let message;
+    try { message = JSON.parse(e.data); } catch { return; }
+    if (message.type === 'snapshot') { localStatus = message; renderLocalModels(); }
+    else if (message.type === 'progress') setLocalProgress(message);
+    else if (message.type === 'status') refreshLocalStatus();
+  };
+  localEvents.onerror = () => {};
+}
+
+function closeLocalEvents() { localEvents?.close(); localEvents = null; }
+
+$('localModelsButton').onclick = async () => {
+  $('localModelsOverlay').classList.remove('hidden');
+  openLocalEvents();
+  await refreshLocalStatus();
+};
+$('localModelsClose').onclick = () => { $('localModelsOverlay').classList.add('hidden'); closeLocalEvents(); clearLocalProgress(); };
+$('localRefresh').onclick = () => refreshLocalStatus();
+$('localStart').onclick = async () => {
+  $('localStart').disabled = true;
+  try { localStatus = await api('/api/local/start', { method: 'POST', body: '{}' }); }
+  catch (error) { alert(error.message); }
+  renderLocalModels();
+};
+$('localStop').onclick = async () => {
+  if (!confirm('Остановить router llama.cpp? Загруженные модели будут выгружены.')) return;
+  try { await api('/api/local/stop', { method: 'POST', body: '{}' }); }
+  catch (error) { alert(error.message); }
+  await refreshLocalStatus();
+};
+
 /* ---------------- model runtime ---------------- */
 
 let runtimeBusy = false;
@@ -1343,6 +1677,18 @@ $('runtimeStart').onclick = async () => {
 
 /* ---------------- init ---------------- */
 
+function renderWarnings(warnings) {
+  const el = $('piWarning');
+  const list = warnings || [];
+  if (!list.length) {
+    el.textContent = '';
+    el.classList.add('hidden');
+    return;
+  }
+  el.textContent = list.map(w => w.message).join('\n');
+  el.classList.remove('hidden');
+}
+
 async function checkPcState() {
   const el = $('pcState');
   loadRuntimeStatus();
@@ -1374,6 +1720,12 @@ async function checkPcState() {
       : null;
     el.title = [label, engineLine, addresses].filter(Boolean).join('\n');
     el.setAttribute('aria-label', label);
+    if (info.local) {
+      localStatus = info.local;
+      updateLocalVisibility(info.local.enabled);
+      if (!$('localModelsOverlay').classList.contains('hidden')) renderLocalModels();
+    }
+    renderWarnings(info.warnings);
   } catch {
     modelBusy = null;
     el.classList.remove('ok', 'run');

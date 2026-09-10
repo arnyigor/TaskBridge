@@ -1,4 +1,6 @@
 config.json
+models.ini
+.serena/
 nul
 data/*
 !data/.gitkeep

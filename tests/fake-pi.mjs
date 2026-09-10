@@ -3,6 +3,9 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 const sessionArg = process.argv.indexOf('--session');
 const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
+const argValue = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; };
+let model = { id: argValue('--model') || 'fixture', provider: argValue('--provider') || null, contextWindow: 65536, maxTokens: 1024 };
+let thinkingLevel = argValue('--thinking') || 'off';
 const entries = sessionFile ? fs.readFileSync(sessionFile, 'utf8').trim().split('\n').map(x => JSON.parse(x)) : [];
 const messages = entries.filter(x => x.type === 'message').map(x => x.message);
 let parentId = entries.at(-1)?.id || null;
@@ -19,7 +22,11 @@ let streaming = false;
 let pending;
 let automatic = true;
 let turn = messages.filter(x => x.role === 'assistant').length;
-const state = () => ({ sessionFile, messageCount: messages.length, isStreaming: streaming, isCompacting: false, autoCompactionEnabled: automatic, model: { id: 'fixture', contextWindow: 65536, maxTokens: 1024 } });
+const state = () => ({ sessionFile, messageCount: messages.length, isStreaming: streaming, isCompacting: false, autoCompactionEnabled: automatic, thinkingLevel, model });
+const availableModels = [
+  { provider: 'fixture', id: 'fixture', name: 'Fixture', contextWindow: 65536, maxTokens: 1024, reasoning: true, input: ['text'] },
+  { provider: 'other', id: 'other', name: 'Other', contextWindow: 8000, maxTokens: 512, reasoning: false, input: ['text', 'image'] }
+];
 function finish(text, fail = false) {
   send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } });
   const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage: 'Fixture model error' } : {}) };
@@ -33,6 +40,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);
   const respond = (data = {}, success = true) => send({ type: 'response', id: command.id, command: command.type, success, data, ...(!success ? { error: 'Fixture rejected prompt' } : {}) });
   if (command.type === 'get_state') return respond(state());
+  if (command.type === 'get_available_models') return respond({ models: availableModels });
+  if (command.type === 'get_available_thinking_levels') return respond({ levels: ['off', 'low', 'medium', 'high'] });
+  if (command.type === 'set_thinking_level') { thinkingLevel = command.level; return respond(); }
+  if (command.type === 'set_model') {
+    model = { provider: command.provider, id: command.modelId, contextWindow: 8000, maxTokens: 512 };
+    return respond(model);
+  }
   if (command.type === 'set_auto_compaction') { automatic = command.enabled; return respond(); }
   if (command.type === 'compact') {
     const result = { tokensBefore: 1100, estimatedTokensAfter: 500 };

@@ -1,10 +1,52 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
 import { TaskStore } from '../src/task-store.mjs';
 import { ChatState } from '../web/chat-state.mjs';
+
+// Minimal llama.cpp router stand-in for the /api/local tests.
+async function fakeRouter(t) {
+  const status = new Map([['vision', 'unloaded'], ['text', 'unloaded']]);
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/health') return res.end(JSON.stringify({ status: 'ok' }));
+    if (req.method === 'GET' && url.pathname === '/models') {
+      return res.end(JSON.stringify({
+        data: [...status.entries()].map(([id, value]) => ({
+          id,
+          status: { value },
+          architecture: { input_modalities: id === 'vision' ? ['text', 'image'] : ['text'] },
+          meta: { n_ctx: 33792 }
+        }))
+      }));
+    }
+    if (req.method === 'POST' && url.pathname === '/models/load') {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => { status.set(JSON.parse(body).model, 'loaded'); res.end('{}'); });
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/models/unload') {
+      let body = '';
+      req.on('data', c => body += c);
+      req.on('end', () => { status.set(JSON.parse(body).model, 'unloaded'); res.end('{}'); });
+      return;
+    }
+    if (url.pathname === '/models/sse') { res.writeHead(200, { 'content-type': 'text/event-stream' }); res.write(': ok\n\n'); return; }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => {
+    server.closeAllConnections?.();
+    return new Promise(resolve => server.close(resolve));
+  });
+  return `http://127.0.0.1:${server.address().port}`;
+}
 
 async function terminal(api, id) {
   for (let i = 0; i < 150; i++) {
@@ -84,6 +126,69 @@ test('events requests are capped by server.maxEventsPerRequest', { timeout: 2000
   assert.ok(total > 5, `expected more than 5 stored events, got ${total}`);
   const capped = await api(`/api/tasks/${created.id}/events?limit=0`);
   assert.ok(capped.length > 0 && capped.length <= 5, `capped length ${capped.length}`);
+});
+
+test('Pi models can be listed and switched for a session', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const catalog = await api('/api/models');
+  assert.deepEqual(catalog.models.map(m => `${m.provider}/${m.id}`), ['fixture/fixture', 'other/other']);
+  assert.ok(catalog.thinkingLevels.includes('high'));
+  assert.deepEqual(catalog.models.find(m => m.id === 'other'), { provider: 'other', id: 'other', name: 'Other', contextWindow: 8000, maxTokens: 512, reasoning: false, images: true });
+
+  // A model chosen for a new task is passed to Pi as --provider/--model, and the
+  // thinking level as --thinking; the captured state reflects the selection.
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'model', model: { provider: 'other', id: 'other' }, thinkingLevel: 'low' });
+  assert.deepEqual(created.requestedModel, { provider: 'other', id: 'other' });
+  const id = created.id;
+  let task = await terminal(api, id);
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+  assert.equal(task.model.provider, 'other');
+  assert.equal(task.model.id, 'other');
+  assert.equal(task.thinkingLevelActual, 'low');
+
+  // Live switch, as the UI does it.
+  const switched = await api(`/api/tasks/${id}/model`, { provider: 'fixture', id: 'fixture' });
+  assert.equal(switched.model.provider, 'fixture');
+  assert.equal(switched.model.id, 'fixture');
+  assert.deepEqual((await api(`/api/tasks/${id}`)).requestedModel, { provider: 'fixture', id: 'fixture' });
+  assert.ok((await api(`/api/tasks/${id}/events?limit=0`)).some(e => e.type === 'MODEL_SWITCH'));
+
+  await api(`/api/tasks/${id}/thinking`, { level: 'high' });
+  const afterThinking = await api(`/api/tasks/${id}`);
+  assert.equal(afterThinking.thinkingLevel, 'high');
+  assert.equal((await api(`/api/tasks/${id}/state`)).state.thinkingLevel, 'high');
+});
+
+test('router mode exposes /api/local and warns when Pi blocks images', { timeout: 20000 }, async t => {
+  const router = await fakeRouter(t);
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-pi-agent-'));
+  t.after(() => fs.rm(agentDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(agentDir, 'settings.json'), JSON.stringify({ images: { blockImages: true } }));
+  const fixture = await startFixture(undefined, {
+    env: { PI_AGENT_DIR: agentDir },
+    root: { localRuntime: { provider: 'llama.cpp', healthUrl: `${router}/health`, router: { enabled: true } } }
+  });
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const local = await api('/api/local');
+  assert.equal(local.enabled, true);
+  assert.equal(local.provider, 'llama.cpp');
+  assert.deepEqual(local.models.map(m => m.id), ['vision', 'text']);
+  assert.equal(local.models.find(m => m.id === 'vision').vision, true);
+
+  const loaded = await api('/api/local/load', { model: 'vision' });
+  assert.deepEqual(loaded.loaded, ['vision']);
+
+  const info = await api('/api/info');
+  assert.equal(info.local.enabled, true);
+  assert.ok(info.warnings.some(w => w.code === 'PI_IMAGES_BLOCKED'), JSON.stringify(info.warnings));
+
+  await api('/api/local/unload', { model: 'vision' });
+  assert.deepEqual((await api('/api/local')).loaded, []);
 });
 
 test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compact, cancel, deletion', { timeout: 20000 }, async t => {

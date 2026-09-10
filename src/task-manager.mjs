@@ -10,7 +10,9 @@ import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles,
 import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
-import { chooseEngine } from './dispatcher.mjs';
+import { chooseEngine, usesLocalRuntime, resolveRouterModel } from './dispatcher.mjs';
+import { ModelCatalog } from './model-catalog.mjs';
+import { LocalModelService } from './local-models.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 
 function now() { return new Date().toISOString(); }
@@ -54,6 +56,13 @@ export class TaskManager extends EventEmitter {
     this.deleted = new Set();
     this.eventWrites = new Map();
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
+    // Router mode: one always-on llama.cpp server that loads presets on demand
+    // (see docs). When configured it replaces the single-model RuntimeManager
+    // for every health/busy/ensure check; the old object stays for the legacy
+    // profile restart endpoints.
+    this.localModels = new LocalModelService(config.localRuntime || {}, dataRoot);
+    this.local = this.localModels.enabled ? this.localModels : this.runtimeManager;
+    this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#piEnv() });
     this.nativeSessions = new NativeSessionService(this);
     this.runtimeChanging = false;
     // Injected by the server; lets AUTO restart the managed runtime when the
@@ -154,6 +163,98 @@ export class TaskManager extends EventEmitter {
     return this.#admit(() => this.#createTask(input, options));
   }
 
+  // Accepts { provider, id } from the client; returns null when the shape is
+  // unusable instead of throwing on an optional field.
+  #normalizeModelSelection(model) {
+    if (!model || typeof model !== 'object') return null;
+    const provider = typeof model.provider === 'string' ? model.provider.trim() : '';
+    const id = typeof model.id === 'string' ? model.id.trim() : '';
+    if (!provider || !id) return null;
+    return { provider, id };
+  }
+
+  #normalizeThinkingLevel(level) {
+    const value = typeof level === 'string' ? level.trim() : '';
+    if (!value) return null;
+    if (!/^[a-z]+$/.test(value)) throw Object.assign(new Error('Некорректный thinking level.'), { code: 'INPUT_INVALID' });
+    return value;
+  }
+
+  #providerFor(requestedModel) {
+    return requestedModel?.provider || this.modelCatalog.peek()?.defaultModel?.provider || null;
+  }
+
+  #localAutostart() {
+    return this.localModels.enabled || this.config.localRuntime?.managed?.enabled === true;
+  }
+
+  // Config fed to chooseEngine. In router mode the legacy single-model
+  // `profiles` list must not validate AUTO's vision/text targets — in router
+  // mode those are router preset ids, not profiles.
+  #engineConfig() {
+    const local = this.config.localRuntime || {};
+    return this.localModels.enabled ? { ...local, profiles: [] } : local;
+  }
+
+  #selectionUsesLocalRuntime(requestedModel) {
+    return usesLocalRuntime(this.config.localRuntime || {}, this.#providerFor(requestedModel));
+  }
+
+  // Whether a task's model is served by the managed local runtime. Unknown
+  // models fall back to the previous behaviour (local runtime required).
+  #usesLocalRuntime(task) {
+    return this.#selectionUsesLocalRuntime(task?.requestedModel || task?.model || null);
+  }
+
+  // Model/thinking flags appended after config pi.args so an explicit per-task
+  // selection wins over the global default, exactly like `pi --provider ...`.
+  #selectionArgs(task) {
+    const args = [];
+    const model = task?.requestedModel;
+    if (model?.provider) args.push('--provider', String(model.provider));
+    if (model?.id) args.push('--model', String(model.id));
+    if (task?.thinkingLevel) args.push('--thinking', String(task.thinkingLevel));
+    return args;
+  }
+
+  // Pi's built-in `llama.cpp` provider only exposes router models when it can
+  // find the server URL. We supply it as an env var so the router catalog shows
+  // up in the unified model picker without a manual `/login llama.cpp`.
+  #piEnv() {
+    const env = { ...(this.config.pi?.env || {}) };
+    if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
+    return Object.keys(env).length ? env : undefined;
+  }
+
+  // The router model that Pi is about to use. Only meaningful for local tasks;
+  // with no explicit selection we fall back to Pi's default when it is local.
+  #localModelFor(task) {
+    if (task.requestedModel?.id) return task.requestedModel.id;
+    const fallback = this.modelCatalog.peek()?.defaultModel;
+    if (fallback?.provider === this.localModels.provider) return fallback.id;
+    return task.engine?.profileId || null;
+  }
+
+  // Router preflight: start the server and preload the model Pi is about to
+  // use, streaming load progress as task events. Router autoload would load it
+  // on the first request anyway; this exists so the UI can show progress and
+  // the user can see what is happening instead of a silent hang.
+  async #prepareLocalModel(task) {
+    const onLog = text => { this.store.appendRaw(task.id, 'runtime.log', text).catch(() => {}); };
+    const modelId = this.#localModelFor(task);
+    const onProgress = event => {
+      this.#event(task, 'LOCAL_MODEL_PROGRESS', event.message || `Загрузка ${event.model || modelId || ''}`.trim(), { model: event.model || modelId || null, ratio: event.ratio ?? null }, false).catch(() => {});
+    };
+    this.localModels.on('progress', onProgress);
+    try {
+      const info = await this.localModels.ensureRunning(onLog, modelId);
+      if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
+      await this.#event(task, 'RUNTIME_READY', `Router: ${info.state}${modelId ? ` · ${modelId}` : ''}`, { state: info.state, model: modelId || null });
+    } finally {
+      this.localModels.off('progress', onProgress);
+    }
+  }
+
   async #resolveFiles(items, token) {
     if (!Array.isArray(items) || !items.length) return [];
     const inline = items.filter(item => item && typeof item.base64 === 'string');
@@ -171,13 +272,33 @@ export class TaskManager extends EventEmitter {
     }
     if (requestedId && this.tasks.has(requestedId)) throw Object.assign(new Error('Cloud taskId уже существует.'), { code: 'ID_CONFLICT' });
     if (this.activeTaskId) throw Object.assign(new Error('Модель уже выполняет другую сессию.'), { code: 'MODEL_BUSY' });
-    const busy = await this.runtimeManager.getBusyStatus();
-    if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
-    if (!this.config.localRuntime?.managed?.enabled && !(await this.runtimeManager.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
+    let requestedModel = this.#normalizeModelSelection(input.model);
+    const thinkingLevel = this.#normalizeThinkingLevel(input.thinkingLevel);
+    // The model list is a Pi concern; if it is already cached (the picker was
+    // just open) reject an unknown selection early. Otherwise trust the client
+    // and let Pi resolve it when the session starts.
+    const knownModels = this.modelCatalog.peek()?.models;
+    if (requestedModel && knownModels && !knownModels.some(m => m.provider === requestedModel.provider && m.id === requestedModel.id)) {
+      throw Object.assign(new Error(`Модель не найдена: ${requestedModel.provider}/${requestedModel.id}`), { code: 'MODEL_NOT_FOUND' });
+    }
+    // Remote providers are not served by the local llama.cpp runtime, so its
+    // health/busy gate only applies when the chosen model actually lives there.
+    if (this.#selectionUsesLocalRuntime(requestedModel)) {
+      const busy = await this.local.getBusyStatus();
+      if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+      if (!this.#localAutostart() && !(await this.local.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
+    }
     const incomingFiles = await this.#resolveFiles(input.files || [], input.uploadToken);
     const prompt = String(input.prompt || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!prompt) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
-    const engine = chooseEngine(this.config.localRuntime || {}, { files: incomingFiles, prompt });
+    const engine = chooseEngine(this.#engineConfig(), { files: incomingFiles, prompt });
+    // In router mode a task must name a real preset, otherwise Pi's default
+    // model (which may still point at the old single-model provider) would send
+    // an id the router does not know. AUTO picks the vision preset for images;
+    // otherwise the configured default preset is used.
+    if (this.localModels.enabled && !requestedModel) {
+      requestedModel = resolveRouterModel(engine, this.config.localRuntime || {}, this.localModels.provider);
+    }
     const projectId = String(input.projectId || this.projects.keys().next().value || '');
     if (projectId !== '__scratch__' && !this.projects.has(projectId)) {
       throw Object.assign(new Error(`Unknown project: ${projectId}`), { code: 'PROJECT_NOT_FOUND' });
@@ -199,6 +320,8 @@ export class TaskManager extends EventEmitter {
       error: null,
       errorCode: null,
       engine,
+      requestedModel,
+      thinkingLevel,
       verification: null,
       git: null,
       compaction: { count: 0, last: null },
@@ -269,23 +392,32 @@ export class TaskManager extends EventEmitter {
       await this.#event(task, 'WORKSPACE_READY', `Workspace: ${task.workspacePath}`);
 
       await this.#setStatus(task, 'PREFLIGHT', 'Checking local model runtime');
-      const profileId = task.engine?.profileId || undefined;
-      if (profileId && task.engine?.auto && this.config.localRuntime?.auto?.enabled === true && this.runtimeSwitcher) {
-        const active = this.runtimeManager.activeProfileId;
-        if (active && active !== profileId) {
-          await this.#event(task, 'ENGINE_SWITCH', `AUTO: ${active} → ${profileId} (${task.engine.reason})`);
-          await this.runtimeSwitcher(profileId);
-        }
-      }
-      const runtimeInfo = await this.runtimeManager.ensureRunning((text) => {
-        this.store.appendRaw(task.id, 'runtime.log', text).catch(() => {});
-      }, profileId);
-      if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
-      await this.#event(task, 'RUNTIME_READY', `Local runtime: ${runtimeInfo.state}`);
+      if (this.#usesLocalRuntime(task)) {
+        if (this.localModels.enabled) {
+          await this.#prepareLocalModel(task);
+        } else {
+          const profileId = task.engine?.profileId || undefined;
+          if (profileId && task.engine?.auto && this.config.localRuntime?.auto?.enabled === true && this.runtimeSwitcher) {
+            const active = this.runtimeManager.activeProfileId;
+            if (active && active !== profileId) {
+              await this.#event(task, 'ENGINE_SWITCH', `AUTO: ${active} → ${profileId} (${task.engine.reason})`);
+              await this.runtimeSwitcher(profileId);
+            }
+          }
+          const runtimeInfo = await this.runtimeManager.ensureRunning((text) => {
+            this.store.appendRaw(task.id, 'runtime.log', text).catch(() => {});
+          }, profileId);
+          if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
+          await this.#event(task, 'RUNTIME_READY', `Local runtime: ${runtimeInfo.state}`);
 
-      const busy = await this.runtimeManager.getBusyStatus();
-      if (busy.busy === true) {
-        throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+          const busy = await this.runtimeManager.getBusyStatus();
+          if (busy.busy === true) {
+            throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+          }
+        }
+      } else {
+        const label = [task.requestedModel?.provider, task.requestedModel?.id].filter(Boolean).join('/');
+        await this.#event(task, 'RUNTIME_SKIPPED', `Локальный runtime не требуется для модели ${label || '(Pi default)'}`);
       }
 
       const pi = await this.#createPi(task);
@@ -349,8 +481,9 @@ export class TaskManager extends EventEmitter {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
     const pi = new PiRpcSession({
       command: this.config.pi?.command || 'pi',
-      args: this.config.pi?.args || [],
+      args: [...(this.config.pi?.args || []), ...this.#selectionArgs(task)],
       cwd: task.workspacePath,
+      env: this.#piEnv(),
       sessionDir,
       sessionName: `task-${task.id}`,
       sessionFile,
@@ -404,8 +537,91 @@ export class TaskManager extends EventEmitter {
         ? { id: state.model.id, provider: state.model.provider, contextWindow: state.model.contextWindow ?? null, maxTokens: state.model.maxTokens ?? null }
         : null;
       task.autoCompactionEnabled = state?.autoCompactionEnabled ?? null;
+      task.thinkingLevelActual = state?.thinkingLevel ?? null;
       await this.store.save(this.#publicTask(task));
     } catch {}
+  }
+
+  // Lists the models Pi currently considers usable (all providers, not just the
+  // local llama.cpp profiles). Refresh forces a fresh Pi probe.
+  async listModels({ refresh = false } = {}) {
+    return this.modelCatalog.list({ refresh });
+  }
+
+  // ---- local llama.cpp router (router mode) ----
+
+  async localStatus() {
+    return this.local.getStatus();
+  }
+
+  async loadLocalModel(id) {
+    if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
+    await this.localModels.ensureRunning(() => {}, id);
+    return this.localModels.getStatus();
+  }
+
+  async startLocal() {
+    if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
+    await this.localModels.ensureRunning(() => {});
+    return this.localModels.getStatus();
+  }
+
+  async unloadLocalModel(id) {
+    if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
+    await this.localModels.unloadModel(id);
+    return this.localModels.getStatus();
+  }
+
+  async stopLocal() {
+    if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
+    return this.localModels.stop();
+  }
+
+  // Switches the model of an existing session, starting (or restoring) the Pi
+  // session if needed. Mirrors Pi's own /model: the switch is written into the
+  // session transcript, so it survives the next TaskBridge restart.
+  async setModel(id, provider, modelId) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const model = this.#normalizeModelSelection({ provider, id: modelId });
+    if (!model) throw Object.assign(new Error('Укажите provider и id модели.'), { code: 'INPUT_INVALID' });
+    const runtime = await this.#ensureSession(task);
+    const state = await runtime.pi.getState().catch(() => null);
+    if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Дождитесь завершения ответа перед сменой модели.'), { code: 'BUSY' });
+    const applied = await runtime.pi.setModel(model.provider, model.id).catch((error) => {
+      throw Object.assign(new Error(`Pi не принял модель ${model.provider}/${model.id}: ${error.message}`), { code: 'MODEL_NOT_FOUND' });
+    });
+    task.requestedModel = model;
+    task.model = applied
+      ? { id: applied.id, provider: applied.provider, contextWindow: applied.contextWindow ?? null, maxTokens: applied.maxTokens ?? null }
+      : { id: model.id, provider: model.provider, contextWindow: null, maxTokens: null };
+    const nextState = await runtime.pi.getState().catch(() => null);
+    task.thinkingLevelActual = nextState?.thinkingLevel ?? task.thinkingLevelActual ?? null;
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${model.id}`, { provider: model.provider, modelId: model.id });
+    return this.#publicTask(task);
+  }
+
+  async setThinkingLevel(id, level) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const value = this.#normalizeThinkingLevel(level);
+    if (!value) throw Object.assign(new Error('Укажите thinking level.'), { code: 'INPUT_INVALID' });
+    const levels = this.modelCatalog.peek()?.thinkingLevels;
+    if (Array.isArray(levels) && levels.length && !levels.includes(value)) {
+      throw Object.assign(new Error(`Модель не поддерживает thinking level «${value}».`), { code: 'INPUT_INVALID' });
+    }
+    task.thinkingLevel = value;
+    const runtime = this.runtimes.get(id);
+    if (runtime && !runtime.pi.closed) {
+      await runtime.pi.setThinkingLevel(value);
+      task.thinkingLevelActual = value;
+    }
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'THINKING_LEVEL', `Thinking level: ${value}`, { level: value });
+    return this.#publicTask(task);
   }
 
   async setAutoCompaction(id, enabled) {
@@ -714,12 +930,12 @@ export class TaskManager extends EventEmitter {
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
     if (!['auto', 'prompt', 'steer', 'follow_up'].includes(mode)) throw Object.assign(new Error('Неизвестный режим сообщения.'), { code: 'INPUT_INVALID' });
-    if (!(await this.runtimeManager.isReady())) await this.runtimeManager.ensureRunning();
+    if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState();
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    if (!streaming && (await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+    if (!streaming && this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
     const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
@@ -779,7 +995,7 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     const runtime = await this.#ensureSession(task);
     if (this.activeTaskId || (await runtime.pi.getState())?.isStreaming) throw Object.assign(new Error('Дождитесь завершения ответа перед сжатием контекста.'), { code: 'BUSY' });
-    if ((await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом.'), { code: 'MODEL_BUSY' });
+    if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом.'), { code: 'MODEL_BUSY' });
     await this.#event(task, 'COMPACT_REQUESTED', 'Manual compaction requested');
     const response = await runtime.pi.compact(String(instructions || ''));
     return response.data || null;
@@ -788,7 +1004,7 @@ export class TaskManager extends EventEmitter {
   async #ensureSession(task) {
     const current = this.runtimes.get(task.id);
     if (current && !current.pi.closed) return current;
-    if ((await this.runtimeManager.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+    if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!task.workspacePath) {
       Object.assign(task, await this.#prepareWorkspace(task));
     }

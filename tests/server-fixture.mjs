@@ -29,7 +29,7 @@ export async function startFixture(port, overrides = {}) {
   }));
   let logs = '';
   const launch = () => {
-    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(overrides.env || {}) } });
     child.stdout.on('data', data => { logs += data; });
     child.stderr.on('data', data => { logs += data; });
     return child;

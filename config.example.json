@@ -26,6 +26,15 @@
   },
   "localRuntime": {
     "healthUrl": "http://127.0.0.1:8080/health",
+    "provider": "llama.cpp",
+    "router": {
+      "enabled": false,
+      "command": "C:\\path\\to\\llama-server.exe",
+      "args": ["--host", "127.0.0.1", "--port", "8080", "--models-preset", "C:\\path\\to\\models.ini", "--models-max", "1"],
+      "cwd": "C:\\path\\to\\llamacpp",
+      "startTimeoutMs": 120000,
+      "loadTimeoutMs": 900000
+    },
     "defaultProfile": "text",
     "auto": {
       "enabled": false,

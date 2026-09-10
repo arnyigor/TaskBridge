@@ -24,12 +24,15 @@
         <select id="runtimeProfile" title="Профиль модели" aria-label="Профиль модели"></select>
         <button id="runtimeStart" type="button" class="iconButton" title="Запустить модель" aria-label="Запустить модель">▶</button>
       </div>
+      <button id="localModelsButton" type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
       <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
       <div id="pcState" class="statusDot" title="Проверка…" aria-label="Статус модели"></div>
       <button id="helpButton" type="button" class="iconButton" title="Как это работает" aria-label="Справка">❓</button>
     </div>
   </header>
+
+  <div id="piWarning" class="banner hidden"></div>
 
   <details class="controlsSpoiler" id="controlsSpoiler">
     <summary><h2>Проект и сессии <span id="taskCount" class="muted small"></span></h2></summary>
@@ -102,6 +105,39 @@
     </div>
   </div>
 
+  <div id="localModelsOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Локальные модели (llama.cpp)</h2>
+      <p class="muted small" id="localRouterState">Загрузка…</p>
+      <div id="localProgress" class="localProgress hidden">
+        <div class="localProgressTrack"><div id="localProgressFill" class="localProgressFill"></div></div>
+        <span id="localProgressText" class="muted small"></span>
+      </div>
+      <div id="localModelsList" class="sessionPickerList">Загрузка…</div>
+      <div class="inline">
+        <button id="localRefresh" type="button">Обновить</button>
+        <button id="localStart" type="button">Запустить router</button>
+        <button id="localStop" type="button">Остановить router</button>
+        <button id="localModelsClose" type="button">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="modelPickerOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Модель Pi</h2>
+      <p class="muted small">Список берётся напрямую у Pi — те же provider'ы, ключи и модели, что видны командой <code>/model</code>. Выбор применяется к текущей сессии или к следующей задаче.</p>
+      <input id="modelSearch" type="search" placeholder="Поиск модели…" aria-label="Поиск модели" />
+      <label class="fieldLabel" for="modelThinking">Thinking level</label>
+      <select id="modelThinking" aria-label="Thinking level"></select>
+      <div id="modelList" class="sessionPickerList">Загрузка…</div>
+      <div class="inline">
+        <button id="modelRefresh" type="button">Обновить список</button>
+        <button id="modelPickerClose" type="button">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
   <div id="helpOverlay" class="authGate hidden">
     <div class="authCard wide helpCard">
       <h2>Как устроен TaskBridge</h2>
@@ -122,9 +158,11 @@
         <h3>Markdown и код</h3>
         <p>Ответы Pi рендерятся как настоящий Markdown: списки, таблицы, ссылки и картинки на файлы проекта кликабельны. У каждого блока кода есть кнопка «Копировать»; у каждого ответа целиком — кнопка 📋 рядом со статусом.</p>
 
-        <h3>Модель (профили и запуск)</h3>
-        <p>Если в настройках заданы профили запуска модели, в шапке появляется выбор профиля («Текст» / «Vision») и кнопка запуска: <b>▶</b> — запустить, <b>⟳</b> — перезапустить. Профиль Vision понимает картинки, профиль Текст — нет (даже если файл прикреплён). Перезапуск безопасен: TaskBridge проверяет, что процесс на нужном порту — это действительно модель из твоих профилей, а не что-то постороннее, и не трогает его, если не уверен.</p>
-        <p>Статус в правом верхнем углу — цветной кружок (наведи курсор, чтобы увидеть подробности): <b>зелёный</b> — модель свободна, <b>фиолетовый</b> — обрабатывает чей-то запрос прямо сейчас, <b>красный</b> — не отвечает вообще. Если включён AUTO-выбор профиля, TaskBridge сам подставит vision-профиль, когда во вложении есть картинка.</p>
+        <h3>Модель (Pi models и профили запуска)</h3>
+        <p>Кнопка «Модель: …» над полем ввода открывает список моделей напрямую из Pi — те же provider'ы, ключи и модели, что видны командой <code>/model</code> (включая удалённые провайдеры, не только локальный llama.cpp). Если сессия выбрана, смена применяется к ней сразу и сохраняется в её истории; если нет — выбор запомнится для следующей новой задачи. Рядом можно задать thinking level.</p>
+        <p>Если в настройках заданы <b>профили запуска локальной модели</b>, в шапке дополнительно появляется выбор профиля («Текст» / «Vision») и кнопка запуска: <b>▶</b> — запустить, <b>⟳</b> — перезапустить. Профиль Vision понимает картинки, профиль Текст — нет. Перезапуск безопасен: TaskBridge проверяет, что процесс на нужном порту — это действительно модель из твоих профилей, а не что-то постороннее.</p>
+        <p>Локальный health-check и выбор профиля применяются только к провайдеру, указанному в <code>localRuntime.provider</code> (по умолчанию <code>llamacpp</code>). Для моделей других провайдеров они пропускаются — важно, чтобы выбранная модель была доступна Pi.</p>
+        <p>Статус в правом верхнем углу — цветной кружок: <b>зелёный</b> — модель свободна, <b>фиолетовый</b> — занята, <b>красный</b> — не отвечает. Если включён AUTO-выбор профиля, TaskBridge сам подставит vision-профиль, когда во вложении есть картинка.</p>
 
         <h3>Применение изменений (worktree)</h3>
         <p>Когда задача выполняется в git worktree, основной проект не трогается. В панели сессии появятся кнопки «Применить к проекту» — применяет результат к исходному репозиторию (нужны чистый репозиторий и тот же HEAD, что при создании worktree; есть force), и «Удалить worktree» — убирает рабочую копию. Удаление сессии тоже чистит её worktree.</p>
@@ -163,6 +201,10 @@
       </div>
 
       <div class="composer-wrap">
+        <div class="modelBar">
+          <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi">Модель: —</button>
+          <span id="thinkingChip" class="muted small"></span>
+        </div>
         <span id="fileList" class="muted small"></span>
         <form class="composer" id="form">
           <div class="promptWrap">
@@ -200,6 +242,12 @@
               <b id="taskTitle">—</b>
               <button id="renameButton" type="button" title="Переименовать" aria-label="Переименовать сессию">✎</button>
             </div>
+            <div class="r taskModelRow">
+              <span>Модель</span>
+              <b id="taskModel">—</b>
+              <button id="changeModelButton" type="button" title="Сменить модель" aria-label="Сменить модель">⚙</button>
+            </div>
+            <div class="r"><span>Thinking</span><b id="taskThinking">—</b></div>
             <div class="r"><span>Статус</span><b id="taskStatus">—</b></div>
             <div class="r"><span>Current</span><b id="current">—</b></div>
             <div class="r"><span>Workspace</span><b id="workspace">—</b></div>

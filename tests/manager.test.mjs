@@ -190,3 +190,38 @@ test('applyTask applies the result patch to a clean source, then cleanup removes
   assert.equal(manager.getTask('w').workspacePath, null);
   await assert.rejects(manager.cleanupWorktree('w'), { code: 'INPUT_INVALID' });
 });
+
+test('setModel switches the session model and records the selection', async t => {
+  const f = await fixture(t);
+  const seen = [];
+  f.pi.setModel = async (provider, modelId) => { seen.push([provider, modelId]); return { provider, id: modelId, contextWindow: 4096, maxTokens: 512 }; };
+  const updated = await f.manager.setModel('a', 'ollama', 'glm-5');
+  assert.deepEqual(seen, [['ollama', 'glm-5']]);
+  assert.deepEqual(updated.model, { provider: 'ollama', id: 'glm-5', contextWindow: 4096, maxTokens: 512 });
+  assert.deepEqual(updated.requestedModel, { provider: 'ollama', id: 'glm-5' });
+  assert.equal(updated.thinkingLevelActual, null);
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'MODEL_SWITCH');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].data.provider, 'ollama');
+});
+
+test('setModel refuses while Pi is streaming and rejects malformed selections', async t => {
+  const streaming = await fixture(t, true);
+  await assert.rejects(streaming.manager.setModel('a', 'ollama', 'glm-5'), { code: 'BUSY' });
+  const f = await fixture(t);
+  await assert.rejects(f.manager.setModel('a', 'ollama', ''), { code: 'INPUT_INVALID' });
+  await assert.rejects(f.manager.setModel('missing', 'ollama', 'glm-5'), { code: 'NOT_FOUND' });
+});
+
+test('setThinkingLevel stores the level and applies it to a live session', async t => {
+  const f = await fixture(t);
+  const seen = [];
+  f.pi.setThinkingLevel = async (level) => { seen.push(level); };
+  const updated = await f.manager.setThinkingLevel('a', 'high');
+  assert.deepEqual(seen, ['high']);
+  assert.equal(updated.thinkingLevel, 'high');
+  assert.equal(updated.thinkingLevelActual, 'high');
+  await assert.rejects(f.manager.setThinkingLevel('a', ''), { code: 'INPUT_INVALID' });
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'THINKING_LEVEL');
+  assert.equal(events.length, 1);
+});

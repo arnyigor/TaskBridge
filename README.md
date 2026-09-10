@@ -148,7 +148,10 @@ Taskbridge/
 │  ├─ multipart.mjs         потоковый парсер multipart/form-data
 │  ├─ uploads.mjs           стейджинг загрузок с TTL
 │  ├─ engine.mjs            классификация ошибок провайдера (quota/rate limit/context)
-│  ├─ dispatcher.mjs        AUTO-выбор профиля модели
+│  ├─ dispatcher.mjs        AUTO-выбор профиля/модели
+│  ├─ local-models.mjs      llama.cpp router: процесс, /models, load/unload, прогресс
+│  ├─ model-catalog.mjs     список моделей Pi (get_available_models)
+│  ├─ pi-settings.mjs       чтение ~/.pi/agent/settings.json (blockImages)
 │  ├─ session-history.mjs   восстановление истории после restart
 │  ├─ native-sessions.mjs   импорт существующих Pi-сессий
 │  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
@@ -169,12 +172,13 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   98 тестов на node:test
+├─ tests/                   115 тестов на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
+├─ models.example.ini       шаблон пресетов llama.cpp router (скопируйте в models.ini)
 ├─ start.cmd                запуск на Windows
 └─ data/                    задачи, события, worktree, логи (не в git)
 ```
@@ -324,12 +328,15 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `server.auth.enabled` | включить pairing-авторизацию |
 | `server.https.enabled` / `port` | self-signed HTTPS для LAN |
 | `pi.command` / `pi.args` | как запускать Pi |
+| `pi.env` | дополнительные env-переменные Pi (TaskBridge сама добавляет `LLAMA_BASE_URL` в router-режиме) |
 | `pi.persistSessions` | сохранять файлы сессий Pi |
 | `pi.projectTrust` | доверие проекту в Pi |
 | `pi.abortTimeoutMs` | сколько ждать RPC `abort` до kill |
 | `pi.sessionRoots` | дополнительные папки сессий Pi для импорта |
 | `localRuntime.healthUrl` | health-check локальной модели |
-| `localRuntime.profiles` | профили запуска (`text`, `vision`, …) |
+| `localRuntime.provider` | provider Pi, который обслуживает локальный runtime (по умолчанию `llama.cpp` в router-режиме, иначе `llamacpp`); для других provider'ов локальный health-check пропускается |
+| `localRuntime.router` | router-режим llama.cpp: `enabled`, `command`, `args`, `cwd`, `env`, `startTimeoutMs`, `loadTimeoutMs` |
+| `localRuntime.profiles` | (legacy) профили одного процесса (`text`, `vision`, …) |
 | `localRuntime.managed` | управляемый запуск llama.cpp |
 | `localRuntime.auto.enabled` | AUTO-выбор профиля под задачу (vision при картинках) |
 | `cloud.enabled` / `cloud.url` | включить Internet bridge и указать Vercel deployment |
@@ -360,6 +367,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `GET` | `/api/project-browser` | список папок в разрешённых корнях |
 | `POST` | `/api/project-browser/register` | зарегистрировать проект |
 | `GET` | `/api/projects/:id/pi-sessions` | существующие Pi-сессии проекта |
+| `GET` | `/api/models` | список доступных моделей Pi (`?refresh=1` — заново опросить Pi) |
 | `GET` | `/api/tasks` | список сессий/задач |
 | `POST` | `/api/tasks` | создать задачу |
 | `POST` | `/api/tasks/from-session` | импортировать Pi-сессию как задачу |
@@ -371,14 +379,21 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `POST` | `/api/tasks/:id/cancel` | STOP |
 | `POST` | `/api/tasks/:id/compact` | COMPACT |
 | `POST` | `/api/tasks/:id/auto-compaction` | вкл/выкл auto compaction |
+| `POST` | `/api/tasks/:id/model` | сменить модель сессии (как `/model` в Pi) |
+| `POST` | `/api/tasks/:id/thinking` | задать thinking level сессии |
 | `GET` | `/api/tasks/:id/artifacts` | список артефактов |
 | `GET` | `/api/tasks/:id/artifacts/:name` | скачать артефакт |
 | `GET` | `/api/tasks/:id/files/:id` | скачать вложение |
 | `GET` | `/api/tasks/:id/workspace-file?path=` | файл из workspace |
 | `POST` | `/api/tasks/:id/apply` | применить `diff.patch` к исходному проекту |
 | `DELETE` | `/api/tasks/:id/worktree` | удалить worktree задачи |
-| `GET` | `/api/runtime` | статус локальной модели |
-| `POST` | `/api/runtime/start` / `restart` | запустить/перезапустить профиль |
+| `GET` | `/api/runtime` | статус локальной модели (legacy-профили) |
+| `POST` | `/api/runtime/start` / `restart` | запустить/перезапустить профиль (legacy) |
+| `GET` | `/api/local` | статус router-режима: state, pid, список локальных моделей |
+| `POST` | `/api/local/load` | загрузить локальную модель (`{ "model": "id" }`) |
+| `POST` | `/api/local/unload` | выгрузить локальную модель |
+| `POST` | `/api/local/stop` | остановить router (только если его запустил TaskBridge) |
+| `GET` | `/api/local/events` | SSE: статус и прогресс загрузки локальных моделей |
 
 ---
 
@@ -493,6 +508,16 @@ TaskBridge отправляет RPC `{"type":"compact"}` и может пока�
 
 RPC `get_state`: текущая модель, thinking level, `isStreaming`, `isCompacting`, id/файл сессии, auto compaction, количество сообщений и pending. Точный размер контекста не выдумывается, если Pi его не отдаёт.
 
+### Model switching (как в Pi)
+
+Список моделей TaskBridge берёт напрямую у Pi: `GET /api/models` поднимает короткоживущий `pi --mode rpc --no-session`, спрашивает `get_available_models` / `get_available_thinking_levels` и кэширует ответ (по умолчанию 60 c). Поэтому видны все provider'ы Pi — не только локальные llama.cpp-профили, но и удалённые (`ollama`, OpenAI-совместимые и т.д.), ровно как в `/model`.
+
+- новая задача: `POST /api/tasks` принимает `model: { provider, id }` и `thinkingLevel`; TaskBridge передаёт их Pi как `--provider/--model/--thinking` поверх `pi.args`;
+- живая сессия: `POST /api/tasks/:id/model` вызывает RPC `set_model` (и `set_thinking_level` для `/thinking`). Pi пишет смену в транскрипт сессии, поэтому она переживает restart TaskBridge;
+- если задача ещё не запускалась, смена модели поднимет/восстановит Pi-сессию.
+
+Локальный health-check и переключение профиля применяются только к провайдеру `localRuntime.provider` (по умолчанию `llamacpp`). Для остальных провайдеров они пропускаются, поэтому удалённая модель работает даже при остановленном локальном llama.cpp.
+
 ---
 
 ## Файлы с телефона
@@ -514,36 +539,63 @@ Multipart — CORS-«простой» content-type, поэтому запрос 
 
 ## Local Runtime Manager
 
-По умолчанию проверяется `http://127.0.0.1:8080/health`. Если сервер уже работает — статус `EXTERNAL_RUNNING`, и TaskBridge его не останавливает.
+### Router mode (рекомендуется)
 
-Управляемый запуск:
+Один `llama-server`, запущенный без `-m` (`--models-preset` или `--models-dir`), обслуживает много моделей и грузит их по требованию — без перезапуска процесса и без убийства Pi-сессий. TaskBridge говорит на том же протоколе, что и встроенный в Pi провайдер `llama.cpp`: `/models`, `/models/load`, `/models/unload`, `/models/sse`.
 
 ```json
 "localRuntime": {
+  "provider": "llama.cpp",
   "healthUrl": "http://127.0.0.1:8080/health",
-  "managed": {
+  "router": {
     "enabled": true,
     "command": "G:\\AIModels\\llamacpp\\llama-server.exe",
-    "args": ["-m", "G:\\AIModels\\model.gguf", "--host", "127.0.0.1", "--port", "8080", "-ngl", "all"],
+    "args": ["--host", "127.0.0.1", "--port", "8080", "--models-preset", "G:\\...\\models.ini", "--models-max", "1"],
     "cwd": "G:\\AIModels\\llamacpp"
   }
 }
 ```
 
-Для первой проверки лучше оставить свой llama-server уже запущенным. Профили `text` / `vision` задаются в `localRuntime.profiles` и переключаются из UI.
+`models.ini` — пресеты llama.cpp (см. `models.example.ini`). Имя секции = id модели, который видит Pi (`llama.cpp/<section>`). У vision-пресета указывается `mmproj`, тогда llama.cpp отдаёт `architecture.input_modalities: ["text","image"]`, и Pi помечает модель как умеющую картинки — никаких ручных `input` в `models.json` больше не нужно.
+
+Как это работает в UI/API:
+
+- включённый router виден в шапке кнопкой «Локальные модели»: список моделей, `loaded/loading/unloaded`, бейдж `vision`, кнопки «Загрузить/Выгрузить/Отменить»;
+- прогресс загрузки (включая mmproj) идёт из `/models/sse` и виден в оверлее и в событиях задачи (`LOCAL_MODEL_PROGRESS`);
+- `POST /api/local/stop` останавливает router (только если процесс запустил сам TaskBridge);
+- Pi подключается к router автоматически: TaskBridge прокидывает `LLAMA_BASE_URL` в окружение Pi (`pi.env`), без ручного `/login llama.cpp`; локальные модели попадают в общий селектор моделей вместе с облачными.
+
+`--models-max` (по умолчанию 4) — опасно на одной GPU: ставьте `1`, иначе модели могут не помещаться в VRAM. `--sleep-idle-seconds` выгружает простаивающие модели. `--models-max`/`--models-autoload` — это флаги router, их нужно писать в `args`, а не в INI.
+
+Перф-флаги в пресете не косметика. Без `device = CUDA0`, `split-mode = none`, `main-gpu = 0`, `load-mode = none`, `parallel = 1` и `cache-type-k/v = q4_0` на 16 ГБ 27B-Q4 уходит в RAM-спилл и prompt processing падает до нешаблонных ~20–130 tok/s. С ними на RTX 5070 Ti измерено **PP ≈ 1400 tok/s, TG ≈ 44 tok/s** (vision-пресет, ctx 33792).
+
+### Legacy: single-model profiles
+
+Если `localRuntime.router` не задан, работает прежняя схема: один процесс, профили `text`/`vision` в `localRuntime.profiles`, переключение через `/api/runtime/restart` (с перезапуском процесса и закрытием Pi-сессий).
+
+```json
+"localRuntime": {
+  "healthUrl": "http://127.0.0.1:8080/health",
+  "managed": { "enabled": true, "command": "...", "args": ["-m", "model.gguf", "-ngl", "all"] }
+}
+```
+
+### Vision и вложения
+
+Чтобы картинки дошли до модели, нужны два условия: (1) в Pi выключен `images.blockImages` в `~/.pi/agent/settings.json` — иначе Pi заменяет любую картинку на «Image reading is disabled.»; (2) у модели в Pi заявлен `input: ["text","image"]` — для router-моделей это приходит из llama.cpp автоматически. TaskBridge читает `settings.json` только для предупреждения: при `blockImages=true` `GET /api/info` возвращает `warnings` с кодом `PI_IMAGES_BLOCKED` и баннер в UI.
 
 ### AUTO dispatcher
 
-При `localRuntime.auto.enabled = true` профиль выбирается на задачу:
+При `localRuntime.auto.enabled = true` модель выбирается на задачу:
 
-- во вложениях есть изображения и задан `auto.visionProfile` → vision-профиль;
+- во вложениях есть изображения и задан `auto.visionProfile` → vision-модель;
 - иначе `auto.textProfile` / `defaultProfile`.
 
-Выбор и причина сохраняются в `task.engine`, переключение видно событием `ENGINE_SWITCH`. Если нужный профиль не загружен, managed-runtime перезапускается на него через тот же безопасный RuntimeControl (только когда `managed.enabled` и модель не занята).
+В router-режиме значениями `auto.*` служат id пресетов (без `profiles`). Выбор и причина сохраняются в `task.engine`.
 
 ### Engine health
 
-`GET /api/info` возвращает `engine`: `reachable`, `model`, `contextWindow`, `slots` — из llama.cpp `/props` и `/slots`; поля опциональны и отсутствуют у серверов, которые их не отдают. Ошибки провайдера классифицируются в стабильные коды: `QUOTA_EXCEEDED`, `RATE_LIMITED`, `CONTEXT_OVERFLOW`, `ENGINE_AUTH`, `MODEL_UNAVAILABLE`, `ENGINE_OVERLOADED`, `ENGINE_UNREACHABLE`; у задачи появляются `retryable` и `retryAfterMs` (разбирается из текста вида «retry after 30s»).
+`GET /api/info` возвращает `engine` (для single-model: `reachable`, `model`, `contextWindow`, `slots` из `/props` и `/slots`) и `local` (router: `state`, `loaded`, `models`). Ошибки провайдера классифицируются в стабильные коды: `QUOTA_EXCEEDED`, `RATE_LIMITED`, `CONTEXT_OVERFLOW`, `ENGINE_AUTH`, `MODEL_UNAVAILABLE`, `ENGINE_OVERLOADED`, `ENGINE_UNREACHABLE`; у задачи появляются `retryable` и `retryAfterMs`.
 
 ---
 
@@ -575,7 +627,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 98 тестов на node:test
+npm test          # 115 тестов на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 

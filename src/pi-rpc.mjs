@@ -29,7 +29,8 @@ export class PiRpcSession extends EventEmitter {
       sessionName,
       sessionFile,
       persistSessions = true,
-      projectTrust = 'approve'
+      projectTrust = 'approve',
+      env
     } = this.options;
 
     if (persistSessions && sessionDir) fs.mkdirSync(sessionDir, { recursive: true });
@@ -52,6 +53,7 @@ export class PiRpcSession extends EventEmitter {
 
     const proc = spawn(command, piArgs, {
       cwd,
+      env: env ? { ...process.env, ...env } : process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       shell: process.platform === 'win32'
@@ -190,6 +192,33 @@ export class PiRpcSession extends EventEmitter {
 
   async setAutoCompaction(enabled) {
     return this.request({ type: 'set_auto_compaction', enabled });
+  }
+
+  // Model switching mirrors Pi's own /model command: Pi owns the provider and
+  // model catalogs, so the list of usable models (and their auth state) can
+  // only be asked of a running Pi over RPC, never re-derived from config files.
+  async getAvailableModels() {
+    const response = await this.request({ type: 'get_available_models' }, 60000);
+    return response.data?.models || [];
+  }
+
+  async setModel(provider, modelId) {
+    const response = await this.request({ type: 'set_model', provider, modelId }, 30000);
+    return response.data || null;
+  }
+
+  async cycleModel(direction = 'forward') {
+    const response = await this.request({ type: 'cycle_model', direction });
+    return response.data || null;
+  }
+
+  async getAvailableThinkingLevels() {
+    const response = await this.request({ type: 'get_available_thinking_levels' }, 30000);
+    return response.data?.levels || [];
+  }
+
+  async setThinkingLevel(level) {
+    return this.request({ type: 'set_thinking_level', level });
   }
 
   async abort(timeoutMs = 10000) {

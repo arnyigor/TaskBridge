@@ -19,6 +19,7 @@ import { windowByTurns } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
 import { CloudTransport } from './cloud/cloud-transport.mjs';
+import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -58,6 +59,12 @@ const store = new TaskStore(dataRoot, {
 });
 const manager = new TaskManager(config, dataRoot, store);
 await manager.init();
+// Router mode is meant to be always-on: the process is a cheap supervisor that
+// only loads models on demand. Start it eagerly so the model picker and the UI
+// can discover local models right away; a failure must not stop the server.
+if (manager.localModels.enabled) {
+  manager.startLocal().catch(error => console.error(`[TaskBridge] Router start failed: ${error.message}`));
+}
 const cloudTransport = new CloudTransport(manager, config.cloud || {}, dataRoot);
 await cloudTransport.start();
 
@@ -234,8 +241,66 @@ async function handleRequest(req, res) {
       return json(res, 200, await runtimeControl.status());
     }
 
+    if (req.method === 'GET' && pathname === '/api/models') {
+      const refresh = url.searchParams.get('refresh') === '1';
+      return json(res, 200, await manager.listModels({ refresh }));
+    }
+
+    if (req.method === 'GET' && pathname === '/api/local') {
+      return json(res, 200, await manager.localStatus());
+    }
+    if (req.method === 'POST' && pathname === '/api/local/start') {
+      return json(res, 200, await manager.startLocal());
+    }
+    if (req.method === 'POST' && pathname === '/api/local/load') {
+      const { model } = await readJson(req);
+      return json(res, 200, await manager.loadLocalModel(model));
+    }
+    if (req.method === 'POST' && pathname === '/api/local/unload') {
+      const { model } = await readJson(req);
+      return json(res, 200, await manager.unloadLocalModel(model));
+    }
+    if (req.method === 'POST' && pathname === '/api/local/stop') {
+      return json(res, 200, await manager.stopLocal());
+    }
+    if (req.method === 'GET' && pathname === '/api/local/events') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+        'x-accel-buffering': 'no'
+      });
+      res.write('retry: 2000\n\n');
+      const send = (type, data) => { try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {} };
+      const onStatus = data => send('status', data);
+      const onProgress = data => send('progress', data);
+      const onEvent = data => send('event', data);
+      manager.localModels.on('status', onStatus);
+      manager.localModels.on('progress', onProgress);
+      manager.localModels.on('event', onEvent);
+      manager.localStatus().then(status => send('snapshot', status)).catch(() => {});
+      const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+      res.on('close', () => {
+        clearInterval(heartbeat);
+        manager.localModels.off('status', onStatus);
+        manager.localModels.off('progress', onProgress);
+        manager.localModels.off('event', onEvent);
+      });
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/api/info') {
-      const [busy, modelReady, engine] = await Promise.all([manager.runtimeManager.getBusyStatus(), manager.runtimeManager.isReady(), manager.runtimeManager.getEngineInfo()]);
+      const [busy, modelReady, engine, local] = await Promise.all([
+        manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus()
+      ]);
+      const settings = await readPiSettings().catch(() => null);
+      const warnings = [];
+      if (imagesBlocked(settings)) {
+        warnings.push({
+          code: 'PI_IMAGES_BLOCKED',
+          message: 'В настройках Pi включён images.blockImages — Pi заменяет любые картинки на текст «Image reading is disabled.» до отправки модели. Выключите его командой /images или в /settings, иначе никакая vision-модель не увидит вложения.'
+        });
+      }
       return json(res, 200, {
         name: 'TaskBridge MVP',
         build,
@@ -246,6 +311,8 @@ async function handleRequest(req, res) {
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
         engine,
+        local,
+        warnings,
         cloud: cloudTransport.status(),
         fileLimits: FILE_LIMITS
       });
@@ -373,6 +440,18 @@ async function handleRequest(req, res) {
       return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken));
     }
 
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setModel(match[1], body.provider, body.id || body.modelId));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/thinking$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setThinkingLevel(match[1], body.level));
+    }
+
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/auto-compaction$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
@@ -436,7 +515,7 @@ async function handleRequest(req, res) {
     if (res.headersSent) { res.destroy(); return; }
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
-      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED'].includes(error.code) ? 400
+      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND'].includes(error.code) ? 400
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN'].includes(error.code) ? 403

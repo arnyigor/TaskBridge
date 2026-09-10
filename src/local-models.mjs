@@ -1,0 +1,361 @@
+import { spawn, execFile } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const failure = (code, message) => Object.assign(new Error(message), { code });
+
+// llama.cpp router mode (server started without -m, with --models-dir or
+// --models-preset) owns a single port and loads presets on demand. Pi already
+// ships a client for exactly these endpoints, so TaskBridge speaks the same
+// protocol instead of inventing its own: /models, /models/load, /models/unload,
+// /models/sse. This is what lets one always-on server replace the old
+// "text vs vision profile = restart the process" approach.
+export function normalizeBaseUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    url.hash = '';
+    url.search = '';
+    url.pathname = url.pathname.replace(/\/+$/u, '').replace(/\/v1$/u, '') || '';
+    return url.toString().replace(/\/$/u, '');
+  } catch {
+    return null;
+  }
+}
+
+// Mirrors the shape llama.cpp sends on /models/sse load events. Kept pure and
+// exported so it can be tested without a running server.
+export function parseLoadProgress(payload) {
+  const progress = payload && typeof payload === 'object' ? payload.progress : null;
+  if (!progress || typeof progress !== 'object') return null;
+  const stages = Array.isArray(progress.stages) ? progress.stages.filter(s => typeof s === 'string') : [];
+  const stage = typeof progress.current === 'string'
+    ? progress.current
+    : (typeof progress.stage === 'string' ? progress.stage : null);
+  const stageRatio = typeof progress.value === 'number' ? Math.max(0, Math.min(1, progress.value)) : null;
+  let ratio = stageRatio;
+  if (stage && stages.length) {
+    const index = stages.indexOf(stage);
+    if (index >= 0) ratio = (index + (stageRatio ?? 0)) / stages.length;
+  }
+  return { message: stage ? `Загрузка: ${stage.replaceAll('_', ' ')}` : 'Загрузка модели', ratio };
+}
+
+// /models returns { data: [{ id, status: { value, progress, failed, exit_code },
+// architecture: { input_modalities }, meta: { n_ctx }, path }] }.
+// Anything without `data` is a single-model endpoint, not a router.
+export function normalizeModels(payload) {
+  if (!payload || !Array.isArray(payload.data)) return null;
+  return payload.data
+    .filter(model => model && typeof model.id === 'string')
+    .map((model) => {
+      const status = model.status && typeof model.status === 'object' ? model.status : {};
+      const modalities = model.architecture?.input_modalities;
+      return {
+        id: model.id,
+        name: typeof model.name === 'string' && model.name ? model.name : model.id,
+        status: typeof status.value === 'string' ? status.value : (typeof model.status === 'string' ? model.status : 'unknown'),
+        progress: status.progress ?? null,
+        failed: status.failed === true,
+        exitCode: Number.isFinite(status.exit_code) ? status.exit_code : null,
+        vision: Array.isArray(modalities) ? modalities.includes('image') : false,
+        contextWindow: Number.isFinite(model.meta?.n_ctx) ? model.meta.n_ctx
+          : (Number.isFinite(model.meta?.n_ctx_train) ? model.meta.n_ctx_train : null),
+        path: typeof model.path === 'string' ? model.path : null
+      };
+    });
+}
+
+export class LocalModelService extends EventEmitter {
+  constructor(config = {}, dataRoot) {
+    super();
+    this.config = config || {};
+    this.dataRoot = dataRoot;
+    this.proc = null;
+    this.state = 'STOPPED';
+    this.lastError = null;
+    this.activeProfileId = null;
+    this.watchController = null;
+  }
+
+  // `managed` = TaskBridge can start/stop this router (a command is configured).
+  // `enabled` = router mode is configured at all (managed or an external one we
+  // only talk to over HTTP). Both gate different things: process control needs
+  // `managed`, list/load/progress only need reachable HTTP.
+  get managed() {
+    return Boolean(this.config.router?.command);
+  }
+
+  get enabled() {
+    return Boolean(this.config.router?.enabled || this.config.router?.command);
+  }
+
+  get provider() {
+    return this.config.provider || 'llama.cpp';
+  }
+
+  get baseUrl() {
+    return normalizeBaseUrl(this.config.router?.baseUrl)
+      || normalizeBaseUrl(String(this.config.healthUrl || '').replace(/\/health$/iu, ''))
+      || 'http://127.0.0.1:8080';
+  }
+
+  get management() {
+    return this.config.router || this.config.managed || {};
+  }
+
+  async request(pathname, { method = 'GET', body, timeout = 15000, signal } = {}) {
+    const timer = new AbortController();
+    const timerId = setTimeout(() => timer.abort(new Error('timeout')), timeout);
+    const signals = signal ? [signal, timer.signal] : [timer.signal];
+    const combined = typeof AbortSignal.any === 'function' ? AbortSignal.any(signals) : timer.signal;
+    try {
+      const response = await fetch(this.baseUrl + pathname, {
+        method,
+        headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: combined
+      });
+      const text = await response.text();
+      let payload = null;
+      try { payload = text ? JSON.parse(text) : null; } catch { payload = null; }
+      if (!response.ok) {
+        throw failure('LOCAL_HTTP_ERROR', payload?.error?.message || `${pathname} → HTTP ${response.status}`);
+      }
+      return payload;
+    } finally {
+      clearTimeout(timerId);
+    }
+  }
+
+  async isReady() {
+    if (!this.managed && !this.config.healthUrl && !this.config.router?.baseUrl) return true;
+    try {
+      const response = await fetch(`${this.baseUrl}/health`, { signal: AbortSignal.timeout(1500) });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async listModels() {
+    const payload = await this.request('/models', { timeout: 5000 });
+    const models = normalizeModels(payload);
+    if (!models) throw failure('LOCAL_NOT_ROUTER', 'llama.cpp не запущен в router-режиме (нет /models с data[]).');
+    return models;
+  }
+
+  // Busy is deliberately "unknown/false": the router multiplexes models, there
+  // is no single slot to inspect like /slots in the single-model server. Task
+  // serialization is already owned by TaskManager.activeTaskId.
+  async getBusyStatus() {
+    return { unknown: false, busy: false };
+  }
+
+  async getEngineInfo() {
+    if (!this.enabled) return { configured: false, reachable: false, state: this.state };
+    const reachable = await this.isReady();
+    if (!reachable) return { configured: true, reachable: false, state: this.state, error: this.lastError };
+    const models = await this.listModels().catch(() => []);
+    const loaded = models.filter(m => m.status === 'loaded' || m.status === 'sleeping');
+    return {
+      configured: true,
+      reachable: true,
+      state: this.state,
+      model: loaded[0]?.id ?? null,
+      contextWindow: loaded[0]?.contextWindow ?? null,
+      loaded: loaded.map(m => m.id),
+      slots: null
+    };
+  }
+
+  async getStatus() {
+    if (!this.proc && this.state !== 'STARTING') {
+      this.state = (await this.isReady()) ? 'EXTERNAL_RUNNING' : 'STOPPED';
+    }
+    let models = null;
+    if (this.state !== 'STOPPED') models = await this.listModels().catch(() => null);
+    return {
+      enabled: this.enabled,
+      mode: 'router',
+      state: this.state,
+      pid: this.proc?.pid ?? null,
+      baseUrl: this.baseUrl,
+      provider: this.provider,
+      reachable: models != null,
+      models: models || [],
+      loaded: (models || []).filter(m => m.status === 'loaded' || m.status === 'sleeping').map(m => m.id),
+      loading: (models || []).filter(m => m.status === 'loading').map(m => m.id),
+      error: this.lastError
+    };
+  }
+
+  async #spawnRouter(onLog = () => {}) {
+    const management = this.management;
+    const command = management.command;
+    const args = management.args || [];
+    if (!command) throw failure('LOCAL_RUNTIME_FAILED', 'Не задана команда запуска router-сервера.');
+    this.state = 'STARTING';
+    this.lastError = null;
+    this.emit('status', { state: this.state });
+    fs.mkdirSync(path.join(this.dataRoot, 'runtime'), { recursive: true });
+    const log = fs.createWriteStream(path.join(this.dataRoot, 'runtime', 'router.log'), { flags: 'a' });
+    const proc = spawn(command, args, {
+      cwd: management.cwd || undefined,
+      env: { ...process.env, ...(management.env || {}) },
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    this.proc = proc;
+    proc.stdout.on('data', chunk => { log.write(chunk); onLog(chunk.toString('utf8')); });
+    proc.stderr.on('data', chunk => { log.write(chunk); onLog(chunk.toString('utf8')); });
+    proc.on('close', (code, signal) => {
+      this.proc = null;
+      this.state = 'STOPPED';
+      if (code) this.lastError = `Router завершился с кодом ${code}${signal ? ` (${signal})` : ''}.`;
+      this.stopWatching();
+      log.end();
+      this.emit('status', { state: this.state, error: this.lastError });
+    });
+    proc.on('error', (error) => {
+      this.lastError = error.message;
+      onLog(`[router error] ${error.message}\n`);
+    });
+
+    const deadline = Date.now() + (management.startTimeoutMs || 120000);
+    while (Date.now() < deadline) {
+      if (!this.proc) throw failure('LOCAL_RUNTIME_FAILED', this.lastError || 'Router завершился до готовности.');
+      if (await this.isReady()) {
+        this.state = 'MANAGED_RUNNING';
+        this.emit('status', { state: this.state, pid: this.proc?.pid ?? null });
+        return;
+      }
+      await sleep(500);
+    }
+    throw failure('LOCAL_RUNTIME_FAILED', 'Таймаут ожидания router-сервера.');
+  }
+
+  // Starts the router if it is not already listening, then (optionally) loads a
+  // specific model with progress. Safe to call for every task.
+  async ensureRunning(onLog = () => {}, modelId) {
+    if (this.managed && !(await this.isReady())) {
+      await this.#spawnRouter(onLog);
+    } else if (await this.isReady()) {
+      this.state = this.proc ? 'MANAGED_RUNNING' : 'EXTERNAL_RUNNING';
+    }
+    if (await this.isReady()) this.startWatching();
+    if (modelId && await this.isReady()) await this.loadModel(modelId);
+    return { state: this.state, pid: this.proc?.pid ?? null, modelId: modelId || null };
+  }
+
+  async loadModel(id, { onProgress, signal } = {}) {
+    if (!id) throw failure('INPUT_INVALID', 'Не указана модель.');
+    const already = (await this.listModels().catch(() => [])).find(m => m.id === id);
+    if (already && (already.status === 'loaded' || already.status === 'sleeping')) {
+      this.activeProfileId = id;
+      return already;
+    }
+    this.startWatching();
+    const onProg = event => { if (!event.model || event.model === id) onProgress?.(event); };
+    this.on('progress', onProg);
+    try {
+      await this.request('/models/load', { method: 'POST', body: { model: id }, timeout: 30000, signal });
+      const deadline = Date.now() + (this.management.loadTimeoutMs || 900000);
+      while (true) {
+        if (signal?.aborted) throw failure('LOCAL_LOAD_CANCELLED', 'Загрузка отменена.');
+        const entry = (await this.listModels().catch(() => [])).find(m => m.id === id);
+        if (entry?.status === 'loaded') {
+          this.activeProfileId = id;
+          this.emit('loaded', entry);
+          return entry;
+        }
+        if (entry?.failed) {
+          throw failure('LOCAL_LOAD_FAILED', `Модель ${id} не загрузилась${entry.exitCode != null ? ` (код ${entry.exitCode})` : ''}.`);
+        }
+        if (Date.now() > deadline) throw failure('LOCAL_LOAD_TIMEOUT', `Таймаут загрузки модели ${id}.`);
+        await sleep(500);
+      }
+    } finally {
+      this.off('progress', onProg);
+    }
+  }
+
+  async unloadModel(id) {
+    if (!id) throw failure('INPUT_INVALID', 'Не указана модель.');
+    await this.request('/models/unload', { method: 'POST', body: { model: id }, timeout: 20000 });
+    const deadline = Date.now() + 30000;
+    while (Date.now() < deadline) {
+      const entry = (await this.listModels().catch(() => [])).find(m => m.id === id);
+      if (!entry || entry.status === 'unloaded' || entry.status === 'sleeping') break;
+      await sleep(300);
+    }
+    if (this.activeProfileId === id) this.activeProfileId = null;
+    this.emit('unloaded', { id });
+    return { id, status: 'unloaded' };
+  }
+
+  // Only a router this process started can be stopped; an externally launched
+  // one is left alone (same safety rule as the single-model runtime).
+  async stop() {
+    if (!this.proc) throw failure('LOCAL_RUNTIME_NOT_MANAGED', 'Router запущен извне — остановите его в приложении, которое его запустило.');
+    const proc = this.proc;
+    this.stopWatching();
+    await new Promise(resolve => {
+      const killer = process.platform === 'win32'
+        ? execFile('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }, resolve)
+        : (proc.kill('SIGTERM'), resolve());
+      killer.on?.('error', resolve);
+    });
+    this.proc = null;
+    this.state = 'STOPPED';
+    this.lastError = null;
+    this.emit('status', { state: this.state });
+    return this.getStatus();
+  }
+
+  startWatching() {
+    if (this.watchController) return;
+    const controller = new AbortController();
+    this.watchController = controller;
+    this.#watchLoop(controller.signal).catch(() => {});
+  }
+
+  stopWatching() {
+    this.watchController?.abort();
+    this.watchController = null;
+  }
+
+  async #watchLoop(signal) {
+    while (!signal.aborted) {
+      try {
+        const response = await fetch(`${this.baseUrl}/models/sse`, { signal });
+        if (!response.ok || !response.body) throw new Error('sse unavailable');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (!signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replaceAll('\r\n', '\n');
+          let boundary;
+          while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+            const frame = buffer.slice(0, boundary);
+            buffer = buffer.slice(boundary + 2);
+            const dataLine = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+            if (!dataLine) continue;
+            let event;
+            try { event = JSON.parse(dataLine); } catch { continue; }
+            this.emit('event', event);
+            const model = event?.model ?? event?.data?.model ?? null;
+            const progress = parseLoadProgress(event?.data ?? event);
+            if (progress) this.emit('progress', { model, ...progress });
+          }
+        }
+      } catch { /* stream error: reconnect below unless aborted */ }
+      if (signal.aborted) break;
+      await sleep(2000);
+    }
+  }
+}
