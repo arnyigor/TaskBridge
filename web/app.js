@@ -283,9 +283,12 @@ function setComposerMode(taskId) {
   const badge = $('continueBadge');
   badge.classList.toggle('hidden', !continuing);
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
+  const hint = isTouchDevice()
+    ? 'Enter — перенос строки, отправка — кнопкой.'
+    : 'Enter — отправить, Shift+Enter — перенос строки.';
   promptEl.placeholder = continuing
-    ? 'Сообщение продолжит текущую сессию. Enter — отправить, Shift+Enter — перенос строки.'
-    : 'Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки.';
+    ? `Сообщение продолжит текущую сессию. ${hint}`
+    : `Сообщение для Pi. ${hint}`;
 }
 
 $('project').addEventListener('change', () => {
@@ -843,6 +846,8 @@ promptEl.addEventListener('input', () => {
 });
 promptEl.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    // Touch devices: Enter inserts a newline; sending is done via the button.
+    if (isTouchDevice()) return;
     event.preventDefault();
     $('form').requestSubmit();
   }
