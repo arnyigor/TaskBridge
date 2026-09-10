@@ -1,6 +1,8 @@
 config.json
 models.ini
 .serena/
+/*.png
+/python_result.txt
 nul
 data/*
 !data/.gitkeep
