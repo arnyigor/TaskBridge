@@ -152,6 +152,7 @@ Taskbridge/
 │  ├─ local-models.mjs      llama.cpp router: процесс, /models, load/unload, прогресс
 │  ├─ model-catalog.mjs     список моделей Pi (get_available_models)
 │  ├─ pi-settings.mjs       чтение ~/.pi/agent/settings.json (blockImages)
+│  ├─ mcp-manager.mjs       MCP для задач: свой конфиг, вкл/выкл, import из Pi
 │  ├─ session-history.mjs   восстановление истории после restart
 │  ├─ native-sessions.mjs   импорт существующих Pi-сессий
 │  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
@@ -172,7 +173,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   115 тестов на node:test
+├─ tests/                   123 теста на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  └─ backup.mjs            снимок БД (npm run backup)
@@ -329,6 +330,8 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `server.https.enabled` / `port` | self-signed HTTPS для LAN |
 | `pi.command` / `pi.args` | как запускать Pi |
 | `pi.env` | дополнительные env-переменные Pi (TaskBridge сама добавляет `LLAMA_BASE_URL` в router-режиме) |
+| `pi.mcp.mode` | MCP для задач: `inherit` (как в Pi), `managed` (свой конфиг TaskBridge), `off` (без MCP) |
+| `pi.mcp.configPath` | путь к своему MCP-конфигу (по умолчанию `data/mcp.json`) |
 | `pi.persistSessions` | сохранять файлы сессий Pi |
 | `pi.projectTrust` | доверие проекту в Pi |
 | `pi.abortTimeoutMs` | сколько ждать RPC `abort` до kill |
@@ -394,6 +397,10 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `POST` | `/api/local/unload` | выгрузить локальную модель |
 | `POST` | `/api/local/stop` | остановить router (только если его запустил TaskBridge) |
 | `GET` | `/api/local/events` | SSE: статус и прогресс загрузки локальных моделей |
+| `GET` | `/api/mcp` | MCP-серверы и режим (`inherit` / `managed` / `off`) |
+| `POST` | `/api/mcp/mode` | сменить режим MCP |
+| `POST` | `/api/mcp/import` | импортировать MCP-конфиг из Pi |
+| `POST` | `/api/mcp/servers` | включить/выключить сервер (`{ name, enabled }`) |
 
 ---
 
@@ -599,6 +606,28 @@ Multipart — CORS-«простой» content-type, поэтому запрос 
 
 ---
 
+## MCP (pi-mcp-adapter)
+
+TaskBridge не правит `~/.pi/agent/mcp.json`. Вместо этого у него свой файл
+(`data/mcp.json`) и режим `pi.mcp.mode`:
+
+- `inherit` — задачи используют MCP-конфиг Pi как есть (по умолчанию);
+- `managed` — задачи запускаются с `--mcp-config data/mcp.json` и
+  `PI_MCP_CONFIG_MODE=exclusive`, то есть используется **только** список
+  TaskBridge. В UI («MCP» в шапке) серверы включаются/выключаются, есть
+  «Импорт из Pi»;
+- `off` — Pi запускается с пустым конфигом, MCP-инструментов у задачи нет.
+
+Зачем: MCP-инструменты могут подменять работу модели. Например
+`image-description-engine` умеет описывать картинки, и модель может «смотреть»
+глазами MCP, а не своим vision. Отключив этот сервер в `managed`, получаем
+честное зрение модели (проверено: задача вызывает только встроенный `read`).
+
+В теле `POST /api/tasks` поддерживается `mcp: { disabledServers: ["..."] }` —
+задача отключает конкретные серверы, не меняя общий список.
+
+---
+
 ## Cloud bridge (Vercel Queues)
 
 Опциональный каталог `cloud/` разворачивается на Vercel отдельно от локального
@@ -627,7 +656,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 115 тестов на node:test
+npm test          # 123 теста на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 

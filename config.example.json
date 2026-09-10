@@ -22,7 +22,10 @@
     "args": [],
     "persistSessions": true,
     "projectTrust": "approve",
-    "abortTimeoutMs": 10000
+    "abortTimeoutMs": 10000,
+    "mcp": {
+      "mode": "inherit"
+    }
   },
   "localRuntime": {
     "healthUrl": "http://127.0.0.1:8080/health",

@@ -191,6 +191,31 @@ test('router mode exposes /api/local and warns when Pi blocks images', { timeout
   assert.deepEqual((await api('/api/local')).loaded, []);
 });
 
+test('MCP endpoints switch mode, import from Pi and toggle servers', { timeout: 20000 }, async t => {
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-pi-mcp-agent-'));
+  t.after(() => fs.rm(agentDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(agentDir, 'mcp.json'), JSON.stringify({
+    mcpServers: { serena: { command: 'serena' }, 'image-description-engine': { command: 'python' } }
+  }));
+  const fixture = await startFixture(undefined, { env: { PI_AGENT_DIR: agentDir } });
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const initial = await api('/api/mcp');
+  assert.equal(initial.mode, 'inherit');
+
+  const managed = await api('/api/mcp/mode', { mode: 'managed' });
+  assert.equal(managed.mode, 'managed');
+  assert.deepEqual(managed.servers.map(s => s.name), ['image-description-engine', 'serena']);
+
+  const toggled = await api('/api/mcp/servers', { name: 'image-description-engine', enabled: false });
+  assert.equal(toggled.servers.find(s => s.name === 'image-description-engine').disabled, true);
+  assert.equal(toggled.servers.find(s => s.name === 'serena').disabled, false);
+
+  const reimported = await api('/api/mcp/import', {});
+  assert.equal(reimported.servers.every(s => !s.disabled), true);
+});
+
 test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compact, cancel, deletion', { timeout: 20000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());

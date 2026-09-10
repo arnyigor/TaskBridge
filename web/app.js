@@ -1299,6 +1299,83 @@ async function importSession(projectId, session) {
   } catch (err) { alert(err.message); }
 }
 
+/* ---------------- MCP (pi-mcp-adapter) ---------------- */
+
+let mcpStatus = null;
+
+function renderMcp() {
+  const mode = mcpStatus?.mode || 'inherit';
+  $('mcpMode').value = mode;
+  $('mcpHint').textContent = mode === 'inherit'
+    ? 'Задачи используют MCP-конфиг Pi без изменений (список ниже — только просмотр). Переключите на managed и импортируйте, чтобы управлять отсюда.'
+    : mode === 'off'
+      ? 'MCP выключен для задач: Pi запускается с пустым конфигом.'
+      : `Задачи используют конфиг TaskBridge: ${mcpStatus?.configPath || ''}`;
+  const servers = mcpStatus?.servers || [];
+  const list = $('mcpList');
+  list.innerHTML = '';
+  if (!servers.length) {
+    list.textContent = mode === 'managed' ? 'Пусто. Нажмите «Импорт из Pi».' : 'Список пуст.';
+    return;
+  }
+  for (const server of servers) {
+    const row = document.createElement('div');
+    row.className = 'localModel';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'id';
+    name.textContent = server.name;
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const badge = document.createElement('span');
+    badge.className = `badge ${server.disabled ? '' : 'ok'}`.trim();
+    badge.textContent = server.disabled ? 'выключен' : 'включён';
+    meta.append(badge);
+    if (server.transport) {
+      const transport = document.createElement('span');
+      transport.className = 'muted small';
+      transport.textContent = server.transport;
+      meta.append(transport);
+    }
+    info.append(name, meta);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = server.disabled ? 'Включить' : 'Выключить';
+    button.disabled = mode !== 'managed';
+    button.onclick = async () => {
+      try {
+        mcpStatus = await api('/api/mcp/servers', { method: 'POST', body: JSON.stringify({ name: server.name, enabled: server.disabled === true }) });
+        renderMcp();
+      } catch (error) { alert(error.message); }
+    };
+    row.append(info, button);
+    list.append(row);
+  }
+}
+
+async function refreshMcp() {
+  try { mcpStatus = await api('/api/mcp'); } catch { mcpStatus = null; }
+  renderMcp();
+}
+
+$('mcpButton').onclick = async () => {
+  $('mcpOverlay').classList.remove('hidden');
+  await refreshMcp();
+};
+$('mcpClose').onclick = () => $('mcpOverlay').classList.add('hidden');
+$('mcpRefresh').onclick = () => refreshMcp();
+$('mcpImport').onclick = async () => {
+  try { mcpStatus = await api('/api/mcp/import', { method: 'POST', body: '{}' }); renderMcp(); }
+  catch (error) { alert(error.message); }
+};
+$('mcpMode').addEventListener('change', async () => {
+  try {
+    mcpStatus = await api('/api/mcp/mode', { method: 'POST', body: JSON.stringify({ mode: $('mcpMode').value }) });
+    renderMcp();
+  } catch (error) { alert(error.message); await refreshMcp(); }
+});
+
 /* ---------------- model selection (Pi models) ---------------- */
 
 // The model list comes straight from Pi (all providers), so TaskBridge shows the
@@ -1565,9 +1642,11 @@ async function refreshLocalStatus() {
 }
 
 function updateLocalVisibility(enabled) {
-  localEnabled = Boolean(enabled);
-  $('localModelsButton').classList.toggle('hidden', !localEnabled);
-  if (localEnabled) $('runtimeControl').classList.add('hidden');
+  const next = Boolean(enabled);
+  if (localEnabled === next) return;
+  localEnabled = next;
+  $('localModelsButton').classList.toggle('hidden', !next);
+  $('runtimeControl').classList.toggle('hidden', next);
 }
 
 async function loadLocalModel(id) {
@@ -1659,6 +1738,9 @@ function renderRuntimeStatus(status) {
 }
 
 async function loadRuntimeStatus() {
+  // In router mode the legacy profile selector must stay hidden; otherwise
+  // every /api/info poll shows it and the next line hides it again (header flicker).
+  if (localEnabled) { $('runtimeControl').classList.add('hidden'); return; }
   try { renderRuntimeStatus(await api('/api/runtime')); }
   catch { $('runtimeControl').classList.add('hidden'); }
 }
@@ -1677,16 +1759,15 @@ $('runtimeStart').onclick = async () => {
 
 /* ---------------- init ---------------- */
 
+let lastWarnings = null;
+
 function renderWarnings(warnings) {
+  const text = (warnings || []).map(w => w.message).join('\n');
+  if (text === lastWarnings) return;
+  lastWarnings = text;
   const el = $('piWarning');
-  const list = warnings || [];
-  if (!list.length) {
-    el.textContent = '';
-    el.classList.add('hidden');
-    return;
-  }
-  el.textContent = list.map(w => w.message).join('\n');
-  el.classList.remove('hidden');
+  el.textContent = text;
+  el.classList.toggle('hidden', !text);
 }
 
 async function checkPcState() {

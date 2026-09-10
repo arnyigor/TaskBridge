@@ -25,6 +25,7 @@
         <button id="runtimeStart" type="button" class="iconButton" title="Запустить модель" aria-label="Запустить модель">▶</button>
       </div>
       <button id="localModelsButton" type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
+      <button id="mcpButton" type="button" class="small" title="MCP-серверы для задач">MCP</button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
       <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
       <div id="pcState" class="statusDot" title="Проверка…" aria-label="Статус модели"></div>
@@ -119,6 +120,25 @@
         <button id="localStart" type="button">Запустить router</button>
         <button id="localStop" type="button">Остановить router</button>
         <button id="localModelsClose" type="button">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="mcpOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>MCP для задач</h2>
+      <p class="muted small" id="mcpHint">Загрузка…</p>
+      <label class="fieldLabel" for="mcpMode">Режим</label>
+      <select id="mcpMode" aria-label="Режим MCP">
+        <option value="inherit">inherit — как в Pi</option>
+        <option value="managed">managed — свой список TaskBridge</option>
+        <option value="off">off — без MCP</option>
+      </select>
+      <div id="mcpList" class="sessionPickerList">Загрузка…</div>
+      <div class="inline wrap">
+        <button id="mcpImport" type="button">Импорт из Pi</button>
+        <button id="mcpRefresh" type="button">Обновить</button>
+        <button id="mcpClose" type="button">Закрыть</button>
       </div>
     </div>
   </div>

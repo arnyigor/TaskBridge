@@ -289,6 +289,28 @@ async function handleRequest(req, res) {
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/api/mcp') {
+      return json(res, 200, await manager.mcpStatus());
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/mode') {
+      const body = await readJson(req);
+      const mode = String(body.mode || '');
+      if (!['inherit', 'managed', 'off'].includes(mode)) throw Object.assign(new Error('Неизвестный режим MCP.'), { code: 'INPUT_INVALID' });
+      config.pi = config.pi || {};
+      config.pi.mcp = { ...(config.pi.mcp || {}), mode };
+      await saveConfig(rootDir, config);
+      await manager.mcp.ensureReady().catch(() => {});
+      return json(res, 200, await manager.mcpStatus());
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/import') {
+      return json(res, 200, await manager.importMcp());
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/servers') {
+      const body = await readJson(req);
+      if (typeof body.name !== 'string' || !body.name.trim()) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await manager.setMcpServer(body.name.trim(), body.enabled !== false));
+    }
+
     if (req.method === 'GET' && pathname === '/api/info') {
       const [busy, modelReady, engine, local] = await Promise.all([
         manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus()

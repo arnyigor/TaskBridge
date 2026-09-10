@@ -878,7 +878,7 @@ pre {
   white-space: nowrap;
 }
 .modelChip:hover { border-color: var(--accent); }
-#modelSearch, #modelThinking {
+#modelSearch, #modelThinking, #mcpMode {
   width: 100%;
   background: #0d1220;
   color: var(--text);
@@ -889,7 +889,7 @@ pre {
   font-size: 13px;
   outline: none;
 }
-#modelSearch:focus, #modelThinking:focus { border-color: var(--accent); }
+#modelSearch:focus, #modelThinking:focus, #mcpMode:focus { border-color: var(--accent); }
 .modelGroup {
   font-size: 10.5px;
   text-transform: uppercase;

@@ -13,6 +13,7 @@ import { classifyEngineError } from './engine.mjs';
 import { chooseEngine, usesLocalRuntime, resolveRouterModel } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
 import { LocalModelService } from './local-models.mjs';
+import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 
 function now() { return new Date().toISOString(); }
@@ -62,7 +63,8 @@ export class TaskManager extends EventEmitter {
     // profile restart endpoints.
     this.localModels = new LocalModelService(config.localRuntime || {}, dataRoot);
     this.local = this.localModels.enabled ? this.localModels : this.runtimeManager;
-    this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#piEnv() });
+    this.mcp = new McpManager(config.pi || {}, dataRoot);
+    this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#llamaEnv() });
     this.nativeSessions = new NativeSessionService(this);
     this.runtimeChanging = false;
     // Injected by the server; lets AUTO restart the managed runtime when the
@@ -76,6 +78,7 @@ export class TaskManager extends EventEmitter {
 
   async init() {
     await this.uploads.cleanup().catch(() => {});
+    await this.mcp.ensureReady().catch(() => {});
     const previous = await this.store.list();
     let trimmed = 0;
     for (const task of previous) {
@@ -180,6 +183,17 @@ export class TaskManager extends EventEmitter {
     return value;
   }
 
+  // Per-task MCP override. Only meaningful in managed/off mode (see #mcpArgs).
+  #normalizeMcp(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const disabledServers = Array.isArray(value.disabledServers)
+      ? [...new Set(value.disabledServers.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim()))]
+      : [];
+    const mode = MCP_MODES.includes(value.mode) ? value.mode : undefined;
+    if (!disabledServers.length && !mode) return null;
+    return { ...(mode ? { mode } : {}), ...(disabledServers.length ? { disabledServers } : {}) };
+  }
+
   #providerFor(requestedModel) {
     return requestedModel?.provider || this.modelCatalog.peek()?.defaultModel?.provider || null;
   }
@@ -220,10 +234,34 @@ export class TaskManager extends EventEmitter {
   // Pi's built-in `llama.cpp` provider only exposes router models when it can
   // find the server URL. We supply it as an env var so the router catalog shows
   // up in the unified model picker without a manual `/login llama.cpp`.
-  #piEnv() {
+  #llamaEnv() {
     const env = { ...(this.config.pi?.env || {}) };
     if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
     return Object.keys(env).length ? env : undefined;
+  }
+
+  // Full env for a task's Pi process: llama endpoint + TaskBridge MCP scoping.
+  #piEnv() {
+    const env = { ...(this.config.pi?.env || {}) };
+    if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
+    Object.assign(env, this.mcp.launch().env);
+    return Object.keys(env).length ? env : undefined;
+  }
+
+  // MCP args for this task. In managed/off mode the base args point at the
+  // TaskBridge config; per-task `disabledServers` get a derived copy so a single
+  // task can opt out of specific servers without touching the shared file.
+  async #mcpArgs(task) {
+    const launch = this.mcp.launch();
+    const disabledServers = Array.isArray(task?.mcp?.disabledServers) ? task.mcp.disabledServers : [];
+    if (!launch.args.length || !disabledServers.length) return launch.args;
+    const config = await this.mcp.read();
+    const map = { ...(config.mcpServers || {}) };
+    for (const name of disabledServers) if (map[name]) map[name] = { ...map[name], disabled: true };
+    const file = path.join(this.store.taskDir(task.id), 'mcp.json');
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, `${JSON.stringify({ ...config, mcpServers: map }, null, 2)}\n`, 'utf8');
+    return ['--mcp-config', file];
   }
 
   // The router model that Pi is about to use. Only meaningful for local tasks;
@@ -322,6 +360,7 @@ export class TaskManager extends EventEmitter {
       engine,
       requestedModel,
       thinkingLevel,
+      mcp: this.#normalizeMcp(input.mcp),
       verification: null,
       git: null,
       compaction: { count: 0, last: null },
@@ -481,7 +520,7 @@ export class TaskManager extends EventEmitter {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
     const pi = new PiRpcSession({
       command: this.config.pi?.command || 'pi',
-      args: [...(this.config.pi?.args || []), ...this.#selectionArgs(task)],
+      args: [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...await this.#mcpArgs(task)],
       cwd: task.workspacePath,
       env: this.#piEnv(),
       sessionDir,
@@ -552,6 +591,22 @@ export class TaskManager extends EventEmitter {
 
   async localStatus() {
     return this.local.getStatus();
+  }
+
+  // ---- MCP (pi-mcp-adapter) ----
+
+  async mcpStatus() {
+    return this.mcp.status();
+  }
+
+  async setMcpServer(name, enabled) {
+    await this.mcp.setDisabled(name, enabled !== true);
+    return this.mcp.status();
+  }
+
+  async importMcp() {
+    await this.mcp.importFromPi();
+    return this.mcp.status();
   }
 
   async loadLocalModel(id) {
