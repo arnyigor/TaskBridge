@@ -1,6 +1,6 @@
 {
   "name": "taskbridge-mvp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -11,7 +11,7 @@
     "start": "node src/server.mjs",
     "smoke:pi": "node scripts/pi-rpc-smoke.mjs",
     "backup": "node scripts/backup.mjs",
-    "check": "node --check src/server.mjs && node --check src/task-manager.mjs && node --check src/pi-rpc.mjs && node --check src/git.mjs && node --check src/runtime-manager.mjs && node --check src/task-store.mjs && node --check src/multipart.mjs && node --check src/uploads.mjs && node --check src/engine.mjs && node --check src/dispatcher.mjs && node --check src/text-tail.mjs && node --check src/instance-lock.mjs && node --check scripts/backup.mjs && node --check web/app.js && node --check web/chat-state.mjs"
+    "check": "node --check src/server.mjs && node --check src/task-manager.mjs && node --check src/pi-rpc.mjs && node --check src/git.mjs && node --check src/runtime-manager.mjs && node --check src/task-store.mjs && node --check src/multipart.mjs && node --check src/uploads.mjs && node --check src/engine.mjs && node --check src/dispatcher.mjs && node --check src/text-tail.mjs && node --check src/instance-lock.mjs && node --check src/cloud/cloud-client.mjs && node --check src/cloud/cloud-outbox.mjs && node --check src/cloud/cloud-commands.mjs && node --check src/cloud/cloud-event-state.mjs && node --check src/cloud/cloud-sanitize.mjs && node --check src/cloud/cloud-transport.mjs && node --check scripts/backup.mjs && node --check web/app.js && node --check web/chat-state.mjs && npm --prefix cloud run check"
   },
   "devDependencies": {
     "linkedom": "^0.18.13"

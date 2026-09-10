@@ -1,6 +1,11 @@
 config.json
+nul
 data/*
 !data/.gitkeep
 .taskbridge-input/
 node_modules/
 launch.txt
+cloud/.vercel/
+cloud/.env*
+!cloud/.env.example
+cloud/public/vendor/

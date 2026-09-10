@@ -34,6 +34,14 @@ test('busy model rejects new sessions and follow-ups before writing history or a
   await assert.rejects(fs.access(path.join(f.root, '.taskbridge-input')));
 });
 
+test('trusted cloud task ids are validated and collisions are rejected before admission', async t => {
+  const f = await fixture(t);
+  f.manager.activeTaskId = 'a';
+  await assert.rejects(f.manager.createTask({ prompt: 'new', projectId: 'p' }, { requestedId: '../bad' }), { code: 'INPUT_INVALID' });
+  await assert.rejects(f.manager.createTask({ prompt: 'duplicate', projectId: 'p' }, { requestedId: 'a' }), { code: 'ID_CONFLICT' });
+  assert.equal((await f.store.list()).length, 1);
+});
+
 test('registerProject persists to config.projects and rejects a duplicate id; removeProject removes both and rejects an unknown id', async t => {
   const f = await fixture(t);
   f.manager.registerProject({ id: 'q', name: 'Q', path: '/tmp/q', useWorktree: false, verification: [] });

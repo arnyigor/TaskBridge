@@ -57,6 +57,18 @@
       "cwd": ""
     }
   },
+  "cloud": {
+    "enabled": false,
+    "url": "https://your-taskbridge.vercel.app",
+    "machineId": "home-pc",
+    "machineSecretEnv": "TASKBRIDGE_MACHINE_SECRET",
+    "eventFlushMs": 100,
+    "pollIntervalMs": 1500,
+    "maxBatchEvents": 100,
+    "maxPayloadKb": 256,
+    "maxOutboxMb": 100,
+    "processedCommandLimit": 2000
+  },
   "workspace": {
     "requireCleanSource": true,
     "useGitWorktreeByDefault": true

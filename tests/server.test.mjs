@@ -15,11 +15,12 @@ async function terminal(api, id) {
   throw new Error('Task did not finish');
 }
 
-test('a task can be created from files alone, without text', { timeout: 20000 }, async t => {
+test('a task can be created from files alone and LAN callers cannot choose its id', { timeout: 20000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api } = fixture;
-  const created = await api('/api/tasks', { projectId: 'fixture', prompt: '', files: [{ name: 'note.txt', size: 1, base64: 'eA==' }] });
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: '', requestedId: 'untrusted_id', files: [{ name: 'note.txt', size: 1, base64: 'eA==' }] });
+  assert.notEqual(created.id, 'untrusted_id');
   assert.equal(created.prompt, 'Прикреплённые файлы');
   let task = null;
   for (let i = 0; i < 150; i++) {

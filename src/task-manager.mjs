@@ -150,8 +150,8 @@ export class TaskManager extends EventEmitter {
     try { return await action(); } finally { this.admitting = false; }
   }
 
-  async createTask(input) {
-    return this.#admit(() => this.#createTask(input));
+  async createTask(input, options = {}) {
+    return this.#admit(() => this.#createTask(input, options));
   }
 
   async #resolveFiles(items, token) {
@@ -164,7 +164,12 @@ export class TaskManager extends EventEmitter {
     return validateUploadRefs(refs, await this.uploads.resolve(token, refs));
   }
 
-  async #createTask(input) {
+  async #createTask(input, options) {
+    const requestedId = options.requestedId;
+    if (requestedId !== undefined && (typeof requestedId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(requestedId))) {
+      throw Object.assign(new Error('Некорректный cloud taskId.'), { code: 'INPUT_INVALID' });
+    }
+    if (requestedId && this.tasks.has(requestedId)) throw Object.assign(new Error('Cloud taskId уже существует.'), { code: 'ID_CONFLICT' });
     if (this.activeTaskId) throw Object.assign(new Error('Модель уже выполняет другую сессию.'), { code: 'MODEL_BUSY' });
     const busy = await this.runtimeManager.getBusyStatus();
     if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
@@ -179,7 +184,7 @@ export class TaskManager extends EventEmitter {
     }
 
     const task = {
-      id: shortId(),
+      id: requestedId || shortId(),
       createdAt: now(),
       updatedAt: now(),
       status: 'QUEUED',

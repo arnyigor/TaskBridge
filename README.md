@@ -44,6 +44,7 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 - [Local Runtime Manager](#local-runtime-manager)
 - [AUTO dispatcher](#auto-dispatcher)
 - [Engine health](#engine-health)
+- [Cloud bridge (Vercel Queues)](#cloud-bridge-vercel-queues)
 - [Безопасность](#безопасность)
 - [Тесты](#тесты)
 - [Известные ограничения](#известные-ограничения)
@@ -168,7 +169,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   87 тестов на node:test
+├─ tests/                   98 тестов на node:test
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  └─ backup.mjs            снимок БД (npm run backup)
@@ -331,6 +332,8 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `localRuntime.profiles` | профили запуска (`text`, `vision`, …) |
 | `localRuntime.managed` | управляемый запуск llama.cpp |
 | `localRuntime.auto.enabled` | AUTO-выбор профиля под задачу (vision при картинках) |
+| `cloud.enabled` / `cloud.url` | включить Internet bridge и указать Vercel deployment |
+| `cloud.machineId` / `machineSecretEnv` | идентификатор ПК и имя env-переменной с machine secret |
 | `workspace.requireCleanSource` | запрещать старт на dirty source repository |
 | `workspace.useGitWorktreeByDefault` | изолировать задачу в worktree |
 | `projectBrowser.roots` | корни, которые видит браузер папок |
@@ -544,6 +547,16 @@ Multipart — CORS-«простой» content-type, поэтому запрос 
 
 ---
 
+## Cloud bridge (Vercel Queues)
+
+Опциональный каталог `cloud/` разворачивается на Vercel отдельно от локального
+сервера. Команды приходят на ПК через poll mode Vercel Queues, а события уходят
+через дисковый outbox с batching, `taskId + seq` и idempotency keys. Локальный
+SQLite остаётся source of truth; PostgreSQL, Redis и WebSocket для MVP не нужны.
+
+Cloud по умолчанию выключен и не меняет LAN-режим. Полная инструкция по
+environment variables, Vercel Root Directory и проверке: [docs/cloud-bridge.md](docs/cloud-bridge.md).
+
 ## Безопасность
 
 В PoC авторизация опциональна (`server.auth.enabled`). Без неё использовать только:
@@ -562,7 +575,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test          # 87 тестов на node:test
+npm test          # 98 тестов на node:test
 npm run check     # синтаксическая проверка основных файлов
 ```
 

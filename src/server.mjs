@@ -18,6 +18,7 @@ import { trimStreamingDeltas } from './event-trim.mjs';
 import { windowByTurns } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
+import { CloudTransport } from './cloud/cloud-transport.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -57,10 +58,19 @@ const store = new TaskStore(dataRoot, {
 });
 const manager = new TaskManager(config, dataRoot, store);
 await manager.init();
+const cloudTransport = new CloudTransport(manager, config.cloud || {}, dataRoot);
+await cloudTransport.start();
 
 // Checkpoint and close SQLite cleanly on Ctrl+C instead of leaving a WAL tail.
+let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => { try { store.close(); } catch {} process.exit(0); });
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    await cloudTransport.stop().catch(() => {});
+    try { store.close(); } catch {}
+    process.exit(0);
+  });
 }
 const access = new AccessControl(config.server?.auth, dataRoot);
 await access.init();
@@ -236,6 +246,7 @@ async function handleRequest(req, res) {
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
         engine,
+        cloud: cloudTransport.status(),
         fileLimits: FILE_LIMITS
       });
     }

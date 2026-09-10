@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#080b14" />
+  <title>TaskBridge Cloud</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+  <section id="login" class="authGate">
+    <form id="loginForm" class="authCard">
+      <div class="loginBrand">
+        <div class="brandIcon" aria-hidden="true">✦</div>
+        <div><h1>TaskBridge</h1><p>Облачный доступ к домашнему Pi</p></div>
+      </div>
+      <label class="fieldLabel" for="password">Пароль</label>
+      <input id="password" type="password" autocomplete="current-password" placeholder="Введите пароль" required />
+      <button class="primary wide" type="submit">Войти</button>
+      <div id="loginError" class="hint error" role="alert"></div>
+    </form>
+  </section>
+
+  <div id="app" class="appShell hidden">
+      <header class="top">
+        <div class="brand">
+          <div class="brandIcon" aria-hidden="true">✦</div>
+          <div>
+            <div class="brandName">TaskBridge <span class="cloudBadge">Cloud</span></div>
+            <div class="brandSubtitle">Pi remote control · live events</div>
+          </div>
+        </div>
+        <div class="headerActions">
+          <span class="brandStatus"><span id="statusDot" class="statusDot"></span><span id="status">проверка ПК…</span></span>
+          <button id="sync" class="iconButton" type="button" title="Обновить" aria-label="Обновить">↻</button>
+        </div>
+      </header>
+
+      <details class="controlsSpoiler" id="controlsSpoiler">
+        <summary><h2>Проект и сессии <span class="muted">(<span id="taskCount">0</span>)</span></h2></summary>
+        <div class="subheader">
+          <label class="compactField">Компьютер<input id="machineId" value="home-pc" pattern="[A-Za-z0-9_-]+" /></label>
+          <label class="compactField projectField">Проект<select id="project"><option value="">ожидание синхронизации…</option></select></label>
+          <button id="newSession" type="button">+ Новая сессия</button>
+        </div>
+        <div id="tasks" class="tasks"></div>
+      </details>
+    </div>
+
+    <main class="main">
+      <section class="chatCard">
+        <header id="chatHead" class="chatHead hidden">
+          <div class="chatTitleBlock"><span class="eyebrow">Сессия</span><strong id="taskTitle"></strong></div>
+        </header>
+        <div id="events" class="messages" aria-live="polite">
+          <div id="empty" class="emptyState">
+            <div class="emptyIcon">✦</div>
+            <strong>Новая сессия</strong>
+            <span>Выберите проект, напишите задачу ниже и нажмите отправить.</span>
+          </div>
+        </div>
+        <form id="followup" class="composer">
+          <textarea id="message" rows="1" maxlength="8000" placeholder="Сообщение для Pi. Enter — отправить, Shift+Enter — перенос строки."></textarea>
+          <button class="sendButton" type="submit" aria-label="Запустить" title="Запустить">
+            <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          </button>
+        </form>
+      </section>
+
+      <aside class="detailPanel">
+        <details id="detail" class="detail hidden" open>
+          <summary><h2>Детали сессии</h2></summary>
+          <div class="detailBody">
+            <div class="sessionGrid">
+              <div class="sessionName"><span>Название</span><b id="detailTitle">—</b></div>
+              <div><span>Статус</span><b id="taskStatus">—</b></div>
+              <div><span>Проект</span><b id="taskProject">—</b></div>
+              <div><span>Current</span><b id="taskCurrent">—</b></div>
+            </div>
+            <div class="actions">
+              <button id="compact" type="button">Compact</button>
+              <button id="stop" class="danger" type="button">Стоп</button>
+            </div>
+            <p class="detailHint">Reasoning и инструменты показываются отдельными сворачиваемыми блоками внутри ответа.</p>
+          </div>
+        </details>
+      </aside>
+    </main>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

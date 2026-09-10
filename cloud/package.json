@@ -1,0 +1,15 @@
+{
+  "name": "taskbridge-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "vercel-build": "node scripts/copy-vendor.mjs",
+    "check": "node --check api/login.mjs && node --check api/tasks.mjs && node --check api/task-events.mjs && node --check api/events-ack.mjs && node --check api/bridge/events.mjs && node --check api/bridge/commands-pull.mjs && node --check api/bridge/commands-ack.mjs && node --check lib/http.mjs && node --check lib/auth.mjs && node --check lib/protocol.mjs && node --check lib/queue.mjs && node --check scripts/copy-vendor.mjs && node --check public/cloud-chat.mjs && node --check public/app.js && node --check public/sw.js"
+  },
+  "dependencies": {
+    "dompurify": "3.4.15",
+    "marked": "17.0.3"
+  }
+}
