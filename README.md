@@ -587,6 +587,18 @@ Multipart — CORS-«простой» content-type, поэтому запрос 
 }
 ```
 
+### Thinking level для router-моделей
+
+Встроенный провайдер Pi `llama.cpp` отдаёт router-модели как `reasoning: false`,
+поэтому Pi зажимает thinking level в `off` независимо от `--reasoning on` на
+сервере. Чтобы thinking работал, в `~/.pi/agent/models.json` добавляется
+провайдер-оверрайд `llama.cpp` (merge по `id`): для каждого пресета
+`reasoning: true`, `thinkingLevelMap`, `compat.thinkingFormat = chat-template`
+с `enable_thinking`/`reasoning_effort`, `contextWindow` и `input`
+(`["text","image"]` для vision-пресетов). После этого
+`get_available_thinking_levels` отдаёт `off/low/medium/xhigh`, а состояние
+сессии показывает реальный уровень вместо `off`.
+
 ### Vision и вложения
 
 Чтобы картинки дошли до модели, нужны два условия: (1) в Pi выключен `images.blockImages` в `~/.pi/agent/settings.json` — иначе Pi заменяет любую картинку на «Image reading is disabled.»; (2) у модели в Pi заявлен `input: ["text","image"]` — для router-моделей это приходит из llama.cpp автоматически. TaskBridge читает `settings.json` только для предупреждения: при `blockImages=true` `GET /api/info` возвращает `warnings` с кодом `PI_IMAGES_BLOCKED` и баннер в UI.
