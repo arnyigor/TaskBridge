@@ -975,3 +975,13 @@ pre {
 .inline.wrap { flex-wrap: wrap; }
 .inline.wrap button { flex: 1 1 44%; min-width: 120px; }
 .authGate { overflow-y: auto; align-items: safe center; }
+
+.localModel .rowActions { display: flex; gap: 6px; flex-shrink: 0; }
+.headerActions .modelChip { max-width: 44vw; }
+
+.mcpServer { display: flex; flex-direction: column; gap: 4px; }
+.mcpTools { margin-left: 2px; }
+.mcpTools summary { cursor: pointer; font-size: 11.5px; color: var(--muted); }
+.toolLine { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 12px; }
+.toolLine input { flex-shrink: 0; }
+.toolLine span { overflow-wrap: anywhere; }

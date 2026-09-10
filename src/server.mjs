@@ -310,6 +310,11 @@ async function handleRequest(req, res) {
       if (typeof body.name !== 'string' || !body.name.trim()) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
       return json(res, 200, await manager.setMcpServer(body.name.trim(), body.enabled !== false));
     }
+    if (req.method === 'POST' && pathname === '/api/mcp/tools') {
+      const body = await readJson(req);
+      if (typeof body.server !== 'string' || !body.server.trim()) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await manager.setMcpTool(body.server.trim(), body.tool, body.enabled !== false));
+    }
 
     if (req.method === 'GET' && pathname === '/api/info') {
       const [busy, modelReady, engine, local] = await Promise.all([

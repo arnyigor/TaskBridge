@@ -604,6 +604,11 @@ export class TaskManager extends EventEmitter {
     return this.mcp.status();
   }
 
+  async setMcpTool(server, tool, enabled) {
+    await this.mcp.setToolExcluded(server, tool, enabled !== true);
+    return this.mcp.status();
+  }
+
   async importMcp() {
     await this.mcp.importFromPi();
     return this.mcp.status();

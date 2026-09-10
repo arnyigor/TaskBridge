@@ -12,8 +12,8 @@ async function temp(t, prefix) {
 }
 
 test('normalizeServer classifies stdio/http and disabled', () => {
-  assert.deepEqual(normalizeServer('s', { command: 'python', args: ['x'] }), { name: 's', url: null, command: 'python', transport: 'stdio', disabled: false });
-  assert.deepEqual(normalizeServer('h', { url: 'https://x/mcp', disabled: true }), { name: 'h', url: 'https://x/mcp', command: null, transport: 'http', disabled: true });
+  assert.deepEqual(normalizeServer('s', { command: 'python', args: ['x'] }), { name: 's', url: null, command: 'python', transport: 'stdio', disabled: false, excludeTools: [] });
+  assert.deepEqual(normalizeServer('h', { url: 'https://x/mcp', disabled: true }), { name: 'h', url: 'https://x/mcp', command: null, transport: 'http', disabled: true, excludeTools: [] });
   assert.equal(normalizeServer('e', null).transport, null);
 });
 
@@ -82,4 +82,29 @@ test('setDisabled rejects an unknown server', async t => {
   const dataRoot = await temp(t, 'tb-mcp-missing-');
   const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
   await assert.rejects(mcp.setDisabled('nope', true), { code: 'NOT_FOUND' });
+});
+
+test('per-tool exclusion writes excludeTools and is reflected in status', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-tools-');
+  const agentDir = await temp(t, 'tb-mcp-tools-agent-');
+  await fs.writeFile(path.join(agentDir, 'mcp-cache.json'), JSON.stringify({
+    version: 2,
+    servers: { img: { tools: [{ name: 'analyze_image', description: 'analyze' }, { name: 'ocr' }] } }
+  }));
+  const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  await mcp.write({ mcpServers: { img: { command: 'python' } } });
+
+  const server = await mcp.setToolExcluded('img', 'analyze_image', true);
+  assert.deepEqual(server.excludeTools, ['analyze_image']);
+  assert.deepEqual(JSON.parse(await fs.readFile(mcp.path, 'utf8')).mcpServers.img.excludeTools, ['analyze_image']);
+
+  const status = await mcp.status({ PI_AGENT_DIR: agentDir });
+  const img = status.servers.find(s => s.name === 'img');
+  assert.deepEqual(img.tools.map(t => t.name), ['analyze_image', 'ocr']);
+  assert.deepEqual(img.excludeTools, ['analyze_image']);
+
+  const cleared = await mcp.setToolExcluded('img', 'analyze_image', false);
+  assert.deepEqual(cleared.excludeTools, []);
+  assert.equal(JSON.parse(await fs.readFile(mcp.path, 'utf8')).mcpServers.img.excludeTools, undefined);
+  await assert.rejects(mcp.setToolExcluded('img', '', true), { code: 'INPUT_INVALID' });
 });

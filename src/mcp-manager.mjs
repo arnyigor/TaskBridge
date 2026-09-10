@@ -22,8 +22,28 @@ export function normalizeServer(name, entry) {
     url,
     command,
     transport: url ? 'http' : command ? 'stdio' : null,
-    disabled: value.disabled === true
+    disabled: value.disabled === true,
+    excludeTools: Array.isArray(value.excludeTools) ? value.excludeTools.filter(t => typeof t === 'string') : []
   };
+}
+
+// Pi's MCP adapter caches every server's tool list in ~/.pi/agent/mcp-cache.json.
+// Reading it lets TaskBridge show per-tool toggles without connecting to a server.
+async function readToolCache(env = process.env) {
+  try {
+    const parsed = JSON.parse(await fs.readFile(path.join(piAgentDir(env), 'mcp-cache.json'), 'utf8'));
+    const servers = isMcpConfig(parsed?.servers) ? parsed.servers : {};
+    const out = {};
+    for (const [name, entry] of Object.entries(servers)) {
+      const tools = Array.isArray(entry?.tools) ? entry.tools : [];
+      out[name] = tools
+        .filter(tool => tool && typeof tool.name === 'string')
+        .map(tool => ({ name: tool.name, description: typeof tool.description === 'string' ? tool.description : '' }));
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 export function isMcpConfig(value) {
@@ -98,6 +118,23 @@ export class McpManager {
     return normalizeServer(name, entry);
   }
 
+  // Per-tool toggle: the adapter supports excludeTools on a server entry.
+  async setToolExcluded(name, tool, excluded) {
+    if (typeof tool !== 'string' || !tool.trim()) throw Object.assign(new Error('Не указан MCP-инструмент.'), { code: 'INPUT_INVALID' });
+    const config = await this.read();
+    const map = isMcpConfig(config.mcpServers) ? config.mcpServers : {};
+    const entry = map[name];
+    if (!isMcpConfig(entry)) throw Object.assign(new Error(`MCP-сервер не найден: ${name}`), { code: 'NOT_FOUND' });
+    const set = new Set(Array.isArray(entry.excludeTools) ? entry.excludeTools.filter(t => typeof t === 'string') : []);
+    if (excluded) set.add(tool);
+    else set.delete(tool);
+    if (set.size) entry.excludeTools = [...set];
+    else delete entry.excludeTools;
+    config.mcpServers = map;
+    await this.write(config);
+    return normalizeServer(name, entry);
+  }
+
   // Copies Pi's global MCP config into the TaskBridge-owned file.
   async importFromPi(env = process.env) {
     const source = path.join(piAgentDir(env), 'mcp.json');
@@ -135,9 +172,11 @@ export class McpManager {
     return { args: ['--mcp-config', file], env: { PI_MCP_CONFIG_MODE: 'exclusive' } };
   }
 
-  async status() {
+  async status(env = process.env) {
     const mode = this.mode;
-    const servers = mode === 'inherit' ? await this.piServers() : await this.servers();
+    const tools = await readToolCache(env);
+    const servers = (mode === 'inherit' ? await this.piServers(env) : await this.servers())
+      .map(server => ({ ...server, tools: tools[server.name] || [] }));
     let exists = false;
     try { await fs.access(mode === 'off' ? this.offPath : this.path); exists = true; } catch { /* not created yet */ }
     return {

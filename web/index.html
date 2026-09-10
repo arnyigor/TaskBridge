@@ -24,6 +24,7 @@
         <select id="runtimeProfile" title="Профиль модели" aria-label="Профиль модели"></select>
         <button id="runtimeStart" type="button" class="iconButton" title="Запустить модель" aria-label="Запустить модель">▶</button>
       </div>
+      <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi">Модель: —</button>
       <button id="localModelsButton" type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
       <button id="mcpButton" type="button" class="small" title="MCP-серверы для задач">MCP</button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
@@ -221,10 +222,6 @@
       </div>
 
       <div class="composer-wrap">
-        <div class="modelBar">
-          <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi">Модель: —</button>
-          <span id="thinkingChip" class="muted small"></span>
-        </div>
         <span id="fileList" class="muted small"></span>
         <form class="composer" id="form">
           <div class="promptWrap">

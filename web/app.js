@@ -1303,6 +1303,8 @@ async function importSession(projectId, session) {
 
 let mcpStatus = null;
 
+let lastMcpTools = new Set();
+
 function renderMcp() {
   const mode = mcpStatus?.mode || 'inherit';
   $('mcpMode').value = mode;
@@ -1319,6 +1321,9 @@ function renderMcp() {
     return;
   }
   for (const server of servers) {
+    const box = document.createElement('div');
+    box.className = 'mcpServer';
+
     const row = document.createElement('div');
     row.className = 'localModel';
     const info = document.createElement('div');
@@ -1332,6 +1337,13 @@ function renderMcp() {
     badge.className = `badge ${server.disabled ? '' : 'ok'}`.trim();
     badge.textContent = server.disabled ? 'выключен' : 'включён';
     meta.append(badge);
+    const excluded = new Set(server.excludeTools || []);
+    if (excluded.size) {
+      const off = document.createElement('span');
+      off.className = 'badge';
+      off.textContent = `−${excluded.size} tool`;
+      meta.append(off);
+    }
     if (server.transport) {
       const transport = document.createElement('span');
       transport.className = 'muted small';
@@ -1350,7 +1362,43 @@ function renderMcp() {
       } catch (error) { alert(error.message); }
     };
     row.append(info, button);
-    list.append(row);
+    box.append(row);
+
+    const tools = server.tools || [];
+    if (tools.length) {
+      const details = document.createElement('details');
+      details.className = 'mcpTools';
+      details.open = lastMcpTools.has(server.name);
+      details.addEventListener('toggle', () => {
+        if (details.open) lastMcpTools.add(server.name);
+        else lastMcpTools.delete(server.name);
+      });
+      const summary = document.createElement('summary');
+      const onCount = tools.length - tools.filter(t => excluded.has(t.name)).length;
+      summary.textContent = `Инструменты: ${onCount}/${tools.length}`;
+      details.append(summary);
+      for (const tool of tools) {
+        const line = document.createElement('label');
+        line.className = 'toolLine';
+        const check = document.createElement('input');
+        check.type = 'checkbox';
+        check.checked = !excluded.has(tool.name);
+        check.disabled = mode !== 'managed' || server.disabled;
+        check.onchange = async () => {
+          try {
+            mcpStatus = await api('/api/mcp/tools', { method: 'POST', body: JSON.stringify({ server: server.name, tool: tool.name, enabled: check.checked }) });
+            renderMcp();
+          } catch (error) { alert(error.message); await refreshMcp(); }
+        };
+        const text = document.createElement('span');
+        text.textContent = tool.name;
+        if (tool.description) text.title = tool.description;
+        line.append(check, text);
+        details.append(line);
+      }
+      box.append(details);
+    }
+    list.append(box);
   }
 }
 
@@ -1423,11 +1471,10 @@ function currentThinking() {
 
 function updateModelChip() {
   const model = currentModel();
-  const chip = $('modelButton');
-  chip.textContent = `Модель: ${modelShortLabel(model)}`;
-  chip.title = model ? `${modelFullLabel(model)} — сменить` : 'Выбрать модель Pi';
   const thinking = currentThinking();
-  $('thinkingChip').textContent = thinking ? `thinking: ${thinking}` : '';
+  const chip = $('modelButton');
+  chip.textContent = `Модель: ${modelShortLabel(model)}${thinking ? ` · ${thinking}` : ''}`;
+  chip.title = `${model ? modelFullLabel(model) : 'модель Pi по умолчанию'}${thinking ? ` · thinking ${thinking}` : ''} — сменить`;
 }
 
 function renderThinkingOptions() {
@@ -1605,8 +1652,22 @@ function localModelRow(m) {
   const loaded = m.status === 'loaded' || m.status === 'sleeping';
   button.textContent = loaded ? 'Выгрузить' : m.status === 'loading' ? 'Отменить' : 'Загрузить';
   button.onclick = () => (loaded || m.status === 'loading') ? unloadLocalModel(m.id) : loadLocalModel(m.id);
-  row.append(info, button);
+  const choose = document.createElement('button');
+  choose.type = 'button';
+  choose.textContent = 'Выбрать';
+  choose.title = 'Сделать моделью текущей сессии / следующей задачи';
+  choose.onclick = () => selectLocalModel(m.id);
+  const actions = document.createElement('div');
+  actions.className = 'rowActions';
+  actions.append(choose, button);
+  row.append(info, actions);
   return row;
+}
+
+// Selecting a local preset from the dialog goes through the same path as the
+// unified picker: live session → set_model (+preload), otherwise → next task.
+async function selectLocalModel(id) {
+  await chooseModel({ provider: localProviderId(), id });
 }
 
 function renderLocalModels() {
