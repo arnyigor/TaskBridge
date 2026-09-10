@@ -1574,6 +1574,41 @@ function renderLocalRouterState() {
   $('localStart').disabled = ['MANAGED_RUNNING', 'EXTERNAL_RUNNING', 'STARTING'].includes(localStatus.state);
 }
 
+function localModelRow(m) {
+  const row = document.createElement('div');
+  row.className = 'localModel';
+  const info = document.createElement('div');
+  info.className = 'info';
+  const id = document.createElement('div');
+  id.className = 'id';
+  id.textContent = m.id;
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const [cls, label] = localStatusBadge(m.status);
+  const badge = document.createElement('span');
+  badge.className = `badge ${cls}`.trim();
+  badge.textContent = label;
+  meta.append(badge);
+  if (m.vision) {
+    const vision = document.createElement('span');
+    vision.className = 'badge vision';
+    vision.textContent = 'vision';
+    meta.append(vision);
+  }
+  const ctx = document.createElement('span');
+  ctx.className = 'muted small';
+  ctx.textContent = m.contextWindow ? `ctx ${m.contextWindow}` : 'ctx ?';
+  meta.append(ctx);
+  info.append(id, meta);
+  const button = document.createElement('button');
+  button.type = 'button';
+  const loaded = m.status === 'loaded' || m.status === 'sleeping';
+  button.textContent = loaded ? 'Выгрузить' : m.status === 'loading' ? 'Отменить' : 'Загрузить';
+  button.onclick = () => (loaded || m.status === 'loading') ? unloadLocalModel(m.id) : loadLocalModel(m.id);
+  row.append(info, button);
+  return row;
+}
+
 function renderLocalModels() {
   const list = $('localModelsList');
   const models = localStatus?.models || [];
@@ -1585,41 +1620,21 @@ function renderLocalModels() {
       : 'Router недоступен — запустите его или проверьте localRuntime.router.';
     return;
   }
+  // Group by quantization, newest/larger context first inside a group, so the
+  // list reads like a model zoo instead of a flat preset dump.
+  const groups = new Map();
   for (const m of models) {
-    const row = document.createElement('div');
-    row.className = 'localModel';
-    const info = document.createElement('div');
-    info.className = 'info';
-    const id = document.createElement('div');
-    id.className = 'id';
-    id.textContent = m.id;
-    const meta = document.createElement('div');
-    meta.className = 'meta';
-    const [cls, label] = localStatusBadge(m.status);
-    const badge = document.createElement('span');
-    badge.className = `badge ${cls}`.trim();
-    badge.textContent = label;
-    meta.append(badge);
-    if (m.vision) {
-      const vision = document.createElement('span');
-      vision.className = 'badge vision';
-      vision.textContent = 'vision';
-      meta.append(vision);
-    }
-    if (m.contextWindow) {
-      const ctx = document.createElement('span');
-      ctx.className = 'muted small';
-      ctx.textContent = `ctx ${m.contextWindow}`;
-      meta.append(ctx);
-    }
-    info.append(id, meta);
-    const button = document.createElement('button');
-    button.type = 'button';
-    const loaded = m.status === 'loaded' || m.status === 'sleeping';
-    button.textContent = loaded ? 'Выгрузить' : m.status === 'loading' ? 'Отменить' : 'Загрузить';
-    button.onclick = () => (loaded || m.status === 'loading') ? unloadLocalModel(m.id) : loadLocalModel(m.id);
-    row.append(info, button);
-    list.append(row);
+    const key = m.quant || '—';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(m);
+  }
+  for (const [quant, items] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const header = document.createElement('div');
+    header.className = 'modelGroup';
+    header.textContent = `${quant} · ${items.length}`;
+    list.append(header);
+    items.sort((a, b) => (b.contextWindow || 0) - (a.contextWindow || 0) || a.id.localeCompare(b.id));
+    for (const m of items) list.append(localModelRow(m));
   }
 }
 

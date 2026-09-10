@@ -43,8 +43,23 @@ export function parseLoadProgress(payload) {
   return { message: stage ? `Загрузка: ${stage.replaceAll('_', ' ')}` : 'Загрузка модели', ratio };
 }
 
-// /models returns { data: [{ id, status: { value, progress, failed, exit_code },
-// architecture: { input_modalities }, meta: { n_ctx }, path }] }.
+function argValue(args, name) {
+  const index = args.indexOf(name);
+  return index >= 0 && index + 1 < args.length ? args[index + 1] : null;
+}
+
+// Quantization is not a separate field in the router catalog, but the child
+// args (and the model path) always carry the .gguf filename, whose last dash
+// segment is the quant (IQ4_XS, Q3_K_XL, ...).
+export function quantFromPath(value) {
+  if (!value) return null;
+  const base = String(value).split(/[\\/]/).pop().replace(/\.gguf$/i, '');
+  const parts = base.split('-').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : null;
+}
+
+// /models returns { data: [{ id, status: { value, progress, failed, exit_code,
+// args }, architecture: { input_modalities }, meta: { n_ctx }, path }] }.
 // Anything without `data` is a single-model endpoint, not a router.
 export function normalizeModels(payload) {
   if (!payload || !Array.isArray(payload.data)) return null;
@@ -53,6 +68,12 @@ export function normalizeModels(payload) {
     .map((model) => {
       const status = model.status && typeof model.status === 'object' ? model.status : {};
       const modalities = model.architecture?.input_modalities;
+      const args = Array.isArray(status.args) ? status.args : [];
+      const modelPath = argValue(args, '--model') || model.path || null;
+      const ctxArg = Number(argValue(args, '--ctx-size'));
+      const contextWindow = Number.isFinite(model.meta?.n_ctx) ? model.meta.n_ctx
+        : (Number.isFinite(model.meta?.n_ctx_train) ? model.meta.n_ctx_train
+          : (Number.isFinite(ctxArg) ? ctxArg : null));
       return {
         id: model.id,
         name: typeof model.name === 'string' && model.name ? model.name : model.id,
@@ -60,9 +81,10 @@ export function normalizeModels(payload) {
         progress: status.progress ?? null,
         failed: status.failed === true,
         exitCode: Number.isFinite(status.exit_code) ? status.exit_code : null,
-        vision: Array.isArray(modalities) ? modalities.includes('image') : false,
-        contextWindow: Number.isFinite(model.meta?.n_ctx) ? model.meta.n_ctx
-          : (Number.isFinite(model.meta?.n_ctx_train) ? model.meta.n_ctx_train : null),
+        vision: Array.isArray(modalities) ? modalities.includes('image') : Boolean(argValue(args, '--mmproj')),
+        contextWindow,
+        quant: quantFromPath(modelPath),
+        modelPath,
         path: typeof model.path === 'string' ? model.path : null
       };
     });

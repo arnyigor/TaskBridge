@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { LocalModelService, normalizeModels, parseLoadProgress } from '../src/local-models.mjs';
+import { LocalModelService, normalizeModels, parseLoadProgress, quantFromPath } from '../src/local-models.mjs';
 
 test('parseLoadProgress mirrors llama.cpp /models/sse load events', () => {
   assert.equal(parseLoadProgress({ status: 'loading' }), null);
@@ -27,6 +27,23 @@ test('normalizeModels distinguishes a router catalog from a single-model endpoin
   assert.equal(models[1].contextWindow, 65536);
   assert.equal(models[2].failed, true);
   assert.equal(models[2].exitCode, 3);
+});
+
+test('normalizeModels derives quantization and configured ctx from child args', () => {
+  const models = normalizeModels({
+    data: [
+      { id: 'q3', status: { value: 'unloaded', args: ['--model', 'G:\\m\\Qwen3.8-27B-UD-Q3_K_XL.gguf', '--ctx-size', '56320'] } },
+      { id: 'iq4v', status: { value: 'unloaded', args: ['--model', 'G:\\m\\Qwen3.8-27B-UD-IQ4_XS.gguf', '--ctx-size', '33792', '--mmproj', 'G:\\m\\mmproj.gguf'] } }
+    ]
+  });
+  assert.equal(models[0].quant, 'Q3_K_XL');
+  assert.equal(models[0].contextWindow, 56320);
+  assert.equal(models[0].vision, false);
+  assert.equal(models[1].quant, 'IQ4_XS');
+  assert.equal(models[1].contextWindow, 33792);
+  assert.equal(models[1].vision, true); // inferred from --mmproj even without architecture
+  assert.equal(quantFromPath('G:\\m\\Qwen3.8-27B-UD-IQ4_XS.gguf'), 'IQ4_XS');
+  assert.equal(quantFromPath(null), null);
 });
 
 // Minimal llama.cpp router stand-in: enough of /models, /models/load,
