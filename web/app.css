@@ -969,3 +969,9 @@ pre {
 .badge.ok { color: var(--success); border-color: rgba(85, 230, 165, 0.4); }
 .badge.run { color: var(--accent); border-color: rgba(167, 139, 250, 0.45); }
 .badge.vision { color: var(--cyan); border-color: rgba(94, 231, 247, 0.35); }
+
+/* Overlays with several action buttons must wrap instead of overflowing the
+   card on a phone (the Close button used to drift off the edge). */
+.inline.wrap { flex-wrap: wrap; }
+.inline.wrap button { flex: 1 1 44%; min-width: 120px; }
+.authGate { overflow-y: auto; align-items: safe center; }
