@@ -1084,6 +1084,8 @@ $('clearPrompt').onclick = clearComposerInput;
 promptEl.addEventListener('input', () => {
   promptEl.style.height = 'auto';
   promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
+  // Saved on every keystroke: refreshing the same session must not wipe it.
+  saveDraft(selectedTaskId || '__new__');
   updateClearButton();
 });
 promptEl.addEventListener('keydown', (event) => {
@@ -1135,7 +1137,16 @@ $('form').addEventListener('submit', async (e) => {
       updateClearButton();
     };
     if (taskId) {
-      const sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow, queue: !sendNow });
+      let sent;
+      try {
+        sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow, queue: !sendNow });
+      } catch (error) {
+        // The machine runs one generation at a time. If it refused only because
+        // the model is busy, the text goes to the queue instead of being lost
+        // (the wording check keeps genuine failures visible).
+        if (!/занят/i.test(error.message)) throw error;
+        sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: false, queue: true });
+      }
       clearComposer();
       renderQueuedPrompt();
       if (sent?.queueReason) showNotice(QUEUED_NOTICE);
@@ -2302,7 +2313,10 @@ async function checkPcState() {
   loadRuntimeStatus();
   try {
     const info = await api('/api/info');
-    $('buildInfo').textContent = info.build?.version ? `· v${info.build.version}` : '';
+    // Visible on purpose (not only in the tooltip): the operator reports bugs
+    // against a version, so the running build must be readable on screen.
+    const shownCommit = String(info.build?.commit || '').slice(0, 7);
+    $('buildInfo').textContent = info.build?.version ? `· v${info.build.version}${shownCommit ? ` · ${shownCommit}` : ''}` : '';
     const buildDetails = [
       info.build?.commit ? `коммит ${info.build.commit}` : null,
       info.build?.date ? `собрано ${new Date(info.build.date).toLocaleString('ru-RU')}` : null
@@ -2356,6 +2370,44 @@ async function loadAll() {
   }
 }
 
+/* ---------------- cloud mode ---------------- */
+
+// Served from the internet: the page talks to the machine through the relay, so
+// it waits for the handshake, says what the machine is doing, and hides the
+// controls that only exist on the PC itself.
+const cloudMode = transport.kind === 'cloud';
+
+function renderModeBanner(state, detail = '') {
+  const node = $('modeBanner');
+  const machine = globalThis.__TASKBRIDGE_CLOUD__?.machineId || 'ПК';
+  const text = {
+    connecting: `Облачный режим: подключаюсь к ${machine} через релей…`,
+    online: `Облачный режим: ${machine} на связи. Команды выполняются на ПК.`,
+    offline: `Облачный режим: ${machine} офлайн — сессии станут доступны, когда ПК включится.`,
+    unauthorized: 'Облачный режим: релей отклонил это устройство — спарьте телефон заново.',
+    error: `Облачный режим: не удалось подключиться к ${machine}.`
+  }[state] || '';
+  node.textContent = detail ? `${text} ${detail}` : text;
+  node.classList.remove('online', 'offline', 'unauthorized', 'error');
+  if (state !== 'connecting') node.classList.add(state);
+  node.classList.toggle('hidden', !text);
+}
+
+function startCloudMode() {
+  document.body.classList.add('cloud-mode');
+  renderModeBanner('connecting');
+  transport.on('machine', payload => renderModeBanner(payload?.online ? 'online' : 'offline'));
+  transport.on('status', value => {
+    if (['connecting', 'offline', 'unauthorized'].includes(value)) renderModeBanner(value);
+  });
+  // Nothing can be fetched before AUTH_OK: wait for it instead of showing errors.
+  transport.ready()
+    .then(() => loadAll())
+    .catch(error => renderModeBanner(error.code === 'AUTH_FAILED' ? 'unauthorized' : 'error', error.message));
+}
+
+if (cloudMode) startCloudMode();
+
 async function init() {
   updateNotifyButton();
   checkPcState();
@@ -2363,7 +2415,9 @@ async function init() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') checkPcState();
   });
-  if (await checkAuth()) await loadAll();
+  // In cloud mode the first load waits for the relay handshake instead (see
+  // startCloudMode), and the pairing screen belongs to the PC.
+  if (!cloudMode && await checkAuth()) await loadAll();
   window.addEventListener('popstate', () => { routeFromLocation(); });
 }
 

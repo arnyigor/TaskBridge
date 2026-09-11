@@ -100,7 +100,7 @@ export function createCloudTransport({
   let reconnectTimer = null;
   const pending = new Map();          // commandId -> { resolve, reject, timer }
   const sessions = new Map();         // sessionId -> { onEvent, onStatus, seen:Set, awaitingSync }
-  const handlers = { event: [], status: [] };
+  const handlers = { event: [], status: [], machine: [] };
 
   const emitStatus = value => { status = value; for (const handler of handlers.status) handler(value); };
   const newEnvelope = (fields) => ({
@@ -148,7 +148,11 @@ export function createCloudTransport({
     if (frame.v !== protocol.version) { logger('warn', { event: 'protocol_version', version: frame.v }); return; }
     if (frame.type === 'AUTH_OK') { attempts = 0; emitStatus('online'); return; }
     if (frame.type === 'AUTH_FAIL') { emitStatus('unauthorized'); logger('error', { event: 'relay_auth_failed', payload: frame.payload }); return; }
-    if (frame.type === 'MACHINE_STATUS') { for (const session of sessions.values()) session.onStatus?.('machine', frame.payload); return; }
+    if (frame.type === 'MACHINE_STATUS') {
+      for (const handler of handlers.machine) handler(frame.payload);
+      for (const session of sessions.values()) session.onStatus?.('machine', frame.payload);
+      return;
+    }
     if (frame.type === 'EVENT') { deliverEvent(frame); return; }
     if (frame.type === 'COMMAND_ACK') {
       if (frame.status === 'ACCEPTED' || frame.status === 'COMPLETED' || frame.status === 'DUPLICATE') settleCommand(frame.commandId, { status: frame.status, ...frame.payload });
@@ -233,6 +237,14 @@ export function createCloudTransport({
     },
 
     on(event, handler) { if (handlers[event]) handlers[event].push(handler); },
+
+    close() {
+      stopped = true;
+      if (reconnectTimer) { clearTimer(reconnectTimer); reconnectTimer = null; }
+      try { socket?.close?.(); } catch { /* the socket is already gone */ }
+      socket = null;
+      emitStatus('stopped');
+    },
 
     async ready(timeoutMs = 10_000) {
       stopped = false;

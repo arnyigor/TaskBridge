@@ -128,10 +128,16 @@ test('accepted steering stores user text and attachment metadata separately', as
   assert.match(f.sent[0], /Additional files/);
 });
 
-test('simultaneous submissions are rejected while the first admission is pending', async t => {
+test('a second submission is rejected while the first admission is still pending', async t => {
   const f = await fixture(t, true);
+  // #message asks Pi for its state before deciding queue vs delivery, so the
+  // stub parks only the first call: that is the admission the guard must see.
+  let calls = 0;
   let release;
-  f.pi.getState = () => new Promise(resolve => { release = () => resolve({ isStreaming: true }); });
+  f.pi.getState = () => {
+    if (calls++ === 0) return new Promise(resolve => { release = () => resolve({ isStreaming: true }); });
+    return Promise.resolve({ isStreaming: true });
+  };
   const first = f.manager.message('a', 'one');
   await new Promise(resolve => setImmediate(resolve));
   await assert.rejects(f.manager.message('a', 'two'), { code: 'BUSY' });
@@ -371,4 +377,26 @@ test('Enter queues even when the model is free, and several messages wait in ord
   await waitFor(() => f.sent.length === 4, 'the immediate pickup');
   assert.equal(f.sent.at(-1), 'быстро');
   await settle();
+});
+
+test('a message to another session waits in that session queue instead of being refused', async t => {
+  const f = await fixture(t);
+  // 'b' exists and the machine is owned by 'a' (a running session).
+  const other = { ...f.task, id: 'b', status: 'SUCCEEDED', workspacePath: f.root, prompt: 'другая' };
+  await f.store.create(other);
+  f.manager.tasks.set('b', other);
+  f.manager.activeTaskId = 'a';
+  f.task.status = 'RUNNING';
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+
+  const queued = await f.manager.message('b', 'подожду', 'auto', [], null, { queue: false });
+  assert.equal(queued.queueReason, 'BUSY');
+  assert.equal(queued.pendingPrompts[0].text, 'подожду');
+  assert.deepEqual(f.manager.queue, ['b'], 'the session waits its turn');
+  assert.equal(f.manager.getTask('b').status, 'QUEUED');
+
+  // Ctrl+Enter cannot create a second writer either: it queues as well.
+  const urgent = await f.manager.message('b', 'срочно', 'auto', [], null, { now: true });
+  assert.deepEqual(urgent.pendingPrompts.map(entry => entry.text), ['подожду', 'срочно']);
 });

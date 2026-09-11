@@ -142,12 +142,30 @@ function resolveImports(source, modules) {
   }
   return names;
 }
-async function ui({ coarsePointer = false } = {}) {
+class TestWebSocket {
+  static OPEN = 1;
+  constructor(url) {
+    this.url = url;
+    this.readyState = 0;
+    this.sent = [];
+    this.listeners = {};
+    sockets.push(this);
+  }
+  addEventListener(type, handler) { this.listeners[type] = handler; }
+  send(text) { this.sent.push(JSON.parse(text)); }
+  close() { this.readyState = 3; }
+  open() { this.readyState = 1; this.listeners.open?.(); }
+  deliver(frame) { this.listeners.message?.({ data: JSON.stringify(frame) }); }
+  drop() { this.readyState = 3; this.listeners.close?.(); }
+}
+
+async function ui({ coarsePointer = false, cloud = false } = {}) {
   const { document, window } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
   window.matchMedia = () => ({ matches: coarsePointer }); // desktop (fine pointer) unless a test opts in
   const intervals = [];
   const streams = [];
   const copied = [];
+  const sockets = [];
   const tasks = { a: task('a'), b: { ...task('b'), prompt: 'Другой чат' } };
   let fetchHook;
   // Sessions have their own address, so the app reads location and writes
@@ -158,7 +176,10 @@ async function ui({ coarsePointer = false } = {}) {
     pushState: (state, title, url) => urls.push({ method: 'push', url }),
     replaceState: (state, title, url) => urls.push({ method: 'replace', url })
   };
-  const locationStub = { pathname: '/', href: 'http://localhost/' };
+  const locationStub = { pathname: '/', href: 'http://localhost/', hostname: cloud ? 'taskbridge.example.app' : 'localhost' };
+  if (cloud) {
+    globalThis.__taskbridgeTestCloud = { url: 'wss://relay.example.app/api/relay', machineId: 'home-pc', deviceToken: 'device-token' };
+  }
   const appSource = await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   const imported = resolveImports(appSource, {
     './chat-state.mjs': { ChatState, ACTIVE_STATUSES },
@@ -168,6 +189,8 @@ async function ui({ coarsePointer = false } = {}) {
     './vendor/purify.mjs': { default: { sanitize: html => html } }
   });
   const context = vm.createContext({ document, window, console, URL, history: historyStub, location: locationStub,
+    WebSocket: TestWebSocket,
+    __TASKBRIDGE_CLOUD__: cloud ? globalThis.__taskbridgeTestCloud : undefined,
     ...imported,
     setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
@@ -192,8 +215,8 @@ async function ui({ coarsePointer = false } = {}) {
     }, alert() {}, confirm: () => true,
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink};', context);
-  return { ...context.testing, document, window, streams, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode};', context);
+  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -638,3 +661,33 @@ test('DOM: an ordinary request goes through the transport, not straight to fetch
   }, /AUTH_REQUIRED/);
   assert.equal(app.document.getElementById('authGate').classList.contains('hidden'), false, 'the pairing gate is shown');
 });
+
+test('DOM: cloud mode says what the machine is doing and hides PC-only controls', async t => {
+  const app = await ui({ cloud: true });
+  // The cloud transport reconnects forever by design; stop it when the test ends.
+  t.after(() => app.transport.close());
+  const doc = app.document;
+
+  // The page knows it is the cloud copy: PC-only controls were marked in the
+  // markup and the stylesheet hides exactly those.
+  assert.equal(doc.body.classList.contains('cloud-mode'), true);
+  const marked = [...doc.querySelectorAll('[data-pc-only]')].map(node => node.id || node.className);
+  assert.ok(marked.length >= 6, marked.join(','));
+  assert.ok(marked.includes('resumeSessionButton'), 'native Pi import is PC-only');
+  assert.ok(marked.includes('mcpButton'), 'MCP settings are PC-only');
+  const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
+  assert.match(css, /body\.cloud-mode \[data-pc-only\] \{ display: none; \}/);
+
+  // The banner is live and names the machine (the state depends on whether the
+  // test relay answers, so only the invariant is asserted here).
+  const banner = doc.getElementById('modeBanner');
+  assert.equal(banner.classList.contains('hidden'), false, 'the banner is visible');
+  assert.match(banner.textContent, /home-pc/, banner.textContent);
+  assert.match(banner.textContent, /Облачный режим:/, banner.textContent);
+});
+
+// TODO(cloud-ui): drive the relay socket from the harness (open/AUTH_OK/
+// MACHINE_STATUS) to cover the online/offline banner transitions. The socket
+// itself is exercised in tests/web-transport.test.mjs and the relay tests; here
+// the harness stops at the transport handshake.
+test.skip('DOM: cloud mode follows the machine status frames', () => {});

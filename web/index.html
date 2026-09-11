@@ -20,15 +20,15 @@
       </div>
     </div>
     <div class="headerActions">
-      <div id="runtimeControl" class="runtimeControl hidden">
+      <div id="runtimeControl" data-pc-only class="runtimeControl hidden">
         <select id="runtimeProfile" title="Профиль модели" aria-label="Профиль модели"></select>
         <button id="runtimeStart" type="button" class="iconButton" title="Запустить модель" aria-label="Запустить модель">▶</button>
       </div>
       <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi">Модель: —</button>
-      <button id="localModelsButton" type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
-      <button id="mcpButton" type="button" class="small" title="MCP-серверы для задач">MCP</button>
+      <button id="localModelsButton" data-pc-only type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
+      <button id="mcpButton" data-pc-only type="button" class="small" title="MCP-серверы для задач">MCP</button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
-      <button id="cloudButton" type="button" class="iconButton" title="Доступ через облако" aria-label="Настройки облака">☁</button>
+      <button id="cloudButton" data-pc-only type="button" class="iconButton" title="Доступ через облако" aria-label="Настройки облака">☁</button>
       <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
       <div id="pcState" class="statusDot" title="Проверка…" aria-label="Статус модели"></div>
       <button id="helpButton" type="button" class="iconButton" title="Как это работает" aria-label="Справка">❓</button>
@@ -36,15 +36,16 @@
   </header>
 
   <div id="piWarning" class="banner hidden"></div>
+  <div id="modeBanner" class="banner hidden"></div>
 
   <details class="controlsSpoiler" id="controlsSpoiler">
     <summary><h2>Проект и сессии <span id="taskCount" class="muted small"></span></h2></summary>
     <div class="subheader" id="subheader">
       <select id="project" title="Проект" aria-label="Проект"></select>
-      <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
-      <button id="manageProjectsButton" type="button" class="small" title="Удалить проекты">🗑 Проекты</button>
+      <button id="addProjectButton" data-pc-only type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
+      <button id="manageProjectsButton" data-pc-only type="button" class="small" title="Удалить проекты">🗑 Проекты</button>
       <span id="continueBadge" class="pill hidden"></span>
-      <button id="resumeSessionButton" type="button" class="small">Импорт сессии Pi</button>
+      <button id="resumeSessionButton" data-pc-only type="button" class="small">Импорт сессии Pi</button>
       <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
       <button id="refresh" type="button" class="small">Обновить список</button>
     </div>
@@ -280,7 +281,7 @@
             <button id="clearPrompt" class="clearPrompt hidden" type="button" title="Очистить" aria-label="Очистить поле ввода">×</button>
           </div>
           <div class="composerActions">
-            <label class="fileIconButton" title="Прикрепить файлы" aria-label="Прикрепить файлы">
+            <label class="fileIconButton" data-pc-only title="Прикрепить файлы" aria-label="Прикрепить файлы">
               <input id="files" type="file" multiple accept="*/*" />
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 0 1-7.78-7.78l9.19-9.19a3.67 3.67 0 0 1 5.19 5.19l-9.2 9.19a1.83 1.83 0 0 1-2.6-2.6l8.49-8.48"/></svg>
             </label>

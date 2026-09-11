@@ -1287,21 +1287,26 @@ export class TaskManager extends EventEmitter {
     // next tick). Otherwise a follow-up sent right after completion — e.g. a
     // remote FOLLOW_UP arriving with the task_finished event — would be refused.
     const alreadyFinished = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status);
-    if (!alreadyFinished && this.activeTaskId && (this.activeTaskId !== id || task.status !== 'RUNNING')) throw Object.assign(new Error('Модель занята другой операцией.'), { code: 'BUSY' });
+    // The machine runs one generation at a time. If another session owns it (or
+    // this one is still preparing), the prompt waits its turn — the operator
+    // never loses the text to a "модель занята" refusal.
+    const reservedElsewhere = Boolean(this.activeTaskId) && (this.activeTaskId !== id || task.status !== 'RUNNING');
     const incomingFiles = await this.#resolveFiles(files, uploadToken);
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
     if (!['auto', 'prompt', 'steer', 'follow_up'].includes(mode)) throw Object.assign(new Error('Неизвестный режим сообщения.'), { code: 'INPUT_INVALID' });
-    if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
-    const runtime = await this.#ensureSession(task);
-    const state = await runtime.pi.getState();
-    const streaming = Boolean(state?.isStreaming);
-    if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
+    // The queue decision happens BEFORE any session is started: asking
+    // #ensureSession first would fail with "модель занята" on a busy runtime, and
+    // the prompt would never reach the queue.
+    const live = this.runtimes.get(id);
+    const liveState = live && !live.pi.closed ? await live.pi.getState().catch(() => null) : null;
+    if (liveState?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
+    const liveStreaming = Boolean(liveState?.isStreaming);
     // Without an explicit queue request, a streaming session still receives the
     // text as steering (the previous behaviour); only a busy model queues it.
-    const holdingModel = !immediate && !streaming && this.#usesLocalRuntime(task)
+    const holdingModel = !immediate && !liveStreaming && this.#usesLocalRuntime(task)
       && (await this.local.getBusyStatus()).busy;
-    if (queue || holdingModel) {
+    if (queue || reservedElsewhere || holdingModel) {
       // The model is held by another consumer (a second client, a stale slot,
       // another session): record the prompt and deliver it when the model is
       // free. Attachments are staged now, so the queued entry stays valid even
@@ -1316,12 +1321,19 @@ export class TaskManager extends EventEmitter {
       // Several messages may wait for one session; they are delivered in order.
       task.pendingPrompts = [...(task.pendingPrompts || []), { text: userText + note, mode }];
       task.updatedAt = now();
-      await this.#markWaiting(task, holdingModel ? 'MODEL_BUSY' : 'QUEUED');
+      await this.#markWaiting(task, reservedElsewhere ? 'BUSY' : (holdingModel ? 'MODEL_BUSY' : 'QUEUED'));
       if (!this.queue.includes(id)) this.queue.push(id);
       // Straight away, so a session that is idle does not wait for the retry tick.
       setImmediate(() => this.#pump());
       return this.#publicTask(task);
     }
+    // Nothing is queued: start (or reuse) the session and deliver the prompt.
+    if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
+    const runtime = await this.#ensureSession(task);
+    const state = await runtime.pi.getState();
+    // Fresh state, taken right before delivering: this decides steer vs prompt.
+    const streaming = Boolean(state?.isStreaming);
+    if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
     if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
     const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
