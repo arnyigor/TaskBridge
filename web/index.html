@@ -387,9 +387,5 @@
   </main>
 
   <script type="module" src="/app.js"></script>
-  <script>
-    // Installable on the phone, and the shell opens even when the machine is off.
-    if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
-  </script>
 </body>
 </html>

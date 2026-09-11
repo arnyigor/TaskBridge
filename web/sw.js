@@ -39,3 +39,36 @@ self.addEventListener('fetch', (event) => {
     }).catch(() => caches.match(request).then(cached => cached || caches.match('/index.html')))
   );
 });
+
+// Web Push (§ notifications). The machine encrypts the text for this browser
+// alone, so the payload arrives readable here and nowhere in between.
+self.addEventListener('push', (event) => {
+  let data = {};
+  try { data = event.data ? event.data.json() : {}; } catch (error) { data = {}; }
+  const title = data.title || 'TaskBridge';
+  event.waitUntil(self.registration.showNotification(title, {
+    body: data.body || '',
+    // One notification per session: a new state replaces the previous line
+    // instead of stacking five of them.
+    tag: data.taskId || 'taskbridge',
+    renotify: Boolean(data.taskId),
+    data: { taskId: data.taskId || null, type: data.type || null },
+    icon: '/icon.svg',
+    badge: '/icon.svg'
+  }));
+});
+
+// Tapping the notification opens that session — reusing an already open tab.
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const taskId = event.notification.data && event.notification.data.taskId;
+  const target = taskId ? `/session/${encodeURIComponent(taskId)}` : '/';
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windows) => {
+    for (const client of windows) {
+      if (new URL(client.url).origin === self.location.origin) {
+        return client.focus().then(() => client.navigate ? client.navigate(target) : client);
+      }
+    }
+    return self.clients.openWindow(target);
+  }));
+});

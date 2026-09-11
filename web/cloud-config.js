@@ -48,3 +48,15 @@
     deviceToken: saved.deviceToken
   };
 })();
+
+// The service worker is registered from here, not from an inline <script>: the
+// server sends script-src 'self', so an inline block is silently blocked and the
+// PWA would never install (found by running it, not by reading it).
+(function () {
+  if (!('serviceWorker' in navigator)) return;
+  addEventListener('load', function () {
+    navigator.serviceWorker.register('/sw.js').catch(function (error) {
+      console.warn('service worker registration failed', error);
+    });
+  });
+})();

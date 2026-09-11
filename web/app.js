@@ -1506,15 +1506,61 @@ function updateNotifyButton() {
   button.setAttribute('aria-label', title);
 }
 
+// Web Push (§ notifications): a notification that arrives with the app closed —
+// or with the phone somewhere else entirely. The machine pushes it directly and
+// encrypts it for this browser, so the cloud only carries the wake-up.
+function urlBase64ToUint8Array(value) {
+  const padded = (value + '='.repeat((4 - value.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(padded);
+  return Uint8Array.from([...raw].map(char => char.charCodeAt(0)));
+}
+
+async function subscribeToPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return null;
+  const { publicKey } = await api('/api/push/key');
+  if (!publicKey) return null;
+  const registration = await navigator.serviceWorker.ready;
+  // An existing subscription made with another key would never deliver: drop it.
+  const current = await registration.pushManager.getSubscription();
+  if (current) {
+    const same = new Uint8Array(current.options?.applicationServerKey || []).toString() === urlBase64ToUint8Array(publicKey).toString();
+    if (same) { await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: current.toJSON(), name: navigator.userAgent.slice(0, 60) }) }); return current; }
+    await current.unsubscribe().catch(() => {});
+  }
+  const subscription = await registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey)
+  });
+  await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: subscription.toJSON(), name: navigator.userAgent.slice(0, 60) }) });
+  return subscription;
+}
+
+async function unsubscribeFromPush() {
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  const registration = await navigator.serviceWorker.ready;
+  const subscription = await registration.pushManager.getSubscription();
+  if (!subscription) return;
+  await api('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: subscription.endpoint }) }).catch(() => {});
+  await subscription.unsubscribe().catch(() => {});
+}
+
 $('notifyButton').onclick = async () => {
   if (!('Notification' in window)) return;
   if (Notification.permission === 'granted') {
-    localStorage.setItem(NOTIFY_KEY, notifyEnabled() ? 'off' : 'on');
+    const turningOff = notifyEnabled();
+    localStorage.setItem(NOTIFY_KEY, turningOff ? 'off' : 'on');
     updateNotifyButton();
+    // Turning notifications off must also stop the ones that arrive while the
+    // app is closed — otherwise the switch is a half-truth.
+    if (turningOff) unsubscribeFromPush().catch(() => {});
+    else subscribeToPush().catch(error => console.warn('push subscribe failed', error));
     return;
   }
   const permission = await Notification.requestPermission();
-  if (permission === 'granted') localStorage.setItem(NOTIFY_KEY, 'on');
+  if (permission === 'granted') {
+    localStorage.setItem(NOTIFY_KEY, 'on');
+    subscribeToPush().catch(error => console.warn('push subscribe failed', error));
+  }
   updateNotifyButton();
   // Chrome blocks the Notification API entirely on plain HTTP origins other
   // than localhost, so a phone opening TaskBridge over LAN IP may never see
@@ -2598,6 +2644,9 @@ if (cloudMode) startCloudMode();
 
 async function init() {
   updateNotifyButton();
+  // Push endpoints rotate (the browser may replace one at any time), so the
+  // machine is told about the current one every time the app opens.
+  if (notifyEnabled()) subscribeToPush().catch(() => {});
   checkPcState();
   setInterval(checkPcState, 4000);
   document.addEventListener('visibilitychange', () => {

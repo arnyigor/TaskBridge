@@ -25,6 +25,7 @@ import { secretFingerprint } from './cloud/machine-auth.mjs';
 import { issueDeviceToken, DEFAULT_DEVICE_TOKEN_TTL_MS } from './cloud/device-token.mjs';
 import { TrustedDevices, newDeviceId } from './cloud/trusted-devices.mjs';
 import { createRelayConnector } from './cloud/relay-connector.mjs';
+import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 
@@ -105,6 +106,10 @@ let relayConnector = null;
 // has to be enforced here: a device token is a stateless signature the relay
 // cannot take back.
 const trustedDevices = await new TrustedDevices(dataRoot).load();
+// Web Push (§ notifications): the machine is its own application server, so a
+// finished session reaches the phone even with the PWA closed — and the text is
+// encrypted for that phone alone, with no cloud in the path.
+const push = await new PushCenter(dataRoot).load();
 
 // Resolves the effective cloud configuration from config.json + environment,
 // validates it and (re)starts the worker. Used at boot and when the settings
@@ -201,6 +206,9 @@ manager.on('task-event', (event) => {
     if (client.replaying) client.pending.push(event);
     else try { deliver(client, event); } catch {}
   }
+  // Only what an operator waits for (finished, failed, needs a confirmation).
+  const notification = notificationFor(event, manager.getTask?.(event.taskId));
+  if (notification) push.notify(notification).catch(() => {});
 });
 
 setInterval(() => {
@@ -410,6 +418,44 @@ async function handleRequest(req, res) {
       } catch (error) {
         return json(res, 200, { ok: false, error: { code: error.code || 'INTERNAL_ERROR', message: error.message } });
       }
+    }
+
+    // --- web push (§ notifications) ------------------------------------------
+    if (req.method === 'GET' && pathname === '/api/push/key') {
+      access.require(req);
+      // The public half only: the private key never leaves this machine.
+      return json(res, 200, { publicKey: push.publicKey, subscriptions: push.list() });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/push/subscribe') {
+      access.require(req);
+      const body = await readJson(req);
+      try {
+        const saved = await push.subscribe(body.subscription, { name: body.name, deviceId: body.deviceId || null });
+        return json(res, 200, { ok: true, subscription: saved });
+      } catch (error) {
+        return errorJson(res, 400, error);
+      }
+    }
+
+    if (req.method === 'POST' && pathname === '/api/push/unsubscribe') {
+      access.require(req);
+      const body = await readJson(req);
+      return json(res, 200, { ok: await push.unsubscribe(body.endpoint) });
+    }
+
+    // A real notification through the real push service, so "почему не приходит"
+    // is answered on the spot instead of at the next finished session.
+    if (req.method === 'POST' && pathname === '/api/push/test') {
+      access.require(req);
+      const result = await push.notify({
+        title: 'TaskBridge: проверка',
+        body: 'Уведомления работают.',
+        taskId: null,
+        type: 'TEST',
+        at: new Date().toISOString()
+      });
+      return json(res, 200, result);
     }
 
     // --- pairing a phone (§ pairing) -----------------------------------------

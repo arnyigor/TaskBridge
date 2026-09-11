@@ -43,7 +43,10 @@ test('the shell loads the cloud config before the app, and caches only files tha
   // A classic script runs before a deferred module: app.js picks its transport
   // from the config, so the order is load-bearing, not cosmetic.
   assert.ok(config < app, 'cloud-config.js must come before the module');
-  assert.match(html, /navigator\.serviceWorker\.register\('\/sw\.js'\)/, 'the PWA must install its shell');
+  // No inline <script> anywhere in the shell: the server sends script-src 'self',
+  // so an inline block is blocked by the browser and simply never runs.
+  assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/, 'inline scripts are blocked by the CSP');
+  assert.match(await read('web/cloud-config.js'), /navigator\.serviceWorker\.register\('\/sw\.js'\)/, 'the PWA must install its shell from an external script');
 
   const shell = (await read('web/sw.js')).match(/const SHELL = \[([^\]]+)\]/s)[1]
     .split(',').map(entry => entry.trim().replace(/^'|'$/g, '')).filter(Boolean);
