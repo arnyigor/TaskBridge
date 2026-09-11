@@ -1117,3 +1117,17 @@ body.cloud-mode [data-pc-only] { display: none; }
 .toolLine { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 12px; }
 .toolLine input { flex-shrink: 0; }
 .toolLine span { overflow-wrap: anywhere; }
+
+/* Паринг телефона: QR, ссылка и список доверенных устройств (§ pairing). */
+.pairSection { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.pairSection h3 { margin: 0; font-size: 13.5px; }
+.pairResult { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.pairQr { background: #fff; padding: 10px; border-radius: var(--radius-m); line-height: 0; }
+.pairQr svg { width: 200px; height: 200px; }
+.pairLinkRow { display: flex; gap: 6px; align-items: center; width: 100%; }
+.pairLink { flex: 1; min-width: 0; font-family: var(--mono); font-size: 10.5px; color: var(--muted); overflow-wrap: anywhere; }
+.deviceRow { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-m); padding: 8px 10px; }
+.deviceRow .deviceInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.deviceRow .name { font-size: 13px; font-weight: 600; }
+.deviceRow .meta { font-size: 11px; color: var(--muted); }
+.deviceRow.revoked .name { color: var(--muted); text-decoration: line-through; }

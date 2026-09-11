@@ -78,6 +78,9 @@ export function createRelayConnector({
   logger = () => {},
   limits = {},
   localApiBase = null,
+  // Device tokens are stateless signatures, so revocation cannot live in the
+  // relay: the machine is asked here, for every frame a client sends.
+  isDeviceAllowed = null,
   fetchImpl = globalThis.fetch,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
@@ -214,6 +217,23 @@ export function createRelayConnector({
     }
   }
 
+  // A frame from a client carries `from` (the relay stamps the deviceId it
+  // authenticated). A device this machine revoked gets an honest refusal rather
+  // than silence, and nothing it asked for is executed.
+  function deviceRefused(frame) {
+    if (typeof isDeviceAllowed !== 'function') return false;
+    const deviceId = frame.from || null;
+    if (isDeviceAllowed(deviceId)) return false;
+    log('warn', { event: 'device_refused', deviceId, frame: frame.type });
+    const error = { code: 'DEVICE_REVOKED', message: 'Это устройство отключено от машины. Подключите телефон заново.' };
+    if (frame.type === 'COMMAND') {
+      send(createEnvelope({ type: 'COMMAND_ACK', machineId, sessionId: frame.sessionId || null, commandId: frame.commandId, status: 'REJECTED', to: deviceId, payload: { error } }));
+    } else if (frame.type === 'REQUEST') {
+      send(createEnvelope({ type: 'RESPONSE', machineId, commandId: frame.commandId || null, status: 'ERROR', to: deviceId, payload: { error } }));
+    }
+    return true;
+  }
+
   async function onFrame(frame) {
     if (frame.type === 'AUTH_OK') {
       status = 'online';
@@ -237,6 +257,7 @@ export function createRelayConnector({
       send(statusFrame(true));
       return;
     }
+    if (['COMMAND', 'REQUEST', 'SYNC'].includes(frame.type) && deviceRefused(frame)) return;
     if (frame.type === 'COMMAND') { await answerCommand(frame); return; }
     if (frame.type === 'REQUEST') { await answerRequest(frame); return; }
     if (frame.type === 'SYNC') { await answerSync(frame); return; }

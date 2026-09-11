@@ -20,6 +20,9 @@ test('the deployment serves the shared web/, with session links falling back to 
   assert.ok(sources.includes('/api/:path*'), 'the API must stay routed to the function');
   const session = vercel.rewrites.find(rule => rule.source === '/session/:id');
   assert.equal(session?.destination, '/index.html', 'a session address must open the app shell');
+  // The pairing link is a client route too: the token lives in its fragment,
+  // which never reaches the server, so the shell has to load and read it.
+  assert.equal(vercel.rewrites.find(rule => rule.source === '/pair')?.destination, '/index.html');
   assert.ok(vercel.rewrites.indexOf(session) > sources.indexOf('/api/:path*'), 'the API rule must win over the shell');
 });
 
@@ -74,23 +77,53 @@ test('the cloud dev host serves the same shell and the same app.js as the machin
 
 test('cloud-config only speaks up on a public origin and only after pairing', async () => {
   const source = await read('web/cloud-config.js');
-  const run = (hostname, stored) => {
+  const run = (hostname, stored, { pathname = '/', hash = '' } = {}) => {
     const window = {};
-    const context = {
-      location: { hostname, protocol: 'https:', host: 'taskbridge.example.app' },
-      localStorage: { getItem: () => stored },
-      window
-    };
-    context.window = window;
-    new Function('location', 'localStorage', 'window', source)(context.location, context.localStorage, window);
-    return window.__TASKBRIDGE_CLOUD__;
+    const store = { value: stored, written: null, replaced: null };
+    const location = { hostname, protocol: 'https:', host: 'taskbridge.example.app', pathname, hash };
+    const localStorage = { getItem: () => store.value, setItem: (key, value) => { store.written = { key, value }; store.value = value; } };
+    const history = { replaceState: (state, title, url) => { store.replaced = url; } };
+    new Function('location', 'localStorage', 'window', 'history', source)(location, localStorage, window, history);
+    return { cloud: window.__TASKBRIDGE_CLOUD__, store };
   };
   const paired = JSON.stringify({ machineId: 'home-pc', deviceToken: 'token-1' });
-  assert.equal(run('localhost', paired), undefined, 'on the machine the page talks to its own origin');
-  assert.equal(run('192.168.1.212', paired), undefined, 'the LAN is the machine too');
-  assert.equal(run('taskbridge.example.app', null), undefined, 'no pairing yet: no half-configured transport');
-  assert.equal(run('taskbridge.example.app', '{'), undefined, 'a corrupted record is ignored, not thrown');
-  assert.deepEqual(run('taskbridge.example.app', paired), {
+  assert.equal(run('localhost', paired).cloud, undefined, 'on the machine the page talks to its own origin');
+  assert.equal(run('192.168.1.212', paired).cloud, undefined, 'the LAN is the machine too');
+  assert.equal(run('taskbridge.example.app', null).cloud, undefined, 'no pairing yet: no half-configured transport');
+  assert.equal(run('taskbridge.example.app', '{').cloud, undefined, 'a corrupted record is ignored, not thrown');
+  assert.deepEqual(run('taskbridge.example.app', paired).cloud, {
     url: 'wss://taskbridge.example.app/api/relay', machineId: 'home-pc', deviceToken: 'token-1'
   });
+});
+
+test('scanning the QR stores the credential and takes it out of the address bar', async () => {
+  const source = await read('web/cloud-config.js');
+  const open = (pathname, hash, stored = null) => {
+    const window = {};
+    const store = { value: stored, replaced: null };
+    const location = { hostname: 'taskbridge.example.app', protocol: 'https:', host: 'taskbridge.example.app', pathname, hash };
+    const localStorage = { getItem: () => store.value, setItem: (key, value) => { store.value = value; } };
+    const history = { replaceState: (state, title, url) => { store.replaced = url; } };
+    new Function('location', 'localStorage', 'window', 'history', source)(location, localStorage, window, history);
+    return { cloud: window.__TASKBRIDGE_CLOUD__, store };
+  };
+
+  const link = '#m=home-pc&t=v1.payload.signature&r=wss%3A%2F%2Frelay.example.app%2Fapi%2Frelay';
+  const paired = open('/pair', link);
+  assert.deepEqual(paired.cloud, {
+    url: 'wss://relay.example.app/api/relay', machineId: 'home-pc', deviceToken: 'v1.payload.signature'
+  }, 'the scanned device is connected straight away');
+  assert.equal(JSON.parse(paired.store.value).deviceToken, 'v1.payload.signature', 'and remembered for the next visit');
+  // The credential must not stay in the address bar or in history.
+  assert.equal(paired.store.replaced, '/');
+
+  // A pairing link without a token changes nothing — no half-written record.
+  const broken = open('/pair', '#m=home-pc');
+  assert.equal(broken.cloud, undefined);
+  assert.equal(broken.store.value, null);
+
+  // The same fragment on an ordinary page is not a pairing link.
+  const elsewhere = open('/', link);
+  assert.equal(elsewhere.cloud, undefined);
+  assert.equal(elsewhere.store.value, null);
 });

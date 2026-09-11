@@ -25,7 +25,8 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return; // always live
   // A session address is the app shell itself; the session is loaded by the app.
-  const request = url.pathname.startsWith('/session/') ? new Request('/index.html') : event.request;
+  const shellRoute = url.pathname.startsWith('/session/') || url.pathname === '/pair';
+  const request = shellRoute ? new Request('/index.html') : event.request;
   // Network first, cache as the fallback: the shell must update itself as soon
   // as the machine (or the deployment) serves a new build.
   event.respondWith(

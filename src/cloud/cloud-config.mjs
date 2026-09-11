@@ -12,6 +12,7 @@ const DEFAULTS = {
   machineDisplayName: '',
   authMode: 'bearer', // 'bearer' | 'hmac'
   realtime: false,
+  relayUrl: '',        // derived from url when empty: wss://<host>/api/relay
   protocolVersion: 1,
   eventFlushMs: 75,
   eventBatchMax: 100,
@@ -60,6 +61,7 @@ export function resolveCloudConfig(config = {}, env = process.env, { dataRoot = 
     machineDisplayName: String(env.TASKBRIDGE_MACHINE_NAME ?? cloud.machineDisplayName ?? '').trim(),
     authMode: String(env.TASKBRIDGE_CLOUD_AUTH_MODE ?? cloud.authMode ?? DEFAULTS.authMode).toLowerCase(),
     realtime: bool(env.TASKBRIDGE_CLOUD_REALTIME ?? cloud.realtime, DEFAULTS.realtime),
+    relayUrl: String(env.TASKBRIDGE_RELAY_URL ?? cloud.relayUrl ?? '').trim(),
     eventFlushMs: num(env.TASKBRIDGE_EVENT_FLUSH_MS ?? cloud.eventFlushMs, DEFAULTS.eventFlushMs, { min: 10, max: 5000 }),
     eventBatchMax: num(env.TASKBRIDGE_EVENT_BATCH_MAX ?? cloud.eventBatchMax, DEFAULTS.eventBatchMax, { min: 1, max: 10000 }),
     eventBatchMaxKb: num(env.TASKBRIDGE_EVENT_BATCH_MAX_KB ?? cloud.eventBatchMaxKb, DEFAULTS.eventBatchMaxKb, { min: 8, max: 8192 }),
@@ -82,6 +84,10 @@ export function resolveCloudConfig(config = {}, env = process.env, { dataRoot = 
     logLevel: String(env.TASKBRIDGE_CLOUD_LOG_LEVEL ?? cloud.logLevel ?? DEFAULTS.logLevel).toLowerCase()
   };
   if (!resolved.machineId) resolved.machineId = defaultMachineId(dataRoot);
+  // The relay lives on the same deployment as the cloud API, so the default
+  // needs no second setting — and the phone derives the very same address from
+  // the page it was served (web/cloud-config.js).
+  if (!resolved.relayUrl && resolved.url) resolved.relayUrl = `${resolved.url.replace(/^http/i, 'ws')}/api/relay`;
   if (!['bearer', 'hmac'].includes(resolved.authMode)) resolved.authMode = 'bearer';
   return resolved;
 }

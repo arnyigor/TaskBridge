@@ -22,6 +22,9 @@ import { resolveCloudConfig, validateCloudConfig } from './cloud/cloud-config.mj
 import { CloudWorker } from './cloud/cloud-worker.mjs';
 import { CloudClient } from './cloud/cloud-client.mjs';
 import { secretFingerprint } from './cloud/machine-auth.mjs';
+import { issueDeviceToken, DEFAULT_DEVICE_TOKEN_TTL_MS } from './cloud/device-token.mjs';
+import { TrustedDevices, newDeviceId } from './cloud/trusted-devices.mjs';
+import { createRelayConnector } from './cloud/relay-connector.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 
@@ -80,6 +83,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     if (shuttingDown) return;
     shuttingDown = true;
     try { await cloudWorker?.stop(); } catch {}
+    try { await relayConnector?.stop(); } catch {}
     try { store.close(); } catch {}
     process.exit(0);
   });
@@ -96,6 +100,11 @@ const httpsConfig = config.server?.https || {};
 let cloudConfig = resolveCloudConfig(config, process.env, { dataRoot });
 let cloudCheck = validateCloudConfig(cloudConfig);
 let cloudWorker = null;
+let relayConnector = null;
+// Which phones may reach this machine (pairing, § cloud-protocol.md). Revocation
+// has to be enforced here: a device token is a stateless signature the relay
+// cannot take back.
+const trustedDevices = await new TrustedDevices(dataRoot).load();
 
 // Resolves the effective cloud configuration from config.json + environment,
 // validates it and (re)starts the worker. Used at boot and when the settings
@@ -104,6 +113,10 @@ async function applyCloudConfig({ quiet = false } = {}) {
   if (cloudWorker) {
     await cloudWorker.stop().catch(() => {});
     cloudWorker = null;
+  }
+  if (relayConnector) {
+    await relayConnector.stop().catch(() => {});
+    relayConnector = null;
   }
   cloudConfig = resolveCloudConfig(config, process.env, { dataRoot });
   cloudCheck = validateCloudConfig(cloudConfig);
@@ -128,6 +141,32 @@ async function applyCloudConfig({ quiet = false } = {}) {
   cloudWorker.start().catch((error) => {
     console.error(`[TaskBridge] cloud transport failed to start: ${error.message}`);
   });
+  // The realtime path: the machine dials the relay itself, so the shared UI on a
+  // phone reaches this API without an inbound port. Off by default — polling
+  // through the cloud API stays authoritative until an operator turns it on.
+  if (cloudConfig.realtime && cloudConfig.relayUrl) {
+    relayConnector = createRelayConnector({
+      url: cloudConfig.relayUrl,
+      machineId: cloudConfig.machineId,
+      machineSecret: cloudConfig.machineSecret,
+      manager,
+      dispatcher: cloudWorker.dispatcher,
+      store,
+      localApiBase: `http://127.0.0.1:${Number(config.server?.port || 8787)}`,
+      // A revoked phone is refused here, frame by frame, and a live one keeps
+      // its "last seen" fresh for the devices screen.
+      isDeviceAllowed: (deviceId) => {
+        if (!deviceId) return false;
+        if (!trustedDevices.allowed(deviceId)) return false;
+        trustedDevices.touch(deviceId);
+        return true;
+      }
+    });
+    relayConnector.start().catch((error) => {
+      console.error(`[TaskBridge] relay connector failed to start: ${error.message}`);
+    });
+    if (!quiet) console.log(`[TaskBridge] relay: ${cloudConfig.relayUrl}`);
+  }
   if (!quiet) console.log(`[TaskBridge] cloud transport enabled: ${cloudConfig.url} as ${cloudConfig.machineId}`);
   return { enabled: true, problems: [] };
 }
@@ -370,6 +409,55 @@ async function handleRequest(req, res) {
         return json(res, 200, { ok: true, machineId: candidate.machineId, url: candidate.url });
       } catch (error) {
         return json(res, 200, { ok: false, error: { code: error.code || 'INTERNAL_ERROR', message: error.message } });
+      }
+    }
+
+    // --- pairing a phone (§ pairing) -----------------------------------------
+    // The QR is minted here, on the machine that owns the secret: it carries the
+    // public address, this machine's id and a device token signed with the
+    // machine secret. The token travels in the URL *fragment*, which a browser
+    // never sends to a server — the cloud only ever sees /pair.
+    if (req.method === 'POST' && pathname === '/api/cloud/pair') {
+      access.require(req);
+      // Minting a credential is a local act, like the LAN pairing code.
+      if (access.enabled && !access.local(req)) return errorJson(res, 403, Object.assign(new Error('Подключить телефон можно только с самого компьютера.'), { code: 'FORBIDDEN' }));
+      if (!cloudConfig.url || !cloudConfig.machineSecret) {
+        return errorJson(res, 400, Object.assign(new Error('Сначала настройте облако: адрес и секрет машины.'), { code: 'INPUT_INVALID' }));
+      }
+      const body = await readJson(req).catch(() => ({}));
+      const deviceId = newDeviceId();
+      const expiresAt = Date.now() + DEFAULT_DEVICE_TOKEN_TTL_MS;
+      const token = issueDeviceToken({ machineId: cloudConfig.machineId, deviceId, secret: cloudConfig.machineSecret });
+      const device = await trustedDevices.add({
+        deviceId,
+        name: body.name,
+        machineId: cloudConfig.machineId,
+        expiresAt: new Date(expiresAt).toISOString()
+      });
+      const link = `${cloudConfig.url}/pair#m=${encodeURIComponent(cloudConfig.machineId)}&t=${encodeURIComponent(token)}&r=${encodeURIComponent(cloudConfig.relayUrl || '')}`;
+      return json(res, 200, { device, url: link, expiresAt: device.expiresAt, machineId: cloudConfig.machineId });
+    }
+
+    if (req.method === 'GET' && pathname === '/api/cloud/devices') {
+      access.require(req);
+      // Never the tokens themselves: they exist only inside the QR, once.
+      return json(res, 200, { devices: trustedDevices.list(), relayUrl: cloudConfig.relayUrl || '', realtime: Boolean(cloudConfig.realtime) });
+    }
+
+    {
+      const match = pathname.match(/^\/api\/cloud\/devices\/([^/]+)$/);
+      if (match && (req.method === 'DELETE' || req.method === 'POST')) {
+        access.require(req);
+        if (access.enabled && !access.local(req)) return errorJson(res, 403, Object.assign(new Error('Отзывать устройства можно только с компьютера.'), { code: 'FORBIDDEN' }));
+        const deviceId = decodeURIComponent(match[1]);
+        try {
+          // POST revokes (the entry stays visible as revoked), DELETE forgets it.
+          if (req.method === 'POST') return json(res, 200, { device: await trustedDevices.revoke(deviceId) });
+          await trustedDevices.remove(deviceId);
+          return json(res, 200, { ok: true });
+        } catch (error) {
+          return errorJson(res, error.code === 'NOT_FOUND' ? 404 : 400, error);
+        }
       }
     }
 

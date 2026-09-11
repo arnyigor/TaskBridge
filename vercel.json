@@ -3,10 +3,23 @@
   "framework": null,
   "outputDirectory": "web",
   "rewrites": [
-    { "source": "/api/:path*", "destination": "/api/index" },
-    { "source": "/session/:id", "destination": "/index.html" }
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index"
+    },
+    {
+      "source": "/session/:id",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/pair",
+      "destination": "/index.html"
+    }
   ],
   "functions": {
-    "api/index.mjs": { "memory": 256, "maxDuration": 30 }
+    "api/index.mjs": {
+      "memory": 256,
+      "maxDuration": 30
+    }
   }
 }
