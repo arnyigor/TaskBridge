@@ -1963,9 +1963,10 @@ let localEnabled = false;
 let localStatus = null;
 let localEvents = null;
 
-// The server reports the id Pi actually serves; the fallback prefers the
-// hand-written provider, which needs no extra environment in Pi.
-function localProviderId() { return localStatus?.provider || 'llamacpp'; }
+// The server reports the id Pi actually serves — do not guess here: proposing
+// a provider Pi does not have is exactly how a local request starts failing
+// with "Provider is not configured".
+function localProviderId() { return localStatus?.provider || null; }
 
 function localStatusBadge(status) {
   const map = {
@@ -2034,7 +2035,9 @@ function localModelRow(m) {
 // Selecting a local preset from the dialog goes through the same path as the
 // unified picker: live session → set_model (+preload), otherwise → next task.
 async function selectLocalModel(id) {
-  await chooseModel({ provider: localProviderId(), id });
+  const provider = localProviderId();
+  if (!provider) { alert('Список локальных моделей ещё не загружен — откройте окно заново.'); return; }
+  await chooseModel({ provider, id });
 }
 
 function renderLocalModels() {

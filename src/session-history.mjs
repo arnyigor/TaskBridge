@@ -50,7 +50,7 @@ export async function restoreSessionFile(task, store, dataRoot) {
   }
   if (pendingUser) messages.push(pendingUser);
   if (!messages.some(x => x.role === 'assistant') && task.assistantText) {
-    messages.push({ role: 'assistant', content: [{ type: 'text', text: task.assistantText }], api: 'openai-completions', provider: task.model?.provider || 'llamacpp', model: task.model?.id || '', usage: task.lastUsage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.parse(task.updatedAt) || Date.now() });
+    messages.push({ role: 'assistant', content: [{ type: 'text', text: task.assistantText }], api: 'openai-completions', provider: task.model?.provider || 'llama.cpp', model: task.model?.id || '', usage: task.lastUsage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.parse(task.updatedAt) || Date.now() });
   }
   const header = { type: 'session', version: 3, id: crypto.randomUUID(), timestamp: task.createdAt || new Date().toISOString(), cwd: task.workspacePath };
   const entries = [header];
