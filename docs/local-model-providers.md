@@ -33,9 +33,19 @@ pi --list-models                     → модели видны
 - У каждой модели — `thinkingLevelMap` и
   `compat.thinkingFormat: "chat-template"` + `chatTemplateKwargs`.
 
-Встроенный `llama.cpp` можно использовать, только задав
-`LLAMA_BASE_URL=http://127.0.0.1:8080` (env) или сделав `/login llama.cpp`;
-тогда рукописный `llamacpp` можно удалить.
+Встроенный `llama.cpp` работает, если задать адрес одним из двух способов:
+
+1. `LLAMA_BASE_URL=http://127.0.0.1:8080` в окружении (TaskBridge выставляет его,
+   когда у него включён router-режим), или
+2. креденшл в `~/.pi/agent/auth.json` —
+   `llama.cpp = { type: "api_key", key: "llamacpp", env: { LLAMA_BASE_URL: "http://127.0.0.1:8080" } }`,
+   что эквивалентно `/login llama.cpp` и не зависит от env запускающего процесса.
+
+Проверенный рабочий вариант — **держать оба провайдера**: встроенный `llama.cpp`
+(поверх креденшла) и самодостаточный рукописный `llamacpp` с тем же набором
+моделей. Тогда TaskBridge работает при любой настройке запуска, а
+`resolveLocalProviderId()` выберет тот id, который Pi реально отдаёт
+(`defaultProvider` в `settings.json` при этом — источник ожиданий пользователя).
 
 ## Что должен делать TaskBridge
 
