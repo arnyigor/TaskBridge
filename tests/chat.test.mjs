@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { ChatState, ACTIVE_STATUSES } from '../web/chat-state.mjs';
-import { selectTransport, createLocalTransport } from '../web/transport.mjs';
+import * as transportModule from '../web/transport.mjs';
 
 const task = (id = 'a') => ({ id, prompt: 'Первый вопрос', status: 'SUCCEEDED', assistantText: 'Первый ответВторой ответ', thinkingText: '', model: { contextWindow: 65536 }, lastUsage: { totalTokens: 13081 } });
 function history(id = 'a') {
@@ -115,6 +115,33 @@ test('steering during a message does not move its remaining text into the next r
   assert.equal(state.current.text, '');
 });
 
+// app.js is a module in the browser; the harness runs it as a script, so the
+// names it imports are resolved from the real modules — and only those. A name
+// used without an import throws here, exactly as it would in the browser.
+function resolveImports(source, modules) {
+  const names = {};
+  const pattern = /^import\s+(.+?)\s+from\s+'([^']+)';?$/gm;
+  for (const match of source.matchAll(pattern)) {
+    const clause = match[1];
+    const module = modules[match[2]];
+    if (!module) throw new Error(`app.js imports an unknown module: ${match[2]}`);
+    const braced = clause.match(/{([^}]*)}/);
+    if (braced) {
+      for (const raw of braced[1].split(',')) {
+        const name = raw.trim();
+        if (!name) continue;
+        if (!(name in module)) throw new Error(`app.js imports ${name}, which ${match[2]} does not export`);
+        names[name] = module[name];
+      }
+    }
+    const defaultName = clause.replace(/{[^}]*}/, '').replace(/,/g, '').trim();
+    if (defaultName) {
+      if (!('default' in module)) throw new Error(`${match[2]} has no default export`);
+      names[defaultName] = module.default;
+    }
+  }
+  return names;
+}
 async function ui({ coarsePointer = false } = {}) {
   const { document, window } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
   window.matchMedia = () => ({ matches: coarsePointer }); // desktop (fine pointer) unless a test opts in
@@ -132,8 +159,16 @@ async function ui({ coarsePointer = false } = {}) {
     replaceState: (state, title, url) => urls.push({ method: 'replace', url })
   };
   const locationStub = { pathname: '/', href: 'http://localhost/' };
-  const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES, history: historyStub, location: locationStub, URL,
-    selectTransport, createLocalTransport,
+  const appSource = await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8');
+  const imported = resolveImports(appSource, {
+    './chat-state.mjs': { ChatState, ACTIVE_STATUSES },
+    './transport.mjs': transportModule,
+    // app.js takes `marked` as a named import and DOMPurify as the default one.
+    './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
+    './vendor/purify.mjs': { default: { sanitize: html => html } }
+  });
+  const context = vm.createContext({ document, window, console, URL, history: historyStub, location: locationStub,
+    ...imported,
     setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
     navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
@@ -155,10 +190,8 @@ async function ui({ coarsePointer = false } = {}) {
       else body = tasks[path.pathname.split('/')[3]];
       return { ok: true, json: async () => body };
     }, alert() {}, confirm: () => true,
-    marked: { setOptions() {}, parse: text => text },
-    DOMPurify: { sanitize: html => html },
   });
-  const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
+  const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
   vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink};', context);
   return { ...context.testing, document, window, streams, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }

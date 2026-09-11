@@ -1,4 +1,5 @@
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
+import { selectTransport } from './transport.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
 const $ = (id) => document.getElementById(id);
