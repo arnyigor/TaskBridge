@@ -128,3 +128,84 @@ test('the queued prompt is delivered by itself when the model frees up', { timeo
   const { state } = await fixture.api(`/api/tasks/${created.id}/state`);
   assert.ok(state.messageCount >= 3, `Pi message count: ${state.messageCount}`);
 });
+
+test('a prompt queued while the session is streaming is delivered when the turn ends', { timeout: 60000 }, async t => {
+  const { fixture, router } = await fixtureWithLocalModel(t);
+  router.free();
+
+  // A running session: the model is free, the session works.
+  const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'первая', model: LOCAL_MODEL });
+  const running = await waitFor(async () => {
+    const task = await fixture.api(`/api/tasks/${created.id}`);
+    return task.status === 'RUNNING' ? task : null;
+  });
+  assert.equal(running.status, 'RUNNING');
+
+  // Enter (queue: true) while it streams: the text waits for the turn to end.
+  const queued = await fixture.api(`/api/tasks/${created.id}/message`, { text: 'после ответа', queue: true });
+  assert.deepEqual(queued.pendingPrompts.map(entry => entry.text), ['после ответа']);
+
+  // Nobody touches anything: Pi answers, and the queued prompt must go out by
+  // itself (this is the "очередь не обновляется после ответа" report).
+  const delivered = await waitFor(async () => {
+    const events = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+    const texts = events.filter(event => event.type === 'USER_MESSAGE').map(event => event.data?.text);
+    return texts.includes('после ответа') ? texts : null;
+  }, { tries: 200, delay: 100 });
+  assert.ok(delivered.includes('после ответа'), `delivered: ${JSON.stringify(delivered)}`);
+
+  const after = await fixture.api(`/api/tasks/${created.id}`);
+  assert.deepEqual(after.pendingPrompts || [], [], 'the queue drained');
+});
+
+test('a prompt queued for another session goes out when the busy session finishes', { timeout: 60000 }, async t => {
+  const { fixture, router } = await fixtureWithLocalModel(t);
+  router.free();
+
+  // 'a' owns the machine.
+  const a = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'работаю', model: LOCAL_MODEL });
+  await waitFor(async () => {
+    const task = await fixture.api(`/api/tasks/${a.id}`);
+    return task.status === 'RUNNING' ? task : null;
+  });
+
+  // 'b' waits: it gets a queue entry instead of a refusal.
+  const b = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'жду', model: LOCAL_MODEL });
+  assert.equal(b.status, 'QUEUED', JSON.stringify(b).slice(0, 200));
+
+  // Once 'a' is done, 'b' must run on its own.
+  const finished = await waitFor(async () => {
+    const task = await fixture.api(`/api/tasks/${b.id}`);
+    return ['SUCCEEDED', 'FAILED'].includes(task.status) ? task : null;
+  }, { tries: 400, delay: 100 });
+  assert.equal(finished.status, 'SUCCEEDED', finished.error || '');
+  const events = await fixture.api(`/api/tasks/${b.id}/events?limit=0`);
+  assert.ok(events.some(event => event.type === 'USER_MESSAGE' || event.type === 'STATUS'), 'b actually ran');
+});
+
+test('«Отправить сейчас» delivers the queued prompt into the running turn', { timeout: 60000 }, async t => {
+  const { fixture, router } = await fixtureWithLocalModel(t);
+  router.free();
+
+  const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'первая', model: LOCAL_MODEL });
+  await waitFor(async () => {
+    const task = await fixture.api(`/api/tasks/${created.id}`);
+    return task.status === 'RUNNING' ? task : null;
+  });
+
+  const queued = await fixture.api(`/api/tasks/${created.id}/message`, { text: 'срочное', queue: true });
+  assert.deepEqual(queued.pendingPrompts.map(entry => entry.text), ['срочное']);
+  // The session that owns the slot stays RUNNING: a QUEUED status here used to
+  // make the button below refuse (and silently re-queue) forever.
+  assert.equal(queued.status, 'RUNNING', JSON.stringify(queued).slice(0, 200));
+
+  const sent = await fixture.api(`/api/tasks/${created.id}/pending/send`, {});
+  assert.deepEqual(sent.pendingPrompts || [], [], 'the prompt left the queue');
+
+  const delivered = await waitFor(async () => {
+    const events = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+    const texts = events.filter(event => event.type === 'USER_MESSAGE').map(event => event.data?.text);
+    return texts.includes('срочное') ? texts : null;
+  }, { tries: 100, delay: 100 });
+  assert.ok(delivered.includes('срочное'), `delivered: ${JSON.stringify(delivered)}`);
+});

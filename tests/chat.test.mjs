@@ -743,7 +743,10 @@ test('DOM: a running session is obvious, and both stop and send stay reachable',
   // hiding send made queueing impossible on touch devices (Enter adds a newline).
   const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
   assert.doesNotMatch(css, /#stopButton:not\(:disabled\)\) #sendButton \{ display: none/);
-  assert.match(css, /#stopButton:not\(:disabled\)\) #stopButton \{ display: grid/);
+  // Стоп всегда на виду (только выключен, когда останавливать нечего): кнопка,
+  // которая то появляется, то исчезает, путает больше.
+  assert.match(css, /#stopButton \{ display: grid/);
+  assert.doesNotMatch(css, /#stopButton \{ display: none/);
   assert.match(css, /#activity:not\(\.hidden\) \{ display: flex/);
 
   // Enabled state while the machine works: stop can cancel, send can queue.

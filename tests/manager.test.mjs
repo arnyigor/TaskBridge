@@ -423,3 +423,21 @@ test('send now refuses while another session owns the machine and keeps the prom
   assert.deepEqual(f.manager.queue, ['a'], 'still waiting its turn');
   assert.equal(f.sent.length, 0, 'Pi still has not seen it');
 });
+
+test('a session created while another one works waits in the queue instead of failing', async t => {
+  const f = await fixture(t);
+  f.task.status = 'RUNNING';
+  f.manager.activeTaskId = 'a';
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+
+  // The old code threw "Модель уже выполняет другую сессию" (409 MODEL_BUSY) and
+  // the operator's prompt was lost; now it is queued like any other.
+  const created = await f.manager.createTask({ projectId: 'p', prompt: 'новая сессия' });
+  assert.equal(created.status, 'QUEUED');
+  assert.equal(created.queueReason, 'BUSY');
+  assert.equal(created.current, 'В очереди');
+  assert.ok(f.manager.queue.includes(created.id));
+  const events = await f.store.readEvents(created.id, 0);
+  assert.deepEqual(events.map(event => event.type), ['QUEUE_WAITING'], 'the wait is recorded, nothing was lost');
+});

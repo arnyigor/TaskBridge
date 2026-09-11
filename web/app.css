@@ -546,15 +546,11 @@ body {
 #project:focus { border-color: var(--accent); }
 .composerActions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
 .composerSendRow { display: flex; gap: 6px; }
-/* Одна главная кнопка на одно место: пока Pi свободен — «Отправить»,
-   пока работает — «Стоп». Скрепка стоит в том же ряду, поэтому композер
-   не бывает выше одной строки кнопок. */
-#stopButton { display: none; }
-/* Стоп появляется рядом с отправкой, но не вместо неё: во время генерации
-   сообщение всё ещё можно поставить в очередь (иначе с телефона не отправить —
-   там Enter переносит строку). */
-#stopButton { display: none; }
-.composerActions:has(#stopButton:not(:disabled)) #stopButton { display: grid; }
+/* Стоп всегда на месте, рядом с отправкой: кнопка, которая появляется и
+   исчезает, путает больше, чем неактивная. Пока останавливать нечего — она
+   просто выключена. */
+#stopButton { display: grid; }
+#stopButton:disabled { opacity: .4; cursor: default; }
 
 /* Полоса состояния: заметная, с таймером и причиной ожидания. */
 #activity:not(.hidden) { display: flex; align-items: center; gap: 6px; }

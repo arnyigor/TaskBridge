@@ -342,7 +342,10 @@ export class TaskManager extends EventEmitter {
       throw Object.assign(new Error('Некорректный cloud taskId.'), { code: 'INPUT_INVALID' });
     }
     if (requestedId && this.tasks.has(requestedId)) throw Object.assign(new Error('Cloud taskId уже существует.'), { code: 'ID_CONFLICT' });
-    if (this.activeTaskId) throw Object.assign(new Error('Модель уже выполняет другую сессию.'), { code: 'MODEL_BUSY' });
+    // The machine runs one generation at a time. A session created while another
+    // one holds it waits in the queue instead of being refused: the operator's
+    // prompt must never be lost to a timing race (the same rule as messages).
+    const ownerBusy = Boolean(this.activeTaskId);
     let requestedModel = this.#normalizeModelSelection(input.model);
     const thinkingLevel = this.#normalizeThinkingLevel(input.thinkingLevel);
     // The model list is a Pi concern; if it is already cached (the picker was
@@ -357,10 +360,11 @@ export class TaskManager extends EventEmitter {
     // A busy local model no longer rejects the request: the task is accepted and
     // starts as soon as the model is free (queue, capacity 1). Losing an
     // operator's prompt to a timing race is never acceptable.
-    let waitingForModel = false;
+    let waitingReason = ownerBusy ? 'BUSY' : null;
     if (this.#selectionUsesLocalRuntime(requestedModel)) {
       if (!this.#localAutostart() && !(await this.local.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
-      waitingForModel = Boolean((await this.local.getBusyStatus()).busy);
+      // The owning session is the more useful reason when both apply.
+      if (!waitingReason && (await this.local.getBusyStatus()).busy) waitingReason = 'MODEL_BUSY';
     }
     const incomingFiles = await this.#resolveFiles(input.files || [], input.uploadToken);
     const prompt = String(input.prompt || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
@@ -383,13 +387,13 @@ export class TaskManager extends EventEmitter {
       createdAt: now(),
       updatedAt: now(),
       status: 'QUEUED',
-      queueReason: waitingForModel ? 'MODEL_BUSY' : null,
+      queueReason: waitingReason,
       projectId,
       prompt,
       workspacePath: null,
       sourcePath: null,
       worktree: false,
-      current: waitingForModel ? 'Ждёт освобождения локальной модели' : 'Queued',
+      current: waitingReason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : (waitingReason ? 'В очереди' : 'Queued'),
       assistantText: '',
       thinkingText: '',
       error: null,
@@ -414,8 +418,9 @@ export class TaskManager extends EventEmitter {
     task._incomingFiles = incomingFiles;
     task._uploadToken = input.uploadToken;
     this.queue.push(task.id);
-    await this.#event(task, waitingForModel ? 'QUEUE_WAITING' : 'TASK_QUEUED',
-      waitingForModel ? 'Ждёт освобождения локальной модели' : 'Task queued', waitingForModel ? { reason: 'MODEL_BUSY' } : {});
+    await this.#event(task, waitingReason ? 'QUEUE_WAITING' : 'TASK_QUEUED',
+      waitingReason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : (waitingReason ? 'В очереди' : 'Task queued'),
+      waitingReason ? { reason: waitingReason } : {});
     this.#pump();
     return this.#publicTask(task);
   }
@@ -459,6 +464,15 @@ export class TaskManager extends EventEmitter {
   // One event per transition, so the UI (and the cloud) can explain why nothing
   // is happening yet.
   async #markWaiting(task, reason) {
+    // A session that is streaming right now keeps its RUNNING status: the prompt
+    // waits for the turn to end, and the status must not claim otherwise (a
+    // QUEUED status on the session that owns the slot also made "Отправить
+    // сейчас" look like a second generation and refuse).
+    if (this.activeTaskId === task.id && task.status === 'RUNNING') {
+      task.updatedAt = now();
+      await this.store.save(this.#publicTask(task));
+      return;
+    }
     if (task.queueReason === reason && task.status === 'QUEUED') return;
     if (task.status !== 'QUEUED') task.statusChangedAt = now();
     task.status = 'QUEUED';
@@ -493,7 +507,7 @@ export class TaskManager extends EventEmitter {
     // The next prompt waits for this turn to end, which is what capacity 1 means.
     if ((task.pendingPrompts || []).length && !this.queue.includes(task.id)) this.queue.push(task.id);
     try {
-      await this.#message(task.id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+      await this.#message(task.id, pending.text, pending.mode || 'auto', [], null, { immediate: true, fromQueue: true });
     } catch (error) {
       // Never die silently inside the pump: explain the retry and keep the text.
       await this.#event(task, 'QUEUE_RETRY', `Не удалось отправить из очереди: ${error.message}. Сообщение осталось в очереди.`).catch(() => {});
@@ -1294,7 +1308,7 @@ export class TaskManager extends EventEmitter {
       const { pending, restore } = await this.#takePending(task);
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
       try {
-        return await this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+        return await this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true, fromQueue: true });
       } catch (error) {
         await restore().catch(() => {});
         throw error;
@@ -1329,7 +1343,7 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false } = {}) {
+  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -1357,6 +1371,11 @@ export class TaskManager extends EventEmitter {
     const holdingModel = !immediate && !liveStreaming && this.#usesLocalRuntime(task)
       && (await this.local.getBusyStatus()).busy;
     if (queue || reservedElsewhere || holdingModel) {
+      // A prompt that came *out* of the queue must never be silently put back
+      // here: that loop is what made «Отправить сейчас» look dead — the button
+      // took the prompt out and this branch returned it, every time. Fail
+      // loudly instead; the caller restores the prompt and the operator sees why.
+      if (fromQueue) throw Object.assign(new Error('Машина занята — сообщение осталось в очереди.'), { code: 'BUSY' });
       // The model is held by another consumer (a second client, a stale slot,
       // another session): record the prompt and deliver it when the model is
       // free. Attachments are staged now, so the queued entry stays valid even
