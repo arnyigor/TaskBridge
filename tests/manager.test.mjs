@@ -612,3 +612,64 @@ test('an in-flight commandId is refused as ACCEPTED, not re-run', async t => {
     { code: 'ACCEPTED' },
   );
 });
+
+test('command dedup survives a restart via the SQLite ledger', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cmd-durable-'));
+  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); });
+
+  const busy = async () => ({ busy: true }); // queue, so no Pi pipeline is needed
+  const makeTask = (store) => ({ id: 'a', createdAt: new Date().toISOString(), status: 'SUCCEEDED', workspacePath: root, prompt: 'x', files: [], assistantText: '', thinkingText: '', compaction: { count: 0 } });
+
+  // First process: execute the command once.
+  const store1 = new TaskStore(root);
+  const m1 = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store1);
+  await m1.init();
+  await store1.create(makeTask(store1));
+  m1.tasks.set('a', { id: 'a', createdAt: new Date().toISOString(), status: 'SUCCEEDED', workspacePath: root, prompt: 'x', files: [], assistantText: '', thinkingText: '', compaction: { count: 0 } });
+  m1.runtimeManager.isReady = async () => true;
+  m1.runtimeManager.getBusyStatus = busy;
+  m1.queuePollMs = 5;
+  const r1 = await m1.message('a', 'привет', 'auto', [], null, { queue: true, commandId: 'dc-1' });
+  assert.equal((r1.pendingPrompts || []).length, 1, 'first process queued the prompt once');
+  await m1.close();
+  store1.close();
+
+  // Second process "restarts" on the same data root with an empty ledger.
+  const store2 = new TaskStore(root);
+  const m2 = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store2);
+  await m2.init();
+  m2.runtimeManager.isReady = async () => true;
+  m2.runtimeManager.getBusyStatus = busy;
+  m2.queuePollMs = 5;
+
+  const stored = store2.getCommand('dc-1');
+  assert.ok(stored && stored.done, 'the command is persisted as done');
+
+  // The replayed result must not enqueue the prompt a second time.
+  const r2 = await m2.message('a', 'привет', 'auto', [], null, { queue: true, commandId: 'dc-1' });
+  assert.equal((r2.pendingPrompts || []).length, 1, 'restart replay did not double the prompt');
+
+  await m2.close();
+  store2.close();
+});
+
+test('an unfinished command after crash is UNKNOWN_AFTER_CRASH, never re-run', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cmd-crash-'));
+  t.after(async () => { await fs.rm(root, { recursive: true, force: true }); });
+  const store = new TaskStore(root);
+  const { createHash } = await import('node:crypto');
+  const hash = createHash('sha256').update(JSON.stringify(['a', 'crash', 'auto', [], null])).digest('hex');
+  // Simulate: a command was ACCEPTED right before the process died.
+  store.upsertCommand('crashed-1', { hash, done: false });
+
+  const m = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store);
+  await m.init();
+  m.runtimeManager.isReady = async () => true;
+  m.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  await assert.rejects(
+    () => m.message('a', 'crash', 'auto', [], null, { commandId: 'crashed-1' }),
+    { code: 'UNKNOWN_AFTER_CRASH' },
+  );
+  await m.close();
+  store.close();
+});

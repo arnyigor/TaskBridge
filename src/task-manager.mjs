@@ -1410,34 +1410,58 @@ export class TaskManager extends EventEmitter {
   }
 
   // Returns an idempotency guard around `fn`. If `commandId` is new it records
-  // ACCEPTED, runs `fn`, and stores the outcome (replaying it on a later call).
-  // A repeat of a finished command returns the saved result; a repeat of one
-  // still in flight is refused as ACCEPTED; the same id with a different
-  // payload is a CONFLICT, executed by no one.
-  //
-  // The payload hash is computed by the caller (passed via `hashOf`), because
-  // only it knows which arguments make the command "the same".
+  // ACCEPTED in SQLite *before* running (so a crash mid-run is durable), runs
+  // `fn`, and stores the outcome. A repeat of a finished command replays the
+  // saved result; a repeat of one still in flight is refused as ACCEPTED; the
+  // same id with different content is a CONFLICT; an id recorded ACCEPTED but
+  // never finished (a prior process crashed) is UNKNOWN_AFTER_CRASH — never
+  // re-run silently. The in-memory map is only a cache + in-flight tracker;
+  // SQLite is the source of truth across restarts.
   async #withCommand(commandId, hashOf, fn) {
     if (!hashOf) throw new Error('internal: hashOf required');
     this.#evictCommands();
     const hash = hashOf();
-    const existing = this.commandLedger.get(commandId);
-    if (existing) {
-      if (existing.hash !== hash) {
+    let entry = this.commandLedger.get(commandId);
+    if (!entry) {
+      // Durable lookup: a finished command from a previous process replays, and
+      // an ACCEPTED-but-unfinished id is a possible crash.
+      const stored = this.store.getCommand(commandId);
+      if (stored) {
+        if (stored.hash !== hash) {
+          throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
+        }
+        if (stored.done) {
+          this.commandLedger.set(commandId, { hash, done: true, result: stored.result, at: stored.at });
+          return stored.result;
+        }
+        this.commandLedger.set(commandId, { hash, done: false, result: null, at: stored.at });
+        throw Object.assign(new Error('Исход команды неизвестен после перезапуска — отправьте её заново с новым commandId.'), { code: 'UNKNOWN_AFTER_CRASH' });
+      }
+    } else {
+      if (entry.hash !== hash) {
         throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
       }
-      if (existing.done) return existing.result;
+      if (entry.done) return entry.result;
       throw Object.assign(new Error('Команда уже выполняется.'), { code: 'ACCEPTED' });
     }
-    const entry = { hash, done: false, result: null, at: Date.now() };
-    this.commandLedger.set(commandId, entry);
+    // New command: persist ACCEPTED before running, so we cannot lose track of a
+    // command that crashed mid-run. If we cannot record it we must not run it.
+    try {
+      this.store.upsertCommand(commandId, { hash, done: false });
+    } catch (error) {
+      throw Object.assign(new Error('Не удалось зафиксировать команду: ' + (error?.message || error)), { code: 'COMMAND_LEDGER_FAILED' });
+    }
+    this.commandLedger.set(commandId, { hash, done: false, result: null, at: Date.now() });
     try {
       const result = await fn();
-      entry.done = true;
-      entry.result = result;
+      const e = this.commandLedger.get(commandId);
+      if (e) { e.done = true; e.result = result; }
+      try { this.store.upsertCommand(commandId, { hash, done: true, result }); } catch { /* best effort */ }
       return result;
     } catch (error) {
-      entry.done = true; // failed but resolved: a retry will get the same error
+      const e = this.commandLedger.get(commandId);
+      if (e) { e.done = true; e.result = null; }
+      try { this.store.upsertCommand(commandId, { hash, done: true, result: null }); } catch { /* best effort */ }
       throw error;
     }
   }
@@ -1447,12 +1471,17 @@ export class TaskManager extends EventEmitter {
   }
 
   #evictCommands() {
-    if (this.commandLedger.size < 2) return;
-    const ttl = 24 * 60 * 60 * 1000;
     const now = Date.now();
-    const expired = [];
-    for (const [k, v] of this.commandLedger) if (now - v.at > ttl) expired.push(k);
-    for (const k of expired) this.commandLedger.delete(k);
+    if (this.commandLedger.size >= 2) {
+      const ttl = 24 * 60 * 60 * 1000;
+      for (const [k, v] of this.commandLedger) if (now - v.at > ttl) this.commandLedger.delete(k);
+    }
+    // Prune resolved rows from SQLite at most hourly (in-flight rows survive to
+    // mark a possible crash).
+    if (!this._lastDbCommandPrune || now - this._lastDbCommandPrune > 60 * 60 * 1000) {
+      this._lastDbCommandPrune = now;
+      try { this.store.pruneCommands(24 * 60 * 60 * 1000); } catch {}
+    }
   }
 
   // A prompt the operator decided not to wait for: it is handed to Pi right
