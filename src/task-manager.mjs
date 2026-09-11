@@ -64,6 +64,7 @@ export class TaskManager extends EventEmitter {
     this.queuePollMs = Number(config.queue?.pollMs) > 0 ? Number(config.queue.pollMs) : 1000;
     this.pumpTimer = null;
     this.pumpAgain = false;
+    this.closing = false;
     this.admitting = false;
     this.deleted = new Set();
     this.eventWrites = new Map();
@@ -140,6 +141,46 @@ export class TaskManager extends EventEmitter {
     }
     if (trimmed) await this.store.vacuum().catch(() => {});
     await this.#sweepOrphans();
+  }
+
+  // Graceful shutdown of the agent side: stop taking new work, stop the queue
+  // timer, then close each live Pi session (close stdin, force-kill the process
+  // tree if it does not exit in time, mirroring RuntimeControl.closePi) and
+  // stop the always-on router. Tolerant by design: shutdown must never throw
+  // its way to process.exit. The cloud worker / relay are owned by the caller
+  // (the server / future host) and are closed separately.
+  async close() {
+    this.closing = true;
+    if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null; }
+    for (const [taskId, entry] of this.runtimes) {
+      try {
+        if (entry?.eventChain) await entry.eventChain;
+        const pi = entry?.pi;
+        if (!pi || pi.closed) continue;
+        const proc = pi.proc;
+        pi.closeStdin();
+        if (proc) {
+          const exited = await this.#waitProcessClose(proc, 2500);
+          if (!exited) await pi.killTree();
+        }
+      } catch { /* best effort during shutdown */ }
+      if (this.runtimes.get(taskId) === entry) this.runtimes.delete(taskId);
+    }
+    try {
+      if (this.localModels?.enabled) await this.localModels.stop();
+    } catch { /* best effort */ }
+  }
+
+  // Resolves when a child process has exited, else false after `ms`.
+  #waitProcessClose(proc, ms) {
+    if (!proc || proc.exitCode != null || proc.signalCode != null) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const finish = result => { clearTimeout(timer); proc.removeListener('close', onClose); resolve(result); };
+      const onClose = () => finish(true);
+      const timer = setTimeout(() => finish(false), ms);
+      proc.once('close', onClose);
+      if (proc.exitCode != null || proc.signalCode != null) finish(true);
+    });
   }
 
   // Directories left behind by a crash or by an older version that did not clean
@@ -545,6 +586,7 @@ export class TaskManager extends EventEmitter {
     // because the thing it would have started is a message an operator is
     // watching. Whatever stays in the queue keeps the poll timer armed, so the
     // queue is self-healing even if some future path forgets to call #pump.
+    if (this.closing) return;
     if (this.pumping) { this.pumpAgain = true; return; }
     if (this.activeTaskId) { this.#schedulePump(); return; }
     if (this.queue.length === 0) return;

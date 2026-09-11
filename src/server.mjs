@@ -85,6 +85,11 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     shuttingDown = true;
     try { await cloudWorker?.stop(); } catch {}
     try { await relayConnector?.stop(); } catch {}
+    // Close the agent side gracefully (Pi sessions + router) so shutdown does
+    // not leave an orphaned Pi or a lingering llama.cpp, and so an active task
+    // is not ripped away mid-turn without an explanation. Bounded by a hard
+    // timeout so Ctrl+C always exits even if a process refuses to die.
+    try { await Promise.race([manager.close(), new Promise(r => setTimeout(r, 6000))]); } catch {}
     try { store.close(); } catch {}
     process.exit(0);
   });

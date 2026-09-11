@@ -525,3 +525,52 @@ test('a cancelled session at the head of the queue does not stall what is behind
   assert.deepEqual(f.manager.queue, []);
   for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });
+
+// Graceful shutdown mirrors RuntimeControl.closePi: close stdin first, and only
+// force-kill a process that refuses to exit. The router is stopped too, and no
+// new work starts afterwards.
+test('close() shuts the Pi and the router down gracefully', async t => {
+  const f = await fixture(t);
+  let stdinClosed = 0;
+  let killed = 0;
+  let routerStopped = 0;
+  const proc = { pid: 4242, exitCode: 0 }; // already exited -> no forced kill
+  const pi = {
+    closed: false,
+    proc,
+    getState: async () => ({ isStreaming: false }),
+    prompt: async () => {}, sendFollowUp: async () => {},
+    abort: async () => {}, killTree: async () => { killed++; },
+    closeStdin: () => { stdinClosed++; }
+  };
+  f.runtime.pi = pi;
+  f.manager.localModels = { enabled: true, stop: async () => { routerStopped++; } };
+
+  await f.manager.close();
+
+  assert.equal(stdinClosed, 1, 'close stdin is requested first');
+  assert.equal(killed, 0, 'an already-exited process is not force-killed');
+  assert.equal(routerStopped, 1, 'the always-on router is stopped');
+  assert.equal(f.manager.runtimes.size, 0, 'no live runtime is left behind');
+  assert.equal(f.manager.closing, true, 'closing is latched');
+});
+
+test('close() force-kills a Pi that refuses to exit in time', async t => {
+  const f = await fixture(t);
+  let killed = 0;
+  // `proc` never emits close and has no exit code: waitProcessClose resolves
+  // false after 2500ms and close() falls back to killTree().
+  const proc = { pid: 9999, exitCode: null, signalCode: null, once: () => {}, removeListener: () => {} };
+  const pi = {
+    closed: false,
+    proc,
+    getState: async () => ({ isStreaming: false }),
+    prompt: async () => {}, sendFollowUp: async () => {},
+    abort: async () => {}, killTree: async () => { killed++; },
+    closeStdin: () => {}
+  };
+  f.runtime.pi = pi;
+  await f.manager.close();
+  assert.equal(killed, 1, 'the stuck process is force-killed');
+  assert.equal(f.manager.runtimes.size, 0);
+});
