@@ -212,7 +212,7 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
 
         if (method === 'POST' && a1 === 'message' && !a2) {
           const b = await readBody();
-          return ok(await agent.request('message', { id, text: b.text, mode: b.mode, files: b.files || [], uploadToken: b.uploadToken, now: b.now === true, queue: b.queue === true }));
+          return ok(await agent.request('message', { id, text: b.text, mode: b.mode, files: b.files || [], uploadToken: b.uploadToken, now: b.now === true, queue: b.queue === true, commandId: b.commandId }));
         }
         if (method === 'POST' && a1 === 'cancel') return ok(await agent.request('cancel', { id }));
         if (method === 'POST' && a1 === 'compact') return ok(await agent.request('compact', { id, instructions: (await readBody()).instructions }));

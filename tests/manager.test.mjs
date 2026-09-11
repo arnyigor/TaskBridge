@@ -574,3 +574,41 @@ test('close() force-kills a Pi that refuses to exit in time', async t => {
   assert.equal(killed, 1, 'the stuck process is force-killed');
   assert.equal(f.manager.runtimes.size, 0);
 });
+
+test('commandId dedupes a retry and conflicts on changed content', async t => {
+  const f = await fixture(t);
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+
+  const first = await f.manager.message('a', 'один раз', 'auto', [], null, { queue: true, commandId: 'cmd-1' });
+  assert.equal((first.pendingPrompts || []).length, 1, 'first call stores one prompt');
+
+  // Duplicate commandId+payload replays the saved result instead of firing again.
+  const second = await f.manager.message('a', 'один раз', 'auto', [], null, { queue: true, commandId: 'cmd-1' });
+  assert.equal(second.id, first.id);
+  assert.equal((second.pendingPrompts || []).length, 1, 'replay did not double the prompt');
+  assert.equal(f.manager.commandLedger.size, 1);
+
+  // Same commandId with different content is a conflict, executed by no one.
+  await assert.rejects(
+    () => f.manager.message('a', 'другой', 'auto', [], null, { queue: true, commandId: 'cmd-1' }),
+    { code: 'CONFLICT' },
+  );
+  assert.equal((f.manager.tasks.get('a').pendingPrompts || []).length, 1, 'the conflicting call changed nothing');
+
+  await f.manager.cancel('a');
+});
+
+test('an in-flight commandId is refused as ACCEPTED, not re-run', async t => {
+  const f = await fixture(t);
+  // Pre-seed an in-flight entry with the exact payload hash so the guard sees it.
+  const args = ['a', 'ещё', 'auto', [], null];
+  const { createHash } = await import('node:crypto');
+  const digest = createHash('sha256').update(JSON.stringify(args)).digest('hex');
+  f.manager.commandLedger.set('inflight-1', { hash: digest, done: false, result: null, at: Date.now() });
+
+  await assert.rejects(
+    () => f.manager.message('a', 'ещё', 'auto', [], null, { commandId: 'inflight-1' }),
+    { code: 'ACCEPTED' },
+  );
+});

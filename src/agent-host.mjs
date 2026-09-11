@@ -35,7 +35,7 @@ export function buildDispatcher({ manager, store }) {
       case 'deleteTask': return m.deleteTask(args.id);
 
       // --- messaging / lifecycle --------------------------------------------
-      case 'message': return m.message(args.id, args.text, args.mode || 'auto', args.files || [], args.uploadToken, { now: args.now === true, queue: args.queue === true });
+      case 'message': return m.message(args.id, args.text, args.mode || 'auto', args.files || [], args.uploadToken, { now: args.now === true, queue: args.queue === true, commandId: args.commandId });
       case 'cancel': return m.cancel(args.id);
       case 'compact': return m.compact(args.id, args.instructions);
       case 'state': return m.state(args.id);

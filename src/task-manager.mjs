@@ -65,6 +65,11 @@ export class TaskManager extends EventEmitter {
     this.pumpTimer = null;
     this.pumpAgain = false;
     this.closing = false;
+    // commandId → { hash, done, result, at }: dedupes operator commands so a
+    // retry / second client / double-click cannot fire a prompt twice. TTL is
+    // bounded by memory (see #dedupeCommand); persistence across a process
+    // restart is a deliberate follow-up.
+    this.commandLedger = new Map();
     this.admitting = false;
     this.deleted = new Set();
     this.eventWrites = new Map();
@@ -1388,8 +1393,66 @@ export class TaskManager extends EventEmitter {
   //   queue: true — take a place in the queue even when the model is free (Enter)
   // With neither flag (cloud/LAN callers) the previous behaviour applies: steer
   // while the session streams, queue while the model is busy with something else.
-  async message(id, text, mode = 'auto', files = [], uploadToken = null, { now: immediate = false, queue = false } = {}) {
-    return this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate, queue }));
+  //
+  // `commandId` (when provided by a client) makes the command idempotent: the
+  // same commandId+payload is replayed from the ledger instead of executed a
+  // second time; the same id with different content is a CONFLICT.
+  async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
+    const commandId = opts && opts.commandId ? String(opts.commandId) : null;
+    if (!commandId) {
+      return this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true }));
+    }
+    return this.#withCommand(
+      commandId,
+      () => this.#payloadHash(id, text, mode, files, uploadToken),
+      async () => this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true })),
+    );
+  }
+
+  // Returns an idempotency guard around `fn`. If `commandId` is new it records
+  // ACCEPTED, runs `fn`, and stores the outcome (replaying it on a later call).
+  // A repeat of a finished command returns the saved result; a repeat of one
+  // still in flight is refused as ACCEPTED; the same id with a different
+  // payload is a CONFLICT, executed by no one.
+  //
+  // The payload hash is computed by the caller (passed via `hashOf`), because
+  // only it knows which arguments make the command "the same".
+  async #withCommand(commandId, hashOf, fn) {
+    if (!hashOf) throw new Error('internal: hashOf required');
+    this.#evictCommands();
+    const hash = hashOf();
+    const existing = this.commandLedger.get(commandId);
+    if (existing) {
+      if (existing.hash !== hash) {
+        throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
+      }
+      if (existing.done) return existing.result;
+      throw Object.assign(new Error('Команда уже выполняется.'), { code: 'ACCEPTED' });
+    }
+    const entry = { hash, done: false, result: null, at: Date.now() };
+    this.commandLedger.set(commandId, entry);
+    try {
+      const result = await fn();
+      entry.done = true;
+      entry.result = result;
+      return result;
+    } catch (error) {
+      entry.done = true; // failed but resolved: a retry will get the same error
+      throw error;
+    }
+  }
+
+  #payloadHash(...args) {
+    return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
+  }
+
+  #evictCommands() {
+    if (this.commandLedger.size < 2) return;
+    const ttl = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const expired = [];
+    for (const [k, v] of this.commandLedger) if (now - v.at > ttl) expired.push(k);
+    for (const k of expired) this.commandLedger.delete(k);
   }
 
   // A prompt the operator decided not to wait for: it is handed to Pi right
