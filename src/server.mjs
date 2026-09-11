@@ -681,8 +681,16 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/message$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken));
+      // now: true is "send immediately, do not wait for the local model" (the
+      // Ctrl+Enter path); otherwise a busy model means the prompt is queued.
+      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken, { now: body.now === true }));
     }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending\/send$/);
+    if (req.method === 'POST' && match) return json(res, 200, await manager.sendPendingNow(match[1]));
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending$/);
+    if (req.method === 'DELETE' && match) return json(res, 200, await manager.dropPending(match[1]));
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
     if (req.method === 'POST' && match) {

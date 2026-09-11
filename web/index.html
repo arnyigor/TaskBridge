@@ -270,11 +270,12 @@
       <div id="approvalBanner" class="approvalBanner hidden" aria-live="polite"></div>
 
       <div class="composer-wrap">
+        <div id="queuedPrompt" class="queuedPrompt hidden"></div>
         <span id="fileList" class="muted small"></span>
         <form class="composer" id="form">
           <div class="promptWrap">
             <textarea id="prompt" rows="1" maxlength="8000"
-              placeholder="Сообщение для Pi. Enter — запустить, Shift+Enter — перенос строки."></textarea>
+              placeholder="Сообщение для Pi. Enter — в очередь, Ctrl+Enter — отправить сразу, Shift+Enter — перенос строки."></textarea>
             <button id="clearPrompt" class="clearPrompt hidden" type="button" title="Очистить" aria-label="Очистить поле ввода">×</button>
           </div>
           <div class="composerActions">
@@ -292,7 +293,7 @@
             </div>
           </div>
         </form>
-        <div class="hint" id="createError">Enter — запустить, Shift+Enter — перенос строки</div>
+        <div class="hint" id="createError">Enter — в очередь, Ctrl+Enter — отправить сразу, Shift+Enter — перенос строки</div>
       </div>
     </section>
 

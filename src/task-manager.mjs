@@ -1224,11 +1224,54 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  async message(id, text, mode = 'auto', files = [], uploadToken = null) {
-    return this.#admit(() => this.#message(id, text, mode, files, uploadToken));
+  // `now` is the wire option ("send immediately, do not wait for the local
+  // model"); it is renamed locally so it does not shadow the now() helper.
+  async message(id, text, mode = 'auto', files = [], uploadToken = null, { now: immediate = false } = {}) {
+    return this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate }));
   }
 
-  async #message(id, text, mode, files, uploadToken) {
+  // A prompt the operator decided not to wait for: it is handed to Pi right
+  // away (Pi/llama.cpp decide how to fit it into the running turn), bypassing
+  // the local queue.
+  async sendPendingNow(id) {
+    return this.#admit(async () => {
+      const task = this.tasks.get(id);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const pending = task.pendingPrompt;
+      if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
+      task.pendingPrompt = null;
+      this.queue = this.queue.filter(x => x !== id);
+      await this.store.save(this.#publicTask(task));
+      return this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+    });
+  }
+
+  // Removing a queued prompt leaves the session as it was: a session that never
+  // ran is cancelled, an existing one simply loses the pending message.
+  async dropPending(id) {
+    return this.#admit(async () => {
+      const task = this.tasks.get(id);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      if (!task.pendingPrompt) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
+      task.pendingPrompt = null;
+      task.queueReason = null;
+      this.queue = this.queue.filter(x => x !== id);
+      if (!task.workspacePath) {
+        task.status = 'CANCELLED';
+        task.current = 'Cancelled';
+        await this.store.save(this.#publicTask(task));
+        await this.#event(task, 'TASK_CANCELLED', 'Queued prompt removed');
+      } else {
+        task.status = 'SUCCEEDED';
+        task.current = 'Сообщение убрано из очереди';
+        await this.store.save(this.#publicTask(task));
+        await this.#event(task, 'QUEUE_DROPPED', task.current);
+      }
+      return this.#publicTask(task);
+    });
+  }
+
+  async #message(id, text, mode, files, uploadToken, { immediate = false } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -1246,7 +1289,7 @@ export class TaskManager extends EventEmitter {
     const state = await runtime.pi.getState();
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    if (!streaming && this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) {
+    if (!immediate && !streaming && this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) {
       // The model is held by another consumer (a second client, a stale slot,
       // another session): record the prompt and deliver it when the model is
       // free. Attachments are staged now, so the queued entry stays valid even

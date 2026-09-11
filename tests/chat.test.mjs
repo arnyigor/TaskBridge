@@ -483,3 +483,70 @@ test('the new line appears even when the continuation arrives without message_en
   frame(6, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'вторая часть' } });
   assert.equal(state.current.text, 'первая часть\n\nвторая часть');
 });
+
+test('DOM: Ctrl+Enter asks for an immediate send, plain Enter accepts the queue', async () => {
+  const app = await ui();
+  // linkedom has no requestSubmit: make it perform a real submit event.
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  await app.selectTask('a');
+  const bodies = [];
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) {
+      bodies.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING' }) };
+    }
+    return null;
+  });
+
+  const prompt = app.document.getElementById('prompt');
+  const key = (ctrlKey) => {
+    const event = new app.window.Event('keydown', { cancelable: true });
+    event.key = 'Enter';
+    event.shiftKey = false;
+    event.isComposing = false;
+    event.ctrlKey = ctrlKey;
+    prompt.dispatchEvent(event);
+  };
+  const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
+
+  const submit = async (text, ctrlKey) => {
+    prompt.value = text;
+    key(ctrlKey);
+    await settle();
+  };
+
+  await submit('в очередь', false);
+  await submit('срочно', true);
+
+  assert.equal(bodies.length, 2, JSON.stringify(bodies));
+  assert.equal(bodies[0].now, false, 'Enter: the prompt may be queued');
+  assert.equal(bodies[1].now, true, 'Ctrl+Enter: send immediately');
+  assert.equal(bodies[1].text, 'срочно');
+});
+
+test('DOM: a queued prompt is shown with buttons to send it now or drop it', async () => {
+  const app = await ui();
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/pending/send')) { calls.push('send'); return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING' }) }; }
+    if (pathname.endsWith('/pending')) { calls.push('drop'); return { ok: true, json: async () => ({ id: 'a', status: 'SUCCEEDED' }) }; }
+    if (/\/api\/tasks\/a$/.test(pathname)) {
+      return { ok: true, json: async () => ({ ...app.tasks.a, pendingPrompt: { text: 'позже спрошу', mode: 'auto' } }) };
+    }
+    return null;
+  });
+
+  await app.selectTask('a');
+  const row = app.document.getElementById('queuedPrompt');
+  assert.equal(row.classList.contains('hidden'), false, 'the queued prompt is visible');
+  assert.match(row.textContent, /позже спрошу/);
+  const buttons = [...row.querySelectorAll('button')].map(button => button.textContent);
+  assert.deepEqual(buttons, ['Отправить сейчас', 'Убрать']);
+
+  row.querySelectorAll('button')[0].onclick();
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['send']);
+});

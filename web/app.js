@@ -290,7 +290,7 @@ function setComposerMode(taskId) {
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
   const hint = isTouchDevice()
     ? 'Enter — перенос строки, отправка — кнопкой.'
-    : 'Enter — отправить, Shift+Enter — перенос строки.';
+    : 'Enter — в очередь, Ctrl+Enter — отправить сразу, Shift+Enter — перенос строки.';
   promptEl.placeholder = continuing
     ? `Сообщение продолжит текущую сессию. ${hint}`
     : `Сообщение для Pi. ${hint}`;
@@ -657,6 +657,7 @@ function maybeNotify(t) {
 function renderTaskDetails(t) {
   maybeNotify(t);
   currentTask = t;
+  renderQueuedPrompt();
   $('taskTitle').textContent = t.title || t.prompt || t.id;
   $('taskStatus').textContent = t.status;
   $('taskModel').textContent = t.model ? modelFullLabel(t.model) : (t.requestedModel ? modelFullLabel(t.requestedModel) : '—');
@@ -788,10 +789,44 @@ async function refreshTask() {
 async function sendContinueMessage(taskId, text, opts = {}) {
   const version = selectionVersion;
   const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
-    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null })
+    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null, now: opts.now === true })
   });
   if (version === selectionVersion) await refreshTask();
   return result;
+}
+
+let composerSendNow = false;
+
+// The queued prompt is visible with its own actions: send it early, or drop it.
+function renderQueuedPrompt() {
+  const host = $('queuedPrompt');
+  const pending = currentTask?.pendingPrompt;
+  if (!pending) { host.classList.add('hidden'); host.innerHTML = ''; return; }
+  host.classList.remove('hidden');
+  host.innerHTML = '';
+  const text = document.createElement('div');
+  text.className = 'queuedText';
+  text.textContent = `В очереди: ${String(pending.text || '').split('\n')[0]}`;
+  const send = document.createElement('button');
+  send.type = 'button';
+  send.className = 'small';
+  send.textContent = 'Отправить сейчас';
+  send.onclick = () => actOnPending('send');
+  const drop = document.createElement('button');
+  drop.type = 'button';
+  drop.className = 'small';
+  drop.textContent = 'Убрать';
+  drop.onclick = () => actOnPending('drop');
+  host.append(text, send, drop);
+}
+
+async function actOnPending(action) {
+  if (!selectedTaskId) return;
+  try {
+    if (action === 'send') await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending/send`, { method: 'POST', body: '{}' });
+    else await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending`, { method: 'DELETE' });
+    await refreshTask();
+  } catch (error) { alert(error.message); }
 }
 
 // Neutral notice (the error styling stays for real failures).
@@ -1031,6 +1066,9 @@ promptEl.addEventListener('keydown', (event) => {
     // Touch devices: Enter inserts a newline; sending is done via the button.
     if (isTouchDevice()) return;
     event.preventDefault();
+    // Ctrl/Cmd+Enter hands the prompt over immediately; plain Enter accepts the
+    // queue when the local model is busy with something else.
+    composerSendNow = event.ctrlKey || event.metaKey;
     $('form').requestSubmit();
   }
 });
@@ -1048,6 +1086,8 @@ $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = promptEl.value.trim();
   const attached = Array.from($('files').files || []);
+  const sendNow = composerSendNow;
+  composerSendNow = false;
   // A file without text is a valid message; the server substitutes a title.
   if ((!prompt && !attached.length) || $('sendButton').disabled) return;
   $('createError').textContent = '';
@@ -1070,8 +1110,9 @@ $('form').addEventListener('submit', async (e) => {
       updateClearButton();
     };
     if (taskId) {
-      const sent = await sendContinueMessage(taskId, prompt, { files, uploadToken });
+      const sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow });
       clearComposer();
+      renderQueuedPrompt();
       if (sent?.queueReason) showNotice(QUEUED_NOTICE);
     } else {
       const task = await api('/api/tasks', {

@@ -280,3 +280,52 @@ test('setThinkingLevel stores the level and applies it to a live session', async
   const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'THINKING_LEVEL');
   assert.equal(events.length, 1);
 });
+
+test('send now bypasses the queue, and a queued prompt can be sent or dropped early', async t => {
+  const f = await fixture(t);
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+  // A delivered prompt leaves a "wait for Pi to settle" waiter behind; resolving
+  // it here mirrors what the real Pi event loop does and keeps the test clean.
+  const settle = async () => {
+    for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+    // The finalizer releases the model slot asynchronously.
+    for (let i = 0; i < 100 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  };
+
+  // Ctrl+Enter: the prompt goes to Pi immediately, even while the model is busy.
+  const now = await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
+  assert.equal(now.pendingPrompt, undefined);
+  assert.deepEqual(f.sent, ['срочно']);
+  assert.equal((await f.store.readEvents('a', 0)).some(event => event.type === 'USER_MESSAGE'), true);
+  await settle();
+
+  // Plain send queues instead.
+  const queued = await f.manager.message('a', 'потом');
+  assert.equal(queued.pendingPrompt.text, 'потом');
+  assert.deepEqual(f.manager.queue, ['a']);
+
+  // "Send now" on the queued prompt delivers it at once and clears the queue.
+  f.sent.length = 0;
+  const sentNow = await f.manager.sendPendingNow('a');
+  await settle();
+  assert.deepEqual(f.sent, ['потом']);
+  assert.ok(!sentNow.pendingPrompt, 'the queue entry is gone');
+  assert.deepEqual(f.manager.queue, []);
+  assert.equal((await f.store.readEvents('a', 0)).filter(event => event.type === 'USER_MESSAGE').length, 2);
+
+  // Dropping a queued prompt neither sends it nor loses the session.
+  const dropped = await f.manager.message('a', 'лишнее');
+  assert.equal(dropped.pendingPrompt.text, 'лишнее');
+  const after = await f.manager.dropPending('a');
+  assert.ok(!after.pendingPrompt, 'the queue entry is gone');
+  assert.equal(after.queueReason, null);
+  assert.equal(after.status, 'SUCCEEDED');
+  assert.deepEqual(f.manager.queue, []);
+  assert.deepEqual(f.sent, ['потом'], 'nothing extra was sent');
+
+  // Actions on an empty queue are rejected instead of silently doing nothing.
+  await assert.rejects(f.manager.sendPendingNow('a'), { code: 'INPUT_INVALID' });
+  await assert.rejects(f.manager.dropPending('a'), { code: 'INPUT_INVALID' });
+  await settle();
+});
