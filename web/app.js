@@ -357,8 +357,9 @@ function resetSelection(id) {
   return selectionVersion;
 }
 
-function startNewTask() {
+function startNewTask({ replace = false } = {}) {
   resetSelection(null);
+  syncSessionUrl(null, { replace });
   $('msgsInner').innerHTML = '<div class="empty" id="emptyState">Выбери сессию из списка или создай новую.</div>';
   document.querySelectorAll('.taskRow.active').forEach(row => row.classList.remove('active'));
   promptEl.focus();
@@ -678,12 +679,49 @@ function renderTaskDetails(t) {
     : t.worktreeRemovedAt ? `Worktree удалён ${new Date(t.worktreeRemovedAt).toLocaleString('ru-RU')}` : '';
 }
 
+/* ---------------- session URLs ---------------- */
+
+// Every session has its own address: a reload, a bookmark, or a link opened on
+// the phone must land on the same conversation (§ sessions with own URL).
+function sessionPath(id) { return id ? `/session/${encodeURIComponent(id)}` : '/'; }
+
+function sessionIdFromPath(pathname) {
+  const match = /^\/session\/([^/]+)\/?$/.exec(pathname || '');
+  if (!match) return null;
+  try { return decodeURIComponent(match[1]); } catch { return null; }
+}
+
+function syncSessionUrl(id, { replace = false } = {}) {
+  const target = sessionPath(id);
+  if (location.pathname === target) return;
+  try {
+    if (replace) history.replaceState({ sessionId: id || null }, '', target);
+    else history.pushState({ sessionId: id || null }, '', target);
+  } catch { /* history can be unavailable in embedded contexts */ }
+}
+
+// Unknown ids fall back to the list instead of leaving a dead address behind.
+async function openSessionFromLocation(tasks) {
+  const id = sessionIdFromPath(location.pathname);
+  if (!id) return false;
+  if (!tasks.some(task => task.id === id)) { syncSessionUrl(null, { replace: true }); return false; }
+  await selectTask(id);
+  return true;
+}
+
+async function routeFromLocation() {
+  const id = sessionIdFromPath(location.pathname);
+  if (!id) return startNewTask({ replace: true });
+  return selectTask(id);
+}
+
 async function selectTask(id) {
   const version = resetSelection(id);
   try {
     const initial = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}`);
     const t = await api(`/api/tasks/${encodeURIComponent(id)}`);
     if (version !== selectionVersion) return;
+    syncSessionUrl(id);
     currentTask = t;
     reachedHistoryStart = initial.reachedStart;
     oldestLoadedSeq = initial.events.length ? initial.events[0].seq : null;
@@ -2166,7 +2204,9 @@ async function loadAll() {
   try {
     await loadProjects();
     const tasks = await loadTasks();
+    if (await openSessionFromLocation(tasks)) return;
     if (tasks.length) await selectTask(tasks[0].id);
+    else startNewTask({ replace: true });
   } catch (e) {
     $('createError').textContent = e.message;
     $('createError').classList.add('error');
@@ -2181,6 +2221,7 @@ async function init() {
     if (document.visibilityState === 'visible') checkPcState();
   });
   if (await checkAuth()) await loadAll();
+  window.addEventListener('popstate', () => { routeFromLocation(); });
 }
 
 init();

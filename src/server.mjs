@@ -231,15 +231,25 @@ function lanAddresses(port, scheme = 'http') {
 async function serveStatic(urlPath, res) {
   const relative = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '');
   const target = path.resolve(webDir, relative);
-  if (!target.startsWith(path.resolve(webDir) + path.sep) && target !== path.join(path.resolve(webDir), 'index.html')) {
+  const shell = path.join(path.resolve(webDir), 'index.html');
+  if (!target.startsWith(path.resolve(webDir) + path.sep) && target !== shell) {
     return false;
   }
-  try {
-    const data = await fs.readFile(target);
-    res.writeHead(200, { 'content-type': contentType(target), 'cache-control': 'no-cache' });
+  const send = async (file) => {
+    const data = await fs.readFile(file);
+    res.writeHead(200, { 'content-type': contentType(file), 'cache-control': 'no-cache' });
     res.end(data);
     return true;
+  };
+  try {
+    return await send(target);
   } catch {
+    // Client routes such as /session/<id> are not files on disk: hand them the
+    // SPA shell so a reload, a bookmark or a phone link opens the same session.
+    // API callers keep their own JSON 404 instead of receiving HTML.
+    if (urlPath !== '/' && !path.extname(urlPath) && !urlPath.startsWith('/api/')) {
+      try { return await send(shell); } catch { return false; }
+    }
     return false;
   }
 }

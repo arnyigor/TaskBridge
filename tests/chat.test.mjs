@@ -121,7 +121,16 @@ async function ui({ coarsePointer = false } = {}) {
   const streams = [];
   const tasks = { a: task('a'), b: { ...task('b'), prompt: 'Другой чат' } };
   let fetchHook;
-  const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES,
+  // Sessions have their own address, so the app reads location and writes
+  // history; linkedom provides neither.
+  const urls = [];
+  // Named *_stub to avoid shadowing this file's own history() event helper.
+  const historyStub = {
+    pushState: (state, title, url) => urls.push({ method: 'push', url }),
+    replaceState: (state, title, url) => urls.push({ method: 'replace', url })
+  };
+  const locationStub = { pathname: '/' };
+  const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES, history: historyStub, location: locationStub,
     setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
     DataTransfer: class { items = { add: (file) => this.files.push(file) }; files = []; },
@@ -146,8 +155,8 @@ async function ui({ coarsePointer = false } = {}) {
     DOMPurify: { sanitize: html => html },
   });
   const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport};', context);
-  return { ...context.testing, document, window, streams, tasks, setFetchHook: hook => { fetchHook = hook; } };
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation};', context);
+  return { ...context.testing, document, window, streams, tasks, urls, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -320,4 +329,33 @@ test('DOM: take-over mode warns and requires the explicit closed-terminal confir
   confirmButton.onclick();
   await settle();
   assert.deepEqual(calls, [{ projectId: 'fixture', sessionKey: key, mode: 'take-over', confirmedClosed: true }]);
+});
+
+test('DOM: sessions carry their own address, and a deep link opens that session', async () => {
+  const app = await ui();
+  app.urls.length = 0;
+
+  // Selecting a session writes its address into the URL.
+  await app.selectTask('b');
+  assert.deepEqual(app.urls, [{ method: 'push', url: '/session/b' }]);
+  assert.match(app.document.getElementById('taskTitle').textContent, /Другой чат/);
+
+  // A link opened later (reload, bookmark, phone) restores the same session.
+  app.urls.length = 0;
+  app.location.pathname = '/session/a';
+  assert.equal(await app.routeFromLocation(), undefined);
+  assert.match(app.document.getElementById('taskTitle').textContent, /Первый вопрос/);
+  assert.deepEqual(app.urls, [], 'the address already matches the open session');
+
+  // An address for a session that no longer exists falls back to the list
+  // instead of leaving a dead URL behind.
+  app.urls.length = 0;
+  app.location.pathname = '/session/gone';
+  assert.equal(await app.openSessionFromLocation([{ id: 'a' }, { id: 'b' }]), false);
+  assert.deepEqual(app.urls, [{ method: 'replace', url: '/' }]);
+
+  // "New session" returns to the list address.
+  app.urls.length = 0;
+  app.startNewTask();
+  assert.deepEqual(app.urls, [{ method: 'push', url: '/' }]);
 });

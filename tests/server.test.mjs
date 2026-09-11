@@ -395,3 +395,23 @@ test('native Pi session importer: list, preview, and a copy-based import over HT
   assert.equal(relisted.sessions[0].existingTaskId, created.id);
   assert.equal(relisted.suggestion, null, 'an imported session is not suggested again');
 });
+
+test('a session address opens the app shell itself, reload-safe, without breaking API 404s', { timeout: 20000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+
+  // /session/<id> is a client route, not a file: the shell must be returned so a
+  // reload, a bookmark or a phone link reaches the same session.
+  for (const path of ['/session/abc123', '/session/abc123/']) {
+    const page = await fetch(fixture.base + path);
+    assert.equal(page.status, 200, path);
+    assert.match(page.headers.get('content-type') || '', /text\/html/);
+    assert.match(await page.text(), /<title>/i);
+  }
+
+  // File-like paths and unknown API routes must not silently become HTML.
+  assert.equal((await fetch(`${fixture.base}/favicon.ico`)).status, 404);
+  const apiMissing = await fetch(`${fixture.base}/api/nope`);
+  assert.equal(apiMissing.status, 404);
+  assert.match(apiMissing.headers.get('content-type') || '', /application\/json/);
+});
