@@ -355,8 +355,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `pi.abortTimeoutMs` | сколько ждать RPC `abort` до kill |
 | `pi.sessionRoots` | дополнительные папки сессий Pi для импорта |
 | `localRuntime.healthUrl` | health-check локальной модели |
-| `localRuntime.provider` | provider Pi, который обслуживает локальный runtime (по умолчанию `llama.cpp` в router-режиме, иначе `llamacpp`); для других provider'ов локальный health-check пропускается |
-| `localRuntime.router` | router-режим llama.cpp: `enabled`, `command`, `args`, `cwd`, `env`, `startTimeoutMs`, `loadTimeoutMs` |
+| `localRuntime.provider` | provider Pi, который обслуживает локальный runtime (по умолчанию `llama.cpp` в router-режиме, иначе `llamacpp`); для других provider'ов локальный health-check пропускается || `localRuntime.router` | router-режим llama.cpp: `enabled`, `command`, `args`, `cwd`, `env`, `startTimeoutMs`, `loadTimeoutMs` |
 | `localRuntime.profiles` | (legacy) профили одного процесса (`text`, `vision`, …) |
 | `localRuntime.managed` | управляемый запуск llama.cpp |
 | `localRuntime.auto.enabled` | AUTO-выбор профиля под задачу (vision при картинках) |
@@ -545,6 +544,8 @@ RPC `get_state`: текущая модель, thinking level, `isStreaming`, `is
 - если задача ещё не запускалась, смена модели поднимет/восстановит Pi-сессию.
 
 Локальный health-check и переключение профиля применяются только к провайдеру `localRuntime.provider` (по умолчанию `llamacpp`). Для остальных провайдеров они пропускаются, поэтому удалённая модель работает даже при остановленном локальном llama.cpp.
+
+Pi знает два id одного и того же локального эндпоинта: рукописный провайдер `llamacpp` и встроенный `llama.cpp` (последний требует `LLAMA_BASE_URL` и без него отвечает «Provider is not configured»). Поэтому id, который TaskBridge передаёт в Pi, сверяется с каталогом Pi: если настроенного id у Pi больше нет, подставляется тот локальный id, который Pi действительно отдаёт. Подробности и правила именования — [docs/local-model-providers.md](docs/local-model-providers.md).
 
 ---
 

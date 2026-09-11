@@ -1906,7 +1906,9 @@ let localEnabled = false;
 let localStatus = null;
 let localEvents = null;
 
-function localProviderId() { return localStatus?.provider || 'llama.cpp'; }
+// The server reports the id Pi actually serves; the fallback prefers the
+// hand-written provider, which needs no extra environment in Pi.
+function localProviderId() { return localStatus?.provider || 'llamacpp'; }
 
 function localStatusBadge(status) {
   const map = {

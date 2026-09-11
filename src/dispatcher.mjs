@@ -47,7 +47,29 @@ export function chooseEngine(localRuntime = {}, input = {}) {
 // "llamacpp" (hand-written models.json provider) and "llama.cpp" (Pi's built-in
 // router provider) both point at a local llama.cpp HTTP endpoint, so either is
 // considered local for the health/busy/profile gate.
+//
+// They are NOT interchangeable when talking to Pi: the built-in "llama.cpp"
+// resolves its endpoint from LLAMA_BASE_URL (or `/login llama.cpp`) and answers
+// "Provider is not configured: llama.cpp" without it, while a hand-written
+// provider of the same id is shadowed by the built-in one. So the id handed to
+// Pi must be one Pi's own catalog actually lists — see resolveLocalProviderId.
 const LOCAL_PROVIDERS = new Set(['llamacpp', 'llama.cpp']);
+
+// Order matters only when both ids exist: the hand-written provider is the one
+// that works without extra environment, so it is preferred.
+const LOCAL_PROVIDER_ORDER = ['llamacpp', 'llama.cpp'];
+
+// Picks the local provider id Pi is actually able to serve, given the id from
+// localRuntime.provider and the providers Pi currently lists. Falls back to the
+// configured id when the catalog is unavailable, so a not-yet-probed Pi keeps
+// the old behaviour.
+export function resolveLocalProviderId({ configured, catalog } = {}) {
+  const present = Array.isArray(catalog)
+    ? LOCAL_PROVIDER_ORDER.filter(id => catalog.some(model => model?.provider === id))
+    : [];
+  if (!present.length) return configured;
+  return present.includes(configured) ? configured : present[0];
+}
 
 // A provider is served by the managed local runtime only when it matches
 // `localRuntime.provider` (default "llamacpp"). Anything else — including an

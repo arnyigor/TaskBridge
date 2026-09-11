@@ -10,7 +10,7 @@ import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles,
 import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
-import { chooseEngine, usesLocalRuntime, resolveRouterModel } from './dispatcher.mjs';
+import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
 import { LocalModelService } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
@@ -287,7 +287,7 @@ export class TaskManager extends EventEmitter {
   #localModelFor(task) {
     if (task.requestedModel?.id) return task.requestedModel.id;
     const fallback = this.modelCatalog.peek()?.defaultModel;
-    if (fallback?.provider === this.localModels.provider) return fallback.id;
+    if (fallback?.provider === this.#localProviderId()) return fallback.id;
     return task.engine?.profileId || null;
   }
 
@@ -353,7 +353,7 @@ export class TaskManager extends EventEmitter {
     // an id the router does not know. AUTO picks the vision preset for images;
     // otherwise the configured default preset is used.
     if (this.localModels.enabled && !requestedModel) {
-      requestedModel = resolveRouterModel(engine, this.config.localRuntime || {}, this.localModels.provider);
+      requestedModel = resolveRouterModel(engine, this.config.localRuntime || {}, this.#localProviderId());
     }
     const projectId = String(input.projectId || this.projects.keys().next().value || '');
     if (projectId !== '__scratch__' && !this.projects.has(projectId)) {
@@ -631,7 +631,19 @@ export class TaskManager extends EventEmitter {
   // ---- local llama.cpp router (router mode) ----
 
   async localStatus() {
-    return this.local.getStatus();
+    // Advertise the id Pi can really serve: with the hand-written provider
+    // renamed (e.g. "llamacpp") the configured one may no longer exist, and
+    // selecting a model under a dead id makes Pi answer
+    // "Provider is not configured".
+    return { ...(await this.local.getStatus()), provider: this.#localProviderId() };
+  }
+
+  // The local provider id Pi actually exposes (see resolveLocalProviderId).
+  #localProviderId() {
+    return resolveLocalProviderId({
+      configured: this.localModels.provider,
+      catalog: this.modelCatalog.peek()?.models
+    });
   }
 
   // ---- MCP (pi-mcp-adapter) ----
