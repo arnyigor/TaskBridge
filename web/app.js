@@ -673,6 +673,23 @@ function maybeNotify(t) {
   try { new Notification(`TaskBridge: ${title}`, { body: (t.title || t.prompt || '').slice(0, 120), tag: t.id }); } catch {}
 }
 
+// One generation runs at a time, so "Стоп" must reach the session that actually
+// works — not only the one that happens to be selected.
+function stopTarget() {
+  const stoppable = (task) => Boolean(task) && ACTIVE_STATUSES.has(task.status) && task.status !== 'CANCELLING';
+  const selected = lastTasks.find(task => task.id === selectedTaskId) || currentTask;
+  if (stoppable(selected)) return selected;
+  return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(stoppable) || null;
+}
+
+function updateStopButton() {
+  const target = stopTarget();
+  $('stopButton').disabled = !target;
+  $('stopButton').title = target
+    ? `Остановить сессию «${target.title || target.id}»`
+    : 'Сейчас нечего останавливать';
+}
+
 function renderTaskDetails(t) {
   maybeNotify(t);
   currentTask = t;
@@ -689,7 +706,7 @@ function renderTaskDetails(t) {
   renderOutputFiles(t.outputFiles || []);
   const c = t.compaction || {};
   $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
-  $('stopButton').disabled = !ACTIVE_STATUSES.has(t.status) || t.status === 'CANCELLING';
+  updateStopButton();
   $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;
   const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(t.status);
   const isWorktree = Boolean(t.worktree);
@@ -1004,6 +1021,9 @@ async function loadTasks() {
   lastTasks = await api('/api/tasks');
   renderTaskFilter();
   renderTaskList();
+  // A session can be running while another one is selected: keep the stop
+  // button pointed at whoever actually works.
+  updateStopButton();
   return lastTasks;
 }
 
@@ -1178,13 +1198,15 @@ $('newTaskButton').onclick = () => {
 };
 
 $('stopButton').onclick = async () => {
-  if (!selectedTaskId) return;
-  if (!confirm('Остановить текущую работу Pi?')) return;
+  const target = stopTarget();
+  if (!target) return;
+  if (!confirm(`Остановить текущую работу Pi в сессии «${target.title || target.id}»?`)) return;
   $('stopButton').disabled = true;
   try {
-    await api(`/api/tasks/${selectedTaskId}/cancel`, { method: 'POST', body: '{}' });
+    await api(`/api/tasks/${encodeURIComponent(target.id)}/cancel`, { method: 'POST', body: '{}' });
   } catch (e) { alert(e.message); }
-  await refreshTask();
+  await loadTasks();
+  if (target.id === selectedTaskId) await refreshTask();
 };
 
 $('refresh').onclick = () => loadTasks();

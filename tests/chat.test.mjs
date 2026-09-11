@@ -215,7 +215,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: () => true,
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -691,3 +691,25 @@ test('DOM: cloud mode says what the machine is doing and hides PC-only controls'
 // itself is exercised in tests/web-transport.test.mjs and the relay tests; here
 // the harness stops at the transport handshake.
 test.skip('DOM: cloud mode follows the machine status frames', () => {});
+
+test('DOM: stop points at the session that is actually running', async () => {
+  const app = await ui();
+  const doc = app.document;
+  const idle = { id: 'a', title: 'Простой', status: 'SUCCEEDED', projectId: 'p' };
+  const busy = { id: 'b', title: 'Работает', status: 'RUNNING', projectId: 'p' };
+  // The list is what the screen renders from; the selected session is the idle
+  // one, and the stop button must still reach the running one.
+  app.setLastTasks?.([idle, busy]);
+  assert.equal(app.stopTarget().id, 'b');
+
+  // With a waiting session in the list and nothing selected, the actual
+  // generation still wins: that is the thing the operator wants to stop.
+  app.setLastTasks?.([{ ...idle, status: 'QUEUED' }, busy]);
+  assert.equal(app.stopTarget().id, 'b');
+
+  // Nothing to stop: the button is disabled instead of firing at a random id.
+  app.setLastTasks?.([idle]);
+  assert.equal(app.stopTarget(), null);
+  app.updateStopButton();
+  assert.equal(doc.getElementById('stopButton').disabled, true);
+});

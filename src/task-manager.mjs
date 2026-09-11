@@ -1245,6 +1245,14 @@ export class TaskManager extends EventEmitter {
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
       const [pending, ...rest] = task.pendingPrompts || [];
       if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
+      // "Сейчас" cannot mean "second generation in parallel": if another session
+      // owns the machine, say so and leave the prompt in the queue.
+      if (this.activeTaskId && this.activeTaskId !== id) {
+        const owner = this.tasks.get(this.activeTaskId);
+        throw Object.assign(
+          new Error(`Машина занята сессией «${owner?.title || this.activeTaskId}» — сначала остановите её.`),
+          { code: 'BUSY' });
+      }
       task.pendingPrompts = rest;
       if (!rest.length) this.queue = this.queue.filter(x => x !== id);
       await this.store.save(this.#publicTask(task));

@@ -400,3 +400,23 @@ test('a message to another session waits in that session queue instead of being 
   const urgent = await f.manager.message('b', 'срочно', 'auto', [], null, { now: true });
   assert.deepEqual(urgent.pendingPrompts.map(entry => entry.text), ['подожду', 'срочно']);
 });
+
+test('send now refuses while another session owns the machine and keeps the prompt', async t => {
+  const f = await fixture(t);
+  const other = { ...f.task, id: 'b', status: 'RUNNING', workspacePath: f.root, prompt: 'занята' };
+  await f.store.create(other);
+  f.manager.tasks.set('b', other);
+  f.manager.activeTaskId = 'b';
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+
+  const queued = await f.manager.message('a', 'хочу сейчас');
+  assert.equal(queued.queueReason, 'BUSY', 'the machine is owned by another session');
+
+  // "Сейчас" cannot mean a second parallel generation: the refusal names the
+  // owner, and the prompt stays in the queue instead of vanishing.
+  await assert.rejects(f.manager.sendPendingNow('a'), /занята сессией/);
+  const task = f.manager.getTask('a');
+  assert.deepEqual(task.pendingPrompts.map(entry => entry.text), ['хочу сейчас']);
+  assert.deepEqual(f.manager.queue, ['a'], 'still waiting its turn');
+  assert.equal(f.sent.length, 0, 'Pi still has not seen it');
+});
