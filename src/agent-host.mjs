@@ -27,6 +27,7 @@ export function buildDispatcher({ manager, store }) {
     switch (name) {
       // --- projects / tasks -------------------------------------------------
       case 'listProjects': return m.listProjects();
+      case 'registerProject': return m.registerProject(args.project);
       case 'listTasks': return m.listTasks();
       case 'getTask': return m.getTask(args.id);
       case 'createTask': return m.createTask(args.input, args.options || {});

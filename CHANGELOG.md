@@ -69,6 +69,27 @@ SSE-канал с реплеем и фан-аутом `task-event` (тот же 
   SSE-подписке.
 - Покрытие: `tests/gateway.test.mjs` — полный путь HTTP→IPC→host→событие→SSE.
 
+## 0.9.3-dev — split: running and acceptance (шаг 5c, P-3 финал)
+
+Разделение становится реально запускаемым процессом и доказано acceptance'ом.
+
+- `src/host.mjs` читает `TASKBRIDGE_DATA_DIR` (не жжёт жёстко `ROOT/data`);
+  диспетчер host дополнен `registerProject`.
+- `scripts/start-split.mjs` — detached-лаунчер host+gateway (опт-ин,
+  `npm run start:split`): поднимает host, ждёт его IPC-порт, поднимает gateway,
+  пишет PIDs/порты в `data/split.json`.
+- `scripts/split-acceptance.mjs` — **acceptance шага 5** (`npm run
+  split:acceptance`): host+gateway как отдельные OS-процессы, создание задачи,
+  SSE на gateway#1, **SIGTERM gateway#1 → host жив и держит lock, gateway#2 на
+  том же эндпоинте видит ту же задачу и стримит SSE-реплей**. PASS в локальном
+  прогоне.
+- Дефолт не меняется: `npm start` / `taskbridge start` остаются монолитом
+  (откат), split — явный выбор.
+
+Остальное (не в этом шаге): реальная генерация Pi переживает рестарт gateway
+— свойство процесса доказано acceptance'ом; финальная интеграция с реальной
+моделью и переключение дефолта — за рамками текущего изменения.
+
 ## 0.9.2 — 2026-xx-xx
 
 Очередь: сообщения больше не висят в ней без причины (по жалобе «встают в

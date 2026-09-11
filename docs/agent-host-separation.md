@@ -167,6 +167,10 @@ reader в gateway и writer в host не блокировали друг дру�
 
 ## 8. Фазы внедрения (каждая — зелёный прогон + проверяемый сценарий)
 
+> Статус фазы: реализованы P-1…P-3 начало (IPC-транспорт, AgentHost, gateway+
+> acceptance), фазы ниже помечены. Split — опт-ин (`npm run start:split`),
+> дефолт остаётся монолитом.
+
 **P-1. Жизненный цикл + костяк двух процессов (без изменения поведения).**
 - `src/host.mjs`: поднимает lock, store, TaskManager, RuntimeManager, CloudWorker,
   relayConnector, PushCenter — ровно то, что сейчас собирает server.mjs L~29–175.

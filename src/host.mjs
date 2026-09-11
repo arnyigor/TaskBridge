@@ -18,7 +18,7 @@ import { AgentHost } from './agent-host.mjs';
 import { loadConfig } from './config.mjs';
 
 const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const DATA_ROOT = path.join(ROOT_DIR, 'data');
+const DATA_ROOT = process.env.TASKBRIDGE_DATA_DIR ? path.resolve(process.env.TASKBRIDGE_DATA_DIR) : path.join(ROOT_DIR, 'data');
 const config = await loadConfig(ROOT_DIR);
 
 const hostPort = Number(process.env.HOST_PORT) > 0 ? Number(process.env.HOST_PORT) : 0;
