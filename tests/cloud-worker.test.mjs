@@ -32,10 +32,10 @@ function createStubManager() {
     listTasks: () => [...tasks.values()],
     getTask: id => tasks.get(id) ?? null,
     emit: event => emitter.emit('task-event', event),
-    async createTask(input) {
-      calls.create.push(input);
+    async createTask(input, options = {}) {
+      calls.create.push({ ...input, ...(options.requestedId ? { id: options.requestedId } : {}) });
       const at = new Date().toISOString();
-      const task = { id: input.id ?? `local-${calls.create.length}`, createdAt: at, updatedAt: at, status: 'QUEUED', projectId: input.projectId, prompt: input.prompt, current: 'Queued' };
+      const task = { id: options.requestedId ?? input.id ?? `local-${calls.create.length}`, createdAt: at, updatedAt: at, status: 'QUEUED', projectId: input.projectId, prompt: input.prompt, current: 'Queued' };
       tasks.set(task.id, task);
       api.activeTaskId = task.id;
       api.emit({ at, taskId: task.id, type: 'TASK_QUEUED', message: 'Task queued', data: {} });
@@ -56,8 +56,8 @@ function createStubManager() {
     async cancel(id) { calls.cancel.push(id); const task = tasks.get(id); if (task) { task.status = 'CANCELLED'; } api.emit({ at: new Date().toISOString(), taskId: id, type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} }); return task ?? null; },
     async message(id, text, mode) { calls.message.push({ id, text, mode }); return tasks.get(id) ?? null; },
     async compact(id, instructions) { calls.compact.push({ id, instructions }); return { tokensBefore: 10, estimatedTokensAfter: 5 }; },
-    async setModel(id, model) { calls.setModel.push({ id, model }); return tasks.get(id) ?? null; },
-    async setThinking(id, level) { calls.setThinking.push({ id, level }); return tasks.get(id) ?? null; }
+    async setModel(id, provider, modelId) { calls.setModel.push({ id, provider, modelId }); return tasks.get(id) ?? null; },
+    async setThinkingLevel(id, level) { calls.setThinking.push({ id, level }); return tasks.get(id) ?? null; }
   };
   return api;
 }
@@ -156,7 +156,7 @@ test('dispatcher routes commands, deduplicates redelivery and rejects unsupporte
   assert.deepEqual(manager.calls.setThinking, [{ id: 'task_abc', level: 'medium' }]);
   const model = await dispatcher.handle({ commandId: 'c8', machineId: 'm', taskId: 'task_abc', seq: 8, type: 'SET_MODEL', payload: { model: { provider: 'anthropic', modelId: 'sonnet' } } });
   assert.equal(model.status, 'ACCEPTED');
-  assert.deepEqual(manager.calls.setModel, [{ id: 'task_abc', model: { provider: 'anthropic', modelId: 'sonnet' } }]);
+  assert.deepEqual(manager.calls.setModel, [{ id: 'task_abc', provider: 'anthropic', modelId: 'sonnet' }]);
 
   const unknownTask = await dispatcher.handle({ commandId: 'c7', machineId: 'm', taskId: 'nope', seq: 7, type: 'ABORT_TASK', payload: {} });
   assert.equal(unknownTask.error.code, 'TASK_NOT_FOUND');

@@ -34,6 +34,14 @@ test('busy model rejects new sessions and follow-ups before writing history or a
   await assert.rejects(fs.access(path.join(f.root, '.taskbridge-input')));
 });
 
+test('trusted cloud task ids are validated and collisions are rejected before admission', async t => {
+  const f = await fixture(t);
+  f.manager.activeTaskId = 'a';
+  await assert.rejects(f.manager.createTask({ prompt: 'new', projectId: 'p' }, { requestedId: '../bad' }), { code: 'INPUT_INVALID' });
+  await assert.rejects(f.manager.createTask({ prompt: 'duplicate', projectId: 'p' }, { requestedId: 'a' }), { code: 'ID_CONFLICT' });
+  assert.equal((await f.store.list()).length, 1);
+});
+
 test('registerProject persists to config.projects and rejects a duplicate id; removeProject removes both and rejects an unknown id', async t => {
   const f = await fixture(t);
   f.manager.registerProject({ id: 'q', name: 'Q', path: '/tmp/q', useWorktree: false, verification: [] });
@@ -183,28 +191,37 @@ test('applyTask applies the result patch to a clean source, then cleanup removes
   await assert.rejects(manager.cleanupWorktree('w'), { code: 'INPUT_INVALID' });
 });
 
-test('setModel and setThinking drive the live Pi session and persist the result', async t => {
-  const f = await fixture(t, true);
-  const calls = [];
-  f.pi.setModel = async (provider, modelId) => { calls.push(['model', provider, modelId]); return { id: modelId, provider, contextWindow: 32000, maxTokens: 2048 }; };
-  f.pi.setThinkingLevel = async level => { calls.push(['thinking', level]); return { level }; };
-
-  const updated = await f.manager.setModel('a', { provider: 'anthropic', modelId: 'claude-sonnet-4' });
-  assert.deepEqual(updated.model, { id: 'claude-sonnet-4', provider: 'anthropic', contextWindow: 32000, maxTokens: 2048 });
-  await f.manager.setThinking('a', 'high');
-  assert.equal(f.manager.getTask('a').thinkingLevel, 'high');
-  assert.deepEqual(calls, [['model', 'anthropic', 'claude-sonnet-4'], ['thinking', 'high']]);
-  const events = (await f.store.readEvents('a', 0)).map(event => event.type);
-  assert.ok(events.includes('MODEL_CHANGED'));
-  assert.ok(events.includes('THINKING_CHANGED'));
-
-  await assert.rejects(f.manager.setModel('a', { provider: 'anthropic' }), { code: 'INPUT_INVALID' });
-  await assert.rejects(f.manager.setThinking('a', 'turbo'), { code: 'INPUT_INVALID' });
+test('setModel switches the session model and records the selection', async t => {
+  const f = await fixture(t);
+  const seen = [];
+  f.pi.setModel = async (provider, modelId) => { seen.push([provider, modelId]); return { provider, id: modelId, contextWindow: 4096, maxTokens: 512 }; };
+  const updated = await f.manager.setModel('a', 'ollama', 'glm-5');
+  assert.deepEqual(seen, [['ollama', 'glm-5']]);
+  assert.deepEqual(updated.model, { provider: 'ollama', id: 'glm-5', contextWindow: 4096, maxTokens: 512 });
+  assert.deepEqual(updated.requestedModel, { provider: 'ollama', id: 'glm-5' });
+  assert.equal(updated.thinkingLevelActual, null);
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'MODEL_SWITCH');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].data.provider, 'ollama');
 });
 
-test('model and thinking changes require a live Pi session', async t => {
-  const f = await fixture(t, false);
-  f.pi.closed = true;
-  await assert.rejects(f.manager.setModel('a', { provider: 'p', modelId: 'm' }), { code: 'SESSION_UNAVAILABLE' });
-  await assert.rejects(f.manager.setThinking('a', 'high'), { code: 'SESSION_UNAVAILABLE' });
+test('setModel refuses while Pi is streaming and rejects malformed selections', async t => {
+  const streaming = await fixture(t, true);
+  await assert.rejects(streaming.manager.setModel('a', 'ollama', 'glm-5'), { code: 'BUSY' });
+  const f = await fixture(t);
+  await assert.rejects(f.manager.setModel('a', 'ollama', ''), { code: 'INPUT_INVALID' });
+  await assert.rejects(f.manager.setModel('missing', 'ollama', 'glm-5'), { code: 'NOT_FOUND' });
+});
+
+test('setThinkingLevel stores the level and applies it to a live session', async t => {
+  const f = await fixture(t);
+  const seen = [];
+  f.pi.setThinkingLevel = async (level) => { seen.push(level); };
+  const updated = await f.manager.setThinkingLevel('a', 'high');
+  assert.deepEqual(seen, ['high']);
+  assert.equal(updated.thinkingLevel, 'high');
+  assert.equal(updated.thinkingLevelActual, 'high');
+  await assert.rejects(f.manager.setThinkingLevel('a', ''), { code: 'INPUT_INVALID' });
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'THINKING_LEVEL');
+  assert.equal(events.length, 1);
 });

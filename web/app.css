@@ -884,6 +884,142 @@ pre {
 
 /* Cloud settings (§91) */
 .cloudRow { display: flex; align-items: center; gap: 8px; }
-.cloudRow input[type="checkbox"] { width: auto; margin: 0; }
+.cloudRow input[type="checkbox"] { width: auto; margin: 0; flex: none; }
 .cloudActions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 #cloudStatus { margin-top: 8px; }
+
+/* The cloud form is a column of labeled fields, not the single-row pairing
+   form the generic `.authCard form` rule was written for. Without this the
+   fields are laid out in one row, the card overflows and «Закрыть» drifts
+   off the edge on a phone. */
+#cloudForm { display: flex; flex-direction: column; gap: 10px; }
+#cloudForm > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+#cloudForm > label.cloudRow { flex-direction: row; align-items: center; color: var(--text); font-size: 13px; }
+#cloudForm input[type="url"],
+#cloudForm input[type="text"],
+#cloudForm input[type="password"] { flex: none; width: 100%; font-size: 13px; letter-spacing: normal; }
+
+/* ---------------- model picker (Pi models) ---------------- */
+
+.modelBar { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.modelChip {
+  max-width: 100%;
+  font-size: 11.5px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 10px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modelChip:hover { border-color: var(--accent); }
+#modelSearch, #modelThinking, #mcpMode {
+  width: 100%;
+  background: #0d1220;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 9px 10px;
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+#modelSearch:focus, #modelThinking:focus, #mcpMode:focus { border-color: var(--accent); }
+.modelGroup {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.modelItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  cursor: pointer;
+  width: 100%;
+}
+.modelItem:hover { border-color: var(--accent); }
+.modelItem.active { border-color: var(--accent); background: rgba(167, 139, 250, 0.12); }
+.modelItem .modelId { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.modelItem .modelMeta { font-size: 10.5px; color: var(--muted); }
+.session .r.taskModelRow { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
+.session .r.taskModelRow span { flex-shrink: 0; }
+.session .r.taskModelRow b { flex: 1; min-width: 0; margin-top: 0; }
+.session .r.taskModelRow button { flex-shrink: 0; padding: 3px 7px; font-size: 12px; }
+
+/* ---------------- local llama.cpp router ---------------- */
+
+.banner {
+  margin: 0 16px 8px;
+  padding: 9px 12px;
+  border-radius: var(--radius-m);
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.1);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.localProgress { display: flex; flex-direction: column; gap: 4px; }
+.localProgressTrack {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.localProgressFill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  transition: width .25s ease;
+}
+.localModel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.localModel .info { flex: 1; min-width: 0; }
+.localModel .id { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
+.localModel .meta { font-size: 10.5px; color: var(--muted); }
+.localModel button { flex-shrink: 0; font-size: 11.5px; padding: 5px 9px; }
+.badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+  margin-right: 4px;
+}
+.badge.ok { color: var(--success); border-color: rgba(85, 230, 165, 0.4); }
+.badge.run { color: var(--accent); border-color: rgba(167, 139, 250, 0.45); }
+.badge.vision { color: var(--cyan); border-color: rgba(94, 231, 247, 0.35); }
+
+/* Overlays with several action buttons must wrap instead of overflowing the
+   card on a phone (the Close button used to drift off the edge). */
+.inline.wrap { flex-wrap: wrap; }
+.inline.wrap button { flex: 1 1 44%; min-width: 120px; }
+.authGate { overflow-y: auto; align-items: safe center; }
+
+.localModel .rowActions { display: flex; gap: 6px; flex-shrink: 0; }
+.headerActions .modelChip { max-width: 44vw; }
+
+.mcpServer { display: flex; flex-direction: column; gap: 4px; }
+.mcpTools { margin-left: 2px; }
+.mcpTools summary { cursor: pointer; font-size: 11.5px; color: var(--muted); }
+.toolLine { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 12px; }
+.toolLine input { flex-shrink: 0; }
+.toolLine span { overflow-wrap: anywhere; }

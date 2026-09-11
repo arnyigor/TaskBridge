@@ -152,13 +152,14 @@ export class CommandDispatcher {
       // Already known locally: treat as an idempotent start, not a second task.
       return { status: 'DUPLICATE', detail: 'Task already exists locally' };
     }
+    // TaskBridge's createTask takes the cloud task id via options.requestedId,
+    // so both sides agree on the id and LAN callers cannot choose one.
     const task = await this.manager.createTask({
-      id: taskId,
       projectId,
       prompt,
       files: Array.isArray(payload.files) ? payload.files : [],
       uploadToken: payload.uploadToken || null
-    });
+    }, { requestedId: taskId });
     return { status: 'ACCEPTED', detail: { taskId: task.id } };
   }
 
@@ -228,16 +229,21 @@ export class CommandDispatcher {
     const model = payload.model && typeof payload.model === 'object'
       ? payload.model
       : { provider: payload.provider, modelId: payload.modelId ?? payload.model };
-    await this.manager.setModel(taskId, model);
-    return { status: 'ACCEPTED', detail: { taskId, model: { provider: model.provider ?? null, modelId: model.modelId ?? null } } };
+    const provider = String(model.provider ?? '').trim();
+    const modelId = String(model.modelId ?? model.id ?? '').trim();
+    if (!provider || !modelId) return reject('COMMAND_REJECTED', 'SET_MODEL requires provider and modelId');
+    // TaskBridge API: setModel(id, provider, modelId).
+    const updated = await this.manager.setModel(taskId, provider, modelId);
+    return { status: 'ACCEPTED', detail: { taskId, model: { provider, modelId, applied: updated.model || null } } };
   }
 
   async #setThinking(taskId, payload) {
-    if (typeof this.manager.setThinking !== 'function') {
+    if (typeof this.manager.setThinkingLevel !== 'function') {
       return reject('COMMAND_REJECTED', 'SET_THINKING is not supported by this TaskBridge build');
     }
     if (!taskId || !this.manager.getTask(taskId)) return reject('TASK_NOT_FOUND', `Unknown task ${taskId}`);
-    await this.manager.setThinking(taskId, payload.level ?? null);
+    // TaskBridge API: setThinkingLevel(id, level).
+    await this.manager.setThinkingLevel(taskId, payload.level ?? null);
     return { status: 'ACCEPTED', detail: { taskId, level: payload.level ?? null } };
   }
 }

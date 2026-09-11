@@ -30,7 +30,12 @@ export async function startFixture(port, overrides = {}) {
   }));
   let logs = '';
   const launch = () => {
-    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Fixture servers must be hermetic: the developer's own TASKBRIDGE_* settings
+    // (usually a machine secret exported for a real cloud deploy) would otherwise
+    // leak in and make cloud tests pass or fail per machine. Tests that need a
+    // value pass it explicitly through overrides.env.
+    const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('TASKBRIDGE_')));
+    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...inherited, ...(overrides.env || {}) } });
     child.stdout.on('data', data => { logs += data; });
     child.stderr.on('data', data => { logs += data; });
     return child;

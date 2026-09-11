@@ -23,21 +23,6 @@ function cloudEnv(port) {
   };
 }
 
-async function withEnv(values, action) {
-  const saved = {};
-  for (const [key, value] of Object.entries(values)) {
-    saved[key] = process.env[key];
-    process.env[key] = value;
-  }
-  try { return await action(); }
-  finally {
-    for (const key of Object.keys(values)) {
-      if (saved[key] === undefined) delete process.env[key];
-      else process.env[key] = saved[key];
-    }
-  }
-}
-
 async function waitFor(check, { timeoutMs = 20000, intervalMs = 100, message = 'condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -72,7 +57,9 @@ test('cloud-created task runs locally and streams back to the cloud', { timeout:
   const { server, user } = await setupCloud();
   t.after(() => server.close());
 
-  const fixture = await withEnv(cloudEnv(server.port), () => startFixture());
+  // The fixture spawns a hermetic child, so the cloud env is passed explicitly
+  // instead of through process.env (see tests/server-fixture.mjs).
+  const fixture = await startFixture(undefined, { env: cloudEnv(server.port) });
   t.after(() => fixture.close());
 
   // The machine registers itself outbound; no inbound port is opened.
@@ -116,7 +103,9 @@ test('remote STOP terminates the local task and reports ABORTED', { timeout: 600
   const { server, user } = await setupCloud();
   t.after(() => server.close());
 
-  const fixture = await withEnv(cloudEnv(server.port), () => startFixture());
+  // The fixture spawns a hermetic child, so the cloud env is passed explicitly
+  // instead of through process.env (see tests/server-fixture.mjs).
+  const fixture = await startFixture(undefined, { env: cloudEnv(server.port) });
   t.after(() => fixture.close());
 
   await waitFor(async () => (await user('/api/machines')).body.find(m => m.id === MACHINE.id && m.status === 'ONLINE'), { message: 'machine heartbeat' });

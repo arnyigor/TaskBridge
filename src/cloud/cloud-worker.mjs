@@ -165,7 +165,7 @@ export class CloudWorker {
         compact: true,
         approvals: typeof this.manager.approvalEnabled === 'function' ? this.manager.approvalEnabled() : false,
         setModel: typeof this.manager.setModel === 'function',
-        setThinking: typeof this.manager.setThinking === 'function',
+        setThinking: typeof this.manager.setThinkingLevel === 'function',
         toolStreaming: true
       }
     };

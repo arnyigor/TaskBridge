@@ -23,6 +23,7 @@ import { CloudWorker } from './cloud/cloud-worker.mjs';
 import { CloudClient } from './cloud/cloud-client.mjs';
 import { secretFingerprint } from './cloud/machine-auth.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
+import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -65,11 +66,20 @@ const manager = new TaskManager(config, dataRoot, store);
 manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
 manager.approvalExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-approval.js');
 await manager.init();
+// Router mode is meant to be always-on: the process is a cheap supervisor that
+// only loads models on demand. Start it eagerly so the model picker and the UI
+// can discover local models right away; a failure must not stop the server.
+if (manager.localModels.enabled) {
+  manager.startLocal().catch(error => console.error(`[TaskBridge] Router start failed: ${error.message}`));
+}
 
 // Checkpoint and close SQLite cleanly on Ctrl+C instead of leaving a WAL tail.
+let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => {
-    try { cloudWorker?.stop(); } catch {}
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try { await cloudWorker?.stop(); } catch {}
     try { store.close(); } catch {}
     process.exit(0);
   });
@@ -425,8 +435,93 @@ async function handleRequest(req, res) {
       return json(res, 200, await runtimeControl.status());
     }
 
+    if (req.method === 'GET' && pathname === '/api/models') {
+      const refresh = url.searchParams.get('refresh') === '1';
+      return json(res, 200, await manager.listModels({ refresh }));
+    }
+
+    if (req.method === 'GET' && pathname === '/api/local') {
+      return json(res, 200, await manager.localStatus());
+    }
+    if (req.method === 'POST' && pathname === '/api/local/start') {
+      return json(res, 200, await manager.startLocal());
+    }
+    if (req.method === 'POST' && pathname === '/api/local/load') {
+      const { model } = await readJson(req);
+      return json(res, 200, await manager.loadLocalModel(model));
+    }
+    if (req.method === 'POST' && pathname === '/api/local/unload') {
+      const { model } = await readJson(req);
+      return json(res, 200, await manager.unloadLocalModel(model));
+    }
+    if (req.method === 'POST' && pathname === '/api/local/stop') {
+      return json(res, 200, await manager.stopLocal());
+    }
+    if (req.method === 'GET' && pathname === '/api/local/events') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+        'x-accel-buffering': 'no'
+      });
+      res.write('retry: 2000\n\n');
+      const send = (type, data) => { try { res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`); } catch {} };
+      const onStatus = data => send('status', data);
+      const onProgress = data => send('progress', data);
+      const onEvent = data => send('event', data);
+      manager.localModels.on('status', onStatus);
+      manager.localModels.on('progress', onProgress);
+      manager.localModels.on('event', onEvent);
+      manager.localStatus().then(status => send('snapshot', status)).catch(() => {});
+      const heartbeat = setInterval(() => { try { res.write(': ping\n\n'); } catch {} }, 15000);
+      res.on('close', () => {
+        clearInterval(heartbeat);
+        manager.localModels.off('status', onStatus);
+        manager.localModels.off('progress', onProgress);
+        manager.localModels.off('event', onEvent);
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && pathname === '/api/mcp') {
+      return json(res, 200, await manager.mcpStatus());
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/mode') {
+      const body = await readJson(req);
+      const mode = String(body.mode || '');
+      if (!['inherit', 'managed', 'off'].includes(mode)) throw Object.assign(new Error('Неизвестный режим MCP.'), { code: 'INPUT_INVALID' });
+      config.pi = config.pi || {};
+      config.pi.mcp = { ...(config.pi.mcp || {}), mode };
+      await saveConfig(rootDir, config);
+      await manager.mcp.ensureReady().catch(() => {});
+      return json(res, 200, await manager.mcpStatus());
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/import') {
+      return json(res, 200, await manager.importMcp());
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/servers') {
+      const body = await readJson(req);
+      if (typeof body.name !== 'string' || !body.name.trim()) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await manager.setMcpServer(body.name.trim(), body.enabled !== false));
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/tools') {
+      const body = await readJson(req);
+      if (typeof body.server !== 'string' || !body.server.trim()) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await manager.setMcpTool(body.server.trim(), body.tool, body.enabled !== false));
+    }
+
     if (req.method === 'GET' && pathname === '/api/info') {
-      const [busy, modelReady, engine] = await Promise.all([manager.runtimeManager.getBusyStatus(), manager.runtimeManager.isReady(), manager.runtimeManager.getEngineInfo()]);
+      const [busy, modelReady, engine, local] = await Promise.all([
+        manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus()
+      ]);
+      const settings = await readPiSettings().catch(() => null);
+      const warnings = [];
+      if (imagesBlocked(settings)) {
+        warnings.push({
+          code: 'PI_IMAGES_BLOCKED',
+          message: 'В настройках Pi включён images.blockImages — Pi заменяет любые картинки на текст «Image reading is disabled.» до отправки модели. Выключите его командой /images или в /settings, иначе никакая vision-модель не увидит вложения.'
+        });
+      }
       return json(res, 200, {
         name: 'TaskBridge MVP',
         build,
@@ -437,6 +532,8 @@ async function handleRequest(req, res) {
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
         engine,
+        local,
+        warnings,
         fileLimits: FILE_LIMITS
       });
     }
@@ -563,22 +660,22 @@ async function handleRequest(req, res) {
       return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken));
     }
 
-    match = pathname.match(/^\/api\/tasks\/([^/]+)\/auto-compaction$/);
-    if (req.method === 'POST' && match) {
-      const body = await readJson(req);
-      return json(res, 200, await manager.setAutoCompaction(match[1], body.enabled));
-    }
-
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 200, await manager.setModel(match[1], body));
+      return json(res, 200, await manager.setModel(match[1], body.provider, body.id || body.modelId));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/thinking$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 200, await manager.setThinking(match[1], body.level));
+      return json(res, 200, await manager.setThinkingLevel(match[1], body.level));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/auto-compaction$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setAutoCompaction(match[1], body.enabled));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/compact$/);
@@ -663,7 +760,7 @@ async function handleRequest(req, res) {
     if (res.headersSent) { res.destroy(); return; }
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
-      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED'].includes(error.code) ? 400
+      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND'].includes(error.code) ? 400
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN'].includes(error.code) ? 403

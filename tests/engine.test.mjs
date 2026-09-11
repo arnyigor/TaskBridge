@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyEngineError, parseRetryAfterMs } from '../src/engine.mjs';
-import { chooseEngine, profileList } from '../src/dispatcher.mjs';
+import { chooseEngine, profileList, usesLocalRuntime, resolveRouterModel } from '../src/dispatcher.mjs';
 
 test('provider failures map to stable engine codes', () => {
   assert.equal(classifyEngineError('You exceeded your current quota, please check your plan').code, 'QUOTA_EXCEEDED');
@@ -58,4 +58,37 @@ test('AUTO disabled keeps the configured default and never switches', () => {
 test('profile list accepts the object form and drops disabled entries', () => {
   const list = profileList({ profiles: { a: { command: 'x' }, b: { command: 'y', enabled: false }, c: {} } });
   assert.deepEqual(list.map(p => p.id), ['a']);
+});
+
+test('the local runtime gate applies only to the configured local provider', () => {
+  const localRuntime = { provider: 'llamacpp' };
+  assert.equal(usesLocalRuntime(localRuntime, 'llamacpp'), true);
+  assert.equal(usesLocalRuntime(localRuntime, 'ollama'), false);
+  assert.equal(usesLocalRuntime(localRuntime, null), true); // unknown model → previous behaviour
+  // Default provider when localRuntime.provider is absent.
+  assert.equal(usesLocalRuntime({}, 'llamacpp'), true);
+  assert.equal(usesLocalRuntime({}, 'openai'), false);
+  // The router provider (llama.cpp) and the hand-written one are the same local endpoint.
+  assert.equal(usesLocalRuntime({ provider: 'llama.cpp' }, 'llamacpp'), true);
+  assert.equal(usesLocalRuntime({ provider: 'llamacpp' }, 'llama.cpp'), true);
+});
+
+test('AUTO dispatcher accepts router model ids when no profiles exist', () => {
+  const localRuntime = {
+    provider: 'llama.cpp',
+    defaultProfile: 'qwen-text',
+    auto: { enabled: true, visionProfile: 'qwen-vision', textProfile: 'qwen-text' }
+  };
+  assert.equal(chooseEngine(localRuntime, { files: [{ name: 'a.png' }] }).profileId, 'qwen-vision');
+  assert.equal(chooseEngine(localRuntime, { files: [] }).profileId, 'qwen-text');
+});
+
+test('router model resolution picks the AUTO preset or the default preset', () => {
+  const localRuntime = { defaultProfile: 'qwen-text' };
+  // AUTO on → the engine already chose vision/text for this task.
+  assert.deepEqual(resolveRouterModel({ auto: true, profileId: 'qwen-vision' }, localRuntime, 'llama.cpp'), { provider: 'llama.cpp', id: 'qwen-vision' });
+  // AUTO off → the configured default preset wins over the engine fallback.
+  assert.deepEqual(resolveRouterModel({ auto: false, profileId: 'legacy-text' }, localRuntime, 'llama.cpp'), { provider: 'llama.cpp', id: 'qwen-text' });
+  assert.equal(resolveRouterModel({ auto: false, profileId: null }, {}, 'llama.cpp'), null);
+  assert.equal(resolveRouterModel({ auto: true, profileId: 'x' }, localRuntime, null), null);
 });

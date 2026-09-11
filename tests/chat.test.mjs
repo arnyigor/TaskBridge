@@ -114,8 +114,9 @@ test('steering during a message does not move its remaining text into the next r
   assert.equal(state.current.text, '');
 });
 
-async function ui() {
+async function ui({ coarsePointer = false } = {}) {
   const { document, window } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
+  window.matchMedia = () => ({ matches: coarsePointer }); // desktop (fine pointer) unless a test opts in
   const intervals = [];
   const streams = [];
   const tasks = { a: task('a'), b: { ...task('b'), prompt: 'Другой чат' } };
@@ -146,7 +147,7 @@ async function ui() {
   });
   const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
   vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage};', context);
-  return { ...context.testing, document, streams, tasks, setFetchHook: hook => { fetchHook = hook; } };
+  return { ...context.testing, document, window, streams, tasks, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -177,6 +178,22 @@ test('DOM: a slow history response cannot replace a newer selected chat', async 
   assert.equal(app.document.getElementById('taskTitle').textContent, 'Другой чат');
   assert.equal(app.streams.length, 1);
   assert.match(app.streams[0].url, /\/b\/stream/);
+});
+
+test('DOM: Enter submits on desktop but only inserts a newline on touch devices', async () => {
+  for (const coarsePointer of [false, true]) {
+    const app = await ui({ coarsePointer });
+    const form = app.document.getElementById('form');
+    let submitted = 0;
+    form.requestSubmit = () => { submitted += 1; };
+    const prompt = app.document.getElementById('prompt');
+    const event = new app.window.Event('keydown');
+    event.key = 'Enter';
+    event.shiftKey = false;
+    event.isComposing = false;
+    prompt.dispatchEvent(event);
+    assert.equal(submitted, coarsePointer ? 0 : 1, `coarsePointer=${coarsePointer}`);
+  }
 });
 
 test('DOM: late poll and late stream cannot revive a chat after New session', async () => {
