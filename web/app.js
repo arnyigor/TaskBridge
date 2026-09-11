@@ -60,17 +60,25 @@ async function copyText(text) {
   }
 }
 
+// One call path for both realities (docs/cloud-ui.md). The local transport talks
+// HTTP to this server; the cloud transport sends protocol frames to the machine
+// and answers a PC-only screen with NOT_SUPPORTED instead of pretending.
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    ...options,
-    headers: { 'content-type': 'application/json', ...(options.headers || {}) }
-  });
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    if (body.code === 'AUTH_REQUIRED') showAuthGate();
-    throw new Error(`${body.code || res.status}: ${body.error || res.statusText}`);
+  const method = options.method || (options.body === undefined ? 'GET' : 'POST');
+  const raw = options.body;
+  // Call sites hand over an already serialized body; the transport takes objects
+  // (and the cloud transport needs the structure, not a string).
+  const body = raw === undefined ? undefined : (typeof raw === 'string' ? safeParse(raw) : raw);
+  try {
+    return await transport.request(method, path, body);
+  } catch (error) {
+    if (error.code === 'AUTH_REQUIRED') showAuthGate();
+    throw new Error(`${error.code || 'HTTP_ERROR'}: ${error.message}`);
   }
-  return body;
+}
+
+function safeParse(text) {
+  try { return JSON.parse(text); } catch { return undefined; }
 }
 
 /* ---------------- chat rendering ---------------- */
@@ -1021,6 +1029,8 @@ async function uploadSelectedFiles() {
   for (const file of files) form.append('files', file, file.name);
   // No content-type header: the browser sets the multipart boundary itself.
   // The custom header is a CSRF guard (see AccessControl.checkOrigin).
+  // Uploads are multipart and stay on HTTP: a cloud page uploads through the
+  // machine, which is a separate step (see docs/cloud-ui.md § files).
   const res = await fetch('/api/uploads', { method: 'POST', headers: { 'x-taskbridge-upload': '1' }, body: form });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {

@@ -604,3 +604,37 @@ test('DOM: several queued messages are summarised with their count', async () =>
   assert.equal(row.classList.contains('hidden'), false);
   assert.match(row.textContent, /В очереди \(2\): первое/);
 });
+
+test('DOM: an ordinary request goes through the transport, not straight to fetch', async () => {
+  const app = await ui();
+  const seen = [];
+  app.setFetchHook(async (url, options = {}) => {
+    seen.push({ url, method: options.method, body: options.body });
+    if (String(url).includes('/api/tasks')) return { ok: true, json: async () => ([]) };
+    return null;
+  });
+  await app.loadTasks();
+  const call = seen.find(entry => String(entry.url).endsWith('/api/tasks'));
+  assert.ok(call, JSON.stringify(seen));
+  assert.equal(call.method, 'GET');
+
+  // A body handed over as a JSON string arrives as an object, so a transport that
+  // is not HTTP (the cloud relay) can carry the structure.
+  const bodies = [];
+  app.setFetchHook(async (url, options = {}) => {
+    bodies.push({ url, method: options.method, body: options.body });
+    return { ok: true, json: async () => ({ id: 'a', status: 'QUEUED' }) };
+  });
+  await app.sendContinueMessage('a', 'привет', {});
+  const posted = bodies.find(entry => String(entry.url).includes('/message'));
+  assert.equal(posted.method, 'POST');
+  assert.equal(JSON.parse(posted.body).text, 'привет');
+
+  // An API failure keeps its code, and the auth gate still appears for AUTH_REQUIRED.
+  app.setFetchHook(async () => ({ ok: false, status: 401, json: async () => ({ code: 'AUTH_REQUIRED', error: 'нужен код' }) }));
+  await assert.rejects(async () => {
+    try { await app.loadTasks(); }
+    catch (error) { assert.match(error.message, /AUTH_REQUIRED/); throw error; }
+  }, /AUTH_REQUIRED/);
+  assert.equal(app.document.getElementById('authGate').classList.contains('hidden'), false, 'the pairing gate is shown');
+});
