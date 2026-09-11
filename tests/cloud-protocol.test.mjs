@@ -12,6 +12,7 @@ import {
 test('every message type the protocol names can be built and round-tripped', () => {
   const fields = {
     MACHINE_STATUS: { machineId: 'home-pc' },
+    PEER_JOINED: { machineId: 'home-pc' },
     SESSION_LIST: { machineId: 'home-pc' },
     ATTACH: { machineId: 'home-pc', sessionId: 'tb_1' },
     DETACH: { machineId: 'home-pc', sessionId: 'tb_1' },

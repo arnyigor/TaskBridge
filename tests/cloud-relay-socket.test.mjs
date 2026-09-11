@@ -45,7 +45,10 @@ test('a machine and a client exchange frames through the relay socket', async t 
   send(machine, hello('machine', 'home-pc'));
   send(client, hello('client', 'home-pc', { deviceId: 'phone-1' }));
   await waitFor(() => client.received.some(frame => frame.type === 'AUTH_OK'), 'the client handshake');
-  assert.equal(machine.received.at(-1).type, 'AUTH_OK');
+  // The machine also learns that a peer joined, which is how it knows to push
+  // its status to a client that arrived later.
+  await waitFor(() => machine.received.some(frame => frame.type === 'AUTH_OK'), 'the machine handshake');
+  await waitFor(() => machine.received.some(frame => frame.type === 'PEER_JOINED'), 'the peer notice');
 
   // A command reaches the machine untouched, including a sealed payload.
   send(client, createEnvelope({ type: 'COMMAND', machineId: 'home-pc', commandId: 'c-1', payload: 'ciphertext' }));

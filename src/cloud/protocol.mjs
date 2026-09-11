@@ -24,6 +24,7 @@ export const MESSAGE_TYPES = new Set([
   'AUTH_OK',      // machine/client → peer: credentials accepted
   'AUTH_FAIL',    // → peer: rejected, with a reason code
   'MACHINE_STATUS', // machine → clients: online/offline, protocol version, load
+  'PEER_JOINED',  // relay → machine: an authenticated client joined (push status)
   'SESSION_LIST',   // machine → clients: sessions a client may attach to
   'ATTACH',       // client → machine: start receiving this session
   'DETACH',       // client → machine: stop receiving it
@@ -75,6 +76,7 @@ const REQUIRED = {
   AUTH_OK: [],
   AUTH_FAIL: [],
   MACHINE_STATUS: ['machineId'],
+  PEER_JOINED: ['machineId'],
   SESSION_LIST: ['machineId'],
   ATTACH: ['machineId', 'sessionId'],
   DETACH: ['machineId', 'sessionId'],

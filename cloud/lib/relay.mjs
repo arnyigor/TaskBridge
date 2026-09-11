@@ -113,6 +113,10 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
       } else {
         if (!clients.has(frame.machineId)) clients.set(frame.machineId, new Set());
         clients.get(frame.machineId).add(connection);
+        // Tell the machine a peer appeared: it owns status and session lists, so
+        // the relay asks it to speak instead of fabricating state itself.
+        const machine = machines.get(frame.machineId);
+        if (machine) send(machine, createEnvelope({ type: 'PEER_JOINED', machineId: frame.machineId, to: session.deviceId || null, payload: { deviceId: session.deviceId || null } }));
         logger('info', { event: 'client_online', machineId: frame.machineId, deviceId: session.deviceId });
       }
       send(connection, createEnvelope({ type: 'AUTH_OK', machineId: frame.machineId, payload: { role, protocolVersion: frame.v, deviceId: session.deviceId } }));
@@ -165,6 +169,10 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
       if (session.role === 'machine') await state.setPresence(session.machineId, config.presenceTtlMs);
 
       if (session.role === 'client') {
+        // Stamp the sender so the machine can answer this device only; the relay
+        // knows the device from the authenticated HELLO, the client does not get
+        // to claim it.
+        if (session.deviceId) frame.from = session.deviceId;
         if (['ATTACH', 'DETACH'].includes(frame.type)) {
           if (frame.type === 'ATTACH') {
             if (session.attached.size >= config.maxAttachedSessions && !session.attached.has(frame.sessionId)) {
