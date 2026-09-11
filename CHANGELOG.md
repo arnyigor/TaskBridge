@@ -33,6 +33,25 @@ Pi и висящего llama.cpp-роутера.
   дизайн и альтернативы — в `docs/agent-host-separation.md` и README.
 - Покрытие: 2 теста в `tests/manager.test.mjs` (graceful и принудительный kill).
 
+## 0.9.3-dev — AgentHost через IPC (шаг 5c, P-2 фундамент)
+
+Разделение host ⇄ gateway начинает жить двумя файлами поверх транспорта
+`src/ipc.mjs`.
+
+- `src/agent-host.mjs`: `AgentHost` собирает агентную сторону (lock, store,
+  TaskManager, router) и отдаёт её через IPC-диспетчер команд (задачи, события,
+  модель, approvals, mcp) плюс форвардит `task-event` в gateway.
+- `src/host.mjs`: отдельный headless-процесс владельца агента (без HTTP),
+  токен подписан в `data/host-ipc.json`. `server.mjs` не тронут — legacy-монолит
+  остаётся рабочим дефолтом и откатом до полного переключения.
+- Транспорт `src/ipc.mjs`: token-auth, newline-JSON поверх loopback TCP,
+  REQ/RES + EVENT/SUBSCRIBE, клиент с реконнектом (нужно для переживания
+  рестарта gateway). Отдельно проверено в `tests/ipc.test.mjs`.
+- Фикс, найденный при этом: `TaskManager.close()` теперь дренит запущенный pump
+  до закрытия store (`#drainPump`) и `#executeInitial`/`#setStatus` прерываются
+  при `closing`, чтобы фоновая запись события не упала на закрытый store.
+- Покрытие: `tests/ipc.test.mjs` (5), `tests/agent-host.test.mjs` (2).
+
 ## 0.9.2 — 2026-xx-xx
 
 Очередь: сообщения больше не висят в ней без причины (по жалобе «встают в

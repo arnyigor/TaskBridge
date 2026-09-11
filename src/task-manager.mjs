@@ -144,14 +144,16 @@ export class TaskManager extends EventEmitter {
   }
 
   // Graceful shutdown of the agent side: stop taking new work, stop the queue
-  // timer, then close each live Pi session (close stdin, force-kill the process
-  // tree if it does not exit in time, mirroring RuntimeControl.closePi) and
-  // stop the always-on router. Tolerant by design: shutdown must never throw
-  // its way to process.exit. The cloud worker / relay are owned by the caller
-  // (the server / future host) and are closed separately.
+  // timer, drain any pump that is already in flight (so it cannot write to the
+  // store after we close it), then close each live Pi session (close stdin,
+  // force-kill the process tree if it does not exit in time, mirroring
+  // RuntimeControl.closePi) and stop the always-on router. Tolerant by design:
+  // shutdown must never throw its way to process.exit. The cloud worker / relay
+  // are owned by the caller (the server / future host) and are closed separately.
   async close() {
     this.closing = true;
     if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null; }
+    await this.#drainPump(2000);
     for (const [taskId, entry] of this.runtimes) {
       try {
         if (entry?.eventChain) await entry.eventChain;
@@ -169,6 +171,16 @@ export class TaskManager extends EventEmitter {
     try {
       if (this.localModels?.enabled) await this.localModels.stop();
     } catch { /* best effort */ }
+  }
+
+  // Waits until an in-flight pump has finished (bounded), so store.write from a
+  // pump cannot race store.close(). The pump aborts promptly because closing is
+  // latched and #executeInitial/#setStatus early-return on it.
+  async #drainPump(timeoutMs) {
+    const deadline = Date.now() + timeoutMs;
+    while (this.pumping && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
   }
 
   // Resolves when a child process has exited, else false after `ms`.
@@ -648,6 +660,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #executeInitial(task) {
+    if (this.closing) return;
     try {
       await this.#setStatus(task, 'PREPARING', 'Preparing workspace');
       const prepared = await this.#prepareWorkspace(task);
@@ -1617,6 +1630,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #setStatus(task, status, current) {
+    if (this.closing) return;
     if (this.deleted.has(task.id)) return;
     // The UI shows "работает 12 с", so the moment of the transition matters.
     if (task.status !== status) task.statusChangedAt = now();
