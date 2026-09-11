@@ -61,6 +61,7 @@ export function buildDispatcher({ manager, store }) {
       // --- events (read-only; host is the only SQLite writer) -------------------
       case 'events': return store.readEvents(args.id, args.count, args.after);
       case 'commandStatus': return m.commandStatus(args.commandId);
+      case 'listRuns': return m.listRuns(args.id, args.limit);
 
       default:
         throw Object.assign(new Error(`unknown command: ${name}`), { code: 'NOT_IMPLEMENTED' });

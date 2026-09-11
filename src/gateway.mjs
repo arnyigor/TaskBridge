@@ -211,6 +211,7 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
             return ok(events);
           }
           if (a1 === 'state' && !a2) return ok({ state: await agent.request('state', { id }) });
+          if (a1 === 'runs' && !a2 && method === 'GET') return ok({ runs: await agent.request('listRuns', { id, limit: Number(q.get('limit')) || 50 }) });
           if (a1 === 'stream' && !a2) return handleStream(res, id, Number(req.headers['last-event-id'] || q.get('after') || 0));
           if (a1 === 'approvals' && !a2) return ok(await agent.request('listApprovals', { id }));
           return notFound(res);

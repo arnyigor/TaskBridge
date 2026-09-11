@@ -159,6 +159,26 @@ durable ledger.
 Покрытие: +1 тест (cancel-идемпотентность + CONFLICT по смене намерения).
 Полный набор: 339 тестов зелёные.
 
+## 0.9.3-dev — SessionManager/Run/PiRunner (этап 2 ТЗ, аддитивно)
+
+Фундамент этапа 2 без переноса исполнения — текущая модель (одна задача =
+одна сессия) не меняется, живой сервер не затрагивается.
+
+- **PiRunner + RunnerRegistry** (`src/runners/pi-runner.mjs`): тонкий адаптер
+  над `PiRpcSession` + набор capabilities (`steer/compact/model/thinking/
+  autoCompaction/approvals/files/resume`), реестр `registerRunner/getRunner/
+  listRunners` для будущих runners (Claude/Codex).
+- **SessionManager** (`src/session-manager.mjs`): read-only session-представление
+  над TaskManager с runner-resolution (MVP: session = задача).
+- **Run-ledger** в SQLite (`runs`): таблица `id/task_id/session_id/kind/status/
+  started_at/finished_at/data`; методы `recordRun/getRun/listRuns`; best-effort
+  запись на границах хода (RUNNING → SUCCEEDED/FAILED/CANCELLED), никогда не
+  влияет на исполнение. Чтение: `manager.listRuns`, маршрут `GET /api/tasks/:id/
+  runs` (монолит + gateway), диспетчер `listRuns`.
+
+Покрытие: +6 тестов (PiRunner/registry, runs-ledger store, SessionManager,
+  сквозная запись Run). Полный набор: 346 тестов (2 skip).
+
 ## 0.9.3-dev — clientId + статус-контракт команд (этап 3 ТЗ)
 
 Команды (message/create/cancel/apply) теперь несут `clientId` и имеют явный

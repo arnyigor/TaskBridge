@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS commands (
   client_id TEXT,
   status TEXT
 );
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  session_id TEXT,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  data TEXT
+);
+CREATE INDEX IF NOT EXISTS runs_task ON runs (task_id, started_at DESC);
 `;
 
 function readJsonSync(file) {
@@ -136,6 +147,33 @@ export class TaskStore {
   pruneCommands(olderThanMs) {
     const cutoff = Date.now() - olderThanMs;
     this.db.prepare('DELETE FROM commands WHERE done = 1 AND at < ?').run(cutoff);
+  }
+
+  // Run ledger (TZ stage 2): one prompt/repair/retry turn, with its own status
+  // and timing, kept next to the task without changing execution.
+  recordRun(run) {
+    this.db.prepare(`INSERT INTO runs (id, task_id, session_id, kind, status, started_at, finished_at, data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET status=excluded.status, finished_at=excluded.finished_at, data=excluded.data`)
+      .run(String(run.id), String(run.taskId), run.sessionId ?? null, String(run.kind || 'prompt'), String(run.status || 'RUNNING'),
+        String(run.startedAt || new Date().toISOString()), run.finishedAt ?? null, run.data == null ? null : JSON.stringify(run.data));
+  }
+
+  getRun(id) {
+    const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(String(id));
+    return row ? this.#runRow(row) : null;
+  }
+
+  listRuns(taskId, limit = 50) {
+    const rows = this.db.prepare('SELECT * FROM runs WHERE task_id = ? ORDER BY started_at DESC LIMIT ?').all(String(taskId), Math.max(1, Number(limit) || 50));
+    return rows.map((row) => this.#runRow(row));
+  }
+
+  #runRow(row) {
+    return {
+      id: row.id, taskId: row.task_id, sessionId: row.session_id, kind: row.kind, status: row.status,
+      startedAt: row.started_at, finishedAt: row.finished_at, data: row.data ? JSON.parse(row.data) : null,
+    };
   }
 
   // Adds client_id/status to the commands table for databases created before

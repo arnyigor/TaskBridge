@@ -44,6 +44,9 @@ function summarizePiEvent(frame) {
   }
 }
 
+// Statuses that end a run (TZ stage 2 telemetry).
+const RUN_TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
+
 export class TaskManager extends EventEmitter {
   constructor(config, dataRoot, store) {
     super();
@@ -55,6 +58,9 @@ export class TaskManager extends EventEmitter {
     this.runtimes = new Map();
     this.queue = [];
     this.activeTaskId = null;
+    // Open run ids per task (stage 2 telemetry): kept out of the task record
+    // so they never leak into saved/public task state.
+    this.openRuns = new Map();
     // Files of prompts queued before their workspace existed: raw input kept in
     // memory only, never written into the task record where every save would
     // carry them.
@@ -1110,6 +1116,7 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
       await this.#writeResult(task);
       await this.#event(task, failed ? 'TASK_FAILED' : 'TASK_SUCCEEDED', task.current);
+      this.#finishRun(task, task.status);
     } finally {
       if (runtime) runtime.verifying = false;
     }
@@ -1261,6 +1268,7 @@ export class TaskManager extends EventEmitter {
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task);
     await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
+    this.#finishRun(task, 'CANCELLED');
   }
 
   async deleteTask(id) {
@@ -1764,11 +1772,38 @@ export class TaskManager extends EventEmitter {
     if (this.deleted.has(task.id)) return;
     // The UI shows "работает 12 с", so the moment of the transition matters.
     if (task.status !== status) task.statusChangedAt = now();
+    // Best-effort run ledger (stage 2): one run per RUNNING stint. Never lets
+    // telemetry failure affect execution.
+    if (status === 'RUNNING' && task.status !== 'RUNNING') this.#startRun(task);
+    else if (RUN_TERMINAL.has(status)) this.#finishRun(task, status);
     task.status = status;
     task.current = current;
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
     await this.#event(task, 'STATUS', current, { status }, false);
+  }
+
+  // --- run ledger (stage 2, best-effort telemetry) -------------------------
+  #startRun(task) {
+    const id = crypto.randomUUID();
+    this.openRuns.set(task.id, id);
+    try {
+      this.store.recordRun({ id, taskId: task.id, sessionId: task.id, kind: 'prompt', status: 'RUNNING', startedAt: new Date().toISOString() });
+    } catch { /* telemetry only */ }
+  }
+
+  #finishRun(task, status) {
+    const id = this.openRuns.get(task.id);
+    if (!id) return;
+    this.openRuns.delete(task.id);
+    try {
+      this.store.recordRun({ id, taskId: task.id, sessionId: task.id, kind: 'prompt', status, finishedAt: new Date().toISOString() });
+    } catch { /* telemetry only */ }
+  }
+
+  // Runs recorded for a task, newest first (read-only; stage 2).
+  listRuns(taskId, limit = 50) {
+    try { return this.store.listRuns(taskId, limit); } catch { return []; }
   }
 
   async #fail(task, error) {

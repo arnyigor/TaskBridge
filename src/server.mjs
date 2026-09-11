@@ -818,6 +818,11 @@ async function handleRequest(req, res) {
       return json(res, 200, { state: await manager.state(match[1]) });
     }
 
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/runs$/);
+    if (req.method === 'GET' && match) {
+      return json(res, 200, { runs: manager.listRuns(match[1], Number(q.get('limit')) || 50) });
+    }
+
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && match) {
       const c = await readJson(req);
