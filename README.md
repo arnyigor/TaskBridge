@@ -642,6 +642,7 @@ PWA с живым стримингом ответа, tool-карточками, 
 
 Полная документация, API и список известных пробелов (WebSocket-фастпас,
 Postgres-адаптер) — в [`docs/cloud-transport.md`](docs/cloud-transport.md).
+Текущая переделка облака: протокол — [`docs/cloud-protocol.md`](docs/cloud-protocol.md), решение по хранилищу — [`docs/cloud-integration-decision.md`](docs/cloud-integration-decision.md), сведение локального и облачного интерфейса в один — [`docs/cloud-ui.md`](docs/cloud-ui.md).
 
 ---
 
