@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,7 +42,7 @@ test('gateway proxies HTTP to the host and streams its events over SSE', async t
   assert.equal(one.prompt, 'hello');
 
   const events = await (await fetch(`${base}/api/tasks/a/events?after=0`)).json();
-  assert.ok(Array.isArray(events.events), 'event page is an array');
+  assert.ok(Array.isArray(events), 'event page is a bare array (monolith contract)');
 
   // Static shell is served.
   const shell = await fetch(`${base}/`);
@@ -76,4 +77,41 @@ test('gateway proxies HTTP to the host and streams its events over SSE', async t
   // blocked waiting on an open stream.
   ctrl.abort();
   await sleep(80);
+});
+
+test('gateway stages uploads on shared disk and serves tail-windowed events', async t => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'gateway-upload-'));
+  t.after(async () => { try { await fs.rm(dataRoot, { recursive: true, force: true }); } catch {} });
+
+  const host = new AgentHost({ config: { projects: [{ id: 'p', path: dataRoot, useWorktree: false }] }, dataRoot, rootDir: ROOT });
+  await host.init();
+  const { port: hostPort } = await host.startIpc();
+  t.after(async () => { await host.close(); });
+
+  const gateway = await createGateway({ config: { projects: [], server: { port: 8787, maxUploadMb: 1 } }, rootDir: ROOT, dataRoot, hostPort, port: 0, tokenFile: host.tokenFile });
+  t.after(async () => { await gateway.close(); });
+  const base = gateway.baseUrl;
+
+  const task = { id: 'u', createdAt: new Date().toISOString(), status: 'SUCCEEDED', workspacePath: dataRoot, prompt: 'u', files: [], assistantText: '', thinkingText: '', compaction: { count: 0 } };
+  await host.store.create(task);
+  host.manager.tasks.set('u', task);
+
+  // Upload through the gateway (multipart on the shared data root).
+  const fd = new FormData();
+  fd.append('file', new Blob(['hello upload']), 'note.txt');
+  const up = await (await fetch(`${base}/api/uploads`, { method: 'POST', body: fd })).json();
+  assert.ok(up.token, 'upload token returned');
+  assert.equal(up.files.length, 1);
+  assert.equal(up.files[0].name, 'note.txt');
+  // Staged on the shared disk, so the host can resolve it by token later.
+  assert.ok(fsSync.existsSync(path.join(dataRoot, 'uploads', up.token)), 'file staged under the shared uploads dir');
+
+  // Tail-windowed event page carries reachedStart (monolith contract).
+  const tailed = await (await fetch(`${base}/api/tasks/u/events?tail=2`)).json();
+  assert.ok(Array.isArray(tailed.events), 'tail result has .events array');
+  assert.equal(tailed.reachedStart, true, 'empty history reports reachedStart');
+
+  // A plain after-cursor poll is a bare array.
+  const plain = await (await fetch(`${base}/api/tasks/u/events?after=0`)).json();
+  assert.ok(Array.isArray(plain), 'plain events is a bare array');
 });

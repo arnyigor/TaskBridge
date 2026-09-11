@@ -22,6 +22,10 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GatewayClient, readToken } from './ipc.mjs';
 import { loadConfig } from './config.mjs';
+import { multipartBoundary } from './multipart.mjs';
+import { UploadStore } from './uploads.mjs';
+import { trimStreamingDeltas } from './event-trim.mjs';
+import { windowByTurns } from './event-window.mjs';
 
 const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const WEB_DIR = path.join(ROOT_DIR, 'web');
@@ -78,12 +82,14 @@ function serveStatic(webDir, req, res, pathname) {
 // `options` (all optional except config):
 //   dataRoot, rootDir, hostPort, port, tokenFile, store.
 // Returns { server, baseUrl, agent, close } once connected and listening.
-export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_DIR, dataRoot = path.join(ROOT_DIR, 'data'), hostPort, port, tokenFile = path.join(path.join(ROOT_DIR, 'data'), 'host-ipc.json'), store = null, maxEvents = 20000 }) {
-  const { TaskStore } = await import('./task-store.mjs');
-  const dataStore = store || new TaskStore(dataRoot, {
-    synchronous: config.server?.sqlite?.synchronous,
-    busyTimeoutMs: config.server?.sqlite?.busyTimeoutMs,
-  });
+export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_DIR, dataRoot = path.join(ROOT_DIR, 'data'), hostPort, port, tokenFile = path.join(path.join(ROOT_DIR, 'data'), 'host-ipc.json'), maxEvents = 20000 }) {
+  // The gateway writes uploads straight to the shared data root (uploads are
+  // files on disk, not task state), so binary never crosses the IPC; the host
+  // resolves the staged files by token from the same directory.
+  const uploadMb = Number(config.server?.maxUploadMb || 0);
+  const uploads = new UploadStore(dataRoot, uploadMb > 0
+    ? { maxFileBytes: uploadMb * 1024 * 1024, maxTotalBytes: uploadMb * 2 * 1024 * 1024 }
+    : {});
 
   const token = readToken(tokenFile);
   if (!token) throw new Error(`no IPC token at ${tokenFile} — start the host first`);
@@ -161,6 +167,12 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
       if (method === 'GET' && pathname === '/api/tasks') return ok(await agent.request('listTasks'));
       if (method === 'POST' && pathname === '/api/tasks') return json(res, 201, await agent.request('createTask', { input: await readBody() }));
       if (method === 'POST' && pathname === '/api/tasks/from-session') return json(res, 201, await agent.request('importSession', { input: await readBody() }));
+      if (method === 'POST' && pathname === '/api/uploads') {
+        const boundary = multipartBoundary(req.headers['content-type']);
+        if (!boundary) throw Object.assign(new Error('Ожидается multipart/form-data с boundary.'), { code: 'INPUT_INVALID' });
+        const token = uploads.newToken();
+        return json(res, 201, await uploads.receive(req, boundary, token));
+      }
 
       const taskPath = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/([^/]+))?(?:\/([^/]+))?$/);
       if (taskPath) {
@@ -173,7 +185,25 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
         if (method === 'DELETE' && !a1) return ok(await agent.request('deleteTask', { id }));
 
         if (method === 'GET') {
-          if (a1 === 'events' && !a2) return ok({ events: await agent.request('events', { id, count: Math.max(1, Number(q.get('limit')) || 200), after: Number(q.get('after') || 0) }) });
+          if (a1 === 'events' && !a2) {
+            if (!(await agent.request('getTask', { id }))) { notFound(res); return; }
+            const after = Number(q.get('after') ?? 0);
+            if (!Number.isSafeInteger(after) || after < 0) throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
+            const requested = q.has('limit') ? Number(q.get('limit')) : 500;
+            if (!Number.isSafeInteger(requested) || requested < 0) throw Object.assign(new Error('Invalid event limit'), { code: 'INPUT_INVALID' });
+            const limit = requested === 0 ? maxEvents : Math.min(requested, maxEvents);
+            const events = trimStreamingDeltas(await agent.request('events', { id, count: limit, after }));
+            // tail: turn-aligned windowing for paginated history load; without
+            // it return the bare array exactly like the monolith.
+            if (q.has('tail')) {
+              const tail = Number(q.get('tail'));
+              const before = q.has('before') ? Number(q.get('before')) : null;
+              if (!Number.isSafeInteger(tail) || tail <= 0) throw Object.assign(new Error('Invalid tail count'), { code: 'INPUT_INVALID' });
+              if (before != null && (!Number.isSafeInteger(before) || before < 0)) throw Object.assign(new Error('Invalid before cursor'), { code: 'INPUT_INVALID' });
+              return ok(windowByTurns(events, tail, before));
+            }
+            return ok(events);
+          }
           if (a1 === 'state' && !a2) return ok({ state: await agent.request('state', { id }) });
           if (a1 === 'stream' && !a2) return handleStream(res, id, Number(req.headers['last-event-id'] || q.get('after') || 0));
           if (a1 === 'approvals' && !a2) return ok(await agent.request('listApprovals', { id }));
@@ -233,7 +263,6 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
     // Force SSE/responses closed so server.close resolves even with an
     // operator's tab still mid-stream on shutdown.
     for (const socket of sockets) { try { socket.destroy(); } catch {} }
-    try { dataStore.close(); } catch {}
     await new Promise((resolve) => server.close(resolve));
   }
 
