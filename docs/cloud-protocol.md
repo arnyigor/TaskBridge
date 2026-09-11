@@ -109,7 +109,16 @@ connect ──► HELLO ──► AUTH ──► ATTACH(machine/session) ──�
 
 1. **Этот документ и модуль протокола** — формат кадра, валидация,
    идемпотентность (`src/cloud/protocol.mjs`).
-2. Релей на Vercel + Redis (presence, комнаты), тесты с локальным WebSocket-сервером.
+2. Релей: ядро (`cloud/lib/relay.mjs`) и сокетный слой (`cloud/lib/ws.mjs`,
+   `cloud/lib/relay-server.mjs`) готовы и покрыты тестами — на реальных сокетах
+   проверены рукопожатие, фрагментированные кадры, ping/pong, слишком большой
+   кадр и разрыв машины. **Не проверено:** привязка к WebSocket на Vercel (у них
+   свой API, в public beta) и адаптер general-purpose Redis (Upstash REST);
+   состояние сейчас — `createMemoryRelayState`, то есть один процесс.
+   **Важно:** релей пока не аутентифицирует машину и устройство (протокол
+   предусматривает `AUTH_OK`/`AUTH_FAIL`, ядро доверяет `HELLO`). Публичный
+   адрес без спарки и ключей открывать нельзя — это закрывает шаг 4.
+   Изоляция машин проверена тестом: клиент одной машины не видит кадры другой.
 3. Транспорт в PWA: `LocalTransport` (localhost) и `CloudTransport` (WSS) за одним
    интерфейсом; один и тот же интерфейс для ПК и телефона.
 4. `MachineIdentity`/`DeviceIdentity`, QR-спарка, `trusted-devices.json` на ПК.

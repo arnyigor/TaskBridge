@@ -220,3 +220,32 @@ test('a malformed frame and a frame for another machine are rejected', async () 
     assert.equal(parseEnvelope(frame).v, 2);
   }
 });
+
+test('machines are isolated: a client of one never sees another machine', async () => {
+  const relay = await relayWith();
+  const machineA = connection();
+  const machineB = connection();
+  const clientA = connection();
+  const clientB = connection();
+  const sessionA = relay.attach(clientA);
+  const sessionB = relay.attach(clientB);
+  const machineSessionA = relay.attach(machineA);
+  const machineSessionB = relay.attach(machineB);
+  await machineSessionA.handle(hello('machine', 'pc-a'));
+  await machineSessionB.handle(hello('machine', 'pc-b'));
+  await sessionA.handle(hello('client', 'pc-a', { deviceId: 'device-a' }));
+  await sessionB.handle(hello('client', 'pc-b', { deviceId: 'device-b' }));
+  await sessionA.handle(createEnvelope({ type: 'ATTACH', machineId: 'pc-a', sessionId: 'tb_a' }));
+  await sessionB.handle(createEnvelope({ type: 'ATTACH', machineId: 'pc-b', sessionId: 'tb_b' }));
+
+  await machineSessionA.handle(createEnvelope({ type: 'EVENT', machineId: 'pc-a', sessionId: 'tb_a', seq: 1, payload: { secret: 'A' } }));
+  await machineSessionA.handle(createEnvelope({ type: 'MACHINE_STATUS', machineId: 'pc-a', payload: { online: true } }));
+  await machineSessionB.handle(createEnvelope({ type: 'EVENT', machineId: 'pc-b', sessionId: 'tb_b', seq: 1, payload: { secret: 'B' } }));
+
+  // Each client sees its own machine and nothing else.
+  assert.equal(clientA.frames.some(frame => frame.payload?.secret === 'B'), false);
+  assert.equal(clientB.frames.some(frame => frame.payload?.secret === 'A'), false);
+  assert.equal(clientB.frames.some(frame => frame.type === 'MACHINE_STATUS'), false, 'status of another machine stays private');
+  assert.equal(clientA.frames.filter(frame => frame.type === 'EVENT').length, 1);
+  assert.equal(clientB.frames.filter(frame => frame.type === 'EVENT').length, 1);
+});

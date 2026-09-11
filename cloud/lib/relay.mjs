@@ -184,7 +184,8 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
     session.handle = handle;
     session.close = close;
     session.hello = hello;
-    connection.onClose = () => { close(); };
+    // The transport owns the close hook (connection.onClose); the relay must not
+    // shadow it, or a live connection would be closed the moment it is attached.
     return session;
   }
 
