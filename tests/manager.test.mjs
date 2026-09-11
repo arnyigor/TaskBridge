@@ -339,7 +339,7 @@ test('send now bypasses the queue, and a queued prompt can be sent or dropped ea
   await settle();
 });
 
-test('Enter queues even when the model is free, and several messages wait in order', async t => {
+test('Enter waits its turn while the model is busy, and several messages keep their order', async t => {
   const f = await fixture(t);
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
   f.manager.queuePollMs = 5;
@@ -373,11 +373,12 @@ test('Enter queues even when the model is free, and several messages wait in ord
   assert.deepEqual(f.manager.getTask('a').pendingPrompts, []);
   assert.deepEqual(f.manager.queue, []);
 
-  // With a free model the queued prompt is picked up at once, not on the retry
-  // tick: an idle session must still feel like a normal chat.
+  // An idle session takes Enter straight away: `queue` means "wait your turn",
+  // not "always park". Parking an idle chat made every message flash «В очереди»
+  // and wait for the next pump tick.
   const quick = await f.manager.message('a', 'быстро', 'auto', [], null, { queue: true });
-  assert.deepEqual(quick.pendingPrompts.map(entry => entry.text), ['быстро']);
-  await waitFor(() => f.sent.length === 4, 'the immediate pickup');
+  assert.deepEqual(quick.pendingPrompts || [], [], 'nothing to wait for, nothing queued');
+  await waitFor(() => f.sent.length === 4, 'the immediate send');
   assert.equal(f.sent.at(-1), 'быстро');
   await settle();
 });
@@ -440,4 +441,87 @@ test('a session created while another one works waits in the queue instead of fa
   assert.ok(f.manager.queue.includes(created.id));
   const events = await f.store.readEvents(created.id, 0);
   assert.deepEqual(events.map(event => event.type), ['QUEUE_WAITING'], 'the wait is recorded, nothing was lost');
+});
+
+// The queue must be self-healing: whatever waits in it gets another chance on
+// the poll tick, even when the wake-up that should have started it was lost.
+// "Сообщение висит в очереди, хотя модель уже ответила" is exactly this failure.
+test('a wake-up that arrives while the machine is busy is not lost', async t => {
+  const f = await fixture(t);
+  f.manager.queuePollMs = 20;
+  const waitFor = async (check, what) => {
+    for (let i = 0; i < 300 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(check(), `timed out waiting for ${what}`);
+  };
+
+  // Another session owns the machine while the prompt is typed.
+  f.manager.activeTaskId = 'other';
+  const queued = await f.manager.message('a', 'подожду', 'auto', [], null, { queue: true });
+  assert.deepEqual(queued.pendingPrompts.map(entry => entry.text), ['подожду']);
+  assert.deepEqual(f.manager.queue, ['a']);
+  assert.deepEqual(f.sent, [], 'nothing goes out while the machine is taken');
+
+  // That session ends somewhere else entirely: nobody calls the pump. The queue
+  // must notice by itself instead of waiting for the next user action.
+  f.manager.activeTaskId = null;
+  await waitFor(() => f.sent.length === 1, 'the queued prompt to go out on its own');
+  assert.deepEqual(f.sent, ['подожду']);
+  assert.deepEqual(f.manager.getTask('a').pendingPrompts, []);
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('a session waiting for a busy local model does not hold up the rest of the queue', async t => {
+  const f = await fixture(t);
+  f.manager.queuePollMs = 20;
+  const waitFor = async (check, what) => {
+    for (let i = 0; i < 300 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(check(), `timed out waiting for ${what}`);
+  };
+
+  // 'a' needs the local model, which another consumer is holding.
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  await f.manager.message('a', 'жду модель', 'auto', [], null, { queue: true });
+
+  // 'b' runs on a remote model: it has nothing to wait for.
+  const remote = { ...f.task, id: 'b', status: 'SUCCEEDED', prompt: 'другая', model: { provider: 'anthropic', id: 'claude' }, pendingPrompts: null, files: [] };
+  await f.store.create(remote);
+  f.manager.tasks.set('b', remote);
+  const remoteSent = [];
+  f.manager.runtimes.set('b', {
+    pi: { closed: false, getState: async () => ({ isStreaming: false }), prompt: async text => { remoteSent.push(text); }, sendFollowUp: async text => { remoteSent.push(text); }, abort: async () => {}, killTree: async () => {} },
+    eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false
+  });
+  await f.manager.message('b', 'мне модель не нужна', 'auto', [], null, { queue: true });
+
+  await waitFor(() => remoteSent.length === 1, 'the remote session to run past the blocked one');
+  assert.deepEqual(remoteSent, ['мне модель не нужна']);
+  assert.deepEqual(f.sent, [], 'the local one is still waiting for its model');
+  assert.equal(f.manager.getTask('a').queueReason, 'MODEL_BUSY');
+  for (const waiter of f.manager.runtimes.get('b').settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  f.manager.queue = [];
+});
+
+test('a cancelled session at the head of the queue does not stall what is behind it', async t => {
+  const f = await fixture(t);
+  f.manager.queuePollMs = 20;
+  const waitFor = async (check, what) => {
+    for (let i = 0; i < 300 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(check(), `timed out waiting for ${what}`);
+  };
+
+  // A dead entry at the head (cancelled between queueing and the pump) used to
+  // stop the pump for good: it was shifted, and nothing re-ran it.
+  f.manager.activeTaskId = 'other';
+  const dead = { ...f.task, id: 'dead', status: 'CANCELLED', prompt: 'отменённая', pendingPrompts: null, files: [] };
+  await f.store.create(dead);
+  f.manager.tasks.set('dead', dead);
+  f.manager.queue.push('dead');
+  await f.manager.message('a', 'я за ним', 'auto', [], null, { queue: true });
+  assert.deepEqual(f.manager.queue, ['dead', 'a']);
+
+  f.manager.activeTaskId = null;
+  await waitFor(() => f.sent.length === 1, 'the prompt behind the cancelled session');
+  assert.deepEqual(f.sent, ['я за ним']);
+  assert.deepEqual(f.manager.queue, []);
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });

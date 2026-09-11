@@ -325,7 +325,7 @@ function setComposerMode(taskId) {
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
   const hint = isTouchDevice()
     ? 'Enter — перенос строки, отправка — кнопкой.'
-    : 'Enter — в очередь, Ctrl+Enter — отправить сразу, Shift+Enter — перенос строки.';
+    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — вклиниться сразу, Shift+Enter — перенос строки.';
   promptEl.placeholder = continuing
     ? `Сообщение продолжит текущую сессию. ${hint}`
     : `Сообщение для Pi. ${hint}`;

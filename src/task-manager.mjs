@@ -63,6 +63,7 @@ export class TaskManager extends EventEmitter {
     // the queue and retried, instead of rejecting the operator's prompt.
     this.queuePollMs = Number(config.queue?.pollMs) > 0 ? Number(config.queue.pollMs) : 1000;
     this.pumpTimer = null;
+    this.pumpAgain = false;
     this.admitting = false;
     this.deleted = new Set();
     this.eventWrites = new Map();
@@ -524,10 +525,12 @@ export class TaskManager extends EventEmitter {
       const waiting = this.pendingFiles.get(pending.id) || { files: [], uploadToken: null };
       await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
       this.pendingFiles.delete(pending.id);
+      return true;
     } catch (error) {
       // Never die silently inside the pump: explain the retry and keep the text.
       await this.#event(task, 'QUEUE_RETRY', `Не удалось отправить из очереди: ${error.message}. Сообщение осталось в очереди.`).catch(() => {});
       await restore();
+      return false;
     }
   }
 
@@ -536,39 +539,69 @@ export class TaskManager extends EventEmitter {
     // One pump at a time. Two overlapping pumps used to take two pending prompts
     // at once, so the queue could deliver them out of order (caught by
     // tests/queue-http.test.mjs).
-    if (this.pumping) return;
-    if (this.activeTaskId || this.queue.length === 0) return;
+    //
+    // A wake-up that arrives during a pump (or while a session owns the machine)
+    // must never be lost: it is remembered and acted on instead of dropped,
+    // because the thing it would have started is a message an operator is
+    // watching. Whatever stays in the queue keeps the poll timer armed, so the
+    // queue is self-healing even if some future path forgets to call #pump.
+    if (this.pumping) { this.pumpAgain = true; return; }
+    if (this.activeTaskId) { this.#schedulePump(); return; }
+    if (this.queue.length === 0) return;
     this.pumping = true;
     try {
-      await this.#pumpOnce();
+      do {
+        this.pumpAgain = false;
+        await this.#pumpOnce();
+      } while (this.pumpAgain && !this.activeTaskId && this.queue.length);
     } finally {
       this.pumping = false;
+      if (this.queue.length) this.#schedulePump();
     }
   }
 
   async #pumpOnce() {
     if (this.activeTaskId || this.queue.length === 0) return;
-    const id = this.queue[0];
-    const task = this.tasks.get(id);
-    if (!task || task.status === 'CANCELLED') { this.queue.shift(); return this.#pump(); }
-    // capacity 1: never start a request the local runtime would refuse.
-    if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) {
-      await this.#markWaiting(task, 'MODEL_BUSY');
-      this.#schedulePump();
-      return;
+    // The first entry that can actually run — not simply the first entry. A
+    // session waiting for a busy local model must not hold up one that needs a
+    // remote model (or no model at all): that head-of-line block is what made a
+    // queue look stuck long after the model had answered.
+    let index = 0;
+    let task = null;
+    while (index < this.queue.length) {
+      const candidate = this.tasks.get(this.queue[index]);
+      if (!candidate || candidate.status === 'CANCELLED' || this.deleted.has(this.queue[index])) {
+        this.queue.splice(index, 1);
+        continue;
+      }
+      // capacity 1: never start a request the local runtime would refuse.
+      if (this.#usesLocalRuntime(candidate) && (await this.local.getBusyStatus()).busy) {
+        await this.#markWaiting(candidate, 'MODEL_BUSY');
+        index++;
+        continue;
+      }
+      task = candidate;
+      break;
     }
-    this.queue.shift();
+    if (!task) { if (this.queue.length) this.#schedulePump(); return; }
+
+    const id = this.queue[index];
+    this.queue.splice(index, 1);
     task.queueReason = null;
     // A stored prompt is delivered through #message, which claims the slot
     // itself: the queue must not hold it meanwhile, nor release it afterwards.
     const delegating = Boolean(task.pendingPrompts?.length);
     this.activeTaskId = delegating ? null : id;
+    let delivered = true;
     try {
-      if (delegating) await this.#deliverPending(task);
+      if (delegating) delivered = await this.#deliverPending(task);
       else await this.#executeInitial(task);
     } finally {
       if (!delegating && this.activeTaskId === id) this.activeTaskId = null;
-      setImmediate(() => this.#pump());
+      // A delivery that failed put the prompt back: retry on the timer instead
+      // of spinning on it immediately.
+      if (delivered) setImmediate(() => this.#pump());
+      else this.#schedulePump();
     }
   }
 
@@ -1391,7 +1424,12 @@ export class TaskManager extends EventEmitter {
     // text as steering (the previous behaviour); only a busy model queues it.
     const holdingModel = !immediate && !liveStreaming && this.#usesLocalRuntime(task)
       && (await this.local.getBusyStatus()).busy;
-    if (queue || reservedElsewhere || holdingModel) {
+    // `queue` means "wait your turn instead of interrupting", not "always park".
+    // A session that is idle right now takes the prompt immediately: parking it
+    // made every Enter flash "В очереди" and put an idle chat at the mercy of
+    // the next pump tick.
+    const waitForTurn = queue && liveStreaming;
+    if (waitForTurn || reservedElsewhere || holdingModel) {
       // A prompt that came *out* of the queue must never be silently put back
       // here: that loop is what made «Отправить сейчас» look dead — the button
       // took the prompt out and this branch returned it, every time. Fail
