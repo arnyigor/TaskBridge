@@ -683,7 +683,8 @@ async function handleRequest(req, res) {
       const body = await readJson(req);
       // now: true is "send immediately, do not wait for the local model" (the
       // Ctrl+Enter path); otherwise a busy model means the prompt is queued.
-      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken, { now: body.now === true }));
+      return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken,
+        { now: body.now === true, queue: body.queue === true }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending\/send$/);

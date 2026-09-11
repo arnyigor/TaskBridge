@@ -789,7 +789,8 @@ async function refreshTask() {
 async function sendContinueMessage(taskId, text, opts = {}) {
   const version = selectionVersion;
   const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
-    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null, now: opts.now === true })
+    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null,
+      now: opts.now === true, queue: opts.queue === true })
   });
   if (version === selectionVersion) await refreshTask();
   return result;
@@ -800,13 +801,14 @@ let composerSendNow = false;
 // The queued prompt is visible with its own actions: send it early, or drop it.
 function renderQueuedPrompt() {
   const host = $('queuedPrompt');
-  const pending = currentTask?.pendingPrompt;
-  if (!pending) { host.classList.add('hidden'); host.innerHTML = ''; return; }
+  const queue = currentTask?.pendingPrompts || [];
+  if (!queue.length) { host.classList.add('hidden'); host.innerHTML = ''; return; }
   host.classList.remove('hidden');
   host.innerHTML = '';
   const text = document.createElement('div');
   text.className = 'queuedText';
-  text.textContent = `В очереди: ${String(pending.text || '').split('\n')[0]}`;
+  const first = String(queue[0].text || '').split('\n')[0];
+  text.textContent = queue.length > 1 ? `В очереди (${queue.length}): ${first}` : `В очереди: ${first}`;
   const send = document.createElement('button');
   send.type = 'button';
   send.className = 'small';
@@ -1110,7 +1112,7 @@ $('form').addEventListener('submit', async (e) => {
       updateClearButton();
     };
     if (taskId) {
-      const sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow });
+      const sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow, queue: !sendNow });
       clearComposer();
       renderQueuedPrompt();
       if (sent?.queueReason) showNotice(QUEUED_NOTICE);

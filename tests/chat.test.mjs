@@ -521,8 +521,10 @@ test('DOM: Ctrl+Enter asks for an immediate send, plain Enter accepts the queue'
   await submit('срочно', true);
 
   assert.equal(bodies.length, 2, JSON.stringify(bodies));
-  assert.equal(bodies[0].now, false, 'Enter: the prompt may be queued');
+  assert.equal(bodies[0].queue, true, 'Enter: take a place in the queue');
+  assert.ok(!bodies[0].now, 'Enter does not skip the queue');
   assert.equal(bodies[1].now, true, 'Ctrl+Enter: send immediately');
+  assert.ok(!bodies[1].queue, 'Ctrl+Enter does not queue');
   assert.equal(bodies[1].text, 'срочно');
 });
 
@@ -534,7 +536,7 @@ test('DOM: a queued prompt is shown with buttons to send it now or drop it', asy
     if (pathname.endsWith('/pending/send')) { calls.push('send'); return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING' }) }; }
     if (pathname.endsWith('/pending')) { calls.push('drop'); return { ok: true, json: async () => ({ id: 'a', status: 'SUCCEEDED' }) }; }
     if (/\/api\/tasks\/a$/.test(pathname)) {
-      return { ok: true, json: async () => ({ ...app.tasks.a, pendingPrompt: { text: 'позже спрошу', mode: 'auto' } }) };
+      return { ok: true, json: async () => ({ ...app.tasks.a, pendingPrompts: [{ text: 'позже спрошу', mode: 'auto' }] }) };
     }
     return null;
   });
@@ -549,4 +551,21 @@ test('DOM: a queued prompt is shown with buttons to send it now or drop it', asy
   row.querySelectorAll('button')[0].onclick();
   for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls, ['send']);
+});
+
+test('DOM: several queued messages are summarised with their count', async () => {
+  const app = await ui();
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (/\/api\/tasks\/a$/.test(pathname)) {
+      return { ok: true, json: async () => ({ ...app.tasks.a, pendingPrompts: [
+        { text: 'первое', mode: 'auto' }, { text: 'второе', mode: 'auto' }
+      ] }) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const row = app.document.getElementById('queuedPrompt');
+  assert.equal(row.classList.contains('hidden'), false);
+  assert.match(row.textContent, /В очереди \(2\): первое/);
 });

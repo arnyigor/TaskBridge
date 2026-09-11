@@ -41,7 +41,7 @@ test('a busy local model queues the prompt instead of refusing it', async t => {
   // and Pi still has not seen it.
   const followUp = await f.manager.message('a', 'позже');
   assert.equal(followUp.queueReason, 'MODEL_BUSY');
-  assert.equal(followUp.pendingPrompt.text, 'позже');
+  assert.equal(followUp.pendingPrompts[0].text, 'позже');
   const waitingEvents = await f.store.readEvents('a', 0);
   assert.deepEqual(waitingEvents.map(event => event.type), ['QUEUE_WAITING'], 'only the waiting state is recorded');
   assert.equal(waitingEvents.some(event => event.type === 'USER_MESSAGE'), false, 'nothing is sent to Pi while waiting');
@@ -50,7 +50,7 @@ test('a busy local model queues the prompt instead of refusing it', async t => {
   // Cancelling a waiting session drops its queued prompt.
   const cancelled = await f.manager.cancel('a');
   assert.equal(cancelled.status, 'CANCELLED');
-  assert.equal(cancelled.pendingPrompt, null);
+  assert.equal(cancelled.pendingPrompts, null);
   assert.equal(cancelled.queueReason, null);
   assert.deepEqual(f.manager.queue, [queued.id]);
 
@@ -63,7 +63,7 @@ test('a queued prompt is delivered as soon as the model is free', async t => {
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
   f.manager.queuePollMs = 5;
   const queued = await f.manager.message('a', 'позже');
-  assert.equal(queued.pendingPrompt.text, 'позже');
+  assert.equal(queued.pendingPrompts[0].text, 'позже');
 
   // The model frees up: the queue delivers the stored prompt unchanged.
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: false });
@@ -73,7 +73,7 @@ test('a queued prompt is delivered as soon as the model is free', async t => {
   assert.ok(events.includes('USER_MESSAGE'), events.join(','));
   assert.ok(events.includes('QUEUE_WAITING'), events.join(','));
   const task = f.manager.getTask('a');
-  assert.equal(task.pendingPrompt, null);
+  assert.deepEqual(task.pendingPrompts, []);
   assert.equal(task.queueReason, null);
   assert.deepEqual(f.manager.queue, []);
 
@@ -295,14 +295,14 @@ test('send now bypasses the queue, and a queued prompt can be sent or dropped ea
 
   // Ctrl+Enter: the prompt goes to Pi immediately, even while the model is busy.
   const now = await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
-  assert.equal(now.pendingPrompt, undefined);
+  assert.equal(now.pendingPrompts, undefined);
   assert.deepEqual(f.sent, ['срочно']);
   assert.equal((await f.store.readEvents('a', 0)).some(event => event.type === 'USER_MESSAGE'), true);
   await settle();
 
   // Plain send queues instead.
   const queued = await f.manager.message('a', 'потом');
-  assert.equal(queued.pendingPrompt.text, 'потом');
+  assert.equal(queued.pendingPrompts[0].text, 'потом');
   assert.deepEqual(f.manager.queue, ['a']);
 
   // "Send now" on the queued prompt delivers it at once and clears the queue.
@@ -310,15 +310,15 @@ test('send now bypasses the queue, and a queued prompt can be sent or dropped ea
   const sentNow = await f.manager.sendPendingNow('a');
   await settle();
   assert.deepEqual(f.sent, ['потом']);
-  assert.ok(!sentNow.pendingPrompt, 'the queue entry is gone');
+  assert.deepEqual(sentNow.pendingPrompts, [], 'the queue entry is gone');
   assert.deepEqual(f.manager.queue, []);
   assert.equal((await f.store.readEvents('a', 0)).filter(event => event.type === 'USER_MESSAGE').length, 2);
 
   // Dropping a queued prompt neither sends it nor loses the session.
   const dropped = await f.manager.message('a', 'лишнее');
-  assert.equal(dropped.pendingPrompt.text, 'лишнее');
+  assert.equal(dropped.pendingPrompts[0].text, 'лишнее');
   const after = await f.manager.dropPending('a');
-  assert.ok(!after.pendingPrompt, 'the queue entry is gone');
+  assert.deepEqual(after.pendingPrompts, [], 'the queue entry is gone');
   assert.equal(after.queueReason, null);
   assert.equal(after.status, 'SUCCEEDED');
   assert.deepEqual(f.manager.queue, []);
@@ -327,5 +327,48 @@ test('send now bypasses the queue, and a queued prompt can be sent or dropped ea
   // Actions on an empty queue are rejected instead of silently doing nothing.
   await assert.rejects(f.manager.sendPendingNow('a'), { code: 'INPUT_INVALID' });
   await assert.rejects(f.manager.dropPending('a'), { code: 'INPUT_INVALID' });
+  await settle();
+});
+
+test('Enter queues even when the model is free, and several messages wait in order', async t => {
+  const f = await fixture(t);
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+  const waitFor = async (check, what) => {
+    for (let i = 0; i < 200 && !check(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(check(), `timed out waiting for ${what}`);
+  };
+  const settle = async () => {
+    for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+    for (let i = 0; i < 100 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  };
+
+  // Nothing is lost when several prompts are typed in a row: they accumulate and
+  // are delivered one turn at a time, in order.
+  await f.manager.message('a', 'первое', 'auto', [], null, { queue: true });
+  await f.manager.message('a', 'второе', 'auto', [], null, { queue: true });
+  const third = await f.manager.message('a', 'третье', 'auto', [], null, { queue: true });
+  assert.deepEqual(third.pendingPrompts.map(entry => entry.text), ['первое', 'второе', 'третье']);
+
+  // The model frees up: the queue drains in order, one prompt per turn.
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: false });
+  await waitFor(() => f.sent.length === 1, 'the first prompt');
+  assert.deepEqual(f.sent, ['первое']);
+  await settle();
+  await waitFor(() => f.sent.length === 2, 'the second prompt');
+  assert.deepEqual(f.sent, ['первое', 'второе']);
+  await settle();
+  await waitFor(() => f.sent.length === 3, 'the third prompt');
+  assert.deepEqual(f.sent, ['первое', 'второе', 'третье']);
+  await settle();
+  assert.deepEqual(f.manager.getTask('a').pendingPrompts, []);
+  assert.deepEqual(f.manager.queue, []);
+
+  // With a free model the queued prompt is picked up at once, not on the retry
+  // tick: an idle session must still feel like a normal chat.
+  const quick = await f.manager.message('a', 'быстро', 'auto', [], null, { queue: true });
+  assert.deepEqual(quick.pendingPrompts.map(entry => entry.text), ['быстро']);
+  await waitFor(() => f.sent.length === 4, 'the immediate pickup');
+  assert.equal(f.sent.at(-1), 'быстро');
   await settle();
 });

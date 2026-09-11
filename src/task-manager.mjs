@@ -117,7 +117,7 @@ export class TaskManager extends EventEmitter {
       // still exactly what the operator asked for. A task that was already
       // running (or preparing) cannot be resumed — its Pi process is gone.
       const queuedNotStarted = task.status === 'QUEUED' && !task.workspacePath;
-      const queuedPrompt = task.status === 'QUEUED' && Boolean(task.pendingPrompt);
+      const queuedPrompt = task.status === 'QUEUED' && Boolean(task.pendingPrompts?.length);
       if (queuedNotStarted || queuedPrompt) {
         task.queueReason = 'RESTORED';
         task.current = 'В очереди после перезапуска TaskBridge';
@@ -470,10 +470,12 @@ export class TaskManager extends EventEmitter {
 
   // A prompt accepted while the model was busy is sent here, unchanged.
   async #deliverPending(task) {
-    const pending = task.pendingPrompt;
-    task.pendingPrompt = null;
+    const [pending, ...rest] = task.pendingPrompts || [];
+    task.pendingPrompts = rest;
+    // The next prompt waits for this turn to end, which is what capacity 1 means.
+    if (rest.length && !this.queue.includes(task.id)) this.queue.push(task.id);
     await this.store.save(this.#publicTask(task));
-    await this.#message(task.id, pending.text, pending.mode || 'auto', [], null);
+    await this.#message(task.id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
   }
 
 
@@ -483,7 +485,7 @@ export class TaskManager extends EventEmitter {
     const task = this.tasks.get(id);
     if (!task || task.status === 'CANCELLED') { this.queue.shift(); return this.#pump(); }
     // capacity 1: never start a request the local runtime would refuse.
-    if (this.#usesLocalRuntime(task) && !task.pendingPrompt && (await this.local.getBusyStatus()).busy) {
+    if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) {
       await this.#markWaiting(task, 'MODEL_BUSY');
       this.#schedulePump();
       return;
@@ -492,7 +494,7 @@ export class TaskManager extends EventEmitter {
     task.queueReason = null;
     // A stored prompt is delivered through #message, which claims the slot
     // itself: the queue must not hold it meanwhile, nor release it afterwards.
-    const delegating = Boolean(task.pendingPrompt);
+    const delegating = Boolean(task.pendingPrompts?.length);
     this.activeTaskId = delegating ? null : id;
     try {
       if (delegating) await this.#deliverPending(task);
@@ -1197,7 +1199,7 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
     // A queued prompt is dropped with the task, on either cancel path.
-    task.pendingPrompt = null;
+    task.pendingPrompts = null;
     task.queueReason = null;
     this.queue = this.queue.filter(x => x !== id);
     if (!runtime) {
@@ -1224,10 +1226,14 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  // `now` is the wire option ("send immediately, do not wait for the local
-  // model"); it is renamed locally so it does not shadow the now() helper.
-  async message(id, text, mode = 'auto', files = [], uploadToken = null, { now: immediate = false } = {}) {
-    return this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate }));
+  // Operator intents, named after the wire options and renamed locally so they
+  // do not shadow the now() helper:
+  //   now: true   — send immediately, do not wait for the local model (Ctrl+Enter)
+  //   queue: true — take a place in the queue even when the model is free (Enter)
+  // With neither flag (cloud/LAN callers) the previous behaviour applies: steer
+  // while the session streams, queue while the model is busy with something else.
+  async message(id, text, mode = 'auto', files = [], uploadToken = null, { now: immediate = false, queue = false } = {}) {
+    return this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate, queue }));
   }
 
   // A prompt the operator decided not to wait for: it is handed to Pi right
@@ -1237,10 +1243,10 @@ export class TaskManager extends EventEmitter {
     return this.#admit(async () => {
       const task = this.tasks.get(id);
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-      const pending = task.pendingPrompt;
+      const [pending, ...rest] = task.pendingPrompts || [];
       if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
-      task.pendingPrompt = null;
-      this.queue = this.queue.filter(x => x !== id);
+      task.pendingPrompts = rest;
+      if (!rest.length) this.queue = this.queue.filter(x => x !== id);
       await this.store.save(this.#publicTask(task));
       return this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
     });
@@ -1252,8 +1258,10 @@ export class TaskManager extends EventEmitter {
     return this.#admit(async () => {
       const task = this.tasks.get(id);
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-      if (!task.pendingPrompt) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
-      task.pendingPrompt = null;
+      const [dropped, ...rest] = task.pendingPrompts || [];
+      if (!dropped) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
+      task.pendingPrompts = rest;
+      if (rest.length) { await this.store.save(this.#publicTask(task)); return this.#publicTask(task); }
       task.queueReason = null;
       this.queue = this.queue.filter(x => x !== id);
       if (!task.workspacePath) {
@@ -1271,7 +1279,7 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  async #message(id, text, mode, files, uploadToken, { immediate = false } = {}) {
+  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -1289,7 +1297,11 @@ export class TaskManager extends EventEmitter {
     const state = await runtime.pi.getState();
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    if (!immediate && !streaming && this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) {
+    // Without an explicit queue request, a streaming session still receives the
+    // text as steering (the previous behaviour); only a busy model queues it.
+    const holdingModel = !immediate && !streaming && this.#usesLocalRuntime(task)
+      && (await this.local.getBusyStatus()).busy;
+    if (queue || holdingModel) {
       // The model is held by another consumer (a second client, a stale slot,
       // another session): record the prompt and deliver it when the model is
       // free. Attachments are staged now, so the queued entry stays valid even
@@ -1301,11 +1313,13 @@ export class TaskManager extends EventEmitter {
       const note = attached.length
         ? '\n\nAdditional files from the phone are in .taskbridge-input/:\n' + attached.map(f => `- ${f.path}`).join('\n')
         : '';
-      task.pendingPrompt = { text: userText + note, mode };
+      // Several messages may wait for one session; they are delivered in order.
+      task.pendingPrompts = [...(task.pendingPrompts || []), { text: userText + note, mode }];
       task.updatedAt = now();
-      await this.#markWaiting(task, 'MODEL_BUSY');
+      await this.#markWaiting(task, holdingModel ? 'MODEL_BUSY' : 'QUEUED');
       if (!this.queue.includes(id)) this.queue.push(id);
-      this.#schedulePump();
+      // Straight away, so a session that is idle does not wait for the retry tick.
+      setImmediate(() => this.#pump());
       return this.#publicTask(task);
     }
     if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
