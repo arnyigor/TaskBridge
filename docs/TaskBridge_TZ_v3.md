@@ -1251,3 +1251,1137 @@ recent native Pi session?
 10. Терминальный interactive client — только если позже действительно окажется нужен.
 
 Так архитектура получается проще и точнее соответствует твоему реальному сценарию: **терминал нужен для старых/существующих Pi-сессий, а после импорта вся дальнейшая работа идёт из TaskBridge с любого устройства.**
+
+
+Да. В твоём случае я бы **не начинал с Android-клиента**. Правильная схема — **публичная PWA на Vercel + локальный TaskBridge Agent Host на ПК + облачный relay**. Android-клиент имеет смысл позже, когда появятся требования к фоновым уведомлениям, системному Share, биометрии, Android Keystore и т. п.
+
+Самое важное изменение относительно предыдущего плана: **UI для удалённого подключения должен жить не на ПК**. Тогда проблема «я уже на мобильном интернете и не вижу кнопку Cloud Access» исчезает полностью.
+
+# Как должно работать
+
+Сейчас условно:
+
+```text
+Телефон в Wi-Fi
+      │
+      ▼
+http://192.168.1.50:8787
+      │
+      ▼
+TaskBridge UI + Core
+```
+
+Это работает только в LAN.
+
+Нужно разделить UI и Core:
+
+```text
+                     INTERNET
+
+                taskbridge.vercel.app
+                         │
+                    PWA frontend
+                         │
+                         ▼
+                   Cloud Relay
+                     ▲       ▲
+                     │       │
+                  WSS│       │WSS
+                     │       │
+                  Phone      PC
+                             │
+                             ▼
+                    TaskBridge Core
+                             │
+                     SessionManager
+                             │
+                         PiRunner
+                             │
+                            Pi
+```
+
+Телефон **никогда не пытается открыть IP домашнего компьютера через мобильную сеть**.
+
+Он всегда открывает:
+
+```text
+https://taskbridge.vercel.app
+```
+
+или твой домен, например:
+
+```text
+https://tb.example.com
+```
+
+Этот адрес доступен:
+
+```text
+Wi-Fi
+4G
+5G
+другая сеть
+другой город
+```
+
+UI загружается с Vercel.
+
+---
+
+# PWA решает именно проблему входа
+
+После первого открытия пользователь устанавливает TaskBridge:
+
+```text
+Chrome
+  ↓
+Install app
+  ↓
+TaskBridge icon
+```
+
+На Android PWA может устанавливаться как WebAPK/приложение с отдельной иконкой и standalone-окном; для установки не требуется писать APK. ([web.dev][1])
+
+После этого сценарий выглядит практически как с Android-приложением:
+
+```text
+📱 TaskBridge
+```
+
+Нажимаешь и видишь:
+
+```text
+TASKBRIDGE
+
+My PC
+● Online
+
+Running
+──────────────
+TaskBridge architecture
+Pi / Qwen3.8
+Running · 18 min
+
+[OPEN]
+```
+
+При этом UI реально загружен с Vercel, а не с твоего ПК.
+
+---
+
+# Главное: Cloud Access нельзя включать через телефон после ухода из LAN
+
+Его надо **один раз настроить на компьютере**.
+
+Например первый запуск:
+
+```text
+TaskBridge
+
+Remote Access
+─────────────
+
+Disabled
+
+[Enable Remote Access]
+```
+
+Нажимаешь.
+
+TaskBridge:
+
+```text
+1. создаёт machineId
+2. создаёт identity key
+3. регистрирует relay
+4. начинает исходящее WSS-соединение
+5. показывает QR для телефона
+```
+
+Например:
+
+```text
+Remote access enabled
+
+Machine
+Igor-PC
+
+● Connected to relay
+
+      █████████
+      ██ QR  ██
+      █████████
+
+Scan with your phone
+
+https://taskbridge.app/pair/...
+```
+
+После этого **ничего больше включать не требуется**.
+
+TaskBridge daemon автоматически стартует вместе с Windows и сам подключается к облаку.
+
+---
+
+# Что происходит, когда ты уже на мобильном интернете
+
+Просто открываешь установленную PWA:
+
+```text
+TaskBridge
+```
+
+PWA загружается с Vercel:
+
+```text
+Phone
+  ↓ HTTPS
+Vercel CDN
+  ↓
+TaskBridge UI
+```
+
+Затем UI открывает:
+
+```text
+wss://taskbridge.vercel.app/api/relay
+```
+
+ПК уже держит своё исходящее соединение:
+
+```text
+PC
+ ↓
+wss://taskbridge.vercel.app/api/relay
+```
+
+Relay связывает:
+
+```text
+phoneClient
+    ↕
+machine:igor-pc
+```
+
+Всё.
+
+Никакого локального UI телефону видеть не надо.
+
+---
+
+# Но здесь есть важный нюанс Vercel
+
+Vercel теперь официально поддерживает WebSocket в Functions — функция появилась в public beta 22 июня 2026 года. ([Vercel][2])
+
+Но нельзя сделать:
+
+```text
+PC WebSocket ──┐
+               │ random Vercel instance
+Phone WS ──────┘
+```
+
+и надеяться, что оба всегда попадут в один process.
+
+Fluid Compute может обслуживать несколько запросов одним instance, но Vercel всё равно масштабирует Functions и не гарантирует единственный глобальный process. ([Vercel][3])
+
+И официальный WebSocket пример Vercel отдельно отмечает проблему: **без shared cross-instance layer устройства, попавшие в разные instances, могут не видеть сообщения друг друга**. ([Vercel][4])
+
+Это важная поправка к первоначальной идее «Vercel совершенно без state».
+
+---
+
+# Значит ли это, что TaskBridge нужна база данных?
+
+**Нет.**
+
+TaskBridge не нужна традиционная БД:
+
+```text
+PostgreSQL
+MySQL
+Supabase DB
+MongoDB
+```
+
+Но cloud relay желательно иметь **небольшой shared realtime state/pub-sub**.
+
+Я бы использовал:
+
+```text
+Upstash Redis
+```
+
+через Vercel Marketplace.
+
+Vercel сейчас прямо предлагает Redis/Upstash как serverless key-value/realtime storage; старый Vercel KV уже заменён интеграциями Marketplace. ([Vercel][5])
+
+Но использовать Redis здесь нужно совсем не как базу TaskBridge.
+
+---
+
+# Что хранится в Redis
+
+**Не хранить:**
+
+```text
+prompts
+chat history
+source code
+Pi sessions
+tasks
+Git diffs
+files
+LLM responses
+```
+
+Всё это остаётся на твоём ПК.
+
+Redis нужен только примерно для:
+
+```text
+machine:abc → online
+TTL = 30 sec
+
+relay channel:
+machine:abc
+
+presence:
+phone xyz
+
+rate-limit:
+device xyz
+```
+
+То есть:
+
+```text
+Redis = телефонная станция
+```
+
+а не:
+
+```text
+Redis = TaskBridge database
+```
+
+При удалении Redis ты не теряешь ни одной TaskBridge session.
+
+---
+
+# Архитектура, которую я рекомендую
+
+```text
+ ┌─────────────────────────────────────────────────────┐
+ │                       VERCEL                        │
+ │                                                     │
+ │  Static PWA                                        │
+ │                                                     │
+ │  Authentication / Pairing API                      │
+ │                                                     │
+ │  WebSocket Relay                                   │
+ │              │                                      │
+ │              ▼                                      │
+ │        ephemeral Redis pub/sub                     │
+ │                                                     │
+ └────────────┬──────────────────────────┬─────────────┘
+              │                          │
+              │ WSS                      │ WSS
+              │                          │
+       ┌──────▼───────┐            ┌─────▼──────────┐
+       │ Android PWA  │            │ TaskBridge PC │
+       │              │            │                │
+       │ Browser/UI   │            │ Gateway        │
+       └──────────────┘            │ AgentHost      │
+                                   │ SessionManager │
+                                   │ PiRunner       │
+                                   └──────┬─────────┘
+                                          │
+                                          ▼
+                                         Pi
+                                          │
+                                          ▼
+                                     local Qwen
+```
+
+И главное свойство:
+
+```text
+Cloud stores no TaskBridge state.
+```
+
+---
+
+# PWA или Android?
+
+Для первой нормальной версии:
+
+| Возможность                             |                       PWA | Native Android |
+| --------------------------------------- | ------------------------: | -------------: |
+| Работа через мобильный интернет         |                         ✅ |              ✅ |
+| Установка на экран                      |                         ✅ |              ✅ |
+| Full UI                                 |                         ✅ |              ✅ |
+| WebSocket                               |                         ✅ |              ✅ |
+| Upload файлов                           |                         ✅ |              ✅ |
+| Camera/file picker                      |                         ✅ |              ✅ |
+| Один код для desktop/mobile             |                     **✅** |              ❌ |
+| Мгновенные обновления                   |                     **✅** |              ❌ |
+| Play Store                              |                  возможно |              ✅ |
+| Share Target                            | возможно, но ограниченнее |          **✅** |
+| Background networking                   |               ограниченно |          **✅** |
+| Android Keystore                        |                ❌ напрямую |          **✅** |
+| Biometric unlock                        |     ограниченнее/WebAuthn |          **✅** |
+| Надёжные foreground/background services |                         ❌ |          **✅** |
+| Стоимость разработки                    |                **низкая** |           выше |
+
+PWA на Android поддерживается широко и может выглядеть как отдельное установленное приложение. ([web.dev][6])
+
+### Поэтому
+
+Я бы сделал:
+
+```text
+v0.x → PWA
+v1.x → optional Android client
+```
+
+Не наоборот.
+
+---
+
+# Причём Android позже сможет использовать тот же protocol
+
+Это важно предусмотреть сейчас:
+
+```text
+             TaskBridge Protocol
+                     │
+       ┌─────────────┼────────────┐
+       │             │            │
+      PWA       Android KMP    Desktop
+```
+
+Не делать API специально под React/PWA.
+
+Тогда Android-клиент позже будет просто ещё одним client implementation.
+
+---
+
+# Как должен выглядеть первый onboarding
+
+Это один из самых важных UX-флоу проекта.
+
+## Первый запуск на ПК
+
+```text
+Welcome to TaskBridge
+
+Local access
+✓ Ready
+
+Remote access
+Not configured
+
+[Enable remote access]
+```
+
+Нажимаешь.
+
+Получаешь:
+
+```text
+Remote access
+
+Machine name
+Igor-PC
+
+[Generate pairing code]
+```
+
+TaskBridge создаёт:
+
+```text
+machineId
+machine key pair
+one-time pairing token
+```
+
+И показывает:
+
+```text
+Scan with phone
+
+       QR
+
+Expires in 10:00
+```
+
+---
+
+# Телефон
+
+QR ведёт **не на локальный IP**, а на:
+
+```text
+https://taskbridge.app/pair/<token>
+```
+
+Поэтому даже если QR открыт камерой позже через мобильную сеть, страница существует.
+
+Телефон показывает:
+
+```text
+Pair with
+
+Igor-PC
+
+TaskBridge requests permission to:
+
+✓ View sessions
+✓ Send messages
+✓ Create tasks
+✓ Stop tasks
+
+[PAIR]
+```
+
+После подтверждения:
+
+```text
+Device paired
+
+Samsung S...
+→ Igor-PC
+```
+
+---
+
+# После этого pairing больше не нужен
+
+На телефоне сохраняется device credential.
+
+Например логически:
+
+```text
+deviceId
+device private key
+machineId
+permissions
+```
+
+При каждом запуске:
+
+```text
+PWA
+ ↓
+authenticate device
+ ↓
+connect machineId
+```
+
+Если ПК выключен:
+
+```text
+Igor-PC
+
+○ Offline
+
+Last seen
+21 min ago
+```
+
+Если включился:
+
+```text
+● Online
+```
+
+и сессии появляются.
+
+---
+
+# Я бы вообще не делал аккаунты на первом этапе
+
+Не нужны:
+
+```text
+email/password
+Google login
+OAuth
+user DB
+```
+
+Для single-user local-first проекта это лишнее.
+
+Использовать:
+
+```text
+Device Pairing
+```
+
+как Signal/WhatsApp Web по идее, но наоборот:
+
+```text
+PC = machine
+Phone = controller
+```
+
+---
+
+# Device authentication
+
+Лучше сразу построить нормальную криптографическую модель.
+
+ПК генерирует:
+
+```text
+MachineIdentity
+
+machineId
+publicKey
+privateKey
+```
+
+Телефон:
+
+```text
+DeviceIdentity
+
+deviceId
+publicKey
+privateKey
+```
+
+Pairing связывает public keys.
+
+TaskBridge PC хранит:
+
+```text
+trusted-devices.json
+
+Phone:
+  deviceId
+  publicKey
+  permissions
+```
+
+Vercel не обязан хранить список доверенных телефонов.
+
+---
+
+# Тогда можно сделать E2EE
+
+Очень желательно.
+
+Например:
+
+```text
+Phone
+ │
+ │ encrypted
+ ▼
+Vercel Relay
+ │
+ │ encrypted
+ ▼
+PC
+```
+
+Relay не должен видеть:
+
+```text
+prompt
+source code
+terminal output
+diff
+```
+
+Ключи знает только:
+
+```text
+Phone
+PC
+```
+
+Cloud видит только:
+
+```text
+machineId
+deviceId
+packet sizes
+timestamps
+```
+
+Для такого проекта это сильная функция.
+
+---
+
+# Один UI — два transport
+
+С точки зрения PWA:
+
+```text
+TaskBridgeClient
+      │
+      ▼
+Transport
+```
+
+Реализации:
+
+```text
+LocalTransport
+CloudTransport
+```
+
+### CloudTransport
+
+```text
+WSS → Vercel relay
+```
+
+### LocalTransport
+
+Можно добавить позже:
+
+```text
+WSS → local TaskBridge
+```
+
+Но я бы **не делал автоматический LAN fast path первым этапом**.
+
+Причина — HTTPS/PWA + локальные IP + сертификаты + ограничения браузера делают direct local connection из HTTPS origin заметно сложнее.
+
+Для первого релиза:
+
+```text
+PWA → cloud relay → PC
+```
+
+даже когда телефон находится дома.
+
+Задержка для текста/tool events будет совершенно приемлемой.
+
+А PC browser:
+
+```text
+localhost → TaskBridge directly
+```
+
+---
+
+# Это также решает вопрос «куда заходить»
+
+У пользователя всегда **один адрес**:
+
+```text
+https://taskbridge.app
+```
+
+Не:
+
+```text
+дома:
+192.168.1.27:8787
+
+снаружи:
+другой URL
+
+через VPN:
+третий URL
+```
+
+Один адрес.
+
+PWA ещё лучше скрывает адрес вообще — просто иконка TaskBridge.
+
+---
+
+# Что должно быть видно при открытии PWA
+
+Не сразу sessions.
+
+Сначала Machines:
+
+```text
+TASKBRIDGE
+
+Machines
+
+● Igor-PC
+  Windows
+  Qwen3.8-27B
+  Running: 1
+
+○ Laptop
+  Offline
+
+[+ Pair machine]
+```
+
+Нажимаешь Igor-PC:
+
+```text
+Igor-PC
+
+Sessions
+
+● TaskBridge development
+  RUNNING
+  Pi / Qwen
+  12m
+
+○ AndroidMrPlanner
+  IDLE
+  Pi / Qwen
+  41m
+
+[+ New session]
+
+[Import Pi session]
+```
+
+Import Pi session запускается **на ПК**, PWA только показывает результат сканирования.
+
+---
+
+# WebSocket reconnect обязателен
+
+Vercel WebSocket connection не бесконечен. Официальный starter прямо реализует reconnect, потому что Function соединение закрывается при достижении максимальной duration. ([Vercel][7])
+
+На Hobby Fluid Compute стандартный максимум сейчас 300 секунд; более длинные режимы доступны на более высоких планах. ([Vercel][3])
+
+Но это не проблема.
+
+Нужно:
+
+```text
+connected
+   ↓
+heartbeat
+   ↓
+disconnect
+   ↓
+reconnect
+   ↓
+AUTH
+   ↓
+ATTACH machine/session
+   ↓
+SYNC lastEventSeq
+   ↓
+continue
+```
+
+Пользователь этого практически не видит.
+
+---
+
+# Session protocol уже должен поддерживать replay
+
+Например телефон последний раз видел:
+
+```text
+eventSeq = 18341
+```
+
+Пока он был offline:
+
+```text
+18342
+18343
+...
+18487
+```
+
+После reconnect:
+
+```text
+SYNC {
+    sessionId,
+    afterEventSeq: 18341
+}
+```
+
+PC возвращает:
+
+```text
+18342...18487
+```
+
+И только затем live stream.
+
+Так терять сообщения невозможно.
+
+---
+
+# Cloud relay не должен хранить event history
+
+Вот важный архитектурный момент:
+
+```text
+WRONG
+
+Phone
+ ↓
+Vercel DB
+ ↓
+session history
+ ↓
+PC
+```
+
+Нужно:
+
+```text
+RIGHT
+
+Phone
+ ↓
+Vercel transport
+ ↓
+PC
+ ↓
+EventJournal
+```
+
+Если phone reconnect:
+
+```text
+PC = source of truth
+```
+
+---
+
+# Что делать, если ПК выключен
+
+PWA всё равно открывается.
+
+Показывает:
+
+```text
+Igor-PC
+○ Offline
+
+Sessions unavailable while machine is offline.
+```
+
+В первой версии этого достаточно.
+
+Позже можно добавить:
+
+```text
+Queue task while offline
+```
+
+И вот только для этого понадобится небольшой durable cloud inbox:
+
+```text
+pending command
+```
+
+Но это можно сделать после MVP через Queue/Redis/Blob, не создавая полноценную application database.
+
+---
+
+# Что делать с файлами
+
+Не гонять большие файлы через JSON WebSocket.
+
+Маленькие:
+
+```text
+< ~1 MB
+→ binary WS frames
+```
+
+Большие позже:
+
+```text
+Phone
+ ↓ encrypted upload
+temporary Blob
+ ↓
+PC downloads
+ ↓ hash verification
+ ↓ delete Blob
+```
+
+Cloud Blob должен быть **temporary transport**, а не storage TaskBridge.
+
+---
+
+# Push notifications
+
+Вот здесь PWA уже немного уступает Android.
+
+Но на первом этапе достаточно Web Push:
+
+```text
+Task finished
+Task needs input
+Task failed
+Review required
+```
+
+Service worker — базовая часть PWA и позволяет реализовать push/offline capabilities. ([web.dev][8])
+
+Если позже Android окажется нужен, именно уведомления будут одним из аргументов.
+
+---
+
+# Когда действительно писать Android/KMP
+
+Я бы не принимал решение «Android никогда не нужен».
+
+Он понадобится, когда захочется:
+
+```text
+стабильный background service
+Android share sheet → TaskBridge
+upload любого файла
+голосовой ввод
+widgets
+quick actions
+biometric unlock
+secure Android Keystore
+richer notifications
+deep integration with filesystem
+```
+
+Но к тому моменту:
+
+```text
+protocol
+auth
+pairing
+relay
+sessions
+reconnect
+```
+
+уже существуют.
+
+Android будет гораздо легче написать.
+
+---
+
+# Подробный порядок разработки
+
+Я бы теперь закрепил roadmap так:
+
+1. **Отделить PWA frontend от локального TaskBridge server.** Один и тот же frontend должен собираться для локального использования и для Vercel; никакой бизнес-логики Pi в браузере.
+
+2. **Ввести TaskBridge Client Protocol.** `HELLO`, `AUTH`, `MACHINE_STATUS`, `SESSION_LIST`, `ATTACH`, `SYNC`, `COMMAND`, `COMMAND_ACK`, `EVENT`, `PING/PONG`; каждому command — UUID, каждому event — monotonic `seq`.
+
+3. **Закончить Persistent SessionManager.** Сессия должна принадлежать Core, а не WebSocket/browser. Закрытие всех браузеров не должно останавливать Pi.
+
+4. **Сделать cloud PWA на Vercel.** Страница должна открываться даже при выключенном ПК. Добавить manifest, service worker, install UI и offline shell.
+
+5. **Добавить MachineIdentity.** `machineId`, key pair, display name; private key только локально.
+
+6. **Добавить DeviceIdentity в PWA.** При первом запуске генерировать device identity; credential сохранять локально, не использовать email/password.
+
+7. **Сделать QR pairing.** QR должен содержать публичный Vercel URL + одноразовый token, а не LAN IP. Token короткоживущий и single-use.
+
+8. **Сделать TaskBridge outbound connector.** ПК сам устанавливает `wss://...` к Vercel. Никаких входящих портов, DDNS или проброса NAT.
+
+9. **Сделать WebSocket relay на Vercel.** Развести namespaces/rooms по `machineId`, а phone connection привязывать к доверенному device.
+
+10. **Добавить минимальный Upstash Redis только для relay/pub-sub/presence.** Не хранить там tasks/sessions/messages. Это не TaskBridge DB, а cross-instance transport state. Vercel сам поддерживает Marketplace-интеграцию Redis/Upstash. ([Vercel][5])
+
+11. **Добавить heartbeat/presence.** ПК обновляет presence TTL; PWA показывает `ONLINE/OFFLINE`; ложный online должен исчезать за десятки секунд.
+
+12. **Реализовать reconnect.** Exponential backoff, желательно с jitter; пересоздание connection после Vercel Function expiration должно быть нормальной штатной операцией.
+
+13. **Реализовать session replay.** Клиент хранит `lastEventSeq`; после reconnect Core возвращает пропущенные события.
+
+14. **Добавить idempotency.** Повтор `commandId` никогда не должен повторно отправлять prompt, stop, apply или другую опасную команду.
+
+15. **Реализовать multi-device.** PC browser и Android PWA одновременно видят одну session; команды проходят через один sequencer.
+
+16. **Реализовать E2EE.** Cloud relay должен передавать ciphertext; ключ TaskBridge session/transport выводится из device/machine identities.
+
+17. **Сделать Machines → Sessions UX.** Сначала выбирается компьютер, затем active/recent sessions; native Pi importer находится там же.
+
+18. **Добавить Pi session importer.** Сканировать Pi sessions локально, группировать по проекту, показывать preview и `Continue in TaskBridge`; безопасный clone — default.
+
+19. **Добавить remote security controls.** Revoked devices, permissions, pairing reset, `Disable remote`, event audit; опасные операции вроде регистрации нового project root отдельно ограничить.
+
+20. **Добавить notification layer.** Сначала Web Push для `DONE/FAILED/INPUT_REQUIRED`; Android native notifications оставить на будущее.
+
+21. **Только после стабилизации PWA сделать Android client.** KMP/Compose клиент использует тот же wire protocol; никакого второго backend.
+
+---
+
+# Acceptance test для удалённого доступа
+
+Вот это я бы вообще положил в ТЗ как **обязательный тест релиза**:
+
+```text
+PC дома
+Wi-Fi включён
+
+1. запустить TaskBridge
+2. Enable Remote Access
+3. спарить Android
+4. создать Pi session
+5. отправить задачу
+6. выключить Wi-Fi на телефоне
+7. перейти на 4G/5G
+8. открыть установленный TaskBridge
+9. увидеть Igor-PC ONLINE
+10. открыть ту же session
+11. получить всю историю
+12. написать follow-up
+13. Pi на домашнем ПК получает его
+14. увидеть streaming ответа на телефоне
+15. заблокировать телефон
+16. разблокировать
+17. reconnect
+18. ни одного пропавшего/дублированного event
+19. открыть браузер на PC
+20. увидеть то же состояние
+```
+
+Если этот сценарий работает — основная концепция remote TaskBridge доказана.
+
+---
+
+# Мой итоговый выбор
+
+**Для TaskBridge сейчас: PWA first. Android later.**
+
+И самое важное — PWA должна быть не:
+
+```text
+установленной копией страницы
+http://192.168.x.x
+```
+
+а полноценным **cloud entry point**:
+
+```text
+TaskBridge PWA
+     ↓
+public Vercel origin
+     ↓
+secure relay
+     ↓
+outbound connection
+     ↓
+your PC
+```
+
+Тогда пользователь может впервые открыть TaskBridge хоть из мобильной сети, хоть из другой страны — UI всегда существует. Единственное, что требуется заранее, — **один раз спарить конкретный телефон/браузер с ПК**, либо позже добавить механизм безопасного подключения нового устройства.
+
+И я бы пересмотрел тезис «совсем без БД»: **без application database — да, однозначно. Без любого shared cloud state — лучше нет.** Минимальный Redis pub/sub с TTL только для маршрутизации делает Vercel relay надёжным и практически не усложняет архитектуру, при этом весь ценный state остаётся локальным. ([Vercel][4])
+
+[1]: https://web.dev/learn/pwa/installation?utm_source=chatgpt.com "Installation  |  web.dev"
+[2]: https://vercel.com/changelog/websocket-support-is-now-in-public-beta?utm_source=chatgpt.com "WebSocket support is now in Public Beta - Vercel"
+[3]: https://vercel.com/docs/fluid-compute?utm_source=chatgpt.com "Fluid compute"
+[4]: https://vercel.com/kb/guide/real-time-chat-websockets?utm_source=chatgpt.com "Build a real-time chat app with WebSockets on Vercel | Vercel Knowledge Base"
+[5]: https://vercel.com/docs/redis?utm_source=chatgpt.com "Redis on Vercel"
+[6]: https://web.dev/learn/pwa/progressive-web-apps?hl=en&utm_source=chatgpt.com "Progressive Web Apps  |  web.dev"
+[7]: https://vercel.com/templates/nuxt/nuxt-websockets-starter?utm_source=chatgpt.com "Nuxt + WebSockets Starter - Vercel"
+[8]: https://web.dev/learn/pwa/welcome?utm_source=chatgpt.com "Welcome to Learn Progressive Web Apps!  |  web.dev"
