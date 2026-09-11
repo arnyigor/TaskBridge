@@ -114,7 +114,15 @@ test('a client of an offline machine is told so, or handed to another instance',
   const session = relay.attach(client);
   await session.handle(hello('client', 'home-pc', { deviceId: 'phone-1' }));
 
+  // A COMMAND is an intention and waits for the machine to come back (§ durable
+  // queue): the phone is told it is parked, not that it failed.
   await session.handle(command('home-pc'));
+  assert.equal(client.frames.at(-1).type, 'COMMAND_ACK');
+  assert.equal(client.frames.at(-1).status, 'ACCEPTED');
+  assert.equal(client.frames.at(-1).payload.queued, true);
+
+  // Anything that needs an answer now is still refused honestly.
+  await session.handle(createEnvelope({ type: 'SYNC', machineId: 'home-pc', sessionId: 'tb_1', payload: { afterSeq: 0 } }));
   assert.equal(client.frames.at(-1).type, 'ERROR');
   assert.equal(client.frames.at(-1).payload.code, 'MACHINE_OFFLINE');
 

@@ -1,5 +1,6 @@
 import { createEnvelope, parseEnvelope, serializeEnvelope } from '../../src/cloud/protocol.mjs';
 import { createOpenAuthenticator } from './relay-auth.mjs';
+import { createMemoryQueue } from './relay-queue.mjs';
 
 // Cloud relay core (§ cloud-protocol.md).
 //
@@ -54,7 +55,7 @@ export function createMemoryRelayState({ now = () => Date.now() } = {}) {
   };
 }
 
-export function createRelay({ state = createMemoryRelayState(), logger = () => {}, limits = {}, auth = null } = {}) {
+export function createRelay({ state = createMemoryRelayState(), logger = () => {}, limits = {}, auth = null, queue: commandQueue = createMemoryQueue() } = {}) {
   const config = { ...RELAY_DEFAULTS, ...limits };
   // Secure by default: without configured credentials the relay accepts nobody.
   // createOpenAuthenticator() is the explicit opt-in for local development and
@@ -69,15 +70,20 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
   let connections = 0;
 
   const send = (connection, envelope) => connection.send(serializeEnvelope(envelope));
-  const reject = (connection, code, message, { close = false } = {}) => {
+  // `commandId` is what lets the client match the refusal to the request it is
+  // still waiting on — without it the screen spins until the timeout, even
+  // though the answer ("the machine is off") arrived immediately.
+  const reject = (connection, code, message, { close = false, commandId = null } = {}) => {
     logger('warn', { event: 'relay_error', code, message });
-    try { send(connection, createEnvelope({ type: 'ERROR', payload: { code, message } })); } catch { /* peer already gone */ }
+    try { send(connection, createEnvelope({ type: 'ERROR', ...(commandId ? { commandId } : {}), payload: { code, message } })); } catch { /* peer already gone */ }
     if (close) connection.close(1008, code);
   };
   const machinePeers = machineId => clients.get(machineId) || new Set();
 
   function attach(connection) {
     const session = { connection, role: null, machineId: null, deviceId: null, attached: new Set(), closed: false };
+    // Set by hello() when a machine authenticates, consumed right after AUTH_OK.
+    let pendingForMachine = null;
     // Rate limiting is per connection, not per role: the HELLO frame arrives
     // before the role is known, and a reconnect must not inherit the old budget.
     const rateKey = `conn:${++connections}`;
@@ -110,6 +116,10 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
         machines.set(frame.machineId, connection);
         await state.setPresence(frame.machineId, config.presenceTtlMs);
         logger('info', { event: 'machine_online', machineId: frame.machineId });
+        // Whatever was asked while this machine was off is handed over now, in
+        // the order it was asked — after AUTH_OK below, so the connector is
+        // already past its handshake when the first command lands.
+        pendingForMachine = frame.machineId;
       } else {
         if (!clients.has(frame.machineId)) clients.set(frame.machineId, new Set());
         clients.get(frame.machineId).add(connection);
@@ -120,6 +130,19 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
         logger('info', { event: 'client_online', machineId: frame.machineId, deviceId: session.deviceId });
       }
       send(connection, createEnvelope({ type: 'AUTH_OK', machineId: frame.machineId, payload: { role, protocolVersion: frame.v, deviceId: session.deviceId } }));
+      if (pendingForMachine) {
+        const machineId = pendingForMachine;
+        pendingForMachine = null;
+        try {
+          const parked = await commandQueue.drain(machineId);
+          for (const frame_ of parked) send(connection, frame_);
+          if (parked.length) logger('info', { event: 'queue_delivered', machineId, count: parked.length });
+        } catch (error) {
+          // A queue that cannot be read must not keep the machine from coming
+          // online: the link is more valuable than the parked commands.
+          logger('error', { event: 'queue_drain_failed', machineId, message: error.message });
+        }
+      }
       return true;
     }
 
@@ -128,7 +151,24 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
       if (peer) { send(peer, frame); return; }
       // The machine may be connected to another relay instance.
       if (await state.isPresent(frame.machineId)) { await state.publish(frame.machineId, frame); return; }
-      reject(connection, 'MACHINE_OFFLINE', `Machine ${frame.machineId} is offline`);
+      // The PC is off. A COMMAND is an intention ("остановить", "отправить") and
+      // waits for it to come back; everything else needs an answer *now* and is
+      // refused honestly instead of being parked forever.
+      if (frame.type === 'COMMAND') {
+        try {
+          const { queued } = await commandQueue.enqueue(frame.machineId, frame);
+          send(connection, createEnvelope({
+            type: 'COMMAND_ACK', machineId: frame.machineId, sessionId: frame.sessionId || null,
+            commandId: frame.commandId, status: 'ACCEPTED', to: session.deviceId || null,
+            payload: { queued: true, pending: queued, message: 'Машина офлайн — команда уйдёт, как только она включится.' }
+          }));
+          logger('info', { event: 'command_queued', machineId: frame.machineId, pending: queued });
+          return;
+        } catch (error) {
+          logger('error', { event: 'queue_enqueue_failed', machineId: frame.machineId, message: error.message });
+        }
+      }
+      reject(connection, 'MACHINE_OFFLINE', `Machine ${frame.machineId} is offline`, { commandId: frame.commandId || null });
     }
 
     function forwardToClients(frame) {

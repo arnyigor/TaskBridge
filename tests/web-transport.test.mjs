@@ -188,8 +188,20 @@ test('a command that the machine never answers times out instead of hanging fore
   const relay = createRelayServer({ logger: () => {}, auth: createSecretAuthenticator({ machines: [MACHINE], logger: () => {} }) });
   const endpoint = await relay.listen({ port: 0 });
   t.after(() => endpoint.close());
-  // No machine is connected: the relay answers MACHINE_OFFLINE, and a command to
-  // a machine that never replies must not leave the caller waiting.
+
+  // The machine is online but silent — a command to an *offline* machine is
+  // parked instead (§ durable queue), so the timeout has to be provoked by a
+  // dispatcher that never answers.
+  const connector = createRelayConnector({
+    url: endpoint.url, machineId: MACHINE.id, machineSecret: MACHINE.secret,
+    manager: { on() {}, off() {}, listTasks: () => [] },
+    dispatcher: { handle() { return new Promise(() => {}); } },
+    store: { async readEvents() { return []; } },
+    logger: () => {}
+  });
+  t.after(() => connector.stop());
+  await connector.start();
+
   const transport = createCloudTransport({ url: endpoint.url, machineId: MACHINE.id, deviceToken: TOKEN, logger: () => {}, commandTimeoutMs: 150 });
   t.after(() => transport.close());
   await transport.ready();

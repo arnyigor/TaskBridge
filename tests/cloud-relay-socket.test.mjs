@@ -153,7 +153,11 @@ test('everything the relay sends is a valid frame of the same protocol version',
   const client = await open(endpoint.url);
   t.after(() => client.close());
   send(client, hello('client', 'nobody-here', { deviceId: 'phone-1' }));
+  // A COMMAND is parked for the sleeping machine; a SYNC needs an answer now
+  // and gets the refusal — both must be valid frames of this protocol version.
   send(client, createEnvelope({ type: 'COMMAND', machineId: 'nobody-here', commandId: 'c-1' }));
+  await waitFor(() => client.received.some(frame => frame.type === 'COMMAND_ACK'), 'the queued acknowledgement');
+  send(client, createEnvelope({ type: 'SYNC', machineId: 'nobody-here', sessionId: 'tb_1', payload: { afterSeq: 0 } }));
   await waitFor(() => client.received.some(frame => frame.type === 'ERROR'), 'the offline error');
   assert.equal(client.received.find(frame => frame.type === 'ERROR').payload.code, 'MACHINE_OFFLINE');
   for (const frame of client.received) assert.equal(parseEnvelope(frame).v, 2);

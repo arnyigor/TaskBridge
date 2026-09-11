@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { openStore, resolveStoreTarget } from './lib/store.mjs';
 import { CloudAuth, loadAuthConfig } from './lib/auth.mjs';
 import { createRouter } from './lib/router.mjs';
+import { createRelayServer } from './lib/relay-server.mjs';
+import { createSecretAuthenticator } from './lib/relay-auth.mjs';
 import { errorBody } from './lib/errors.mjs';
 
 // Local/self-hosted host for the cloud control plane. Vercel uses
@@ -87,6 +89,13 @@ async function serveStatic(urlPath, res) {
 
 export async function startServer({ port = PORT, host = HOST, storeTarget = STORE_TARGET, env = process.env, logger = log } = {}) {
   const service = await createCloudService({ storeTarget, env, logger });
+  // The relay: the machine dials in over WebSocket and the phones reach it
+  // through this same host. Machines are the ones configured for the cloud API,
+  // so a relay cannot be talked to by a machine this deployment does not know.
+  const relay = createRelayServer({
+    auth: createSecretAuthenticator({ machines: loadAuthConfig(env).machines, logger }),
+    logger
+  });
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -136,12 +145,14 @@ export async function startServer({ port = PORT, host = HOST, storeTarget = STOR
   }, 6 * 60 * 60 * 1000);
   retentionTimer.unref?.();
 
+  relay.attach(server);
   await new Promise(resolve => server.listen(port, host, resolve));
-  logger('info', { component: 'CloudServer', event: 'listening', host, port, store: storeTarget });
+  logger('info', { component: 'CloudServer', event: 'listening', host, port, store: storeTarget, relay: '/api/relay', queue: relay.queue.kind });
 
   return {
     server,
     service,
+    relay,
     port: server.address().port,
     close: async () => {
       clearInterval(retentionTimer);

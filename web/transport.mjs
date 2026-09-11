@@ -179,7 +179,15 @@ export function createCloudTransport({
       }
       return;
     }
-    if (frame.type === 'ERROR') logger('warn', { event: 'relay_error', payload: frame.payload });
+    if (frame.type === 'ERROR') {
+      logger('warn', { event: 'relay_error', payload: frame.payload });
+      // A relay-level refusal (the machine is offline, a rate limit) is the
+      // answer to whatever is waiting: deliver it now instead of letting the
+      // caller sit through its timeout.
+      const error = { code: frame.payload?.code || 'RELAY_ERROR', message: frame.payload?.message || 'The relay refused the frame' };
+      if (frame.commandId) settleCommand(frame.commandId, { error });
+      else for (const commandId of [...pending.keys()]) settleCommand(commandId, { error });
+    }
   }
 
   function connect() {

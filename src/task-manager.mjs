@@ -55,6 +55,10 @@ export class TaskManager extends EventEmitter {
     this.runtimes = new Map();
     this.queue = [];
     this.activeTaskId = null;
+    // Files of prompts queued before their workspace existed: raw input kept in
+    // memory only, never written into the task record where every save would
+    // carry them.
+    this.pendingFiles = new Map();
     // capacity 1: a task that cannot start yet (local model busy) is kept in
     // the queue and retried, instead of rejecting the operator's prompt.
     this.queuePollMs = Number(config.queue?.pollMs) > 0 ? Number(config.queue.pollMs) : 1000;
@@ -502,12 +506,24 @@ export class TaskManager extends EventEmitter {
     };
   }
 
+  // A queued prompt that never ran releases the files that were waiting with it.
+  #releasePendingFiles(prompts) {
+    for (const prompt of prompts || []) {
+      const waiting = this.pendingFiles.get(prompt?.id);
+      if (!waiting) continue;
+      this.pendingFiles.delete(prompt.id);
+      if (waiting.uploadToken) this.uploads.discard(waiting.uploadToken).catch(() => {});
+    }
+  }
+
   async #deliverPending(task) {
     const { pending, restore } = await this.#takePending(task);
     // The next prompt waits for this turn to end, which is what capacity 1 means.
     if ((task.pendingPrompts || []).length && !this.queue.includes(task.id)) this.queue.push(task.id);
     try {
-      await this.#message(task.id, pending.text, pending.mode || 'auto', [], null, { immediate: true, fromQueue: true });
+      const waiting = this.pendingFiles.get(pending.id) || { files: [], uploadToken: null };
+      await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
+      this.pendingFiles.delete(pending.id);
     } catch (error) {
       // Never die silently inside the pump: explain the retry and keep the text.
       await this.#event(task, 'QUEUE_RETRY', `Не удалось отправить из очереди: ${error.message}. Сообщение осталось в очереди.`).catch(() => {});
@@ -1250,6 +1266,7 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
     // A queued prompt is dropped with the task, on either cancel path.
+    this.#releasePendingFiles(task.pendingPrompts);
     task.pendingPrompts = null;
     task.queueReason = null;
     this.queue = this.queue.filter(x => x !== id);
@@ -1308,7 +1325,10 @@ export class TaskManager extends EventEmitter {
       const { pending, restore } = await this.#takePending(task);
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
       try {
-        return await this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true, fromQueue: true });
+        const waiting = this.pendingFiles.get(pending.id) || { files: [], uploadToken: null };
+        const result = await this.#message(id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
+        this.pendingFiles.delete(pending.id);
+        return result;
       } catch (error) {
         await restore().catch(() => {});
         throw error;
@@ -1324,6 +1344,7 @@ export class TaskManager extends EventEmitter {
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
       const [dropped, ...rest] = task.pendingPrompts || [];
       if (!dropped) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
+      this.#releasePendingFiles([dropped]);
       task.pendingPrompts = rest;
       if (rest.length) { await this.store.save(this.#publicTask(task)); return this.#publicTask(task); }
       task.queueReason = null;
@@ -1343,7 +1364,7 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false } = {}) {
+  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [] } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -1380,15 +1401,27 @@ export class TaskManager extends EventEmitter {
       // another session): record the prompt and deliver it when the model is
       // free. Attachments are staged now, so the queued entry stays valid even
       // across a restart.
-      const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
-      if (attached.length) task.attachments = [...(task.attachments || []), ...attached];
-      task.files = [...(task.files || []), ...attached.map(metadata)];
-      if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
+      // Files can only be staged into a workspace that exists. A session queued
+      // before it ever started has none yet, so its files wait with the prompt
+      // (in memory, next to the upload staging) and are staged at delivery,
+      // when the workspace is real.
+      const stageNow = Boolean(task.workspacePath);
+      const pendingId = crypto.randomUUID();
+      const attached = stageNow ? await stageFiles(task, this.store.taskDir(id), incomingFiles) : [];
+      if (attached.length) {
+        task.attachments = [...(task.attachments || []), ...attached];
+        task.files = [...(task.files || []), ...attached.map(metadata)];
+      }
+      if (stageNow && uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
+      if (!stageNow && ((files || []).length || uploadToken)) this.pendingFiles.set(pendingId, { files: files || [], uploadToken: uploadToken || null });
       const note = attached.length
         ? '\n\nAdditional files from the phone are in .taskbridge-input/:\n' + attached.map(f => `- ${f.path}`).join('\n')
         : '';
       // Several messages may wait for one session; they are delivered in order.
-      task.pendingPrompts = [...(task.pendingPrompts || []), { text: userText + note, mode }];
+      // The files are staged already; the delivered turn must carry them too,
+      // otherwise the chat shows a raw .taskbridge-input path instead of the
+      // file the operator attached.
+      task.pendingPrompts = [...(task.pendingPrompts || []), { id: pendingId, text: userText + note, mode, files: attached.map(metadata) }];
       task.updatedAt = now();
       await this.#markWaiting(task, reservedElsewhere ? 'BUSY' : (holdingModel ? 'MODEL_BUSY' : 'QUEUED'));
       if (!this.queue.includes(id)) this.queue.push(id);
@@ -1404,9 +1437,12 @@ export class TaskManager extends EventEmitter {
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
     if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
-    const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
+    // A prompt delivered from the queue was staged when it was accepted: reusing
+    // those records keeps one copy on disk and one entry in task.attachments.
+    const attached = staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles);
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
-    const message = userText + (attached.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
+    // The queued text already carries the note about its files.
+    const message = userText + (attached.length && !staged.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
     const effectiveMode = mode === 'auto' ? (streaming ? 'steer' : 'prompt') : mode;
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
     // are persisted. A rejected RPC must not create a phantom user turn.
@@ -1429,12 +1465,12 @@ export class TaskManager extends EventEmitter {
       accepted = true;
       task.error = task.errorCode = task._modelError = null;
       task.retryable = task.retryAfterMs = null;
-      task.attachments = [...(task.attachments || []), ...attached];
+      if (!staged.length) task.attachments = [...(task.attachments || []), ...attached];
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
     } catch (error) {
-      if (!accepted) await rollbackFiles(task, this.store.taskDir(id), attached);
+      if (!accepted && !staged.length) await rollbackFiles(task, this.store.taskDir(id), attached);
       if (!streaming) {
         this.#resolveSettle(id);
         if (this.activeTaskId === id) this.activeTaskId = null;

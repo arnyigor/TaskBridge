@@ -1,6 +1,7 @@
 import http from 'node:http';
 import { attachWebSocketServer } from './ws.mjs';
 import { createMemoryRelayState, createRelay } from './relay.mjs';
+import { createQueueFromEnv } from './relay-queue.mjs';
 
 // Binds the relay to a real HTTP server: the socket layer stays here, the routing
 // policy lives in relay.mjs and the shared state in a state adapter (memory
@@ -14,10 +15,13 @@ export function createRelayServer({
   // No authenticator means the relay accepts nobody; production passes
   // createSecretAuthenticator({ machines }).
   auth = null,
+  // Commands sent while the machine is off. Upstash when the deployment has it,
+  // memory otherwise (a single host has nothing to share state with).
+  queue = createQueueFromEnv(process.env, { logger }),
   maxFrameBytes,
   maxMessageBytes
 } = {}) {
-  const relay = createRelay({ state, logger, limits, auth });
+  const relay = createRelay({ state, logger, limits, auth, queue });
   const http_server_holder = { server: null, connections: new Set() };
 
   function handleConnection(connection, request) {
@@ -34,6 +38,7 @@ export function createRelayServer({
   return {
     relay,
     state,
+    queue,
     // Attach to an existing server (the local cloud host) ...
     attach(server) {
       http_server_holder.server = server;

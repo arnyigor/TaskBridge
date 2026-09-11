@@ -209,3 +209,35 @@ test('«Отправить сейчас» delivers the queued prompt into the ru
   }, { tries: 100, delay: 100 });
   assert.ok(delivered.includes('срочное'), `delivered: ${JSON.stringify(delivered)}`);
 });
+
+test('a queued message keeps its attachment, with a name and not a raw path', { timeout: 60000 }, async t => {
+  const { fixture, router } = await fixtureWithLocalModel(t);
+
+  // The model is busy: prompt and file go to the queue together.
+  const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'первое', model: LOCAL_MODEL });
+  const queued = await fixture.api(`/api/tasks/${created.id}/message`, {
+    text: 'посмотри файл', queue: true, files: [{ name: 'sample.txt', size: 1, base64: 'eA==' }]
+  });
+  assert.equal(queued.pendingPrompts.length, 1);
+  // The session has no workspace yet, so the file cannot be staged into one —
+  // it waits with the prompt and is staged at delivery instead of being lost.
+  assert.deepEqual(queued.files || [], []);
+
+  // The model frees up: both prompts run, and the file must arrive with its own.
+  router.free();
+  const delivered = await waitFor(async () => {
+    const events = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+    return events.find(event => event.type === 'USER_MESSAGE' && event.data?.text === 'посмотри файл') || null;
+  }, { tries: 300, delay: 100 });
+
+  // The delivered turn must carry the file itself: without it the chat falls
+  // back to parsing the text and shows ".taskbridge-input/<id>/<id>/sample.txt".
+  assert.equal(delivered.data.files.length, 1, JSON.stringify(delivered.data));
+  assert.equal(delivered.data.files[0].name, 'sample.txt');
+  assert.match(delivered.data.files[0].path, /^\.taskbridge-input\//);
+
+  // And it is recorded exactly once — not once when queued and again on delivery
+  // (which would also mean two copies on disk).
+  const task = await fixture.api(`/api/tasks/${created.id}`);
+  assert.equal((task.attachments || []).filter(file => file.name === 'sample.txt').length, 1, JSON.stringify(task.attachments));
+});
