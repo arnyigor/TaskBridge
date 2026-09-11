@@ -452,3 +452,34 @@ test('DOM: a queued prompt is reported as queued, not as an error', async () => 
   assert.equal(status.classList.contains('error'), false, 'a queued prompt is not an error');
   assert.equal(prompt.value, '', 'the composer is cleared: the text is safe in the queue');
 });
+
+test('text after a tool round starts on a new line instead of being glued on', () => {
+  const state = new ChatState(task());
+  const frame = (seq, pi) => state.apply({ seq, type: 'PI_EVENT', data: { pi } });
+  const assistant = text => ({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+
+  frame(1, { type: 'agent_start' });
+  frame(2, { type: 'message_start', message: { role: 'assistant' } });
+  frame(3, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Сейчас проверю файл' } });
+  frame(4, assistant('Сейчас проверю файл'));
+  frame(5, { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'ls' } });
+  frame(6, { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: false });
+  frame(7, { type: 'message_start', message: { role: 'assistant' } });
+  frame(8, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Готово: файл создан' } });
+  frame(9, assistant('Готово: файл создан'));
+
+  // No leading break, and the continuation is its own paragraph.
+  assert.equal(state.current.text, 'Сейчас проверю файл\n\nГотово: файл создан');
+});
+
+test('the new line appears even when the continuation arrives without message_end', () => {
+  const state = new ChatState(task());
+  const frame = (seq, pi) => state.apply({ seq, type: 'PI_EVENT', data: { pi } });
+  frame(1, { type: 'message_start', message: { role: 'assistant' } });
+  frame(2, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'первая часть' } });
+  frame(3, { type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'a.txt' } });
+  frame(4, { type: 'tool_execution_end', toolCallId: 't1', toolName: 'read', isError: false });
+  frame(5, { type: 'message_start', message: { role: 'assistant' } });
+  frame(6, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'вторая часть' } });
+  assert.equal(state.current.text, 'первая часть\n\nвторая часть');
+});

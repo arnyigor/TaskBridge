@@ -2,6 +2,14 @@ export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUN
 
 // Both disk replay and live delivery use the same reducer. Polling never replaces
 // a turn with slices of the session-wide accumulated text.
+// Assistant messages are concatenated into one turn, so the continuation after a
+// tool round keeps a paragraph break instead of running into the previous text.
+function paragraphSeparator(text) {
+  const trimmed = String(text || '').trimEnd();
+  if (!trimmed) return '';
+  return trimmed.endsWith('\n') ? '\n' : '\n\n';
+}
+
 export class ChatState {
   // seedInitial: false when constructing from a paginated *tail* window that
   // doesn't reach the task's original prompt — that first turn has no
@@ -79,11 +87,15 @@ export class ChatState {
       this.executionTurn = this.current;
       this.textPrefix = this.current.text;
       this.thinkingPrefix = this.current.thinking;
+      this.textSeparator = paragraphSeparator(this.current.text);
+      this.separatorApplied = false;
       this.current.active = true;
       this.messageOpen = true;
     }
     if (frame.type === 'message_update') {
       if (!this.messageOpen) {
+        // Deltas without a message_start continue the current message (steering
+        // mid-answer): only a real message_start starts a new paragraph.
         this.messageTurn = this.current;
         this.textPrefix = this.current.text;
         this.thinkingPrefix = this.current.thinking;
@@ -91,7 +103,10 @@ export class ChatState {
       }
       const turn = this.messageTurn || this.current;
       const delta = frame.assistantMessageEvent;
-      if (delta?.type === 'text_delta') turn.text += delta.delta || '';
+      if (delta?.type === 'text_delta') {
+        if (this.textSeparator && !this.separatorApplied) { turn.text += this.textSeparator; this.separatorApplied = true; }
+        turn.text += delta.delta || '';
+      }
       if (delta?.type === 'thinking_delta') turn.thinking += delta.delta || '';
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
@@ -100,10 +115,15 @@ export class ChatState {
       if (Array.isArray(content)) {
         const text = content.filter(x => x.type === 'text').map(x => x.text || '').join('');
         const thinking = content.filter(x => x.type === 'thinking').map(x => x.thinking || '').join('');
-        turn.text = (this.messageTurn ? this.textPrefix : turn.text) + text;
+        // The message text is rebuilt from the prefix, so the paragraph break
+        // must be part of it — whether or not a delta already inserted it for
+        // the streaming view.
+        turn.text = (this.messageTurn ? this.textPrefix + (this.textSeparator || '') : turn.text) + text;
         turn.thinking = (this.messageTurn ? this.thinkingPrefix : turn.thinking) + thinking;
       }
       if (frame.message.errorMessage) turn.error = frame.message.errorMessage;
+      this.textSeparator = '';
+      this.separatorApplied = false;
       this.messageTurn = null;
       this.messageOpen = false;
     }
