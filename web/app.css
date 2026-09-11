@@ -550,8 +550,21 @@ body {
    пока работает — «Стоп». Скрепка стоит в том же ряду, поэтому композер
    не бывает выше одной строки кнопок. */
 #stopButton { display: none; }
+/* Стоп появляется рядом с отправкой, но не вместо неё: во время генерации
+   сообщение всё ещё можно поставить в очередь (иначе с телефона не отправить —
+   там Enter переносит строку). */
+#stopButton { display: none; }
 .composerActions:has(#stopButton:not(:disabled)) #stopButton { display: grid; }
-.composerActions:has(#stopButton:not(:disabled)) #sendButton { display: none; }
+
+/* Полоса состояния: заметная, с таймером и причиной ожидания. */
+#activity:not(.hidden) { display: flex; align-items: center; gap: 6px; }
+#activity { font-size: 12px; padding: 2px 2px 4px; color: var(--accent); }
+#activity.waiting { color: var(--muted); }
+#activity::before {
+  content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: currentColor; animation: activityPulse 1.2s ease-in-out infinite;
+}
+@keyframes activityPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.75); } }
 .fileIconButton {
   width: 26px;
   height: 26px;

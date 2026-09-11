@@ -77,8 +77,11 @@ test('a queued prompt is delivered as soon as the model is free', async t => {
   assert.equal(task.queueReason, null);
   assert.deepEqual(f.manager.queue, []);
 
-  // Let the detached settle path finish instead of leaving a 12h timer behind.
+  // Let the detached settle path finish (while the store is still open) instead
+  // of leaving a 12h timer and a late write behind.
   for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  await new Promise(resolve => setImmediate(resolve));
 });
 
 test('trusted cloud task ids are validated and collisions are rejected before admission', async t => {

@@ -215,7 +215,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: () => true,
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -712,4 +712,43 @@ test('DOM: stop points at the session that is actually running', async () => {
   assert.equal(app.stopTarget(), null);
   app.updateStopButton();
   assert.equal(doc.getElementById('stopButton').disabled, true);
+});
+
+test('DOM: a running session is obvious, and both stop and send stay reachable', async () => {
+  const app = await ui();
+  const doc = app.document;
+  const activity = doc.getElementById('activity');
+  const stop = doc.getElementById('stopButton');
+  const send = doc.getElementById('sendButton');
+
+  // Running: the strip appears with a live timer and the model name.
+  app.renderActivity({ status: 'RUNNING', model: { id: 'qwen-27b' }, statusChangedAt: new Date(Date.now() - 5000).toISOString() });
+  assert.equal(activity.classList.contains('hidden'), false);
+  assert.match(activity.textContent, /Pi работает/);
+  assert.match(activity.textContent, /5 с|\d+ с/);
+  assert.match(activity.textContent, /qwen-27b/);
+
+  // Waiting: the strip says why, so the queue is not a mystery.
+  app.renderActivity({ status: 'QUEUED', queueReason: 'MODEL_BUSY', statusChangedAt: new Date().toISOString() });
+  assert.match(activity.textContent, /В очереди/);
+  assert.match(activity.textContent, /ждёт модель/);
+  assert.equal(activity.classList.contains('waiting'), true);
+
+  // Idle: nothing is shown, and no timer is left behind.
+  app.renderActivity({ status: 'SUCCEEDED' });
+  assert.equal(activity.classList.contains('hidden'), true);
+  assert.equal(activity.textContent, '');
+
+  // The stylesheet must keep BOTH buttons available while a run is active —
+  // hiding send made queueing impossible on touch devices (Enter adds a newline).
+  const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
+  assert.doesNotMatch(css, /#stopButton:not\(:disabled\)\) #sendButton \{ display: none/);
+  assert.match(css, /#stopButton:not\(:disabled\)\) #stopButton \{ display: grid/);
+  assert.match(css, /#activity:not\(\.hidden\) \{ display: flex/);
+
+  // Enabled state while the machine works: stop can cancel, send can queue.
+  app.setLastTasks?.([{ id: 'a', title: 'Работает', status: 'RUNNING', projectId: 'p' }]);
+  app.updateStopButton();
+  assert.equal(stop.disabled, false, 'stop must be clickable while a run is active');
+  assert.equal(send.disabled, false, 'send must stay clickable so a prompt can queue');
 });

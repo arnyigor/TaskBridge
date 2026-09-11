@@ -460,6 +460,7 @@ export class TaskManager extends EventEmitter {
   // is happening yet.
   async #markWaiting(task, reason) {
     if (task.queueReason === reason && task.status === 'QUEUED') return;
+    if (task.status !== 'QUEUED') task.statusChangedAt = now();
     task.status = 'QUEUED';
     task.queueReason = reason;
     task.current = reason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : 'В очереди';
@@ -469,17 +470,53 @@ export class TaskManager extends EventEmitter {
   }
 
   // A prompt accepted while the model was busy is sent here, unchanged.
-  async #deliverPending(task) {
+  // Taking a prompt out of the queue must never lose it. `restore` puts it back in
+  // front and makes the session wait again, so a failure (the model got busy in a
+  // race, an RPC error) costs time, not the operator's text.
+  async #takePending(task) {
     const [pending, ...rest] = task.pendingPrompts || [];
+    if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
     task.pendingPrompts = rest;
-    // The next prompt waits for this turn to end, which is what capacity 1 means.
-    if (rest.length && !this.queue.includes(task.id)) this.queue.push(task.id);
     await this.store.save(this.#publicTask(task));
-    await this.#message(task.id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+    return {
+      pending,
+      restore: async () => {
+        task.pendingPrompts = [pending, ...(task.pendingPrompts || [])];
+        if (!this.queue.includes(task.id)) this.queue.unshift(task.id);
+        await this.#markWaiting(task, 'QUEUED');
+      }
+    };
+  }
+
+  async #deliverPending(task) {
+    const { pending, restore } = await this.#takePending(task);
+    // The next prompt waits for this turn to end, which is what capacity 1 means.
+    if ((task.pendingPrompts || []).length && !this.queue.includes(task.id)) this.queue.push(task.id);
+    try {
+      await this.#message(task.id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+    } catch (error) {
+      // Never die silently inside the pump: explain the retry and keep the text.
+      await this.#event(task, 'QUEUE_RETRY', `Не удалось отправить из очереди: ${error.message}. Сообщение осталось в очереди.`).catch(() => {});
+      await restore();
+    }
   }
 
 
   async #pump() {
+    // One pump at a time. Two overlapping pumps used to take two pending prompts
+    // at once, so the queue could deliver them out of order (caught by
+    // tests/queue-http.test.mjs).
+    if (this.pumping) return;
+    if (this.activeTaskId || this.queue.length === 0) return;
+    this.pumping = true;
+    try {
+      await this.#pumpOnce();
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  async #pumpOnce() {
     if (this.activeTaskId || this.queue.length === 0) return;
     const id = this.queue[0];
     const task = this.tasks.get(id);
@@ -1243,20 +1280,25 @@ export class TaskManager extends EventEmitter {
     return this.#admit(async () => {
       const task = this.tasks.get(id);
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-      const [pending, ...rest] = task.pendingPrompts || [];
-      if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
-      // "Сейчас" cannot mean "second generation in parallel": if another session
-      // owns the machine, say so and leave the prompt in the queue.
+      // Check first: "сейчас" cannot mean a second generation in parallel, and a
+      // refusal must leave the prompt where it was.
       if (this.activeTaskId && this.activeTaskId !== id) {
         const owner = this.tasks.get(this.activeTaskId);
         throw Object.assign(
           new Error(`Машина занята сессией «${owner?.title || this.activeTaskId}» — сначала остановите её.`),
           { code: 'BUSY' });
       }
-      task.pendingPrompts = rest;
-      if (!rest.length) this.queue = this.queue.filter(x => x !== id);
-      await this.store.save(this.#publicTask(task));
-      return this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+      // Like Ctrl+Enter, "сейчас" is allowed to try even when the model looks
+      // busy (the flag can be stale): if the attempt fails, `restore` below puts
+      // the prompt back at the front of the queue.
+      const { pending, restore } = await this.#takePending(task);
+      if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
+      try {
+        return await this.#message(id, pending.text, pending.mode || 'auto', [], null, { immediate: true });
+      } catch (error) {
+        await restore().catch(() => {});
+        throw error;
+      }
     });
   }
 
@@ -1441,6 +1483,8 @@ export class TaskManager extends EventEmitter {
 
   async #setStatus(task, status, current) {
     if (this.deleted.has(task.id)) return;
+    // The UI shows "работает 12 с", so the moment of the transition matters.
+    if (task.status !== status) task.statusChangedAt = now();
     task.status = status;
     task.current = current;
     task.updatedAt = now();

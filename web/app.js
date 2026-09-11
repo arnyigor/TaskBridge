@@ -682,6 +682,40 @@ function stopTarget() {
   return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(stoppable) || null;
 }
 
+// What the machine is doing, in one line: a running session must be obvious
+// (the small "ждёт модель" badge in the list is not enough), with a live timer
+// so a stuck run is visible too.
+const ACTIVITY_LABELS = {
+  QUEUED: 'В очереди', PREPARING: 'Подготовка', PREFLIGHT: 'Проверка',
+  RUNNING: 'Pi работает', WAITING_USER: 'Ждёт подтверждения', CANCELLING: 'Останавливаю…'
+};
+let activityTimer = null;
+
+function renderActivity(task = currentTask) {
+  const host = $('activity');
+  const status = task?.status;
+  const label = ACTIVITY_LABELS[status];
+  if (!label) {
+    if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+    host.classList.add('hidden');
+    host.textContent = '';
+    return;
+  }
+  const since = Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt || '') || null;
+  const paint = () => {
+    const seconds = since === null ? null : Math.max(0, Math.round((Date.now() - since) / 1000));
+    const wait = status === 'QUEUED' ? (task.queueReason === 'MODEL_BUSY' ? ' — ждёт модель' : ' — ждёт очередь') : '';
+    const elapsed = seconds === null ? '' : ` · ${seconds} с`;
+    const model = task.model?.id ? ` · ${task.model.id}` : '';
+    host.textContent = `${label}${wait}${elapsed}${model}`;
+  };
+  paint();
+  // Elapsed time keeps ticking while a session works or waits.
+  if (!activityTimer) activityTimer = setInterval(paint, 1000);
+  host.classList.remove('hidden');
+  host.classList.toggle('waiting', status !== 'RUNNING');
+}
+
 function updateStopButton() {
   const target = stopTarget();
   $('stopButton').disabled = !target;
@@ -707,6 +741,7 @@ function renderTaskDetails(t) {
   const c = t.compaction || {};
   $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
   updateStopButton();
+  renderActivity(t);
   $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;
   const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(t.status);
   const isWorktree = Boolean(t.worktree);
@@ -814,7 +849,7 @@ async function refreshTask() {
     // A stale metadata response must not stop a newer streaming event.
     if (chatState.cursor === initialCursor) chatState.snapshot(t);
     renderChat();
-    renderTaskDetails(t);
+    renderTaskDetails(t); // also refreshes the stop button and the activity strip
     await loadArtifacts();
     await loadTasks();
   } catch (error) {
