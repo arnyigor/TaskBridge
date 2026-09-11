@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import net from 'node:net';
 import crypto from 'node:crypto';
 import { createRelayServer } from '../cloud/lib/relay-server.mjs';
+import { createOpenAuthenticator } from '../cloud/lib/relay-auth.mjs';
 import { createEnvelope, parseEnvelope } from '../src/cloud/protocol.mjs';
 import { encodeFrame } from '../cloud/lib/ws.mjs';
 
@@ -11,7 +12,7 @@ import { encodeFrame } from '../cloud/lib/ws.mjs';
 // oversized input and the close handshake.
 
 async function withRelay(t, { limits } = {}) {
-  const relay = createRelayServer({ logger: () => {}, ...(limits ? { limits } : {}) });
+  const relay = createRelayServer({ logger: () => {}, auth: createOpenAuthenticator(), ...(limits ? { limits } : {}) });
   const endpoint = await relay.listen({ port: 0 });
   t.after(() => endpoint.close());
   return { relay, endpoint };

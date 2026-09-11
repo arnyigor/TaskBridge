@@ -11,10 +11,13 @@ export function createRelayServer({
   state = createMemoryRelayState(),
   logger = () => {},
   limits = {},
+  // No authenticator means the relay accepts nobody; production passes
+  // createSecretAuthenticator({ machines }).
+  auth = null,
   maxFrameBytes,
   maxMessageBytes
 } = {}) {
-  const relay = createRelay({ state, logger, limits });
+  const relay = createRelay({ state, logger, limits, auth });
   const http_server_holder = { server: null, connections: new Set() };
 
   function handleConnection(connection, request) {

@@ -1,4 +1,5 @@
 import { createEnvelope, parseEnvelope, serializeEnvelope } from '../../src/cloud/protocol.mjs';
+import { createOpenAuthenticator } from './relay-auth.mjs';
 
 // Cloud relay core (§ cloud-protocol.md).
 //
@@ -53,8 +54,16 @@ export function createMemoryRelayState({ now = () => Date.now() } = {}) {
   };
 }
 
-export function createRelay({ state = createMemoryRelayState(), logger = () => {}, limits = {} } = {}) {
+export function createRelay({ state = createMemoryRelayState(), logger = () => {}, limits = {}, auth = null } = {}) {
   const config = { ...RELAY_DEFAULTS, ...limits };
+  // Secure by default: without configured credentials the relay accepts nobody.
+  // createOpenAuthenticator() is the explicit opt-in for local development and
+  // for tests that only exercise routing.
+  const unconfigured = {
+    async authenticateMachine() { return { ok: false, code: 'AUTH_NOT_CONFIGURED', message: 'Relay credentials are not configured' }; },
+    async authenticateClient() { return { ok: false, code: 'AUTH_NOT_CONFIGURED', message: 'Relay credentials are not configured' }; }
+  };
+  const authenticator = auth || { mode: 'closed', ...unconfigured };
   const machines = new Map();  // machineId -> connection
   const clients = new Map();   // machineId -> Set<connection>
   let connections = 0;
@@ -82,9 +91,21 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
         // Two writers for one machine would mean two owners of the same sessions.
         return reject(connection, 'MACHINE_ALREADY_CONNECTED', `Machine ${frame.machineId} is already connected`, { close: true });
       }
+      const deviceId = typeof frame.payload?.deviceId === 'string' ? frame.payload.deviceId : null;
+      // Authentication happens before anything is routed or remembered: a peer
+      // that cannot prove who it is never reaches the room maps.
+      const verdict = role === 'machine'
+        ? await authenticator.authenticateMachine({ machineId: frame.machineId, credential: frame.payload?.auth })
+        : await authenticator.authenticateClient({ machineId: frame.machineId, deviceId, credential: frame.payload?.auth });
+      if (!verdict?.ok) {
+        logger('warn', { event: 'relay_auth_rejected', role, machineId: frame.machineId, code: verdict?.code || 'AUTH_FAILED' });
+        send(connection, createEnvelope({ type: 'AUTH_FAIL', machineId: frame.machineId, payload: { code: verdict?.code || 'AUTH_FAILED', message: verdict?.message || 'Authentication failed' } }));
+        connection.close(1008, 'auth failed');
+        return false;
+      }
       session.role = role;
       session.machineId = frame.machineId;
-      session.deviceId = typeof frame.payload?.deviceId === 'string' ? frame.payload.deviceId : null;
+      session.deviceId = deviceId || verdict.deviceId || null;
       if (role === 'machine') {
         machines.set(frame.machineId, connection);
         await state.setPresence(frame.machineId, config.presenceTtlMs);
@@ -94,7 +115,7 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
         clients.get(frame.machineId).add(connection);
         logger('info', { event: 'client_online', machineId: frame.machineId, deviceId: session.deviceId });
       }
-      send(connection, createEnvelope({ type: 'AUTH_OK', machineId: frame.machineId, payload: { role, protocolVersion: frame.v } }));
+      send(connection, createEnvelope({ type: 'AUTH_OK', machineId: frame.machineId, payload: { role, protocolVersion: frame.v, deviceId: session.deviceId } }));
       return true;
     }
 
@@ -180,8 +201,18 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
       }
     }
 
+    // Frames are handled strictly in arrival order: two frames in the same tick
+    // (HELLO followed by a command) must not race, or authentication could be
+    // overtaken by the frame it is supposed to gate.
+    let queue = Promise.resolve();
+    const enqueue = text => {
+      const next = queue.then(() => handle(text), () => handle(text));
+      queue = next.catch(() => {});
+      return next;
+    };
+
     connection.relaySession = session;
-    session.handle = handle;
+    session.handle = enqueue;
     session.close = close;
     session.hello = hello;
     // The transport owns the close hook (connection.onClose); the relay must not
@@ -191,6 +222,7 @@ export function createRelay({ state = createMemoryRelayState(), logger = () => {
 
   return {
     attach,
+    authMode: authenticator.mode,
     // Diagnostics only: never exposes payloads.
     stats() {
       return {

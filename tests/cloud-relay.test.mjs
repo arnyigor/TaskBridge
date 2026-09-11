@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRelay, createMemoryRelayState } from '../cloud/lib/relay.mjs';
+import { createOpenAuthenticator } from '../cloud/lib/relay-auth.mjs';
 import { createEnvelope, parseEnvelope } from '../src/cloud/protocol.mjs';
 
 // The relay is a telephone exchange: it routes frames between a machine and its
@@ -24,8 +25,10 @@ const command = (machineId, payload = { text: 'привет' }) => createEnvelop
   type: 'COMMAND', machineId, commandId: 'c-1', payload
 });
 
+// Routing only: authentication has its own test file. The open authenticator is
+// an explicit opt-in, never the default.
 async function relayWith(limits = {}) {
-  return createRelay({ limits, logger: () => {} });
+  return createRelay({ limits, logger: () => {}, auth: createOpenAuthenticator() });
 }
 
 test('a frame without HELLO is refused instead of being routed for an unknown peer', async () => {
@@ -121,7 +124,7 @@ test('a client of an offline machine is told so, or handed to another instance',
   const original = state.publish;
   state.publish = async (machineId, frame) => { published.push({ machineId, type: frame.type }); return original(machineId, frame); };
   await state.setPresence('laptop-home', 60_000);
-  const second = createRelay({ state, logger: () => {} });
+  const second = createRelay({ state, logger: () => {}, auth: createOpenAuthenticator() });
   const remote = connection();
   const remoteSession = second.attach(remote);
   await remoteSession.handle(hello('client', 'laptop-home', { deviceId: 'phone-2' }));
@@ -152,7 +155,7 @@ test('PING is answered by the relay itself, so a client can test the link cheapl
 test('too many frames per second close the connection, and the limit recovers', async () => {
   let clock = 1_000_000;
   const state = createMemoryRelayState({ now: () => clock });
-  const relay = createRelay({ state, limits: { maxFramesPerSecond: 2 }, logger: () => {} });
+  const relay = createRelay({ state, limits: { maxFramesPerSecond: 2 }, logger: () => {}, auth: createOpenAuthenticator() });
   const client = connection();
   const session = relay.attach(client);
   await session.handle(hello('client', 'home-pc'));   // 1
@@ -171,7 +174,7 @@ test('too many frames per second close the connection, and the limit recovers', 
 
 test('a machine going away clears presence and tells its clients', async () => {
   const state = createMemoryRelayState();
-  const relay = createRelay({ state, logger: () => {} });
+  const relay = createRelay({ state, logger: () => {}, auth: createOpenAuthenticator() });
   const machine = connection();
   const client = connection();
   const machineSession = relay.attach(machine);
