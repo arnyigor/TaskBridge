@@ -52,6 +52,23 @@ Pi и висящего llama.cpp-роутера.
   при `closing`, чтобы фоновая запись события не упала на закрытый store.
 - Покрытие: `tests/ipc.test.mjs` (5), `tests/agent-host.test.mjs` (2).
 
+## 0.9.3-dev — Gateway через IPC (шаг 5c, P-3 начало)
+
+`src/gateway.mjs`: HTTP/SSE-фронтенд без владения агентом — каждый клиентский
+вызов транслируется в IPC-команду host'у. Статика, маршруты задач (message,
+cancel, compact, apply, model, thinking, pending, approvals, events, state),
+SSE-канал с реплеем и фан-аутом `task-event` (тот же контракт, что в монолите).
+
+- `src/gateway.mjs` — модуль (`createGateway`) + условный CLI: опт-ин, не
+  задействован в `npm start`; монолит остаётся дефолтом и откатом.
+- Диспетчер host пополнен (`setAutoCompaction`, `cleanupWorktree`).
+- Фикс в gateway: `handleStream` деструктурировал `{events}` из ответа
+  диспетчера, но тот возвращает массив — на этом SSE закрывался после
+  реплея (catch → res.end). Теперь читает массив напрямую.
+- Гейтвей при close гасит открытые сокеты, чтобы `server.close` не висел на
+  SSE-подписке.
+- Покрытие: `tests/gateway.test.mjs` — полный путь HTTP→IPC→host→событие→SSE.
+
 ## 0.9.2 — 2026-xx-xx
 
 Очередь: сообщения больше не висят в ней без причины (по жалобе «встают в

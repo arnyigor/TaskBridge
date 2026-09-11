@@ -53,6 +53,8 @@ export function buildDispatcher({ manager, store }) {
       case 'importSession': return m.importSession(args.input);
       case 'listApprovals': return m.listApprovals(args.id);
       case 'resolveApproval': return m.resolveApproval(args.id, args.approvalId, args.decision);
+      case 'setAutoCompaction': return m.setAutoCompaction(args.id, args.enabled === true);
+      case 'cleanupWorktree': return m.cleanupWorktree ? m.cleanupWorktree(args.id) : Promise.reject(Object.assign(new Error('not implemented'), { code: 'NOT_IMPLEMENTED' }));
       case 'mcpStatus': return m.mcpStatus ? m.mcpStatus(args.id) : { providers: [] };
 
       // --- events (read-only; host is the only SQLite writer) -------------------
