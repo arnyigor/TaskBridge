@@ -159,6 +159,24 @@ durable ledger.
 Покрытие: +1 тест (cancel-идемпотентность + CONFLICT по смене намерения).
 Полный набор: 339 тестов зелёные.
 
+## 0.9.3-dev — clientId + статус-контракт команд (этап 3 ТЗ)
+
+Команды (message/create/cancel/apply) теперь несут `clientId` и имеют явный
+статус в ledger.
+
+- `client_id`/`status` добавлены в таблицу `commands` (+ миграция для старых
+  БД через `PRAGMA table_info`/ALTER; idемпотентно).
+- Ledger переходов: ACCEPTED → DISPATCHING → COMPLETED/REJECTED; после крaша
+e  in-flight → `UNKNOWN_AFTER_CRASH`. `#withCommand(commandId, clientId, hash,
+  fn)`.
+- Новый `manager.commandStatus(commandId)` — статус + `clientId` (read-only,
+  live-ответ команд не меняет). Маршрут `GET /api/commands/:id` и в монолите, и
+  в split-gateway; `clientId` проброшен через диспетчер, gateway и монолитные
+  маршруты.
+
+Покрытие: +1 тест (`commandStatus` возвращает `COMPLETED` + `clientId`;
+  неизвестный id → null). Полный набор: 340 тестов зелёные.
+
 ## 0.9.2 — 2026-xx-xx
 
 Очередь: сообщения больше не висят в ней без причины (по жалобе «встают в

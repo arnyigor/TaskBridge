@@ -261,7 +261,7 @@ export class TaskManager extends EventEmitter {
   async createTask(input, options = {}) {
     const commandId = options && options.commandId ? String(options.commandId) : null;
     if (!commandId) return this.#admit(() => this.#createTask(input, options));
-    return this.#withCommand(commandId, () => this.#payloadHash(input), () => this.#admit(() => this.#createTask(input, options)));
+    return this.#withCommand(commandId, options && options.clientId ? String(options.clientId) : null, () => this.#payloadHash(input), () => this.#admit(() => this.#createTask(input, options)));
   }
 
   // Accepts { provider, id } from the client; returns null when the shape is
@@ -1295,10 +1295,10 @@ export class TaskManager extends EventEmitter {
 
   // Applies this task's result patch to the source checkout. Refuses when the
   // source is dirty or has moved since the worktree was created, unless forced.
-  async applyTask(id, { force = false, commandId } = {}) {
+  async applyTask(id, { force = false, commandId, clientId } = {}) {
     const cid = commandId ? String(commandId) : null;
     if (!cid) return this.#applyTask(id, force === true);
-    return this.#withCommand(cid, () => this.#payloadHash(id, 'apply', force === true), () => this.#applyTask(id, force === true));
+    return this.#withCommand(cid, clientId ? String(clientId) : null, () => this.#payloadHash(id, 'apply', force === true), () => this.#applyTask(id, force === true));
   }
 
   async #applyTask(id, force) {
@@ -1364,7 +1364,7 @@ export class TaskManager extends EventEmitter {
   async cancel(id, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     if (!commandId) return this.#cancel(id);
-    return this.#withCommand(commandId, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id));
+    return this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id));
   }
 
   async #cancel(id) {
@@ -1418,6 +1418,7 @@ export class TaskManager extends EventEmitter {
     }
     return this.#withCommand(
       commandId,
+      opts && opts.clientId ? String(opts.clientId) : null,
       () => this.#payloadHash(id, text, mode, files, uploadToken),
       async () => this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true })),
     );
@@ -1431,7 +1432,7 @@ export class TaskManager extends EventEmitter {
   // never finished (a prior process crashed) is UNKNOWN_AFTER_CRASH — never
   // re-run silently. The in-memory map is only a cache + in-flight tracker;
   // SQLite is the source of truth across restarts.
-  async #withCommand(commandId, hashOf, fn) {
+  async #withCommand(commandId, clientId, hashOf, fn) {
     if (!hashOf) throw new Error('internal: hashOf required');
     this.#evictCommands();
     const hash = hashOf();
@@ -1445,10 +1446,11 @@ export class TaskManager extends EventEmitter {
           throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
         }
         if (stored.done) {
-          this.commandLedger.set(commandId, { hash, done: true, result: stored.result, at: stored.at });
+          const status = stored.status || (stored.result != null ? 'COMPLETED' : 'REJECTED');
+          this.commandLedger.set(commandId, { hash, done: true, result: stored.result, at: stored.at, clientId: stored.clientId, status });
           return stored.result;
         }
-        this.commandLedger.set(commandId, { hash, done: false, result: null, at: stored.at });
+        this.commandLedger.set(commandId, { hash, done: false, result: null, at: stored.at, clientId: stored.clientId, status: 'UNKNOWN_AFTER_CRASH' });
         throw Object.assign(new Error('Исход команды неизвестен после перезапуска — отправьте её заново с новым commandId.'), { code: 'UNKNOWN_AFTER_CRASH' });
       }
     } else {
@@ -1456,29 +1458,51 @@ export class TaskManager extends EventEmitter {
         throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
       }
       if (entry.done) return entry.result;
-      throw Object.assign(new Error('Команда уже выполняется.'), { code: 'ACCEPTED' });
+      throw Object.assign(new Error('Команда уже выполняется.'), { code: entry.status === 'UNKNOWN_AFTER_CRASH' ? 'UNKNOWN_AFTER_CRASH' : 'ACCEPTED' });
     }
     // New command: persist ACCEPTED before running, so we cannot lose track of a
     // command that crashed mid-run. If we cannot record it we must not run it.
     try {
-      this.store.upsertCommand(commandId, { hash, done: false });
+      this.store.upsertCommand(commandId, { hash, done: false, clientId, status: 'ACCEPTED' });
     } catch (error) {
       throw Object.assign(new Error('Не удалось зафиксировать команду: ' + (error?.message || error)), { code: 'COMMAND_LEDGER_FAILED' });
     }
-    this.commandLedger.set(commandId, { hash, done: false, result: null, at: Date.now() });
+    this.commandLedger.set(commandId, { hash, done: false, result: null, at: Date.now(), clientId, status: 'ACCEPTED' });
     try {
-      const result = await fn();
       const e = this.commandLedger.get(commandId);
-      if (e) { e.done = true; e.result = result; }
-      try { this.store.upsertCommand(commandId, { hash, done: true, result }); } catch { /* best effort */ }
+      if (e) e.status = 'DISPATCHING';
+      try { this.store.upsertCommand(commandId, { hash, done: false, clientId, status: 'DISPATCHING' }); } catch {}
+      const result = await fn();
+      const f = this.commandLedger.get(commandId);
+      if (f) { f.done = true; f.result = result; f.status = 'COMPLETED'; }
+      try { this.store.upsertCommand(commandId, { hash, done: true, result, clientId, status: 'COMPLETED' }); } catch {}
       return result;
     } catch (error) {
-      const e = this.commandLedger.get(commandId);
-      if (e) { e.done = true; e.result = null; }
-      try { this.store.upsertCommand(commandId, { hash, done: true, result: null }); } catch { /* best effort */ }
+      const g = this.commandLedger.get(commandId);
+      if (g) { g.done = true; g.result = null; g.status = 'REJECTED'; }
+      try { this.store.upsertCommand(commandId, { hash, done: true, result: null, clientId, status: 'REJECTED' }); } catch {}
       throw error;
     }
   }
+
+  // Command-status contract (TZ stage 3): ACCEPTED / DISPATCHING / COMPLETED /
+  // REJECTED / UNKNOWN_AFTER_CRASH, plus the client that issued it. Read-only;
+  // does not change the live command response shape.
+  commandStatus(commandId) {
+    const key = String(commandId);
+    const e = this.commandLedger.get(key);
+    if (e) return { commandId: key, status: e.status || (e.done ? 'COMPLETED' : 'DISPATCHING'), done: e.done, at: e.at, clientId: e.clientId || null };
+    const stored = this.store.getCommand(key);
+    if (!stored) return null;
+    return {
+      commandId: key,
+      status: stored.status || (stored.done ? (stored.result != null ? 'COMPLETED' : 'REJECTED') : 'UNKNOWN_AFTER_CRASH'),
+      done: stored.done,
+      at: stored.at,
+      clientId: stored.clientId || null,
+    };
+  }
+
 
   #payloadHash(...args) {
     return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');

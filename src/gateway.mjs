@@ -164,11 +164,13 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
 
       if (method === 'GET' && pathname === '/api/info') return ok({ build: { version: 'gateway' }, cloud: { enabled: false } });
       if (method === 'GET' && pathname === '/api/projects') return ok(await agent.request('listProjects'));
+      const cmdM = method === 'GET' ? pathname.match(/^\/api\/commands\/(.+)$/) : null;
+      if (cmdM) return ok(await agent.request('commandStatus', { commandId: cmdM[1] }));
       if (method === 'GET' && pathname === '/api/tasks') return ok(await agent.request('listTasks'));
       if (method === 'POST' && pathname === '/api/tasks') {
         const b = await readBody();
-        const { commandId, ...input } = b;
-        return json(res, 201, await agent.request('createTask', { input, commandId }));
+        const { commandId, clientId, ...input } = b;
+        return json(res, 201, await agent.request('createTask', { input, commandId, clientId }));
       }
       if (method === 'POST' && pathname === '/api/tasks/from-session') return json(res, 201, await agent.request('importSession', { input: await readBody() }));
       if (method === 'POST' && pathname === '/api/uploads') {
@@ -216,11 +218,11 @@ export async function createGateway({ config, rootDir = ROOT_DIR, webDir = WEB_D
 
         if (method === 'POST' && a1 === 'message' && !a2) {
           const b = await readBody();
-          return ok(await agent.request('message', { id, text: b.text, mode: b.mode, files: b.files || [], uploadToken: b.uploadToken, now: b.now === true, queue: b.queue === true, commandId: b.commandId }));
+          return ok(await agent.request('message', { id, text: b.text, mode: b.mode, files: b.files || [], uploadToken: b.uploadToken, now: b.now === true, queue: b.queue === true, commandId: b.commandId, clientId: b.clientId }));
         }
-        if (method === 'POST' && a1 === 'cancel') return ok(await agent.request('cancel', { id, commandId: (await readBody()).commandId }));
+        if (method === 'POST' && a1 === 'cancel') { const b = await readBody(); return ok(await agent.request('cancel', { id, commandId: b.commandId, clientId: b.clientId })); }
         if (method === 'POST' && a1 === 'compact') return ok(await agent.request('compact', { id, instructions: (await readBody()).instructions }));
-        if (method === 'POST' && a1 === 'apply') { const b = await readBody(); return ok(await agent.request('applyTask', { id, force: b.force === true, commandId: b.commandId })); }
+        if (method === 'POST' && a1 === 'apply') { const b = await readBody(); return ok(await agent.request('applyTask', { id, force: b.force === true, commandId: b.commandId, clientId: b.clientId })); }
         if (method === 'POST' && a1 === 'model' && !a2) { const b = await readBody(); return ok(await agent.request('setModel', { id, provider: b.provider, modelId: b.modelId ?? b.id })); }
         if (method === 'POST' && a1 === 'thinking' && !a2) return ok(await agent.request('setThinking', { id, level: (await readBody()).level }));
         if (method === 'POST' && a1 === 'auto-compaction' && !a2) return ok(await agent.request('setAutoCompaction', { id, enabled: (await readBody()).enabled === true }));

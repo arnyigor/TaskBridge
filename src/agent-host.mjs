@@ -30,18 +30,18 @@ export function buildDispatcher({ manager, store }) {
       case 'registerProject': return m.registerProject(args.project);
       case 'listTasks': return m.listTasks();
       case 'getTask': return m.getTask(args.id);
-      case 'createTask': return m.createTask(args.input, { ...(args.options || {}), commandId: args.commandId });
+      case 'createTask': return m.createTask(args.input, { ...(args.options || {}), commandId: args.commandId, clientId: args.clientId });
       case 'renameTask': return m.renameTask(args.id, args.title);
       case 'deleteTask': return m.deleteTask(args.id);
 
       // --- messaging / lifecycle --------------------------------------------
-      case 'message': return m.message(args.id, args.text, args.mode || 'auto', args.files || [], args.uploadToken, { now: args.now === true, queue: args.queue === true, commandId: args.commandId });
-      case 'cancel': return m.cancel(args.id, { commandId: args.commandId });
+      case 'message': return m.message(args.id, args.text, args.mode || 'auto', args.files || [], args.uploadToken, { now: args.now === true, queue: args.queue === true, commandId: args.commandId, clientId: args.clientId });
+      case 'cancel': return m.cancel(args.id, { commandId: args.commandId, clientId: args.clientId });
       case 'compact': return m.compact(args.id, args.instructions);
       case 'state': return m.state(args.id);
       case 'sendPendingNow': return m.sendPendingNow(args.id);
       case 'dropPending': return m.dropPending(args.id);
-      case 'applyTask': return m.applyTask(args.id, { force: args.force === true, commandId: args.commandId });
+      case 'applyTask': return m.applyTask(args.id, { force: args.force === true, commandId: args.commandId, clientId: args.clientId });
 
       // --- model -----------------------------------------------------------------
       case 'setModel': return m.setModel(args.id, args.provider, args.modelId ?? args.model ?? args.id2);
@@ -60,6 +60,7 @@ export function buildDispatcher({ manager, store }) {
 
       // --- events (read-only; host is the only SQLite writer) -------------------
       case 'events': return store.readEvents(args.id, args.count, args.after);
+      case 'commandStatus': return m.commandStatus(args.commandId);
 
       default:
         throw Object.assign(new Error(`unknown command: ${name}`), { code: 'NOT_IMPLEMENTED' });

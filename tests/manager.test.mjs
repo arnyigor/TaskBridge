@@ -687,3 +687,16 @@ test('commandId dedupes cancel too (same result, different intent conflicts)', a
   // Same commandId with a different intent (different task) is a conflict.
   await assert.rejects(() => f.manager.cancel('other', { commandId: 'cc-1' }), { code: 'CONFLICT' });
 });
+
+test('commandStatus reports clientId and status after completion', async t => {
+  const f = await fixture(t);
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+  await f.manager.message('a', 'статус', 'auto', [], null, { queue: true, commandId: 'cs-1', clientId: 'phone-x' });
+  const st = f.manager.commandStatus('cs-1');
+  assert.equal(st.status, 'COMPLETED');
+  assert.equal(st.clientId, 'phone-x');
+  assert.equal(st.done, true);
+  assert.equal(f.manager.commandStatus('no-such-id'), null);
+  await f.manager.cancel('a');
+});

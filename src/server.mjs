@@ -693,6 +693,11 @@ async function handleRequest(req, res) {
       return json(res, 200, manager.listProjects());
     }
 
+    if (req.method === 'GET' && pathname.startsWith('/api/commands/')) {
+      const cmdMatch = pathname.match(/^\/api\/commands\/(.+)$/);
+      return json(res, 200, manager.commandStatus(cmdMatch[1]));
+    }
+
     if (req.method === 'POST' && pathname === '/api/uploads') {
       const boundary = multipartBoundary(req.headers['content-type']);
       if (!boundary) throw Object.assign(new Error('Ожидается multipart/form-data с boundary.'), { code: 'INPUT_INVALID' });
@@ -743,8 +748,8 @@ async function handleRequest(req, res) {
 
     if (req.method === 'POST' && pathname === '/api/tasks') {
       const body = await readJson(req);
-      const { commandId, ...input } = body;
-      const task = await manager.createTask(input, { commandId });
+      const { commandId, clientId, ...input } = body;
+      const task = await manager.createTask(input, { commandId, clientId });
       return json(res, 202, task);
     }
 
@@ -815,7 +820,8 @@ async function handleRequest(req, res) {
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && match) {
-      return json(res, 200, await manager.cancel(match[1], { commandId: (await readJson(req)).commandId }));
+      const c = await readJson(req);
+      return json(res, 200, await manager.cancel(match[1], { commandId: c.commandId, clientId: c.clientId }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/message$/);
@@ -824,7 +830,7 @@ async function handleRequest(req, res) {
       // now: true is "send immediately, do not wait for the local model" (the
       // Ctrl+Enter path); otherwise a busy model means the prompt is queued.
       return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken,
-        { now: body.now === true, queue: body.queue === true, commandId: body.commandId }));
+        { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending\/send$/);
@@ -860,7 +866,7 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/apply$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req).catch(() => ({}));
-      return json(res, 200, await manager.applyTask(match[1], { force: body.force === true, commandId: body.commandId }));
+      return json(res, 200, await manager.applyTask(match[1], { force: body.force === true, commandId: body.commandId, clientId: body.clientId }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/worktree$/);

@@ -37,7 +37,9 @@ CREATE TABLE IF NOT EXISTS commands (
   payload_hash TEXT NOT NULL,
   done INTEGER NOT NULL DEFAULT 0,
   result TEXT,
-  at INTEGER NOT NULL
+  at INTEGER NOT NULL,
+  client_id TEXT,
+  status TEXT
 );
 `;
 
@@ -70,6 +72,7 @@ export class TaskStore {
     // Enforce task/event integrity; must be set outside any transaction.
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec(SCHEMA);
+    this.#ensureCommandColumns();
     this.#migrateSchema();
     this.#importLegacy();
   }
@@ -113,23 +116,36 @@ export class TaskStore {
   // Durable commandId ledger (TZ stage 3): lets a retry after a process
   // restart replay the saved result instead of silently running a second time.
   getCommand(commandId) {
-    const row = this.db.prepare('SELECT command_id, payload_hash AS hash, done, result, at FROM commands WHERE command_id = ?').get(String(commandId));
+    const row = this.db.prepare('SELECT command_id, payload_hash AS hash, done, result, at, client_id AS clientId, status FROM commands WHERE command_id = ?').get(String(commandId));
     if (!row) return null;
-    return { hash: row.hash, done: row.done === 1, result: row.result ? JSON.parse(row.result) : null, at: Number(row.at) };
+    return { hash: row.hash, done: row.done === 1, result: row.result ? JSON.parse(row.result) : null, at: Number(row.at), clientId: row.clientId || null, status: row.status || null };
   }
 
-  upsertCommand(commandId, { hash, done, result = null, at = Date.now() }) {
-    this.db.prepare(`INSERT INTO commands (command_id, payload_hash, done, result, at)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(command_id) DO UPDATE SET payload_hash=excluded.payload_hash, done=excluded.done, result=excluded.result, at=excluded.at`)
-      .run(String(commandId), String(hash), done ? 1 : 0, result == null ? null : JSON.stringify(result), at);
+  upsertCommand(commandId, { hash, done, result = null, at = Date.now(), clientId = null, status = null }) {
+    this.db.prepare(`INSERT INTO commands (command_id, payload_hash, done, result, at, client_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(command_id) DO UPDATE SET
+        payload_hash=excluded.payload_hash, done=excluded.done, result=excluded.result,
+        at=excluded.at, client_id=excluded.client_id, status=excluded.status`)
+      .run(String(commandId), String(hash), done ? 1 : 0, result == null ? null : JSON.stringify(result), at, clientId ? String(clientId) : null, status ? String(status) : null);
   }
+
 
   // Drops resolved ledger rows older than `olderThanMs` so the table stays
   // small; in-flight (done=0) rows are kept: they mark a possible crash.
   pruneCommands(olderThanMs) {
     const cutoff = Date.now() - olderThanMs;
     this.db.prepare('DELETE FROM commands WHERE done = 1 AND at < ?').run(cutoff);
+  }
+
+  // Adds client_id/status to the commands table for databases created before
+  // the status contract existed. Idempotent via PRAGMA table_info.
+  #ensureCommandColumns() {
+    try {
+      const cols = new Set(this.db.prepare('PRAGMA table_info(commands)').all().map((r) => r.name));
+      if (!cols.has('client_id')) this.db.exec('ALTER TABLE commands ADD COLUMN client_id TEXT');
+      if (!cols.has('status')) this.db.exec('ALTER TABLE commands ADD COLUMN status TEXT');
+    } catch { /* table may not exist yet on a broken/fresh db; SCHEMA recreates it */ }
   }
 
   close() {
