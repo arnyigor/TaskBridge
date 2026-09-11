@@ -419,3 +419,36 @@ test('DOM: commands sit above the answer and below the reasoning block', async (
   // The answer stays readable without scrolling past a long tool list.
   assert.match(body.querySelector('.md').textContent, /Первый ответ|Второй ответ/);
 });
+
+test('DOM: a queued prompt is reported as queued, not as an error', async () => {
+  const app = await ui();
+  await app.loadTasks();
+
+  // The sessions list marks the wait, so the reason is visible without opening
+  // the session.
+  app.tasks.a.status = 'QUEUED';
+  app.tasks.a.queueReason = 'MODEL_BUSY';
+  await app.loadTasks();
+  assert.match(app.document.querySelector('.taskRow[data-id="a"]').textContent, /ждёт модель/);
+
+  // Sending while the model is busy reports the queue instead of failing.
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) {
+      return { ok: true, json: async () => ({ id: 'a', status: 'QUEUED', queueReason: 'MODEL_BUSY' }) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const prompt = app.document.getElementById('prompt');
+  prompt.value = 'ещё вопрос';
+  const form = app.document.getElementById('form');
+  form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+
+  const status = app.document.getElementById('createError');
+  assert.match(status.textContent, /в очереди/);
+  assert.equal(status.classList.contains('error'), false, 'a queued prompt is not an error');
+  assert.equal(prompt.value, '', 'the composer is cleared: the text is safe in the queue');
+});

@@ -55,6 +55,10 @@ export class TaskManager extends EventEmitter {
     this.runtimes = new Map();
     this.queue = [];
     this.activeTaskId = null;
+    // capacity 1: a task that cannot start yet (local model busy) is kept in
+    // the queue and retried, instead of rejecting the operator's prompt.
+    this.queuePollMs = Number(config.queue?.pollMs) > 0 ? Number(config.queue.pollMs) : 1000;
+    this.pumpTimer = null;
     this.admitting = false;
     this.deleted = new Set();
     this.eventWrites = new Map();
@@ -109,7 +113,18 @@ export class TaskManager extends EventEmitter {
         await this.store.save(task).catch(() => {});
         trimmed++;
       }
-      if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
+      // A queued task is restored: nothing was sent to Pi yet, so the prompt is
+      // still exactly what the operator asked for. A task that was already
+      // running (or preparing) cannot be resumed — its Pi process is gone.
+      const queuedNotStarted = task.status === 'QUEUED' && !task.workspacePath;
+      const queuedPrompt = task.status === 'QUEUED' && Boolean(task.pendingPrompt);
+      if (queuedNotStarted || queuedPrompt) {
+        task.queueReason = 'RESTORED';
+        task.current = 'В очереди после перезапуска TaskBridge';
+        task.updatedAt = now();
+        await this.store.save(task);
+        this.queue.push(task.id);
+      } else if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
         task.status = 'FAILED';
         task.errorCode = 'FAILED_RECOVERY';
         task.error = 'TaskBridge restarted while this task was active.';
@@ -339,10 +354,13 @@ export class TaskManager extends EventEmitter {
     }
     // Remote providers are not served by the local llama.cpp runtime, so its
     // health/busy gate only applies when the chosen model actually lives there.
+    // A busy local model no longer rejects the request: the task is accepted and
+    // starts as soon as the model is free (queue, capacity 1). Losing an
+    // operator's prompt to a timing race is never acceptable.
+    let waitingForModel = false;
     if (this.#selectionUsesLocalRuntime(requestedModel)) {
-      const busy = await this.local.getBusyStatus();
-      if (busy.busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
       if (!this.#localAutostart() && !(await this.local.isReady())) throw Object.assign(new Error('Локальная модель недоступна.'), { code: 'LOCAL_RUNTIME_FAILED' });
+      waitingForModel = Boolean((await this.local.getBusyStatus()).busy);
     }
     const incomingFiles = await this.#resolveFiles(input.files || [], input.uploadToken);
     const prompt = String(input.prompt || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
@@ -365,12 +383,13 @@ export class TaskManager extends EventEmitter {
       createdAt: now(),
       updatedAt: now(),
       status: 'QUEUED',
+      queueReason: waitingForModel ? 'MODEL_BUSY' : null,
       projectId,
       prompt,
       workspacePath: null,
       sourcePath: null,
       worktree: false,
-      current: 'Queued',
+      current: waitingForModel ? 'Ждёт освобождения локальной модели' : 'Queued',
       assistantText: '',
       thinkingText: '',
       error: null,
@@ -395,7 +414,8 @@ export class TaskManager extends EventEmitter {
     task._incomingFiles = incomingFiles;
     task._uploadToken = input.uploadToken;
     this.queue.push(task.id);
-    await this.#event(task, 'TASK_QUEUED', 'Task queued');
+    await this.#event(task, waitingForModel ? 'QUEUE_WAITING' : 'TASK_QUEUED',
+      waitingForModel ? 'Ждёт освобождения локальной модели' : 'Task queued', waitingForModel ? { reason: 'MODEL_BUSY' } : {});
     this.#pump();
     return this.#publicTask(task);
   }
@@ -425,16 +445,60 @@ export class TaskManager extends EventEmitter {
     };
   }
 
+  // Retry the queue later instead of spinning: the model is owned by someone
+  // else for an unknown time.
+  #schedulePump() {
+    if (this.pumpTimer) return;
+    this.pumpTimer = setTimeout(() => {
+      this.pumpTimer = null;
+      setImmediate(() => this.#pump());
+    }, this.queuePollMs);
+    this.pumpTimer.unref?.();
+  }
+
+  // One event per transition, so the UI (and the cloud) can explain why nothing
+  // is happening yet.
+  async #markWaiting(task, reason) {
+    if (task.queueReason === reason && task.status === 'QUEUED') return;
+    task.status = 'QUEUED';
+    task.queueReason = reason;
+    task.current = reason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : 'В очереди';
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'QUEUE_WAITING', task.current, { reason });
+  }
+
+  // A prompt accepted while the model was busy is sent here, unchanged.
+  async #deliverPending(task) {
+    const pending = task.pendingPrompt;
+    task.pendingPrompt = null;
+    await this.store.save(this.#publicTask(task));
+    await this.#message(task.id, pending.text, pending.mode || 'auto', [], null);
+  }
+
+
   async #pump() {
     if (this.activeTaskId || this.queue.length === 0) return;
-    const id = this.queue.shift();
+    const id = this.queue[0];
     const task = this.tasks.get(id);
-    if (!task) return this.#pump();
-    this.activeTaskId = id;
+    if (!task || task.status === 'CANCELLED') { this.queue.shift(); return this.#pump(); }
+    // capacity 1: never start a request the local runtime would refuse.
+    if (this.#usesLocalRuntime(task) && !task.pendingPrompt && (await this.local.getBusyStatus()).busy) {
+      await this.#markWaiting(task, 'MODEL_BUSY');
+      this.#schedulePump();
+      return;
+    }
+    this.queue.shift();
+    task.queueReason = null;
+    // A stored prompt is delivered through #message, which claims the slot
+    // itself: the queue must not hold it meanwhile, nor release it afterwards.
+    const delegating = Boolean(task.pendingPrompt);
+    this.activeTaskId = delegating ? null : id;
     try {
-      await this.#executeInitial(task);
+      if (delegating) await this.#deliverPending(task);
+      else await this.#executeInitial(task);
     } finally {
-      if (this.activeTaskId === id) this.activeTaskId = null;
+      if (!delegating && this.activeTaskId === id) this.activeTaskId = null;
       setImmediate(() => this.#pump());
     }
   }
@@ -1132,10 +1196,13 @@ export class TaskManager extends EventEmitter {
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
+    // A queued prompt is dropped with the task, on either cancel path.
+    task.pendingPrompt = null;
+    task.queueReason = null;
+    this.queue = this.queue.filter(x => x !== id);
     if (!runtime) {
       task.status = 'CANCELLED';
       task.current = 'Cancelled';
-      this.queue = this.queue.filter(x => x !== id);
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
       return this.#publicTask(task);
@@ -1179,7 +1246,25 @@ export class TaskManager extends EventEmitter {
     const state = await runtime.pi.getState();
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    if (!streaming && this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
+    if (!streaming && this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) {
+      // The model is held by another consumer (a second client, a stale slot,
+      // another session): record the prompt and deliver it when the model is
+      // free. Attachments are staged now, so the queued entry stays valid even
+      // across a restart.
+      const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
+      if (attached.length) task.attachments = [...(task.attachments || []), ...attached];
+      task.files = [...(task.files || []), ...attached.map(metadata)];
+      if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
+      const note = attached.length
+        ? '\n\nAdditional files from the phone are in .taskbridge-input/:\n' + attached.map(f => `- ${f.path}`).join('\n')
+        : '';
+      task.pendingPrompt = { text: userText + note, mode };
+      task.updatedAt = now();
+      await this.#markWaiting(task, 'MODEL_BUSY');
+      if (!this.queue.includes(id)) this.queue.push(id);
+      this.#schedulePump();
+      return this.#publicTask(task);
+    }
     if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
     const attached = await stageFiles(task, this.store.taskDir(id), incomingFiles);
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});

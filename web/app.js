@@ -787,11 +787,20 @@ async function refreshTask() {
 
 async function sendContinueMessage(taskId, text, opts = {}) {
   const version = selectionVersion;
-  await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
+  const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
     method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null })
   });
   if (version === selectionVersion) await refreshTask();
+  return result;
 }
+
+// Neutral notice (the error styling stays for real failures).
+function showNotice(text) {
+  $('createError').textContent = text;
+  $('createError').classList.remove('error');
+}
+
+const QUEUED_NOTICE = 'Локальная модель занята другой задачей — сообщение в очереди и отправится автоматически, как только она освободится.';
 
 /* ---------------- panel ---------------- */
 
@@ -870,6 +879,7 @@ function taskRow(t) {
         <span class="pill ${pillClass(t.status)}">${escapeHtml(t.status)}</span>
         <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
         ${modelLabel ? `<span class="t-model">${escapeHtml(modelLabel)}</span>` : ''}
+        ${t.queueReason ? '<span class="t-queue">ждёт модель</span>' : ''}
         <span class="t-time">${escapeHtml(relativeTime(t.updatedAt || t.createdAt))}</span>
       </div>
     </div>`;
@@ -1060,8 +1070,9 @@ $('form').addEventListener('submit', async (e) => {
       updateClearButton();
     };
     if (taskId) {
-      await sendContinueMessage(taskId, prompt, { files, uploadToken });
+      const sent = await sendContinueMessage(taskId, prompt, { files, uploadToken });
       clearComposer();
+      if (sent?.queueReason) showNotice(QUEUED_NOTICE);
     } else {
       const task = await api('/api/tasks', {
         method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking })
@@ -1069,6 +1080,7 @@ $('form').addEventListener('submit', async (e) => {
       // Clear before selectTask() runs resetSelection(), which would
       // otherwise capture this just-sent text as a stale "new task" draft.
       clearComposer();
+      if (task.queueReason) showNotice(QUEUED_NOTICE);
       if (version === selectionVersion) {
         await loadTasks();
         await selectTask(task.id);

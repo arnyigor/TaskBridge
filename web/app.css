@@ -768,6 +768,14 @@ button:disabled { opacity: .4; cursor: default; }
 }
 .taskRow .t-link:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); }
 .taskRow .t-model { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.taskRow .t-queue {
+  font-size: 10px;
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 999px;
+  padding: 0 6px;
+  flex-shrink: 0;
+}
 .taskRow .t-prompt { padding-right: 54px; }
 
 /* Sessions screen: what is running now, then recent history (§ TZ Sessions). */

@@ -24,14 +24,61 @@ async function fixture(t, streaming = false) {
   return { manager, store, task, pi, runtime, sent, root };
 }
 
-test('busy model rejects new sessions and follow-ups before writing history or attachments', async t => {
+test('a busy local model queues the prompt instead of refusing it', async t => {
   const f = await fixture(t);
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
-  await assert.rejects(f.manager.createTask({ prompt: 'new', projectId: 'p' }), { code: 'MODEL_BUSY' });
-  await assert.rejects(f.manager.message('a', 'new', 'auto', [{ name: 'file.txt', base64: 'eA==' }]), { code: 'MODEL_BUSY' });
-  assert.equal((await f.store.list()).length, 1);
-  assert.deepEqual(await f.store.readEvents('a', 0), []);
-  await assert.rejects(fs.access(path.join(f.root, '.taskbridge-input')));
+  f.manager.queuePollMs = 5;
+
+  // A new session waits its turn instead of losing the operator's prompt.
+  const queued = await f.manager.createTask({ prompt: 'new', projectId: 'p' });
+  assert.equal(queued.status, 'QUEUED');
+  assert.equal(queued.queueReason, 'MODEL_BUSY');
+  assert.equal(queued.current, 'Ждёт освобождения локальной модели');
+  assert.deepEqual(f.manager.queue, [queued.id]);
+  assert.equal(queued.workspacePath, null, 'nothing is prepared while waiting');
+
+  // A follow-up to an existing session is queued the same way: the text is kept,
+  // and Pi still has not seen it.
+  const followUp = await f.manager.message('a', 'позже');
+  assert.equal(followUp.queueReason, 'MODEL_BUSY');
+  assert.equal(followUp.pendingPrompt.text, 'позже');
+  const waitingEvents = await f.store.readEvents('a', 0);
+  assert.deepEqual(waitingEvents.map(event => event.type), ['QUEUE_WAITING'], 'only the waiting state is recorded');
+  assert.equal(waitingEvents.some(event => event.type === 'USER_MESSAGE'), false, 'nothing is sent to Pi while waiting');
+  assert.deepEqual(f.manager.queue, [queued.id, 'a']);
+
+  // Cancelling a waiting session drops its queued prompt.
+  const cancelled = await f.manager.cancel('a');
+  assert.equal(cancelled.status, 'CANCELLED');
+  assert.equal(cancelled.pendingPrompt, null);
+  assert.equal(cancelled.queueReason, null);
+  assert.deepEqual(f.manager.queue, [queued.id]);
+
+  await f.manager.cancel(queued.id);
+  assert.deepEqual(f.manager.queue, []);
+});
+
+test('a queued prompt is delivered as soon as the model is free', async t => {
+  const f = await fixture(t);
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  f.manager.queuePollMs = 5;
+  const queued = await f.manager.message('a', 'позже');
+  assert.equal(queued.pendingPrompt.text, 'позже');
+
+  // The model frees up: the queue delivers the stored prompt unchanged.
+  f.manager.runtimeManager.getBusyStatus = async () => ({ busy: false });
+  for (let i = 0; i < 200 && !f.sent.length; i++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(f.sent, ['позже']);
+  const events = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(events.includes('USER_MESSAGE'), events.join(','));
+  assert.ok(events.includes('QUEUE_WAITING'), events.join(','));
+  const task = f.manager.getTask('a');
+  assert.equal(task.pendingPrompt, null);
+  assert.equal(task.queueReason, null);
+  assert.deepEqual(f.manager.queue, []);
+
+  // Let the detached settle path finish instead of leaving a 12h timer behind.
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });
 
 test('trusted cloud task ids are validated and collisions are rejected before admission', async t => {
@@ -142,11 +189,19 @@ test('startup sweeps orphaned pi-sessions and workspaces for unknown task ids', 
   assert.equal(await exists(path.join(dataRoot, 'pi-sessions', 'kept')), true);
 });
 
-test('server recovery terminates persisted queued sessions too', async t => {
+test('restart restores a queued prompt and fails only what was really running', async t => {
   const f = await fixture(t);
-  await f.store.save({ ...f.task, status: 'QUEUED' });
+  // Never started: the prompt was never sent anywhere, so it survives.
+  await f.store.save({ ...f.task, id: 'queued', status: 'QUEUED', workspacePath: null, prompt: 'никогда не стартовала' });
+  // Already running: its Pi process is gone, so it cannot continue.
+  await f.store.save({ ...f.task, id: 'running', status: 'RUNNING', workspacePath: f.root });
   await f.manager.init();
-  assert.equal(f.manager.getTask('a').errorCode, 'FAILED_RECOVERY');
+
+  assert.equal(f.manager.getTask('running').errorCode, 'FAILED_RECOVERY');
+  const restored = f.manager.getTask('queued');
+  assert.equal(restored.status, 'QUEUED');
+  assert.equal(restored.queueReason, 'RESTORED');
+  assert.deepEqual(f.manager.queue, ['queued']);
 });
 
 test('applyTask applies the result patch to a clean source, then cleanup removes the worktree', async t => {
