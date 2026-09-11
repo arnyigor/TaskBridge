@@ -743,7 +743,8 @@ async function handleRequest(req, res) {
 
     if (req.method === 'POST' && pathname === '/api/tasks') {
       const body = await readJson(req);
-      const task = await manager.createTask(body);
+      const { commandId, ...input } = body;
+      const task = await manager.createTask(input, { commandId });
       return json(res, 202, task);
     }
 
@@ -814,7 +815,7 @@ async function handleRequest(req, res) {
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && match) {
-      return json(res, 200, await manager.cancel(match[1]));
+      return json(res, 200, await manager.cancel(match[1], { commandId: (await readJson(req)).commandId }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/message$/);
@@ -859,7 +860,7 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/apply$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req).catch(() => ({}));
-      return json(res, 200, await manager.applyTask(match[1], { force: body.force === true }));
+      return json(res, 200, await manager.applyTask(match[1], { force: body.force === true, commandId: body.commandId }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/worktree$/);

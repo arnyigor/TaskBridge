@@ -30,18 +30,18 @@ export function buildDispatcher({ manager, store }) {
       case 'registerProject': return m.registerProject(args.project);
       case 'listTasks': return m.listTasks();
       case 'getTask': return m.getTask(args.id);
-      case 'createTask': return m.createTask(args.input, args.options || {});
+      case 'createTask': return m.createTask(args.input, { ...(args.options || {}), commandId: args.commandId });
       case 'renameTask': return m.renameTask(args.id, args.title);
       case 'deleteTask': return m.deleteTask(args.id);
 
       // --- messaging / lifecycle --------------------------------------------
       case 'message': return m.message(args.id, args.text, args.mode || 'auto', args.files || [], args.uploadToken, { now: args.now === true, queue: args.queue === true, commandId: args.commandId });
-      case 'cancel': return m.cancel(args.id);
+      case 'cancel': return m.cancel(args.id, { commandId: args.commandId });
       case 'compact': return m.compact(args.id, args.instructions);
       case 'state': return m.state(args.id);
       case 'sendPendingNow': return m.sendPendingNow(args.id);
       case 'dropPending': return m.dropPending(args.id);
-      case 'applyTask': return m.applyTask(args.id, { force: args.force === true });
+      case 'applyTask': return m.applyTask(args.id, { force: args.force === true, commandId: args.commandId });
 
       // --- model -----------------------------------------------------------------
       case 'setModel': return m.setModel(args.id, args.provider, args.modelId ?? args.model ?? args.id2);

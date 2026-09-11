@@ -673,3 +673,17 @@ test('an unfinished command after crash is UNKNOWN_AFTER_CRASH, never re-run', a
   await m.close();
   store.close();
 });
+
+test('commandId dedupes cancel too (same result, different intent conflicts)', async t => {
+  const f = await fixture(t);
+  const first = await f.manager.cancel('a', { commandId: 'cc-1' });
+  assert.equal(first.status, 'SUCCEEDED'); // terminal task: returns as-is
+
+  // Duplicate commandId+payload replays the stored result without cancel work.
+  const second = await f.manager.cancel('a', { commandId: 'cc-1' });
+  assert.equal(second.id, first.id);
+  assert.ok(f.manager.commandLedger.get('cc-1'), 'cancel recorded in the ledger');
+
+  // Same commandId with a different intent (different task) is a conflict.
+  await assert.rejects(() => f.manager.cancel('other', { commandId: 'cc-1' }), { code: 'CONFLICT' });
+});

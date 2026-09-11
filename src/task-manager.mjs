@@ -259,7 +259,9 @@ export class TaskManager extends EventEmitter {
   }
 
   async createTask(input, options = {}) {
-    return this.#admit(() => this.#createTask(input, options));
+    const commandId = options && options.commandId ? String(options.commandId) : null;
+    if (!commandId) return this.#admit(() => this.#createTask(input, options));
+    return this.#withCommand(commandId, () => this.#payloadHash(input), () => this.#admit(() => this.#createTask(input, options)));
   }
 
   // Accepts { provider, id } from the client; returns null when the shape is
@@ -1293,7 +1295,13 @@ export class TaskManager extends EventEmitter {
 
   // Applies this task's result patch to the source checkout. Refuses when the
   // source is dirty or has moved since the worktree was created, unless forced.
-  async applyTask(id, { force = false } = {}) {
+  async applyTask(id, { force = false, commandId } = {}) {
+    const cid = commandId ? String(commandId) : null;
+    if (!cid) return this.#applyTask(id, force === true);
+    return this.#withCommand(cid, () => this.#payloadHash(id, 'apply', force === true), () => this.#applyTask(id, force === true));
+  }
+
+  async #applyTask(id, force) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     if (!task.worktree || !task.sourcePath) {
@@ -1353,7 +1361,13 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  async cancel(id) {
+  async cancel(id, opts = {}) {
+    const commandId = opts && opts.commandId ? String(opts.commandId) : null;
+    if (!commandId) return this.#cancel(id);
+    return this.#withCommand(commandId, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id));
+  }
+
+  async #cancel(id) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });

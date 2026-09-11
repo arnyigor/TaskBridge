@@ -142,6 +142,23 @@ stop → not running. Полный набор: 333 теста зелёные.
 Покрытие: +2 теста в `tests/manager.test.mjs` (dedup-replay + CONFLICT, и
 in-flight → ACCEPTED). Полный набор: 336 тестов зелёные.
 
+## 0.9.3-dev — commandId на остальные опасные команды (этап 3 ТЗ)
+
+Idемпотентность расширена на `createTask`, `cancel` и `applyTask` под тем же
+durable ledger.
+
+- `createTask(input, { commandId })` — повтор с тем же input реплеится (не
+  создаёт вторую задачу).
+- `cancel(id, { commandId })` — повтор возвращает сохранённый результат.
+- `applyTask(id, { force, commandId })` — повтор с тем же force реплеится.
+- Везде: тот же id с другим содержимым → `CONFLICT`, повтор идущей →
+  `ACCEPTED`, после крaша → `UNKNOWN_AFTER_CRASH`. Внутренние тела вынесены в
+  `#applyTask`/`#cancel`; `commandId` проброшен через host-диспетчер, gateway
+  и монолитные маршруты.
+
+Покрытие: +1 тест (cancel-идемпотентность + CONFLICT по смене намерения).
+Полный набор: 339 тестов зелёные.
+
 ## 0.9.2 — 2026-xx-xx
 
 Очередь: сообщения больше не висят в ней без причины (по жалобе «встают в
