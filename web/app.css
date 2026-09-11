@@ -685,6 +685,7 @@ button:disabled { opacity: .4; cursor: default; }
 .stop { background: rgba(251, 113, 133, 0.14); border-color: rgba(251, 113, 133, 0.5); color: var(--danger); }
 .stop:hover:not(:disabled) { border-color: var(--danger); }
 
+#retryPrompt { margin-top: 6px; font-size: 11.5px; padding: 5px 10px; }
 .hint { font-size: 11px; color: var(--muted); margin-top: 7px; min-height: 14px; white-space: pre-wrap; }
 .hint.error { color: var(--danger); }
 

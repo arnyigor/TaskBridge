@@ -298,6 +298,9 @@
           </div>
         </form>
         <div class="hint" id="createError">Enter — в очередь, Ctrl+Enter — отправить сразу, Shift+Enter — перенос строки</div>
+        <!-- The last prompt is kept in memory, so a failed send is repeated with
+             one click instead of being retyped. -->
+        <button id="retryPrompt" class="small hidden" type="button">Повторить последнее</button>
       </div>
     </section>
 

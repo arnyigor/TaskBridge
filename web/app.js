@@ -127,6 +127,26 @@ function renderOutputFiles(files) {
   for (const f of files) el.append(fileCard(f, selectedTaskId));
 }
 
+// One copy button for every message — Pi's answers and the operator's own
+// lines alike (a prompt is often repeated or moved to another session). The
+// text is read at click time from `_text`, so a streaming turn copies what is
+// on screen now.
+function copyButton(text = '', label = 'Скопировать сообщение') {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'copyBtn';
+  btn.textContent = '📋';
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn._text = text;
+  btn.onclick = async () => {
+    const ok = await copyText(btn._text || '');
+    btn.textContent = ok ? '✓' : '✕';
+    setTimeout(() => { btn.textContent = '📋'; }, 1200);
+  };
+  return btn;
+}
+
 function appendUserTurn(text, files = [], before = null) {
   hideEmptyState();
   const turn = document.createElement('div');
@@ -143,6 +163,7 @@ function appendUserTurn(text, files = [], before = null) {
     for (const f of files) list.append(f.id ? fileCard(f, selectedTaskId) : Object.assign(document.createElement('span'), { className: 'fileChip', textContent: `📎 ${f.name}` }));
     body.append(list);
   }
+  body.append(copyButton(text, 'Скопировать сообщение'));
   turn.append(body);
   $('msgsInner').insertBefore(turn, before);
   if (!before) scrollBottom();
@@ -173,12 +194,7 @@ function appendBotTurn() {
   bubble.append(md);
   const meta = document.createElement('div');
   meta.className = 'meta';
-  const copyBtn = document.createElement('button');
-  copyBtn.type = 'button';
-  copyBtn.className = 'copyBtn';
-  copyBtn.textContent = '📋';
-  copyBtn.title = 'Скопировать ответ';
-  copyBtn.setAttribute('aria-label', 'Скопировать ответ');
+  const copyBtn = copyButton('', 'Скопировать ответ');
   const metaRow = document.createElement('div');
   metaRow.className = 'metaRow';
   metaRow.append(botBadge(), meta, copyBtn);
@@ -370,6 +386,7 @@ function resetSelection(id) {
   $('worktreeActions').classList.add('hidden');
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
+  $('retryPrompt').classList.add('hidden');
   setComposerMode(id);
   restoreDraft(id || '__new__');
   updateModelChip();
@@ -412,7 +429,7 @@ function renderChat() {
     liveActive = turn.active;
     if (node.text !== turn.text || node.active !== turn.active || node.error !== turn.error) {
       updateText();
-      node.copyBtn.onclick = () => copyText(turn.text);
+      node.copyBtn._text = turn.text;
       if (turn.error) {
         const error = document.createElement('div');
         error.className = 'turnError';
@@ -543,13 +560,8 @@ function renderSettledTurn(turn, before) {
   bubble.append(md);
   const meta = document.createElement('div');
   meta.className = 'meta';
-  const copyBtn = document.createElement('button');
-  copyBtn.type = 'button';
-  copyBtn.className = 'copyBtn';
-  copyBtn.textContent = '📋';
-  copyBtn.title = 'Скопировать ответ';
-  copyBtn.setAttribute('aria-label', 'Скопировать ответ');
-  copyBtn.onclick = () => copyText(turn.text);
+  const copyBtn = copyButton('', 'Скопировать ответ');
+  copyBtn._text = turn.text;
   const metaRow = document.createElement('div');
   metaRow.className = 'metaRow';
   metaRow.append(botBadge(), meta, copyBtn);
@@ -728,6 +740,7 @@ function renderTaskDetails(t) {
   maybeNotify(t);
   currentTask = t;
   renderQueuedPrompt();
+  updateRetryButton();
   $('taskTitle').textContent = t.title || t.prompt || t.id;
   $('taskStatus').textContent = t.status;
   $('taskModel').textContent = t.model ? modelFullLabel(t.model) : (t.requestedModel ? modelFullLabel(t.requestedModel) : '—');
@@ -1155,6 +1168,27 @@ promptEl.addEventListener('keydown', (event) => {
   }
 });
 
+// The composer is cleared as soon as a prompt is handed over, so a failed send
+// (or a session that died on it) would cost the operator the text. The last
+// prompt stays in memory of the page and one click sends it again.
+let lastPrompt = null; // { id, text, failedSend }
+
+function updateRetryButton() {
+  const repeatable = Boolean(lastPrompt) && lastPrompt.id === (selectedTaskId || null)
+    && (lastPrompt.failedSend || currentTask?.status === 'FAILED');
+  $('retryPrompt').classList.toggle('hidden', !repeatable);
+  if (repeatable) $('retryPrompt').title = lastPrompt.text.slice(0, 200);
+}
+
+$('retryPrompt').onclick = () => {
+  if (!lastPrompt) return;
+  promptEl.value = lastPrompt.text;
+  promptEl.style.height = 'auto';
+  updateClearButton();
+  $('retryPrompt').classList.add('hidden');
+  $('form').requestSubmit();
+};
+
 function setBusy(busy) {
   $('sendButton').disabled = busy;
   $('project').disabled = busy || Boolean(selectedTaskId);
@@ -1203,6 +1237,7 @@ $('form').addEventListener('submit', async (e) => {
         sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: false, queue: true });
       }
       clearComposer();
+      lastPrompt = { id: taskId, text: prompt, failedSend: false };
       renderQueuedPrompt();
       if (sent?.queueReason) showNotice(QUEUED_NOTICE);
     } else {
@@ -1212,6 +1247,7 @@ $('form').addEventListener('submit', async (e) => {
       // Clear before selectTask() runs resetSelection(), which would
       // otherwise capture this just-sent text as a stale "new task" draft.
       clearComposer();
+      lastPrompt = { id: task.id, text: prompt, failedSend: false };
       if (task.queueReason) showNotice(QUEUED_NOTICE);
       if (version === selectionVersion) {
         await loadTasks();
@@ -1221,8 +1257,11 @@ $('form').addEventListener('submit', async (e) => {
   } catch (err) {
     $('createError').textContent = err.message;
     $('createError').classList.add('error');
+    // The text may already be gone from the composer: keep it for one click.
+    lastPrompt = { id: selectedTaskId, text: prompt, failedSend: true };
   } finally {
     setBusy(false);
+    updateRetryButton();
     if (!isTouchDevice()) promptEl.focus();
   }
 });

@@ -755,3 +755,63 @@ test('DOM: a running session is obvious, and both stop and send stay reachable',
   assert.equal(stop.disabled, false, 'stop must be clickable while a run is active');
   assert.equal(send.disabled, false, 'send must stay clickable so a prompt can queue');
 });
+
+test('DOM: a failed send can be repeated without retyping it', async () => {
+  const app = await ui();
+  await app.loadTasks();
+  await app.selectTask('a');
+
+  const prompt = app.document.getElementById('prompt');
+  const retry = app.document.getElementById('retryPrompt');
+  assert.equal(retry.classList.contains('hidden'), true, 'nothing to repeat yet');
+
+  // The send fails: the text must not die with it.
+  let attempts = 0;
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/message')) return null;
+    attempts++;
+    if (attempts === 1) return { ok: false, status: 500, json: async () => ({ error: { message: 'Pi упал' } }) };
+    return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING' }) };
+  });
+
+  const form = app.document.getElementById('form');
+  // linkedom has no requestSubmit: make it perform a real submit event.
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const submit = async () => {
+    form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+    for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  };
+
+  prompt.value = 'повтори меня';
+  await submit();
+  assert.equal(retry.classList.contains('hidden'), false, 'the failed prompt is offered again');
+
+  // One click resends exactly the same text.
+  prompt.value = '';
+  retry.dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(attempts, 2, 'the retry actually sent something');
+  assert.equal(retry.classList.contains('hidden'), true, 'a successful resend clears the offer');
+});
+
+test('DOM: every message carries its own copy button', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+
+  const turns = [...app.document.querySelectorAll('.turn')];
+  assert.ok(turns.length >= 3, `too few turns rendered: ${turns.length}`);
+  for (const turn of turns) assert.ok(turn.querySelector('.copyBtn'), `a message without a copy button: ${turn.textContent.slice(0, 40)}`);
+
+  // Own line: copies exactly what was sent.
+  const mine = [...app.document.querySelectorAll('.turn.me .copyBtn')].at(-1);
+  mine.dispatchEvent(new app.window.Event('click'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.copied.at(-1), 'Второй вопрос');
+
+  // Pi's answer: copies the text of that turn, not of the whole chat.
+  const bot = [...app.document.querySelectorAll('.turn:not(.me) .copyBtn')].at(-1);
+  bot.dispatchEvent(new app.window.Event('click'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.copied.at(-1), 'Второй ответ');
+});
