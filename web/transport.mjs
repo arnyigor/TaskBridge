@@ -155,6 +155,26 @@ export function createCloudTransport({
       else settleCommand(frame.commandId, { error: frame.payload?.error || { code: frame.status, message: 'Command was not accepted' } });
       return;
     }
+    if (frame.type === 'RESPONSE') {
+      // Same correlation map as commands: both are request/answer pairs.
+      if (frame.status === 'OK') {
+        const body = frame.payload?.body ?? '';
+        let parsed = {};
+        try { parsed = body ? JSON.parse(body) : {}; } catch { parsed = {}; }
+        const httpStatus = Number(frame.payload?.httpStatus || 200);
+        const contentType = frame.payload?.contentType || '';
+        if (httpStatus >= 400) {
+          settleCommand(frame.commandId, { error: { code: parsed.code || `HTTP_${httpStatus}`, message: parsed.error || `HTTP ${httpStatus}` } });
+        } else if (!contentType.includes('json')) {
+          settleCommand(frame.commandId, { status: 'OK', text: body, httpStatus });
+        } else {
+          settleCommand(frame.commandId, { status: 'OK', data: parsed, httpStatus });
+        }
+      } else {
+        settleCommand(frame.commandId, { error: frame.payload?.error || { code: frame.status, message: 'The machine denied the request' } });
+      }
+      return;
+    }
     if (frame.type === 'ERROR') logger('warn', { event: 'relay_error', payload: frame.payload });
   }
 
@@ -190,10 +210,27 @@ export function createCloudTransport({
     }, delay);
   }
 
+  async function requestLocalApi(method, path, body, timeoutMs = 30_000) {
+    const commandId = globalThis.crypto?.randomUUID?.() || `r-${Date.now()}-${Math.round(random() * 1e6)}`;
+    const envelope = newEnvelope({ type: 'REQUEST', commandId, payload: { method, path, ...(body === undefined ? {} : { body }) } });
+    const result = await new Promise((resolve, reject) => {
+      const timer = setTimer(() => { pending.delete(commandId); reject(failure('REQUEST_TIMEOUT', 'The machine did not answer')); }, timeoutMs);
+      pending.set(commandId, { resolve, reject, timer });
+      if (!send(envelope)) { clearTimer(timer); pending.delete(commandId); reject(failure('RELAY_OFFLINE', 'The relay is not connected')); }
+    });
+    if (result.text !== undefined) return result.text;
+    return result.data ?? {};
+  }
+
   const transport = {
     kind: 'cloud',
 
-    async request() { throw failure('NOT_SUPPORTED', 'This screen needs the machine: open TaskBridge on the PC'); },
+    // The machine replays this against its own API and hands back the same
+    // response a local page would get (allowlist on the machine side), so the
+    // shared screens keep calling api('/api/...') unchanged.
+    async request(method, path, body) {
+      return requestLocalApi(method, path, body);
+    },
 
     on(event, handler) { if (handlers[event]) handlers[event].push(handler); },
 

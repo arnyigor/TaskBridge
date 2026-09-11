@@ -172,3 +172,59 @@ test('frames produced before the link is up are flushed once it is', async t => 
   assert.equal(connector.status().queued, 0);
   assert.equal(client.received.find(frame => frame.sessionId === 'tb_9').payload.event.message, 'queued early');
 });
+
+test('the cloud allowlist is a method+path match, and traversal is never allowed', async t => {
+  const { isCloudRequestAllowed, CLOUD_ALLOWED } = await import('../src/cloud/relay-connector.mjs');
+  assert.ok(CLOUD_ALLOWED.length > 0);
+  // Allowed: the shared screens.
+  assert.equal(isCloudRequestAllowed('GET', '/api/tasks'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/tasks/tb_1'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/tasks/tb_1/message'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/models'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/tasks/tb_1/events?tail=20'), true);
+  // Denied: wrong method, PC-only surfaces, traversal, anything outside /api.
+  assert.equal(isCloudRequestAllowed('DELETE', '/api/tasks'), false);
+  assert.equal(isCloudRequestAllowed('POST', '/api/tasks/tb_1/apply'), false);
+  assert.equal(isCloudRequestAllowed('GET', '/api/project-browser'), false);
+  assert.equal(isCloudRequestAllowed('POST', '/api/cloud/config'), false);
+  assert.equal(isCloudRequestAllowed('POST', '/api/uploads'), false);
+  assert.equal(isCloudRequestAllowed('GET', '/api/tasks/../config.json'), false);
+  assert.equal(isCloudRequestAllowed('GET', '/session/tb_1'), false);
+  assert.equal(isCloudRequestAllowed('GET', 'http://evil.example/api/tasks'), false);
+  // A path segment cannot be skipped by an empty id.
+  assert.equal(isCloudRequestAllowed('GET', '/api/tasks//model'), false);
+});
+
+test('a REQUEST outside the allowlist is denied with a code, not executed', async t => {
+  const relay = createRelayServer({ logger: () => {}, auth: createSecretAuthenticator({ machines: [MACHINE], logger: () => {} }) });
+  const endpoint = await relay.listen({ port: 0 });
+  t.after(() => endpoint.close());
+  const requested = [];
+  let apiCall = null;
+  const connector = createRelayConnector({
+    url: endpoint.url, machineId: MACHINE.id, machineSecret: MACHINE.secret,
+    manager: { on() {}, off() {} }, dispatcher: { async handle() { return { status: 'ACCEPTED' }; } },
+    localApiBase: 'http://127.0.0.1:1',
+    fetchImpl: async (url, options) => { requested.push({ url, method: options?.method }); return { status: 200, text: async () => '{}', headers: { get: () => 'application/json' } }; },
+    logger: () => {}
+  });
+  t.after(() => connector.stop());
+  await connector.start();
+  await waitFor(() => connector.status().status === 'online', 'the machine to come online');
+
+  const client = await connectClient(endpoint);
+  t.after(() => client.close());
+  await waitFor(() => client.received.some(frame => frame.type === 'AUTH_OK'), 'the client handshake');
+
+  client.send(JSON.stringify(createEnvelope({ type: 'REQUEST', machineId: MACHINE.id, commandId: 'r-1', payload: { method: 'GET', path: '/api/project-browser?path=C:/' } })));
+  await waitFor(() => client.received.some(frame => frame.type === 'RESPONSE'), 'the denial');
+  const denied = client.received.find(frame => frame.type === 'RESPONSE');
+  assert.equal(denied.status, 'DENIED');
+  assert.equal(denied.payload.error.code, 'CLOUD_PATH_DENIED');
+  assert.deepEqual(requested, [], 'nothing was executed on the machine');
+
+  client.send(JSON.stringify(createEnvelope({ type: 'REQUEST', machineId: MACHINE.id, commandId: 'r-2', payload: { method: 'GET', path: '/api/tasks' } })));
+  await waitFor(() => client.received.filter(frame => frame.type === 'RESPONSE').length === 2, 'the allowed answer');
+  assert.deepEqual(requested, [{ url: 'http://127.0.0.1:1/api/tasks', method: 'GET' }]);
+  assert.equal(client.received.filter(frame => frame.type === 'RESPONSE').at(-1).status, 'OK');
+});

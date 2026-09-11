@@ -11,6 +11,44 @@ import { createEnvelope, parseEnvelope, serializeEnvelope } from './protocol.mjs
 //   • keeps presence alive with PING.
 //
 // No inbound port is ever opened: everything travels on this outbound socket.
+//
+// The same socket also carries REQUEST frames from the shared UI: the machine
+// replays them against its own local API (fetchImpl to localApiBase) and answers
+// with RESPONSE, so the browser keeps one interface while all logic stays here.
+// Only what CLOUD_ALLOWED exists for is executed — everything else is denied.
+
+// What a cloud client may ask the machine's API for. It starts deliberately small
+// (what the shared screens need today) and grows together with device
+// permissions at pairing time.
+export const CLOUD_ALLOWED = [
+  { method: 'GET', path: '/api/health' },
+  { method: 'GET', path: '/api/info' },
+  { method: 'GET', path: '/api/tasks' },
+  { method: 'POST', path: '/api/tasks' },
+  { method: 'GET', path: '/api/tasks/:id' },
+  { method: 'GET', path: '/api/tasks/:id/events' },
+  { method: 'DELETE', path: '/api/tasks/:id' },
+  { method: 'POST', path: '/api/tasks/:id/message' },
+  { method: 'POST', path: '/api/tasks/:id/model' },
+  { method: 'POST', path: '/api/tasks/:id/thinking' },
+  { method: 'POST', path: '/api/tasks/:id/compact' },
+  { method: 'POST', path: '/api/tasks/:id/pending/send' },
+  { method: 'DELETE', path: '/api/tasks/:id/pending' },
+  { method: 'GET', path: '/api/models' },
+  { method: 'GET', path: '/api/local' }
+];
+
+export function isCloudRequestAllowed(method, path) {
+  if (typeof path !== 'string' || !path.startsWith('/api/') || path.includes('..') || path.includes('//')) return false;
+  const clean = path.split('?')[0].replace(/\/$/, '');
+  return CLOUD_ALLOWED.some(entry => {
+    if (entry.method !== method) return false;
+    const expected = entry.path.split('/');
+    const actual = clean.split('/');
+    if (expected.length !== actual.length) return false;
+    return expected.every((part, index) => part.startsWith(':') ? actual[index].length > 0 : part === actual[index]);
+  });
+}
 
 export const CONNECTOR_DEFAULTS = {
   pingIntervalMs: 20_000,
@@ -19,7 +57,8 @@ export const CONNECTOR_DEFAULTS = {
   reconnectMaxMs: 30_000,
   maxQueuedFrames: 2_000,
   syncBatch: 200,
-  syncMaxBatches: 50
+  syncMaxBatches: 50,
+  requestTimeoutMs: 30_000
 };
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -33,6 +72,8 @@ export function createRelayConnector({
   store,
   logger = () => {},
   limits = {},
+  localApiBase = null,
+  fetchImpl = globalThis.fetch,
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   WebSocketImpl = globalThis.WebSocket
@@ -124,6 +165,36 @@ export function createRelayConnector({
     send(ack(state, { detail: result?.detail ?? null, error: result?.error ?? null, result: result?.result ?? null }));
   }
 
+  // A REQUEST is replayed against this machine's own API: the cloud client gets
+  // exactly what a local browser would get, and never more than the allowlist.
+  async function answerRequest(frame) {
+    const requestId = frame.commandId;
+    const method = String(frame.payload?.method || 'GET').toUpperCase();
+    const requestPath = String(frame.payload?.path || '');
+    const respond = (status, payload) => send(createEnvelope({
+      type: 'RESPONSE', machineId, commandId: requestId, status, to: frame.from || null, payload
+    }));
+    if (!localApiBase || typeof fetchImpl !== 'function') { respond('ERROR', { error: { code: 'LOCAL_API_UNAVAILABLE', message: 'This machine cannot answer API requests' } }); return; }
+    if (!isCloudRequestAllowed(method, requestPath)) {
+      log('warn', { event: 'cloud_request_denied', method, path: requestPath });
+      respond('DENIED', { error: { code: 'CLOUD_PATH_DENIED', message: `${method} ${requestPath} is not available to a cloud client` } });
+      return;
+    }
+    try {
+      const response = await fetchImpl(`${localApiBase}${requestPath}`, {
+        method,
+        ...(frame.payload?.body === undefined || frame.payload?.body === null
+          ? {}
+          : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(frame.payload.body) }),
+        signal: AbortSignal.timeout(config.requestTimeoutMs || 30_000)
+      });
+      const text = await response.text().catch(() => '');
+      respond('OK', { httpStatus: response.status, body: text, contentType: response.headers?.get?.('content-type') || 'application/json' });
+    } catch (error) {
+      respond('ERROR', { error: { code: error.code || 'LOCAL_API_FAILED', message: error.message } });
+    }
+  }
+
   async function answerSync(frame) {
     if (typeof store?.readEvents !== 'function') return;
     const after = Number(frame.payload?.afterSeq ?? 0);
@@ -162,6 +233,7 @@ export function createRelayConnector({
       return;
     }
     if (frame.type === 'COMMAND') { await answerCommand(frame); return; }
+    if (frame.type === 'REQUEST') { await answerRequest(frame); return; }
     if (frame.type === 'SYNC') { await answerSync(frame); return; }
   }
 

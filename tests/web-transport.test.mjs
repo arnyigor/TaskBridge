@@ -101,6 +101,16 @@ test('the cloud transport attaches, syncs, streams and commands a real machine',
   const endpoint = await relay.listen({ port: 0 });
   t.after(() => endpoint.close());
 
+  const localApi = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/api/models') { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ models: [{ provider: 'llama.cpp', id: 'qwen-27b-q3' }] })); return; }
+    if (url.pathname === '/api/tasks/42') { res.writeHead(404, { 'content-type': 'application/json' }); res.end(JSON.stringify({ code: 'NOT_FOUND', error: 'Сессия не найдена.' })); return; }
+    res.writeHead(200, { 'content-type': 'text/plain' }); res.end('plain text');
+  });
+  await new Promise(resolve => localApi.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => { localApi.closeAllConnections?.(); localApi.close(resolve); }));
+  const localApiBase = `http://127.0.0.1:${localApi.address().port}`;
+
   const stored = [
     { seq: 1, type: 'TASK_QUEUED', taskId: 'tb_1', message: 'старт' },
     { seq: 2, type: 'USER_MESSAGE', taskId: 'tb_1', message: 'привет' }
@@ -112,7 +122,7 @@ test('the cloud transport attaches, syncs, streams and commands a real machine',
     url: endpoint.url, machineId: MACHINE.id, machineSecret: MACHINE.secret,
     manager: { on(event, handler) { if (event === 'task-event') events.push(handler); }, off() {}, listTasks: () => [] },
     dispatcher: { async handle(command) { commands.push(command); return { status: 'ACCEPTED', detail: { ok: true } }; } },
-    store, logger: () => {}
+    store, localApiBase, logger: () => {}
   });
   t.after(() => connector.stop());
   await connector.start();
@@ -143,8 +153,22 @@ test('the cloud transport attaches, syncs, streams and commands a real machine',
   assert.equal(commands[0].taskId, 'tb_1');
   assert.equal(commands[0].payload.text, 'продолжай');
 
-  // Local-only screens are told plainly that they need the PC.
-  await assert.rejects(transport.request('GET', '/api/models'), { code: 'NOT_SUPPORTED' });
+  // The shared screens work: an allowed path is replayed against the machine's
+  // own API and comes back exactly as a local page would see it.
+  const models = await transport.request('GET', '/api/models');
+  assert.deepEqual(models, { models: [{ provider: 'llama.cpp', id: 'qwen-27b-q3' }] });
+
+  // A failure keeps its code, so the UI shows the same message as locally.
+  await assert.rejects(transport.request('GET', '/api/tasks/42'), { code: 'NOT_FOUND' });
+
+  // Non-JSON answers pass through as text.
+  const plain = await transport.request('GET', '/api/info');
+  assert.equal(typeof plain, 'string');
+
+  // Anything outside the allowlist is refused by the machine, not by luck.
+  await assert.rejects(transport.request('GET', '/api/project-browser?path=/'), { code: 'CLOUD_PATH_DENIED' });
+  await assert.rejects(transport.request('POST', '/api/cloud/config', {}), { code: 'CLOUD_PATH_DENIED' });
+  await assert.rejects(transport.request('GET', '/api/tasks/../secrets'), { code: 'CLOUD_PATH_DENIED' });
   assert.equal(statuses.includes('synced-empty'), false);
   handle.close();
 });

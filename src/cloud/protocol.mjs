@@ -31,6 +31,12 @@ export const MESSAGE_TYPES = new Set([
   'SYNC',         // client → machine: replay everything after `afterSeq`
   'COMMAND',      // client → machine: do something (never replayed blindly)
   'COMMAND_ACK',  // machine → client: accepted/duplicate/rejected + result
+  // The shared UI needs the machine's own API (session list, history, models) to
+  // render screens it already knows; REQUEST/RESPONSE carries that over the same
+  // socket instead of teaching the browser a second, narrower API. The machine
+  // answers from its local API with an allowlist — see relay-connector.
+  'REQUEST',      // client → machine: run path/method on the local API
+  'RESPONSE',     // machine → client: the result, correlated by commandId
   'EVENT',        // machine → clients: one session event with a monotonic seq
   'PING',
   'PONG',
@@ -83,6 +89,8 @@ const REQUIRED = {
   SYNC: ['machineId', 'sessionId'],
   COMMAND: ['machineId', 'commandId'],
   COMMAND_ACK: ['machineId', 'commandId', 'status'],
+  REQUEST: ['machineId', 'commandId'],
+  RESPONSE: ['machineId', 'commandId', 'status'],
   EVENT: ['machineId', 'sessionId', 'seq'],
   PING: [],
   PONG: [],
