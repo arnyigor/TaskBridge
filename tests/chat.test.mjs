@@ -119,6 +119,7 @@ async function ui({ coarsePointer = false } = {}) {
   window.matchMedia = () => ({ matches: coarsePointer }); // desktop (fine pointer) unless a test opts in
   const intervals = [];
   const streams = [];
+  const copied = [];
   const tasks = { a: task('a'), b: { ...task('b'), prompt: 'Другой чат' } };
   let fetchHook;
   // Sessions have their own address, so the app reads location and writes
@@ -129,10 +130,11 @@ async function ui({ coarsePointer = false } = {}) {
     pushState: (state, title, url) => urls.push({ method: 'push', url }),
     replaceState: (state, title, url) => urls.push({ method: 'replace', url })
   };
-  const locationStub = { pathname: '/' };
-  const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES, history: historyStub, location: locationStub,
+  const locationStub = { pathname: '/', href: 'http://localhost/' };
+  const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES, history: historyStub, location: locationStub, URL,
     setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
+    navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
     DataTransfer: class { items = { add: (file) => this.files.push(file) }; files = []; },
     fetch: async (url, options) => {
       if (fetchHook) { const intercepted = await fetchHook(url, options); if (intercepted) return intercepted; }
@@ -155,8 +157,8 @@ async function ui({ coarsePointer = false } = {}) {
     DOMPurify: { sanitize: html => html },
   });
   const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation};', context);
-  return { ...context.testing, document, window, streams, tasks, urls, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink};', context);
+  return { ...context.testing, document, window, streams, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -358,4 +360,29 @@ test('DOM: sessions carry their own address, and a deep link opens that session'
   app.urls.length = 0;
   app.startNewTask();
   assert.deepEqual(app.urls, [{ method: 'push', url: '/' }]);
+});
+
+test('DOM: the sessions screen groups active and recent sessions and shares their link', async () => {
+  const app = await ui();
+  const doc = app.document;
+
+  // Both fixture sessions are finished: everything lands under "Недавние".
+  await app.loadTasks();
+  assert.deepEqual([...doc.querySelectorAll('.taskGroup')].map(node => node.textContent), ['Недавние · 2']);
+
+  // A running session moves to the top group with its model and relative time.
+  app.tasks.a.status = 'RUNNING';
+  app.tasks.a.model = { provider: 'llamacpp', id: 'qwen-27b-q3' };
+  app.tasks.a.updatedAt = new Date().toISOString();
+  await app.loadTasks();
+  assert.deepEqual([...doc.querySelectorAll('.taskGroup')].map(node => node.textContent), ['Активные · 1', 'Недавние · 1']);
+  const first = doc.querySelector('.taskRow');
+  assert.equal(first.dataset.id, 'a');
+  assert.match(first.textContent, /RUNNING/);
+  assert.match(first.textContent, /llamacpp\/qwen-27b-q3/);
+  assert.match(first.textContent, /только что|мин назад/);
+
+  // Sharing hands over the session address, which is what a phone needs.
+  await app.copySessionLink('a');
+  assert.deepEqual(app.copied, [`http://localhost/session/a`]);
 });

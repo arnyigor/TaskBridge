@@ -840,20 +840,58 @@ function renderTaskFilter() {
   $('taskProjectFilter').value = taskFilterProjectId;
 }
 
-function renderTaskList() {
-  $('taskCount').textContent = lastTasks.length ? `(${lastTasks.length})` : '';
-  let tasks = taskFilterProjectId === 'all' ? lastTasks : lastTasks.filter(t => t.projectId === taskFilterProjectId);
-  if (taskSearchQuery) tasks = tasks.filter(t => (t.title || t.prompt || '').toLowerCase().includes(taskSearchQuery));
-  $('tasks').innerHTML = tasks.length ? tasks.map((t) => `
+// Relative time keeps the sessions screen readable: an absolute timestamp for
+// every row is noise when what matters is "started two minutes ago".
+function relativeTime(value) {
+  const at = Date.parse(value);
+  if (!Number.isFinite(at)) return '—';
+  const seconds = Math.round((Date.now() - at) / 1000);
+  if (seconds < 60) return 'только что';
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days} дн назад`;
+  return new Date(at).toLocaleDateString();
+}
+
+function taskRow(t) {
+  const model = t.model || t.requestedModel;
+  const modelLabel = model ? modelFullLabel(model) : (t.engine?.profileId || null);
+  return `
     <div class="taskRow ${t.id === selectedTaskId ? 'active' : ''}" data-id="${t.id}">
       <button class="t-delete" type="button" data-delete-id="${t.id}" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
+      <button class="t-link" type="button" data-link-id="${t.id}" title="Скопировать ссылку на сессию" aria-label="Скопировать ссылку на сессию">🔗</button>
       <div class="t-prompt">${escapeHtml(t.title || t.prompt)}</div>
       <div class="t-sub">
         <span class="pill ${pillClass(t.status)}">${escapeHtml(t.status)}</span>
         <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
-        <span class="t-time">${new Date(t.createdAt).toLocaleString()}</span>
+        ${modelLabel ? `<span class="t-model">${escapeHtml(modelLabel)}</span>` : ''}
+        <span class="t-time">${escapeHtml(relativeTime(t.updatedAt || t.createdAt))}</span>
       </div>
-    </div>`).join('') : `<div class="none">${lastTasks.length ? 'Ничего не найдено.' : 'Пока нет сессий.'}</div>`;
+    </div>`;
+}
+
+// Sessions screen: what is running now comes first, everything finished is
+// recent history (§ TZ: Sessions with ACTIVE / RECENT).
+function renderTaskList() {
+  $('taskCount').textContent = lastTasks.length ? `(${lastTasks.length})` : '';
+  let tasks = taskFilterProjectId === 'all' ? lastTasks : lastTasks.filter(t => t.projectId === taskFilterProjectId);
+  if (taskSearchQuery) tasks = tasks.filter(t => (t.title || t.prompt || '').toLowerCase().includes(taskSearchQuery));
+  if (!tasks.length) {
+    $('tasks').innerHTML = `<div class="none">${lastTasks.length ? 'Ничего не найдено.' : 'Пока нет сессий.'}</div>`;
+    return;
+  }
+  const active = tasks.filter(t => ACTIVE_STATUSES.has(t.status))
+    .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  const recent = tasks.filter(t => !ACTIVE_STATUSES.has(t.status))
+    .sort((a, b) => Date.parse(b.updatedAt || b.createdAt) - Date.parse(a.updatedAt || a.createdAt));
+  const group = (title, items) => items.length
+    ? `<div class="taskGroup">${title} · ${items.length}</div>${items.map(taskRow).join('')}`
+    : '';
+  $('tasks').innerHTML = group('Активные', active) + group('Недавние', recent);
+
   document.querySelectorAll('.taskRow').forEach((row) => {
     row.onclick = () => selectTask(row.dataset.id);
   });
@@ -863,6 +901,23 @@ function renderTaskList() {
       deleteTask(btn.dataset.deleteId);
     };
   });
+  document.querySelectorAll('.t-link').forEach((btn) => {
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      copySessionLink(btn.dataset.linkId);
+    };
+  });
+}
+
+// The address is the point of per-session URLs: hand it to the phone or another
+// browser instead of describing which session to open.
+async function copySessionLink(id) {
+  const path = sessionPath(id);
+  const url = location.href ? new URL(path, location.href).href : path;
+  try { await navigator.clipboard.writeText(url); alert(`Ссылка скопирована:
+${url}`); }
+  catch { alert(`Ссылка на сессию:
+${url}`); }
 }
 
 $('taskProjectFilter').addEventListener('change', () => {
