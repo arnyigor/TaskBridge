@@ -146,7 +146,7 @@ async function ui({ coarsePointer = false } = {}) {
     DOMPurify: { sanitize: html => html },
   });
   const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, refreshImportSuggestion};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport};', context);
   return { ...context.testing, document, window, streams, tasks, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -245,19 +245,14 @@ test('DOM: the Pi importer groups sessions by project, previews one and imports 
   const pin = (el, value) => Object.defineProperty(el, 'value', { value, writable: true, configurable: true });
   const fire = (el, type) => el.dispatchEvent(new app.window.Event(type));
 
-  // A freshly updated terminal session is offered for the project in view.
-  pin(doc.getElementById('project'), 'fixture');
-  await app.refreshImportSuggestion(true);
-  const banner = doc.getElementById('piSessionSuggestion');
-  assert.equal(banner.classList.contains('hidden'), false);
-  assert.match(banner.textContent, /TaskBridge architecture/);
-
-  // The list is grouped by project and searchable.
+  // The list is grouped by project, searchable, and marks the session the user
+  // has just left in the terminal.
   doc.getElementById('resumeSessionButton').onclick();
   await settle();
   assert.equal(doc.getElementById('importOverlay').classList.contains('hidden'), false);
   assert.match(doc.getElementById('importList').textContent, /Тестовый проект/);
   assert.match(doc.getElementById('importList').textContent, /Начни с SessionManager/);
+  assert.match(doc.getElementById('importList').textContent, /только что из терминала/);
   pin(doc.getElementById('importSearch'), 'нет-такого');
   fire(doc.getElementById('importSearch'), 'input');
   assert.match(doc.getElementById('importList').textContent, /Ничего не найдено/);

@@ -298,7 +298,6 @@ function setComposerMode(taskId) {
 
 $('project').addEventListener('change', () => {
   if (!selectedTaskId) newTaskProjectId = $('project').value;
-  refreshImportSuggestion();
 });
 
 const drafts = new Map(); // taskId | '__new__' -> { text, files: File[] }
@@ -1338,8 +1337,6 @@ $('manageProjectsClose').onclick = () => $('manageProjectsOverlay').classList.ad
 let importGroups = null;
 let importQuery = '';
 let importSelection = null;
-let importSuggestion = null;
-let importSuggestionAt = 0;
 
 const importModelLabel = model => model ? `${model.provider ? `${model.provider}/` : ''}${model.id || ''}` : '—';
 
@@ -1349,9 +1346,11 @@ function importSessionRow(group, session) {
   row.className = 'sessionPickerItem';
   if (importSelection?.session.key === session.key) row.classList.add('active');
   const name = session.preview || session.name;
+  const recent = group.suggestion?.key === session.key && !session.existingTaskId;
   const meta = [
     new Date(session.mtime).toLocaleString(),
-    session.existingTaskId ? 'уже открыта в TaskBridge' : null
+    session.existingTaskId ? 'уже открыта в TaskBridge' : null,
+    recent ? 'только что из терминала' : null
   ].filter(Boolean).join(' · ');
   row.innerHTML = `<span class="name">${escapeHtml(name)}</span><span class="meta">${escapeHtml(session.name)}</span><span class="meta">${escapeHtml(meta)}</span>`;
   row.onclick = () => selectImportSession(group, session);
@@ -1485,39 +1484,11 @@ async function openImport(preselect = null) {
 
 function closeImport() { $('importOverlay').classList.add('hidden'); }
 
-// A terminal Pi session touched minutes ago is almost always the one the user
-// just closed, so it is offered instead of waiting to be found in the list.
-async function refreshImportSuggestion(force = false) {
-  if (!force && Date.now() - importSuggestionAt < 15000) return;
-  importSuggestionAt = Date.now();
-  const projectId = $('project').value;
-  try { importGroups = await api('/api/native-sessions'); } catch { importSuggestion = null; renderImportSuggestion(); return; }
-  importSuggestion = importGroups.find(group => group.id === projectId)?.suggestion || null;
-  renderImportSuggestion();
-}
-
-function renderImportSuggestion() {
-  const node = $('piSessionSuggestion');
-  if (!importSuggestion) { node.classList.add('hidden'); node.textContent = ''; return; }
-  const projectId = $('project').value;
-  node.textContent = '';
-  const text = document.createElement('span');
-  text.textContent = `Похоже, вы только что работали в терминальном Pi: «${importSuggestion.name}» (${new Date(importSuggestion.mtime).toLocaleTimeString()}). Продолжить в TaskBridge?`;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.className = 'small';
-  button.textContent = 'Продолжить в TaskBridge';
-  button.onclick = () => openImport({ projectId, key: importSuggestion.key });
-  node.append(text, button);
-  node.classList.remove('hidden');
-}
-
 $('resumeSessionButton').onclick = () => openImport();
 $('importClose').onclick = closeImport;
 $('importRefresh').onclick = () => openImport();
 $('importMode').addEventListener('change', () => { if (importSelection) selectImportSession(importSelection.group, importSelection.session); });
 $('importSearch').addEventListener('input', () => { importQuery = $('importSearch').value; renderImportList(); });
-$('piSessionSuggestion').addEventListener('click', event => { if (event.target === $('piSessionSuggestion')) $('piSessionSuggestion').classList.add('hidden'); });
 
 /* ---------------- help ---------------- */
 
@@ -2196,7 +2167,6 @@ async function loadAll() {
     await loadProjects();
     const tasks = await loadTasks();
     if (tasks.length) await selectTask(tasks[0].id);
-    refreshImportSuggestion(true);
   } catch (e) {
     $('createError').textContent = e.message;
     $('createError').classList.add('error');

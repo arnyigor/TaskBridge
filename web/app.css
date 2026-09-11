@@ -910,9 +910,6 @@ pre {
 .cloudActions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 #cloudStatus { margin-top: 8px; }
 
-#piSessionSuggestion { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-#piSessionSuggestion button { flex-shrink: 0; }
-
 /* The cloud form is a column of labeled fields, not the single-row pairing
    form the generic `.authCard form` rule was written for. Without this the
    fields are laid out in one row, the card overflows and «Закрыть» drifts
