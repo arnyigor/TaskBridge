@@ -1,8 +1,13 @@
 {
-  "name": "TaskBridge MVP",
+  "name": "TaskBridge",
   "short_name": "TaskBridge",
+  "description": "Pi remote control: live sessions, queue and approvals",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
-  "background_color": "#0c0e12",
-  "theme_color": "#111318"
+  "background_color": "#080b14",
+  "theme_color": "#080b14",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
 }

@@ -97,8 +97,7 @@ engines: node >= 22.13 (node:sqlite, global fetch)
 | `cloud/lib/upload-set.mjs` | реальный набор файлов для `vercel deploy` |
 | `cloud/server.mjs` | локальный хост облака + SSE + retention |
 | `cloud/api/index.mjs` | Vercel-функция (общий роутер) |
-| `cloud/web/*` | PWA: список задач, стриминг, tool-карточки, STOP, approvals |
-| `cloud/web/event-reducer.mjs` | чистая логика применения событий (тестируется отдельно) |
+| `web/*` | единый UI: он же PWA в облаке (раздаётся Vercel из `vercel.json`) |
 | `api/index.mjs`, `vercel.json` | энтрипоинт и конфиг Vercel (root = корень репозитория) |
 
 ### 3.3 Инструменты и документация

@@ -245,7 +245,8 @@ npm run check:secrets -- -v    # плюс список всех файлов, к
 2. **Root Directory: корень репозитория** (не `cloud/`). Роутер импортирует
    общие протокольные модули из `src/domain/`, они должны попасть в сборку.
 3. **Framework Preset: Other**, Build Command — пусто, Output Directory берётся
-   из `vercel.json` (`cloud/web`). Install Command по умолчанию (`npm install`)
+   из `vercel.json` (`web` — тот же интерфейс, что раздаёт ПК). Install Command
+   по умолчанию (`npm install`)
    подтянет `pg` из `optionalDependencies`.
 4. **Storage → Create Database → Postgres** и подключить к проекту (даст
    `POSTGRES_URL`). Альтернатива: вручную добавить `POSTGRES_URL` от Neon.

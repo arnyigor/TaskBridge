@@ -14,7 +14,7 @@
 | | `master` (`190cf49`) | `feature/cloud-transport` (`293a1d9`…`2477b73`) |
 |---|---|---|
 | Транспорт | Vercel Queues + OIDC, serverless-функции по маршруту | свой протокол: durable events, `seq`, replay, heartbeat, polling команд |
-| Облачная служба | `cloud/api/*` (Root Directory = `cloud`), `cloud/public/*` | `cloud/server.mjs` + `cloud/api/index.mjs` + `cloud/web/*` (Root Directory = корень) |
+| Облачная служба | `cloud/api/*` (Root Directory = `cloud`), `cloud/public/*` | `cloud/server.mjs` + `cloud/api/index.mjs` + общий `web/` (Root Directory = корень) |
 | Хранилище | очередь Vercel, TTL 7 дней, без своей БД | memory / SQLite / Postgres, retention, дедупликация `(taskId, seq)` |
 | Возможности | START/FOLLOW_UP/COMPACT/STOP, SYNC_STATE | то же + approvals, model/thinking, метрики, ограничение вывода инструментов, PWA с tool-карточками |
 | Проверки | E2E-smoke не выполнялся (нужен Vercel Queues/OIDC) | 188 тестов, локальный E2E, аудит утечек, план деплоя |

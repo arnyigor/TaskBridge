@@ -1,0 +1,96 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import http from 'node:http';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// One UI for both realities (docs/cloud-ui.md): the machine, the cloud dev host
+// and the Vercel deployment must all serve the very same files in web/. These
+// checks are what stops a second, quietly diverging copy from reappearing.
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const read = name => fs.readFile(path.join(root, name), 'utf8');
+const exists = name => fs.access(path.join(root, name)).then(() => true, () => false);
+
+test('the deployment serves the shared web/, with session links falling back to the shell', async () => {
+  const vercel = JSON.parse(await read('vercel.json'));
+  assert.equal(vercel.outputDirectory, 'web', 'Vercel must publish the shared UI, not a copy');
+  const sources = vercel.rewrites.map(rule => rule.source);
+  assert.ok(sources.includes('/api/:path*'), 'the API must stay routed to the function');
+  const session = vercel.rewrites.find(rule => rule.source === '/session/:id');
+  assert.equal(session?.destination, '/index.html', 'a session address must open the app shell');
+  assert.ok(vercel.rewrites.indexOf(session) > sources.indexOf('/api/:path*'), 'the API rule must win over the shell');
+});
+
+test('the legacy cloud UI copy is gone and nothing points at it any more', async () => {
+  assert.equal(await exists('cloud/web'), false, 'cloud/web must not come back: it is the same app');
+  const checked = JSON.parse(await read('package.json')).scripts.check;
+  assert.doesNotMatch(checked, /cloud\/web/, 'npm run check must not reference the deleted copy');
+  for (const file of ['web/app.js', 'web/sw.js', 'web/cloud-config.js', 'web/transport.mjs']) {
+    assert.match(checked, new RegExp(file.replace('/', '\\/')), `${file} must be syntax-checked`);
+  }
+});
+
+test('the shell loads the cloud config before the app, and caches only files that exist', async () => {
+  const html = await read('web/index.html');
+  const config = html.indexOf('/cloud-config.js');
+  const app = html.indexOf('type="module" src="/app.js"');
+  assert.ok(config > 0 && app > 0, 'both scripts must be in the shell');
+  // A classic script runs before a deferred module: app.js picks its transport
+  // from the config, so the order is load-bearing, not cosmetic.
+  assert.ok(config < app, 'cloud-config.js must come before the module');
+  assert.match(html, /navigator\.serviceWorker\.register\('\/sw\.js'\)/, 'the PWA must install its shell');
+
+  const shell = (await read('web/sw.js')).match(/const SHELL = \[([^\]]+)\]/s)[1]
+    .split(',').map(entry => entry.trim().replace(/^'|'$/g, '')).filter(Boolean);
+  for (const asset of shell) {
+    if (asset === '/') continue;
+    assert.ok(await exists(path.join('web', asset)), `sw.js precaches a missing file: ${asset}`);
+  }
+});
+
+test('the cloud dev host serves the same shell and the same app.js as the machine', async () => {
+  const { startServer } = await import('../cloud/server.mjs');
+  const running = await startServer({ port: 0, host: '127.0.0.1', storeTarget: 'memory:', env: {}, logger: () => {} });
+  const port = running.port;
+  const get = async (urlPath) => new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port, path: urlPath }, res => {
+      let body = '';
+      res.on('data', chunk => body += chunk);
+      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body }));
+    }).on('error', reject);
+  });
+  try {
+    const [index, app, session] = await Promise.all([get('/'), get('/app.js'), get('/session/abc123')]);
+    assert.equal(index.status, 200);
+    assert.equal(index.body, await read('web/index.html'), 'the cloud host serves the shared shell byte for byte');
+    assert.equal(app.body, await read('web/app.js'), 'and the shared app, not a trimmed copy');
+    assert.equal(session.body, index.body, 'a session link opens the shell here too');
+  } finally {
+    await running.close();
+  }
+});
+
+test('cloud-config only speaks up on a public origin and only after pairing', async () => {
+  const source = await read('web/cloud-config.js');
+  const run = (hostname, stored) => {
+    const window = {};
+    const context = {
+      location: { hostname, protocol: 'https:', host: 'taskbridge.example.app' },
+      localStorage: { getItem: () => stored },
+      window
+    };
+    context.window = window;
+    new Function('location', 'localStorage', 'window', source)(context.location, context.localStorage, window);
+    return window.__TASKBRIDGE_CLOUD__;
+  };
+  const paired = JSON.stringify({ machineId: 'home-pc', deviceToken: 'token-1' });
+  assert.equal(run('localhost', paired), undefined, 'on the machine the page talks to its own origin');
+  assert.equal(run('192.168.1.212', paired), undefined, 'the LAN is the machine too');
+  assert.equal(run('taskbridge.example.app', null), undefined, 'no pairing yet: no half-configured transport');
+  assert.equal(run('taskbridge.example.app', '{'), undefined, 'a corrupted record is ignored, not thrown');
+  assert.deepEqual(run('taskbridge.example.app', paired), {
+    url: 'wss://taskbridge.example.app/api/relay', machineId: 'home-pc', deviceToken: 'token-1'
+  });
+});

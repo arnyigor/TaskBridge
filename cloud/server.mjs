@@ -12,7 +12,10 @@ import { errorBody } from './lib/errors.mjs';
 // contract cannot drift between them.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const webDir = path.join(__dirname, 'web');
+// One UI for both realities (docs/cloud-ui.md): this dev host serves the very
+// same web/ that the machine serves and that Vercel deploys (outputDirectory in
+// vercel.json), so the cloud copy cannot drift from the local one.
+const webDir = path.resolve(__dirname, '..', 'web');
 
 const PORT = Number(process.env.CLOUD_PORT || 8788);
 const HOST = process.env.CLOUD_HOST || '0.0.0.0';
@@ -60,10 +63,10 @@ export async function createCloudService({ storeTarget = STORE_TARGET, env = pro
 }
 
 async function serveStatic(urlPath, res) {
-  // The PWA uses <base href="/web/"> so the same files work both on Vercel
-  // (real /web/ directory) and on this dev server (served from the root).
   let relative = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '');
-  if (relative === 'web' || relative.startsWith('web/')) relative = relative.slice(3).replace(/^\/+/, '');
+  // A session address is the app shell itself (vercel.json rewrites it too):
+  // a reload or a bookmark must land on the same conversation.
+  if (relative === 'session' || relative.startsWith('session/')) relative = 'index.html';
   if (relative === '' || relative.endsWith('/')) relative += 'index.html';
   const target = path.resolve(webDir, relative);
   if (!target.startsWith(path.resolve(webDir) + path.sep)) return false;

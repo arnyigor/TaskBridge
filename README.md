@@ -178,12 +178,10 @@ Taskbridge/
 ├─ cloud/                   облачный control plane (Vercel-совместимый)
 │  ├─ lib/                  роутер API, auth, store (memory/sqlite/postgres), errors, ids
 │  ├─ api/index.mjs         Vercel function (общий роутер)
-│  ├─ server.mjs            локальный хост облака + SSE
-│  └─ web/                  PWA: задачи, стриминг, tool-карточки, STOP
-│     └─ event-reducer.mjs  чистая логика применения событий (тестируемая)
+│  └─ server.mjs            локальный хост облака + SSE (раздаёт тот же web/)
 ├─ api/index.mjs            Vercel-энтрипоинт (реэкспорт cloud/api)
 ├─ .vercelignore            исключает config.json/data из CLI-деплоя
-├─ vercel.json              конфиг Vercel (outputDirectory: cloud/web)
+├─ vercel.json              конфиг Vercel (outputDirectory: web — один UI)
 ├─ web/
 │  ├─ index.html            разметка UI
 │  ├─ app.js                логика UI, SSE, рендер чата

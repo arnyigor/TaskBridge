@@ -122,8 +122,9 @@ processed command seq and the last poll error. It never returns the secret.
   fast path.
 * `cloud/lib/store-postgres.mjs` — Postgres adapter (required on serverless).
 * `api/index.mjs` + `vercel.json` — Vercel entry point and project config
-  (project root = repository root, static output = `cloud/web`).
-* `cloud/web/` — installable PWA: machine dashboard, task list/creation, live
+  (project root = repository root, static output = `web`).
+* `web/` — the one installable PWA, served by the machine and by Vercel alike:
+  session list/creation, live
   conversation, tool cards, activity log, STOP / follow-up / compact / approvals,
   connection indicators, replay after reconnect.
 
@@ -161,7 +162,7 @@ Keep the machine secret out of git; `config.json` is git-ignored already.
    the router imports shared protocol helpers from `src/domain/`.
 2. Framework preset: **Other**. Build command: leave empty (`npm install` is
    enough; `pg` is an optional dependency and is installed by default).
-   Output directory comes from `vercel.json` (`cloud/web`).
+   Output directory comes from `vercel.json` (`web`).
 3. Add a database: **Vercel Postgres** or Neon. It sets `POSTGRES_URL`.
 4. Environment variables (Production + Preview):
 

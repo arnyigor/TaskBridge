@@ -6,7 +6,13 @@
   <meta name="theme-color" content="#080b14" />
   <title>TaskBridge</title>
   <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon.svg" />
+  <link rel="apple-touch-icon" href="/icon.svg" />
   <link rel="stylesheet" href="/app.css" />
+  <!-- Classic script: it runs before the deferred module below, so app.js
+       already knows whether this page reaches the machine directly or through
+       the relay (docs/cloud-ui.md). -->
+  <script src="/cloud-config.js"></script>
 </head>
 <body>
   <header class="top">
@@ -362,5 +368,9 @@
   </main>
 
   <script type="module" src="/app.js"></script>
+  <script>
+    // Installable on the phone, and the shell opens even when the machine is off.
+    if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  </script>
 </body>
 </html>
