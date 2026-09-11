@@ -169,11 +169,29 @@ export class LocalModelService extends EventEmitter {
     return models;
   }
 
-  // Busy is deliberately "unknown/false": the router multiplexes models, there
-  // is no single slot to inspect like /slots in the single-model server. Task
-  // serialization is already owned by TaskManager.activeTaskId.
+  // The router multiplexes models, but a model that is loaded still runs in its
+  // own child server, and the router forwards /slots?model=<id> to it (verified
+  // against llama.cpp b10883). Only already-loaded models are probed: asking
+  // about an unloaded one would autoload it (--models-autoload is on), so the
+  // slot query would itself make the model busy.
   async getBusyStatus() {
-    return { unknown: false, busy: false };
+    const models = await this.listModels().catch(() => null);
+    if (!models) return { unknown: true };
+    const loaded = models.filter(m => m.status === 'loaded');
+    if (!loaded.length) return { unknown: false, busy: false };
+    let inspected = false;
+    for (const model of loaded) {
+      let slots;
+      try {
+        slots = await this.request(`/slots?model=${encodeURIComponent(model.id)}`, { timeout: 1500 });
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(slots) || !slots.length) continue;
+      inspected = true;
+      if (slots.some(slot => slot?.is_processing)) return { unknown: false, busy: true };
+    }
+    return inspected ? { unknown: false, busy: false } : { unknown: true };
   }
 
   async getEngineInfo() {

@@ -50,6 +50,8 @@ test('normalizeModels derives quantization and configured ctx from child args', 
 // /models/unload and /models/sse to exercise LocalModelService end to end.
 async function fakeRouter(t, models) {
   const status = new Map(models.map(m => [m.id, { value: 'unloaded', vision: m.vision === true, ctx: m.ctx ?? null }]));
+  const slotsCalls = [];
+  const processing = new Map();
   const clients = new Set();
   const broadcast = event => { for (const res of clients) { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {} } };
   const server = http.createServer(async (req, res) => {
@@ -65,6 +67,17 @@ async function fakeRouter(t, models) {
           meta: { n_ctx: s.ctx }
         }))
       }));
+    }
+    // Mirrors the router: /slots needs an explicit ?model= and autoloads an
+    // unloaded one (which is exactly what getBusyStatus must avoid).
+    if (req.method === 'GET' && url.pathname === '/slots') {
+      const id = url.searchParams.get('model');
+      slotsCalls.push(id);
+      const entry = id ? status.get(id) : null;
+      if (!entry) { res.statusCode = 400; return res.end(JSON.stringify({ error: { code: 400, message: 'model name is missing from the request' } })); }
+      if (entry.value === 'unloaded') entry.value = 'loaded';
+      res.setHeader('content-type', 'application/json');
+      return res.end(JSON.stringify([{ id: 0, n_ctx: entry.ctx, is_processing: processing.get(id) === true }]));
     }
     if (req.method === 'GET' && url.pathname === '/models/sse') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -106,7 +119,7 @@ async function fakeRouter(t, models) {
     server.closeAllConnections?.();
     return new Promise(resolve => server.close(resolve));
   });
-  return { baseUrl: `http://127.0.0.1:${server.address().port}`, status };
+  return { baseUrl: `http://127.0.0.1:${server.address().port}`, status, slotsCalls, processing };
 }
 
 test('LocalModelService lists, loads with progress, unloads and reports status', async t => {
@@ -136,6 +149,32 @@ test('LocalModelService lists, loads with progress, unloads and reports status',
   await service.unloadModel('vision');
   assert.deepEqual((await service.getStatus()).loaded, []);
   service.stopWatching();
+});
+
+test('LocalModelService reports a loaded router model as busy only while it generates', async t => {
+  const router = await fakeRouter(t, [{ id: 'text', ctx: 65536 }, { id: 'vision', vision: true }]);
+  const service = new LocalModelService({ provider: 'llama.cpp', healthUrl: `${router.baseUrl}/health` }, t.name);
+
+  // Nothing loaded: idle, and no /slots probe is sent — that would autoload.
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false });
+  assert.deepEqual(router.slotsCalls, []);
+
+  await service.loadModel('text');
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false });
+  assert.deepEqual(router.slotsCalls, ['text']);
+
+  router.processing.set('text', true);
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: true });
+  assert.deepEqual(router.slotsCalls, ['text', 'text']);
+
+  router.processing.set('text', false);
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false });
+  service.stopWatching();
+});
+
+test('LocalModelService reports unknown busy when the router is unreachable', async t => {
+  const service = new LocalModelService({ provider: 'llama.cpp', healthUrl: 'http://127.0.0.1:1/health' }, t.name);
+  assert.deepEqual(await service.getBusyStatus(), { unknown: true });
 });
 
 test('LocalModelService only stops a router it started by itself', async t => {
