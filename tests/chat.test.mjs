@@ -386,3 +386,36 @@ test('DOM: the sessions screen groups active and recent sessions and shares thei
   await app.copySessionLink('a');
   assert.deepEqual(app.copied, [`http://localhost/session/a`]);
 });
+
+test('DOM: commands sit above the answer and below the reasoning block', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+
+  // Reasoning only appears once Pi streams thinking, so feed one delta and let
+  // the normal refresh path render it.
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    return { ok: true, json: async () => [...history('a'), { taskId: 'a', seq: 99, type: 'PI_EVENT',
+      data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'Сначала подумаю про SessionManager.' } } } }] };
+  });
+  await app.refreshTask();
+
+  // The fixture's tool calls belong to the last assistant turn, which is also
+  // where the injected thinking delta lands.
+  const body = [...app.document.querySelectorAll('.turn .body')].filter(node => node.querySelector('.msg.s-bot')).at(-1);
+  assert.ok(body, 'no assistant turn rendered');
+  const children = [...body.children].map(node => node.className.split(' ').filter(Boolean).join(' '));
+  const indexOf = kind => [...body.children].findIndex(node => node.classList.contains(kind));
+  const reasoning = indexOf('reasoning');
+  const tool = indexOf('tool');
+  const answer = indexOf('msg');
+
+  assert.ok(reasoning >= 0, `no reasoning block: ${children}`);
+  assert.ok(tool >= 0, `no tool chips: ${children}`);
+  assert.ok(answer >= 0, `no answer bubble: ${children}`);
+  assert.ok(reasoning < tool, `reasoning must precede commands: ${children}`);
+  assert.ok(tool < answer, `commands must precede the answer: ${children}`);
+  // The answer stays readable without scrolling past a long tool list.
+  assert.match(body.querySelector('.md').textContent, /Первый ответ|Второй ответ/);
+});

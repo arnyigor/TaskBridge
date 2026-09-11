@@ -166,7 +166,7 @@ function appendBotTurn() {
   body.append(bubble, metaRow);
   turn.append(body);
   $('msgsInner').append(turn);
-  liveTurn = { body, md, meta, metaRow, copyBtn, turn };
+  liveTurn = { body, bubble, md, meta, metaRow, copyBtn, turn };
   updateThinking();
   updateText();
   scrollBottom();
@@ -217,7 +217,7 @@ function appendInlineImage(relPath) {
   img.alt = relPath;
   img.loading = 'lazy';
   link.append(img);
-  liveTurn.body.insertBefore(link, liveTurn.metaRow);
+  liveTurn.body.insertBefore(link, liveTurn.bubble || liveTurn.metaRow);
   scrollBottom();
 }
 
@@ -418,7 +418,9 @@ function renderChat() {
         body.textContent = tool.label;
         chip.append(summary, body);
         chip._summary = summary;
-        node.body.insertBefore(chip, node.metaRow);
+        // Commands belong above the answer (and below the reasoning block), so
+        // a long tool list never pushes the reply out of view.
+        node.body.insertBefore(chip, node.bubble || node.metaRow);
         node.tools.set(tool.id, chip);
       }
       // A settled turn's tools never change again; skipping the write (not
@@ -558,7 +560,7 @@ function renderSettledTurn(turn, before) {
     summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
     chip._summary = summary;
     chip._state = tool.state;
-    body.insertBefore(chip, metaRow);
+    body.insertBefore(chip, bubble);
     tools.set(tool.id, chip);
     if (tool.state === 'done' && tool.imagePath && IMAGE_EXT_RE.test(tool.imagePath) && selectedTaskId) {
       const url = `/api/tasks/${selectedTaskId}/workspace-file?path=${encodeURIComponent(tool.imagePath)}`;
@@ -572,14 +574,14 @@ function renderSettledTurn(turn, before) {
       img.alt = tool.imagePath;
       img.loading = 'lazy';
       link.append(img);
-      body.insertBefore(link, metaRow);
+      body.insertBefore(link, bubble);
       chip.dataset.imageShown = 'true';
     }
   }
   meta.textContent = turn.status || '';
 
   $('msgsInner').insertBefore(wrap, before);
-  return { body, md, meta, metaRow, copyBtn, tools, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
+  return { body, bubble, md, meta, metaRow, copyBtn, tools, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
 }
 
 function renderPrependedTurns(turns) {
