@@ -451,7 +451,9 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === 'GET' && pathname === '/api/local') {
-      return json(res, 200, await manager.localStatus());
+      // Deliberate user action: it may probe Pi once so the advertised provider
+      // id is one Pi actually serves.
+      return json(res, 200, await manager.localStatus({ probeCatalog: true }));
     }
     if (req.method === 'POST' && pathname === '/api/local/start') {
       return json(res, 200, await manager.startLocal());

@@ -63,3 +63,35 @@ test('localStatus advertises the id Pi serves, not the stale configured one', as
   assert.equal(status.enabled, true);
   assert.deepEqual(status.models, []);
 });
+
+test('the local models endpoint probes Pi once, the polled info call does not', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-local-probe-'));
+  const store = new TaskStore(path.join(root, 'data'));
+  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const manager = new TaskManager({
+    projects: [],
+    localRuntime: { provider: 'llama.cpp', router: { enabled: true, command: 'llama-server' } }
+  }, path.join(root, 'data'), store);
+  manager.local.getStatus = async () => ({ enabled: true, provider: 'llama.cpp', models: [], loaded: [] });
+
+  let probes = 0;
+  manager.modelCatalog.list = async () => { probes += 1; return { models: [{ provider: 'llamacpp', id: 'qwen-27b-q3' }], thinkingLevels: [] }; };
+  // Whatever the catalog would return later is irrelevant for the polled call.
+  let cached = null;
+  manager.modelCatalog.peek = () => cached;
+
+  assert.equal((await manager.localStatus()).provider, 'llama.cpp');
+  assert.equal(probes, 0, '/api/info must not start a Pi probe');
+
+  manager.modelCatalog.list = async () => {
+    probes += 1;
+    cached = { models: [{ provider: 'llamacpp', id: 'qwen-27b-q3' }], thinkingLevels: [] };
+    return cached;
+  };
+  assert.equal((await manager.localStatus({ probeCatalog: true })).provider, 'llamacpp');
+  assert.equal(probes, 1);
+
+  // Already warm: no second probe.
+  assert.equal((await manager.localStatus({ probeCatalog: true })).provider, 'llamacpp');
+  assert.equal(probes, 1);
+});

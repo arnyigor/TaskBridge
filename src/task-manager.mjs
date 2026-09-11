@@ -630,7 +630,11 @@ export class TaskManager extends EventEmitter {
 
   // ---- local llama.cpp router (router mode) ----
 
-  async localStatus() {
+  // `probeCatalog` is for the endpoint the user opens deliberately (the local
+  // models dialog): the id Pi can serve is only knowable from Pi's own catalog,
+  // and probing costs a short Pi start, so the polled /api/info must not do it.
+  async localStatus({ probeCatalog = false } = {}) {
+    if (probeCatalog && !this.modelCatalog.peek()) await this.modelCatalog.list().catch(() => {});
     // Advertise the id Pi can really serve: with the hand-written provider
     // renamed (e.g. "llamacpp") the configured one may no longer exist, and
     // selecting a model under a dead id makes Pi answer
