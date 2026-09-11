@@ -41,7 +41,8 @@ export function createLocalTransport({ base = '', fetchImpl = globalThis.fetch, 
     open(sessionId, { after = 0, onEvent = () => {}, onStatus = () => {} } = {}) {
       if (typeof EventSourceImpl !== 'function') throw failure('INPUT_INVALID', 'EventSource is not available');
       const query = after ? `?after=${encodeURIComponent(after)}` : '';
-      const source = new EventSourceImpl(`${base}/api/tasks/${encodeURIComponent(sessionId)}/events${query}`);
+      // /stream is the SSE endpoint; /events is the paginated history.
+      const source = new EventSourceImpl(`${base}/api/tasks/${encodeURIComponent(sessionId)}/stream${query}`);
       let cursor = after;
       source.onmessage = message => {
         let event;

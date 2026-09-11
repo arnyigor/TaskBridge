@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
 import { ChatState, ACTIVE_STATUSES } from '../web/chat-state.mjs';
+import { selectTransport, createLocalTransport } from '../web/transport.mjs';
 
 const task = (id = 'a') => ({ id, prompt: 'Первый вопрос', status: 'SUCCEEDED', assistantText: 'Первый ответВторой ответ', thinkingText: '', model: { contextWindow: 65536 }, lastUsage: { totalTokens: 13081 } });
 function history(id = 'a') {
@@ -132,6 +133,7 @@ async function ui({ coarsePointer = false } = {}) {
   };
   const locationStub = { pathname: '/', href: 'http://localhost/' };
   const context = vm.createContext({ document, window, console, ChatState, ACTIVE_STATUSES, history: historyStub, location: locationStub, URL,
+    selectTransport, createLocalTransport,
     setTimeout, clearTimeout, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval() {},
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
     navigator: { clipboard: { writeText: async text => { copied.push(text); } } },

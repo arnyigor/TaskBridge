@@ -53,7 +53,7 @@ test('the local transport speaks HTTP and streams SSE, skipping repeated seq', a
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
     requests.push({ method: req.method, path: url.pathname, after: url.searchParams.get('after') });
-    if (url.pathname === '/api/tasks/a/events') {
+    if (url.pathname === '/api/tasks/a/stream') {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
       res.write(`data: ${JSON.stringify({ seq: 1, type: 'USER_MESSAGE' })}\n\n`);
       res.write(`data: ${JSON.stringify({ seq: 1, type: 'USER_MESSAGE' })}\n\n`); // duplicate after reconnect
@@ -79,7 +79,7 @@ test('the local transport speaks HTTP and streams SSE, skipping repeated seq', a
   assert.equal(statuses[0], 'open');
   handle.close();
   // A zero cursor means "from the start": no query parameter is sent at all.
-  assert.equal(requests.filter(r => r.path === '/api/tasks/a/events')[0].after, null);
+  assert.equal(requests.filter(r => r.path === '/api/tasks/a/stream')[0].after, null);
 });
 
 test('the local transport reports HTTP failures with their code', async t => {

@@ -3,6 +3,16 @@ import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
 const $ = (id) => document.getElementById(id);
 
+// One interface, two realities (docs/cloud-ui.md): same-origin HTTP + SSE when the
+// page is served by the machine, the relay protocol when it is served from the
+// cloud. A deployment that runs in the cloud injects window.__TASKBRIDGE_CLOUD__.
+const transport = selectTransport({
+  location,
+  cloud: globalThis.__TASKBRIDGE_CLOUD__ || null,
+  fetchImpl: typeof fetch === 'function' ? fetch.bind(globalThis) : undefined,
+  EventSourceImpl: typeof EventSource === 'function' ? EventSource : undefined
+});
+
 marked.setOptions({ gfm: true, breaks: true });
 
 let selectedTaskId = null;
@@ -741,17 +751,19 @@ async function selectTask(id) {
     chatState.snapshot(t, true);
     renderChat();
     renderTaskDetails(t);
-    source = new EventSource(`/api/tasks/${encodeURIComponent(id)}/stream?after=${chatState.cursor}`);
-    source.onmessage = e => {
-      if (version !== selectionVersion) return;
-      let event;
-      try { event = JSON.parse(e.data); } catch { return; }
-      if (chatState.apply(event)) {
-        if (!textUpdateTimer) textUpdateTimer = setTimeout(() => { textUpdateTimer = null; if (version === selectionVersion) renderChat(); }, 80);
-        if (event.type === 'STATUS' || event.type.startsWith('TASK_')) refreshTask();
-      }
-    };
-    source.onerror = () => { if (version === selectionVersion) refreshTask(); };
+    // The session stream comes from whichever transport this page runs on: SSE on
+    // the PC, protocol frames through the relay in the cloud (web/transport.mjs).
+    source = transport.open(id, {
+      after: chatState.cursor,
+      onEvent: event => {
+        if (version !== selectionVersion) return;
+        if (chatState.apply(event)) {
+          if (!textUpdateTimer) textUpdateTimer = setTimeout(() => { textUpdateTimer = null; if (version === selectionVersion) renderChat(); }, 80);
+          if (event.type === 'STATUS' || event.type.startsWith('TASK_')) refreshTask();
+        }
+      },
+      onStatus: value => { if (value === 'reconnecting' && version === selectionVersion) refreshTask(); }
+    });
     refreshTimer = setInterval(refreshTask, 2000);
     await loadArtifacts();
   } catch (error) {
@@ -2172,6 +2184,9 @@ async function unloadLocalModel(id) {
 
 function openLocalEvents() {
   if (localEvents) return;
+  // Load progress comes from the local router, so this stays direct SSE: it is
+  // simply not available to a page served from the cloud.
+  if (transport.kind !== 'local') return;
   localEvents = new EventSource('/api/local/events');
   localEvents.onmessage = (e) => {
     let message;
