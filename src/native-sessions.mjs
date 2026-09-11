@@ -6,6 +6,12 @@ import { listPiSessions, readPiSession } from './pi-session-index.mjs';
 import { TEXT_TAIL, THINKING_TAIL, appendTail } from './text-tail.mjs';
 
 const fail = (message, code = 'INPUT_INVALID') => Object.assign(new Error(message), { code });
+
+// A terminal Pi session touched this recently is very likely the one the user
+// just closed, so it is offered first instead of buried in the history list.
+const RECENT_MS = 10 * 60 * 1000;
+const IMPORT_MODES = new Set(['clone', 'take-over']);
+const PREVIEW_TEXT_CHARS = 400;
 const timestamp = value => Number.isFinite(new Date(value).getTime()) ? new Date(value).toISOString() : new Date().toISOString();
 const messageText = message => typeof message.content === 'string' ? message.content : (message.content || []).filter(x => x.type === 'text').map(x => x.text || '').join('');
 const identity = value => process.platform === 'win32' ? path.normalize(value).toLowerCase() : path.normalize(value);
@@ -50,11 +56,76 @@ export class NativeSessionService {
     }));
   }
 
+  // Every project's native sessions in one call: the importer groups them by
+  // project (§ new P0: group, search, preview) instead of asking the operator
+  // to pick a project first.
+  async listAll() {
+    const groups = [];
+    for (const project of this.manager.projects.values()) {
+      if (project.id === '__scratch__') continue;
+      let sessions = [];
+      try { sessions = await this.list(project.id); } catch { sessions = []; }
+      if (!sessions.length) continue;
+      const fresh = sessions.find(session => !session.existingTaskId
+        && Number.isFinite(Date.parse(session.mtime)) && Date.now() - Date.parse(session.mtime) <= RECENT_MS) || null;
+      groups.push({
+        id: project.id,
+        name: project.name || project.id,
+        path: project.path,
+        sessions,
+        suggestion: fresh ? { key: fresh.key, name: fresh.name, mtime: fresh.mtime, preview: fresh.preview } : null
+      });
+    }
+    return groups;
+  }
+
+  // Details for the confirmation step: what the conversation contains, which
+  // model and thinking level it used, and whether it is already in TaskBridge.
+  async preview({ projectId, sessionKey } = {}) {
+    const project = this.project(projectId);
+    if (typeof sessionKey !== 'string' || !/^[a-f0-9]{64}$/.test(sessionKey)) throw fail('Недопустимый ключ сессии.');
+    const candidates = await listPiSessions(project, this.roots(project));
+    const source = candidates.find(item => item.key === sessionKey);
+    if (!source) throw fail('Сессия не найдена в разрешённых папках проекта.', 'NOT_FOUND');
+    let native;
+    try { native = await readPiSession(source.file, project.path); }
+    catch (error) { throw fail(`Не удалось прочитать сессию Pi: ${error.message}`); }
+    const entries = native.entries;
+    const lastOfType = type => [...entries].reverse().find(entry => entry.type === type) || null;
+    const modelChange = lastOfType('model_change');
+    const thinking = lastOfType('thinking_level_change');
+    const branch = native.branchMessages;
+    const lastAssistant = [...branch].reverse().find(message => message.role === 'assistant') || null;
+    const usage = [...branch].reverse().find(message => message.usage?.totalTokens)?.usage || null;
+    const cut = value => (value || '').slice(0, PREVIEW_TEXT_CHARS);
+    return {
+      projectId: project.id,
+      projectPath: project.path,
+      key: source.key,
+      id: source.id,
+      name: source.name,
+      mtime: source.mtime,
+      entryCount: Math.max(0, entries.length - 1),
+      messageCount: branch.length,
+      model: modelChange
+        ? { provider: modelChange.provider || null, id: modelChange.modelId || null }
+        : (lastAssistant?.model ? { provider: lastAssistant.provider || null, id: lastAssistant.model } : null),
+      thinkingLevel: thinking?.thinkingLevel ?? null,
+      tokens: usage?.totalTokens ?? null,
+      lastUser: cut(messageText([...branch].reverse().find(message => message.role === 'user') || {})),
+      lastAssistant: cut(messageText(lastAssistant || {})),
+      existingTaskId: await this.existing(source)
+    };
+  }
+
   // TaskManager serializes admission so simultaneous browser requests cannot
   // publish two tasks for one source. Import itself never starts Pi or a model.
-  async importSession({ projectId, sessionKey, confirmedClosed } = {}) {
+  async importSession({ projectId, sessionKey, mode = 'clone', confirmedClosed } = {}) {
     const project = this.project(projectId);
-    if (confirmedClosed !== true) throw fail('Закройте эту сессию Pi в терминале и подтвердите это перед продолжением.');
+    if (!IMPORT_MODES.has(mode)) throw fail('Неизвестный режим импорта: ожидается clone или take-over.');
+    // A clone never writes to the original, so the terminal session does not
+    // have to be closed first; only taking ownership of the original does.
+    if (mode === 'take-over' && confirmedClosed !== true) throw fail('Закройте эту сессию Pi в терминале и подтвердите это перед продолжением.');
     if (typeof sessionKey !== 'string' || !/^[a-f0-9]{64}$/.test(sessionKey)) throw fail('Недопустимый ключ сессии.');
     const candidates = await listPiSessions(project, this.roots(project));
     const source = candidates.find(item => item.key === sessionKey);
@@ -71,12 +142,24 @@ export class NativeSessionService {
       id: crypto.randomUUID().replaceAll('-', '').slice(0, 12), createdAt: importedAt, updatedAt: importedAt,
       status: 'SUCCEEDED', projectId, prompt: (firstUser && messageText(firstUser)) || source.name || 'Продолжение сессии Pi',
       workspacePath: project.path, sourcePath: project.path, worktree: false,
-      nativeHistory: true, nativeSession: true, nativeSourceKey: source.key, piSessionFile: source.file,
+      nativeHistory: true, nativeSession: true, nativeSourceKey: source.key,
+      nativeSource: { kind: 'pi-native', key: source.key, id: source.id, file: source.file, mode },
+      piSessionFile: null,
       current: 'История Pi импортирована. Можно продолжить разговор.', assistantText: '', thinkingText: '',
       error: null, errorCode: null, verification: [], verificationStatus: 'NOT_CONFIGURED', git: null,
       compaction: { count: 0, last: null }, lastUsage: null, model: null, autoCompactionEnabled: null,
       files: [], attachments: [], outputFiles: []
     };
+    if (mode === 'clone') {
+      // Every entry is copied verbatim into the TaskBridge-owned task folder:
+      // the terminal session stays untouched and can still be reopened in Pi.
+      const copy = path.join(this.manager.store.taskDir(task.id), 'source-session.jsonl');
+      await fs.mkdir(path.dirname(copy), { recursive: true });
+      await fs.writeFile(copy, `${native.entries.map(entry => JSON.stringify(entry)).join('\n')}\n`, { flag: 'wx' });
+      task.piSessionFile = copy;
+    } else {
+      task.piSessionFile = source.file;
+    }
     const events = [];
     let imageBytes = 0;
     const event = (type, message, data, at = importedAt) => events.push({ at, taskId: task.id, type, message, data });

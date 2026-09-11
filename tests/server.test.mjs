@@ -300,3 +300,98 @@ test('/debug/cloud reports a disabled transport and local mode keeps working', {
   const task = await terminal(fixture.api, created.id);
   assert.equal(task.status, 'SUCCEEDED', fixture.logs());
 });
+
+// The original way in — a phone or laptop in the same Wi-Fi hitting the PC's
+// LAN address — must keep working regardless of the cloud transport
+// (§2.1 "Сохраняются … LAN", §4 acceptance "LAN работает при выключенном
+// облаке"). The merged cloud work must not have taken this path down.
+test('LAN access keeps working while the cloud is off', { timeout: 30000 }, async t => {
+  const lan = Object.values(os.networkInterfaces()).flat()
+    .find(iface => iface && iface.family === 'IPv4' && !iface.internal);
+  if (!lan) return t.skip('this machine has no LAN interface');
+
+  const fixture = await startFixture(undefined, { server: { host: '0.0.0.0' } });
+  t.after(() => fixture.close());
+  const port = new URL(fixture.base).port;
+  const base = `http://${lan.address}:${port}`;
+
+  // The UI itself is served over the LAN address, not just loopback.
+  const info = await (await fetch(`${base}/api/info`)).json();
+  assert.ok(info.addresses.some(entry => entry.url.includes(`:${port}`)), JSON.stringify(info.addresses));
+
+  const page = await fetch(`${base}/`);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /<title>/i);
+
+  // A whole task can be created and finished from the LAN address.
+  const created = await (await fetch(`${base}/api/tasks`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ projectId: 'fixture', prompt: 'LAN check' })
+  })).json();
+  assert.ok(created.id, JSON.stringify(created));
+  let task = null;
+  for (let i = 0; i < 150; i++) {
+    task = await (await fetch(`${base}/api/tasks/${created.id}`)).json();
+    if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+
+  // Cloud is off in this fixture: LAN must not depend on it.
+  assert.equal((await (await fetch(`${base}/debug/cloud`)).json()).enabled, false);
+});
+
+test('native Pi session importer: list, preview, and a copy-based import over HTTP', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+
+  // A terminal Pi session for the fixture project, in one of the scan roots.
+  const sessions = path.join(root, 'data', 'pi-sessions');
+  await fs.mkdir(sessions, { recursive: true });
+  const header = { type: 'session', version: 3, id: 'native-http', timestamp: '2026-09-09T10:00:00.000Z', cwd: root };
+  const entries = [
+    { type: 'message', id: 'a', parentId: null, timestamp: header.timestamp, message: { role: 'user', content: [{ type: 'text', text: 'Терминальная сессия' }] } },
+    { type: 'message', id: 'b', parentId: 'a', timestamp: header.timestamp, message: { role: 'assistant', model: 'qwen3.8-27b', provider: 'llamacpp', usage: { totalTokens: 1234 }, content: [{ type: 'text', text: 'Ответ ассистента' }] } },
+    { type: 'thinking_level_change', id: 'c', parentId: 'b', timestamp: header.timestamp, thinkingLevel: 'high' }
+  ];
+  const body = [header, ...entries].map(entry => JSON.stringify(entry)).join('\n') + '\n';
+  const file = path.join(sessions, 'terminal.jsonl');
+  await fs.writeFile(file, body);
+
+  const groups = await api('/api/native-sessions');
+  const group = groups.find(item => item.id === 'fixture');
+  assert.ok(group, JSON.stringify(groups));
+  assert.equal(group.sessions.length, 1);
+  const session = group.sessions[0];
+
+  const preview = await api(`/api/native-sessions/preview?projectId=fixture&key=${session.key}`);
+  assert.equal(preview.name, 'terminal');
+  assert.deepEqual(preview.model, { provider: 'llamacpp', id: 'qwen3.8-27b' });
+  assert.equal(preview.thinkingLevel, 'high');
+  assert.equal(preview.tokens, 1234);
+  assert.equal(preview.lastAssistant, 'Ответ ассистента');
+  assert.equal(preview.existingTaskId, null);
+
+  // Import copies by default: no confirmation flag is needed and the terminal
+  // file is left exactly as it was.
+  const created = await api('/api/tasks/from-session', { projectId: 'fixture', sessionKey: session.key });
+  assert.ok(created.id, JSON.stringify(created));
+  assert.equal(created.status, 'SUCCEEDED');
+  assert.equal(created.nativeSource.mode, 'clone');
+  assert.equal(await fs.readFile(file, 'utf8'), body);
+  assert.notEqual(created.piSessionFile, await fs.realpath(file));
+  assert.equal(await fs.readFile(created.piSessionFile, 'utf8'), body);
+
+  // Follow-up continues the imported conversation instead of failing on a
+  // missing or foreign session file.
+  const task = await terminal(api, created.id);
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+  assert.ok((await api(`/api/tasks/${created.id}/events?limit=0`)).some(event => event.type === 'USER_MESSAGE'));
+
+  // The list now reports it as already open, so the UI can offer "Открыть".
+  const relisted = (await api('/api/native-sessions')).find(item => item.id === 'fixture');
+  assert.equal(relisted.sessions[0].existingTaskId, created.id);
+  assert.equal(relisted.suggestion, null, 'an imported session is not suggested again');
+});

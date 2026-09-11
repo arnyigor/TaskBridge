@@ -572,6 +572,18 @@ async function handleRequest(req, res) {
 
     const sessionsMatch = pathname.match(/^\/api\/projects\/([^/]+)\/pi-sessions$/);
     if (req.method === 'GET' && sessionsMatch) return json(res, 200, await manager.nativeSessions.list(sessionsMatch[1]));
+    // Native Pi sessions across every project, grouped, with a "likely current"
+    // suggestion (§ importer P0). The project-scoped route above stays for
+    // compatibility.
+    if (req.method === 'GET' && pathname === '/api/native-sessions') {
+      return json(res, 200, await manager.nativeSessions.listAll());
+    }
+    if (req.method === 'GET' && pathname === '/api/native-sessions/preview') {
+      return json(res, 200, await manager.nativeSessions.preview({
+        projectId: url.searchParams.get('projectId'),
+        sessionKey: url.searchParams.get('key')
+      }));
+    }
     if (req.method === 'POST' && pathname === '/api/tasks/from-session') return json(res, 201, await manager.importSession(await readJson(req)));
 
     if (req.method === 'GET' && pathname === '/api/tasks') {

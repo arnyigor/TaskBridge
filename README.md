@@ -70,7 +70,7 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 - `COMPACT` через Pi RPC и статистика сжатия, когда Pi её отдаёт;
 - `get_state` — модель, thinking level, streaming/compacting, id сессии;
 - переключатель auto compaction;
-- импорт уже существующих Pi-сессий проекта как задач TaskBridge;
+- импорт уже существующих Pi-сессий как задач TaskBridge: кнопка «Импорт сессии Pi» показывает найденные сессии всех проектов с поиском и предпросмотром, а по умолчанию делает **безопасную копию** (оригинал в терминале не трогается); режим «забрать оригинал» — отдельно, с подтверждением;
 - постраничная (turn-aligned) загрузка истории длинных сессий.
 
 ### Интерфейс
@@ -387,10 +387,12 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `GET` | `/api/project-browser` | список папок в разрешённых корнях |
 | `POST` | `/api/project-browser/register` | зарегистрировать проект |
 | `GET` | `/api/projects/:id/pi-sessions` | существующие Pi-сессии проекта |
+| `GET` | `/api/native-sessions` | сессии всех проектов, сгруппированы, с подсказкой недавней |
+| `GET` | `/api/native-sessions/preview` | предпросмотр сессии: модель, thinking, размер, последние сообщения |
 | `GET` | `/api/models` | список доступных моделей Pi (`?refresh=1` — заново опросить Pi) |
 | `GET` | `/api/tasks` | список сессий/задач |
 | `POST` | `/api/tasks` | создать задачу |
-| `POST` | `/api/tasks/from-session` | импортировать Pi-сессию как задачу |
+| `POST` | `/api/tasks/from-session` | импортировать Pi-сессию (`mode: clone` по умолчанию, `take-over` — с `confirmedClosed`) |
 | `GET` / `DELETE` / `PATCH` | `/api/tasks/:id` | получить / удалить / переименовать |
 | `GET` | `/api/tasks/:id/events` | события (`after`, `limit`, `tail`, `before`) |
 | `GET` | `/api/tasks/:id/stream` | SSE-поток live events |

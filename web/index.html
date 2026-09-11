@@ -36,6 +36,7 @@
   </header>
 
   <div id="piWarning" class="banner hidden"></div>
+  <div id="piSessionSuggestion" class="banner hidden"></div>
 
   <details class="controlsSpoiler" id="controlsSpoiler">
     <summary><h2>Проект и сессии <span id="taskCount" class="muted small"></span></h2></summary>
@@ -44,7 +45,7 @@
       <button id="addProjectButton" type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
       <button id="manageProjectsButton" type="button" class="small" title="Удалить проекты">🗑 Проекты</button>
       <span id="continueBadge" class="pill hidden"></span>
-      <button id="resumeSessionButton" type="button" class="small">Продолжить сессию Pi</button>
+      <button id="resumeSessionButton" type="button" class="small">Импорт сессии Pi</button>
       <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
       <button id="refresh" type="button" class="small">Обновить список</button>
     </div>
@@ -76,13 +77,22 @@
     </div>
   </div>
 
-  <div id="sessionPickerOverlay" class="authGate hidden">
+  <div id="importOverlay" class="authGate hidden">
     <div class="authCard wide">
-      <h2>Сессии Pi проекта</h2>
-      <p class="muted small">Найденные на диске сессии Pi для выбранного проекта. Перед подключением закройте эту сессию в терминале, если она там открыта.</p>
-      <p id="sessionPickerPath" class="muted small"></p>
-      <div id="sessionPickerList" class="sessionPickerList">Загрузка…</div>
-      <button id="sessionPickerClose" type="button">Закрыть</button>
+      <h2>Импорт сессии Pi</h2>
+      <p class="muted small">TaskBridge скопирует выбранную сессию к себе и продолжит разговор. Оригинал в терминале не меняется — его по-прежнему можно открыть в Pi.</p>
+      <input id="importSearch" type="search" placeholder="Поиск: имя, проект, путь, модель…" aria-label="Поиск сессии Pi" />
+      <label class="fieldLabel" for="importMode">Режим импорта</label>
+      <select id="importMode" aria-label="Режим импорта">
+        <option value="clone">Безопасная копия — оригинал не трогаем</option>
+        <option value="take-over">Забрать оригинал — сессию дальше ведёт TaskBridge</option>
+      </select>
+      <div id="importList" class="sessionPickerList">Загрузка…</div>
+      <div id="importPreview" class="importPreview hidden"></div>
+      <div class="inline wrap">
+        <button id="importRefresh" type="button">Обновить</button>
+        <button id="importClose" type="button">Закрыть</button>
+      </div>
     </div>
   </div>
 
@@ -219,8 +229,10 @@
         <h3>Применение изменений (worktree)</h3>
         <p>Когда задача выполняется в git worktree, основной проект не трогается. В панели сессии появятся кнопки «Применить к проекту» — применяет результат к исходному репозиторию (нужны чистый репозиторий и тот же HEAD, что при создании worktree; есть force), и «Удалить worktree» — убирает рабочую копию. Удаление сессии тоже чистит её worktree.</p>
 
-        <h3>Продолжение сессии Pi из терминала</h3>
-        <p>Кнопка «Продолжить сессию Pi» показывает сессии, найденные на диске (созданные командой <code>pi</code> в терминале, а не через TaskBridge). Важно: TaskBridge не может проверить, открыта ли такая сессия в терминале прямо сейчас. Если процесс <code>pi</code> там ещё работает и одновременно с этим её открыть здесь — оба процесса будут писать в один файл, и он может испортиться. Закрывай терминал перед импортом.</p>
+        <h3>Импорт сессии Pi из терминала</h3>
+        <p>Кнопка «Импорт сессии Pi» показывает сессии, найденные на диске (созданные командой <code>pi</code> в терминале, а не через TaskBridge): они сгруппированы по проектам, есть поиск и предпросмотр (модель, thinking, число сообщений, последние фразы). После нажатия «Продолжить в TaskBridge» выбранная сессия становится обычной сессией TaskBridge — дальше с ней можно работать с любого устройства.</p>
+        <p>По умолчанию TaskBridge делает <b>безопасную копию</b>: разговор переносится в собственную папку TaskBridge, а оригинальный файл в терминале не меняется и его можно открыть в Pi как раньше. Второй режим — «Забрать оригинал»: сессию дальше ведёт только TaskBridge. Его стоит включать, если вы уверены, что терминальный Pi закрыт: при одновременной записи с двух сторон файл может испортиться.</p>
+        <p>Если вы только что закрыли сессию в терминале (файл менялся меньше 10 минут назад), TaskBridge предложит её отдельной строкой над списком — чтобы не искать её вручную.</p>
 
         <h3>Подключение с телефона</h3>
         <p>Если в настройках включена авторизация — на компьютере нужно нажать «Подключить телефон», получить 8-значный код и ввести его на телефоне. Код действует 10 минут.</p>
@@ -232,7 +244,7 @@
 
         <h3>Известные ограничения этой версии</h3>
         <ul>
-          <li>Нет обнаружения занятости терминальной сессии Pi — только предупреждение.</li>
+          <li>Нет обнаружения занятости терминальной сессии Pi — только предупреждение (в режиме «Забрать оригинал»).</li>
           <li>История сессий не чистится автоматически — только удаление вручную.</li>
           <li>Уведомления и буфер обмена через системный API работают только по HTTPS/localhost.</li>
         </ul>

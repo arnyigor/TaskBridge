@@ -298,6 +298,7 @@ function setComposerMode(taskId) {
 
 $('project').addEventListener('change', () => {
   if (!selectedTaskId) newTaskProjectId = $('project').value;
+  refreshImportSuggestion();
 });
 
 const drafts = new Map(); // taskId | '__new__' -> { text, files: File[] }
@@ -1327,32 +1328,196 @@ $('manageProjectsButton').onclick = () => {
 };
 $('manageProjectsClose').onclick = () => $('manageProjectsOverlay').classList.add('hidden');
 
-/* ---------------- native Pi sessions ---------------- */
+/* ---------------- native Pi session importer ---------------- */
 
-$('resumeSessionButton').onclick = async () => {
-  const projectId = $('project').value;
-  if (!projectId || projectId === '__scratch__') { alert('Выберите проект, у которого есть сессии Pi.'); return; }
-  $('sessionPickerOverlay').classList.remove('hidden');
-  $('sessionPickerPath').textContent = `Папка: ${projects.find(p => p.id === projectId)?.path || projectId}`;
-  $('sessionPickerList').textContent = 'Загрузка…';
+// Import once, continue everywhere: the terminal Pi session is copied into
+// TaskBridge and the conversation continues here (PC browser → phone → PC).
+// "Safe copy" is the default, so the terminal file is never touched; taking
+// ownership of the original stays an explicitly confirmed advanced mode.
+
+let importGroups = null;
+let importQuery = '';
+let importSelection = null;
+let importSuggestion = null;
+let importSuggestionAt = 0;
+
+const importModelLabel = model => model ? `${model.provider ? `${model.provider}/` : ''}${model.id || ''}` : '—';
+
+function importSessionRow(group, session) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'sessionPickerItem';
+  if (importSelection?.session.key === session.key) row.classList.add('active');
+  const name = session.preview || session.name;
+  const meta = [
+    new Date(session.mtime).toLocaleString(),
+    session.existingTaskId ? 'уже открыта в TaskBridge' : null
+  ].filter(Boolean).join(' · ');
+  row.innerHTML = `<span class="name">${escapeHtml(name)}</span><span class="meta">${escapeHtml(session.name)}</span><span class="meta">${escapeHtml(meta)}</span>`;
+  row.onclick = () => selectImportSession(group, session);
+  return row;
+}
+
+function renderImportList() {
+  const list = $('importList');
+  const groups = importGroups || [];
+  const query = importQuery.trim().toLowerCase();
+  list.innerHTML = '';
+  let shown = 0;
+  for (const group of groups) {
+    const sessions = group.sessions.filter(session => !query
+      || [session.name, session.preview, group.name, group.path].filter(Boolean).join(' ').toLowerCase().includes(query));
+    if (!sessions.length) continue;
+    const header = document.createElement('div');
+    header.className = 'modelGroup';
+    header.textContent = `${group.name} · ${group.path}`;
+    list.append(header);
+    for (const session of sessions) list.append(importSessionRow(group, session));
+    shown += sessions.length;
+  }
+  if (!shown) {
+    list.textContent = groups.length
+      ? 'Ничего не найдено.'
+      : 'Сессии Pi не найдены. Проверьте pi.sessionRoots в config.json или поработайте в терминальном Pi.';
+  }
+}
+
+function renderImportPreview(preview) {
+  const node = $('importPreview');
+  node.classList.remove('hidden');
+  node.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'importTitle';
+  title.textContent = preview.name || preview.id;
+  const details = document.createElement('div');
+  details.className = 'importDetails';
+  const rows = [
+    ['Проект', preview.projectPath],
+    ['Модель', importModelLabel(preview.model)],
+    ['Thinking', preview.thinkingLevel || '—'],
+    ['Сообщений', String(preview.messageCount)],
+    ['Токенов', preview.tokens == null ? '—' : preview.tokens.toLocaleString()],
+    ['Изменена', new Date(preview.mtime).toLocaleString()]
+  ];
+  details.innerHTML = rows.map(([label, value]) => `<div class="r"><span>${escapeHtml(label)}</span><b>${escapeHtml(String(value ?? '—'))}</b></div>`).join('');
+  const last = (label, text) => {
+    if (!text) return null;
+    const box = document.createElement('div');
+    box.className = 'importText';
+    box.innerHTML = `<span class="meta">${escapeHtml(label)}</span><p>${escapeHtml(text)}</p>`;
+    return box;
+  };
+  node.append(title, details);
+  for (const box of [last('Последнее сообщение пользователя', preview.lastUser), last('Последний ответ', preview.lastAssistant)]) {
+    if (box) node.append(box);
+  }
+
+  if (preview.existingTaskId) {
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.textContent = 'Открыть сессию в TaskBridge';
+    open.onclick = async () => { closeImport(); await selectTask(preview.existingTaskId); };
+    node.append(open);
+    return;
+  }
+
+  const mode = importMode();
+  const note = document.createElement('p');
+  note.className = 'muted small';
+  note.textContent = mode === 'take-over'
+    ? 'Сессию дальше ведёт TaskBridge, оригинальный файл не копируется. Не открывайте её одновременно в терминальном Pi.'
+    : 'Будет создана копия. Оригинал останется на месте и его можно открыть в Pi как раньше.';
+  const confirmButton = document.createElement('button');
+  confirmButton.type = 'button';
+  confirmButton.className = 'primary';
+  confirmButton.textContent = 'Продолжить в TaskBridge';
+  confirmButton.onclick = () => confirmImport(preview);
+  node.append(note, confirmButton);
+}
+
+async function selectImportSession(group, session) {
+  importSelection = { group, session };
+  document.querySelectorAll('#importList .sessionPickerItem').forEach(node => node.classList.remove('active'));
+  renderImportList();
+  const node = $('importPreview');
+  node.classList.remove('hidden');
+  node.textContent = 'Загрузка…';
   try {
-    const sessions = await api(`/api/projects/${encodeURIComponent(projectId)}/pi-sessions`);
-    if (!sessions.length) { $('sessionPickerList').textContent = 'Сессии Pi для этого проекта не найдены.'; return; }
-    $('sessionPickerList').innerHTML = '';
-    for (const session of sessions) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'sessionPickerItem';
-      const primary = session.preview || session.name;
-      const secondary = session.preview && session.preview !== session.name ? session.name : null;
-      button.innerHTML = `<span class="name">${escapeHtml(primary)}</span>${secondary ? `<span class="meta">${escapeHtml(secondary)}</span>` : ''}<span class="meta">${new Date(session.mtime).toLocaleString()}${session.existingTaskId ? ' · уже открыта в TaskBridge' : ''}</span>`;
-      button.onclick = () => importSession(projectId, session);
-      $('sessionPickerList').append(button);
-    }
-  } catch (err) { $('sessionPickerList').textContent = err.message; }
-};
+    const preview = await api(`/api/native-sessions/preview?projectId=${encodeURIComponent(group.id)}&key=${encodeURIComponent(session.key)}`);
+    if (importSelection?.session.key !== session.key) return; // a newer click won
+    renderImportPreview(preview);
+  } catch (error) { node.textContent = `Не удалось прочитать сессию: ${error.message}`; }
+}
 
-$('sessionPickerClose').onclick = () => $('sessionPickerOverlay').classList.add('hidden');
+// Anything unexpected falls back to the safe copy: taking ownership of the
+// terminal's file must only ever happen after an explicit choice.
+function importMode() { return $('importMode').value === 'take-over' ? 'take-over' : 'clone'; }
+
+async function confirmImport(preview) {
+  const mode = importMode();
+  if (mode === 'take-over' && !confirm('Сессия станет управляемой TaskBridge: дальше её ведёт только он. Убедитесь, что в терминале она закрыта — при одновременной записи файл может испортиться. Продолжить?')) return;
+  try {
+    const task = await api('/api/tasks/from-session', {
+      method: 'POST',
+      body: JSON.stringify({ projectId: preview.projectId, sessionKey: preview.key, mode, ...(mode === 'take-over' ? { confirmedClosed: true } : {}) })
+    });
+    closeImport();
+    await loadTasks();
+    await selectTask(task.id);
+  } catch (error) { alert(error.message); }
+}
+
+async function openImport(preselect = null) {
+  $('importOverlay').classList.remove('hidden');
+  $('importPreview').classList.add('hidden');
+  $('importList').textContent = 'Загрузка…';
+  importQuery = $('importSearch').value = '';
+  importSelection = null;
+  try { importGroups = await api('/api/native-sessions'); }
+  catch (error) { $('importList').textContent = error.message; return; }
+  renderImportList();
+  if (preselect) {
+    const group = importGroups.find(item => item.id === preselect.projectId);
+    const session = group?.sessions.find(item => item.key === preselect.key);
+    if (group && session) selectImportSession(group, session);
+  }
+}
+
+function closeImport() { $('importOverlay').classList.add('hidden'); }
+
+// A terminal Pi session touched minutes ago is almost always the one the user
+// just closed, so it is offered instead of waiting to be found in the list.
+async function refreshImportSuggestion(force = false) {
+  if (!force && Date.now() - importSuggestionAt < 15000) return;
+  importSuggestionAt = Date.now();
+  const projectId = $('project').value;
+  try { importGroups = await api('/api/native-sessions'); } catch { importSuggestion = null; renderImportSuggestion(); return; }
+  importSuggestion = importGroups.find(group => group.id === projectId)?.suggestion || null;
+  renderImportSuggestion();
+}
+
+function renderImportSuggestion() {
+  const node = $('piSessionSuggestion');
+  if (!importSuggestion) { node.classList.add('hidden'); node.textContent = ''; return; }
+  const projectId = $('project').value;
+  node.textContent = '';
+  const text = document.createElement('span');
+  text.textContent = `Похоже, вы только что работали в терминальном Pi: «${importSuggestion.name}» (${new Date(importSuggestion.mtime).toLocaleTimeString()}). Продолжить в TaskBridge?`;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'small';
+  button.textContent = 'Продолжить в TaskBridge';
+  button.onclick = () => openImport({ projectId, key: importSuggestion.key });
+  node.append(text, button);
+  node.classList.remove('hidden');
+}
+
+$('resumeSessionButton').onclick = () => openImport();
+$('importClose').onclick = closeImport;
+$('importRefresh').onclick = () => openImport();
+$('importMode').addEventListener('change', () => { if (importSelection) selectImportSession(importSelection.group, importSelection.session); });
+$('importSearch').addEventListener('input', () => { importQuery = $('importSearch').value; renderImportList(); });
+$('piSessionSuggestion').addEventListener('click', event => { if (event.target === $('piSessionSuggestion')) $('piSessionSuggestion').classList.add('hidden'); });
 
 /* ---------------- help ---------------- */
 
@@ -1432,18 +1597,6 @@ $('cloudForm').onsubmit = async (event) => {
     setCloudStatus(`Не сохранено: ${error.message}`, true);
   }
 };
-
-async function importSession(projectId, session) {
-  if (!session.existingTaskId && !confirm('TaskBridge не может проверить, открыта ли эта сессия в терминале. Если процесс pi там ещё работает — закройте его сейчас: при одновременной записи с двух сторон файл сессии может испортиться. Сессия точно закрыта?')) return;
-  try {
-    const task = await api('/api/tasks/from-session', {
-      method: 'POST', body: JSON.stringify({ projectId, sessionKey: session.key, confirmedClosed: true })
-    });
-    $('sessionPickerOverlay').classList.add('hidden');
-    await loadTasks();
-    await selectTask(task.id);
-  } catch (err) { alert(err.message); }
-}
 
 /* ---------------- MCP (pi-mcp-adapter) ---------------- */
 
@@ -2043,6 +2196,7 @@ async function loadAll() {
     await loadProjects();
     const tasks = await loadTasks();
     if (tasks.length) await selectTask(tasks[0].id);
+    refreshImportSuggestion(true);
   } catch (e) {
     $('createError').textContent = e.message;
     $('createError').classList.add('error');

@@ -227,8 +227,30 @@ body {
   color: var(--text);
 }
 .sessionPickerItem:hover { border-color: var(--accent); }
+.sessionPickerItem.active { border-color: var(--accent); background: rgba(167, 139, 250, 0.12); }
 .sessionPickerItem .name { font-size: 13px; font-weight: 600; }
 .sessionPickerItem .meta { font-size: 11px; color: var(--muted); padding: 0; }
+
+/* Native Pi session importer: the selected session is previewed below the list
+   so the operator confirms a real conversation, not a name. */
+.importPreview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  background: var(--surface-2);
+  padding: 10px 12px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+.importTitle { font-size: 13.5px; font-weight: 600; }
+.importDetails { display: flex; flex-direction: column; gap: 3px; }
+.importDetails .r { display: flex; gap: 8px; font-size: 12px; }
+.importDetails .r span { color: var(--muted); flex-shrink: 0; min-width: 84px; }
+.importDetails .r b { font-weight: 500; overflow-wrap: anywhere; }
+.importText p { margin: 3px 0 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.importPreview button.primary { border-color: var(--accent); }
 
 .projectRow {
   display: flex;
@@ -887,6 +909,9 @@ pre {
 .cloudRow input[type="checkbox"] { width: auto; margin: 0; flex: none; }
 .cloudActions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 #cloudStatus { margin-top: 8px; }
+
+#piSessionSuggestion { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+#piSessionSuggestion button { flex-shrink: 0; }
 
 /* The cloud form is a column of labeled fields, not the single-row pairing
    form the generic `.authCard form` rule was written for. Without this the

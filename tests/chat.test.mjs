@@ -146,7 +146,7 @@ async function ui({ coarsePointer = false } = {}) {
     DOMPurify: { sanitize: html => html },
   });
   const app = (await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8')).replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, refreshImportSuggestion};', context);
   return { ...context.testing, document, window, streams, tasks, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -209,4 +209,120 @@ test('DOM: late poll and late stream cannot revive a chat after New session', as
   app.streams[0].onmessage({ data: JSON.stringify(history()[0]) });
   assert.ok(app.document.getElementById('emptyState'));
   assert.equal(app.document.querySelectorAll('.turn').length, 0);
+});
+
+test('DOM: the Pi importer groups sessions by project, previews one and imports a copy', async () => {
+  const app = await ui();
+  const calls = [];
+  const now = new Date().toISOString();
+  const key = 'k'.repeat(64);
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/native-sessions') {
+      return { ok: true, json: async () => ([{
+        id: 'fixture', name: 'Тестовый проект', path: 'G:/Projects/TaskBridge',
+        sessions: [{ key, name: 'TaskBridge architecture', mtime: now, preview: 'Начни с SessionManager', existingTaskId: null }],
+        suggestion: { key, name: 'TaskBridge architecture', mtime: now, preview: 'Начни с SessionManager' }
+      }]) };
+    }
+    if (pathname === '/api/native-sessions/preview') {
+      calls.push({ route: pathname, projectId: searchParams.get('projectId'), key: searchParams.get('key') });
+      return { ok: true, json: async () => ({ projectId: 'fixture', key, name: 'TaskBridge architecture', mtime: now,
+        projectPath: 'G:/Projects/TaskBridge', model: { provider: 'llamacpp', id: 'qwen3.8-27b' }, thinkingLevel: 'medium',
+        messageCount: 146, tokens: 48921, lastUser: 'не обязательно именно в терминале', lastAssistant: 'Да, тогда архитектуру', existingTaskId: null }) };
+    }
+    if (pathname === '/api/tasks/from-session') {
+      calls.push({ route: pathname, body: JSON.parse(options.body) });
+      return { ok: true, json: async () => ({ id: 'imported', prompt: 'Начни', status: 'SUCCEEDED' }) };
+    }
+    return null; // everything else goes to the default stub
+  });
+
+  const doc = app.document;
+  // linkedom implements neither select.value nor oninput/onchange, so values are
+  // pinned and events dispatched explicitly.
+  const pin = (el, value) => Object.defineProperty(el, 'value', { value, writable: true, configurable: true });
+  const fire = (el, type) => el.dispatchEvent(new app.window.Event(type));
+
+  // A freshly updated terminal session is offered for the project in view.
+  pin(doc.getElementById('project'), 'fixture');
+  await app.refreshImportSuggestion(true);
+  const banner = doc.getElementById('piSessionSuggestion');
+  assert.equal(banner.classList.contains('hidden'), false);
+  assert.match(banner.textContent, /TaskBridge architecture/);
+
+  // The list is grouped by project and searchable.
+  doc.getElementById('resumeSessionButton').onclick();
+  await settle();
+  assert.equal(doc.getElementById('importOverlay').classList.contains('hidden'), false);
+  assert.match(doc.getElementById('importList').textContent, /Тестовый проект/);
+  assert.match(doc.getElementById('importList').textContent, /Начни с SessionManager/);
+  pin(doc.getElementById('importSearch'), 'нет-такого');
+  fire(doc.getElementById('importSearch'), 'input');
+  assert.match(doc.getElementById('importList').textContent, /Ничего не найдено/);
+  pin(doc.getElementById('importSearch'), '');
+  fire(doc.getElementById('importSearch'), 'input');
+
+  // Choosing a session previews the real conversation before writing anything.
+  doc.querySelector('#importList .sessionPickerItem').onclick();
+  await settle();
+  const preview = doc.getElementById('importPreview').textContent;
+  assert.match(preview, /llamacpp\/qwen3.8-27b/);
+  assert.match(preview, /48.921/);
+  assert.match(preview, /не обязательно именно в терминале/);
+  assert.deepEqual(calls.filter(call => call.route === '/api/native-sessions/preview'), [{ route: '/api/native-sessions/preview', projectId: 'fixture', key }]);
+  assert.equal(calls.some(call => call.route === '/api/tasks/from-session'), false, 'nothing is imported before the confirmation');
+
+  // Confirming imports a safe copy: clone mode, no closed-terminal confirmation.
+  const confirmButton = [...doc.querySelectorAll('#importPreview button')]
+    .find(button => /Продолжить в TaskBridge/.test(button.textContent));
+  assert.ok(confirmButton, `no confirm button in: ${preview}`);
+  confirmButton.onclick();
+  await settle();
+  const importCall = calls.find(call => call.route === '/api/tasks/from-session');
+  assert.deepEqual(importCall.body, { projectId: 'fixture', sessionKey: key, mode: 'clone' });
+  assert.equal(doc.getElementById('importOverlay').classList.contains('hidden'), true);
+});
+
+test('DOM: take-over mode warns and requires the explicit closed-terminal confirmation', async () => {
+  const app = await ui();
+  const calls = [];
+  const now = new Date().toISOString();
+  const key = 't'.repeat(64);
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname === '/api/native-sessions') {
+      return { ok: true, json: async () => ([{ id: 'fixture', name: 'P', path: 'G:/p', suggestion: null,
+        sessions: [{ key, name: 'Session', mtime: now, preview: 'hi', existingTaskId: null }] }]) };
+    }
+    if (pathname === '/api/native-sessions/preview') {
+      return { ok: true, json: async () => ({ projectId: 'fixture', key, name: 'Session', mtime: now, projectPath: 'G:/p',
+        model: null, thinkingLevel: null, messageCount: 2, tokens: null, lastUser: 'hi', lastAssistant: 'hey', existingTaskId: null }) };
+    }
+    if (pathname === '/api/tasks/from-session') {
+      calls.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ id: 'imported', status: 'SUCCEEDED' }) };
+    }
+    return null;
+  });
+
+  const doc = app.document;
+  const pin = (el, value) => Object.defineProperty(el, 'value', { value, writable: true, configurable: true });
+  const fire = (el, type) => el.dispatchEvent(new app.window.Event(type));
+  // linkedom implements neither select.value nor onchange, so pin and dispatch.
+  pin(doc.getElementById('importMode'), 'take-over');
+  fire(doc.getElementById('importMode'), 'change');
+  doc.getElementById('resumeSessionButton').onclick();
+  await settle();
+  doc.querySelector('#importList .sessionPickerItem').onclick();
+  await settle();
+  assert.match(doc.getElementById('importPreview').textContent, /не открывайте её одновременно в терминальном Pi/i);
+
+  const confirmButton = [...doc.querySelectorAll('#importPreview button')]
+    .find(button => /Продолжить в TaskBridge/.test(button.textContent));
+  confirmButton.onclick();
+  await settle();
+  assert.deepEqual(calls, [{ projectId: 'fixture', sessionKey: key, mode: 'take-over', confirmedClosed: true }]);
 });
