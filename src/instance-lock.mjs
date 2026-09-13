@@ -1,11 +1,36 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { execFileSync } from 'node:child_process';
+
 // process.kill(pid, 0) throws ESRCH when the process is gone and EPERM when it
 // exists but belongs to another user (still alive for our purposes).
 function alive(pid) {
   try { process.kill(pid, 0); return true; }
-  catch (error) { return error.code === 'EPERM'; }
+  catch (error) {
+    if (error.code !== 'EPERM') return false;
+    // EPERM only means the process belongs to another user — it can be a stale
+    // lock whose PID was reused by an unrelated system process (e.g. PID reuse
+    // after a crashed server). Verify the holder is actually a node process
+    // before treating it as a live TaskBridge instance.
+    return isNodeProcess(pid);
+  }
+}
+
+// Returns true when the PID exists and its image name looks like a node/
+// electron/bun runtime. On failure (missing tool, unknown platform) falls back
+// to true so a legitimate running instance from another user is not killed off.
+function isNodeProcess(pid) {
+  try {
+    const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
+      encoding: 'utf8', timeout: 5000, windowsHide: true,
+    }).trim();
+    if (!out || out.includes('INFO:')) return false;
+    const image = (out.split(',')[0] || '').replace(/"/g, '').toLowerCase();
+    return /node|electron|bun|deno/.test(image);
+  } catch {
+    return true;
+  }
 }
 
 // Prevents two TaskBridge servers from sharing one data directory: they would
