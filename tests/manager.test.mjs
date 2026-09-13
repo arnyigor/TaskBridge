@@ -69,7 +69,15 @@ test('a queued prompt is delivered as soon as the model is free', async t => {
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: false });
   for (let i = 0; i < 200 && !f.sent.length; i++) await new Promise(resolve => setTimeout(resolve, 10));
   assert.deepEqual(f.sent, ['позже']);
-  const events = (await f.store.readEvents('a', 0)).map(event => event.type);
+  // The prompt reaches Pi before the USER_MESSAGE record is written (the RPC
+  // acknowledgement comes first), so wait for the durable event, not just for
+  // the send.
+  let events = [];
+  for (let i = 0; i < 200; i++) {
+    events = (await f.store.readEvents('a', 0)).map(event => event.type);
+    if (events.includes('USER_MESSAGE')) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.ok(events.includes('USER_MESSAGE'), events.join(','));
   assert.ok(events.includes('QUEUE_WAITING'), events.join(','));
   const task = f.manager.getTask('a');

@@ -113,7 +113,10 @@ test('the queued prompt is delivered by itself when the model frees up', { timeo
 
   const finished = await waitFor(async () => {
     const task = await fixture.api(`/api/tasks/${created.id}`);
-    return ['SUCCEEDED', 'FAILED'].includes(task.status) ? task : null;
+    // Each queued prompt runs as its own turn, so the first terminal status is
+    // not the end: wait until the queue is empty too, or the assertion below
+    // would race the pump.
+    return ['SUCCEEDED', 'FAILED'].includes(task.status) && (task.pendingPrompts || []).length === 0 ? task : null;
   }, { tries: 300, delay: 100 });
   assert.equal(finished.status, 'SUCCEEDED', finished.error || '');
   assert.equal((finished.pendingPrompts || []).length, 0, 'the queue drained');
