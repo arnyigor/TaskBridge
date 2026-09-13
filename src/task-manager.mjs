@@ -511,7 +511,7 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, _modelError, _baseline, _nativeLease, _uploadToken, ...safe } = task;
+    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
@@ -713,7 +713,10 @@ export class TaskManager extends EventEmitter {
 
       const pi = await this.#createPi(task);
       await this.#captureModelInfo(task, pi);
-      task._baseline = await snapshotWorkspace(task.workspacePath);
+      // Snapshot and turn token belong to this turn only: a follow-up that
+      // starts while this turn finalizes must not overwrite them.
+      const turn = this.#beginTurn(task);
+      const baseline = await snapshotWorkspace(task.workspacePath);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id) || this.runtimes.get(task.id)?.cancelRequested) {
         await pi.killTree();
         return;
@@ -737,7 +740,7 @@ export class TaskManager extends EventEmitter {
       if (runtime?.cancelRequested) {
         await this.#finalizeCancelled(task);
       } else if (task.status !== 'FAILED') {
-        await this.#verifyAndFinalize(task);
+        await this.#verifyAndFinalize(task, { turn, baseline });
       }
     } catch (error) {
       await this.#fail(task, error);
@@ -809,7 +812,7 @@ export class TaskManager extends EventEmitter {
       pi,
       settleResolvers: [],
       cancelRequested: false,
-      verifying: false,
+      turn: 0,
       eventChain: Promise.resolve()
     };
     this.runtimes.set(task.id, runtime);
@@ -1075,51 +1078,93 @@ export class TaskManager extends EventEmitter {
     }
   }
 
-  async #verifyAndFinalize(task) {
-    if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
-    if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }));
+  // A turn is one prompt followed by its settle. The token lets a finalizer know
+  // whether a newer turn has already taken the session over.
+  #beginTurn(task) {
     const runtime = this.runtimes.get(task.id);
-    if (runtime?.verifying) return;
-    if (runtime) runtime.verifying = true;
-    try {
-      await this.#setStatus(task, 'VERIFYING', 'Collecting diff and running verification');
-      const gitState = await collectGitState(task.workspacePath);
-      task.git = {
-        isGit: gitState.isGit,
-        status: gitState.status,
-        changedFiles: gitState.changedFiles
-      };
-      await this.store.writeArtifact(task.id, 'diff.patch', gitState.diff || '');
-      await this.store.writeArtifact(task.id, 'git-status.txt', gitState.status || '');
+    const turn = (runtime?.turn || 0) + 1;
+    if (runtime) runtime.turn = turn;
+    task._turn = turn;
+    return turn;
+  }
 
-      const project = this.projects.get(task.projectId);
-      const commands = project?.verification || [];
-      const verification = await runVerification(commands, task.workspacePath, (result) => {
-        const text = `\n$ ${result.command}\n${result.stdout || ''}\n${result.stderr || ''}\n`;
-        this.store.appendRaw(task.id, 'verification.log', text).catch(() => {});
-      });
-      if (this.deleted.has(task.id) || task.status === 'CANCELLED' || runtime?.cancelRequested) return;
-      task.verification = verification;
-      const output = await captureOutputs(task, this.store.taskDir(task.id), task._baseline);
-      task.outputFiles = [...(task.outputFiles || []), ...output.files];
-      if (output.files.length || output.warnings.length) await this.#event(task, 'OUTPUT_FILES', output.warnings.join('\n'), output);
-      delete task._baseline;
-      task.verificationStatus = commands.length ? (verification.some(x => !x.ok) ? 'FAILED' : 'PASSED') : 'NOT_CONFIGURED';
+  async #verifyAndFinalize(task, run = {}) {
+    if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
+    const runtime = this.runtimes.get(task.id);
+    const turn = run.turn ?? null;
+    // A newer turn already owns the session: this turn must not touch its state.
+    if (turn != null && task._turn !== turn) return;
+    if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }));
+    await this.#setStatus(task, 'VERIFYING', 'Collecting diff and changed files');
+    const gitState = await collectGitState(task.workspacePath);
+    task.git = {
+      isGit: gitState.isGit,
+      status: gitState.status,
+      changedFiles: gitState.changedFiles
+    };
+    await this.store.writeArtifact(task.id, 'diff.patch', gitState.diff || '');
+    await this.store.writeArtifact(task.id, 'git-status.txt', gitState.status || '');
 
-      const failed = verification.some((x) => !x.ok);
-      task.status = failed ? 'FAILED' : 'SUCCEEDED';
-      task.errorCode = failed ? 'VERIFICATION_FAILED' : null;
-      task.error = failed ? 'One or more verification commands failed.' : null;
-      if (!failed) { task.retryable = null; task.retryAfterMs = null; }
-      task.current = failed ? 'Verification failed' : 'Done';
-      task.updatedAt = now();
-      await this.store.save(this.#publicTask(task));
-      await this.#writeResult(task);
-      await this.#event(task, failed ? 'TASK_FAILED' : 'TASK_SUCCEEDED', task.current);
-      this.#finishRun(task, task.status);
-    } finally {
-      if (runtime) runtime.verifying = false;
-    }
+    const output = await captureOutputs(task, this.store.taskDir(task.id), run.baseline);
+    task.outputFiles = [...(task.outputFiles || []), ...output.files];
+    if (output.files.length || output.warnings.length) await this.#event(task, 'OUTPUT_FILES', output.warnings.join('\n'), output);
+
+    if (this.deleted.has(task.id) || task.status === 'CANCELLED' || runtime?.cancelRequested) return;
+    // Re-checked after the awaits: a newer turn may have started meanwhile.
+    if (turn != null && task._turn !== turn) return;
+
+    const commands = (this.projects.get(task.projectId)?.verification) || [];
+    // The turn's outcome is decided by the MODEL, not by the project's checks.
+    // A check that fails after a complete answer used to mark the whole task
+    // FAILED and hide the answer; verification now runs detached below and only
+    // updates `verification`/`verificationStatus`.
+    task.verification = [];
+    task.verificationStatus = commands.length ? 'RUNNING' : 'NOT_CONFIGURED';
+    task.status = 'SUCCEEDED';
+    task.errorCode = null;
+    task.error = null;
+    task.retryable = null;
+    task.retryAfterMs = null;
+    task.current = 'Done';
+    task.updatedAt = now();
+    // Publish the terminal event BEFORE the terminal status becomes readable: a
+    // client that polls the status must never receive TASK_SUCCEEDED as a late
+    // event (that ordering race flaked tests/server.test.mjs).
+    await this.#event(task, 'TASK_SUCCEEDED', task.current);
+    await this.store.save(this.#publicTask(task));
+    this.#finishRun(task, task.status);
+    await this.#writeResult(task).catch(() => {});
+    if (commands.length) this.#runVerification(task, commands, turn);
+  }
+
+  // Project verification is advisory and detached (see #verifyAndFinalize): it
+  // must never change the task outcome, hold the slot or delay the next message.
+  #runVerification(task, commands, turn) {
+    const running = (async () => {
+      try {
+        const verification = await runVerification(commands, task.workspacePath, (result) => {
+          const text = `\n$ ${result.command}\n${result.stdout || ''}\n${result.stderr || ''}\n`;
+          this.store.appendRaw(task.id, 'verification.log', text).catch(() => {});
+        });
+        if (this.deleted.has(task.id)) return;
+        // A newer turn ran meanwhile: its own verification is the current one.
+        if (turn != null && task._turn !== turn) return;
+        const failed = verification.some((x) => !x.ok);
+        task.verification = verification;
+        task.verificationStatus = failed ? 'FAILED' : 'PASSED';
+        task.updatedAt = now();
+        await this.store.save(this.#publicTask(task));
+        await this.#event(task, 'VERIFICATION', failed ? 'Verification failed' : 'Verification passed', {
+          status: task.verificationStatus,
+          commands: verification.map((v) => ({ command: v.command, ok: v.ok, exitCode: v.exitCode ?? null }))
+        });
+        await this.#writeResult(task).catch(() => {});
+      } catch (error) {
+        if (!this.deleted.has(task.id)) await this.#event(task, 'VERIFICATION_ERROR', error.message).catch(() => {});
+      }
+    })();
+    running.catch(() => {});
+    return running;
   }
 
   // Reads a bounded slice of a tool's local log (§38). `emit` publishes the
@@ -1265,9 +1310,10 @@ export class TaskManager extends EventEmitter {
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
     task.updatedAt = now();
+    // Event before the terminal status, same ordering rule as #verifyAndFinalize.
+    await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task);
-    await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
     this.#finishRun(task, 'CANCELLED');
   }
 
@@ -1667,7 +1713,7 @@ export class TaskManager extends EventEmitter {
     // Fresh state, taken right before delivering: this decides steer vs prompt.
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    if (!streaming) task._baseline = await snapshotWorkspace(task.workspacePath);
+    const baseline = streaming ? null : await snapshotWorkspace(task.workspacePath);
     // A prompt delivered from the queue was staged when it was accepted: reusing
     // those records keeps one copy on disk and one entry in task.attachments.
     const attached = staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles);
@@ -1683,8 +1729,10 @@ export class TaskManager extends EventEmitter {
     runtime.eventChain = runtime.eventChain.then(() => gate);
     let settled;
     let accepted = false;
+    let turn = null;
     if (!streaming) {
       this.activeTaskId = id;
+      turn = this.#beginTurn(task);
       runtime.cancelRequested = false;
       runtime.cancelFinalizing = null;
       settled = this.#waitForSettle(id, 12 * 60 * 60 * 1000);
@@ -1712,7 +1760,7 @@ export class TaskManager extends EventEmitter {
       (async () => {
         try {
           await settled;
-          if (!runtime.cancelRequested && !['CANCELLED', 'FAILED'].includes(task.status)) await this.#verifyAndFinalize(task);
+          if (!runtime.cancelRequested && !['CANCELLED', 'FAILED'].includes(task.status)) await this.#verifyAndFinalize(task, { turn, baseline });
         } catch (error) { await this.#fail(task, error); }
         finally { if (this.activeTaskId === id) this.activeTaskId = null; this.#pump(); }
       })().catch(error => console.error(error));
@@ -1817,9 +1865,12 @@ export class TaskManager extends EventEmitter {
     task.error = error.message || String(error);
     task.current = 'Failed';
     task.updatedAt = now();
+    // Publish the event before the failed status is observable (see
+    // #verifyAndFinalize): a late TASK_FAILED broke the "no events after a
+    // terminal status" contract the client relies on.
+    await this.#event(task, 'TASK_FAILED', task.error, { errorCode: task.errorCode });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
-    await this.#event(task, 'TASK_FAILED', task.error, { errorCode: task.errorCode });
   }
 
   async #event(task, type, message, data = {}, persistTask = true) {

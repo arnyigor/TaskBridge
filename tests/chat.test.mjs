@@ -39,6 +39,27 @@ test('multi-turn replay, duplicate delivery and terminal status preserve exact a
   assert.equal(state.turns[2].files[0].name, 'photo.png');
 });
 
+test('VERIFYING is an active status: the answer stays open until the terminal event', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'go', data: { text: 'go' } });
+  state.apply({ taskId: 'a', seq: 2, type: 'STATUS', message: 'Collecting diff', data: { status: 'VERIFYING' } });
+  // The finalizer works after Pi settled; the reply must not be shown as done.
+  assert.equal(state.current.active, true);
+  assert.equal(state.current.status, 'VERIFYING');
+
+  // A poll landing in the same phase must not finish the reply either.
+  const polled = new ChatState(task());
+  polled.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'go', data: { text: 'go' } });
+  polled.snapshot({ ...task(), status: 'VERIFYING' });
+  assert.equal(polled.current.active, true);
+  assert.equal(polled.current.status, 'VERIFYING');
+
+  // Only the terminal event closes the turn.
+  state.apply({ taskId: 'a', seq: 3, type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  assert.equal(state.current.active, false);
+  assert.equal(state.current.status, 'SUCCEEDED');
+});
+
 test('seedInitial:false starts with no synthetic first turn, and the first real USER_MESSAGE bootstraps current', () => {
   const state = new ChatState(task(), { seedInitial: false });
   assert.deepEqual(state.turns, []);

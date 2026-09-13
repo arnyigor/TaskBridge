@@ -1,4 +1,4 @@
-export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'CANCELLING']);
+export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING']);
 
 // Both disk replay and live delivery use the same reducer. Polling never replaces
 // a turn with slices of the session-wide accumulated text.

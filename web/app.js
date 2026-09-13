@@ -699,7 +699,8 @@ function stopTarget() {
 // so a stuck run is visible too.
 const ACTIVITY_LABELS = {
   QUEUED: 'В очереди', PREPARING: 'Подготовка', PREFLIGHT: 'Проверка',
-  RUNNING: 'Pi работает', WAITING_USER: 'Ждёт подтверждения', CANCELLING: 'Останавливаю…'
+  RUNNING: 'Pi работает', WAITING_USER: 'Ждёт подтверждения',
+  VERIFYING: 'Собираю результат и проверки', CANCELLING: 'Останавливаю…'
 };
 let activityTimer = null;
 

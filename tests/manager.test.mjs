@@ -700,3 +700,41 @@ test('commandStatus reports clientId and status after completion', async t => {
   assert.equal(f.manager.commandStatus('no-such-id'), null);
   await f.manager.cancel('a');
 });
+
+test('a failing project check never fails a completed answer and never holds the slot', async t => {
+  const f = await fixture(t);
+  f.task.projectId = 'p';
+  // The project has a check that fails, like a red `npm test` suite.
+  f.manager.projects.get('p').verification = ['node -e "process.exit(3)"'];
+
+  await f.manager.message('a', 'go', 'auto', [], null, { now: true });
+  // Mirror the real Pi event loop: release the settle waiter.
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+
+  // Wait for the detached verification to store its verdict.
+  for (let i = 0; i < 300; i++) {
+    const task = f.manager.getTask('a');
+    if (task.status === 'SUCCEEDED' && task.verificationStatus !== 'RUNNING') break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  const task = f.manager.getTask('a');
+  // The answer is complete: the check's failure is reported separately, never as
+  // "One or more verification commands failed", and never as a FAILED task.
+  assert.equal(task.status, 'SUCCEEDED');
+  assert.equal(task.error, null);
+  assert.equal(task.errorCode, null);
+  assert.equal(task.verificationStatus, 'FAILED');
+  assert.equal(task.verification[0].ok, false);
+
+  // The slot is free as soon as the turn is published, so a follow-up is sent
+  // straight away instead of landing in the queue behind the checks.
+  f.manager.projects.get('p').verification = [];
+  f.sent.length = 0;
+  const follow = await f.manager.message('a', 'next', 'auto', [], null, { now: true });
+  assert.equal(follow.pendingPrompts, undefined, 'the follow-up was not queued');
+  assert.deepEqual(f.sent, ['next']);
+
+  // Let the second turn settle while the store is still open.
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
+});
