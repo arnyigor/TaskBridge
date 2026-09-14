@@ -1,6 +1,6 @@
 {
   "name": "taskbridge-mvp",
-  "version": "0.9.5-dev",
+  "version": "0.9.5",
   "private": true,
   "type": "module",
   "bin": {

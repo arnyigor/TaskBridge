@@ -2,12 +2,14 @@
 
 **Пульт управления локальным coding-агентом Pi с телефона по Wi‑Fi.**
 
-TaskBridge — это небольшой локальный HTTP/PWA-сервер, который запускается на компьютере рядом с проектом и даёт с телефона:
+TaskBridge (v0.9.5) — небольшой локальный HTTP/PWA-сервер, который запускается на компьютере рядом с проектом и даёт с телефона:
 
 - поставить задачу выбранной модели в выбранном проекте;
 - видеть в реальном времени, что делает агент (tools, streaming, статусы);
 - остановить выполнение кнопкой `STOP`;
 - дописать/уточнить задачу в живую сессию (follow-up / steering);
+- править, ветвить, удалять и перегенерировать отдельные сообщения и ходы;
+- видеть, почему машина думает долго: скорости модели (PP/TG) и загрузку GPU/CPU/RAM;
 - сжать контекст (`COMPACT`) и посмотреть состояние Pi;
 - открыть историю сессий, вложения и артефакты результата.
 
@@ -21,6 +23,8 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 ```
 
 Это рабочий proof-of-concept. TaskBridge не содержит собственного агента и не вмешивается в настройки провайдера модели — он запускает тот же `pi --mode rpc`, которым вы пользуетесь вручную, и работает поверх его JSONL-протокола.
+
+Основной режим сейчас — **local-only по Wi‑Fi**: облачный транспорт (удалённый доступ через интернет) реализован на серверной стороне, но выключен (`cloud.enabled: false`), а вход в облачные настройки убран из интерфейса — см. [Cloud transport](#cloud-transport-remote-access).
 
 ---
 
@@ -75,7 +79,10 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 - у каждой сессии свой адрес `/session/<id>`: обновление страницы, закладка и ссылка на другом устройстве открывают тот же разговор (сервер отдаёт SPA-оболочку для таких путей);
 - экран сессий делит список на «Активные» и «Недавние», в строке — статус, проект, модель и относительное время обновления, кнопка 🔗 копирует ссылку на сессию;
 - очередь с capacity=1: если локальная модель занята (другой клиент, чужая сессия, залипший слот), промпт **не теряется** — задача/сообщение встаёт в очередь («ждёт модель»), отправляется автоматически при освобождении модели и переживает перезапуск TaskBridge;
-- как в современных чатах: `Enter` — поставить в очередь (даже если модель свободна: сессия подхватит сразу), `Ctrl+Enter` (Cmd+Enter) — отправить немедленно, не дожидаясь модели; сообщения в очереди видны над полем ввода (с количеством) и у каждого есть «Отправить сейчас» и «Убрать»; несколько сообщений к одной сессии ждут своей очереди по порядку и не теряются.
+- как в современных чатах: `Enter` — поставить в очередь (даже если модель свободна: сессия подхватит сразу), `Ctrl+Enter` (Cmd+Enter) — отправить немедленно, не дожидаясь модели; сообщения в очереди видны над полем ввода (с количеством) и у каждого есть «Отправить сейчас» и «Убрать»; несколько сообщений к одной сессии ждут своей очереди по порядку и не теряются;
+- действия на каждом сообщении завершённой сессии (встроенным SVG, без эмодзи): **править** сообщение оператора («исправить и запустить заново»), **ветвить** разговор от любого хода, **удалить** ход, **перегенерировать** ответ. Под этим — `POST /api/tasks/:id/turns/:turnId/edit`, `…/delete`, `…/regenerate`, `…/fork`; правка сохраняет тот же seq, а обрезание хвоста помечается `TURN_EDITED` / `TURN_TRUNCATED`, поэтому живой клиент видит ровно то же, что и БД;
+- восстановление неудавшегося последнего хода: если модель уже успела выдать текст или вызвать инструмент, «⧉ Скопировать сообщение» возвращает вывод в поле ввода (откатить ход нельзя — вывод был бы потерян); если модель ничего не произвела, ход повторяют через «изменить и отправить заново» или «перегенерировать»;
+- пока задача выполняется, ход править/ветвить нельзя: панель действий скрыта, история живой сессии не меняется.
 
 ### Интерфейс
 
@@ -95,6 +102,9 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 - project-specific verification commands;
 - проверка здоровья локального llama.cpp endpoint и managed-запуск профилей `text` / `vision`;
 - AUTO-выбор профиля модели под задачу и классификация ошибок движка (quota / rate limit / context);
+- скорости загруженной модели (PP/TG) и состояние ПК — CPU (дельтами `os.cpus()`), RAM и GPU через `nvidia-smi` — в `GET /api/info` (`engine.metrics`, `system`);
+- `GET /api/metrics` — счётчики задач/событий/облака, в том числе в формате Prometheus;
+- web-push уведомления (VAPID): `GET /api/push/key`, `POST /api/push/subscribe` / `unsubscribe` / `test`;
 - опциональная авторизация по pairing-коду и self-signed HTTPS для LAN.
 
 ---
@@ -109,8 +119,10 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 | Транспорт UI | HTTP + SSE |
 | Frontend | нативный HTML/CSS/JS, PWA, без фреймворков |
 | Markdown | `marked` + `DOMPurify` (лежат в `web/vendor`, без CDN) |
-| Тесты | встроенный `node:test` + `linkedom` для DOM-тестов |
+| Тесты | встроенный `node:test` + `linkedom` для DOM-тестов (54 файла) |
 | Хранилище | SQLite через встроенный `node:sqlite` (`data/taskbridge.db`, WAL) |
+| Наблюдаемость | `/api/metrics` (+ Prometheus), PP/TG из `/metrics` llama.cpp, GPU через `nvidia-smi` |
+| Облако (опция) | `cloud/` — Vercel-совместимый control plane: роутер, store (memory/sqlite/postgres), relay, WS; локально `npm run cloud` |
 
 ---
 
@@ -120,12 +132,15 @@ TaskBridge — это небольшой локальный HTTP/PWA-серве�
 ┌──────────────┐   HTTP / SSE    ┌──────────────────────────────────────┐
 │  Телефон     │ ───────────────▶│  TaskBridge (Node.js, node:http)     │
 │  браузер/PWA │◀─────────────── │                                      │
-└──────────────┘   live events   │  server.mjs      HTTP API + static   │
-                                 │  task-manager    жизненный цикл      │
-                                 │  pi-rpc.mjs      JSONL RPC клиент    │
+                                 │  server.mjs / gateway.mjs  HTTP+SSE  │
+                                 │  task-manager/session-manager  цикл  │
+                                 │  pi-rpc.mjs / runners/pi-runner      │
                                  │  task-store.mjs  события/метаданные  │
+                                 │  events/, domain/  TaskEvent, seq    │
                                  │  git.mjs         worktree, diff      │
-                                 │  runtime-manager llama.cpp health    │
+                                 │  local-models    llama.cpp router    │
+                                 │  system-metrics/metrics  PP/TG, ж.   │
+                                 │  cloud/worker    outbox, relay (off) │
                                  │  auth.mjs / tls.mjs  pairing, HTTPS  │
                                  └───────────────┬──────────────────────┘
                                                  │ stdio (JSONL)
@@ -147,9 +162,13 @@ TaskBridge — тонкая прослойка: он не переписывае
 Taskbridge/
 ├─ src/
 │  ├─ server.mjs            HTTP-сервер, роутинг API, SSE, раздача статики
+│  ├─ gateway.mjs           HTTP/SSE-фронт без состояния агента (шаг 5, P-3)
 │  ├─ task-manager.mjs      жизненный цикл задач, очередь, сообщения, Pi-сессии
-│  ├─ pi-rpc.mjs            запуск Pi и JSONL RPC-клиент
+│  ├─ session-manager.mjs   владение Pi-сессиями: Run, idle, close
+│  ├─ runners/pi-runner.mjs запуск/остановка процесса Pi на задачу
+│  ├─ pi-rpc.mjs            JSONL RPC-клиент Pi
 │  ├─ task-store.mjs        SQLite-хранилище задач и событий
+│  ├─ instance-lock.mjs     один экземпляр на data-каталог (pid-lock)
 │  ├─ multipart.mjs         потоковый парсер multipart/form-data
 │  ├─ uploads.mjs           стейджинг загрузок с TTL
 │  ├─ engine.mjs            классификация ошибок провайдера (quota/rate limit/context)
@@ -163,20 +182,27 @@ Taskbridge/
 │  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
 │  ├─ event-trim.mjs        отбрасывание устаревших streaming-дельт
 │  ├─ event-window.mjs      постраничная выдача истории по turn'ам
+│  ├─ text-tail.mjs         ограниченный хвост текста (streaming)
+│  ├─ tool-output.mjs       rolling-окно вывода инструментов
 │  ├─ git.mjs               worktree, status, diff, patch
 │  ├─ files.mjs             вложения, лимиты, безопасные пути
+│  ├─ metrics.mjs           /api/metrics (в т.ч. Prometheus)
+│  ├─ system-metrics.mjs    CPU/RAM/GPU и PP/TG модели
 │  ├─ runtime-manager.mjs   health-check и запуск llama.cpp
 │  ├─ runtime-control.mjs   профили runtime, start/restart/status
 │  ├─ project-browser.mjs   браузер папок для регистрации проектов
 │  ├─ auth.mjs              pairing-код, cookie, rate limit
 │  ├─ tls.mjs               self-signed сертификат для LAN HTTPS
 │  ├─ config.mjs            загрузка/сохранение config.json
+│  ├─ host.mjs / ipc.mjs    AgentHost (владелец агента) и IPC-транспорт (шаг 5)
+│  ├─ approvals/policy.mjs  политика подтверждений опасных tool-вызовов
+│  ├─ push/                 web-push (VAPID) и центр уведомлений
 │  ├─ domain/               протокол: TaskEvent, CloudCommand, machine state
 │  ├─ events/               EventMux, sequence, нормализация, snapshot'ы
 │  └─ cloud/                CloudWorker, outbox, heartbeat, dispatcher, approvals
 ├─ pi-extension/            Pi-расширение: подтверждение опасных tool-вызовов
 ├─ cloud/                   облачный control plane (Vercel-совместимый)
-│  ├─ lib/                  роутер API, auth, store (memory/sqlite/postgres), errors, ids
+│  ├─ lib/                  роутер API, auth, credentials, store (memory/sqlite/postgres), relay/ws, errors, ids
 │  ├─ api/index.mjs         Vercel function (общий роутер)
 │  └─ server.mjs            локальный хост облака + SSE (раздаёт тот же web/)
 ├─ api/index.mjs            Vercel-энтрипоинт (реэкспорт cloud/api)
@@ -186,15 +212,21 @@ Taskbridge/
 │  ├─ index.html            разметка UI
 │  ├─ app.js                логика UI, SSE, рендер чата
 │  ├─ chat-state.mjs        чистое состояние чата (тестируемое)
+│  ├─ transport.mjs         выбор local/cloud транспорта для UI
+│  ├─ cloud-config.js       /cloud-config.js (настройки облака для страницы)
+│  ├─ sw.js                 service worker PWA
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   216 тестов на node:test
+├─ tests/                   54 файла тестов на node:test (~394 проверки)
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  ├─ cloud-secrets.mjs     генерация токенов/секретов (npm run cloud:secrets)
 │  ├─ cloud-deploy.mjs      автодеплой на Vercel (npm run cloud:deploy)
+│  ├─ cloud-local.mjs       локальный прогон облака (start/status/stop/verify)
 │  ├─ check-secrets.mjs     аудит утечек (npm run check:secrets)
+│  ├─ restart-and-verify.mjs перезапуск и проверка сервера
+│  ├─ start-split.mjs / split-acceptance.mjs  host ⇄ gateway split
 │  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
@@ -404,6 +436,11 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `POST` | `/api/tasks/:id/auto-compaction` | вкл/выкл auto compaction |
 | `POST` | `/api/tasks/:id/model` | сменить модель сессии (как `/model` в Pi) |
 | `POST` | `/api/tasks/:id/thinking` | задать thinking level сессии |
+| `POST` | `/api/tasks/:id/undo-last-turn` | откатить последний чистый ход (API; в UI заменён копированием текста) |
+| `POST` | `/api/tasks/:id/turns/:turnId/edit` | исправить сообщение оператора и перезапустить ход (`TURN_EDITED`) |
+| `POST` | `/api/tasks/:id/turns/:turnId/delete` | удалить ход и всё после него (`TURN_TRUNCATED`) |
+| `POST` | `/api/tasks/:id/regenerate` | удалить ответ и запросить его заново (вопрос тот же) |
+| `POST` | `/api/tasks/:id/fork` | ветка: новая сессия из разговора до выбранного хода |
 | `GET` | `/api/tasks/:id/artifacts` | список артефактов |
 | `GET` | `/api/tasks/:id/artifacts/:name` | скачать артефакт |
 | `GET` | `/api/tasks/:id/files/:id` | скачать вложение |
@@ -422,6 +459,11 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `POST` | `/api/mcp/import` | импортировать MCP-конфиг из Pi |
 | `POST` | `/api/mcp/servers` | включить/выключить сервер (`{ name, enabled }`) |
 | `POST` | `/api/mcp/tools` | включить/выключить один инструмент (`{ server, tool, enabled }`) |
+| `GET` | `/api/metrics` | метрики в JSON или Prometheus (`?format=prometheus`) |
+| `GET` / `POST` | `/api/push/key` · `/api/push/subscribe` · `/api/push/unsubscribe` · `/api/push/test` | web-push (VAPID): ключ, подписка, отписка, тест |
+| `POST` | `/api/commands/:commandId` | приём команды облака (идемпотентно) |
+| `GET` / `POST` | `/api/cloud/config` · `/api/cloud/test` · `/api/cloud/pair` · `/api/cloud/devices` | настройка, проверка, паринг и устройства облака (серверные) |
+| `GET` | `/debug/cloud` | диагностика облачного транспорта |
 
 ---
 
@@ -574,6 +616,11 @@ Multipart — CORS-«простой» content-type, поэтому запрос 
 IP, VPN и без длительных Vercel-запросов. Локальный runtime остаётся единственным
 исполнителем, облако — только транспорт, аутентификация и durable-хранилище.
 
+> **Статус:** серверная часть готова и покрыта тестами, но транспорт сейчас
+> **выключен** (`cloud.enabled: false`), а вход в облачные настройки (иконка ☁ и
+> диалог) убран из UI — работаем только по локальной сети. Экран и включение
+> возвращаются откатом коммита `96792db`.
+
 ```text
 Телефон / PWA ──HTTPS/SSE──► Vercel (или npm run cloud)
                                 ▲               │ команды
@@ -601,8 +648,9 @@ IP, VPN и без длительных Vercel-запросов. Локальны
 (сохраняется между restart'ами), `EventMux`, батчинг дельт с coalescing,
 приоритеты событий, durable outbox с backpressure, heartbeat, polling команд,
 идемпотентность `commandId`, reconnect с backoff 1s→30s, reconcile при старте,
-redaction секретов и путей, метрики (`/api/metrics`, в т.ч. Prometheus), экран
-настроек облака, диагностика `/debug/cloud`.
+redaction секретов и путей, метрики (`/api/metrics`, в т.ч. Prometheus),
+диагностика `/debug/cloud` (экран настроек облака убран из UI вместе с
+выключением транспорта, серверные `/api/cloud/*` работают как прежде).
 
 Дополнительно (Этап A): **подтверждения опасных tool-вызовов** работают
 по-настоящему — Pi-расширение блокирует `tool_call` до ответа оператора локально
@@ -638,8 +686,8 @@ PWA с живым стримингом ответа, tool-карточками, 
 `lastReceivedSeq` и дозабирает события, а машина копит их в outbox. Задача может
 идти часами: ни один HTTP-запрос не удерживается открытым.
 
-Полная документация, API и список известных пробелов (WebSocket-фастпас,
-Postgres-адаптер) — в [`docs/cloud-transport.md`](docs/cloud-transport.md).
+Полная документация, API и список известных пробелов — в
+[`docs/cloud-transport.md`](docs/cloud-transport.md).
 Текущая переделка облака: протокол — [`docs/cloud-protocol.md`](docs/cloud-protocol.md), решение по хранилищу — [`docs/cloud-integration-decision.md`](docs/cloud-integration-decision.md), сведение локального и облачного интерфейса в один — [`docs/cloud-ui.md`](docs/cloud-ui.md).
 
 ---
@@ -768,12 +816,17 @@ TaskBridge не правит `~/.pi/agent/mcp.json`. Вместо этого у 
 ## Cloud bridge (Vercel Queues)
 
 Опциональный каталог `cloud/` разворачивается на Vercel отдельно от локального
-сервера. Команды приходят на ПК через poll mode Vercel Queues, а события уходят
-через дисковый outbox с batching, `taskId + seq` и idempotency keys. Локальный
-SQLite остаётся source of truth; PostgreSQL, Redis и WebSocket для MVP не нужны.
+сервера. Команды приходят на ПК через очередь облака (poll) и WebSocket-релай
+(`cloud/lib/relay*.mjs`, `cloud/lib/ws.mjs` — RFC 6455 без зависимостей), а события
+уходят через дисковый outbox с batching, `taskId + seq` и idempotency keys.
+Локальный SQLite остаётся source of truth; хранилище облака — memory / sqlite /
+postgres (`cloud/lib/store-postgres.mjs`).
 
-Cloud по умолчанию выключен и не меняет LAN-режим. Полная инструкция по
-environment variables, Vercel Root Directory и проверке: [docs/cloud-bridge.md](docs/cloud-bridge.md).
+Cloud по умолчанию выключен и не меняет LAN-режим. Локальный прогон облака —
+`npm run cloud:local` (`start` / `status` / `stop` / `verify`). Полная инструкция по
+environment variables, Vercel Root Directory и проверке —
+[docs/cloud-transport.md](docs/cloud-transport.md) и
+[docs/cloud-deploy-vercel.md](docs/cloud-deploy-vercel.md).
 
 ## Безопасность
 
@@ -793,7 +846,7 @@ TaskBridge не имеет endpoint вида `/shell`, но Pi сам являе
 ## Тесты
 
 ```powershell
-npm test            # 216 тестов (215 pass, 1 skip — живой Postgres)
+npm test            # 394 теста в 54 файлах (392 pass, 2 skip: живой Postgres и облачный DOM-тест)
 npm run test:cloud  # только тесты облачного транспорта
 npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
 npm run check       # синтаксическая проверка основных файлов + аудит секретов
@@ -837,8 +890,14 @@ TaskBridge долго был одним монолитом: один OS-проц
    `SIGINT/SIGTERM` сервера с жёстким таймаутом, чтобы Ctrl+C всегда завершался
    и не оставлял осиротевших Pi/llama.cpp. Покрыто тестами
    (`tests/manager.test.mjs`, graceful + принудительный kill).
-3. **Дизайн полного разделения** задокументирован в
-   `docs/agent-host-separation.md` — как следующий (не начатый пока) этап.
+3. **Split host ⇄ gateway (P-1…P-3, opt-in):** `src/host.mjs` (`AgentHost` —
+   владелец TaskManager, Pi, router и instance lock, без HTTP) и `src/gateway.mjs`
+   (HTTP/SSE-фронт без состояния агента) говорят по IPC (`src/ipc.mjs`: loopback
+   TCP с токеном, `HELLO/COMMAND/RESULT/EVENT`). Опт-ин-запуск —
+   `npm run start:split`; процессный acceptance (убить gateway, поднять заново,
+   задача жива) — `npm run split:acceptance`. По умолчанию `npm start` /
+   `taskbridge start` по-прежнему поднимают монолит `src/server.mjs`
+   (требование «monolith keep» до зелёного P-4).
 
 ### Альтернативы, которые рассматривались
 
@@ -864,10 +923,11 @@ TaskBridge долго был одним монолитом: один OS-проц
    плановая операция, полный split платит большую цену за редкую выгоду;
    разделение вводится, когда оно становится реальной болью.
 
-Следующий шаг за этим решением: продолжить фазами P-1…P-4 из
-`docs/agent-host-separation.md` (перенос владения агентом в `src/host.mjs`,
-IPC-контракт, устойчивость к рестарту gateway), либо остановиться на P-0, если
-жёсткий kill не является требованием.
+Сделаны P-1…P-3 начало (IPC-транспорт, `AgentHost`, gateway и acceptance);
+split работает опт-ином, монолит остаётся дефолтом. Следующий шаг — **P-4**:
+перевести CLI `taskbridge open/status/start/stop` и `restart-and-verify` на
+host+gateway и убрать legacy-монолит, когда прогон будет полностью зелёным
+(`docs/agent-host-separation.md`).
 
 ---
 
@@ -882,7 +942,7 @@ IPC-контракт, устойчивость к рестарту gateway), л�
 7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
 8. Claude Code и Codex как отдельные runner'ы пока не подключены.
 9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
-10. Cloud transport: WebSocket-фастпас не реализован (polling корректен и обязателен, SSE есть на локальном хосте облака); Postgres-адаптер для serverless есть, но не проверен на живом сервере (`TASKBRIDGE_TEST_DATABASE_URL=postgres://… npm run test:cloud`).
+10. Cloud transport сейчас выключен (`cloud.enabled: false`) и убран из UI — рабочий режим local-only по Wi‑Fi. В серверной части есть WebSocket-релай (`cloud/lib/ws.mjs` + `relay-server.mjs`, машина через `src/cloud/relay-connector.mjs`) как realtime-канал, а poll-путь остаётся обязательным фолбэком; Postgres-адаптер для serverless написан, но на живом сервере не прогонялся (`TASKBRIDGE_TEST_DATABASE_URL=postgres://… npm run test:postgres`), и на живую Vercel деплой ещë не выполнялся.
 11. Подтверждения инструментов включаются опцией `approvals.enabled`; расширение передаётся Pi через `--extension` (не ставится глобально). Длительный soak-прогон (30+ минут) запускается вручную через `TASKBRIDGE_STRESS_SECONDS`.
 
 ---
@@ -893,9 +953,9 @@ IPC-контракт, устойчивость к рестарту gateway), л�
 1. ClaudeCodeRunner
 2. CodexRunner
 3. KMP Android client
-4. WebSocket/SSE fast path для Vercel
-5. AgentHost: перезапуск UI/gateway без убийства агента
-   (шаг 5; дизайн: docs/agent-host-separation.md, фазы P-1…P-4)
+4. AgentHost P-4: CLI и restart-and-verify на host+gateway, удаление монолита
+   (P-1…P-3 уже сделаны, split опт-ин: `npm run start:split`)
+5. Живой деплой облака (Vercel + Postgres) и проверка relay/WS на нём
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.
