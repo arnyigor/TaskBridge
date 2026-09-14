@@ -34,7 +34,6 @@
       <button id="localModelsButton" data-pc-only type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
       <button id="mcpButton" data-pc-only type="button" class="small" title="MCP-серверы для задач">MCP</button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
-      <button id="cloudButton" data-pc-only type="button" class="iconButton" title="Доступ через облако" aria-label="Настройки облака">☁</button>
       <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
       <details id="sysState" class="sysState hidden">
         <summary title="Состояние системы и модели" aria-label="Состояние системы">—</summary>
@@ -125,55 +124,6 @@
       <p class="muted small">Удаление убирает проект только из списка TaskBridge — папка на диске не трогается, старые сессии этого проекта продолжают работать.</p>
       <div id="manageProjectsList" class="sessionPickerList"></div>
       <button id="manageProjectsClose" type="button">Закрыть</button>
-    </div>
-  </div>
-
-  <div id="cloudOverlay" class="authGate hidden">
-    <div class="authCard wide">
-      <h2>Доступ через облако</h2>
-      <p class="muted small">Машина сама открывает исходящее соединение — порт наружу открывать не нужно. Секрет хранится только локально и никогда не отдаётся браузеру.</p>
-      <form id="cloudForm">
-        <label class="cloudRow"><input id="cloudEnabled" type="checkbox" /> Включить облачный транспорт</label>
-        <label>Адрес облака
-          <input id="cloudUrl" type="url" placeholder="https://taskbridge.example.app" autocomplete="off" />
-        </label>
-        <label>ID машины
-          <input id="cloudMachineId" type="text" placeholder="home-pc-01" autocomplete="off" />
-        </label>
-        <label>Отображаемое имя (необязательно)
-          <input id="cloudMachineName" type="text" placeholder="Main Windows Workstation" autocomplete="off" />
-        </label>
-        <label>Секрет машины
-          <input id="cloudSecret" type="password" autocomplete="new-password" placeholder="оставьте пустым, чтобы не менять" />
-        </label>
-        <label class="cloudRow"><input id="cloudRedact" type="checkbox" /> Скрывать абсолютные пути в облаке</label>
-        <div class="cloudActions inline wrap">
-          <button id="cloudTest" type="button" class="small">Проверить соединение</button>
-          <button id="cloudSave" type="submit" class="small">Сохранить</button>
-          <button id="cloudClose" type="button" class="small">Закрыть</button>
-        </div>
-      </form>
-      <div id="cloudStatus" class="hint"></div>
-      <!-- Pairing a phone: the QR carries the public address and a device token
-           signed by this machine; the token rides in the URL fragment, which a
-           browser never sends to the cloud. -->
-      <section class="pairSection">
-        <h3>Телефоны</h3>
-        <p class="muted small">Отсканируйте QR телефоном — он откроет облачный адрес и запомнит доступ к этой машине. Ключ виден только на этом экране.</p>
-        <div class="inline wrap">
-          <button id="cloudPairButton" type="button" class="small">Показать QR для телефона</button>
-          <button id="cloudDevicesRefresh" type="button" class="small">Обновить список</button>
-        </div>
-        <div id="cloudPairResult" class="pairResult hidden">
-          <div id="cloudPairQr" class="pairQr"></div>
-          <div class="pairLinkRow">
-            <code id="cloudPairLink" class="pairLink"></code>
-            <button id="cloudPairCopy" type="button" class="small">Скопировать ссылку</button>
-          </div>
-        </div>
-        <div id="cloudDevices" class="sessionPickerList">—</div>
-      </section>
-      <p class="muted small">Изменения вступают в силу сразу; лимиты вывода инструментов и правила подтверждений применяются после перезапуска TaskBridge.</p>
     </div>
   </div>
 

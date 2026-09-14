@@ -1048,12 +1048,6 @@ pre {
 .approvalActions { display: flex; gap: 8px; }
 .approvalActions .danger { border-color: #b23; color: #ffb3b3; }
 
-/* Cloud settings (§91) */
-.cloudRow { display: flex; align-items: center; gap: 8px; }
-.cloudRow input[type="checkbox"] { width: auto; margin: 0; flex: none; }
-.cloudActions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
-#cloudStatus { margin-top: 8px; }
-
 /* Cloud mode: the page is served from the internet and talks to the machine
    through the relay. Controls that can only work on the PC itself are hidden
    instead of failing on click (docs/cloud-ui.md). */
@@ -1063,17 +1057,6 @@ body.cloud-mode [data-pc-only] { display: none; }
 #modeBanner:not(.hidden) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 #modeBanner.offline, #modeBanner.unauthorized, #modeBanner.error { border-color: rgba(251, 113, 133, 0.5); background: rgba(251, 113, 133, 0.1); }
 #modeBanner.online { border-color: rgba(85, 230, 165, 0.45); background: rgba(85, 230, 165, 0.08); }
-
-/* The cloud form is a column of labeled fields, not the single-row pairing
-   form the generic `.authCard form` rule was written for. Without this the
-   fields are laid out in one row, the card overflows and «Закрыть» drifts
-   off the edge on a phone. */
-#cloudForm { display: flex; flex-direction: column; gap: 10px; }
-#cloudForm > label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-#cloudForm > label.cloudRow { flex-direction: row; align-items: center; color: var(--text); font-size: 13px; }
-#cloudForm input[type="url"],
-#cloudForm input[type="text"],
-#cloudForm input[type="password"] { flex: none; width: 100%; font-size: 13px; letter-spacing: normal; }
 
 /* ---------------- model picker (Pi models) ---------------- */
 
@@ -1236,20 +1219,6 @@ body.cloud-mode [data-pc-only] { display: none; }
 .toolLine { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 12px; }
 .toolLine input { flex-shrink: 0; }
 .toolLine span { overflow-wrap: anywhere; }
-
-/* Паринг телефона: QR, ссылка и список доверенных устройств (§ pairing). */
-.pairSection { border-top: 1px solid var(--border); margin-top: 12px; padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
-.pairSection h3 { margin: 0; font-size: 13.5px; }
-.pairResult { display: flex; flex-direction: column; gap: 8px; align-items: center; }
-.pairQr { background: #fff; padding: 10px; border-radius: var(--radius-m); line-height: 0; }
-.pairQr svg { width: 200px; height: 200px; }
-.pairLinkRow { display: flex; gap: 6px; align-items: center; width: 100%; }
-.pairLink { flex: 1; min-width: 0; font-family: var(--mono); font-size: 10.5px; color: var(--muted); overflow-wrap: anywhere; }
-.deviceRow { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-m); padding: 8px 10px; }
-.deviceRow .deviceInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.deviceRow .name { font-size: 13px; font-weight: 600; }
-.deviceRow .meta { font-size: 11px; color: var(--muted); }
-.deviceRow.revoked .name { color: var(--muted); text-decoration: line-through; }
 
 /* Live PP/TG + machine state, a single muted line above the composer. */
 .liveMetrics {
