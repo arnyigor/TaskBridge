@@ -156,25 +156,25 @@ test('LocalModelService reports a loaded router model as busy only while it gene
   const service = new LocalModelService({ provider: 'llama.cpp', healthUrl: `${router.baseUrl}/health` }, t.name);
 
   // Nothing loaded: idle, and no /slots probe is sent — that would autoload.
-  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false });
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false, loaded: false });
   assert.deepEqual(router.slotsCalls, []);
 
   await service.loadModel('text');
-  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false });
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false, loaded: true });
   assert.deepEqual(router.slotsCalls, ['text']);
 
   router.processing.set('text', true);
-  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: true });
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: true, loaded: true });
   assert.deepEqual(router.slotsCalls, ['text', 'text']);
 
   router.processing.set('text', false);
-  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false });
+  assert.deepEqual(await service.getBusyStatus(), { unknown: false, busy: false, loaded: true });
   service.stopWatching();
 });
 
 test('LocalModelService reports unknown busy when the router is unreachable', async t => {
   const service = new LocalModelService({ provider: 'llama.cpp', healthUrl: 'http://127.0.0.1:1/health' }, t.name);
-  assert.deepEqual(await service.getBusyStatus(), { unknown: true });
+  assert.deepEqual(await service.getBusyStatus(), { unknown: true, busy: false, loaded: null });
 });
 
 test('LocalModelService only stops a router it started by itself', async t => {

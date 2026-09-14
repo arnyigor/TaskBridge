@@ -178,6 +178,85 @@ scope машины, дедупликация, replay, reconcile), reducer PWA, d
 при открытии `taskbridge-cloud.vercel.app` — это ответы Vercel на несуществующий
 деплой (у TaskBridge конверт другой: `{"error":{"code":…}}`). Деплоя пока нет.
 
+### Перепроверка 14 сентября 2026 (мобильный интернет)
+
+Через мобильный интернет (сотовая сеть, не Wi‑Fi) TaskBridge **сейчас не
+доступен**. Проверено на работающем локальном сервере 0.9.5-dev (`e6370c7`):
+
+- `GET /debug/cloud` → `{"enabled": false, "reason": "Cloud transport is disabled
+  by configuration."}`: в `config.json` блок `cloud` есть, но `enabled: false`,
+  поэтому машина не открывает ни одного исходящего соединения.
+- Деплой на Vercel существует и не тот. Проект `arnyigors-projects/taskbridge-cloud`
+  (`cloud/.vercel/project.json`), 3 production-сборки от 10 сентября, все `Ready`,
+  алиас `https://taskbridge-cloud.vercel.app` отдаёт статику и функции
+  **старого cloud bridge** (`190cf49`): `api/login`, `api/bridge/commands-ack`,
+  `api/bridge/commands-pull`, `api/events`, `api/events-ack` (проверено `vercel
+  inspect`). Все адреса текущего транспорта — `/api/health`, `/api/bridge/heartbeat`,
+  `/api/bridge/commands`, `/api/bridge/reconcile`, `/api/relay` — возвращают
+  штатную 404 Vercel. Включить облако на этот адрес бессмысленно: heartbeat уйдёт
+  в 404.
+- Спаренный 11 сентября телефон (`data/trusted-devices.json`, `dev-afa0746257f96e50`)
+  имеет `lastSeenAt: null` — до машины он так и не дошёл.
+- Работает по-прежнему только локальная сеть: `http://192.168.1.212:8787` и
+  `https://192.168.1.212:8443` (это же отдаёт `GET /api/info` → `addresses`).
+
+Чтобы мобильный интернет заработал, нужно (1) задеплоить текущий код из корня
+репозитория (`vercel.json`: `outputDirectory: web` + функция `api/index.mjs`;
+`npm run cloud:deploy -- --project taskbridge-cloud --database-url "postgres://…"
+--write-config`), (2) проверить `/api/health` → `store: postgres`, `durable: true`,
+и включить `cloud.enabled` + `realtime` с адресом и секретом машины,
+(3) спарить телефон QR-кодом (`POST /api/cloud/pair`). Альтернатива без Vercel и
+Postgres — сценарий C ниже (`npm run cloud` на ПК + Cloudflare Tunnel).
+
+### Подключение без QR и «по паролю» (сверено с кодом 14.09.2026)
+
+Пароля в текущем коде нет ни на одном из входов:
+
+| Вход | Что удостоверяет телефон | Где задаётся |
+|---|---|---|
+| LAN (`http://192.168.1.212:8787`) | сейчас **ничего**: `server.auth.enabled: false`, `GET /api/auth` → `{"enabled": false}` — ни пароля, ни кода, ни QR | `config.json` → `server.auth` |
+| LAN с включённой авторизацией | **8-значный код**, не пароль: ПК показывает его в `GET /api/auth/pairing` (только с localhost, иначе 403), телефон шлёт `POST /api/auth/pair` | `src/auth.mjs` (`pairing`, `pair`) |
+| Облако / PWA | **device token** `v1.<payload>.<HMAC-SHA256>`, подписан секретом машины, TTL 30 дней — выдают при паринге | `src/cloud/device-token.mjs` |
+| Старый деплой на Vercel | пароль (`/api/login` → 401) — это легаси `190cf49`, текущий код его не понимает (см. выше) | — |
+
+Без QR подключиться можно двумя способами:
+
+* **A. Туннель прямо на ПК (обычно самый быстрый, облако и база не нужны).**
+  `cloudflared tunnel --url http://127.0.0.1:8787` (или ngrok) → открыть выданный
+  `https://…` на телефоне. Проверено по коду, не запуском (на машине туннеля нет:
+  `cloudflared`/`ngrok` не в PATH, есть `winget`): страница приходит с того же
+  origin, что и API, а `selectTransport` (`web/transport.mjs`) без
+  `__TASKBRIDGE_CLOUD__` выбирает локальный транспорт → обычный HTTP+SSE, как в
+  LAN; `checkOrigin` (`src/auth.mjs`) сравнивает `Origin` с `Host`, а туннель
+  сохраняет `Host`, так что проверка проходит. Обязательно вместе с
+  `server.auth.enabled: true` — иначе ссылка равна полному доступу к Pi, и код
+  (8 цифр) придётся смотреть на самом ПК: `GET /api/auth/pairing` отвечает 403 не
+  с localhost.
+* **B. Ссылку паринга вместо QR.** В облачном деплое QR — только картинка: рядом
+  лежит `#cloudPairLink` и кнопка «Скопировать ссылку». Ссылку
+  `<cloud>/pair#m=…&t=…&r=wss://…` можно послать себе в мессенджер и открыть на
+  телефоне — сканировать нечего. Упирается в то же: облако не задеплоено (§6).
+
+### Решение 14 сентября 2026: пока только локальная сеть (Wi‑Fi)
+
+На этом этапе работаем **только по локальной сети**. Облако и туннели отложены: их
+первый реальный шаг упирается в аккаунт/домен, а телефонная PWA ходит на релей
+только по WebSocket, который из доступных быстрых туннелей стабильно держит лишь
+ngrok (проверки — в разделах выше).
+
+* `config.json` → `cloud.enabled: false`; применено на живом сервере через
+  `POST /api/cloud/config` — сразу, без перезапуска: `GET /debug/cloud` →
+  `{"enabled": false, "reason": "Cloud transport is disabled by configuration."}`.
+  Адрес и секрет машины в конфиге оставлены, транспорт просто не поднимается —
+  машина больше не стучится в мёртвый адрес туннеля.
+* Рабочие адреса — только LAN: `http://192.168.1.212:8787` и
+  `https://192.168.1.212:8443` (то же в `GET /api/info` → `addresses`).
+  `server.auth.enabled: false`, поэтому телефону достаточно открыть адрес по Wi‑Fi:
+  ни 8-значного кода, ни QR, ни пароля.
+* Код облака (`cloud/`, `src/cloud/`), деплой-скрипт и `scripts/cloud-local.mjs`
+  (сценарий C: облако на ПК + туннель) **не удалялись** — включатся позже, когда
+  появится публичный адрес.
+
 ---
 
 ## 7. Известные ограничения
@@ -205,6 +284,7 @@ scope машины, дедупликация, replay, reconcile), reducer PWA, d
 
 ### Сценарий B — только домашняя сеть (база не нужна)
 Облако не включать. Локальный UI и LAN-доступ работают по умолчанию, ничего создавать не нужно.
+**Это вариант, выбранный на сейчас** — см. «Решение 14 сентября 2026» в §6.
 
 ### Сценарий C — публичный доступ без Vercel и без Postgres
 Запустить `npm run cloud` на своей машине (SQLite) и открыть наружу через Cloudflare Tunnel.

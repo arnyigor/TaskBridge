@@ -1014,17 +1014,13 @@ test('TURN_EDITED replaces the settled message text, on both sides of the exchan
   assert.equal(state.turns.length, 4);
 });
 
-test('DOM: a clean failed last turn can be repeated without a duplicate', async () => {
+test('DOM: a clean failed last turn offers no separate repeat button', async () => {
   const app = await ui();
   app.tasks.a.status = 'FAILED';
   const failedHistory = [
     ...history(),
     { taskId: 'a', seq: 13, type: 'USER_MESSAGE', message: 'Что пошло не так?', data: { text: 'Что пошло не так?', files: [] } },
     { taskId: 'a', seq: 14, type: 'TASK_FAILED', message: 'boom', data: {} },
-  ];
-  const truncatedHistory = [
-    ...failedHistory,
-    { taskId: 'a', seq: 15, type: 'TURN_TRUNCATED', message: 'retracted', data: { fromSeq: 13, text: 'Что пошло не так?' } },
   ];
   let undoCalled = false;
   app.setFetchHook(async (url) => {
@@ -1034,28 +1030,24 @@ test('DOM: a clean failed last turn can be repeated without a duplicate', async 
       return { ok: true, json: async () => ({ ok: true, text: 'Что пошло не так?', fromSeq: 13 }) };
     }
     if (pathname === '/api/tasks/a/events') {
-      // The marker only exists once the turn has actually been retracted.
-      const all = undoCalled ? truncatedHistory : failedHistory;
-      const list = searchParams.has('tail') ? all : all.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      const list = searchParams.has('tail') ? failedHistory : failedHistory.filter(e => e.seq > Number(searchParams.get('after') || 0));
       return { ok: true, json: async () => (searchParams.has('tail') ? { events: list, reachedStart: true } : list) };
     }
     return null;
   });
   await app.selectTask('a');
-  const prompt = app.document.getElementById('prompt');
   const mine = () => [...app.document.querySelectorAll('.turn.me')];
   assert.equal(mine().length, 3, 'initial + two follow-up messages');
-  const retry = [...app.document.querySelectorAll('button')].find(b => b.textContent.includes('Повторить сообщение'));
-  assert.ok(retry, 'the clean failed exchange offers a repeat');
-  retry.dispatchEvent(new app.window.Event('click'));
-  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
-  assert.ok(undoCalled, 'the retraction endpoint was called');
-  assert.equal(prompt.value, 'Что пошло не так?', 'the message returns to the composer');
-  assert.equal(mine().length, 2, 'the retracted request disappears from the chat');
-  assert.ok(![...app.document.querySelectorAll('button')].some(b => b.textContent.includes('Повторить сообщение')), 'the offer disappears with the turn');
+  // The retry text button is gone: the operator line carries the edit icon
+  // ("fix and resend") and the empty answer carries regenerate, so a clean
+  // failure needs no extra button and nothing is retracted.
+  const labels = [...app.document.querySelectorAll('button')].map(b => b.textContent);
+  assert.ok(!labels.some(t => t.includes('Повторить сообщение')), `no repeat button: ${labels.join(' | ')}`);
+  assert.ok(!labels.some(t => t.includes('Скопировать сообщение')), 'nothing was produced, so nothing is copy-only');
+  assert.ok(!undoCalled, 'nothing asked the server to retract the turn');
 });
 
-test('DOM: a cancelled first run offers a retry, not a copy-only', async () => {
+test('DOM: a cancelled first run offers neither a retry nor a copy-only', async () => {
   const app = await ui();
   // A session that was stopped before the model produced anything: the task
   // record carries no saved text either.
@@ -1076,7 +1068,7 @@ test('DOM: a cancelled first run offers a retry, not a copy-only', async () => {
   });
   await app.selectTask('a');
   const labels = [...app.document.querySelectorAll('button')].map(b => b.textContent);
-  assert.ok(labels.some(t => t.includes('Повторить сообщение')), `expected a retry button: ${labels.join(' | ')}`);
+  assert.ok(!labels.some(t => t.includes('Повторить сообщение')), `no retry button: ${labels.join(' | ')}`);
   assert.ok(!labels.some(t => t.includes('Скопировать сообщение')), 'nothing was produced, so nothing is copy-only');
 });
 

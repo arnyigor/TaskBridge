@@ -640,13 +640,15 @@ function renderChat() {
   scrollBottom();
 }
 
-/* ---------------- repeat a failed message ---------------- */
+/* ---------------- recover a failed message ---------------- */
 
-// The resend offer lives only on the exchange that failed last — a failure
-// buried under newer messages cannot be retracted. And when the model already
-// produced text or ran tools, the turn cannot be retracted at all (its output
-// would be lost forever): only copying the message into the composer is
-// offered then.
+// Only the exchange that failed last can be recovered — a failure buried under
+// newer messages cannot be taken back. A run that produced nothing needs no
+// button at all: the operator's own line carries "fix and resend" and the newest
+// answer carries "regenerate", so a separate repeat button was just duplication
+// of those two icons. What is left is the case the inline icons cannot cover:
+// the model did answer (text or a tool call), so the turn cannot be retracted and
+// the only way back is to copy the message into the composer.
 function updateTurnFailureActions(node, turn) {
   if (turn !== chatState.current) return; // only the newest exchange can be retracted
   const status = currentTask?.status;
@@ -657,25 +659,23 @@ function updateTurnFailureActions(node, turn) {
     && chatState.turns[lastReal] === turn;
   if (!node.failureActions) {
     if (!visible) return;
+    // "Nothing was produced" = no visible answer and no tool call. Reasoning
+    // alone does not change this: the edit and regenerate icons still cover the
+    // retry, so no button is added here.
+    if (!turn.text && !turn.tools.length) return;
     let userTurn = null;
     for (let i = lastReal - 1; i >= 0; i--) {
       if (chatState.turns[i].role === 'user') { userTurn = chatState.turns[i]; break; }
     }
     if (!userTurn) return;
-    // "Nothing was produced" = no visible answer and no tool call. Reasoning
-    // alone must not block a retry: a cancelled run that got as far as
-    // thinking still left the operator with an empty bubble.
-    const clean = !turn.text && !turn.tools.length;
     const actions = document.createElement('div');
     actions.className = 'turnActions';
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'small';
-    button.textContent = clean ? '↻ Повторить сообщение' : '⧉ Скопировать сообщение';
-    button.title = clean
-      ? 'Удалить этот ход из истории и вернуть сообщение в поле ввода'
-      : 'Модель успела ответить — можно только вернуть текст сообщения в поле ввода';
-    button.onclick = () => clean ? resendFailedTurn() : copyToComposer(userTurn.text);
+    button.textContent = '⧉ Скопировать сообщение';
+    button.title = 'Модель успела ответить — можно только вернуть текст сообщения в поле ввода';
+    button.onclick = () => copyToComposer(userTurn.text);
     actions.append(button);
     node.md.append(actions);
     node.failureActions = actions;
@@ -688,18 +688,6 @@ function copyToComposer(text) {
   promptEl.style.height = 'auto';
   updateClearButton();
   if (!isTouchDevice()) promptEl.focus();
-}
-
-async function resendFailedTurn() {
-  if (!selectedTaskId) return;
-  try {
-    const result = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/undo-last-turn`, { method: 'POST', body: '{}' });
-    copyToComposer(result.text);
-    await refreshTask();
-  } catch (error) {
-    $('createError').textContent = error.message;
-    $('createError').classList.add('error');
-  }
 }
 
 /* ---------------- message actions: fix in place, drop, branch, repeat ---------------- */
@@ -1679,7 +1667,9 @@ $('form').addEventListener('submit', async (e) => {
       clearComposer();
       lastPrompt = { id: taskId, text: prompt, failedSend: false };
       renderQueuedPrompt();
-      if (sent?.queueReason) showNotice(QUEUED_NOTICE);
+      if (sent?.queueReason) showNotice(sent.queueReason === 'MODEL_LOADING'
+        ? 'Локальная модель ещё не загружена — сообщение в очереди и отправится, как только она будет готова.'
+        : QUEUED_NOTICE);
     } else {
       const task = await api('/api/tasks', {
         method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking })

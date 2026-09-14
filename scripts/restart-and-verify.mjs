@@ -136,8 +136,14 @@ async function runChecks({ port, httpsPort, previousBuild, previousPid }) {
   const lan = pickLanAddress();
   add('LAN-адрес объявлен', Boolean(lan && (info.body?.addresses || []).some(a => a.url.includes(lan))), `${lan || 'нет интерфейса'} → ${JSON.stringify(info.body?.addresses || [])}`);
 
+  // The cloud transport is optional: local-only is the default, scenario C runs
+  // it on purpose. So the state is reported instead of being required to be off,
+  // and an enabled transport is only green when it actually connected.
   const debugCloud = await fetchJson(`http://127.0.0.1:${port}/debug/cloud`).catch(() => ({ body: null }));
-  add('облако не поднимает транспорт', debugCloud.body?.enabled === false, JSON.stringify(debugCloud.body));
+  const cloudOn = debugCloud.body?.enabled === true;
+  add(cloudOn ? 'облако включено и подключено' : 'облако выключено (local-only)',
+    cloudOn ? debugCloud.body?.connected === true : debugCloud.body?.enabled === false,
+    JSON.stringify(debugCloud.body));
 
   const tasks = await fetchJson(`http://127.0.0.1:${port}/api/tasks`).catch(() => ({ body: [] }));
   const list = Array.isArray(tasks.body) ? tasks.body : [];

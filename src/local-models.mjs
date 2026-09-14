@@ -237,9 +237,11 @@ export class LocalModelService extends EventEmitter {
   // slot query would itself make the model busy.
   async getBusyStatus() {
     const models = await this.listModels().catch(() => null);
-    if (!models) return { unknown: true };
-    const loaded = models.filter(m => m.status === 'loaded');
-    if (!loaded.length) return { unknown: false, busy: false };
+    if (!models) return { unknown: true, busy: false, loaded: null };
+    // loaded — positively "no model is loaded" lets the caller park a prompt
+    // instead of blocking the request on loading one.
+    const loaded = models.filter(m => m.status === 'loaded' || m.status === 'sleeping');
+    if (!loaded.length) return { unknown: false, busy: false, loaded: false };
     let inspected = false;
     for (const model of loaded) {
       let slots;
@@ -250,9 +252,9 @@ export class LocalModelService extends EventEmitter {
       }
       if (!Array.isArray(slots) || !slots.length) continue;
       inspected = true;
-      if (slots.some(slot => slot?.is_processing)) return { unknown: false, busy: true };
+      if (slots.some(slot => slot?.is_processing)) return { unknown: false, busy: true, loaded: true };
     }
-    return inspected ? { unknown: false, busy: false } : { unknown: true };
+    return inspected ? { unknown: false, busy: false, loaded: true } : { unknown: true, busy: false, loaded: true };
   }
 
   async getEngineInfo() {

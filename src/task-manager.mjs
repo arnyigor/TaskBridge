@@ -550,7 +550,8 @@ export class TaskManager extends EventEmitter {
     if (task.status !== 'QUEUED') task.statusChangedAt = now();
     task.status = 'QUEUED';
     task.queueReason = reason;
-    task.current = reason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : 'В очереди';
+    task.current = reason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели'
+      : reason === 'MODEL_LOADING' ? 'Ждёт загрузки локальной модели' : 'В очереди';
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
     await this.#event(task, 'QUEUE_WAITING', task.current, { reason });
@@ -1998,14 +1999,21 @@ export class TaskManager extends EventEmitter {
     const liveStreaming = Boolean(liveState?.isStreaming);
     // Without an explicit queue request, a streaming session still receives the
     // text as steering (the previous behaviour); only a busy model queues it.
-    const holdingModel = !immediate && !liveStreaming && this.#usesLocalRuntime(task)
-      && (await this.local.getBusyStatus()).busy;
+    const localBusy = this.#usesLocalRuntime(task) ? await this.local.getBusyStatus() : null;
+    const holdingModel = !immediate && !liveStreaming && localBusy?.busy === true;
     // `queue` means "wait your turn instead of interrupting", not "always park".
     // A session that is idle right now takes the prompt immediately: parking it
     // made every Enter flash "В очереди" and put an idle chat at the mercy of
     // the next pump tick.
     const waitForTurn = queue && liveStreaming;
-    if (waitForTurn || reservedElsewhere || holdingModel) {
+    // A COLD local model is what makes "Enter → buttons locked, nothing sent"
+    // happen: without --models-autoload this prompt would block the HTTP request
+    // while Pi loads the model (tens of seconds to minutes). Ack immediately by
+    // parking, and let the pump load the model and deliver in the background.
+    // `immediate` (Ctrl+Enter / queue delivery) is excluded on purpose: it means
+    // "don't wait", and the pump delivers through it.
+    const coldModel = !immediate && !fromQueue && localBusy?.loaded === false;
+    if (waitForTurn || reservedElsewhere || holdingModel || coldModel) {
       // A prompt that came *out* of the queue must never be silently put back
       // here: that loop is what made «Отправить сейчас» look dead — the button
       // took the prompt out and this branch returned it, every time. Fail
@@ -2037,7 +2045,7 @@ export class TaskManager extends EventEmitter {
       // file the operator attached.
       task.pendingPrompts = [...(task.pendingPrompts || []), { id: pendingId, text: userText + note, mode, files: attached.map(metadata) }];
       task.updatedAt = now();
-      await this.#markWaiting(task, reservedElsewhere ? 'BUSY' : (holdingModel ? 'MODEL_BUSY' : 'QUEUED'));
+      await this.#markWaiting(task, reservedElsewhere ? 'BUSY' : (holdingModel ? 'MODEL_BUSY' : (coldModel ? 'MODEL_LOADING' : 'QUEUED')));
       if (!this.queue.includes(id)) this.queue.push(id);
       // Straight away, so a session that is idle does not wait for the retry tick.
       setImmediate(() => this.#pump());
