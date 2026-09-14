@@ -1128,6 +1128,18 @@ const ACTIVITY_LABELS = {
   RUNNING: 'Pi работает', WAITING_USER: 'Ждёт подтверждения',
   VERIFYING: 'Собираю результат и проверки', CANCELLING: 'Останавливаю…'
 };
+
+// The details panel must not print a raw enum: the operator reads "Готово", not
+// "SUCCEEDED", and "Ошибка", not "FAILED_RECOVERY". A status the server adds
+// later falls back to its raw code on purpose, so it stays visible instead of
+// disappearing — the "why" behind a failure is in the turn/error text anyway.
+const TASK_STATUS_LABELS = {
+  QUEUED: 'В очереди', PREPARING: 'Подготовка', PREFLIGHT: 'Проверка',
+  RUNNING: 'Работает', WAITING_USER: 'Ждёт подтверждения',
+  VERIFYING: 'Собираю результат и проверки', CANCELLING: 'Останавливаю…',
+  SUCCEEDED: 'Готово', FAILED: 'Ошибка', CANCELLED: 'Остановлено'
+};
+function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || status || '—'; }
 let activityTimer = null;
 
 function renderActivity(task = currentTask) {
@@ -1169,7 +1181,8 @@ function renderTaskDetails(t) {
   renderQueuedPrompt();
   updateRetryButton();
   $('taskTitle').textContent = t.title || t.prompt || t.id;
-  $('taskStatus').textContent = t.status;
+  $('taskStatus').textContent = taskStatusLabel(t.status);
+  $('taskStatus').title = t.errorCode ? `${t.status} · ${t.errorCode}` : (t.status || '');
   $('taskModel').textContent = t.model ? modelFullLabel(t.model) : (t.requestedModel ? modelFullLabel(t.requestedModel) : '—');
   $('taskThinking').textContent = t.thinkingLevelActual || t.thinkingLevel || '—';
   updateModelChip();

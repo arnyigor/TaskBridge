@@ -236,7 +236,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: () => true,
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, rewriteMarkdownLinks, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -793,6 +793,25 @@ test('DOM: stop points at the session that is actually running', async () => {
   assert.equal(app.stopTarget(), null);
   app.updateStopButton();
   assert.equal(doc.getElementById('stopButton').disabled, true);
+});
+
+test('DOM: the details panel shows a readable status, not the raw enum', async () => {
+  const app = await ui();
+  const el = app.document.getElementById('taskStatus');
+
+  // A finished run reads as a word, not as a machine code.
+  app.renderTaskDetails({ ...task('a'), status: 'SUCCEEDED' });
+  assert.equal(el.textContent, 'Готово');
+
+  // A recovered failure stays honest about why, without leaking the enum to the
+  // screen — the raw code stays reachable in the tooltip for bug reports.
+  app.renderTaskDetails({ ...task('a'), status: 'FAILED', errorCode: 'FAILED_RECOVERY' });
+  assert.equal(el.textContent, 'Ошибка');
+  assert.match(el.title, /FAILED_RECOVERY/);
+
+  // A status the server adds later must stay visible instead of disappearing.
+  app.renderTaskDetails({ ...task('a'), status: 'SOMETHING_NEW' });
+  assert.equal(el.textContent, 'SOMETHING_NEW');
 });
 
 test('DOM: a running session is obvious, and both stop and send stay reachable', async () => {
