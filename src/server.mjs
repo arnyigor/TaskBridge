@@ -28,6 +28,7 @@ import { createRelayConnector } from './cloud/relay-connector.mjs';
 import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
+import { readSystemMetrics } from './system-metrics.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -662,8 +663,8 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === 'GET' && pathname === '/api/info') {
-      const [busy, modelReady, engine, local] = await Promise.all([
-        manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus()
+      const [busy, modelReady, engine, local, system] = await Promise.all([
+        manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus(), readSystemMetrics()
       ]);
       const settings = await readPiSettings().catch(() => null);
       const warnings = [];
@@ -683,6 +684,7 @@ async function handleRequest(req, res) {
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
         engine,
+        system,
         local,
         warnings,
         fileLimits: FILE_LIMITS
@@ -836,6 +838,39 @@ async function handleRequest(req, res) {
       // Ctrl+Enter path); otherwise a busy model means the prompt is queued.
       return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken,
         { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId }));
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/undo-last-turn$/);
+    if (req.method === 'POST' && match) return json(res, 200, await manager.undoLastTurn(match[1]));
+
+    // In-place correction of an already settled message: the record is fixed,
+    // the model is NOT asked again and no answer is regenerated.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)\/edit$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.editTurn(match[1], { turnId: decodeURIComponent(match[2]), text: body.text }));
+    }
+
+    // A message and everything that came after it. The log is linear, so a
+    // later branch cannot survive its parent; the client warns with the
+    // affected count before calling this.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)\/delete$/);
+    if (req.method === 'POST' && match) return json(res, 200, await manager.deleteTurns(match[1], decodeURIComponent(match[2])));
+
+    // Regenerate: the last answer (and anything after it) is dropped and the
+    // same question is put to the model again.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/regenerate$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.regenerateLastTurn(match[1], body.turnId));
+    }
+
+    // Fork: a new session in the same project whose conversation is a copy of
+    // this one through the chosen message; the source is left untouched.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/fork$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 201, await manager.forkTask(match[1], body.turnId));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending\/send$/);

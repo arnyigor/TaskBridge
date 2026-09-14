@@ -381,7 +381,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `GET` | `/api/auth` | статус авторизации |
 | `POST` | `/api/auth/pair` | вход по pairing-коду |
 | `GET` | `/api/auth/pairing` | текущий код (только с localhost) |
-| `GET` | `/api/info` | имя, build, адреса, готовность модели, engine health, лимиты файлов |
+| `GET` | `/api/info` | имя, build, адреса, готовность модели, engine health, скорости модели (`engine.metrics`), состояние ПК (`system`), лимиты файлов |
 | `POST` | `/api/uploads` | потоковая multipart-загрузка файлов |
 | `GET` | `/api/projects` | список проектов |
 | `DELETE` | `/api/projects/:id` | удалить проект |
@@ -715,6 +715,27 @@ Postgres-адаптер) — в [`docs/cloud-transport.md`](docs/cloud-transport
 ### Engine health
 
 `GET /api/info` возвращает `engine` (для single-model: `reachable`, `model`, `contextWindow`, `slots` из `/props` и `/slots`) и `local` (router: `state`, `loaded`, `models`). Ошибки провайдера классифицируются в стабильные коды: `QUOTA_EXCEEDED`, `RATE_LIMITED`, `CONTEXT_OVERFLOW`, `ENGINE_AUTH`, `MODEL_UNAVAILABLE`, `ENGINE_OVERLOADED`, `ENGINE_UNREACHABLE`; у задачи появляются `retryable` и `retryAfterMs`.
+
+### Скорости модели и состояние ПК
+
+Пока модель отвечает, из `GET /api/info` видно, тормозит ли она (и почему):
+
+- `engine.metrics` — скорости загруженной llama.cpp-модели. PP (prompt) и TG
+  (generation) в tok/s берутся из `/metrics` сервера, который роутер
+  проксирует в дочерний процесс (`llamacpp:prompt_tokens_seconds`,
+  `llamacpp:predicted_tokens_seconds`). **Нужен `metrics = true` в пресете
+  (`[*]` в `models.ini`)** и перезапуск роутера. Без него `/metrics` отвечает
+  501, и UI честно показывает «нет данных», а не ноль.
+- TG облачной модели — из её же `usage`: output-токены за время, что приходили
+  дельты (`task.metrics`, поле `tg`). Паузы между дельтами > 2 с (выполнение
+  инструментов) в генерацию не считаются. Показывается в строке Context.
+- `system` — CPU (из дельт `os.cpus()`; `os.loadavg()` на Windows всегда нули),
+  RAM (used/total) и, если есть `nvidia-smi`, GPU: память, утилизация,
+  мощность draw/limit, температура. Нет данных — поле `null`, а не ноль.
+
+В UI это кликабельная плашка «Состояние системы» в шапке: компактная сводка
+(GPU/CPU/RAM), а по клику — все параметры и скорости модели. Обновляется тем же
+опросом `/api/info` раз в 4 с.
 
 ---
 

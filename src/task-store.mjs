@@ -290,6 +290,19 @@ export class TaskStore {
     }
   }
 
+  #appendRowAt(id, seq, event) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      event.seq = seq;
+      this.db.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run(id, seq, JSON.stringify(event));
+      this.db.exec('COMMIT');
+      return seq;
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch { /* transaction already aborted */ }
+      throw error;
+    }
+  }
+
   // Serializes file-backed artifact writes per task. Database writes are
   // synchronous, so call order already defines their order.
   #fileWrite(id, action) {
@@ -324,6 +337,47 @@ export class TaskStore {
     this.#appendRow(id, event);
     await fsp.mkdir(dir, { recursive: true }).catch(() => {});
     return event;
+  }
+
+  // The highest cursor ever allocated for a task; needed by callers that rewrite
+  // history and must keep the event sequence monotonic (see #truncateFrom).
+  async maxSeq(id) {
+    this.taskDir(id);
+    return Number(this.db.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE task_id = ?').get(id).seq);
+  }
+
+  // Append at an explicit cursor. Only history rewrites use this: after a
+  // truncation the rows above the cut are gone, so "MAX(seq) + 1" would hand
+  // back a seq a live client has already seen and silently drop the event.
+  async appendEventAt(id, seq, event) {
+    if (this.removed.has(id)) throw notFound();
+    if (!Number.isSafeInteger(seq) || seq < 1) throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
+    const dir = this.taskDir(id);
+    this.#appendRowAt(id, seq, event);
+    await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+    return event;
+  }
+
+  // Rewrite the payload of one existing event, keeping its cursor. Used when the
+  // operator edits a message that must keep its identity (same event, same seq,
+  // corrected text) — deleting and re-adding it would change its id.
+  async updateEventData(id, seq, patch) {
+    this.taskDir(id);
+    const row = this.db.prepare('SELECT payload FROM events WHERE task_id = ? AND seq = ?').get(id, seq);
+    if (!row) throw notFound();
+    const event = { ...JSON.parse(row.payload), ...patch };
+    this.db.prepare('UPDATE events SET payload = ? WHERE task_id = ? AND seq = ?').run(JSON.stringify(event), id, seq);
+    return event;
+  }
+
+  // "Repeat message": permanently drops the last failed exchange from the
+  // replayed history (everything from the last user message on) so the same
+  // prompt can be resent without a visible duplicate.
+  async truncateEvents(id, fromSeq) {
+    if (!Number.isSafeInteger(fromSeq) || fromSeq < 1) {
+      throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
+    }
+    this.db.prepare('DELETE FROM events WHERE task_id = ? AND seq >= ?').run(id, fromSeq);
   }
 
   async appendRaw(id, name, content) {

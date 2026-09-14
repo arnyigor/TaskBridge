@@ -46,14 +46,24 @@ async function approvalGate(toolCallId, toolName, args) {
   }
   return 'TIMEOUT';
 }
+// The answer arrives as several deltas a few ms apart, like a streamed
+// response: that is what lets TaskBridge measure TG from usage (output tokens
+// over the time the deltas actually spanned).
 function finish(text, fail = false) {
-  send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } });
-  const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage: 'Fixture model error' } : {}) };
-  persist(message);
-  send({ type: 'message_end', message });
-  streaming = false;
-  send({ type: 'agent_end' });
-  send({ type: 'agent_settled' });
+  const parts = text.length >= 3 ? [text.slice(0, 1), text.slice(1, 2), text.slice(2)] : [text];
+  let index = 0;
+  const emit = () => {
+    send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: parts[index] } });
+    index += 1;
+    if (index < parts.length) { setTimeout(emit, 25); return; }
+    const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage: 'Fixture model error' } : {}) };
+    persist(message);
+    send({ type: 'message_end', message });
+    streaming = false;
+    send({ type: 'agent_end' });
+    send({ type: 'agent_settled' });
+  };
+  emit();
 }
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);

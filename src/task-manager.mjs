@@ -15,6 +15,7 @@ import { ModelCatalog } from './model-catalog.mjs';
 import { LocalModelService } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
+import { computeTokensPerSecond, accumulateStreamMs } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
 
@@ -477,6 +478,7 @@ export class TaskManager extends EventEmitter {
       git: null,
       compaction: { count: 0, last: null },
       lastUsage: null,
+      metrics: null,
       model: null,
       autoCompactionEnabled: null,
       files: incomingFiles.map(metadata),
@@ -511,7 +513,7 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, ...safe } = task;
+    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genLastDeltaAt, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
@@ -997,6 +999,7 @@ export class TaskManager extends EventEmitter {
 
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
+      if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task);
       if (delta?.type === 'text_delta') task.assistantText = appendTail(task.assistantText, delta.delta, TEXT_TAIL);
       if (delta?.type === 'thinking_delta') {
         task.thinkingText = appendTail(task.thinkingText, delta.delta, THINKING_TAIL);
@@ -1041,6 +1044,7 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       if (frame.message.usage?.totalTokens > 0) task.lastUsage = frame.message.usage;
       if (frame.message.stopReason === 'error') task._modelError = frame.message.errorMessage || 'Модель завершила ответ с ошибкой.';
+      this.#recordGenerationSpeed(task);
     }
     if (frame.type === 'message_end' || frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
       task.updatedAt = now();
@@ -1054,6 +1058,29 @@ export class TaskManager extends EventEmitter {
     }
 
     if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
+  }
+
+  // Wall-clock time the model spent emitting deltas. Tool execution happens
+  // between deltas as long pauses, so only short gaps are added: a 30 s `npm
+  // test` in the middle of a turn must not be counted as generation time and
+  // drag the reported TG down.
+  #trackStreamTime(task) {
+    const at = Date.now();
+    task._genStreamMs = accumulateStreamMs(task._genLastDeltaAt, at, task._genStreamMs);
+    task._genLastDeltaAt = at;
+  }
+
+  // TG from the model's own usage: output tokens over the time it actually
+  // streamed them. Works for a cloud provider (the only speed it exposes) and
+  // is a fallback for a local llama.cpp without --metrics. PP is not knowable
+  // from a streaming response and is left to the llama.cpp /metrics source.
+  #recordGenerationSpeed(task) {
+    task._genLastDeltaAt = 0;
+    const ms = task._genStreamMs || 0;
+    task._genStreamMs = 0;
+    const tg = computeTokensPerSecond(task.lastUsage?.output, ms);
+    if (tg == null) return;
+    task.metrics = { tg, outputTokens: Number(task.lastUsage.output), ms, source: 'usage' };
   }
 
   #waitForSettle(taskId, timeoutMs) {
@@ -1421,16 +1448,293 @@ export class TaskManager extends EventEmitter {
     return this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id));
   }
 
-  async #cancel(id) {
+  // "Repeat message": permanently removes the last failed exchange (the
+  // user's message + the model's error/abort) from the history so the same
+  // text can be sent again without a duplicate. Allowed only for the very
+  // last turn, only in a FAILED/CANCELLED session, and only when the model
+  // produced nothing (no text, no tools): otherwise its output would be lost
+  // forever and the UI only offers copying the text instead.
+  async undoLastTurn(id) {
+    return this.#admit(() => this.#undoLastTurn(id));
+  }
+
+  async #undoLastTurn(id) {
+    const task = this.tasks.get(id);
+    if (!task || this.deleted.has(id)) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    if (!['FAILED', 'CANCELLED'].includes(task.status)) {
+      throw Object.assign(new Error('Отозвать можно только последний ход с ошибкой или отменённый.'), { code: 'NOT_ALLOWED' });
+    }
+    const events = await this.store.readEvents(id, 0);
+    let lastUser = null;
+    for (const event of events) if (event.type === 'USER_MESSAGE') lastUser = event;
+    // The session's very first prompt has no USER_MESSAGE of its own (it lives
+    // in task.prompt), so retracting it drops the whole log and asks the client
+    // to forget the turn it synthesized from the task record.
+    const fromSeq = lastUser ? lastUser.seq : 1;
+    // "The model produced nothing" means no visible answer (text) and no tools.
+    // Reasoning alone and a message_start without a body do not block a retry:
+    // a cancel right after the first frame is exactly the case the operator
+    // wants to send again.
+    const producedText = (frame) => {
+      if (frame?.type === 'message_update') return frame.assistantMessageEvent?.type === 'text_delta' && Boolean(frame.assistantMessageEvent.delta);
+      if (frame?.type === 'message_end') return (frame.message?.content || []).some(part => part?.type === 'text' && String(part.text || '').trim());
+      return false;
+    };
+    const usedTools = (frame) => ['tool_execution_start', 'tool_execution_update', 'tool_execution_end'].includes(frame?.type);
+    let terminal = null;
+    let hasContent = false;
+    for (const event of events) {
+      if (lastUser && event.seq <= lastUser.seq) continue;
+      const frame = event.data?.pi;
+      if (event.type === 'PI_EVENT' && (producedText(frame) || usedTools(frame))) hasContent = true;
+      if (event.type === 'TASK_SUCCEEDED' || (event.type === 'STATUS' && event.data?.status === 'SUCCEEDED')) terminal = 'ok';
+      else if (event.type === 'TASK_FAILED' || event.type === 'TASK_CANCELLED'
+        || (event.type === 'STATUS' && ['FAILED', 'CANCELLED'].includes(event.data?.status))) terminal = 'fail';
+    }
+    if (terminal !== 'fail') {
+      throw Object.assign(new Error('Последний ход завершился успешно — отозвать нельзя.'), { code: 'NOT_ALLOWED' });
+    }
+    if (hasContent) {
+      throw Object.assign(new Error('Модель успела дать ответ — отозвать нельзя, скопируйте сообщение.'), { code: 'NOT_ALLOWED' });
+    }
+    // The truncation must not race with a concurrent event write for this task,
+    // and the TURN_TRUNCATED marker must land after it in the same chain.
+    await this.#truncateFrom(task, fromSeq, { dropInitial: !lastUser, text: lastUser ? (lastUser.data?.text ?? lastUser.message ?? '') : (task.prompt || '') });
+    const text = lastUser ? (lastUser.data?.text ?? lastUser.message ?? '') : (task.prompt || '');
+    return { ok: true, text, fromSeq, dropInitial: !lastUser };
+  }
+
+  // One primitive behind delete and resend: every event from the start of the
+  // chosen exchange on is dropped for good, and a marker tells live clients to
+  // drop the matching turns too. The seq is reused by that marker first, so a
+  // streaming client's cursor never skips past a later event.
+  async #truncateFrom(task, fromSeq, { dropInitial = false, keepUser = false, reason = 'retry', text = null } = {}) {
+    const id = task.id;
+    const prior = this.eventWrites.get(id) || Promise.resolve();
+    // The marker is written at the PRE-truncation high-water mark + 1, not at
+    // `fromSeq`. Clients drop events they have already seen (`seq <= cursor`),
+    // and a live client's cursor sits exactly at that high-water mark — a
+    // marker that reused `fromSeq` was therefore dropped as "already known" and
+    // the rewrite (regenerate / delete / repeat) never reached the screen.
+    // Keeping the seq monotonic is what makes the cursor update carry.
+    const chain = prior.then(async () => {
+      const markerSeq = (await this.store.maxSeq(id)) + 1;
+      await this.store.truncateEvents(id, fromSeq);
+      const message = reason === 'delete' ? 'Сообщение удалено из истории.'
+        : reason === 'regenerate' ? 'Ответ удалён: запрос отправлен заново.'
+        : reason === 'edit' ? 'Сообщение изменено: отправлено заново.'
+        : 'Неудачный ход удалён: сообщение возвращено в поле ввода.';
+      await this.#recordEvent(task, 'TURN_TRUNCATED', message, { fromSeq, dropInitial, keepUser, reason, text }, true, markerSeq);
+    });
+    this.eventWrites.set(id, chain.then(() => {}, () => {}));
+    await chain;
+  }
+
+  // A turn id as the client knows it: `user-12` (the seq of its USER_MESSAGE)
+  // or `user-initial` for the session's first prompt, which has no event of
+  // its own.
+  #turnSequences(turnId) {
+    const value = String(turnId || '');
+    if (value === 'user-initial') return { fromSeq: 1, dropInitial: true, mode: 'initial' };
+    const match = /^user-(\d+)$/.exec(value);
+    if (!match) throw Object.assign(new Error('Неизвестное сообщение.'), { code: 'INPUT_INVALID' });
+    return { fromSeq: Number(match[1]), dropInitial: false, mode: 'seq' };
+  }
+
+  // Deletes a message and everything that came after it. The log is linear, so
+  // a later branch cannot survive its parent — the client warns with the
+  // affected count before calling this.
+  async deleteTurns(id, turnId) {
+    return this.#admit(async () => {
+      const task = this.#mutableTask(id);
+      const { fromSeq, dropInitial, mode } = this.#turnSequences(turnId);
+      const events = await this.store.readEvents(id, 0);
+      if (mode === 'seq' && !events.some(event => event.type === 'USER_MESSAGE' && event.seq === fromSeq)) {
+        throw Object.assign(new Error('Сообщение не найдено в истории.'), { code: 'NOT_FOUND' });
+      }
+      await this.#truncateFrom(task, fromSeq, { dropInitial, reason: 'delete' });
+      return { ok: true, fromSeq, dropInitial };
+    });
+  }
+
+  // Editing the operator's own message is "fix it and run again": the message
+  // keeps its own place in the log (same event, same seq, corrected text), while
+  // everything BELOW it — the answers, their tools, notes — is wiped, and the
+  // edited text is put to the model as a fresh prompt. It is not an in-place
+  // cosmetic correction: the old answer was produced for the old text.
+  async editTurn(id, { turnId, text }) {
+    return this.#admit(() => this.#editTurn(id, turnId, text));
+  }
+
+  async #editTurn(id, turnId, text) {
+    const task = this.#mutableTask(id);
+    const value = String(turnId || '');
+    if (!value.startsWith('user-')) {
+      throw Object.assign(new Error('Переотправить можно только сообщение оператора.'), { code: 'INPUT_INVALID' });
+    }
+    if (typeof text !== 'string') throw Object.assign(new Error('Не передан текст сообщения.'), { code: 'INPUT_INVALID' });
+    const edited = text.trim();
+    if (!edited) throw Object.assign(new Error('Пустое сообщение отправлять нечего.'), { code: 'INPUT_INVALID' });
+    const { fromSeq, dropInitial } = this.#turnSequences(value);
+    if (dropInitial) {
+      // The session's first prompt has no event of its own: it lives in
+      // task.prompt, so that is what gets corrected — and the whole log is cut.
+      await this.#truncateFrom(task, 1, { dropInitial: true, keepUser: true, reason: 'edit', text: edited });
+      task.prompt = edited;
+      await this.store.save(this.#publicTask(task));
+    } else {
+      const own = (await this.store.readEvents(id, 0)).find(event => event.seq === fromSeq);
+      await this.#truncateFrom(task, fromSeq + 1, { keepUser: true, reason: 'edit', text: edited });
+      if (own) await this.store.updateEventData(id, fromSeq, { message: edited, data: { ...(own.data || {}), text: edited } });
+    }
+    // Live clients are told about the corrected text (the row above keeps its
+    // cursor, so their stream would otherwise never notice the change).
+    await this.#event(task, 'TURN_EDITED', 'Сообщение отредактировано и отправлено заново.', { id: value, text: edited, role: 'user' });
+    return this.#message(id, edited, 'auto', [], null, { immediate: true, announce: false });
+  }
+
+  // "Regenerate": the last exchange is dropped — answer, tools and anything
+  // after it — and the very same question is sent to the model again. Unlike
+  // undoLastTurn this is allowed even when the model already answered, because
+  // replacing that answer is the whole point; a finished session is still
+  // required, or the live frames would fight the new run for the same turn.
+  async regenerateLastTurn(id, turnId) {
+    return this.#admit(() => this.#regenerateLastTurn(id, turnId));
+  }
+
+  async #regenerateLastTurn(id, turnId) {
+    const task = this.#mutableTask(id);
+    const events = await this.store.readEvents(id, 0);
+    let lastUser = null;
+    for (const event of events) if (event.type === 'USER_MESSAGE') lastUser = event;
+    // Regenerating only ever touches the newest exchange, and the caller must
+    // name it: "nothing was sent" must never silently re-run a session somebody
+    // else is looking at.
+    const expected = lastUser ? `assistant-${lastUser.seq}` : 'assistant-initial';
+    if (String(turnId || '') !== expected) {
+      throw Object.assign(new Error('Повторить можно только самый новый ответ.'), { code: 'NOT_ALLOWED' });
+    }
+    const fromSeq = lastUser ? lastUser.seq : 1;
+    const text = lastUser ? (lastUser.data?.text ?? lastUser.message ?? '') : (task.prompt || '');
+    if (!String(text).trim()) throw Object.assign(new Error('Пустой запрос — повторять нечего.'), { code: 'INPUT_INVALID' });
+    // Only the ANSWER is rewritten. The operator's message is not erased and not
+    // re-created as a new one: its event stays exactly where it was, and the
+    // prompt is handed to Pi again without announcing a second USER_MESSAGE.
+    await this.#truncateFrom(task, fromSeq + 1, { dropInitial: !lastUser, keepUser: true, reason: 'regenerate', text });
+    // #message directly: the public wrapper would re-enter #admit, which is
+    // single-shot by design.
+    return this.#message(id, text, 'auto', [], null, { immediate: true, announce: false });
+  }
+
+  // "Fork": a new session in the same project whose conversation is a copy of
+  // this one through the chosen exchange. Nothing runs and no model is asked —
+  // the copy is replayed by the client at once, and the fork's first message
+  // rebuilds Pi's session file from those events (session-history.mjs), so the
+  // branch keeps its context. The source is left untouched.
+  async forkTask(id, turnId) {
+    return this.#admit(() => this.#forkTask(id, turnId));
+  }
+
+  async #forkTask(id, turnId) {
+    const source = this.#mutableTask(id);
+    const events = await this.store.readEvents(id, 0);
+    const boundary = this.#forkBoundary(events, turnId);
+    const kept = events.filter(event => event.seq <= boundary);
+    const task = {
+      id: shortId(),
+      createdAt: now(),
+      updatedAt: now(),
+      status: 'SUCCEEDED',
+      queueReason: null,
+      projectId: source.projectId,
+      prompt: source.prompt,
+      title: source.title ? `${source.title} (ветка)` : null,
+      // The workspace is prepared when the first message of the fork runs, so a
+      // worktree project gets its own checkout instead of sharing one.
+      workspacePath: null,
+      sourcePath: null,
+      worktree: false,
+      current: 'Ветка',
+      assistantText: '',
+      thinkingText: '',
+      error: null,
+      errorCode: null,
+      engine: source.engine,
+      requestedModel: source.requestedModel,
+      thinkingLevel: source.thinkingLevel,
+      mcp: source.mcp,
+      verification: null,
+      git: null,
+      compaction: { count: 0, last: null },
+      lastUsage: null,
+      metrics: null,
+      model: source.model,
+      autoCompactionEnabled: null,
+      files: [],
+      attachments: [],
+      outputFiles: [],
+      forkedFrom: id
+    };
+    await this.store.create(task);
+    this.tasks.set(task.id, task);
+    for (const event of kept) await this.store.appendEvent(task.id, { ...event, taskId: task.id });
+    await this.#event(task, 'TASK_FORKED', `Ветка сессии ${id}: перенесено ходов — ${kept.length}.`, { from: id, throughSeq: boundary });
+    return this.#publicTask(task);
+  }
+
+  // Where a fork stops: the end of the chosen exchange. "user-<seq>" and
+  // "assistant-<seq>" name the same exchange (the message that started it and
+  // the answer it got), and the copy stops just before the next message in
+  // either case — so it always ends on a settled answer, never on a question
+  // nobody has asked yet.
+  #forkBoundary(events, turnId) {
+    const value = String(turnId || '');
+    if (value === 'user-initial' || value === 'assistant-initial') {
+      const first = events.find(event => event.type === 'USER_MESSAGE');
+      return first ? first.seq - 1 : Number.MAX_SAFE_INTEGER;
+    }
+    const match = /^(?:user|assistant)-(\d+)$/.exec(value);
+    if (!match) throw Object.assign(new Error('Ответвить можно только от сообщения или ответа.'), { code: 'INPUT_INVALID' });
+    const fromSeq = Number(match[1]);
+    if (!events.some(event => event.type === 'USER_MESSAGE' && event.seq === fromSeq)) {
+      throw Object.assign(new Error('Ход не найден в истории.'), { code: 'NOT_FOUND' });
+    }
+    const next = events.find(event => event.type === 'USER_MESSAGE' && event.seq > fromSeq);
+    return next ? next.seq - 1 : Number.MAX_SAFE_INTEGER;
+  }
+
+  // Shared guard for history mutations: the session must exist and must not be
+  // working right now (editing the answer that is streaming would fight the
+  // live frames for the same turn). The status is what says so — every working
+  // phase (QUEUED…CANCELLING, VERIFYING) is non-terminal. `activeTaskId` is NOT
+  // used as an extra guard: it stays set through the async finalizer, so right
+  // after an answer lands it refused edits for a moment even though nothing was
+  // writing history any more.
+  #mutableTask(id) {
+    const task = this.tasks.get(id);
+    if (!task || this.deleted.has(id)) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    if (!RUN_TERMINAL.has(task.status)) {
+      throw Object.assign(new Error('Сессия сейчас работает — дождитесь завершения.'), { code: 'NOT_ALLOWED' });
+    }
+    return task;
+  }
+
+  async #cancel(id, { keepPending = false } = {}) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
-    // A queued prompt is dropped with the task, on either cancel path.
-    this.#releasePendingFiles(task.pendingPrompts);
-    task.pendingPrompts = null;
-    task.queueReason = null;
-    this.queue = this.queue.filter(x => x !== id);
+    // A queued prompt is dropped with the task, on either cancel path — unless
+    // the cancel is only interrupting a generation (Ctrl+Enter / «Отправить
+    // сейчас»), where the operator's queue must survive.
+    if (keepPending) {
+      if ((task.pendingPrompts || []).length && !this.queue.includes(id)) this.queue.push(id);
+    } else {
+      this.#releasePendingFiles(task.pendingPrompts);
+      task.pendingPrompts = null;
+      task.queueReason = null;
+      this.queue = this.queue.filter(x => x !== id);
+    }
     if (!runtime) {
       task.status = 'CANCELLED';
       task.current = 'Cancelled';
@@ -1467,15 +1771,43 @@ export class TaskManager extends EventEmitter {
   // second time; the same id with different content is a CONFLICT.
   async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
-    if (!commandId) {
-      return this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true }));
-    }
+    // Ctrl+Enter («вклиниться сразу»): the text must reach the model now, not
+    // after the reasoning block in flight ends, so the generation is stopped
+    // first (see #interruptGeneration).
+    const send = async () => {
+      if (opts.now === true) await this.#interruptGeneration(id);
+      return this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true });
+    };
+    if (!commandId) return this.#admit(send);
     return this.#withCommand(
       commandId,
       opts && opts.clientId ? String(opts.clientId) : null,
       () => this.#payloadHash(id, text, mode, files, uploadToken),
-      async () => this.#admit(() => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true })),
+      () => this.#admit(send),
     );
+  }
+
+  // True while a tool call has started and has not reported back yet.
+  #toolsInFlight(id) {
+    for (const key of this.toolLogs.keys()) if (key.startsWith(`${id}:`)) return true;
+    return false;
+  }
+
+  // "Send now" has to beat a long reasoning block: Pi injects a steer only
+  // between messages, so text sent while the model is thinking would sit until
+  // that block ends and only then reach the model. Stopping the generation in
+  // flight makes the operator's message the very next thing Pi sees. A tool
+  // call in flight is never interrupted — aborting there leaves half-applied
+  // side effects on disk — and in that case the text simply steers, as before.
+  async #interruptGeneration(id) {
+    const live = this.runtimes.get(id);
+    if (!live || live.pi.closed || !this.tasks.get(id)) return false;
+    const state = await live.pi.getState().catch(() => null);
+    if (!state?.isStreaming || this.#toolsInFlight(id)) return false;
+    // The prompts already queued for this session survive the interrupt: the
+    // operator asked to cut in, not to drop their queue.
+    await this.#cancel(id, { keepPending: true });
+    return true;
   }
 
   // Returns an idempotency guard around `fn`. If `commandId` is new it records
@@ -1593,7 +1925,12 @@ export class TaskManager extends EventEmitter {
       }
       // Like Ctrl+Enter, "сейчас" is allowed to try even when the model looks
       // busy (the flag can be stale): if the attempt fails, `restore` below puts
-      // the prompt back at the front of the queue.
+      // the prompt back at the front of the queue. A generation in flight is
+      // stopped first, so the message is not queued behind the model's current
+      // reasoning block.
+      // "Сейчас" must not sit behind the model's current reasoning block, so a
+      // generation in flight is stopped before the queue is touched.
+      await this.#interruptGeneration(id).catch(() => false);
       const { pending, restore } = await this.#takePending(task);
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
       try {
@@ -1636,7 +1973,7 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [] } = {}) {
+  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -1746,7 +2083,9 @@ export class TaskManager extends EventEmitter {
       task.retryable = task.retryAfterMs = null;
       if (!staged.length) task.attachments = [...(task.attachments || []), ...attached];
       await this.store.save(this.#publicTask(task));
-      await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
+      // announce:false = the message is already in history (regeneration), so a
+      // second USER_MESSAGE would show the operator's own line twice.
+      if (announce) await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
     } catch (error) {
       if (!accepted && !staged.length) await rollbackFiles(task, this.store.taskDir(id), attached);
@@ -1882,10 +2221,11 @@ export class TaskManager extends EventEmitter {
     return next;
   }
 
-  async #recordEvent(task, type, message, data, persistTask) {
+  async #recordEvent(task, type, message, data, persistTask, seq = null) {
     if (this.deleted.has(task.id)) return;
     const event = { at: now(), taskId: task.id, type, message, data };
-    await this.store.appendEvent(task.id, event);
+    if (seq === null) await this.store.appendEvent(task.id, event);
+    else await this.store.appendEventAt(task.id, seq, event);
     if (persistTask) {
       task.updatedAt = event.at;
       await this.store.save(this.#publicTask(task)).catch(() => {});

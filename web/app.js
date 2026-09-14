@@ -98,9 +98,37 @@ function botBadge() {
 }
 
 const IMAGE_MIME_RE = /^image\//;
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+
+// An attached file is treated as a picture when the server said its MIME type is
+// an image or, failing that, when the name carries a known image extension.
+function isImageFile(file) {
+  if (!file || typeof file !== 'object') return false;
+  return (typeof file.mimeType === 'string' && IMAGE_MIME_RE.test(file.mimeType))
+    || IMAGE_EXT_RE.test(String(file.name || ''));
+}
 
 function fileUrl(taskId, fileId, download) {
   return `/api/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileId)}${download ? '?download=1' : ''}`;
+}
+
+// Renders an uploaded image inline in the conversation instead of only a chip,
+// so a picture sent to the chat is actually visible. Uses the same endpoint the
+// download chip points at, which serves the file inline for image types.
+function imagePreview(file, taskId) {
+  if (!isImageFile(file) || !file.id) return null;
+  const link = document.createElement('a');
+  link.href = fileUrl(taskId, file.id, false);
+  link.target = '_blank';
+  link.rel = 'noopener';
+  link.className = 'chatImage';
+  link.title = file.name;
+  const img = document.createElement('img');
+  img.src = fileUrl(taskId, file.id, false);
+  img.alt = file.name;
+  img.loading = 'lazy';
+  link.append(img);
+  return link;
 }
 
 function fileCard(file, taskId) {
@@ -113,9 +141,11 @@ function fileCard(file, taskId) {
   open.textContent = `📎 ${file.name}`;
   const download = document.createElement('a');
   download.href = fileUrl(taskId, file.id, true);
-  download.textContent = '⭳';
+  download.className = 'downloadIcon';
   download.title = 'Скачать';
   download.setAttribute('aria-label', `Скачать ${file.name}`);
+  // Inline SVG, not the glyph U+2B73: that rare codepoint is missing from many fonts and rendered as a tofu box instead of a download arrow.
+  download.append(messageIcon('download'));
   card.append(open, download);
   return card;
 }
@@ -130,19 +160,21 @@ function renderOutputFiles(files) {
 // One copy button for every message — Pi's answers and the operator's own
 // lines alike (a prompt is often repeated or moved to another session). The
 // text is read at click time from `_text`, so a streaming turn copies what is
-// on screen now.
+// on screen now. The mark is the same inline SVG as the other message icons;
+// on click it becomes a check or a cross for a moment as feedback.
 function copyButton(text = '', label = 'Скопировать сообщение') {
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'copyBtn';
-  btn.textContent = '📋';
   btn.title = label;
   btn.setAttribute('aria-label', label);
   btn._text = text;
+  const show = name => { btn.textContent = ''; btn.append(messageIcon(name)); };
+  show('copy');
   btn.onclick = async () => {
     const ok = await copyText(btn._text || '');
-    btn.textContent = ok ? '✓' : '✕';
-    setTimeout(() => { btn.textContent = '📋'; }, 1200);
+    show(ok ? 'check' : 'cross');
+    setTimeout(() => show('copy'), 1200);
   };
   return btn;
 }
@@ -160,13 +192,23 @@ function appendUserTurn(text, files = [], before = null) {
   if (files.length && selectedTaskId) {
     const list = document.createElement('div');
     list.className = 'attachedFiles';
-    for (const f of files) list.append(f.id ? fileCard(f, selectedTaskId) : Object.assign(document.createElement('span'), { className: 'fileChip', textContent: `📎 ${f.name}` }));
+    for (const f of files) {
+      const preview = f.id ? imagePreview(f, selectedTaskId) : null;
+      if (preview) body.append(preview);
+      list.append(f.id ? fileCard(f, selectedTaskId) : Object.assign(document.createElement('span'), { className: 'fileChip', textContent: `📎 ${f.name}` }));
+    }
     body.append(list);
   }
-  body.append(copyButton(text, 'Скопировать сообщение'));
+  // Copy and any message actions (edit/fork/drop) share one row, so the copy
+  // button is not stranded on a line above the rest of the icons.
+  const msgActions = document.createElement('div');
+  msgActions.className = 'msgActions';
+  msgActions.append(copyButton(text, 'Скопировать сообщение'));
+  body.append(msgActions);
   turn.append(body);
   $('msgsInner').insertBefore(turn, before);
   if (!before) scrollBottom();
+  return turn;
 }
 
 function reasoningEl(text) {
@@ -225,6 +267,23 @@ function updateThinking() {
 
 const TYPING_HTML = '<div class="typing"><i></i><i></i><i></i></div>';
 
+// The turn OBJECT was replaced (a rewritten answer keeps the same id but is a
+// new object), so everything that belonged to the previous answer has to go:
+// its tool chips above all, or a regenerated reply would still show the old
+// commands. `.reasoning`, inline images and the error line go with them.
+function resetTurnDom(node) {
+  for (const chip of (node.tools || new Map()).values()) chip.remove();
+  node.tools = new Map();
+  if (node.body) {
+    node.body.querySelector(':scope > .reasoning')?.remove();
+    for (const stale of [...node.body.querySelectorAll(':scope > .tool, :scope > .chatImage')]) stale.remove();
+  }
+  node.md?.querySelector('.turnError')?.remove();
+  if (node.copyBtn) node.copyBtn._text = '';
+  // Force the next comparison to see "everything changed".
+  node.text = node.thinking = node.status = node.error = node.active = undefined;
+}
+
 function updateText() {
   if (!liveTurn) return;
   const text = liveText.trim();
@@ -232,8 +291,6 @@ function updateText() {
   else liveTurn.md.innerHTML = liveActive ? TYPING_HTML : '<span class="muted">Ответ не был получен.</span>';
   scrollBottom();
 }
-
-const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 
 function toolIcon(state) {
   return state === 'run' ? '…' : state === 'error' ? '✕' : '✓';
@@ -256,6 +313,80 @@ function appendInlineImage(relPath) {
   scrollBottom();
 }
 
+/* ---------------- image context menu ---------------- */
+
+// A single click on a chat picture opens the same kind of menu the browser
+// shows on a long press (view / save / copy link), instead of navigating away.
+// The menu is a light DOM popup positioned at the tap point.
+let imageMenu = null;
+
+function closeImageMenu() {
+  if (!imageMenu) return;
+  imageMenu.remove();
+  imageMenu = null;
+}
+
+function imageMenuItems(src, alt) {
+  const downloadUrl = `${src}${src.includes('?') ? '&' : '?'}download=1`;
+  const absolute = new URL(src, location.href).href;
+  return [
+    ['Посмотреть', () => { if (window.open) window.open(absolute, '_blank', 'noopener'); }],
+    ['Скачать', () => {
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      if (alt) a.download = alt;
+      document.body.append(a);
+      a.click();
+      a.remove();
+    }],
+    ['Копировать ссылку', () => { copyText(absolute); }]
+  ];
+}
+
+function openImageMenu(x, y, src, alt = '') {
+  closeImageMenu();
+  const menu = document.createElement('div');
+  menu.className = 'imageMenu';
+  menu.setAttribute('role', 'menu');
+  for (const [label, action] of imageMenuItems(src, alt)) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'imageMenuItem';
+    item.setAttribute('role', 'menuitem');
+    item.textContent = label;
+    item.onclick = () => { closeImageMenu(); action(); };
+    menu.append(item);
+  }
+  document.body.append(menu);
+  // Keep the popup inside the viewport; linkedom has no layout, so fall back
+  // to the raw tap point when the measurements are unavailable.
+  const width = menu.getBoundingClientRect().width || 0;
+  const height = menu.getBoundingClientRect().height || 0;
+  const vw = window.innerWidth || 0;
+  const vh = window.innerHeight || 0;
+  menu.style.left = `${Math.max(8, width && vw ? Math.min(x, vw - width - 8) : x)}px`;
+  menu.style.top = `${Math.max(8, height && vh ? Math.min(y, vh - height - 8) : y)}px`;
+  imageMenu = menu;
+}
+
+// Any chat image served by the workspace/files API gets the menu. Event
+// delegation keeps this working for images added later (streaming, history).
+document.addEventListener('click', (event) => {
+  if (imageMenu && imageMenu.contains(event.target)) return;
+  const target = event.target;
+  if (target && target.tagName === 'IMG') {
+    const src = target.getAttribute('src') || '';
+    if (src.includes('/api/tasks/')) {
+      event.preventDefault();
+      openImageMenu(event.clientX || 0, event.clientY || 0, src, target.getAttribute('alt') || target.getAttribute('title') || '');
+      return;
+    }
+  }
+  closeImageMenu();
+});
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeImageMenu(); });
+
+
 function appendSystemNote(text, before = null) {
   hideEmptyState();
   const note = document.createElement('div');
@@ -263,6 +394,7 @@ function appendSystemNote(text, before = null) {
   note.textContent = text;
   $('msgsInner').insertBefore(note, before);
   if (!before) scrollBottom();
+  return note;
 }
 
 function renderContext(t) {
@@ -284,6 +416,9 @@ function renderContext(t) {
     $('usage').textContent = `${used.toLocaleString('ru-RU')} ток.`;
     bar.classList.add('hidden');
   }
+  // TG is measured from the model's own usage (web/app.js receives task.metrics),
+  // so it is shown for cloud models too — the only speed they expose.
+  if (t.metrics?.tg != null) $('usage').textContent += ` · TG ${fmtMetric(t.metrics.tg)} tok/s`;
 
   const autoBtn = $('autoCompaction');
   if (t.autoCompactionEnabled == null || t.sessionAvailable === false) {
@@ -325,7 +460,7 @@ function setComposerMode(taskId) {
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
   const hint = isTouchDevice()
     ? 'Enter — перенос строки, отправка — кнопкой.'
-    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — вклиниться сразу, Shift+Enter — перенос строки.';
+    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — вклиниться сразу (прервёт текущий ответ, если инструмент не выполняется), Shift+Enter — перенос строки.';
   promptEl.placeholder = continuing
     ? `Сообщение продолжит текущую сессию. ${hint}`
     : `Сообщение для Pi. ${hint}`;
@@ -403,26 +538,49 @@ function startNewTask({ replace = false } = {}) {
 
 function renderChat() {
   if (!chatState) return;
+  // TURN_TRUNCATED (repeat message) removes turns from chatState; their DOM
+  // nodes must go with them, or the retracted exchange stays on screen.
+  for (const [id, node] of [...turnNodes]) {
+    if (!chatState.turns.some(t => t.id === id)) {
+      (node.wrap || node.turn)?.remove();
+      turnNodes.delete(id);
+    }
+  }
+  const newest = newestTurn();
   for (const turn of chatState.turns) {
     let node = turnNodes.get(turn.id);
     if (!node) {
       if (turn.role === 'user') {
-        appendUserTurn(turn.text, turn.files);
-        turnNodes.set(turn.id, {});
+        node = { wrap: appendUserTurn(turn.text, turn.files), text: turn.text };
+        turnNodes.set(turn.id, node);
+      } else if (turn.role === 'note') {
+        turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text) });
         continue;
+      } else {
+        liveText = liveThinking = '';
+        liveActive = false;
+        appendBotTurn();
+        node = { ...liveTurn, tools: new Map() };
+        turnNodes.set(turn.id, node);
       }
-      if (turn.role === 'note') {
-        appendSystemNote(turn.text);
-        turnNodes.set(turn.id, {});
-        continue;
+    }
+    // The operator's line is checked on every pass, not only when it is first
+    // created: an edited message keeps its id, so the node is reused and its text
+    // has to be refreshed (a user bubble is never rebuilt from the turn object).
+    if (turn.role === 'user') {
+      if (node.text !== turn.text) {
+        const bubble = node.wrap.querySelector('.msg.s-me');
+        if (bubble) bubble.textContent = turn.text;
+        const copy = node.wrap.querySelector('.copyBtn');
+        if (copy) copy._text = turn.text;
+        node.text = turn.text;
       }
-      liveText = liveThinking = '';
-      liveActive = false;
-      appendBotTurn();
-      node = { ...liveTurn, tools: new Map() };
-      turnNodes.set(turn.id, node);
+      updateTurnActions(node, turn, turn === newest);
+      continue;
     }
     if (turn.role !== 'assistant') continue;
+    if (node.turnRef && node.turnRef !== turn) resetTurnDom(node);
+    node.turnRef = turn;
     liveTurn = node;
     liveText = turn.text;
     liveThinking = turn.thinking;
@@ -440,6 +598,7 @@ function renderChat() {
       node.active = turn.active;
       node.error = turn.error;
     }
+    updateTurnFailureActions(node, turn);
     if (node.thinking !== turn.thinking) {
       updateThinking();
       node.thinking = turn.thinking;
@@ -476,8 +635,280 @@ function renderChat() {
       node.meta.textContent = turn.status || '';
       node.status = turn.status;
     }
+    updateTurnActions(node, turn, turn === newest);
   }
   scrollBottom();
+}
+
+/* ---------------- repeat a failed message ---------------- */
+
+// The resend offer lives only on the exchange that failed last — a failure
+// buried under newer messages cannot be retracted. And when the model already
+// produced text or ran tools, the turn cannot be retracted at all (its output
+// would be lost forever): only copying the message into the composer is
+// offered then.
+function updateTurnFailureActions(node, turn) {
+  if (turn !== chatState.current) return; // only the newest exchange can be retracted
+  const status = currentTask?.status;
+  if (!turn.error && !['FAILED', 'CANCELLED'].includes(status)) return;
+  let lastReal = chatState.turns.length - 1;
+  while (lastReal >= 0 && chatState.turns[lastReal].role === 'note') lastReal--;
+  const visible = ['FAILED', 'CANCELLED'].includes(status)
+    && chatState.turns[lastReal] === turn;
+  if (!node.failureActions) {
+    if (!visible) return;
+    let userTurn = null;
+    for (let i = lastReal - 1; i >= 0; i--) {
+      if (chatState.turns[i].role === 'user') { userTurn = chatState.turns[i]; break; }
+    }
+    if (!userTurn) return;
+    // "Nothing was produced" = no visible answer and no tool call. Reasoning
+    // alone must not block a retry: a cancelled run that got as far as
+    // thinking still left the operator with an empty bubble.
+    const clean = !turn.text && !turn.tools.length;
+    const actions = document.createElement('div');
+    actions.className = 'turnActions';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'small';
+    button.textContent = clean ? '↻ Повторить сообщение' : '⧉ Скопировать сообщение';
+    button.title = clean
+      ? 'Удалить этот ход из истории и вернуть сообщение в поле ввода'
+      : 'Модель успела ответить — можно только вернуть текст сообщения в поле ввода';
+    button.onclick = () => clean ? resendFailedTurn() : copyToComposer(userTurn.text);
+    actions.append(button);
+    node.md.append(actions);
+    node.failureActions = actions;
+  }
+  node.failureActions.classList.toggle('hidden', !visible);
+}
+
+function copyToComposer(text) {
+  promptEl.value = text || '';
+  promptEl.style.height = 'auto';
+  updateClearButton();
+  if (!isTouchDevice()) promptEl.focus();
+}
+
+async function resendFailedTurn() {
+  if (!selectedTaskId) return;
+  try {
+    const result = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/undo-last-turn`, { method: 'POST', body: '{}' });
+    copyToComposer(result.text);
+    await refreshTask();
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
+}
+
+/* ---------------- message actions: fix in place, drop, branch, repeat ---------------- */
+
+// Icons on every settled message: a pencil fixes the text without asking the
+// model again, a branch mark forks a new session from this message, a trash can
+// drops the message with everything that followed it, and a refresh re-runs the
+// newest answer. All four are inline SVG marks (see messageIcon), not emoji: an
+// emoji ignores the theme colour, changes size with the font and can read as the
+// wrong thing (🌿 was a herb, not a fork). They need a finished session — the
+// server refuses to rewrite history while a run is in flight, so the whole bar is
+// hidden on the streaming turn.
+function updateTurnActions(node, turn, isNewest) {
+  if (!node || turn.role === 'note') return;
+  const element = node.wrap || node.turn;
+  if (element) element.dataset.turnId = turn.id;
+  if (!node.actionBar) {
+    // Operator messages group the icons into the row that already holds copy;
+    // answers put them into the meta row next to the copy button.
+    const host = turn.role === 'user' ? (element && element.querySelector('.msgActions')) : node.metaRow;
+    if (!host) return;
+    const bar = document.createElement('span');
+    bar.className = 'turnActionBar';
+    node.buttons = {};
+    if (turn.role === 'user') {
+      // Editing re-sends: the text is corrected, everything below it is wiped and
+      // the model is asked again — so this action lives on the operator's own
+      // line only (an answer is re-run, never edited in place).
+      node.buttons.edit = turnAction('edit', messageIcon('edit'), 'Изменить и отправить заново', () => beginEditTurn(node, turn));
+      node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Ответвить новую сессию от этого сообщения', () => forkTurn(turn));
+      node.buttons.drop = turnAction('drop', messageIcon('drop'), 'Удалить это сообщение и всё после него', () => deleteTurn(turn));
+      bar.append(node.buttons.edit, node.buttons.fork, node.buttons.drop);
+    } else {
+      // An answer is a branch point too — "continue differently from here" —
+      // and both ends of an exchange name the same fork.
+      node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Ответвить новую сессию от этого ответа', () => forkTurn(turn));
+      node.buttons.regen = turnAction('regen', messageIcon('regen'), 'Перегенерировать ответ', () => regenerateTurn(turn));
+      bar.append(node.buttons.fork, node.buttons.regen);
+    }
+    host.append(bar);
+    node.actionBar = bar;
+  }
+  // A message that is still streaming cannot be edited, dropped or branched:
+  // the server refuses to rewrite history while a run is in flight.
+  const busy = turn.active === true;
+  node.actionBar.classList.toggle('hidden', busy);
+  node.buttons.fork?.classList.toggle('hidden', busy);
+  node.buttons.drop?.classList.toggle('hidden', busy);
+  // Regenerating only ever touches the newest answer.
+  node.buttons.regen?.classList.toggle('hidden', busy || isNewest !== true);
+}
+
+// The newest turn that is not an internal note — the only one "regenerate" may touch.
+function newestTurn() {
+  if (!chatState) return null;
+  for (let i = chatState.turns.length - 1; i >= 0; i--) {
+    if (chatState.turns[i].role !== 'note') return chatState.turns[i];
+  }
+  return null;
+}
+
+// Every icon in a message row is an inline SVG mark, not an emoji glyph: an
+// emoji ignores the theme colour (currentColor), changes size with the font, and
+// can read as the wrong thing (🌿 was a herb, not a fork). The action marks are
+// Feather's edit-3, git-branch, trash-2 and refresh-cw, so the whole bar shares
+// one stroke weight and colour and scales with the button's font-size (1em);
+// copy, check and cross are the clipboard icon and its copy feedback.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const MESSAGE_ICONS = {
+  edit: [['path', { d: 'M12 20h9' }], ['path', { d: 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z' }]],
+  fork: [['path', { d: 'M6 3v12' }], ['circle', { cx: '18', cy: '6', r: '3' }], ['circle', { cx: '6', cy: '18', r: '3' }], ['path', { d: 'M18 9a9 9 0 0 1-9 9' }]],
+  drop: [['polyline', { points: '3 6 5 6 21 6' }], ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }], ['line', { x1: '10', y1: '11', x2: '10', y2: '17' }], ['line', { x1: '14', y1: '11', x2: '14', y2: '17' }]],
+  regen: [['polyline', { points: '23 4 23 10 17 10' }], ['polyline', { points: '1 20 1 14 7 14' }], ['path', { d: 'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15' }]],
+  copy: [['rect', { x: '9', y: '9', width: '13', height: '13', rx: '2', ry: '2' }], ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }]],
+  check: [['polyline', { points: '20 6 9 17 4 12' }]],
+  cross: [['line', { x1: '18', y1: '6', x2: '6', y2: '18' }], ['line', { x1: '6', y1: '6', x2: '18', y2: '18' }]],
+  download: [['polyline', { points: '21 15 21 19 21 19 3 19 3 15' }], ['line', { x1: '7', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '17', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '12', y1: '15', x2: '12', y2: '3' }]]
+};
+function messageIcon(name) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '1em');
+  svg.setAttribute('height', '1em');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  for (const [tag, attrs] of MESSAGE_ICONS[name] || []) {
+    const el = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) el.setAttribute(key, value);
+    svg.append(el);
+  }
+  return svg;
+}
+
+function turnAction(action, icon, label, onclick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'actionBtn';
+  button.dataset.action = action;
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  if (typeof icon === 'string') button.textContent = icon;
+  else button.append(icon);
+  button.onclick = onclick;
+  return button;
+}
+
+async function regenerateTurn(turn) {
+  if (!selectedTaskId) return;
+  if (!confirm('Перегенерировать ответ? Текущий ответ и всё, что после него, будут удалены.')) return;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/regenerate`, {
+      method: 'POST', body: JSON.stringify({ turnId: turn.id })
+    });
+    await refreshTask();
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
+}
+
+// A fork is a session of its own: the server copies the conversation through
+// this message, then we open it so the operator can continue differently.
+async function forkTurn(turn) {
+  if (!selectedTaskId) return;
+  try {
+    const created = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/fork`, {
+      method: 'POST', body: JSON.stringify({ turnId: turn.id })
+    });
+    await loadTasks();
+    await selectTask(created.id);
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
+}
+
+function beginEditTurn(node, turn) {
+  if (!selectedTaskId) return;
+  const element = node.wrap || node.turn;
+  const host = turn.role === 'user' ? (element && element.querySelector('.body')) : node.body;
+  const view = turn.role === 'user' ? (element && element.querySelector('.msg.s-me')) : node.bubble;
+  if (!host || !view || host.querySelector('.editBox')) return;
+  const box = document.createElement('div');
+  box.className = 'editBox';
+  const area = document.createElement('textarea');
+  area.className = 'editArea';
+  area.value = turn.text ?? view.textContent ?? '';
+  const row = document.createElement('div');
+  row.className = 'editRow';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'small';
+  save.textContent = 'Сохранить';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'small';
+  cancel.textContent = 'Отмена';
+  const note = document.createElement('span');
+  note.className = 'muted small';
+  row.append(save, cancel, note);
+  box.append(area, row);
+  view.classList.add('hidden');
+  host.insertBefore(box, view.nextSibling);
+  const close = () => { box.remove(); view.classList.remove('hidden'); };
+  cancel.onclick = close;
+  save.onclick = async () => {
+    const newText = area.value;
+    // Close at once — the server may take a while to start the run — and reopen
+    // only if the request is refused, so the typed text is never lost.
+    close();
+    save.disabled = true;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/turns/${encodeURIComponent(turn.id)}/edit`, {
+        method: 'POST', body: JSON.stringify({ text: newText })
+      });
+      turn.text = newText; // instant; the server stores exactly this text
+      // Everything below this message was wiped and the model was asked again:
+      // the stream and this refresh bring the new answer in.
+      await refreshTask();
+    } catch (error) {
+      area.value = newText;
+      view.classList.add('hidden');
+      host.insertBefore(box, view.nextSibling);
+      save.disabled = false;
+      note.textContent = error.message;
+    }
+  };
+  area.focus();
+}
+
+async function deleteTurn(turn) {
+  if (!selectedTaskId || !chatState) return;
+  const index = chatState.turns.findIndex(candidate => candidate.id === turn.id);
+  const after = index >= 0 ? chatState.turns.length - index - 1 : 0;
+  const question = after > 0
+    ? `Удалить это сообщение и ещё ${after} после него? Восстановить нельзя.`
+    : 'Удалить это сообщение? Восстановить нельзя.';
+  if (!confirm(question)) return;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/turns/${encodeURIComponent(turn.id)}/delete`, { method: 'POST', body: '{}' });
+    await refreshTask();
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
 }
 
 function applyEvents(events) {
@@ -612,7 +1043,7 @@ function renderSettledTurn(turn, before) {
   meta.textContent = turn.status || '';
 
   $('msgsInner').insertBefore(wrap, before);
-  return { body, bubble, md, meta, metaRow, copyBtn, tools, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
+  return { wrap, body, bubble, md, meta, metaRow, copyBtn, tools, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
 }
 
 function renderPrependedTurns(turns) {
@@ -622,9 +1053,16 @@ function renderPrependedTurns(turns) {
   const reference = loadOlderBtn ? loadOlderBtn.nextSibling : $('msgsInner').firstChild;
   for (const turn of turns) {
     if (turnNodes.has(turn.id)) continue;
-    if (turn.role === 'user') { appendUserTurn(turn.text, turn.files, reference); turnNodes.set(turn.id, {}); continue; }
-    if (turn.role === 'note') { appendSystemNote(turn.text, reference); turnNodes.set(turn.id, {}); continue; }
-    turnNodes.set(turn.id, renderSettledTurn(turn, reference));
+    if (turn.role === 'user') {
+      const userNode = { wrap: appendUserTurn(turn.text, turn.files, reference), text: turn.text };
+      turnNodes.set(turn.id, userNode);
+      updateTurnActions(userNode, turn, false);
+      continue;
+    }
+    if (turn.role === 'note') { turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, reference) }); continue; }
+    const settled = renderSettledTurn(turn, reference);
+    turnNodes.set(turn.id, settled);
+    updateTurnActions(settled, turn, false);
   }
 }
 
@@ -900,6 +1338,7 @@ function renderQueuedPrompt() {
   send.type = 'button';
   send.className = 'small';
   send.textContent = 'Отправить сейчас';
+  send.title = 'Прервать текущий ответ и отправить это сообщение сразу';
   send.onclick = () => actOnPending('send');
   const drop = document.createElement('button');
   drop.type = 'button';
@@ -1391,6 +1830,24 @@ function rewriteMarkdownLinks(container) {
     if (!href || href.startsWith('#')) continue;
     if (isExternalUrl(href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; continue; }
     if (href.startsWith('/')) { a.removeAttribute('href'); continue; }
+    // A relative link to a picture is an image the model is showing, not a file
+    // to save: render it inline (clicking still opens the full picture) instead
+    // of handing the operator a download link.
+    if (IMAGE_EXT_RE.test(href)) {
+      const inline = workspaceFileUrl(href, false);
+      if (!inline) { a.removeAttribute('href'); continue; }
+      const label = a.textContent || href;
+      a.textContent = '';
+      const img = document.createElement('img');
+      img.src = inline;
+      img.alt = label;
+      img.loading = 'lazy';
+      a.append(img);
+      a.href = inline;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      continue;
+    }
     const url = workspaceFileUrl(href, true);
     if (url) { a.href = url; a.target = '_blank'; a.rel = 'noopener'; } else a.removeAttribute('href');
   }
@@ -2543,6 +3000,69 @@ function renderWarnings(warnings) {
   el.classList.toggle('hidden', !text);
 }
 
+function fmtMetric(value, digits = 1) {
+  return value == null || !Number.isFinite(Number(value))
+    ? '—'
+    : Number(value).toLocaleString('ru-RU', { maximumFractionDigits: digits });
+}
+
+const mbToGb = mb => (mb == null ? null : mb / 1024);
+
+// Live PC + model state: the answer to "is the machine the reason the model is
+// slow?". Nothing is invented — a field without data says so (TZ v3 §13).
+function renderSysState(info) {
+  const el = $('sysState');
+  const body = $('sysStateBody');
+  if (!el || !body) return;
+  const sys = info.system || null;
+  const engine = info.engine || {};
+  const metrics = engine.metrics;
+  const lines = [];
+
+  if (engine.configured) lines.push(`Модель: ${engine.model || 'не загружена'}`);
+
+  const ram = sys?.ram;
+  if (ram) lines.push(`RAM: ${fmtMetric(mbToGb(ram.used))} / ${fmtMetric(mbToGb(ram.total))} GB (${Math.round(ram.ratio * 100)}%)`);
+  const cpu = sys?.cpu;
+  if (cpu) lines.push(`CPU: ${cpu.load == null ? '—' : `${Math.round(cpu.load * 100)}%`} (${cpu.cores} ядер)`);
+  const gpus = sys?.gpu;
+  if (Array.isArray(gpus) && gpus.length) {
+    for (const gpu of gpus) {
+      const mem = gpu.memoryUsedMb != null && gpu.memoryTotalMb != null
+        ? `${fmtMetric(mbToGb(gpu.memoryUsedMb))} / ${fmtMetric(mbToGb(gpu.memoryTotalMb))} GB`
+        : '—';
+      const power = gpu.powerDrawW != null
+        ? `${fmtMetric(gpu.powerDrawW, 0)} W${gpu.powerLimitW != null ? ` / ${fmtMetric(gpu.powerLimitW, 0)} W` : ''}`
+        : '—';
+      lines.push(`GPU${gpu.name ? ` (${gpu.name})` : ''}: ${mem} · ${gpu.utilization != null ? `${gpu.utilization}%` : '—'} · ${power}${gpu.temperatureC != null ? ` · ${gpu.temperatureC} °C` : ''}`);
+    }
+  } else {
+    lines.push('GPU: нет данных (nvidia-smi недоступен)');
+  }
+
+  const compact = [];
+  if (Array.isArray(gpus) && gpus.length && gpus[0].utilization != null) compact.push(`GPU ${gpus[0].utilization}%`);
+  if (cpu?.load != null) compact.push(`CPU ${Math.round(cpu.load * 100)}%`);
+  if (ram) compact.push(`RAM ${Math.round(ram.ratio * 100)}%`);
+
+  el.classList.toggle('hidden', !sys);
+  el.querySelector('summary').textContent = compact.length ? compact.join(' · ') : 'Система —';
+  body.textContent = lines.join('\n');
+
+  // Live line right above the composer: speeds only.
+  const live = $('liveMetrics');
+  if (live) {
+    const parts = [];
+    if (metrics && metrics.available) {
+      if (metrics.pp != null) parts.push(`PP ${fmtMetric(metrics.pp)}`);
+      if (metrics.tg != null) parts.push(`TG ${fmtMetric(metrics.tg)} tok/s`);
+    }
+    const liveText = parts.join(' · ');
+    if (live.textContent !== liveText) live.textContent = liveText;
+    live.classList.toggle('hidden', !liveText);
+  }
+}
+
 async function checkPcState() {
   const el = $('pcState');
   loadRuntimeStatus();
@@ -2577,6 +3097,7 @@ async function checkPcState() {
       : null;
     el.title = [label, engineLine, addresses].filter(Boolean).join('\n');
     el.setAttribute('aria-label', label);
+    renderSysState(info);
     if (info.local) {
       localStatus = info.local;
       updateLocalVisibility(info.local.enabled);
@@ -2649,7 +3170,7 @@ async function init() {
   // machine is told about the current one every time the app opens.
   if (notifyEnabled()) subscribeToPush().catch(() => {});
   checkPcState();
-  setInterval(checkPcState, 4000);
+  setInterval(checkPcState, 2000);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') checkPcState();
   });

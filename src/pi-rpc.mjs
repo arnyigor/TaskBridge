@@ -16,6 +16,11 @@ export class PiRpcSession extends EventEmitter {
     this.pending = new Map();
     this.closed = false;
     this.lastState = null;
+    // Count of parsed outgoing frames. A pending request snapshots it at start
+    // to tell a hung process (no frame since) from one that is alive and merely
+    // slow to acknowledge (frames still arrive). A counter, not a timestamp:
+    // two events in the same millisecond must still be distinguishable.
+    this.frameCount = 0;
   }
 
   async start() {
@@ -118,23 +123,63 @@ export class PiRpcSession extends EventEmitter {
       return;
     }
 
+    this.frameCount += 1;
     this.emit('frame', frame);
 
     if (frame.type === 'response' && frame.id && this.pending.has(frame.id)) {
-      const pending = this.pending.get(frame.id);
-      this.pending.delete(frame.id);
-      clearTimeout(pending.timer);
-      if (frame.success) pending.resolve(frame);
-      else pending.reject(new Error(frame.error || `${frame.command || 'RPC command'} failed`));
+      if (frame.success) this.#settle(frame.id, true, frame);
+      else this.#settle(frame.id, false, new Error(frame.error || `${frame.command || 'RPC command'} failed`));
       return;
     }
 
-    if (frame.type !== 'response') this.emit('event', frame);
+    if (frame.type !== 'response') {
+      // Any output proves the process is alive and working, so re-arm the idle
+      // timers of every pending request: a slow-but-progressing Pi must not be
+      // reported as hung while it is still emitting events.
+      this.#bumpPending();
+      this.emit('event', frame);
+    }
+  }
+
+  #settle(id, ok, value) {
+    const pending = this.pending.get(id);
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    clearTimeout(pending.hardTimer);
+    this.pending.delete(id);
+    if (ok) pending.resolve(value);
+    else pending.reject(value);
+    return true;
+  }
+
+  #bumpPending() {
+    for (const pending of this.pending.values()) {
+      if (typeof pending.bump === 'function') pending.bump();
+    }
+  }
+
+  // A single timeout used to hide three very different situations: the process
+  // is gone, the process is alive but silent (hung), or the process is alive
+  // and still producing output but has not acknowledged this command (slow).
+  // Report all three with distinct codes so the caller can retry the slow/exited
+  // cases and stop the hung one instead of treating every timeout the same.
+  #timeoutError(command, timeoutMs, startCount) {
+    const type = command.type || 'RPC command';
+    const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+    const alive = Boolean(this.proc) && !this.closed && this.proc.exitCode === null && !this.proc.killed;
+    if (!alive) {
+      return Object.assign(new Error(`Pi RPC process is not running while waiting for ${type}.`), { code: 'PI_RPC_EXITED', retryable: true });
+    }
+    if (this.frameCount > startCount) {
+      return Object.assign(new Error(`Pi RPC slow response for ${type}: Pi is alive and sending events, but has not acknowledged within ${seconds}s.`), { code: 'PI_RPC_SLOW', retryable: true });
+    }
+    return Object.assign(new Error(`Pi RPC timeout for ${type}: no output from the Pi process for ${seconds}s — it looks hung.`), { code: 'PI_RPC_HUNG', retryable: false });
   }
 
   #rejectAll(error) {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      clearTimeout(pending.hardTimer);
       pending.reject(error);
     }
     this.pending.clear();
@@ -150,16 +195,32 @@ export class PiRpcSession extends EventEmitter {
   request(command, timeoutMs = 15000) {
     const id = command.id || randomId();
     const payload = { ...command, id };
+    const startedAt = Date.now();
+    const startCount = this.frameCount;
+    // The idle timer fires only after `timeoutMs` with no frame at all; every
+    // frame Pi emits re-arms it (see #bumpPending). A hard cap guarantees
+    // termination even if a request is never answered but events keep flowing.
+    const hardCapMs = timeoutMs * 8;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Pi RPC timeout for ${command.type}`));
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const onTimeout = () => this.#settle(id, false, this.#timeoutError(command, timeoutMs, startCount));
+      const pending = {
+        resolve,
+        reject,
+        bump: () => {
+          const remaining = startedAt + hardCapMs - Date.now();
+          if (remaining <= 0) return;
+          clearTimeout(pending.timer);
+          pending.timer = setTimeout(onTimeout, Math.min(timeoutMs, remaining));
+        }
+      };
+      pending.timer = setTimeout(onTimeout, timeoutMs);
+      pending.hardTimer = setTimeout(onTimeout, hardCapMs);
+      this.pending.set(id, pending);
       try {
         this.send(payload);
       } catch (error) {
-        clearTimeout(timer);
+        clearTimeout(pending.timer);
+        clearTimeout(pending.hardTimer);
         this.pending.delete(id);
         reject(error);
       }

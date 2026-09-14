@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { parsePrometheusMetrics } from './local-models.mjs';
 
 export class RuntimeManager {
   constructor(config, dataRoot) {
@@ -61,9 +62,18 @@ export class RuntimeManager {
         return res.ok ? await res.json() : null;
       } catch { return null; }
     };
+    const loadText = async pathname => {
+      try {
+        const res = await fetch(base + pathname, { signal: AbortSignal.timeout(1500) });
+        return res.ok ? await res.text() : null;
+      } catch { return null; }
+    };
     let value;
     if (await this.isReady()) {
-      const [props, slots] = await Promise.all([load('/props'), load('/slots')]);
+      const [props, slots, metricsText] = await Promise.all([load('/props'), load('/slots'), loadText('/metrics')]);
+      // PP/TG need --metrics on the server; without it /metrics answers 501 and
+      // the UI shows "—" rather than a fabricated zero.
+      const metrics = metricsText ? parsePrometheusMetrics(metricsText) : null;
       value = {
         configured: true,
         reachable: true,
@@ -72,7 +82,10 @@ export class RuntimeManager {
         contextWindow: props?.default_generation_settings?.n_ctx ?? props?.n_ctx ?? null,
         slots: Array.isArray(slots)
           ? { total: slots.length, busy: slots.filter(slot => slot?.is_processing).length }
-          : null
+          : null,
+        metrics: metrics && (metrics.pp != null || metrics.tg != null)
+          ? { available: true, source: 'llama.cpp', model: props?.model_path ? path.basename(props.model_path) : null, ...metrics }
+          : { available: false, reason: metricsText ? 'no-gauges' : 'metrics-disabled' }
       };
     } else {
       value = { configured: true, reachable: false, state: this.state, error: this.lastError };

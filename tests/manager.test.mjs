@@ -746,3 +746,46 @@ test('a failing project check never fails a completed answer and never holds the
   for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
   for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
 });
+
+test('send-now stops the reasoning in flight so the message reaches Pi immediately', async t => {
+  const f = await fixture(t, true); // RUNNING session with Pi streaming
+  let aborts = 0;
+  let aborted = false;
+  f.pi.abort = async () => { aborts += 1; aborted = true; };
+  f.pi.getState = async () => ({ isStreaming: !aborted });
+  await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
+  assert.equal(aborts, 1, 'the answer in flight was stopped');
+  assert.deepEqual(f.sent, ['срочно'], 'the text was delivered as a fresh message');
+  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(types.includes('TASK_CANCELLED'), `the interrupted turn is honest: ${types.join(',')}`);
+  assert.ok(types.includes('USER_MESSAGE'), types.join(','));
+  assert.equal(f.manager.getTask('a').status, 'RUNNING', 'and the new turn is running');
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('send-now never interrupts a running tool call', async t => {
+  const f = await fixture(t, true);
+  let aborts = 0;
+  f.pi.abort = async () => { aborts += 1; };
+  f.manager.toolLogs.set('a:t1', { name: 'tool-t1.log', bytes: 0 });
+  await f.manager.message('a', 'текст', 'auto', [], null, { now: true });
+  assert.equal(aborts, 0, 'aborting a tool call would leave half-applied side effects');
+  assert.deepEqual(f.sent, ['текст'], 'the message still reaches Pi (as steering)');
+});
+
+test('a queued prompt survives the send-now interrupt', async t => {
+  const f = await fixture(t, true);
+  let aborted = false;
+  f.pi.abort = async () => { aborted = true; };
+  f.pi.getState = async () => ({ isStreaming: !aborted });
+  const task = f.manager.tasks.get('a');
+  task.pendingPrompts = [{ id: 'p1', text: 'потом', mode: 'auto', files: [] }];
+  f.manager.pendingFiles.set('p1', { files: [], uploadToken: null });
+  await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
+  // Cutting in must not drop what the operator already queued: the prompt is
+  // never released without being delivered.
+  const pending = (f.manager.tasks.get('a').pendingPrompts || []).map(p => p.text);
+  assert.ok(pending.includes('потом') || f.sent.includes('потом'), JSON.stringify({ pending, sent: f.sent }));
+  assert.ok(f.manager.pendingFiles.has('p1'), 'the staged files of the queued prompt were not released');
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});

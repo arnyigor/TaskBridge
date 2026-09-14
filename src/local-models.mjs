@@ -90,6 +90,67 @@ export function normalizeModels(payload) {
     });
 }
 
+// llama.cpp /metrics (server-task.cpp) is Prometheus text. The UI needs PP
+// (prompt) and TG (generation) tokens/s. NOTE: the `*_tokens_seconds` gauges
+// are unreliable (often stuck at 0 while the model works), so the rates are
+// derived from the cumulative counters when present:
+//   PP = prompt_tokens_total / prompt_seconds_total
+//   TG = tokens_predicted_total / tokens_predicted_seconds_total
+// A delta between consecutive parses gives the INSTANT rate (what the
+// llama.cpp Web UI shows); the counters' cumulative average is the fallback.
+// The gauges are only used as a last resort when counters are absent.
+//
+// `modelKey` scopes the instant-rate delta state per model/server.
+const prevMetricSample = new Map();
+
+export function parsePrometheusMetrics(text, modelKey = '') {
+  const values = new Map();
+  for (const rawLine of String(text || '').split(/\r?\n/u)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const space = line.lastIndexOf(' ');
+    if (space <= 0) continue;
+    const value = Number(line.slice(space + 1));
+    if (Number.isFinite(value)) values.set(line.slice(0, space).trim(), value);
+  }
+  const pick = name => (values.has(name) ? values.get(name) : null);
+  const counters = {
+    promptTokens: pick('llamacpp:prompt_tokens_total'),
+    promptSeconds: pick('llamacpp:prompt_seconds_total'),
+    predictedTokens: pick('llamacpp:tokens_predicted_total'),
+    predictedSeconds: pick('llamacpp:tokens_predicted_seconds_total')
+  };
+  let pp = null;
+  let tg = null;
+  const hasCounters = counters.promptTokens !== null && counters.promptSeconds !== null
+    && counters.predictedTokens !== null && counters.predictedSeconds !== null;
+  if (hasCounters) {
+    if (counters.promptSeconds > 0) pp = counters.promptTokens / counters.promptSeconds;
+    if (counters.predictedSeconds > 0) tg = counters.predictedTokens / counters.predictedSeconds;
+    const prev = prevMetricSample.get(modelKey);
+    if (prev) {
+      const elapsed = Date.now() - prev.at;
+      if (elapsed > 500) {
+        const dPt = counters.promptTokens - prev.c.promptTokens;
+        const dPs = counters.promptSeconds - prev.c.promptSeconds;
+        const dTt = counters.predictedTokens - prev.c.predictedTokens;
+        const dTs = counters.predictedSeconds - prev.c.predictedSeconds;
+        if (dPt > 0 && dPs > 0) pp = dPt / dPs;
+        if (dTt > 0 && dTs > 0) tg = dTt / dTs;
+      }
+    }
+    prevMetricSample.set(modelKey, { at: Date.now(), c: counters });
+  }
+  if (pp === null) pp = pick('llamacpp:prompt_tokens_seconds');
+  if (tg === null) tg = pick('llamacpp:predicted_tokens_seconds');
+  return {
+    pp,
+    tg,
+    requestsProcessing: pick('llamacpp:requests_processing'),
+    requestsDeferred: pick('llamacpp:requests_deferred')
+  };
+}
+
 export class LocalModelService extends EventEmitter {
   constructor(config = {}, dataRoot) {
     super();
@@ -207,8 +268,36 @@ export class LocalModelService extends EventEmitter {
       model: loaded[0]?.id ?? null,
       contextWindow: loaded[0]?.contextWindow ?? null,
       loaded: loaded.map(m => m.id),
-      slots: null
+      slots: null,
+      metrics: await this.getMetrics(models)
     };
+  }
+
+  // PP/TG for the loaded model, read from llama.cpp /metrics. The router proxies
+  // the endpoint to the child server (server.cpp), and the child must have been
+  // started with --metrics — otherwise it answers 501 and the UI is told the
+  // data is unavailable instead of being shown a zero.
+  async getMetrics(models = null) {
+    if (!this.enabled) return { available: false, reason: 'not-configured' };
+    const list = models || await this.listModels().catch(() => null);
+    if (!list) return { available: false, reason: 'unreachable' };
+    const loaded = list.filter(m => m.status === 'loaded' || m.status === 'sleeping');
+    if (!loaded.length) return { available: false, reason: 'no-model' };
+    for (const model of loaded) {
+      let response;
+      try {
+        response = await fetch(`${this.baseUrl}/metrics?model=${encodeURIComponent(model.id)}`, { signal: AbortSignal.timeout(2000) });
+      } catch {
+        continue;
+      }
+      if (!response.ok) {
+        if (response.status === 501) return { available: false, reason: 'metrics-disabled', model: model.id };
+        continue;
+      }
+      const parsed = parsePrometheusMetrics(await response.text(), model.id);
+      return { available: true, source: 'llama.cpp', model: model.id, ...parsed };
+    }
+    return { available: false, reason: 'unreachable' };
   }
 
   async getStatus() {

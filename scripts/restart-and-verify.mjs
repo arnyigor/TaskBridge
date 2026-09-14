@@ -117,6 +117,11 @@ function pickLanAddress() {
     .find(iface => iface && iface.family === 'IPv4' && !iface.internal)?.address || null;
 }
 
+// A build is identified by version AND commit: the version is bumped by hand
+// per release, the commit pinpoints the code. Comparing only the commit made a
+// correct restart look broken whenever the working tree was not committed yet.
+const buildId = (build) => (build ? `${build.version || '?'}@${build.commit || '?'}` : null);
+
 async function runChecks({ port, httpsPort, previousBuild, previousPid }) {
   const checks = [];
   const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail });
@@ -126,7 +131,7 @@ async function runChecks({ port, httpsPort, previousBuild, previousPid }) {
 
   const info = await fetchJson(`http://127.0.0.1:${port}/api/info`).catch(() => ({ body: null }));
   const build = info.body?.build || null;
-  add('новый код запущен (сборка изменилась)', Boolean(build && previousBuild && build.commit !== previousBuild), `было ${previousBuild || '—'}, стало ${build?.commit || '—'} (${build?.version || '—'})`);
+  add('новый код запущен (сборка изменилась)', Boolean(build && previousBuild && buildId(build) !== previousBuild), `было ${previousBuild || '—'}, стало ${buildId(build) || '—'}`);
   add('облако выключено', !info.body?.cloud, info.body?.cloud ? JSON.stringify(info.body.cloud) : 'поля cloud нет');
   const lan = pickLanAddress();
   add('LAN-адрес объявлен', Boolean(lan && (info.body?.addresses || []).some(a => a.url.includes(lan))), `${lan || 'нет интерфейса'} → ${JSON.stringify(info.body?.addresses || [])}`);
@@ -180,7 +185,7 @@ function renderReport({ args, startedAt, previousBuild, previousPid, stopped, re
     `Время: ${new Date().toISOString()}`,
     `Действие: ${args.dryRun ? 'только проверки (dry-run, без перезапуска)' : 'перезапуск и проверки'}`,
     `Было: PID ${previousPid ?? '—'}, сборка ${previousBuild || '—'}`,
-    `Стало: сборка ${build?.commit || '—'} (${build?.version || '—'})${stopped ? ', старый процесс остановлен' : ''}${restarted ? ', новый процесс запущен' : ''}`,
+    `Стало: сборка ${buildId(build) || '—'}${stopped ? ', старый процесс остановлен' : ''}${restarted ? ', новый процесс запущен' : ''}`,
     '',
     `## Итог: ${ok}/${checks.length} проверок пройдено`,
     '',
@@ -206,7 +211,7 @@ async function main() {
 
   const previousPid = await listeningPid(args.port);
   const info = await fetchJson(`http://127.0.0.1:${args.port}/api/info`).catch(() => ({ body: null }));
-  const previousBuild = info.body?.build?.commit || null;
+  const previousBuild = buildId(info.body?.build) || null;
   const previousTask = (await fetchJson(`http://127.0.0.1:${args.port}/api/tasks`).catch(() => ({ body: [] })))?.body?.find?.(task => task.status === 'RUNNING')?.id || null;
 
   let stopped = false;

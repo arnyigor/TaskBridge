@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { LocalModelService, normalizeModels, parseLoadProgress, quantFromPath } from '../src/local-models.mjs';
+import { LocalModelService, normalizeModels, parseLoadProgress, parsePrometheusMetrics, quantFromPath } from '../src/local-models.mjs';
 
 test('parseLoadProgress mirrors llama.cpp /models/sse load events', () => {
   assert.equal(parseLoadProgress({ status: 'loading' }), null);
@@ -181,6 +181,74 @@ test('LocalModelService only stops a router it started by itself', async t => {
   const router = await fakeRouter(t, [{ id: 'a' }]);
   const service = new LocalModelService({ healthUrl: `${router.baseUrl}/health` }, t.name);
   await assert.rejects(service.stop(), { code: 'LOCAL_RUNTIME_NOT_MANAGED' });
+});
+
+test('parsePrometheusMetrics derives PP/TG from cumulative counters when gauges are stuck at 0', () => {
+  const text = [
+    'llamacpp:prompt_tokens_seconds 0',
+    'llamacpp:predicted_tokens_seconds 0',
+    'llamacpp:prompt_tokens_total 14668',
+    'llamacpp:prompt_seconds_total 102.096',
+    'llamacpp:tokens_predicted_total 334',
+    'llamacpp:tokens_predicted_seconds_total 7.47526'
+  ].join('\n');
+  const { pp, tg } = parsePrometheusMetrics(text, 'counters-test');
+  assert.ok(pp > 140 && pp < 145, `pp ${pp}`);
+  assert.ok(tg > 44 && tg < 45, `tg ${tg}`);
+});
+
+test('parsePrometheusMetrics keeps only the llama.cpp PP/TG gauges', () => {
+  const text = [
+    '# HELP llamacpp:prompt_tokens_seconds Average prompt throughput in tokens/s',
+    '# TYPE llamacpp:prompt_tokens_seconds gauge',
+    'llamacpp:prompt_tokens_seconds 118.5',
+    '# TYPE llamacpp:predicted_tokens_seconds gauge',
+    'llamacpp:predicted_tokens_seconds 42.25',
+    'llamacpp:requests_processing 1',
+    'llamacpp:requests_deferred 0',
+    'llamacpp:prompt_tokens_total 5000',
+    ''
+  ].join('\n');
+  assert.deepEqual(parsePrometheusMetrics(text), { pp: 118.5, tg: 42.25, requestsProcessing: 1, requestsDeferred: 0 });
+  // Missing gauges stay null — a zero would read as "the model is frozen".
+  assert.deepEqual(parsePrometheusMetrics('llamacpp:prompt_tokens_total 1\n'), {
+    pp: null, tg: null, requestsProcessing: null, requestsDeferred: null
+  });
+});
+
+// Router stand-in that only answers /health, /models and /metrics; `metrics`
+// null means the child was started without --metrics (llama.cpp answers 501).
+async function metricsRouter(t, { metrics = '' } = {}) {
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost');
+    if (url.pathname === '/health') return res.end(JSON.stringify({ status: 'ok' }));
+    if (url.pathname === '/models') return res.end(JSON.stringify({ data: [{ id: 'm1', status: { value: 'loaded' } }] }));
+    if (url.pathname === '/metrics') {
+      if (!url.searchParams.get('model')) { res.statusCode = 400; return res.end('{}'); }
+      if (metrics === null) { res.statusCode = 501; return res.end(JSON.stringify({ error: { message: 'This server does not support metrics endpoint. Start it with `--metrics`' } })); }
+      res.setHeader('content-type', 'text/plain');
+      return res.end(metrics);
+    }
+    res.statusCode = 404;
+    res.end('{}');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections?.(); return new Promise(resolve => server.close(resolve)); });
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+test('LocalModelService exposes PP/TG for the loaded model from /metrics', async t => {
+  const base = await metricsRouter(t, { metrics: 'llamacpp:prompt_tokens_seconds 118.5\nllamacpp:predicted_tokens_seconds 42.25\n' });
+  const service = new LocalModelService({ provider: 'llama.cpp', router: { enabled: true }, healthUrl: `${base}/health` }, t.name);
+  assert.deepEqual(await service.getMetrics(), {
+    available: true, source: 'llama.cpp', model: 'm1', pp: 118.5, tg: 42.25, requestsProcessing: null, requestsDeferred: null
+  });
+});
+
+test('LocalModelService says metrics are unavailable without --metrics', async t => {
+  const base = await metricsRouter(t, { metrics: null });
+  const service = new LocalModelService({ provider: 'llama.cpp', router: { enabled: true }, healthUrl: `${base}/health` }, t.name);
+  assert.deepEqual(await service.getMetrics(), { available: false, reason: 'metrics-disabled', model: 'm1' });
 });
 
 test('LocalModelService refuses to load when the server is not a router catalog', async t => {

@@ -186,6 +186,11 @@ test('router mode exposes /api/local and warns when Pi blocks images', { timeout
   const info = await api('/api/info');
   assert.equal(info.local.enabled, true);
   assert.ok(info.warnings.some(w => w.code === 'PI_IMAGES_BLOCKED'), JSON.stringify(info.warnings));
+  // PC state + model speed for the UI: the shape must survive even when the
+  // router has no /metrics (the stand-in answers 404), where it reports why.
+  assert.ok(info.system?.ram?.total > 0, 'RAM is reported');
+  assert.equal(info.engine.metrics.available, false);
+  assert.equal(info.engine.metrics.reason, 'unreachable');
 
   await api('/api/local/unload', { model: 'vision' });
   assert.deepEqual((await api('/api/local')).loaded, []);
@@ -226,6 +231,11 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   assert.equal(task.status, 'SUCCEEDED', fixture.logs());
   assert.deepEqual(task.engine, { profileId: null, auto: false, reason: null });
   assert.equal(task.lastUsage.totalTokens, 1100);
+  // TG for cloud/any provider comes from the model's own usage: output tokens
+  // over the time the deltas spanned (see fake-pi's streamed finish).
+  assert.equal(task.metrics.source, 'usage');
+  assert.equal(task.metrics.outputTokens, 100);
+  assert.ok(task.metrics.tg > 0, `tg=${task.metrics.tg}`);
   await api(`/api/tasks/${id}/message`, { text: 'continue', files: [{ name: 'sample.txt', size: 1, base64: 'eA==' }] });
   task = await terminal(api, id);
   assert.equal(task.status, 'SUCCEEDED');
@@ -414,4 +424,171 @@ test('a session address opens the app shell itself, reload-safe, without breakin
   const apiMissing = await fetch(`${fixture.base}/api/nope`);
   assert.equal(apiMissing.status, 404);
   assert.match(apiMissing.headers.get('content-type') || '', /application\/json/);
+});
+
+test('message actions over HTTP: delete drops a message and everything after it', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  // A follow-up, so the delete has something after it to drop. The session's
+  // very first prompt has no USER_MESSAGE event of its own: only this one does.
+  await api(`/api/tasks/${id}/message`, { text: 'второе' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+  const users = (await api(`/api/tasks/${id}/events?limit=0`)).filter(e => e.type === 'USER_MESSAGE');
+  assert.equal(users.length, 1, 'exactly the follow-up carries a USER_MESSAGE');
+  const turnId = `user-${users[0].seq}`;
+
+  // Delete drops the message and every event that followed it; only the marker
+  // (which sits above every seq the client has seen) survives.
+  const dropped = await api(`/api/tasks/${id}/turns/${turnId}/delete`, {});
+  assert.deepEqual(dropped, { ok: true, fromSeq: users[0].seq, dropInitial: false });
+  const afterDelete = await api(`/api/tasks/${id}/events?limit=0`);
+  assert.ok(afterDelete.some(e => e.type === 'TURN_TRUNCATED' && e.data.fromSeq === users[0].seq), 'a live marker notifies clients');
+  assert.equal(afterDelete.filter(e => e.type === 'USER_MESSAGE').length, 0, 'the message is gone from history');
+  assert.ok(afterDelete.every(e => e.seq < users[0].seq || e.type === 'TURN_TRUNCATED'), 'nothing after the deleted message survives');
+
+  // Bad input stays an explicit refusal, never a silent no-op.
+  await assert.rejects(() => api(`/api/tasks/${id}/turns/nonsense/edit`, { text: 'x' }), err => err.code === 'INPUT_INVALID');
+  await assert.rejects(() => api(`/api/tasks/${id}/turns/assistant-1/delete`, {}), err => err.code === 'INPUT_INVALID');
+});
+
+test('a rewrite reaches a client that already streamed past it', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+  await api(`/api/tasks/${id}/message`, { text: 'второе' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const before = await api(`/api/tasks/${id}/events?limit=0`);
+  const cursor = before.at(-1).seq; // what a live client has already streamed
+  const target = before.filter(e => e.type === 'USER_MESSAGE').at(-1);
+
+  await api(`/api/tasks/${id}/turns/user-${target.seq}/delete`, {});
+
+  // The whole point: `after=<cursor>` must still deliver the marker. When it
+  // reused `fromSeq`, the client dropped it as "already known" and the chat
+  // kept showing the deleted exchange.
+  const missed = await api(`/api/tasks/${id}/events?limit=0&after=${cursor}`);
+  assert.ok(missed.length > 0, 'the rewrite is not swallowed by the client cursor');
+  assert.equal(missed[0].type, 'TURN_TRUNCATED');
+  assert.equal(missed[0].data.fromSeq, target.seq);
+});
+
+test('edit over HTTP rewrites the message in place and re-runs everything below it', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+  await api(`/api/tasks/${id}/message`, { text: 'второе' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const before = await api(`/api/tasks/${id}/events?limit=0`);
+  const user = before.filter(e => e.type === 'USER_MESSAGE').at(-1);
+
+  await api(`/api/tasks/${id}/turns/user-${user.seq}/edit`, { text: 'второе (исправлено)' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const after = await api(`/api/tasks/${id}/events?limit=0`);
+  // The message keeps its own place (same event, same seq) with the edited text,
+  // so the stored history — and Pi's rebuilt session — carry what was sent.
+  assert.equal(after.filter(e => e.type === 'USER_MESSAGE').length, 1, 'not duplicated');
+  const same = after.find(e => e.type === 'USER_MESSAGE');
+  assert.equal(same.seq, user.seq);
+  assert.equal(same.data.text, 'второе (исправлено)');
+  assert.equal(same.message, 'второе (исправлено)');
+  // Everything below it was wiped, and the model ran again on the new text.
+  const marker = after.find(e => e.type === 'TURN_TRUNCATED');
+  assert.equal(marker.data.reason, 'edit');
+  assert.equal(marker.data.fromSeq, user.seq + 1);
+  assert.equal(marker.data.keepUser, true);
+  assert.ok(after.some(e => e.type === 'TURN_EDITED' && e.data.text === 'второе (исправлено)'), 'live clients learn the new text');
+  assert.ok(after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT'), 'the model answered again');
+
+  // An answer cannot be edited (it is re-run), and an empty edit is refused.
+  await assert.rejects(() => api(`/api/tasks/${id}/turns/assistant-${user.seq}/edit`, { text: 'x' }), err => err.code === 'INPUT_INVALID');
+  await assert.rejects(() => api(`/api/tasks/${id}/turns/user-${user.seq}/edit`, { text: '   ' }), err => err.code === 'INPUT_INVALID');
+});
+
+test('regenerate over HTTP rewrites only the answer — the operator message stays itself', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+  await api(`/api/tasks/${id}/message`, { text: 'второе' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const before = await api(`/api/tasks/${id}/events?limit=0`);
+  const user = before.filter(e => e.type === 'USER_MESSAGE').at(-1);
+  const cursor = before.at(-1).seq;
+
+  await api(`/api/tasks/${id}/regenerate`, { turnId: `assistant-${user.seq}` });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const after = await api(`/api/tasks/${id}/events?limit=0`);
+  // The operator's message is neither erased nor duplicated: same event, same seq.
+  assert.equal(after.filter(e => e.type === 'USER_MESSAGE').length, 1);
+  const same = after.find(e => e.type === 'USER_MESSAGE');
+  assert.equal(same.seq, user.seq, 'the message keeps its own place in the log');
+  assert.equal(same.data.text, 'второе');
+
+  const marker = after.find(e => e.type === 'TURN_TRUNCATED');
+  assert.equal(marker.data.reason, 'regenerate');
+  assert.equal(marker.data.fromSeq, user.seq + 1, 'only what followed the message was dropped');
+  assert.equal(marker.data.keepUser, true);
+  assert.ok(marker.seq > cursor, 'the marker is visible to a client that already streamed the answer');
+  assert.ok(after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT'), 'the answer was produced again');
+
+  // "Nothing was sent" must never re-run the session somebody is looking at.
+  await assert.rejects(() => api(`/api/tasks/${id}/regenerate`, {}), err => err.code === 'NOT_ALLOWED');
+  await assert.rejects(() => api(`/api/tasks/${id}/regenerate`, { turnId: 'assistant-999' }), err => err.code === 'NOT_ALLOWED');
+});
+
+test('fork over HTTP copies the conversation and leaves the source alone', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+  await api(`/api/tasks/${id}/message`, { text: 'второе' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const users = (await api(`/api/tasks/${id}/events?limit=0`)).filter(e => e.type === 'USER_MESSAGE');
+  assert.equal(users.length, 1);
+  const forked = await api(`/api/tasks/${id}/fork`, { turnId: `user-${users[0].seq}` });
+  assert.notEqual(forked.id, id);
+  assert.equal(forked.forkedFrom, id);
+  assert.equal((await api('/api/tasks')).length, 2, 'the branch is a session of its own');
+
+  // The branch replays the source conversation; only its own marker is extra.
+  const source = await api(`/api/tasks/${id}/events?limit=0`);
+  const copy = await api(`/api/tasks/${forked.id}/events?limit=0`);
+  assert.equal(copy.at(-1).type, 'TASK_FORKED');
+  assert.deepEqual(copy.slice(0, -1).map(e => e.type), source.map(e => e.type));
+  assert.deepEqual((await api(`/api/tasks/${id}/events?limit=0`)).map(e => e.seq), source.map(e => e.seq));
+
+  // A message that never existed is a 404; an answer is not a branch point.
+  await assert.rejects(() => api(`/api/tasks/${id}/fork`, { turnId: 'user-999' }), err => err.code === 'NOT_FOUND');
+  await assert.rejects(() => api(`/api/tasks/${id}/fork`, { turnId: 'nonsense' }), err => err.code === 'INPUT_INVALID');
+  // Both ends of an exchange name the same fork: branching from the answer
+  // copies the very same conversation.
+  const fromAnswer = await api(`/api/tasks/${id}/fork`, { turnId: `assistant-${users[0].seq}` });
+  const answerCopy = await api(`/api/tasks/${fromAnswer.id}/events?limit=0`);
+  assert.deepEqual(answerCopy.slice(0, -1).map(e => e.type), source.map(e => e.type));
 });

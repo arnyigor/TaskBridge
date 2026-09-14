@@ -471,19 +471,47 @@ body {
   display: block;
 }
 
+/* Context menu for a chat image, shown on a single click (see app.js). */
+.imageMenu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--panel, #1b1b22);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.5);
+}
+.imageMenuItem {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.imageMenuItem:hover { background: rgba(255, 255, 255, 0.1); }
+
 .metaRow { display: flex; align-items: center; gap: 6px; width: 100%; }
 .meta { font-size: 11px; color: var(--muted); padding: 0 2px; flex: 1; min-width: 0; }
 .copyBtn {
   flex-shrink: 0;
   border: none;
-  background: transparent;
-  color: var(--muted);
-  padding: 2px 5px;
-  font-size: 12px;
-  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 16px;
+  border-radius: 8px;
   line-height: 1;
+  cursor: pointer;
 }
-.copyBtn:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); }
+.copyBtn svg { display: block; }
+.copyBtn:hover { color: var(--accent); background: var(--accent-soft); }
 .md pre { position: relative; }
 .codeCopyBtn {
   position: absolute;
@@ -515,6 +543,59 @@ body {
   font-size: 12px;
 }
 .turnError button:hover { background: rgba(251, 113, 133, 0.14); }
+
+/* repeat/copy actions under a failed turn */
+.turnActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+/* Per-message actions, each an inline SVG mark: a pencil fixes the text in
+   place, a branch forks a new session from the message, a trash can drops it
+   with everything after, a refresh re-runs the newest answer. They follow the
+   theme colour and scale with font-size — at 12px muted glyphs they were
+   invisible. */
+.turnActionBar { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.turnActionBar.hidden { display: none; }
+/* Copy + message actions share a single row under the operator's bubble, so the
+   icons never stack onto separate lines. */
+.msgActions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.actionBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: none;
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 16px;
+  border-radius: 8px;
+  line-height: 1;
+  cursor: pointer;
+}
+.actionBtn svg { display: block; }
+.actionBtn:hover { color: var(--accent); background: var(--accent-soft); }
+@media (min-width: 900px) {
+  .actionBtn, .copyBtn { font-size: 18px; padding: 6px 10px; }
+  .turnActionBar { gap: 6px; }
+}
+.editBox { display: grid; gap: 6px; width: 100%; }
+.editArea {
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+  font: inherit;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 8px;
+}
+.editRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
 /* typing indicator */
 .typing { display: inline-flex; gap: 4px; padding: 4px 2px; }
@@ -589,6 +670,7 @@ body {
   padding: 4px 6px 4px 10px;
   margin: 2px 4px 2px 0;
 }
+.fileChip svg { display: block; }
 .fileChip button {
   border: none;
   background: transparent;
@@ -1010,6 +1092,43 @@ body.cloud-mode [data-pc-only] { display: none; }
   white-space: nowrap;
 }
 .modelChip:hover { border-color: var(--accent); }
+
+/* Live system/model state chip (see renderSysState): GPU/RAM/CPU plus the
+   loaded model's PP/TG, so a slow answer can be told apart from a slow PC. */
+.sysState { position: relative; font-size: 11.5px; }
+.sysState > summary {
+  list-style: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+.sysState > summary::-webkit-details-marker { display: none; }
+.sysState > summary:hover { border-color: var(--accent); color: var(--text); }
+.sysState[open] > summary { border-color: var(--accent); color: var(--text); }
+.sysStateBody {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 40;
+  min-width: 300px;
+  max-width: 92vw;
+  white-space: pre-line;
+  background: var(--panel, #1b1b22);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-m);
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
 #modelSearch, #modelThinking, #mcpMode {
   width: 100%;
   background: #0d1220;
@@ -1131,3 +1250,15 @@ body.cloud-mode [data-pc-only] { display: none; }
 .deviceRow .name { font-size: 13px; font-weight: 600; }
 .deviceRow .meta { font-size: 11px; color: var(--muted); }
 .deviceRow.revoked .name { color: var(--muted); text-decoration: line-through; }
+
+/* Live PP/TG + machine state, a single muted line above the composer. */
+.liveMetrics {
+  margin: 0 0 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -236,7 +236,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: () => true,
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, rewriteMarkdownLinks, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -268,6 +268,66 @@ test('DOM: a slow history response cannot replace a newer selected chat', async 
   assert.equal(app.document.getElementById('taskTitle').textContent, 'Другой чат');
   assert.equal(app.streams.length, 1);
   assert.match(app.streams[0].url, /\/b\/stream/);
+});
+
+test('DOM: an attached image is shown inline, not only as a chip', async () => {
+  const app = await ui();
+  app.tasks.a.files = [
+    { id: '11111111-1111-1111-1111-111111111111', name: 'photo.png', mimeType: 'image/png', path: '.taskbridge-input/a/f/photo.png' },
+    { id: '22222222-2222-2222-2222-222222222222', name: 'notes.txt', mimeType: 'text/plain', path: '.taskbridge-input/a/f/notes.txt' }
+  ];
+  await app.selectTask('a');
+  const firstUserTurn = app.document.querySelector('.turn.me');
+  const preview = firstUserTurn.querySelector('.chatImage img');
+  assert.ok(preview, 'the image attachment renders as an <img>');
+  assert.match(preview.getAttribute('src'), /\/api\/tasks\/a\/files\/11111111-1111-1111-1111-111111111111$/);
+  // A non-image attachment gets no preview; both stay reachable as chips.
+  assert.equal(firstUserTurn.querySelectorAll('.chatImage').length, 1);
+  assert.equal(firstUserTurn.querySelectorAll('.attachedFiles .fileChip').length, 2);
+  // The chip's download action is an SVG arrow, not the rare ⭳ glyph (U+2B73)
+  // that renders as a missing-glyph box on many fonts.
+  for (const chip of firstUserTurn.querySelectorAll('.attachedFiles .fileChip')) {
+    const dl = chip.querySelector('a[title="Скачать"]');
+    assert.ok(dl && dl.querySelector('svg'), 'the download action is an SVG icon');
+    assert.equal(dl.textContent.trim(), '', 'and carries no text glyph');
+    assert.equal(dl.querySelector('svg').getAttribute('stroke'), 'currentColor', 'and follows the theme');
+  }
+});
+
+test('DOM: a model link to a picture renders inline instead of a download link', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const box = app.document.createElement('div');
+  box.innerHTML = '<p><a href="telegram_window.png">telegram_window.png</a> and <a href="report.pdf">report.pdf</a></p>';
+  app.rewriteMarkdownLinks(box);
+  // A relative link to an image is a picture the model is showing: inline preview.
+  const img = box.querySelector('a img');
+  assert.ok(img, 'the image link becomes an inline <img>');
+  assert.match(img.getAttribute('src'), /\/api\/tasks\/a\/workspace-file\?path=telegram_window\.png$/);
+  assert.doesNotMatch(img.getAttribute('src'), /download=1/);
+  // A non-image link stays a download link as before.
+  const pdf = box.querySelector('a[href*="report.pdf"]');
+  assert.match(pdf.getAttribute('href'), /download=1/);
+});
+
+test('DOM: a single click on a chat image opens a menu like long-press', async () => {
+  const app = await ui();
+  app.tasks.a.files = [{ id: '11111111-1111-1111-1111-111111111111', name: 'photo.png', mimeType: 'image/png' }];
+  await app.selectTask('a');
+  const img = app.document.querySelector('.turn.me .chatImage img');
+  assert.ok(img, 'the attachment preview exists');
+  const click = new app.window.Event('click', { bubbles: true, cancelable: true });
+  img.dispatchEvent(click);
+  const menu = app.document.querySelector('.imageMenu');
+  assert.ok(menu, 'the image context menu appears');
+  assert.deepEqual(
+    [...menu.querySelectorAll('.imageMenuItem')].map(b => b.textContent),
+    ['Посмотреть', 'Скачать', 'Копировать ссылку']
+  );
+  assert.equal(click.defaultPrevented, true, 'navigating away is prevented');
+  // A click anywhere else closes it.
+  app.document.body.dispatchEvent(new app.window.Event('click', { bubbles: true, cancelable: true }));
+  assert.equal(app.document.querySelector('.imageMenu'), null);
 });
 
 test('DOM: Enter submits on desktop but only inserts a newline on touch devices', async () => {
@@ -823,6 +883,13 @@ test('DOM: every message carries its own copy button', async () => {
   const turns = [...app.document.querySelectorAll('.turn')];
   assert.ok(turns.length >= 3, `too few turns rendered: ${turns.length}`);
   for (const turn of turns) assert.ok(turn.querySelector('.copyBtn'), `a message without a copy button: ${turn.textContent.slice(0, 40)}`);
+  // The copy mark is an inline SVG, like the other message icons: an emoji would
+  // ignore the theme colour and the row's shared stroke weight.
+  for (const turn of turns) {
+    const svg = turn.querySelector('.copyBtn svg');
+    assert.ok(svg, 'the copy button is an icon, not a glyph');
+    assert.equal(svg.getAttribute('stroke'), 'currentColor', 'the copy icon follows the theme');
+  }
 
   // Own line: copies exactly what was sent.
   const mine = [...app.document.querySelectorAll('.turn.me .copyBtn')].at(-1);
@@ -835,4 +902,284 @@ test('DOM: every message carries its own copy button', async () => {
   bot.dispatchEvent(new app.window.Event('click'));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(app.copied.at(-1), 'Второй ответ');
+});
+
+test('TURN_TRUNCATED retracts the failed exchange and rolls back current', () => {
+  const state = new ChatState(task());
+  for (const event of history()) state.apply(event);
+  state.apply({ taskId: 'a', seq: 13, type: 'USER_MESSAGE', message: 'go again', data: { text: 'go again' } });
+  state.apply({ taskId: 'a', seq: 14, type: 'TASK_FAILED', message: 'boom', data: {} });
+  assert.equal(state.current.error, 'boom');
+  state.apply({ taskId: 'a', seq: 15, type: 'TURN_TRUNCATED', message: 'retracted', data: { fromSeq: 13 } });
+  assert.deepEqual(state.turns.map(t => t.id), ['user-initial', 'assistant-initial', 'user-5', 'assistant-5']);
+  assert.equal(state.current.text, 'Второй ответ');
+  // A stale marker replayed against already-clean history changes nothing.
+  state.apply({ taskId: 'a', seq: 16, type: 'TURN_TRUNCATED', message: 'retracted', data: { fromSeq: 13 } });
+  assert.equal(state.turns.length, 4);
+});
+
+test('TURN_TRUNCATED with keepUser rewrites only the answer, never the operator line', () => {
+  const state = new ChatState(task());
+  for (const event of history()) state.apply(event);
+  const userTurn = state.turns.find(t => t.id === 'user-5');
+  state.apply({
+    taskId: 'a', seq: 15, type: 'TURN_TRUNCATED', message: 'regen',
+    data: { fromSeq: 6, keepUser: true, reason: 'regenerate', text: 'Второй вопрос' }
+  });
+  assert.deepEqual(state.turns.map(t => t.id), ['user-initial', 'assistant-initial', 'user-5', 'assistant-5']);
+  assert.equal(state.turns.find(t => t.id === 'user-5'), userTurn, 'the very same turn object stays put');
+  assert.equal(userTurn.text, 'Второй вопрос', 'the operator line is untouched');
+  assert.equal(state.current, state.turns.at(-1), 'the stream lands on the rewritten answer');
+  assert.equal(state.current.role, 'assistant');
+  assert.equal(state.current.text, '', 'the old answer is gone');
+  assert.equal(state.current.active, true);
+});
+
+test('DOM: an edited message refreshes the bubble it already has', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const bubbles = () => [...app.document.querySelectorAll('.turn.me .msg')].map(t => t.textContent);
+  assert.deepEqual(bubbles(), ['Первый вопрос', 'Второй вопрос']);
+  // The server corrected the message in place (same turn id, new text).
+  app.streams[0].onmessage({ data: JSON.stringify({ taskId: 'a', seq: 15, type: 'TURN_EDITED', message: 'edited', data: { id: 'user-5', text: 'Второй вопрос (исправлен)', role: 'user' } }) });
+  await new Promise(resolve => setTimeout(resolve, 150)); // renderChat is debounced by 80 ms
+  assert.deepEqual(bubbles(), ['Первый вопрос', 'Второй вопрос (исправлен)']);
+  // Its copy button copies what is on screen now, not the original text.
+  const copy = [...app.document.querySelectorAll('.turn.me .copyBtn')].at(-1);
+  copy.dispatchEvent(new app.window.Event('click'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.copied.at(-1), 'Второй вопрос (исправлен)');
+});
+
+test('DOM: a refused edit reopens the editor with the typed text', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/edit')) return { ok: false, status: 400, json: async () => ({ code: 'NOT_ALLOWED', error: 'нельзя сейчас' }) };
+    return null;
+  });
+  const userBar = [...app.document.querySelectorAll('.turn.me .turnActionBar')].at(-1);
+  userBar.querySelector('[data-action="edit"]').dispatchEvent(new app.window.Event('click'));
+  const area = app.document.querySelector('.editArea');
+  area.value = 'мое исправленное';
+  [...app.document.querySelectorAll('.editRow button')].find(b => b.textContent === 'Сохранить')
+    .dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  const reopened = app.document.querySelector('.editArea');
+  assert.ok(reopened, 'the editor reopens on a refused save');
+  assert.equal(reopened.value, 'мое исправленное', 'the typed text is kept');
+});
+
+test('DOM: rewriting an answer takes that turn’s tool chips with it', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const chips = () => [...app.document.querySelectorAll('.turn:not(.me) .tool')].map(t => t.textContent.trim());
+  assert.equal(chips().length, 1, 'the fixture ran one command');
+  // The server says: only the answer was rewritten (keepUser). Its turn object is
+  // replaced, not emptied, and the view must not keep the old commands on screen.
+  app.streams[0].onmessage({ data: JSON.stringify({ taskId: 'a', seq: 15, type: 'TURN_TRUNCATED', message: 'regen', data: { fromSeq: 6, keepUser: true, reason: 'regenerate' } }) });
+  await new Promise(resolve => setTimeout(resolve, 150)); // renderChat is debounced by 80 ms
+  assert.deepEqual(chips(), [], 'the old command is gone from the rewritten answer');
+  assert.equal(app.document.querySelectorAll('.turn.me').length, 2, 'the operator messages stay');
+  assert.equal(app.document.querySelectorAll('.turn').length, 4, 'still two exchanges');
+});
+
+test('TURN_TRUNCATED with dropInitial forgets the turn synthesized from task.prompt', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'PI_EVENT', message: '', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 2, type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  assert.equal(state.turns.length, 2);
+  state.apply({ taskId: 'a', seq: 3, type: 'TURN_TRUNCATED', message: 'retracted', data: { fromSeq: 1, dropInitial: true } });
+  assert.deepEqual(state.turns, []);
+  assert.equal(state.current.text, '');
+  assert.equal(state.current.error, null);
+  // The resent prompt builds a fresh turn on the placeholder.
+  state.apply({ taskId: 'a', seq: 4, type: 'USER_MESSAGE', message: 'original', data: { text: 'original', files: [] } });
+  assert.deepEqual(state.turns.map(t => t.id), ['user-4', 'assistant-4']);
+  assert.equal(state.current.text, '');
+});
+
+test('TURN_EDITED replaces the settled message text, on both sides of the exchange', () => {
+  const state = new ChatState(task());
+  for (const event of history()) state.apply(event);
+  const userTurn = state.turns.find(t => t.id === 'user-5');
+  const botTurn = state.turns.find(t => t.id === 'assistant-5');
+  state.apply({ taskId: 'a', seq: 13, type: 'TURN_EDITED', message: 'edited', data: { id: 'user-5', text: 'Второй вопрос (исправлен)', role: 'user' } });
+  state.apply({ taskId: 'a', seq: 14, type: 'TURN_EDITED', message: 'edited', data: { id: 'assistant-5', text: 'Ответ исправлен', role: 'assistant' } });
+  assert.equal(userTurn.text, 'Второй вопрос (исправлен)');
+  assert.equal(botTurn.text, 'Ответ исправлен');
+  // An edit for a turn this window no longer holds must not invent one.
+  state.apply({ taskId: 'a', seq: 15, type: 'TURN_EDITED', message: 'edited', data: { id: 'user-999', text: 'нет такого', role: 'user' } });
+  assert.equal(state.turns.length, 4);
+});
+
+test('DOM: a clean failed last turn can be repeated without a duplicate', async () => {
+  const app = await ui();
+  app.tasks.a.status = 'FAILED';
+  const failedHistory = [
+    ...history(),
+    { taskId: 'a', seq: 13, type: 'USER_MESSAGE', message: 'Что пошло не так?', data: { text: 'Что пошло не так?', files: [] } },
+    { taskId: 'a', seq: 14, type: 'TASK_FAILED', message: 'boom', data: {} },
+  ];
+  const truncatedHistory = [
+    ...failedHistory,
+    { taskId: 'a', seq: 15, type: 'TURN_TRUNCATED', message: 'retracted', data: { fromSeq: 13, text: 'Что пошло не так?' } },
+  ];
+  let undoCalled = false;
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/undo-last-turn') {
+      undoCalled = true;
+      return { ok: true, json: async () => ({ ok: true, text: 'Что пошло не так?', fromSeq: 13 }) };
+    }
+    if (pathname === '/api/tasks/a/events') {
+      // The marker only exists once the turn has actually been retracted.
+      const all = undoCalled ? truncatedHistory : failedHistory;
+      const list = searchParams.has('tail') ? all : all.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: list, reachedStart: true } : list) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const prompt = app.document.getElementById('prompt');
+  const mine = () => [...app.document.querySelectorAll('.turn.me')];
+  assert.equal(mine().length, 3, 'initial + two follow-up messages');
+  const retry = [...app.document.querySelectorAll('button')].find(b => b.textContent.includes('Повторить сообщение'));
+  assert.ok(retry, 'the clean failed exchange offers a repeat');
+  retry.dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(undoCalled, 'the retraction endpoint was called');
+  assert.equal(prompt.value, 'Что пошло не так?', 'the message returns to the composer');
+  assert.equal(mine().length, 2, 'the retracted request disappears from the chat');
+  assert.ok(![...app.document.querySelectorAll('button')].some(b => b.textContent.includes('Повторить сообщение')), 'the offer disappears with the turn');
+});
+
+test('DOM: a cancelled first run offers a retry, not a copy-only', async () => {
+  const app = await ui();
+  // A session that was stopped before the model produced anything: the task
+  // record carries no saved text either.
+  app.tasks.a.status = 'CANCELLED';
+  app.tasks.a.assistantText = '';
+  const events = [
+    { taskId: 'a', seq: 1, type: 'PI_EVENT', message: 'Pi started processing', data: { pi: { type: 'agent_start' } } },
+    { taskId: 'a', seq: 2, type: 'PI_EVENT', message: '', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 3, type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} },
+  ];
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = searchParams.has('tail') ? events : events.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: list, reachedStart: true } : list) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const labels = [...app.document.querySelectorAll('button')].map(b => b.textContent);
+  assert.ok(labels.some(t => t.includes('Повторить сообщение')), `expected a retry button: ${labels.join(' | ')}`);
+  assert.ok(!labels.some(t => t.includes('Скопировать сообщение')), 'nothing was produced, so nothing is copy-only');
+});
+
+test('DOM: a failed turn with model output only copies the message', async () => {
+  const app = await ui();
+  app.tasks.a.status = 'FAILED';
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/undo-last-turn') throw new Error('must not be called');
+    if (pathname === '/api/tasks/a/events') {
+      const failedHistory = [
+        ...history(),
+        { taskId: 'a', seq: 13, type: 'USER_MESSAGE', message: 'Что пошло не так?', data: { text: 'Что пошло не так?', files: [] } },
+        { taskId: 'a', seq: 14, type: 'PI_EVENT', message: '', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+        { taskId: 'a', seq: 15, type: 'PI_EVENT', message: '', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'частичный ответ' } } } },
+        { taskId: 'a', seq: 16, type: 'TASK_FAILED', message: 'boom', data: {} },
+      ];
+      const all = searchParams.has('tail') ? failedHistory : failedHistory.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: all, reachedStart: true } : all) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const prompt = app.document.getElementById('prompt');
+  const mine = () => [...app.document.querySelectorAll('.turn.me')];
+  assert.equal(mine().length, 3);
+  const copy = [...app.document.querySelectorAll('button')].find(b => b.textContent.includes('Скопировать сообщение'));
+  assert.ok(copy, 'no retraction is offered once the model produced output');
+  copy.dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prompt.value, 'Что пошло не так?', 'the text is copied into the composer');
+  assert.equal(mine().length, 3, 'history stays intact');
+});
+
+test('DOM: every message carries edit/fork/drop actions, and the newest answer offers a repeat', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const calls = [];
+  app.tasks.forked = { ...task('forked'), prompt: 'Первое сообщение ветки' };
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname !== '/api/tasks/a/fork' && pathname !== '/api/tasks/a/regenerate' && !pathname.includes('/turns/')) return null;
+    calls.push({ pathname, method: options.method || 'GET', body: options.body });
+    if (pathname.endsWith('/fork')) return { ok: true, json: async () => ({ id: 'forked' }) };
+    return { ok: true, json: async () => ({ ok: true }) };
+  });
+
+  const bars = [...app.document.querySelectorAll('.turnActionBar')];
+  assert.ok(bars.length >= 4, `too few action bars: ${bars.length}`);
+  const userBar = [...app.document.querySelectorAll('.turn.me .turnActionBar')].at(-1);
+  const botBar = app.document.querySelector('.turn:not(.me) .turnActionBar');
+  assert.ok(userBar && botBar, 'both directions carry the action bar');
+  const visible = bar => [...bar.querySelectorAll('.actionBtn')].filter(b => !b.classList.contains('hidden')).map(b => b.dataset.action);
+  assert.deepEqual(visible(userBar), ['edit', 'fork', 'drop'], 'the operator line can be fixed, branched or dropped');
+  // Every action is an inline SVG mark, not an emoji: an emoji ignores the theme
+  // colour and changes size with the font, and 🌿 read as “herb”, not “fork”.
+  const iconMark = button => {
+    const svg = button.querySelector('svg');
+    assert.ok(svg, `${button.dataset.action} is drawn as an icon, not text`);
+    assert.ok(!button.textContent.trim(), `${button.dataset.action} carries no glyph`);
+    assert.equal(svg.getAttribute('stroke'), 'currentColor', `${button.dataset.action} follows the theme colour`);
+    assert.ok(svg.children.length, `${button.dataset.action} has real geometry`);
+  };
+  for (const button of userBar.querySelectorAll('.actionBtn')) iconMark(button);
+  // An answer is a branch point too; it can be re-run, never "edited" (an edit
+  // re-sends the operator's text, so it lives on that line only).
+  assert.deepEqual(visible(botBar), ['fork']);
+  const lastBotBar = [...app.document.querySelectorAll('.turn:not(.me) .turnActionBar')].at(-1);
+  assert.deepEqual(visible(lastBotBar), ['fork', 'regen']);
+  for (const button of lastBotBar.querySelectorAll('.actionBtn')) iconMark(button);
+
+  // ✎ opens the editor; Save re-sends the corrected text (the server wipes
+  // everything below it and asks the model again).
+  userBar.querySelector('.actionBtn').dispatchEvent(new app.window.Event('click'));
+  const area = app.document.querySelector('.editArea');
+  assert.ok(area, 'the editor opens');
+  area.value = 'Второй вопрос (исправлен)';
+  const save = [...app.document.querySelectorAll('.editRow button')].find(b => b.textContent === 'Сохранить');
+  save.dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  const edited = calls.find(c => c.pathname.endsWith('/edit'));
+  assert.ok(edited, 'the edit endpoint was called');
+  assert.equal(edited.pathname, '/api/tasks/a/turns/user-5/edit');
+  assert.equal(edited.body, JSON.stringify({ text: 'Второй вопрос (исправлен)' }));
+  assert.ok(!app.document.querySelector('.editArea'), 'the editor closes on success');
+
+  // 🔄 asks again and re-runs the model in the same session.
+  lastBotBar.querySelectorAll('.actionBtn')[1].dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  const regenerated = calls.find(c => c.pathname.endsWith('/regenerate'));
+  assert.ok(regenerated, 'the regenerate endpoint was called');
+  assert.equal(regenerated.body, JSON.stringify({ turnId: 'assistant-5' }), 'the newest answer names itself');
+
+  // 🗑 asks first (the harness answers yes), then drops the message and after.
+  userBar.querySelectorAll('.actionBtn')[2].dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls.some(c => c.pathname.endsWith('/delete')), 'the delete endpoint was called');
+
+  // 🌿 branches a session from this message and opens the copy.
+  userBar.querySelectorAll('.actionBtn')[1].dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  const forked = calls.find(c => c.pathname.endsWith('/fork'));
+  assert.ok(forked, 'the fork endpoint was called');
+  assert.equal(forked.body, JSON.stringify({ turnId: 'user-5' }));
+  assert.equal(app.urls.at(-1)?.url, '/session/forked', 'the new branch is opened');
 });

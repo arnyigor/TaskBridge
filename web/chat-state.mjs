@@ -61,6 +61,65 @@ export class ChatState {
     if (error) this.current.error = error;
   }
 
+  // The failed exchange was permanently removed from history by the server
+  // (repeat/resend). Turns produced by events at or after fromSeq — the
+  // retracted user bubble, its error reply and any notes — disappear from the
+  // chat too; `current` rolls back to the previous assistant turn.
+  //
+  // `keepUser` is the regeneration case: only the ANSWER is rewritten, so the
+  // operator's own line stays exactly where it was and gets a fresh (empty,
+  // active) assistant turn to stream into. Rebuilding it from a new
+  // USER_MESSAGE would have looked like "my message was erased and duplicated".
+  #truncateTurns(fromSeq, { dropInitial = false, keepUser = false } = {}) {
+    if (!Number.isSafeInteger(fromSeq) || fromSeq < 0) return;
+    const seqOf = (turn) => {
+      const prefix = turn.role === 'user' ? 'user-' : turn.role === 'note' ? 'note-' : 'assistant-';
+      const value = Number(String(turn.id || '').slice(prefix.length));
+      return String(turn.id || '').startsWith(prefix) && Number.isSafeInteger(value) ? value : null;
+    };
+    // A dropped turn takes its tools out of the shared index as well: a stale
+    // entry would later swallow a tool result that belongs to the new answer.
+    const forget = (turn) => { for (const tool of turn.tools || []) this.tools.delete(tool.id); };
+    this.turns = this.turns.filter(turn => {
+      const seq = seqOf(turn);
+      // seq === null: the turn synthesized from task.prompt, which has no event
+      // of its own. Regeneration keeps them (the trailing answer is dropped by
+      // the loop below); a retry drops the whole log.
+      if (seq === null) {
+        if (keepUser) return true;
+        if (dropInitial) { forget(turn); return false; }
+        return true;
+      }
+      if (seq < fromSeq) return true;
+      forget(turn);
+      return false;
+    });
+    if (keepUser) {
+      // Drop the answer (and anything trailing after it), then hand the incoming
+      // stream a fresh turn to land on. The turn OBJECT is replaced, not just
+      // emptied — the view uses that identity to throw away what belonged to the
+      // previous answer (its tool chips above all).
+      while (this.turns.length && this.turns.at(-1).role !== 'user') forget(this.turns.pop());
+      const seed = this.turns.length ? (seqOf(this.turns.at(-1)) ?? 'initial') : 'initial';
+      this.current = { id: `assistant-${seed}`, role: 'assistant', text: '', thinking: '', tools: [], active: true, status: '', error: null };
+      this.turns.push(this.current);
+    } else {
+      const lastAssistant = [...this.turns].reverse().find(turn => turn.role === 'assistant');
+      if (lastAssistant) {
+        this.current = lastAssistant;
+      } else {
+        // The window began with the retracted exchange: keep a detached
+        // placeholder so live streaming state has somewhere to land until the
+        // resent message creates the real turn.
+        this.current = { id: `assistant-truncated-${fromSeq}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null };
+      }
+    }
+    this.messageTurn = null;
+    this.messageOpen = false;
+    this.textSeparator = '';
+    this.separatorApplied = false;
+  }
+
   apply(event) {
     if (event.taskId && event.taskId !== this.taskId) return false;
     if (event.seq <= this.cursor) return false;
@@ -69,6 +128,16 @@ export class ChatState {
     if (event.type === 'USER_MESSAGE') {
       this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq);
       this.current.active = true;
+    } else if (event.type === 'TURN_TRUNCATED') {
+      this.#truncateTurns(Number(event.data?.fromSeq), {
+        dropInitial: event.data?.dropInitial === true,
+        keepUser: event.data?.keepUser === true
+      });
+    } else if (event.type === 'TURN_EDITED') {
+      // An already settled message was corrected in place: the record is what
+      // the server stored, so a reload shows the corrected text too.
+      const edited = this.turns.find(turn => turn.id === event.data?.id);
+      if (edited) edited.text = String(event.data?.text ?? '');
     } else if (event.type === 'STATUS') {
       if (ACTIVE_STATUSES.has(event.data?.status)) {
         this.current.active = true;

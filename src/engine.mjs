@@ -6,6 +6,24 @@
 // Order matters: the first matching rule wins.
 const RULES = [
   {
+    // RPC-layer failures: a slow acknowledgement is worth another try, a hung
+    // process must be stopped rather than retried, and an exited process is
+    // retryable because a fresh session will be spawned.
+    code: 'PI_RPC_SLOW',
+    retryable: true,
+    patterns: [/Pi RPC slow response/i]
+  },
+  {
+    code: 'PI_RPC_EXITED',
+    retryable: true,
+    patterns: [/Pi RPC process is not running/i]
+  },
+  {
+    code: 'PI_RPC_HUNG',
+    retryable: false,
+    patterns: [/no output from the Pi process/i, /looks hung/i]
+  },
+  {
     code: 'QUOTA_EXCEEDED',
     retryable: false,
     patterns: [
