@@ -153,7 +153,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
 
   // The app listens on both a plain and a TLS port; the proxy mirrors that, so
   // an existing phone bookmark on https keeps working in split mode.
-  if (httpsConfig.enabled) {
+  // LAN_TLS=off is for callers that must not touch 8443 (acceptance harnesses):
+  // the config is the repo's, so https.enabled there is not about them.
+  if (httpsConfig.enabled && process.env.LAN_TLS !== 'off') {
     try {
       const { key, cert, certPath } = await ensureTlsCert(dataRoot);
       const secure = createReverseProxy({ upstreamPort, port: Number(httpsConfig.port || 8443), host, tls: { key, cert } });

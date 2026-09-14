@@ -32,7 +32,8 @@
     "split:acceptance": "node scripts/split-acceptance.mjs",
     "lan:start": "node scripts/start-lan.mjs start",
     "lan:status": "node scripts/start-lan.mjs status",
-    "lan:stop": "node scripts/start-lan.mjs stop"
+    "lan:stop": "node scripts/start-lan.mjs stop",
+    "lan:acceptance": "node scripts/lan-acceptance.mjs"
   },
   "devDependencies": {
     "linkedom": "^0.18.13"
