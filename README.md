@@ -405,6 +405,11 @@ pi -p "Прочитай README проекта и ответь одной стр�
 
 ## HTTP API
 
+Машиночитаемый контракт — [`src/api-contract.mjs`](src/api-contract.mjs) (версия
+`apiVersion` в `GET /api/info`), описание для клиента —
+[`docs/api-contract.md`](docs/api-contract.md); расхождение ловит
+`tests/api-contract.test.mjs`.
+
 Все `/api/*`, кроме `auth`/`health`, требуют авторизацию, если она включена.
 
 | Метод | Путь | Назначение |

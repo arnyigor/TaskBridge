@@ -29,6 +29,7 @@ import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
+import { API_VERSION } from './api-contract.mjs';
 
 const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
@@ -677,6 +678,7 @@ async function handleRequest(req, res) {
       return json(res, 200, {
         name: 'TaskBridge MVP',
         build,
+        apiVersion: API_VERSION,
         addresses: [
           ...lanAddresses(Number(config.server?.port || 8787)),
           ...(httpsConfig.enabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])
