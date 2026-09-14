@@ -80,9 +80,15 @@ function tail(file, lines = 8) {
 
 function spawnDetached({ file, args, env, log }) {
   const out = fs.openSync(log, 'a');
-  const child = spawn(file, args, { cwd: ROOT, detached: true, windowsHide: true, env: { ...process.env, ...env }, stdio: ['ignore', out, out] });
-  child.unref();
-  return child;
+  // The child gets its own copy of the descriptor; keeping ours open makes the
+  // exit path trip a libuv assertion on Windows.
+  try {
+    const child = spawn(file, args, { cwd: ROOT, detached: true, windowsHide: true, env: { ...process.env, ...env }, stdio: ['ignore', out, out] });
+    child.unref();
+    return child;
+  } finally {
+    fs.closeSync(out);
+  }
 }
 
 async function start() {
@@ -94,7 +100,9 @@ async function start() {
   }
 
   const config = await loadConfig(ROOT);
-  const publicPort = Number(config.server?.port || 8787);
+  // LAN_PORT is how a smoke run stands next to a live server instead of fighting
+  // it for the configured port.
+  const publicPort = Number(process.env.LAN_PORT || config.server?.port || 8787);
   const internalPort = await freePort();
   const appLog = path.join(DATA, 'lan-app.log');
   const proxyLog = path.join(DATA, 'lan-proxy.log');
@@ -108,6 +116,7 @@ async function start() {
     log: appLog,
     env: {
       TASKBRIDGE_BIND_HOST: '127.0.0.1',
+      TASKBRIDGE_PORT: String(internalPort),
       TASKBRIDGE_PUBLIC_PORT: String(publicPort),
       TASKBRIDGE_DISABLE_TLS: '1',
     },
@@ -186,4 +195,6 @@ if (!run) {
   console.error(`[lan] unknown command: ${command} (start | status | stop)`);
   process.exit(2);
 }
-process.exit(await run());
+/* exitCode, not exit(): exiting while a detached child handle is still closing
+   trips a libuv assertion on Windows (UV_HANDLE_CLOSING). */
+process.exitCode = await run();

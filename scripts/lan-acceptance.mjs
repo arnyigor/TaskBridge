@@ -74,21 +74,27 @@ function killTree(pid) {
 // proxy restart" is only meaningful if the proxy is something that can die.
 function startProxy({ internalPort, publicPort, log }) {
   const out = fs.openSync(log, 'a');
-  const child = spawn(process.execPath, ['src/proxy.mjs'], {
-    cwd: ROOT,
-    detached: true,
-    windowsHide: true,
-    env: {
-      ...process.env,
-      LAN_INTERNAL_PORT: String(internalPort),
-      LAN_PORT: String(publicPort),
-      LAN_HOST: '127.0.0.1',
-      LAN_TLS: 'off', // the repo config has https enabled; that port belongs to the operator
-    },
-    stdio: ['ignore', out, out],
-  });
-  child.unref();
-  return child;
+  // Close our copy of the descriptor once the child holds one: leaving it open
+  // trips a libuv assertion on the way out (Windows).
+  try {
+    const child = spawn(process.execPath, ['src/proxy.mjs'], {
+      cwd: ROOT,
+      detached: true,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        LAN_INTERNAL_PORT: String(internalPort),
+        LAN_PORT: String(publicPort),
+        LAN_HOST: '127.0.0.1',
+        LAN_TLS: 'off', // the repo config has https enabled; that port belongs to the operator
+      },
+      stdio: ['ignore', out, out],
+    });
+    child.unref();
+    return child;
+  } finally {
+    fs.closeSync(out);
+  }
 }
 
 let fixture = null;

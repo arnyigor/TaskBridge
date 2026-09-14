@@ -36,7 +36,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 const webDir = path.join(rootDir, 'web');
-const dataRoot = path.join(rootDir, 'data');
+// TASKBRIDGE_DATA_DIR lets a second instance run without touching the operator's
+// data (tests, acceptance harnesses, smoke runs next to a live server).
+const dataRoot = process.env.TASKBRIDGE_DATA_DIR
+  ? path.resolve(process.env.TASKBRIDGE_DATA_DIR)
+  : path.join(rootDir, 'data');
 
 // Identifies exactly which build/commit this running process was started
 // from, so a stale-vs-fresh deploy is visible in the UI instead of guessed
@@ -60,9 +64,11 @@ const config = await loadConfig(rootDir);
 // keep the app loopback-only and let it print links that point at the proxy
 // instead of at itself, without editing the user's config.json:
 //   TASKBRIDGE_BIND_HOST      — bind loopback (the proxy is the only door)
+//   TASKBRIDGE_PORT           — the port to listen on (the internal one)
 //   TASKBRIDGE_PUBLIC_PORT    — the port the *proxy* listens on, for the UI's links
 //   TASKBRIDGE_DISABLE_TLS=1  — TLS moves to the proxy, so the app must not open 8443
 const bindHostOverride = process.env.TASKBRIDGE_BIND_HOST || null;
+const portOverride = Number(process.env.TASKBRIDGE_PORT || 0) || null;
 const publicPortOverride = Number(process.env.TASKBRIDGE_PUBLIC_PORT || 0) || null;
 const tlsDisabled = process.env.TASKBRIDGE_DISABLE_TLS === '1';
 
@@ -1005,7 +1011,7 @@ async function handleRequest(req, res) {
 }
 
 const host = bindHostOverride || config.server?.host || '0.0.0.0';
-const port = Number(config.server?.port || 8787);
+const port = portOverride || Number(config.server?.port || 8787);
 // What the UI prints. Behind the proxy the bound port is the internal one, which
 // no phone can reach — the public port is the proxy's.
 const publicPort = publicPortOverride || port;
