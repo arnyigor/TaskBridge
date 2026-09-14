@@ -163,6 +163,7 @@ Taskbridge/
 ├─ src/
 │  ├─ server.mjs            HTTP-сервер, роутинг API, SSE, раздача статики
 │  ├─ gateway.mjs           HTTP/SSE-фронт без состояния агента (шаг 5, P-3)
+│  ├─ proxy.mjs             турникет варианта B: LAN-вход в приложение на loopback
 │  ├─ task-manager.mjs      жизненный цикл задач, очередь, сообщения, Pi-сессии
 │  ├─ session-manager.mjs   владение Pi-сессиями: Run, idle, close
 │  ├─ runners/pi-runner.mjs запуск/остановка процесса Pi на задачу
@@ -227,6 +228,7 @@ Taskbridge/
 │  ├─ check-secrets.mjs     аудит утечек (npm run check:secrets)
 │  ├─ restart-and-verify.mjs перезапуск и проверка сервера
 │  ├─ start-split.mjs / split-acceptance.mjs  host ⇄ gateway split
+│  ├─ start-lan.mjs         запуск варианта B (npm run lan:start/status/stop)
 │  └─ backup.mjs            снимок БД (npm run backup)
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
@@ -904,6 +906,14 @@ TaskBridge долго был одним монолитом: один OS-проц
    задача жива) — `npm run split:acceptance`. По умолчанию `npm start` /
    `taskbridge start` по-прежнему поднимают монолит `src/server.mjs`
    (требование «monolith keep» до зелёного P-4).
+4. **Вариант B — выбран (турникет вместо второй реализации API):** `src/proxy.mjs`
+   передаёт приложение как есть, поэтому паритет гарантирован по построению, а не
+   по числу портированных маршрутов (это и проверяет `tests/lan-mode.test.mjs`,
+   прогоняя весь опубликованный контракт через прокси). Запуск — `npm run lan:start`:
+   приложение поднимается только на `127.0.0.1`, прокси — единственная дверь в LAN
+   и владелец TLS; `npm run lan:status` / `lan:stop` — состояние и остановка.
+   Дефолт (`npm start`, `start.cmd`) при этом не менялся. Остаток —
+   `docs/agent-host-separation.md` §12.1.
 
 ### Альтернативы, которые рассматривались
 

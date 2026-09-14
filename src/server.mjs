@@ -54,6 +54,18 @@ const build = await (async () => {
 })();
 
 const config = await loadConfig(rootDir);
+
+// Variant B (docs/agent-host-separation.md §12): the app runs *behind* the LAN
+// proxy, and the proxy owns the public face — address, port, TLS. These knobs
+// keep the app loopback-only and let it print links that point at the proxy
+// instead of at itself, without editing the user's config.json:
+//   TASKBRIDGE_BIND_HOST      — bind loopback (the proxy is the only door)
+//   TASKBRIDGE_PUBLIC_PORT    — the port the *proxy* listens on, for the UI's links
+//   TASKBRIDGE_DISABLE_TLS=1  — TLS moves to the proxy, so the app must not open 8443
+const bindHostOverride = process.env.TASKBRIDGE_BIND_HOST || null;
+const publicPortOverride = Number(process.env.TASKBRIDGE_PUBLIC_PORT || 0) || null;
+const tlsDisabled = process.env.TASKBRIDGE_DISABLE_TLS === '1';
+
 await fs.mkdir(dataRoot, { recursive: true });
 let instanceLock;
 try {
@@ -680,8 +692,8 @@ async function handleRequest(req, res) {
         build,
         apiVersion: API_VERSION,
         addresses: [
-          ...lanAddresses(Number(config.server?.port || 8787)),
-          ...(httpsConfig.enabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])
+          ...lanAddresses(publicPort),
+          ...(httpsConfig.enabled && !tlsDisabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])
         ],
         modelBusy: busy.unknown ? null : busy.busy,
         modelReady,
@@ -992,17 +1004,20 @@ async function handleRequest(req, res) {
   }
 }
 
-const host = config.server?.host || '0.0.0.0';
+const host = bindHostOverride || config.server?.host || '0.0.0.0';
 const port = Number(config.server?.port || 8787);
+// What the UI prints. Behind the proxy the bound port is the internal one, which
+// no phone can reach — the public port is the proxy's.
+const publicPort = publicPortOverride || port;
 const server = http.createServer(handleRequest);
 server.listen(port, host, () => {
   console.log(`\nTaskBridge MVP listening on ${host}:${port}`);
   console.log(`Local: http://127.0.0.1:${port}`);
-  for (const item of lanAddresses(port)) console.log(`LAN (${item.interface}): ${item.url}`);
+  for (const item of lanAddresses(publicPort)) console.log(`LAN (${item.interface}): ${item.url}`);
   console.log(access.enabled ? '\nPairing enabled. Open localhost and click «Подключить телефон» for a code.\n' : '\nPairing disabled by configuration.\n');
 });
 
-if (httpsConfig.enabled) {
+if (httpsConfig.enabled && !tlsDisabled) {
   const httpsPort = Number(httpsConfig.port || 8443);
   try {
     const { key, cert, certPath } = await ensureTlsCert(dataRoot);

@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import https from 'node:https';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createReverseProxy } from '../src/proxy.mjs';
+import { ensureTlsCert } from '../src/tls.mjs';
 
 function startUpstream(handler) {
   const server = http.createServer(handler);
@@ -155,4 +160,36 @@ test('the proxy binds the address it is given, and refuses to start without an u
   const res = await request(proxy.port, { path: '/' });
   assert.equal(res.body, 'up');
   await sleep(0); // keep the async shape obvious for the teardown hooks
+});
+
+test('with a certificate the proxy terminates TLS and still forwards plain http', async (t) => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-tls-'));
+  t.after(() => fs.rm(dataRoot, { recursive: true, force: true }));
+  // The self-signed cert comes from the same helper the app uses, so this also
+  // covers "TLS moved to the proxy" (step 3) — except where openssl is missing.
+  let tls;
+  try { tls = await ensureTlsCert(dataRoot); }
+  catch (error) { t.skip(`no certificate available: ${error.message}`); return; }
+
+  const { server: up, port: upPort } = await startUpstream((req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify({ scheme: req.headers['x-forwarded-proto'] || 'http' }));
+  });
+  t.after(() => new Promise((resolve) => up.close(resolve)));
+
+  const proxy = createReverseProxy({ upstreamPort: upPort, port: 0, host: '127.0.0.1', tls, logger: { error: () => {} } });
+  await proxy.listen();
+  t.after(() => proxy.close());
+
+  const body = await new Promise((resolve, reject) => {
+    https.get({ host: '127.0.0.1', port: proxy.port, path: '/api/info', rejectUnauthorized: false }, (res) => {
+      assert.equal(res.statusCode, 200);
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    }).on('error', reject);
+  });
+
+  assert.deepEqual(JSON.parse(body), { scheme: 'http' });
+  assert.match(proxy.baseUrl, /^https:/);
 });
