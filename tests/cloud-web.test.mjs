@@ -62,9 +62,13 @@ test('the cloud dev host serves the same shell and the same app.js as the machin
   const port = running.port;
   const get = async (urlPath) => new Promise((resolve, reject) => {
     http.get({ host: '127.0.0.1', port, path: urlPath }, res => {
-      let body = '';
-      res.on('data', chunk => body += chunk);
-      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body }));
+      // Collect Buffers and decode once: `body += chunk` decodes each TCP chunk
+      // on its own, so a multi-byte character split across a chunk boundary
+      // becomes replacement characters and the byte-for-byte check fails at
+      // random (the file is served correctly — only the test mangled it).
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, type: res.headers['content-type'], body: Buffer.concat(chunks).toString('utf8') }));
     }).on('error', reject);
   });
   try {
