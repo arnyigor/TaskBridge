@@ -227,3 +227,44 @@ reader в gateway и writer в host не блокировали друг дру�
   процесс, но не вводит новую модель данных сессий.
 - E2EE, несколько клиентов с sequencer, Android/KMP — позже.
 - `taskbridge pi` как терминальный клиент — не делаем (по решению «бразуер-first»).
+
+## 12. P-4: инвентаризация остатка (замер перед продолжением)
+
+Статус на 2026-09-14: P-1…P-3 сделаны (IPC-транспорт, `AgentHost`, gateway,
+acceptance) — `npm run split:acceptance` зелёный. Дефолт по-прежнему монолит,
+потому что gateway отдаёт **6 групп маршрутов из ~40**. Замер:
+
+| Область | Монолит `server.mjs` | Gateway |
+|---|---|---|
+| health / info | ✅ полный payload | ⚠️ заглушка `{ build: { version: 'gateway' } }` — в split-UI видна «версия gateway», нет `engine`/`system` |
+| projects / tasks / uploads / commands | ✅ | ✅ (подмножество) |
+| `tasks/:id` — events, stream, state, message, cancel, compact, model, thinking, auto-compaction, apply, worktree, approvals | ✅ | ✅ |
+| `tasks/:id` — turns/edit, turns/delete, regenerate, fork, undo-last-turn, artifacts(+`:name`), files/:id, workspace-file, runs | ✅ | ❌ |
+| models | ✅ | ❌ |
+| native-sessions(+preview), `projects/:id/pi-sessions` | ✅ | ❌ |
+| project-browser(+register), `DELETE projects/:id` | ✅ | ❌ |
+| mcp (status / mode / import / servers / tools) | ✅ | ❌ (в IPC есть только `mcpStatus`) |
+| local (router: status / load / unload / stop / start / events) | ✅ | ❌ |
+| runtime (status / start / restart) | ✅ | ❌ |
+| metrics (JSON + Prometheus) | ✅ | ❌ |
+| push (key / subscribe / unsubscribe / test) | ✅ | ❌ |
+| auth (status / pair / pairing) | ✅ | ❌ |
+| cloud (`/api/cloud/*`), `/debug/cloud` | ✅ | ❌ |
+
+Вывод: «сделать split дефолтом» нельзя без переноса ~30 групп маршрутов и
+расширения IPC-контракта. Отсюда развилка (обе дают цель шага 5 — рестарт
+gateway не убивает агента):
+
+**Вариант A — текущий курс дизайна.** Явные команды IPC на каждый маршрут.
+Плюс: типизированный контракт, нет второго HTTP-прыжка.
+Минус: ~30 маршрутов дублируются в двух таблицах (монолит и gateway) → дрейф,
+а именно он и ломает «стабильное ядро».
+
+**Вариант B — host поднимает полный HTTP-апп на loopback, gateway становится
+тонким прокси** (TLS и авторизация — на стороне gateway, лицевой части LAN).
+Плюс: 100 % паритета по построению, одна таблица маршрутов, gateway перестаёт быть
+второй реализацией API (перестаёт «врать», как сейчас с `version: 'gateway'`).
+Минус: host перестаёт быть «headless» (§3 этого не предполагал); лишний локальный
+HTTP-прыжок; часть работы P-2 (таблица маршрутов gateway) становится ненужной.
+
+Решение по A/B принимает владелец проекта: оно определяет весь остаток P-4.
