@@ -159,6 +159,66 @@ async function start() {
   return 0;
 }
 
+// Foreground mode: what `npm start` and start.cmd have always felt like — the
+// app's log stays on this terminal — with the proxy alongside it. Ctrl+C reaches
+// both (same console), the proxy goes first, and the exit code is the app's.
+async function runForeground() {
+  const config = await loadConfig(ROOT);
+  const publicPort = Number(process.env.LAN_PORT || config.server?.port || 8787);
+  const internalPort = await freePort();
+  fs.mkdirSync(DATA, { recursive: true });
+
+  const app = spawn(process.execPath, ['src/server.mjs'], {
+    cwd: ROOT,
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      TASKBRIDGE_BIND_HOST: '127.0.0.1',
+      TASKBRIDGE_PORT: String(internalPort),
+      TASKBRIDGE_PUBLIC_PORT: String(publicPort),
+      TASKBRIDGE_DISABLE_TLS: '1',
+    },
+  });
+
+  const appUp = await waitForHealth(internalPort, { timeoutMs: 30000, onFail: () => app.exitCode !== null });
+  if (!appUp) {
+    killTree(app.pid);
+    console.error('[lan] the app did not come up — see its output above.');
+    return 1;
+  }
+
+  const proxy = spawnDetached({
+    file: process.execPath,
+    args: ['src/proxy.mjs'],
+    log: path.join(DATA, 'lan-proxy.log'),
+    env: { LAN_INTERNAL_PORT: String(internalPort), LAN_PORT: String(publicPort) },
+  });
+  const proxyUp = await waitForHealth(publicPort, { onFail: () => proxy.exitCode !== null });
+  if (!proxyUp) {
+    killTree(proxy.pid);
+    killTree(app.pid);
+    console.error('[lan] the proxy did not come up. Its log says:');
+    console.error(tail(path.join(DATA, 'lan-proxy.log'), 12) || '  (empty)');
+    return 1;
+  }
+
+  fs.writeFileSync(STATE, JSON.stringify({
+    appPid: app.pid, proxyPid: proxy.pid, internalPort, publicPort,
+    startedAt: new Date().toISOString(),
+  }, null, 2));
+
+  console.log(`[lan] app ${app.pid} on 127.0.0.1:${internalPort} (loopback only)`);
+  console.log(`[lan] proxy ${proxy.pid} on 0.0.0.0:${publicPort} — this is what the phone opens`);
+  console.log(`[lan] http://127.0.0.1:${publicPort} · Ctrl+C stops both\n`);
+
+  // The app owns the agent: when it is gone, the LAN face must not outlive it.
+  const code = await new Promise((resolve) => app.on('close', (value) => resolve(value ?? 0)));
+  killTree(proxy.pid);
+  try { fs.unlinkSync(STATE); } catch { /* already gone */ }
+  console.log('[lan] stopped');
+  return code;
+}
+
 async function status() {
   const state = readState();
   if (!state) {
@@ -189,12 +249,12 @@ function stop() {
   return 0;
 }
 
-const command = (process.argv[2] || 'start').toLowerCase();
-const run = { start, status, stop }[command];
-if (!run) {
-  console.error(`[lan] unknown command: ${command} (start | status | stop)`);
+const command = (process.argv[2] || 'run').toLowerCase();
+const handler = { run: runForeground, start, status, stop }[command];
+if (!handler) {
+  console.error(`[lan] unknown command: ${command} (run | start | status | stop)`);
   process.exit(2);
 }
 /* exitCode, not exit(): exiting while a detached child handle is still closing
    trips a libuv assertion on Windows (UV_HANDLE_CLOSING). */
-process.exitCode = await run();
+process.exitCode = await handler();

@@ -232,7 +232,7 @@ Taskbridge/
 ├─ docs/                    ТЗ, ревью и планы
 ├─ config.example.json      шаблон конфигурации
 ├─ models.example.ini       шаблон пресетов llama.cpp router (скопируйте в models.ini)
-├─ start.cmd                запуск на Windows
+├─ start.cmd                запуск на Windows (LAN-режим: приложение + турникет)
 └─ data/                    задачи, события, worktree, логи (не в git)
 ```
 
@@ -290,18 +290,29 @@ npm run smoke:pi -- "G:\path\to\project"
 ### 2. Запустить TaskBridge
 
 ```powershell
-start.cmd
+start.cmd        # или: npm start
 ```
 
-При первом старте автоматически создаётся `config.json` из `config.example.json`. Сервер напечатает:
+Запускается **LAN-режим**: приложение поднимается только на `127.0.0.1`,
+а в сеть смотрит турникет (`src/proxy.mjs`) — тогда перезапуск сетевой части не
+убивает агента (см. [Устойчивость процессов](#устойчивость-процессов-шаг-5-lan-турникет)).
+При первом старте автоматически создаётся `config.json` из `config.example.json`. В выводе видно оба процесса и адрес для телефона:
 
 ```text
-TaskBridge MVP listening on 0.0.0.0:8787
-Local: http://127.0.0.1:8787
-LAN (Wi-Fi): http://192.168.1.42:8787
+TaskBridge MVP listening on 127.0.0.1:51234
+LAN (Ethernet 2): http://192.168.1.42:8787
+
+[lan] app 4242 on 127.0.0.1:51234 (loopback only)
+[lan] proxy 4243 on 0.0.0.0:8787 — this is what the phone opens
+[lan] http://127.0.0.1:8787 · Ctrl+C stops both
 ```
 
-На телефоне в той же Wi‑Fi сети открыть LAN URL.
+На телефоне в той же Wi‑Fi сети открыть LAN URL (порт из `config.json`).
+Остановить — `Ctrl+C` в этом окне, или `taskbridge stop` / `npm run lan:stop`.
+Фоновый запуск — `npm run lan:start`.
+
+Один процесс (старое поведение) остаётся доступен как аварийный вариант:
+`npm run start:monolith` или `taskbridge start --monolith`.
 
 ### 3. Самая быстрая проверка без проекта
 
@@ -909,8 +920,11 @@ UI/UX». Код split'а удалён; разбор решения и остат
 себе цель не закрывает: он не переживает аварийный kill (это отдельный критерий
 K2 в роадмапе).
 
-Следующий шаг — перевести дефолт (`npm start`, `start.cmd`, `taskbridge start`) на
-турникет и научить `bin/taskbridge.mjs` двум процессам (§12.1, шаги 5–6).
+Дефолт переведён: `npm start`, `start.cmd` и `taskbridge start` поднимают именно
+LAN-режим (турникет + приложение на loopback); `taskbridge stop` и
+`npm run lan:stop` останавливают оба процесса. Остался один хвост —
+`scripts/restart-and-verify.mjs` пока перезапускает приложение целиком, а не
+только турникет (§12.1).
 
 
 ## Известные ограничения
@@ -939,8 +953,9 @@ K2 в роадмапе).
 
 **Стабильное ядро**
 
-- AgentHost / P-4: дефолт переведён на «приложение на loopback + турникет»
-  (§12.1, шаги 5–6: `npm start`, `start.cmd`, `bin/taskbridge` про два процесса);
+- AgentHost / P-4: дефолт — «приложение на loopback + турникет»
+  (§12.1, шаги 5–6 сделаны: `npm start`, `start.cmd`, `taskbridge` про два
+  процесса; осталась только `restart-and-verify`);
 - аварийный рестарт больше не оставляет задачи в `FAILED_RECOVERY`;
 - долгий soak без потерь: очередь, восстановление сессии, повтор упавшего хода,
   нет осиротевших Pi/llama.cpp;

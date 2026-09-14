@@ -14,4 +14,6 @@ if errorlevel 1 (
   exit /b 1
 )
 
-node src\server.mjs
+rem LAN mode: the app on loopback + the proxy that owns the LAN face.
+rem Single-process escape hatch: node src\server.mjs
+node scripts\start-lan.mjs run

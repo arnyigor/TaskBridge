@@ -286,8 +286,8 @@ HTTP-прыжок; часть работы P-2 (таблица маршруто�
 | 2 | лаунчер `npm run lan:start` (app на loopback + прокси на LAN), TLS на прокси, `TASKBRIDGE_BIND_HOST` / `TASKBRIDGE_PUBLIC_PORT` / `TASKBRIDGE_DISABLE_TLS` | ✅ |
 | 3 | паритет как свойство: `tests/lan-mode.test.mjs` прогоняет **весь опубликованный контракт** через прокси (не «шесть портированных маршрутов») | ✅ |
 | 4 | старые IPC-маршруты gateway (`src/gateway.mjs`, `src/agent-host.mjs`, `src/host.mjs`, `src/ipc.mjs`) | ✅ **удалены** (вместе со `start:split`, `split:acceptance` и их тестами) |
-| 5 | дефолт (`npm start`, `start.cmd`, `taskbridge start`) перевести на лаунчер; `restart-and-verify` — только прокси | ⏳ |
-| 6 | `bin/taskbridge.mjs` (`status`/`stop`/`doctor`) знать про два процесса | ⏳ |
+| 5 | дефолт (`npm start`, `start.cmd`, `taskbridge start`) на лаунчер | ✅ сделано (кроме `restart-and-verify` — он пока поднимает приложение целиком) |
+| 6 | `bin/taskbridge.mjs` (`status`/`stop`/`doctor`/`open`) знает про два процесса | ✅ сделано |
 
 Риски, которые B обязан закрыть, и где они закрыты:
 

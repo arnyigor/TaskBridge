@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// taskbridge — command-line front door for a running TaskBridge (monolith or
-// the split host+gateway). This is intentionally a thin admin/client CLI: it
-// talks to the server over its HTTP API and never spawns its own Pi.
+// taskbridge — command-line front door for a running TaskBridge. This is
+// intentionally a thin admin/client CLI: it talks to the server over its HTTP API
+// and never spawns its own Pi.
 //
-// Default (`taskbridge start`) runs the legacy monolith (src/server.mjs).
-// `taskbridge start --split` runs host + gateway as separate background
-// processes (scripts/start-split.mjs) and keeps the agent in the host, so a
-// gateway restart does not kill it. status / stop / open detect whichever
-// mode is actually running.
+// Default (`taskbridge start`) is the LAN mode: the app on loopback plus the proxy
+// that owns the LAN face (scripts/start-lan.mjs,
+// docs/agent-host-separation.md §12.1), so a restart of the LAN face does not kill
+// the agent. `--monolith` keeps the old single-process daemon as an escape hatch.
+// status / stop / open detect whichever mode is actually running.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,13 +20,13 @@ const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 function nowISO() { return new Date().toISOString(); }
 function log(msg) { console.log(`[taskbridge ${nowISO()}] ${msg}`); }
 
-// --- process / lock / split helpers ----------------------------------------
+// --- process / lock / LAN-mode helpers -------------------------------------
 
 function dataRoot() {
   return process.env.TASKBRIDGE_DATA_DIR ? path.resolve(process.env.TASKBRIDGE_DATA_DIR) : path.join(ROOT_DIR, 'data');
 }
 function lockFile() { return path.join(dataRoot(), 'taskbridge.lock'); }
-function splitFile() { return path.join(dataRoot(), 'split.json'); }
+function lanFile() { return path.join(dataRoot(), 'lan.json'); }
 
 function alive(pid) {
   try { process.kill(pid, 0); return true; }
@@ -45,19 +45,22 @@ function runningLock() {
   return b && alive(b.pid) ? b : null;
 }
 
-function runningSplit() {
-  try {
-    const s = JSON.parse(fs.readFileSync(splitFile(), 'utf8'));
-    if (!s || !Number.isSafeInteger(s.hostPid) || !Number.isSafeInteger(s.gatewayPid)) return null;
-    if (!alive(s.hostPid) || !alive(s.gatewayPid)) return null;
-    return s;
-  } catch { return null; }
+function readLan() {
+  try { return JSON.parse(fs.readFileSync(lanFile(), 'utf8')); } catch { return null; }
 }
-function wantsSplit() { return process.argv.slice(2).includes('--split'); }
+// LAN mode is two processes (app on loopback, proxy on the LAN) recorded in
+// data/lan.json. Both must be alive for the mode to count as running.
+function runningLan() {
+  const s = readLan();
+  if (!s || !Number.isSafeInteger(s.appPid) || !Number.isSafeInteger(s.proxyPid)) return null;
+  if (!alive(s.appPid) || !alive(s.proxyPid)) return null;
+  return s;
+}
+function wantsMonolith() { return process.argv.slice(2).includes('--monolith'); }
 
 function effectiveUrl(config) {
-  const split = runningSplit();
-  const port = split ? split.gatewayPort : (config.server?.port ?? 8787);
+  const lan = runningLan();
+  const port = lan ? lan.publicPort : (config.server?.port ?? 8787);
   return `http://127.0.0.1:${port}`;
 }
 
@@ -79,17 +82,18 @@ async function portReady(url, timeoutMs = 15000) {
 // --- subcommands ------------------------------------------------------------
 
 async function cmdStatus(config) {
-  const split = runningSplit();
+  const lan = runningLan();
   const lock = runningLock();
-  if (split && lock) {
-    console.log(`TaskBridge: running in split mode`);
-    console.log(`  host (agent):   PID ${split.hostPid}`);
-    console.log(`  gateway (UI):   PID ${split.gatewayPid}`);
-    console.log(`  URL:            ${effectiveUrl(config)}`);
-    console.log(`  IPC:            127.0.0.1:${split.hostPort}`);
-    console.log(`  data:           ${dataRoot()}`);
+  if (lan) {
+    console.log(`TaskBridge: running (LAN mode)`);
+    console.log(`  app (agent):  PID ${lan.appPid}   127.0.0.1:${lan.internalPort} (loopback only)`);
+    console.log(`  proxy (LAN):  PID ${lan.proxyPid}   0.0.0.0:${lan.publicPort}`);
+    console.log(`  URL:          ${effectiveUrl(config)}`);
+    console.log(`  data:         ${dataRoot()}`);
   } else if (lock) {
-    console.log(`TaskBridge: running (monolith, PID ${lock.pid})`);
+    const half = readLan();
+    console.log(`TaskBridge: running (single process, PID ${lock.pid})`);
+    if (half) console.log('  note:         data/lan.json exists but its proxy is gone — restart with "taskbridge start"');
     console.log(`  URL:       ${effectiveUrl(config)}`);
     console.log(`  startedAt: ${lock.startedAt ?? 'unknown'}`);
     console.log(`  data:      ${dataRoot()}`);
@@ -106,8 +110,8 @@ async function cmdDoctor(config) {
     console.log(`  data dir:    ${dataRoot()} (will be created on first start)`);
   } else {
     const lock = runningLock();
-    const split = runningSplit();
-    console.log(`  data dir:    ${dataRoot()} (present${lock ? `, locked by PID ${lock.pid}` : ', not locked'}${split ? ', split running' : ''})`);
+    const lan = runningLan();
+    console.log(`  data dir:    ${dataRoot()} (present${lock ? `, locked by PID ${lock.pid}` : ', not locked'}${lan ? ', LAN mode running' : ''})`);
   }
   console.log(`  root dir:    ${ROOT_DIR}`);
   console.log(`  config:      ${fs.existsSync(configPath) ? 'present' : 'MISSING'}`);
@@ -119,28 +123,24 @@ async function cmdDoctor(config) {
   return problems.length ? 1 : 0;
 }
 
-async function startSplit(timeoutMs = 20000) {
-  if (runningSplit()) {
-    log(`split already running (host ${runningSplit().hostPid}, gateway ${runningSplit().gatewayPid})`);
+async function startLan(config, timeoutMs = 25000) {
+  const running = runningLan();
+  if (running) {
+    log(`LAN mode already running (app ${running.appPid}, proxy ${running.proxyPid})`);
     return true;
   }
-  const child = spawn(process.execPath, ['scripts/start-split.mjs'], {
+  log('starting LAN mode (app on loopback + proxy) …');
+  const child = spawn(process.execPath, ['scripts/start-lan.mjs', 'start'], {
     cwd: ROOT_DIR,
-    env: { ...process.env, TASKBRIDGE_DATA_DIR: dataRoot() },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
-  log('starting split (host + gateway) …');
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (runningSplit()) { return await portReady(effectiveUrl(await loadConfig(ROOT_DIR))); }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  log('split did not become ready in time');
-  return false;
+  const code = await new Promise((resolve) => child.on('close', resolve));
+  if (code !== 0) return false;
+  return await portReady(effectiveUrl(config), timeoutMs);
 }
 
 async function startServer(config, timeoutMs = 15000) {
-  if (runningLock() && !runningSplit()) {
+  if (runningLock()) {
     log(`server already running (PID ${runningLock().pid})`);
     return true;
   }
@@ -158,21 +158,19 @@ async function startServer(config, timeoutMs = 15000) {
 }
 
 async function stopServer(timeoutMs = 9000) {
-  const split = runningSplit();
-  if (split) {
-    log(`stopping split: host PID ${split.hostPid}, gateway PID ${split.gatewayPid}`);
-    for (const pid of [split.gatewayPid, split.hostPid]) {
-      try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
-    }
+  const lan = runningLan();
+  if (lan) {
+    log(`stopping LAN mode: app PID ${lan.appPid}, proxy PID ${lan.proxyPid}`);
+    // The proxy goes first: while it still forwards, the app would answer a
+    // request that is about to be cut off.
+    const child = spawn(process.execPath, ['scripts/start-lan.mjs', 'stop'], { cwd: ROOT_DIR, stdio: ['ignore', 'inherit', 'inherit'] });
+    await new Promise((resolve) => child.on('close', resolve));
     const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline && (alive(split.hostPid) || alive(split.gatewayPid))) {
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    for (const pid of [split.gatewayPid, split.hostPid]) {
+    while (Date.now() < deadline && (alive(lan.appPid) || alive(lan.proxyPid))) await new Promise((r) => setTimeout(r, 200));
+    for (const pid of [lan.proxyPid, lan.appPid]) {
       if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} log(`PID ${pid} forced (SIGKILL)`); }
     }
-    try { fs.rmSync(splitFile(), { force: true }); } catch {}
-    log('split stopped');
+    log('stopped');
     return;
   }
   const holder = runningLock();
@@ -200,9 +198,9 @@ async function cmdOpen(config, arg) {
   if (project) log(`project: ${project.name || project.id} (${project.path})`);
   else if (arg) log(`note: '${cwd}' is not under a registered project — opening the task list`);
 
-  if (!runningSplit() && !runningLock()) {
+  if (!runningLan() && !runningLock()) {
     log('server not running — starting it');
-    const ok = wantsSplit() ? await startSplit() : await startServer(config);
+    const ok = wantsMonolith() ? await startServer(config) : await startLan(config);
     if (!ok) { console.error('TaskBridge could not be started. Check `taskbridge doctor`.'); process.exit(1); }
   }
 
@@ -226,20 +224,21 @@ async function cmdOpen(config, arg) {
 
 const USAGE = `taskbridge — admin/client CLI for a running TaskBridge server
 
-usage: taskbridge <command> [--split] [path]
+usage: taskbridge <command> [--monolith] [path]
 
 commands:
   open [path]   open the latest session for the current dir (or path) in the
                 browser; starts a server if none is running
-  status        is it running? (monolith or split host+gateway)
+  status        is it running? (LAN mode = app + proxy, or a single process)
   doctor        check config, data dir and lock state
-  start [--split] start the server (split = host + gateway background procs)
-  stop          stop whatever is running (split or monolith)
+  start [--monolith]  start the server (default: LAN mode — the app on loopback
+                plus the LAN proxy; --monolith keeps the old daemon)
+  stop          stop whatever is running (LAN mode or single process)
   help          show this help
 `;
 
 const command = process.argv[2];
-const arg = process.argv.find((a) => a !== '--split' && !a.startsWith('-') && a !== command);
+const arg = process.argv.find((a) => a !== '--monolith' && !a.startsWith('-') && a !== command);
 
 if (!command || command === 'help' || command === '--help' || command === '-h') {
   console.log(USAGE);
@@ -253,7 +252,7 @@ switch (command) {
   case 'status': await cmdStatus(config); break;
   case 'doctor': process.exit(await cmdDoctor(config)); break;
   case 'start': {
-    const ok = wantsSplit() ? await startSplit() : await startServer(config);
+    const ok = wantsMonolith() ? await startServer(config) : await startLan(config);
     process.exit(ok ? 0 : 1);
     break;
   }
