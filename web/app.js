@@ -599,6 +599,7 @@ function resetSelection(id) {
   $('stopButton').disabled = true;
   $('compact').disabled = true;
   $('autoCompaction').disabled = true;
+  $('sessionDetailsButton').classList.toggle('hidden', !id);
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
   for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
@@ -3070,6 +3071,12 @@ function openLocalEvents() {
 }
 
 function closeLocalEvents() { localEvents?.close(); localEvents = null; }
+
+$('sessionDetailsButton').onclick = () => $('sessionDetailsOverlay').classList.remove('hidden');
+const closeSessionDetails = () => $('sessionDetailsOverlay').classList.add('hidden');
+$('sessionDetailsClose').onclick = closeSessionDetails;
+$('sessionDetailsCloseBtn').onclick = closeSessionDetails;
+$('sessionDetailsOverlay').onclick = (e) => { if (e.target === $('sessionDetailsOverlay')) closeSessionDetails(); };
 
 $('localModelsButton').onclick = async () => {
   $('localModelsOverlay').classList.remove('hidden');

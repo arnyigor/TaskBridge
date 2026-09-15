@@ -85,9 +85,10 @@ test('a complete service-worker upgrade activates before removing the old cache'
     clients: { claim: async () => { actions.push('claim'); } },
     location: { origin: 'https://taskbridge.test' },
   };
+  const currentCache = source.match(/const CACHE = ['"]([^'"]+)['"]/)?.[1] || 'taskbridge-v2';
   const caches = {
     open: async () => ({ addAll: async () => { actions.push('cached'); } }),
-    keys: async () => ['taskbridge-v1', 'taskbridge-v2'],
+    keys: async () => ['taskbridge-v1', currentCache],
     delete: async key => { actions.push(`delete:${key}`); },
   };
   vm.runInNewContext(source, { self, caches, URL, Request, fetch: async () => ({ ok: true, clone() { return this; } }) });
