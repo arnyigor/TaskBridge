@@ -2810,7 +2810,9 @@ async function chooseModel(model) {
     renderTaskDetails(updated);
     updateModelChip();
     $('modelPickerOverlay').classList.add('hidden');
-    if (localEnabled && model.provider === localProviderId()) loadLocalModel(model.id);
+    if (localEnabled && model.provider === localProviderId()) {
+      loadLocalModel(model.id).catch(() => {});
+    }
   } catch (error) {
     alert(`Не удалось сменить модель: ${error.message}`);
   } finally {

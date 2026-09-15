@@ -438,10 +438,16 @@ export class LocalModelService extends EventEmitter {
 
   async loadModel(id, { onProgress, signal } = {}) {
     if (!id) throw failure('INPUT_INVALID', 'Не указана модель.');
-    const already = (await this.listModels().catch(() => [])).find(m => m.id === id);
-    if (already && (already.status === 'loaded' || already.status === 'sleeping')) {
-      this.activeProfileId = id;
+    const models = await this.listModels().catch(() => []);
+    const already = models.find(m => m.id === id || m.name === id);
+    if (already && (already.status === 'loaded' || already.status === 'sleeping' || already.status === 'unknown')) {
+      this.activeProfileId = already.id;
       return already;
+    }
+    // An external single-model llama-server doesn't support /models/load: it already runs this model.
+    if (this.state === 'EXTERNAL_RUNNING' && models.some(m => m.status === 'unknown')) {
+      this.activeProfileId = id;
+      return already || { id, status: 'loaded' };
     }
     this.startWatching();
     const onProg = event => { if (!event.model || event.model === id) onProgress?.(event); };
@@ -451,7 +457,7 @@ export class LocalModelService extends EventEmitter {
       const deadline = Date.now() + (this.management.loadTimeoutMs || 900000);
       while (true) {
         if (signal?.aborted) throw failure('LOCAL_LOAD_CANCELLED', 'Загрузка отменена.');
-        const entry = (await this.listModels().catch(() => [])).find(m => m.id === id);
+        const entry = (await this.listModels().catch(() => [])).find(m => m.id === id || m.name === id);
         if (entry?.status === 'loaded') {
           this.activeProfileId = id;
           this.emit('loaded', entry);
@@ -463,6 +469,12 @@ export class LocalModelService extends EventEmitter {
         if (Date.now() > deadline) throw failure('LOCAL_LOAD_TIMEOUT', `Таймаут загрузки модели ${id}.`);
         await sleep(500);
       }
+    } catch (err) {
+      if (['LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER'].includes(err.code) && await this.isReady()) {
+        this.activeProfileId = id;
+        return already || { id, status: 'loaded' };
+      }
+      throw err;
     } finally {
       this.off('progress', onProg);
     }
