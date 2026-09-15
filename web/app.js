@@ -227,7 +227,8 @@ function timeEl(value, { range = null } = {}) {
 // and hides it when the turn carries no recorded time at all.
 function setTurnTime(node, turn, host) {
   if (!host) return;
-  const next = timeEl(turn.at, { range: turn.endedAt });
+  const startVal = turn.at || turn.userAt;
+  const next = timeEl(startVal, { range: turn.endedAt });
   if (!next) { node.timeEl?.remove(); node.timeEl = null; return; }
   if (node.timeEl && node.timeEl.parentElement === host) {
     if (node.timeEl._shown !== next.textContent) { node.timeEl.textContent = next.textContent; node.timeEl._shown = next.textContent; }

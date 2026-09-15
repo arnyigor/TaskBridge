@@ -48,6 +48,18 @@ export class ChatState {
   }
 
   addUser(text, files, id, at = null) {
+    // If the previous turn was not marked final, close it cleanly:
+    if (this.current && this.current.role === 'assistant' && !this.current.final) {
+      this.current.active = false;
+      this.current.superseded = true;
+      if (!this.current.status) {
+        this.current.status = String(this.current.text || '').trim().length ? 'DONE' : 'CANCELLED';
+      }
+      if (!this.current.endedAt && at) {
+        this.current.endedAt = at;
+      }
+      this.current.final = true;
+    }
     // Older logs embedded upload instructions in the visible message.
     const marker = '\n\nAdditional files from the phone are in .taskbridge-input/:\n';
     const split = String(text || '').split(marker);
@@ -56,21 +68,32 @@ export class ChatState {
     // (`at`) and end (`endedAt`) without touching it.
     this.turns.push({ id: `user-${id}`, role: 'user', text: split[0], files, at });
     const key = id === 'initial' ? 0 : Number(id);
-    this.current = { id: `assistant-${id}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: key, at: null, endedAt: null };
+    this.current = { id: `assistant-${id}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: key, at: null, endedAt: null, userAt: at };
     this.turns.push(this.current);
     this.variants.set(key, { ids: [`assistant-${id}`], selected: `assistant-${id}` });
   }
 
   finish(status, error = null, at = null) {
-    const running = this.turns.filter(turn => turn.role === 'assistant' && (turn.active || !turn.status));
-    // An answer that was CUT OFF without saying anything is a failure: Pi's
-    // «Request was aborted» (an error), a stop, or a message that superseded the
-    // answer. A run that completed on its own is a different thing — an agent
-    // that did its work with tools and wrote no prose still SUCCEEDED — so the
-    // rule keys on the interruption, not merely on empty text.
     const answered = (turn) => String(turn.text || '').trim().length > 0;
     const cutOff = (turn) => !answered(turn) && (turn.superseded || status === 'CANCELLED');
     const labelFor = (turn) => (turn.error || cutOff(turn) ? 'FAILED' : status);
+
+    // A late cancel or settlement that predates the CURRENT user prompt belongs to
+    // the PREVIOUS assistant turn, never to the fresh active answer!
+    const currentStart = this.current?.at || this.current?.userAt;
+    if (at && currentStart && Date.parse(at) < Date.parse(currentStart)) {
+      const prev = [...this.turns].reverse().find(t => t.role === 'assistant' && t !== this.current);
+      if (prev) {
+        prev.status = (error || prev.error || cutOff(prev)) ? 'FAILED' : status;
+        if (error) prev.error = error;
+        prev.endedAt = prev.endedAt || at;
+        prev.final = true;
+        for (const tool of prev.tools) if (tool.state === 'run') tool.state = 'interrupted';
+      }
+      return;
+    }
+
+    const running = this.turns.filter(turn => turn.role === 'assistant' && (turn.active || !turn.status));
     for (const turn of this.turns) {
       if (turn.role !== 'assistant') continue;
       // `DONE` (from agent_settled) is an INTERIM label: when the run's real
@@ -338,7 +361,13 @@ export class ChatState {
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       const sink = this.messageTurn || this.current;
       const aborted = frame.message.stopReason === 'aborted' || /abort/i.test(String(frame.message.errorMessage || ''));
-      const orphan = this.orphanMessage && this.orphanMessage.turn !== sink && aborted ? this.orphanMessage : null;
+      let orphan = this.orphanMessage && this.orphanMessage.turn !== sink && aborted ? this.orphanMessage : null;
+      // An aborted end belonging to the previous turn (its timestamp or event.at
+      // predates the current user turn) must route to that previous assistant turn:
+      if (!orphan && aborted && this.current?.userAt && event.at && Date.parse(event.at) < Date.parse(this.current.userAt)) {
+        const prev = [...this.turns].reverse().find(t => t.role === 'assistant' && t !== this.current);
+        if (prev) orphan = { turn: prev, textPrefix: prev.text, thinkingPrefix: prev.thinking, textSeparator: '' };
+      }
       const turn = orphan?.turn || sink;
       const context = orphan || this;
       const content = frame.message.content;
