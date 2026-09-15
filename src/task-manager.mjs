@@ -12,7 +12,7 @@ import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs'
 import { classifyEngineError } from './engine.mjs';
 import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
-import { LocalModelService } from './local-models.mjs';
+import { LocalModelService, quantFromPath } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 import { computeTokensPerSecond, accumulateStreamMs } from './system-metrics.mjs';
@@ -1025,6 +1025,33 @@ export class TaskManager extends EventEmitter {
     return this.localModels.stop();
   }
 
+  // Translates a raw file path or alias into the exact model id Pi lists in its
+  // catalog (e.g. G:\...\Qwen3.8-27B-UD-Q3_K_XL.gguf -> qwen-27b-q3).
+  #resolvePiModelId(provider, modelId) {
+    if (!modelId) return modelId;
+    const known = this.modelCatalog.peek()?.models || [];
+    if (known.some(m => m.provider === provider && m.id === modelId)) return modelId;
+
+    const isPath = modelId.includes('\\') || modelId.includes('/') || modelId.endsWith('.gguf');
+    const baseName = isPath ? modelId.split(/[\\/]/).pop().replace(/\.gguf$/i, '').toLowerCase() : modelId.toLowerCase();
+    const providerModels = known.filter(m => m.provider === provider);
+
+    const match = providerModels.find(m => {
+      const mid = m.id.toLowerCase();
+      const mname = (m.name || '').toLowerCase();
+      return mid === baseName || baseName.includes(mid) || mname.includes(baseName);
+    });
+    if (match) return match.id;
+
+    const quant = quantFromPath(modelId)?.toLowerCase();
+    if (quant) {
+      const quantMatch = providerModels.find(m => m.id.toLowerCase().includes(quant) || (m.name || '').toLowerCase().includes(quant));
+      if (quantMatch) return quantMatch.id;
+    }
+
+    return modelId;
+  }
+
   // Switches the model of an existing session, starting (or restoring) the Pi
   // session if needed. Mirrors Pi's own /model: the switch is written into the
   // session transcript, so it survives the next TaskBridge restart.
@@ -1036,18 +1063,19 @@ export class TaskManager extends EventEmitter {
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState().catch(() => null);
     if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Дождитесь завершения ответа перед сменой модели.'), { code: 'BUSY' });
-    const applied = await runtime.pi.setModel(model.provider, model.id).catch((error) => {
-      throw Object.assign(new Error(`Pi не принял модель ${model.provider}/${model.id}: ${error.message}`), { code: 'MODEL_NOT_FOUND' });
+    const targetModelId = this.#resolvePiModelId(model.provider, model.id);
+    const applied = await runtime.pi.setModel(model.provider, targetModelId).catch((error) => {
+      throw Object.assign(new Error(`Pi не принял модель ${model.provider}/${targetModelId}: ${error.message}`), { code: 'MODEL_NOT_FOUND' });
     });
-    task.requestedModel = model;
+    task.requestedModel = { provider: model.provider, id: applied?.id || targetModelId };
     task.model = applied
       ? { id: applied.id, provider: applied.provider, contextWindow: applied.contextWindow ?? null, maxTokens: applied.maxTokens ?? null }
-      : { id: model.id, provider: model.provider, contextWindow: null, maxTokens: null };
+      : { id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null };
     const nextState = await runtime.pi.getState().catch(() => null);
     task.thinkingLevelActual = nextState?.thinkingLevel ?? task.thinkingLevelActual ?? null;
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
-    await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${model.id}`, { provider: model.provider, modelId: model.id });
+    await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id}`, { provider: model.provider, modelId: task.requestedModel.id });
     return this.#publicTask(task);
   }
 

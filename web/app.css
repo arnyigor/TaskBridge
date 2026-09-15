@@ -1189,6 +1189,10 @@ body.cloud-mode [data-pc-only] { display: none; }
   background: rgba(255, 255, 255, 0.045);
   border-color: rgba(255, 255, 255, 0.15);
 }
+.localModel.selected {
+  border-color: rgba(85, 230, 165, 0.5);
+  background: rgba(85, 230, 165, 0.05);
+}
 .localModel .info {
   flex: 1;
   min-width: 0;
@@ -1250,6 +1254,12 @@ body.cloud-mode [data-pc-only] { display: none; }
   border-color: rgba(192, 132, 252, 0.35);
   background: rgba(192, 132, 252, 0.08);
 }
+.badge.selectedBadge {
+  color: var(--success);
+  border-color: rgba(85, 230, 165, 0.6);
+  background: rgba(85, 230, 165, 0.16);
+  font-weight: 600;
+}
 .badge.mutedBadge {
   color: var(--muted);
   border-color: var(--border);
@@ -1289,6 +1299,13 @@ body.cloud-mode [data-pc-only] { display: none; }
 }
 .localModel .chooseBtn:hover {
   filter: brightness(1.1);
+}
+.localModel .chooseBtn.selected {
+  background: rgba(85, 230, 165, 0.12);
+  color: var(--success);
+  border-color: rgba(85, 230, 165, 0.4);
+  cursor: default;
+  font-weight: 600;
 }
 .localModel .loadBtn {
   background: rgba(255, 255, 255, 0.06);

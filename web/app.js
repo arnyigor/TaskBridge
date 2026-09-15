@@ -2943,12 +2943,33 @@ function localModelRow(m) {
   const actions = document.createElement('div');
   actions.className = 'rowActions';
 
+  const activeId = currentTask?.model?.id || currentTask?.requestedModel?.id || pendingModel?.id;
+  const isCurrent = Boolean(activeId && (
+    m.id === activeId ||
+    m.name === activeId ||
+    (m.name && activeId.toLowerCase().includes(m.name.toLowerCase())) ||
+    (m.quant && activeId.toLowerCase().includes(m.quant.toLowerCase()))
+  ));
+
+  if (isCurrent) {
+    row.classList.add('selected');
+    const selectedBadge = document.createElement('span');
+    selectedBadge.className = 'badge selectedBadge';
+    selectedBadge.textContent = '✓ Выбрана';
+    meta.prepend(selectedBadge);
+  }
+
   const choose = document.createElement('button');
   choose.type = 'button';
-  choose.className = 'chooseBtn';
-  choose.textContent = 'Выбрать';
-  choose.title = 'Сделать моделью текущей сессии / следующей задачи';
-  choose.onclick = () => selectLocalModel(m.id);
+  choose.className = `chooseBtn ${isCurrent ? 'selected' : ''}`.trim();
+  choose.textContent = isCurrent ? '✓ Выбрана' : 'Выбрать';
+  choose.disabled = isCurrent;
+  choose.title = isCurrent ? 'Эта модель уже выбрана' : 'Сделать моделью текущей сессии / следующей задачи';
+  choose.onclick = async () => {
+    choose.disabled = true;
+    choose.textContent = '…';
+    await selectLocalModel(m.id);
+  };
   actions.append(choose);
 
   // External server models cannot be loaded/unloaded via router API
@@ -2972,7 +2993,14 @@ function localModelRow(m) {
 async function selectLocalModel(id) {
   const provider = localProviderId();
   if (!provider) { alert('Список локальных моделей ещё не загружен — откройте окно заново.'); return; }
-  await chooseModel({ provider, id });
+  try {
+    await chooseModel({ provider, id });
+    if (selectedTaskId) await refreshTask();
+    renderLocalModels();
+  } catch (error) {
+    alert(`Не удалось выбрать модель: ${error.message}`);
+    renderLocalModels();
+  }
 }
 
 function renderLocalModels() {
