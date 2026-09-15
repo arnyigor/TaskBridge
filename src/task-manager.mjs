@@ -48,6 +48,11 @@ function summarizePiEvent(frame) {
 // Statuses that end a run (TZ stage 2 telemetry).
 const RUN_TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 
+// "Continue" has no RPC in Pi, so the request is an explicit instruction. It is
+// delivered with announce:false, and what the model writes next is appended to
+// the answer it continues — the operator sees the same message grow.
+const CONTINUE_PROMPT = 'Продолжи свой предыдущий ответ ровно с того места, где он оборвался. Не повторяй уже написанное и не добавляй вступлений — продолжай текст сразу.';
+
 export class TaskManager extends EventEmitter {
   constructor(config, dataRoot, store) {
     super();
@@ -78,6 +83,9 @@ export class TaskManager extends EventEmitter {
     // restart is a deliberate follow-up.
     this.commandLedger = new Map();
     this.admitting = false;
+    // Task id whose pending prompt the pump is delivering right now (delegating
+    // delivery). Read by sendPendingNow to refuse cutting into it.
+    this.dispatching = null;
     this.deleted = new Set();
     this.eventWrites = new Map();
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
@@ -393,6 +401,18 @@ export class TaskManager extends EventEmitter {
       const info = await this.localModels.ensureRunning(onLog, modelId);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
       await this.#event(task, 'RUNTIME_READY', `Router: ${info.state}${modelId ? ` · ${modelId}` : ''}`, { state: info.state, model: modelId || null });
+    } catch (error) {
+      // The router could not load the preset: an external llama-server manages
+      // the model itself (no /models/load, or the preset id is not in its list).
+      // The model that IS running can still answer — Pi talks to it directly —
+      // so the turn proceeds with an honest note instead of failing the
+      // operator's message with «Ответ не был получен».
+      const recoverable = ['LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'LOCAL_LOAD_TIMEOUT', 'LOCAL_LOAD_CANCELLED'].includes(error.code);
+      if (recoverable && await this.localModels.isReady().catch(() => false)) {
+        await this.#event(task, 'RUNTIME_READY', `Модель управляется внешним сервером — продолжаю с тем, что запущено (${error.message}).`, { model: modelId || null });
+        return;
+      }
+      throw error;
     } finally {
       this.localModels.off('progress', onProgress);
     }
@@ -650,6 +670,20 @@ export class TaskManager extends EventEmitter {
         index++;
         continue;
       }
+      // capacity 1 for the session itself: a queued prompt waits for the turn in
+      // flight to end. Delivering it while that answer is still streaming turned
+      // it into a steer — the queue emptied the instant it was filled, which is
+      // exactly what "the message does not wait in the queue" looked like.
+      // (An explicit «Отправить сейчас» / Ctrl+Enter interrupts on purpose and
+      // does not go through the queue.)
+      const liveRuntime = this.runtimes.get(candidate.id);
+      if (liveRuntime && !liveRuntime.pi.closed) {
+        const liveState = await liveRuntime.pi.getState().catch(() => null);
+        // The prompt stays queued, but the status is left alone: the session that
+        // owns the slot is the one generating, and flipping it to QUEUED made a
+        // working session look like a stuck queue.
+        if (liveState?.isStreaming) { index++; continue; }
+      }
       task = candidate;
       break;
     }
@@ -664,9 +698,15 @@ export class TaskManager extends EventEmitter {
     this.activeTaskId = delegating ? null : id;
     let delivered = true;
     try {
-      if (delegating) delivered = await this.#deliverPending(task);
-      else await this.#executeInitial(task);
+      if (delegating) {
+        // A delegating delivery claims its slot only inside #message, so this
+        // flag is what tells sendPendingNow (see there) that the machine is
+        // busy with a delivery activeTaskId cannot represent.
+        this.dispatching = id;
+        delivered = await this.#deliverPending(task);
+      } else await this.#executeInitial(task);
     } finally {
+      this.dispatching = null;
       if (!delegating && this.activeTaskId === id) this.activeTaskId = null;
       // A delivery that failed put the prompt back: retry on the timer instead
       // of spinning on it immediately.
@@ -1330,6 +1370,13 @@ export class TaskManager extends EventEmitter {
 
   async #writeCancelled(task) {
     if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
+    // A cancel can overlap a delivery: «Отправить сейчас» stops the run, and the
+    // queue pump delivers the message while that stop is still finalizing. The
+    // runtime resets cancelRequested when it starts the new turn, so a terminal
+    // TASK_CANCELLED written after it would mark a RUNNING answer as stopped
+    // (the chat then shows the fresh turn as «прервано»).
+    const runtime = this.runtimes.get(task.id);
+    if (runtime && runtime.cancelRequested !== true && task.status === 'RUNNING') return;
     const gitState = task.workspacePath ? await collectGitState(task.workspacePath).catch(() => null) : null;
     if (gitState) {
       task.git = { isGit: gitState.isGit, status: gitState.status, changedFiles: gitState.changedFiles };
@@ -1478,7 +1525,11 @@ export class TaskManager extends EventEmitter {
     // wants to send again.
     const producedText = (frame) => {
       if (frame?.type === 'message_update') return frame.assistantMessageEvent?.type === 'text_delta' && Boolean(frame.assistantMessageEvent.delta);
-      if (frame?.type === 'message_end') return (frame.message?.content || []).some(part => part?.type === 'text' && String(part.text || '').trim());
+      // Pi records the operator's own message as a message_end frame too
+      // (role=user), so the role must be checked — otherwise the prompt counts
+      // as the model's answer and a retry is refused for an empty reply.
+      if (frame?.type === 'message_end') return frame.message?.role === 'assistant'
+        && (frame.message?.content || []).some(part => part?.type === 'text' && String(part.text || '').trim());
       return false;
     };
     const usedTools = (frame) => ['tool_execution_start', 'tool_execution_update', 'tool_execution_end'].includes(frame?.type);
@@ -1563,19 +1614,39 @@ export class TaskManager extends EventEmitter {
   // everything BELOW it — the answers, their tools, notes — is wiped, and the
   // edited text is put to the model as a fresh prompt. It is not an in-place
   // cosmetic correction: the old answer was produced for the old text.
-  async editTurn(id, { turnId, text }) {
-    return this.#admit(() => this.#editTurn(id, turnId, text));
+  async editTurn(id, { turnId, text, branch = false }) {
+    return this.#admit(() => this.#editTurn(id, turnId, text, branch));
   }
 
-  async #editTurn(id, turnId, text) {
+  async #editTurn(id, turnId, text, branch = false) {
     const task = this.#mutableTask(id);
     const value = String(turnId || '');
-    if (!value.startsWith('user-')) {
-      throw Object.assign(new Error('Переотправить можно только сообщение оператора.'), { code: 'INPUT_INVALID' });
-    }
     if (typeof text !== 'string') throw Object.assign(new Error('Не передан текст сообщения.'), { code: 'INPUT_INVALID' });
     const edited = text.trim();
     if (!edited) throw Object.assign(new Error('Пустое сообщение отправлять нечего.'), { code: 'INPUT_INVALID' });
+    if (value.startsWith('assistant-')) {
+      // Editing an ANSWER: no model is asked. In place the text is corrected; as
+      // a branch the edited text becomes another variant of the same exchange
+      // (the previous answer is kept and stays switchable). Only answers of the
+      // newest exchange may branch — for older ones the fork is the way.
+      const events = await this.store.readEvents(id, 0);
+      const { turnSeq } = this.#newestExchange(events);
+      const { variants } = this.#variantsOf(events, turnSeq);
+      if (!variants.some(variant => variant.id === value)) {
+        throw Object.assign(new Error('Править можно только самый новый ответ.'), { code: 'NOT_ALLOWED' });
+      }
+      if (branch) {
+        const variantId = shortId();
+        await this.#event(task, 'TURN_VARIANT_START', 'Ответ отредактирован: создан новый вариант.',
+          { turnSeq, variantId, editedText: edited });
+        return { ok: true, turnId: `assistant-${variantId}`, role: 'assistant', branch: true, variantId };
+      }
+      await this.#event(task, 'TURN_EDITED', 'Ответ отредактирован вручную.', { id: value, text: edited, role: 'assistant' });
+      return { ok: true, turnId: value, role: 'assistant', branch: false };
+    }
+    if (!value.startsWith('user-')) {
+      throw Object.assign(new Error('Переотправить можно только сообщение оператора.'), { code: 'INPUT_INVALID' });
+    }
     const { fromSeq, dropInitial } = this.#turnSequences(value);
     if (dropInitial) {
       // The session's first prompt has no event of its own: it lives in
@@ -1594,11 +1665,10 @@ export class TaskManager extends EventEmitter {
     return this.#message(id, edited, 'auto', [], null, { immediate: true, announce: false });
   }
 
-  // "Regenerate": the last exchange is dropped — answer, tools and anything
-  // after it — and the very same question is sent to the model again. Unlike
-  // undoLastTurn this is allowed even when the model already answered, because
-  // replacing that answer is the whole point; a finished session is still
-  // required, or the live frames would fight the new run for the same turn.
+  // "Regenerate as a variant": the same question is put to the model again, but
+  // the previous answer is KEPT — it becomes a hidden sibling of the same
+  // exchange and the client switches between them (‹ n/m ›). Nothing is deleted
+  // here: a bad regeneration must not cost the answer that already existed.
   async regenerateLastTurn(id, turnId) {
     return this.#admit(() => this.#regenerateLastTurn(id, turnId));
   }
@@ -1606,25 +1676,101 @@ export class TaskManager extends EventEmitter {
   async #regenerateLastTurn(id, turnId) {
     const task = this.#mutableTask(id);
     const events = await this.store.readEvents(id, 0);
-    let lastUser = null;
-    for (const event of events) if (event.type === 'USER_MESSAGE') lastUser = event;
-    // Regenerating only ever touches the newest exchange, and the caller must
-    // name it: "nothing was sent" must never silently re-run a session somebody
-    // else is looking at.
-    const expected = lastUser ? `assistant-${lastUser.seq}` : 'assistant-initial';
-    if (String(turnId || '') !== expected) {
+    const { turnSeq, lastUser } = this.#newestExchange(events);
+    const { variants } = this.#variantsOf(events, turnSeq);
+    // Only the newest exchange may be regenerated, and the caller must name one
+    // of its answers: "nothing was sent" must never silently re-run a session
+    // somebody else is looking at.
+    if (!variants.some(variant => variant.id === String(turnId || ''))) {
       throw Object.assign(new Error('Повторить можно только самый новый ответ.'), { code: 'NOT_ALLOWED' });
     }
-    const fromSeq = lastUser ? lastUser.seq : 1;
     const text = lastUser ? (lastUser.data?.text ?? lastUser.message ?? '') : (task.prompt || '');
     if (!String(text).trim()) throw Object.assign(new Error('Пустой запрос — повторять нечего.'), { code: 'INPUT_INVALID' });
-    // Only the ANSWER is rewritten. The operator's message is not erased and not
-    // re-created as a new one: its event stays exactly where it was, and the
-    // prompt is handed to Pi again without announcing a second USER_MESSAGE.
-    await this.#truncateFrom(task, fromSeq + 1, { dropInitial: !lastUser, keepUser: true, reason: 'regenerate', text });
+    const variantId = shortId();
+    // The marker is what tells every client — and the next replay — that the
+    // frames arriving now belong to a NEW answer of the same exchange, not to
+    // the one that just went out of view.
+    await this.#event(task, 'TURN_VARIANT_START', 'Новый вариант ответа.', { turnSeq, variantId, text });
     // #message directly: the public wrapper would re-enter #admit, which is
-    // single-shot by design.
+    // single-shot by design. announce:false keeps the operator's question single.
     return this.#message(id, text, 'auto', [], null, { immediate: true, announce: false });
+  }
+
+  // The exchange regenerate/select may touch: the one behind the last
+  // USER_MESSAGE, or the session's own first prompt when there is none.
+  #newestExchange(events) {
+    let lastUser = null;
+    for (const event of events) if (event.type === 'USER_MESSAGE') lastUser = event;
+    return { turnSeq: lastUser ? lastUser.seq : 0, lastUser };
+  }
+
+  // Every answer of one exchange, oldest first. The first answer has no marker of
+  // its own — its id is derived from the exchange, exactly like the client does.
+  #variantsOf(events, turnSeq) {
+    const seq = Number(turnSeq) || 0;
+    const variants = [{ id: seq ? `assistant-${seq}` : 'assistant-initial', variantId: seq ? String(seq) : 'initial', at: seq }];
+    for (const event of events) {
+      if (event.type !== 'TURN_VARIANT_START' || Number(event.data?.turnSeq || 0) !== seq) continue;
+      variants.push({ id: `assistant-${event.data.variantId}`, variantId: String(event.data.variantId), at: event.seq });
+    }
+    return { turnSeq: seq, variants };
+  }
+
+  // Which answer of which exchange the client wants to see. Nothing is rewritten
+  // and no model is asked: a reading preference, persisted so a reload lands on
+  // the same variant.
+  async selectVariant(id, { turnSeq, variantId }) {
+    return this.#admit(async () => {
+      const task = this.#mutableTask(id);
+      const events = await this.store.readEvents(id, 0);
+      const { variants } = this.#variantsOf(events, Number(turnSeq));
+      if (!variants.some(variant => variant.variantId === String(variantId))) {
+        throw Object.assign(new Error('Такого варианта ответа нет.'), { code: 'NOT_FOUND' });
+      }
+      const seq = Number(turnSeq) || 0;
+      await this.#event(task, 'TURN_VARIANT_SELECTED', 'Показан другой вариант ответа.', { turnSeq: seq, variantId: String(variantId) });
+      return { ok: true, turnSeq: seq, variantId: String(variantId), total: variants.length };
+    });
+  }
+
+  // "Continue": the existing answer is asked to go on. No new exchange and no
+  // new variant is created — what the model writes next is appended to the same
+  // answer (the client already renders a mid-answer continuation into the turn
+  // it belongs to). Pi has no "continue" RPC, so the request is an explicit
+  // instruction; unlike regenerate, nothing is dropped and no variant is made.
+  async continueTurn(id, turnId) {
+    return this.#admit(() => this.#continueTurn(id, turnId));
+  }
+
+  async #continueTurn(id, turnId) {
+    const task = this.#mutableTask(id);
+    const events = await this.store.readEvents(id, 0);
+    const { turnSeq } = this.#newestExchange(events);
+    const { variants } = this.#variantsOf(events, turnSeq);
+    // Continue only ever touches the newest answer, and the caller must name it:
+    // "nothing was sent" must never silently re-run a session somebody else is
+    // looking at.
+    if (!variants.some(variant => variant.id === String(turnId || ''))) {
+      throw Object.assign(new Error('Продолжить можно только самый новый ответ.'), { code: 'NOT_ALLOWED' });
+    }
+    const answer = this.#answerText(events, turnSeq);
+    if (!String(answer).trim()) throw Object.assign(new Error('Продолжать нечего — ответ пуст.'), { code: 'INPUT_INVALID' });
+    return this.#message(id, CONTINUE_PROMPT, 'auto', [], null, { immediate: true, announce: false });
+  }
+
+  // The newest answer's text of one exchange: the closing message_end carries
+  // the full final content, so the last one wins.
+  #answerText(events, turnSeq) {
+    const seq = Number(turnSeq) || 0;
+    let text = '';
+    for (const event of events) {
+      if (event.seq <= seq) continue;
+      const frame = event.data?.pi;
+      if (event.type === 'PI_EVENT' && frame?.type === 'message_end' && frame.message?.role === 'assistant') {
+        text = (frame.message.content || []).filter(part => part?.type === 'text').map(part => part?.text || '').join('');
+      }
+    }
+    return text;
   }
 
   // "Fork": a new session in the same project whose conversation is a copy of
@@ -1901,6 +2047,18 @@ export class TaskManager extends EventEmitter {
       const ttl = 24 * 60 * 60 * 1000;
       for (const [k, v] of this.commandLedger) if (now - v.at > ttl) this.commandLedger.delete(k);
     }
+    // Hard ceiling for the in-memory cache: SQLite remains the source of
+    // truth, so a resolved entry is safe to drop. In-flight entries (done:false)
+    // are never evicted here — a replay of a command that is being executed
+    // must keep seeing ACCEPTED.
+    const maxCommands = 1000;
+    if (this.commandLedger.size > maxCommands) {
+      const removable = [...this.commandLedger.entries()]
+        .filter(([, v]) => v.done)
+        .sort((a, b) => a[1].at - b[1].at);
+      const excess = this.commandLedger.size - maxCommands;
+      for (let i = 0; i < Math.min(excess, removable.length); i++) this.commandLedger.delete(removable[i][0]);
+    }
     // Prune resolved rows from SQLite at most hourly (in-flight rows survive to
     // mark a possible crash).
     if (!this._lastDbCommandPrune || now - this._lastDbCommandPrune > 60 * 60 * 1000) {
@@ -1917,12 +2075,18 @@ export class TaskManager extends EventEmitter {
       const task = this.tasks.get(id);
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
       // Check first: "сейчас" cannot mean a second generation in parallel, and a
-      // refusal must leave the prompt where it was.
+      // refusal must leave the prompt where it was. The pump may be delivering
+      // another session's queued prompt right now (a delegating delivery claims
+      // its slot only inside #message, so activeTaskId alone cannot see it) —
+      // "сейчас" must not cut into a delivery in flight either.
       if (this.activeTaskId && this.activeTaskId !== id) {
         const owner = this.tasks.get(this.activeTaskId);
         throw Object.assign(
           new Error(`Машина занята сессией «${owner?.title || this.activeTaskId}» — сначала остановите её.`),
           { code: 'BUSY' });
+      }
+      if (this.dispatching) {
+        throw Object.assign(new Error('Очередь доставляет сообщение прямо сейчас — повторите через мгновение.'), { code: 'BUSY' });
       }
       // Like Ctrl+Enter, "сейчас" is allowed to try even when the model looks
       // busy (the flag can be stale): if the attempt fails, `restore` below puts
@@ -1932,7 +2096,26 @@ export class TaskManager extends EventEmitter {
       // "Сейчас" must not sit behind the model's current reasoning block, so a
       // generation in flight is stopped before the queue is touched.
       await this.#interruptGeneration(id).catch(() => false);
-      const { pending, restore } = await this.#takePending(task);
+      // The pump may have already taken (or delivered) the only queued prompt by
+      // now: «Отправить сейчас» clicked right after Enter. An empty queue here is
+      // not an error — the message is already on its way, and the operator must
+      // not see «Нет сообщения в очереди» for a text that was sent.
+      if (!(task.pendingPrompts || []).length) {
+        this.queue = this.queue.filter(x => x !== id);
+        return this.#publicTask(task);
+      }
+      let pending, restore;
+      try {
+        ({ pending, restore } = await this.#takePending(task));
+      } catch (error) {
+        if (error.code === 'INPUT_INVALID') {
+          // Lost the race with the pump: the prompt was taken and is being
+          // delivered right now.
+          this.queue = this.queue.filter(x => x !== id);
+          return this.#publicTask(task);
+        }
+        throw error;
+      }
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
       try {
         const waiting = this.pendingFiles.get(pending.id) || { files: [], uploadToken: null };
@@ -1984,8 +2167,11 @@ export class TaskManager extends EventEmitter {
     const alreadyFinished = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status);
     // The machine runs one generation at a time. If another session owns it (or
     // this one is still preparing), the prompt waits its turn — the operator
-    // never loses the text to a "модель занята" refusal.
-    const reservedElsewhere = Boolean(this.activeTaskId) && (this.activeTaskId !== id || task.status !== 'RUNNING');
+    // never loses the text to a "модель занята" refusal. A task that already
+    // reached a terminal state may start a new turn even if the queue slot has
+    // not been released yet (the finalizer clears it on the next tick).
+    const reservedElsewhere = Boolean(this.activeTaskId)
+      && (this.activeTaskId !== id || (!alreadyFinished && task.status !== 'RUNNING'));
     const incomingFiles = await this.#resolveFiles(files, uploadToken);
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
@@ -2095,6 +2281,18 @@ export class TaskManager extends EventEmitter {
       // second USER_MESSAGE would show the operator's own line twice.
       if (announce) await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
+      else if (task.status !== 'CANCELLING') {
+        // A steer lands inside the answer that is already streaming, so the
+        // `if (!streaming)` branch above never runs: a prompt that was parked as
+        // "queued" kept that stale status on screen while the model was in fact
+        // answering it — which reads exactly like a stuck queue. The same is
+        // true after an interrupt («Отправить сейчас» cancels the run, then
+        // delivers): the task must not stay CANCELLED while it is generating.
+        await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
+      }
+      // Release gate immediately after USER_MESSAGE is safely persisted so the
+      // HTTP response returns to client without waiting for subsequent background ticks.
+      release();
     } catch (error) {
       if (!accepted && !staged.length) await rollbackFiles(task, this.store.taskDir(id), attached);
       if (!streaming) {
@@ -2109,7 +2307,15 @@ export class TaskManager extends EventEmitter {
           await settled;
           if (!runtime.cancelRequested && !['CANCELLED', 'FAILED'].includes(task.status)) await this.#verifyAndFinalize(task, { turn, baseline });
         } catch (error) { await this.#fail(task, error); }
-        finally { if (this.activeTaskId === id) this.activeTaskId = null; this.#pump(); }
+        finally {
+          // A newer turn may already own the session: a follow-up accepted while
+          // this turn was finalizing (its `alreadyFinished` check lets it start
+          // right away) has called #beginTurn by now. Releasing the slot here
+          // would let the queue start another task in parallel with the live
+          // generation — the same guard #verifyAndFinalize uses.
+          if (this.activeTaskId === id && task._turn === turn) this.activeTaskId = null;
+          this.#pump();
+        }
       })().catch(error => console.error(error));
     }
     return this.#publicTask(task);

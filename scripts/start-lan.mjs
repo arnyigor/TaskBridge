@@ -22,7 +22,11 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig } from '../src/config.mjs';
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const DATA = path.join(ROOT, 'data');
+// State: <dataDir>/lan.json, logs: <dataDir>/lan-app.log, lan-proxy.log.
+// Honors TASKBRIDGE_DATA_DIR so the launcher, the app, and the acceptance
+// script all agree on where state lives (a smoke run next to a live server
+// keeps the live one untouched).
+const DATA = process.env.TASKBRIDGE_DATA_DIR ? path.resolve(process.env.TASKBRIDGE_DATA_DIR) : path.join(ROOT, 'data');
 const STATE = path.join(DATA, 'lan.json');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -155,7 +159,7 @@ async function start() {
   console.log(`[lan] app   ${app.pid}  -> 127.0.0.1:${internalPort}  (the only door: loopback)`);
   console.log(`[lan] proxy ${proxy.pid} -> 0.0.0.0:${publicPort}       (this is what the phone opens)`);
   console.log(`[lan] http://127.0.0.1:${publicPort}`);
-  console.log(`[lan] pids in data/lan.json, logs data/lan-*.log`);
+  console.log(`[lan] pids in ${DATA}/lan.json, logs ${DATA}/lan-*.log`);
   return 0;
 }
 
@@ -222,7 +226,7 @@ async function runForeground() {
 async function status() {
   const state = readState();
   if (!state) {
-    console.log('[lan] not running (no data/lan.json)');
+    console.log('[lan] not running (no lan.json)');
     return 1;
   }
   const appUp = alive(state.appPid);

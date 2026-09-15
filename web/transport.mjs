@@ -27,9 +27,13 @@ export function createLocalTransport({ base = '', fetchImpl = globalThis.fetch, 
   return {
     kind: 'local',
 
-    async request(method, path, body) {
+    async request(method, path, body, timeoutMs = null) {
       const response = await fetchImpl(`${base}${path}`, {
         method,
+        // A hard ceiling for read-only calls (refreshTask): a request that never
+        // answers must not hold the page's refresh lock forever. Sends are not
+        // given one — a model load can legitimately take minutes.
+        ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
         ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
       });
       const payload = await response.json().catch(() => ({}));

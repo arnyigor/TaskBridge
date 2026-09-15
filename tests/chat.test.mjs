@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import vm from 'node:vm';
 import { parseHTML } from 'linkedom';
+import * as chatStateModule from '../web/chat-state.mjs';
 import { ChatState, ACTIVE_STATUSES } from '../web/chat-state.mjs';
 import * as transportModule from '../web/transport.mjs';
 
@@ -203,7 +204,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
   }
   const appSource = await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   const imported = resolveImports(appSource, {
-    './chat-state.mjs': { ChatState, ACTIVE_STATUSES },
+    './chat-state.mjs': chatStateModule,
     './transport.mjs': transportModule,
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
@@ -1091,7 +1092,7 @@ test('DOM: a cancelled first run offers neither a retry nor a copy-only', async 
   assert.ok(!labels.some(t => t.includes('Скопировать сообщение')), 'nothing was produced, so nothing is copy-only');
 });
 
-test('DOM: a failed turn with model output only copies the message', async () => {
+test('DOM: a failed turn never grows a standing copy or repeat button', async () => {
   const app = await ui();
   app.tasks.a.status = 'FAILED';
   app.setFetchHook(async (url) => {
@@ -1111,14 +1112,14 @@ test('DOM: a failed turn with model output only copies the message', async () =>
     return null;
   });
   await app.selectTask('a');
-  const prompt = app.document.getElementById('prompt');
   const mine = () => [...app.document.querySelectorAll('.turn.me')];
   assert.equal(mine().length, 3);
-  const copy = [...app.document.querySelectorAll('button')].find(b => b.textContent.includes('Скопировать сообщение'));
-  assert.ok(copy, 'no retraction is offered once the model produced output');
-  copy.dispatchEvent(new app.window.Event('click'));
-  for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve));
-  assert.equal(prompt.value, 'Что пошло не так?', 'the text is copied into the composer');
+  // A failed exchange grows no standing button under the answer any more: the
+  // inline message icons are the only actions on a message.
+  const labels = [...app.document.querySelectorAll('button')].map(b => b.textContent);
+  assert.ok(!labels.some(t => t.includes('Скопировать сообщение')), `no copy button: ${labels.join(' | ')}`);
+  assert.ok(!labels.some(t => t.includes('Повторить сообщение')), `no repeat button: ${labels.join(' | ')}`);
+  assert.ok(!app.document.querySelector('.turnActions'), 'the failed-turn action row is gone');
   assert.equal(mine().length, 3, 'history stays intact');
 });
 
@@ -1129,7 +1130,7 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   app.tasks.forked = { ...task('forked'), prompt: 'Первое сообщение ветки' };
   app.setFetchHook(async (url, options = {}) => {
     const { pathname } = new URL(url, 'http://localhost');
-    if (pathname !== '/api/tasks/a/fork' && pathname !== '/api/tasks/a/regenerate' && !pathname.includes('/turns/')) return null;
+    if (pathname !== '/api/tasks/a/fork' && pathname !== '/api/tasks/a/regenerate' && pathname !== '/api/tasks/a/continue' && !pathname.includes('/turns/')) return null;
     calls.push({ pathname, method: options.method || 'GET', body: options.body });
     if (pathname.endsWith('/fork')) return { ok: true, json: async () => ({ id: 'forked' }) };
     return { ok: true, json: async () => ({ ok: true }) };
@@ -1152,11 +1153,11 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
     assert.ok(svg.children.length, `${button.dataset.action} has real geometry`);
   };
   for (const button of userBar.querySelectorAll('.actionBtn')) iconMark(button);
-  // An answer is a branch point too; it can be re-run, never "edited" (an edit
-  // re-sends the operator's text, so it lives on that line only).
+  // An answer is a branch point too. Older answers only fork/regen-ish nothing:
+  // re-run, continue and edit live on the newest answer alone.
   assert.deepEqual(visible(botBar), ['fork']);
   const lastBotBar = [...app.document.querySelectorAll('.turn:not(.me) .turnActionBar')].at(-1);
-  assert.deepEqual(visible(lastBotBar), ['fork', 'regen']);
+  assert.deepEqual(visible(lastBotBar), ['edit', 'fork', 'regen', 'continue']);
   for (const button of lastBotBar.querySelectorAll('.actionBtn')) iconMark(button);
 
   // ✎ opens the editor; Save re-sends the corrected text (the server wipes
@@ -1175,11 +1176,18 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   assert.ok(!app.document.querySelector('.editArea'), 'the editor closes on success');
 
   // 🔄 asks again and re-runs the model in the same session.
-  lastBotBar.querySelectorAll('.actionBtn')[1].dispatchEvent(new app.window.Event('click'));
+  lastBotBar.querySelectorAll('.actionBtn')[2].dispatchEvent(new app.window.Event('click'));
   for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
   const regenerated = calls.find(c => c.pathname.endsWith('/regenerate'));
   assert.ok(regenerated, 'the regenerate endpoint was called');
   assert.equal(regenerated.body, JSON.stringify({ turnId: 'assistant-5' }), 'the newest answer names itself');
+
+  // → continues the answer in place: nothing is dropped, the model appends.
+  lastBotBar.querySelectorAll('.actionBtn')[3].dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+  const continued = calls.find(c => c.pathname.endsWith('/continue'));
+  assert.ok(continued, 'the continue endpoint was called');
+  assert.equal(continued.body, JSON.stringify({ turnId: 'assistant-5' }));
 
   // 🗑 asks first (the harness answers yes), then drops the message and after.
   userBar.querySelectorAll('.actionBtn')[2].dispatchEvent(new app.window.Event('click'));
@@ -1193,4 +1201,572 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   assert.ok(forked, 'the fork endpoint was called');
   assert.equal(forked.body, JSON.stringify({ turnId: 'user-5' }));
   assert.equal(app.urls.at(-1)?.url, '/session/forked', 'the new branch is opened');
+});
+
+test('a regenerated answer becomes a sibling variant, not a replacement', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 3, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ А' } } } });
+  state.apply({ taskId: 'a', seq: 4, type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  const first = state.turns.at(-1);
+  assert.equal(first.text, 'ответ А');
+
+  // Regenerate: a marker, then the frames of the new answer.
+  state.apply({ taskId: 'a', seq: 5, type: 'TURN_VARIANT_START', message: 'Новый вариант', data: { turnSeq: 1, variantId: 'v2', text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 6, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 7, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ Б' } } } });
+
+  const second = state.turns.at(-1);
+  assert.equal(second.id, 'assistant-v2');
+  assert.equal(second.text, 'ответ Б');
+  assert.equal(state.current, second, 'live frames land on the new variant');
+  assert.equal(first.hidden, true, 'the previous answer stays, hidden');
+  assert.equal(first.text, 'ответ А', 'and keeps its text');
+  assert.deepEqual(state.variantsOf(second), { key: 1, index: 1, total: 2, ids: ['assistant-1', 'assistant-v2'], selectedId: 'assistant-v2' });
+
+  // Switching back is a persisted preference, not an edit.
+  state.apply({ taskId: 'a', seq: 8, type: 'TURN_VARIANT_SELECTED', message: 'Показан другой вариант', data: { turnSeq: 1, variantId: '1' } });
+  assert.equal(first.hidden, false);
+  assert.equal(second.hidden, true);
+  assert.equal(state.variantsOf(first).index, 0);
+  assert.equal(state.current, second, 'the frame sink does not move with the view');
+
+  // A replay of the same log lands on the same variant.
+  const replay = new ChatState(task());
+  for (const event of [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } },
+    { taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 3, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ А' } } } },
+    { taskId: 'a', seq: 5, type: 'TURN_VARIANT_START', data: { turnSeq: 1, variantId: 'v2' } },
+    { taskId: 'a', seq: 6, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 7, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ Б' } } } },
+    { taskId: 'a', seq: 8, type: 'TURN_VARIANT_SELECTED', data: { turnSeq: 1, variantId: '1' } },
+  ]) replay.apply(event);
+  assert.equal(replay.turns.at(-2).hidden, false, 'the replayed log shows the selected variant');
+  assert.equal(replay.turns.at(-1).hidden, true);
+});
+
+test('retracting an exchange drops its variant bookkeeping', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 2, type: 'TURN_VARIANT_START', data: { turnSeq: 1, variantId: 'v2' } });
+  state.apply({ taskId: 'a', seq: 3, type: 'TASK_FAILED', message: 'boom', data: {} });
+  assert.equal(state.variants.get(1).ids.length, 2);
+  state.apply({ taskId: 'a', seq: 4, type: 'TURN_TRUNCATED', data: { fromSeq: 1, reason: 'delete' } });
+  assert.equal(state.variants.has(1), false);
+  assert.equal(state.turns.some(turn => turn.id === 'assistant-v2'), false);
+});
+
+test('DOM: ‹ n/m › switches between the answers of one exchange', async () => {
+  const app = await ui();
+  const events = [
+    { taskId: 'a', seq: 1, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ А' } } } },
+    { taskId: 'a', seq: 3, type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ответ А' }] } } } },
+    { taskId: 'a', seq: 4, type: 'TASK_SUCCEEDED', message: 'Done', data: {} },
+    { taskId: 'a', seq: 5, type: 'TURN_VARIANT_START', message: 'Новый вариант', data: { turnSeq: 0, variantId: 'v2' } },
+    { taskId: 'a', seq: 6, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 7, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ Б' } } } },
+    { taskId: 'a', seq: 8, type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ответ Б' }] } } } },
+  ];
+  const posted = [];
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const all = searchParams.has('tail') ? events : events.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: all, reachedStart: true } : all) };
+    }
+    if (pathname === '/api/tasks/a/variant') {
+      posted.push(JSON.parse(options.body));
+      // The server stores the choice: the next refresh lands on it.
+      events.push({ taskId: 'a', seq: Math.max(...events.map(e => e.seq)) + 1, type: 'TURN_VARIANT_SELECTED', message: '', data: { turnSeq: posted.at(-1).turnSeq, variantId: posted.at(-1).variantId } });
+      return { ok: true, json: async () => ({ ok: true }) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const nav = app.document.querySelector('.variantNav');
+  assert.ok(nav, 'the switcher is rendered');
+  assert.equal(nav.querySelector('.variantCount').textContent, '2/2', 'the newest variant is selected');
+  // The previous answer is not on screen: it is a hidden sibling.
+  assert.ok(app.document.body.textContent.includes('ответ Б'), 'the selected variant renders');
+  assert.ok(!app.document.querySelector('.turn:not(.me)')?.textContent.includes('ответ А'), 'the hidden variant is out of the DOM');
+
+  nav.querySelectorAll('.actionBtn')[0].dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(posted, [{ turnSeq: 0, variantId: 'initial' }], 'the choice is sent server-side');
+  const nav2 = app.document.querySelector('.variantNav');
+  assert.equal(nav2.querySelector('.variantCount').textContent, '1/2', 'the older variant is shown');
+  assert.ok(app.document.body.textContent.includes('ответ А'), 'the older variant renders after the switch');
+  assert.ok(!app.document.querySelector('.turn:not(.me)')?.textContent.includes('ответ Б'), 'the newer variant left the DOM');
+  // And back.
+  const nextBtn = nav2.querySelector('[data-action="variant-next"]');
+  assert.ok(nextBtn, 'the next button exists');
+  assert.ok(!nextBtn.disabled, 'the next button is enabled');
+  nextBtn.dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(posted.at(-1), { turnSeq: 0, variantId: 'v2' });
+  assert.equal(app.document.querySelector('.variantNav .variantCount').textContent, '2/2');
+});
+
+test('a failed refresh cannot freeze the chat: the lock is released and the next tick works', async () => {
+  const app = await ui();
+  // A refresh whose requests fail (a wedged server, a lost connection) used to
+  // leave refreshingVersion set forever when the fetch never answered; now the
+  // failure lands in the catch, the lock is released, and the next tick carries
+  // the chat forward instead of staying frozen until a page reload.
+  let fail = false;
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (fail && pathname === '/api/tasks/a/events' && !searchParams.has('tail')) {
+      throw Object.assign(new Error('aborted'), { code: 'HTTP_ABORTED' });
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  fail = true;
+  await app.refreshTask();
+  fail = false;
+  await app.refreshTask();
+  const bots = app.document.querySelectorAll('.turn:not(.me)');
+  assert.ok(bots.length >= 2, `the chat kept updating after a failed refresh: ${bots.length}`);
+  // The failure surfaced as an honest connection notice.
+  assert.ok(app.document.getElementById('createError').textContent.includes('Связь прервана'));
+});
+
+test('a slow send shows the waiting notice, and it clears when the send is over', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  let release;
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) {
+      // Hold the send for a moment so the slow-send notice has time to appear.
+      await new Promise(resolve => { release = resolve; });
+      return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING' }) };
+    }
+    return null;
+  });
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const prompt = app.document.getElementById('prompt');
+  prompt.value = 'медленно';
+  form.requestSubmit();
+  assert.equal(app.document.getElementById('sendButton').disabled, true, 'the composer is busy');
+  // The notice appears only after the 2s threshold: the harness's setTimeout is
+  // recorded, so fire it by hand.
+  const timers = app.intervals || [];
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!app.document.getElementById('createError').textContent.includes('Отправляю'), 'no notice before the threshold');
+
+  release();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.document.getElementById('sendButton').disabled, false, 'the composer is free again');
+  assert.ok(!app.document.getElementById('createError').textContent.includes('Отправляю'), 'the notice does not linger');
+});
+
+test('a refused send keeps the text one click away', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  let calls = 0;
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) {
+      calls++;
+      return { ok: false, json: async () => ({ error: 'Сбой сети', code: 'NETWORK_ERROR' }) };
+    }
+    return null;
+  });
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const prompt = app.document.getElementById('prompt');
+  prompt.value = 'не пропади';
+  form.requestSubmit();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(!app.document.getElementById('retryPrompt').classList.contains('hidden'), 'the retry offer is up');
+  // One click restores and resends exactly the same text.
+  app.document.getElementById('retryPrompt').dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(calls >= 2, 'the prompt retry was fired');
+});
+
+test('DOM: a parked message waits in the queue instead of showing up twice', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const parkedTask = { ...app.tasks.a, status: 'QUEUED', queueReason: 'QUEUED', pendingPrompts: [{ id: 'p1', text: 'в очереди' }] };
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) return { ok: true, json: async () => parkedTask };
+    if (pathname === '/api/tasks/a') return { ok: true, json: async () => parkedTask };
+    return null;
+  });
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const prompt = app.document.getElementById('prompt');
+  const before = app.document.querySelectorAll('.turn.me').length;
+  prompt.value = 'в очереди';
+  form.requestSubmit();
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(app.document.querySelectorAll('.turn.me').length, before, 'запаркованное сообщение не рисуется в чате');
+  const badge = app.document.getElementById('queuedPrompt');
+  assert.ok(!badge.classList.contains('hidden'), 'очередь видна');
+  assert.ok(badge.textContent.includes('в очереди'), `в очереди показан текст: ${badge.textContent}`);
+  assert.ok(![...app.document.querySelectorAll('.turn.me')].some(t => t.textContent.includes('в очереди')), 'и не дублируется в ленте');
+});
+
+test('DOM: a steered message stays in the conversation (not parked)', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING', pendingPrompts: [] }) };
+    return null;
+  });
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const prompt = app.document.getElementById('prompt');
+  const before = app.document.querySelectorAll('.turn.me').length;
+  prompt.value = 'вклинилось';
+  form.requestSubmit();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.document.querySelectorAll('.turn.me').length, before + 1, 'вклинившееся сообщение остаётся в ленте');
+});
+
+test('DOM: messages carry their times — sent for the operator, start and end for the answer', async () => {
+  const app = await ui();
+  const at = (min) => `2026-09-15T10:${String(min).padStart(2, '0')}:00.000Z`;
+  const events = [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: at(1), message: 'вопрос', data: { text: 'вопрос', files: [] } },
+    { taskId: 'a', seq: 2, at: at(2), type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 3, at: at(3), type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ' } } } },
+    { taskId: 'a', seq: 4, at: at(4), type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ответ' }] } } } },
+    { taskId: 'a', seq: 5, at: at(5), type: 'TASK_SUCCEEDED', message: 'Done', data: {} },
+  ];
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = searchParams.has('tail') ? events : events.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: list, reachedStart: true } : list) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+
+  // The operator's line: when it was sent.
+  const mine = [...app.document.querySelectorAll('.turn.me')].at(-1);
+  const sentTime = mine.querySelector('.msgTime');
+  assert.ok(sentTime, 'у сообщения оператора есть время отправки');
+  assert.match(sentTime.textContent, /^\d{2}:\d{2}:\d{2}$/, `формат времени с секундами: ${sentTime.textContent}`);
+
+  // The answer: when it started and when it finished (a range).
+  const bot = [...app.document.querySelectorAll('.turn:not(.me)')].at(-1);
+  const answerTime = bot.querySelector('.msgTime');
+  assert.ok(answerTime, 'у ответа есть время');
+  assert.match(answerTime.textContent, /^\d{2}:\d{2}:\d{2}(–\d{2}:\d{2}:\d{2})?$/, `начало и конец с секундами: ${answerTime.textContent}`);
+  assert.ok(answerTime.title.length > 0, 'в подсказке полная метка времени');
+});
+
+test('DOM: a turn without a recorded time shows no clock', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const times = [...app.document.querySelectorAll('.turn .msgTime')];
+  assert.equal(times.length, 0, 'без времени в событиях часы не рисуются');
+});
+
+test('DOM: an empty settled turn never turns into the typing animation', async () => {
+  const app = await ui();
+  // A session that is still running (non-terminal status) whose last answer was
+  // interrupted and left empty: the empty turn must keep saying the answer was
+  // not received. Guessing "waiting" from the task status made it flash
+  // «Ответ не был получен.» and then swap to the animation a poll later.
+  app.tasks.a.status = 'RUNNING';
+  const events = [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:00:00.000Z', message: 'вопрос', data: { text: 'вопрос', files: [] } },
+    { taskId: 'a', seq: 2, at: '2026-09-15T10:00:01.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 3, at: '2026-09-15T10:00:02.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [] } } } },
+    { taskId: 'a', seq: 4, at: '2026-09-15T10:00:02.000Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} },
+  ];
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = searchParams.has('tail') ? events : events.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: list, reachedStart: true } : list) };
+    }
+    if (pathname.endsWith('/message')) return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING', pendingPrompts: [] }) };
+    return null;
+  });
+  await app.selectTask('a');
+  const empty = [...app.document.querySelectorAll('.turn:not(.me) .md')].at(-1);
+  assert.match(empty.textContent, /Запрос прерван|Ответ не был получен/, 'пустой ход остаётся пустым, а не показывает анимацию');
+  assert.equal(empty.querySelector('.typing'), null, 'никакой анимации на завершённом пустом ходе');
+
+  // A new message (steered into the running turn) shows its own animation…
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const prompt = app.document.getElementById('prompt');
+  prompt.value = 'новое';
+  form.requestSubmit();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  const bubbles = [...app.document.querySelectorAll('.turn:not(.me) .md')];
+  assert.match(bubbles.at(-2).textContent, /Запрос прерван|Ответ не был получен/, 'старый пустой ход не подменяется анимацией');
+  assert.ok(bubbles.at(-1).querySelector('.typing'), 'новое сообщение показывает анимацию');
+
+  // …and a refresh (same events, still non-terminal) must not flip anything.
+  await app.refreshTask();
+  const after = [...app.document.querySelectorAll('.turn:not(.me) .md')];
+  assert.match(after.at(-2).textContent, /Запрос прерван|Ответ не был получен/, 'после обновления ничего не перескочило');
+});
+
+
+test('DOM: a delivered message leaves the queue the moment it appears in the chat', async () => {
+  const app = await ui();
+  const base = [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:00:00.000Z', message: 'первое', data: { text: 'первое', files: [] } },
+    { taskId: 'a', seq: 2, at: '2026-09-15T10:00:05.000Z', type: 'TASK_SUCCEEDED', message: 'Done', data: {} },
+  ];
+  // The task still reports the queued entry — exactly what the poll would return
+  // while the badge is visible.
+  app.tasks.a = { ...app.tasks.a, status: 'QUEUED', queueReason: 'QUEUED', pendingPrompts: [{ id: 'p1', text: 'в очереди' }] };
+  let delivered = false;
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = [...base, ...(delivered ? [{ taskId: 'a', seq: 3, at: '2026-09-15T10:00:06.000Z', type: 'USER_MESSAGE', message: 'в очереди', data: { text: 'в очереди', files: [] } }] : [])];
+      const page = searchParams.has('tail') ? list : list.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: page, reachedStart: true } : page) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const badge = app.document.getElementById('queuedPrompt');
+  badge.classList.remove('hidden');
+  badge.textContent = 'В очереди: в очереди';
+
+  delivered = true;
+  await app.refreshTask();
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+
+  assert.ok([...app.document.querySelectorAll('.turn.me')].some(t => t.textContent.includes('в очереди')), 'сообщение появилось в ленте');
+  const queue = app.queuedPromptText ? app.queuedPromptText() : app.document.getElementById('queuedPrompt').textContent;
+  assert.equal(/В очереди: в очереди/.test(queue), false, `сообщение больше не в очереди: ${queue}`);
+});
+
+test('an interrupted answer keeps its own status when the session finishes later', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:36:31.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:36:32.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [], errorMessage: 'Request aborted' } } } });
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:36:33.000Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  const interrupted = state.current;
+  // An answer that broke off with an error is FAILED — even though the terminal
+  // event for the run was TASK_CANCELLED («Request was aborted» + FAILED).
+  assert.equal(interrupted.status, 'FAILED');
+  assert.equal(interrupted.error, 'Request aborted');
+
+  // The session goes on and finishes: the interrupted answer must not be
+  // relabelled as if it had succeeded.
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:36:51.000Z', type: 'USER_MESSAGE', message: 'дальше', data: { text: 'дальше' } });
+  state.apply({ taskId: 'a', seq: 5, at: '2026-09-15T10:37:10.000Z', type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  state.snapshot({ ...task(), status: 'SUCCEEDED' });
+  assert.equal(interrupted.status, 'FAILED', 'статус прерванного ответа не переписывается статусом сессии');
+  assert.equal(interrupted.error, 'Request aborted', 'и его ошибка остаётся видимой');
+});
+
+test('an aborted answer is not labelled DONE, and its range is never inverted', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:39:27.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:39:29.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  // Pi broke the answer off and reported it as an error.
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:39:31.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [], errorMessage: 'Request was aborted' } } } });
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:39:31.000Z', type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  const aborted = state.current;
+  assert.equal(aborted.error, 'Request was aborted');
+  assert.notEqual(aborted.status, 'DONE', 'оборванный ответ не показывается как DONE');
+  assert.equal(aborted.status, 'FAILED');
+
+  // A stale end marker (a cancel finalizing after the next message started) must
+  // not close the NEW turn with a time earlier than its own start.
+  state.apply({ taskId: 'a', seq: 5, at: '2026-09-15T10:39:34.000Z', type: 'USER_MESSAGE', message: 'следующее', data: { text: 'следующее' } });
+  state.apply({ taskId: 'a', seq: 6, at: '2026-09-15T10:39:34.500Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  const next = state.current;
+  state.apply({ taskId: 'a', seq: 7, at: '2026-09-15T10:39:31.000Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  assert.ok(!next.endedAt, 'устаревший маркер не закрывает новый ход');
+  assert.equal(Date.parse(next.at) <= Date.parse(next.endedAt || next.at), true, 'диапазон не переворачивается');
+});
+
+test('a stop after the answer settles shows CANCELLED, not the interim DONE', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:50:45.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:50:48.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  // Pi settles first (its own event order), the operator's stop is recorded after.
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:50:49.300Z', type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  assert.equal(state.current.status, 'DONE', 'сначала промежуточный DONE');
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:50:49.380Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  assert.equal(state.current.status, 'FAILED', 'остановка без единого слова — FAILED (ответа нет)');
+
+  // A stopped answer that already said something keeps CANCELLED.
+  const partial = new ChatState(task());
+  partial.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:50:45.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  partial.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:50:46.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'начал отвечать' } } } });
+  partial.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:50:49.300Z', type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  partial.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:50:49.380Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  assert.equal(partial.current.status, 'CANCELLED');
+
+  // …and when the interrupted answer carries an error, it is FAILED.
+  const errored = new ChatState(task());
+  errored.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:50:45.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  errored.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:50:48.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [], errorMessage: 'This operation was aborted' } } } });
+  errored.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:50:49.300Z', type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  errored.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:50:49.380Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  assert.equal(errored.current.status, 'FAILED');
+  assert.equal(errored.current.error, 'This operation was aborted');
+});
+
+test('a turn superseded by the next message keeps its own state, not SUCCEEDED', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:53:14.000Z', message: 'первое', data: { text: 'первое' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:53:15.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:53:15.500Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash' } } });
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:53:16.000Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: false } } });
+  const first = state.current;
+  // The operator's next message arrives while this answer is still open.
+  state.apply({ taskId: 'a', seq: 5, at: '2026-09-15T10:53:18.000Z', type: 'USER_MESSAGE', message: 'второе', data: { text: 'второе' } });
+  assert.equal(first.superseded, true);
+  assert.equal(first.active, false, 'вытесненный ход закрыт сразу');
+  assert.equal(first.endedAt, '2026-09-15T10:53:18.000Z', 'и закрыт моментом вытеснения');
+
+  state.apply({ taskId: 'a', seq: 6, at: '2026-09-15T10:53:25.000Z', type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  state.snapshot({ ...task(), status: 'SUCCEEDED' });
+  assert.notEqual(first.status, 'SUCCEEDED', `вытесненный ход не переименовывается: ${first.status}`);
+  assert.equal(first.status, 'FAILED', 'ход без ответа — FAILED, а не «завершено»');
+});
+
+test('DOM: a cut-off answer shows an interruption note and FAILED', async () => {
+  const app = await ui();
+  const events = [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:57:31.000Z', message: 'test 1', data: { text: 'test 1', files: [] } },
+    { taskId: 'a', seq: 2, at: '2026-09-15T10:57:33.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 3, at: '2026-09-15T10:57:34.000Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash' } } },
+    { taskId: 'a', seq: 4, at: '2026-09-15T10:57:34.500Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: false } } },
+    // The operator's next message supersedes this answer.
+    { taskId: 'a', seq: 5, at: '2026-09-15T10:57:36.000Z', type: 'USER_MESSAGE', message: 'test 2', data: { text: 'test 2', files: [] } },
+    { taskId: 'a', seq: 6, at: '2026-09-15T10:57:44.000Z', type: 'TASK_SUCCEEDED', message: 'Done', data: {} },
+  ];
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = searchParams.has('tail') ? events : events.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => (searchParams.has('tail') ? { events: list, reachedStart: true } : list) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  const cut = [...app.document.querySelectorAll('.turn:not(.me)')].at(-2);
+  assert.match(cut.textContent, /Запрос прерван/, `пометка прерывания: ${cut.textContent.slice(0, 80)}`);
+  assert.match(cut.textContent, /FAILED/, 'статус прерванного хода — FAILED');
+  assert.equal(/SUCCEEDED|DONE/.test(cut.querySelector('.meta')?.textContent || ''), false, 'никакого «завершено» у прерванного');
+});
+
+test('a late abort report lands on the interrupted answer, not on the fresh one', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T11:14:29.000Z', message: 'первое', data: { text: 'первое' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T11:14:30.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T11:14:31.000Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash' } } });
+  const interrupted = state.current;
+
+  // The operator interrupts and sends the next message; the fresh answer starts…
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T11:14:33.000Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  state.apply({ taskId: 'a', seq: 5, at: '2026-09-15T11:14:33.500Z', type: 'USER_MESSAGE', message: 'второе', data: { text: 'второе' } });
+  state.apply({ taskId: 'a', seq: 6, at: '2026-09-15T11:14:34.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  const fresh = state.current;
+  assert.notEqual(fresh, interrupted);
+  // The fresh answer has already started its own tool call — exactly the case
+  // where the late abort used to be misattributed to it.
+  state.apply({ taskId: 'a', seq: 6.5, at: '2026-09-15T11:14:34.050Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 't2', toolName: 'bash' } } });
+  state.apply({ taskId: 'a', seq: 6.6, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'свежий ' } } } });
+  state.apply({ taskId: 'a', seq: 6.7, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'новая мысль' } } } });
+
+  // …and only NOW does Pi report the abort, including the OLD partial content.
+  state.apply({ taskId: 'a', seq: 7, at: '2026-09-15T11:14:34.100Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'старый ответ' }, { type: 'thinking', thinking: 'старая мысль' }], errorMessage: 'This operation was aborted' } } } });
+  assert.equal(interrupted.error, 'This operation was aborted', 'ошибка обрыва ушла в прерванный ход');
+  assert.equal(interrupted.status, 'FAILED');
+  assert.ok(!fresh.error, 'новый ход не помечен ошибкой чужого ответа');
+  assert.equal(interrupted.text, 'старый ответ');
+  assert.equal(fresh.text, 'свежий ', 'чужой end не стирает свежие дельты');
+  assert.equal(fresh.thinking, 'новая мысль', 'чужие thinking не попадают в новый ответ');
+  assert.equal(state.messageTurn, fresh, 'свежий streaming sink остаётся открытым');
+  assert.equal(state.messageOpen, true);
+
+  // The fresh answer continues normally.
+  state.apply({ taskId: 'a', seq: 8, at: '2026-09-15T11:14:36.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ' } } } });
+  state.apply({ taskId: 'a', seq: 9, at: '2026-09-15T11:14:37.000Z', type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  assert.equal(fresh.status, 'SUCCEEDED', 'новый ход завершается успешно');
+  assert.equal(fresh.text, 'свежий ответ');
+  assert.ok(!fresh.error, 'и остаётся без чужой ошибки');
+});
+
+test('DOM incremental: abort before next USER_MESSAGE never appears on the next reply', async () => {
+  const app = await ui();
+  const e = (seq, type, pi, at, extra = {}) => ({ taskId: 'a', seq, type, at, message: extra.message || type, data: pi ? { pi } : (extra.data || {}) });
+  const events = [
+    e(1, 'USER_MESSAGE', null, '2026-09-15T11:17:34.995Z', { message: 'Test 1', data: { text: 'Test 1', files: [] } }),
+    e(2, 'STATUS', null, '2026-09-15T11:17:34.998Z', { data: { status: 'RUNNING' } }),
+    e(3, 'PI_EVENT', { type: 'agent_start' }, '2026-09-15T11:17:35.002Z'),
+    e(4, 'PI_EVENT', { type: 'message_start', message: { role: 'assistant' } }, '2026-09-15T11:17:38.054Z'),
+    e(5, 'PI_EVENT', { type: 'message_end', message: { role: 'assistant', stopReason: 'toolUse', content: [{ type: 'toolCall' }] } }, '2026-09-15T11:17:39.023Z'),
+    e(6, 'PI_EVENT', { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash' }, '2026-09-15T11:17:39.073Z'),
+    e(7, 'PI_EVENT', { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: false }, '2026-09-15T11:17:39.234Z'),
+    e(8, 'STATUS', null, '2026-09-15T11:17:39.447Z', { data: { status: 'CANCELLING' } }),
+    e(9, 'PI_EVENT', { type: 'message_start', message: { role: 'assistant', stopReason: 'aborted', errorMessage: 'Request aborted' } }, '2026-09-15T11:17:39.451Z'),
+    e(10, 'PI_EVENT', { type: 'message_end', message: { role: 'assistant', stopReason: 'aborted', errorMessage: 'Request aborted', content: [] } }, '2026-09-15T11:17:39.453Z'),
+    e(11, 'PI_EVENT', { type: 'agent_settled' }, '2026-09-15T11:17:39.544Z'),
+    e(12, 'TASK_CANCELLED', null, '2026-09-15T11:17:39.952Z', { message: 'Task cancelled' }),
+    e(13, 'USER_MESSAGE', null, '2026-09-15T11:17:40.004Z', { message: 'test 2', data: { text: 'test 2', files: [] } }),
+    e(14, 'STATUS', null, '2026-09-15T11:17:40.006Z', { data: { status: 'RUNNING' } }),
+    e(15, 'PI_EVENT', { type: 'agent_start' }, '2026-09-15T11:17:40.009Z'),
+    e(16, 'PI_EVENT', { type: 'message_start', message: { role: 'assistant' } }, '2026-09-15T11:17:42.486Z'),
+    e(17, 'PI_EVENT', { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Второй ответ' } }, '2026-09-15T11:17:43.000Z'),
+    e(18, 'PI_EVENT', { type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'Второй ответ' }] } }, '2026-09-15T11:17:48.711Z'),
+    e(19, 'PI_EVENT', { type: 'agent_settled' }, '2026-09-15T11:17:48.794Z'),
+    e(20, 'TASK_SUCCEEDED', null, '2026-09-15T11:17:49.213Z', { message: 'Done' }),
+  ];
+  let delivered = 0;
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = events.slice(0, delivered).filter(item => item.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => searchParams.has('tail') ? { events: list, reachedStart: true } : list };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  for (delivered = 1; delivered <= events.length; delivered++) await app.refreshTask();
+  const bots = [...app.document.querySelectorAll('.turn:not(.me)')];
+  assert.equal(bots.length, 3);
+  assert.match(bots[1].textContent, /Request aborted/);
+  assert.match(bots[1].textContent, /FAILED/);
+  assert.equal(/Request aborted|FAILED/.test(bots[2].textContent), false, `чужой abort попал в новый ход: ${bots[2].textContent}`);
+  assert.match(bots[2].textContent, /Второй ответ/);
+  assert.match(bots[2].textContent, /SUCCEEDED/);
+});
+
+test('a structured late aborted end without error text preserves the fresh stream', () => {
+  const state = new ChatState(task());
+  const pi = (seq, frame) => state.apply({ taskId: 'a', seq, type: 'PI_EVENT', data: { pi: frame } });
+  pi(1, { type: 'message_start', message: { role: 'assistant' } });
+  const old = state.current;
+  state.apply({ taskId: 'a', seq: 2, type: 'USER_MESSAGE', message: 'новое', data: { text: 'новое' } });
+  pi(3, { type: 'message_start', message: { role: 'assistant' } });
+  const fresh = state.current;
+  pi(4, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'новый ответ' } });
+  pi(5, { type: 'message_end', message: { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'старый ответ' }] } });
+  assert.equal(old.stopReason, 'aborted');
+  assert.equal(old.text, 'старый ответ');
+  assert.equal(old.error, 'Request was aborted');
+  assert.equal(old.status, 'FAILED');
+  assert.equal(fresh.text, 'новый ответ');
+  assert.equal(fresh.error, null);
+  assert.equal(state.messageTurn, fresh);
+  assert.equal(state.messageOpen, true);
 });

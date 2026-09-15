@@ -516,12 +516,19 @@ test('edit over HTTP rewrites the message in place and re-runs everything below 
   assert.ok(after.some(e => e.type === 'TURN_EDITED' && e.data.text === 'второе (исправлено)'), 'live clients learn the new text');
   assert.ok(after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT'), 'the model answered again');
 
-  // An answer cannot be edited (it is re-run), and an empty edit is refused.
-  await assert.rejects(() => api(`/api/tasks/${id}/turns/assistant-${user.seq}/edit`, { text: 'x' }), err => err.code === 'INPUT_INVALID');
+  // An answer CAN be edited: as a branch it becomes another variant of the same
+  // exchange, and the model is not asked. An empty edit is still refused.
+  const branch = await api(`/api/tasks/${id}/turns/assistant-${user.seq}/edit`, { text: 'второе (вариант)', branch: true });
+  assert.equal(branch.branch, true);
+  assert.ok(branch.variantId, 'the branch carries its own variant id');
+  const events = await api(`/api/tasks/${id}/events?limit=0`);
+  const branchMark = events.filter(e => e.type === 'TURN_VARIANT_START').at(-1);
+  assert.equal(branchMark.data.turnSeq, user.seq);
+  assert.equal(branchMark.data.editedText, 'второе (вариант)');
   await assert.rejects(() => api(`/api/tasks/${id}/turns/user-${user.seq}/edit`, { text: '   ' }), err => err.code === 'INPUT_INVALID');
 });
 
-test('regenerate over HTTP rewrites only the answer — the operator message stays itself', { timeout: 30000 }, async t => {
+test('regenerate over HTTP adds another answer of the same exchange and keeps the old one', { timeout: 30000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api } = fixture;
@@ -546,12 +553,23 @@ test('regenerate over HTTP rewrites only the answer — the operator message sta
   assert.equal(same.seq, user.seq, 'the message keeps its own place in the log');
   assert.equal(same.data.text, 'второе');
 
-  const marker = after.find(e => e.type === 'TURN_TRUNCATED');
-  assert.equal(marker.data.reason, 'regenerate');
-  assert.equal(marker.data.fromSeq, user.seq + 1, 'only what followed the message was dropped');
-  assert.equal(marker.data.keepUser, true);
+  // Regenerate adds ANOTHER answer of the same exchange. The previous one stays
+  // in history — ‹ 1/2 › switches between them — so nothing is dropped at all.
+  assert.equal(after.some(e => e.type === 'TURN_TRUNCATED'), false, 'the old answer is not deleted');
+  const marker = after.find(e => e.type === 'TURN_VARIANT_START');
+  assert.ok(marker, after.map(e => e.type).join(','));
+  assert.equal(marker.data.turnSeq, user.seq);
+  assert.equal(marker.data.text, 'второе');
+  assert.ok(marker.data.variantId, 'the new answer has an id of its own');
   assert.ok(marker.seq > cursor, 'the marker is visible to a client that already streamed the answer');
-  assert.ok(after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT'), 'the answer was produced again');
+  assert.ok(after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT'), 'a second answer was produced');
+
+  // Switching between the answers is a reading preference, and it is persisted.
+  const selected = await api(`/api/tasks/${id}/variant`, { turnSeq: user.seq, variantId: String(user.seq) });
+  assert.deepEqual({ ok: selected.ok, total: selected.total }, { ok: true, total: 2 });
+  const chosen = (await api(`/api/tasks/${id}/events?limit=0`)).at(-1);
+  assert.equal(chosen.type, 'TURN_VARIANT_SELECTED');
+  assert.deepEqual(chosen.data, { turnSeq: user.seq, variantId: String(user.seq) });
 
   // "Nothing was sent" must never re-run the session somebody is looking at.
   await assert.rejects(() => api(`/api/tasks/${id}/regenerate`, {}), err => err.code === 'NOT_ALLOWED');

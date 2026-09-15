@@ -90,6 +90,25 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (['prompt', 'steer', 'follow_up'].includes(command.type)) {
     if (command.message.includes('reject')) return respond({}, false);
+    // A model error BEFORE any output: the «Повторить сообщение» case. No text
+    // deltas and no tool call, so the turn is genuinely empty.
+    if (command.message.includes('model-error-empty')) {
+      respond();
+      streaming = true;
+      send({ type: 'agent_start' });
+      const user = { role: 'user', content: [{ type: 'text', text: command.message }] };
+      persist(user);
+      send({ type: 'message_start', message: user });
+      send({ type: 'message_end', message: user });
+      send({ type: 'message_start', message: { role: 'assistant', content: [] } });
+      const failed = { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'Fixture model error', usage: { input: 10, output: 0, totalTokens: 10 } };
+      persist(failed);
+      send({ type: 'message_end', message: failed });
+      streaming = false;
+      send({ type: 'agent_end' });
+      send({ type: 'agent_settled' });
+      return;
+    }
     respond();
     streaming = true;
     turn += 1;

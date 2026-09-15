@@ -12,6 +12,7 @@ export class RuntimeManager {
     this.activeProfileId = null;
     this.lastError = null;
     this.engineCache = null;
+    this.metricSamples = new Map();
   }
 
   async isReady() {
@@ -36,7 +37,9 @@ export class RuntimeManager {
       if (!res.ok) return { unknown: true };
       const slots = await res.json();
       if (!Array.isArray(slots) || !slots.length) return { unknown: true };
-      return { unknown: false, busy: slots.every((s) => s.is_processing) };
+      // `some` matches LocalModelService.getBusyStatus: any processing slot
+      // means the model cannot take another generation right now.
+      return { unknown: false, busy: slots.some((s) => s.is_processing) };
     } catch {
       return { unknown: true };
     }
@@ -73,7 +76,7 @@ export class RuntimeManager {
       const [props, slots, metricsText] = await Promise.all([load('/props'), load('/slots'), loadText('/metrics')]);
       // PP/TG need --metrics on the server; without it /metrics answers 501 and
       // the UI shows "—" rather than a fabricated zero.
-      const metrics = metricsText ? parsePrometheusMetrics(metricsText) : null;
+      const metrics = metricsText ? parsePrometheusMetrics(metricsText, 'runtime', this.metricSamples) : null;
       value = {
         configured: true,
         reachable: true,

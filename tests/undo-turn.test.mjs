@@ -148,15 +148,16 @@ test('a truncation marker keeps the cursor monotonic, so a live client still see
   assert.deepEqual((await store.readEvents('a', 0, high)).map(e => e.type), ['TURN_TRUNCATED'], 'and `after=<cursor>` returns it');
 });
 
-test('editTurn refuses anything but a non-empty operator message', async t => {
+test('editTurn refuses an unknown turn and an empty text', async t => {
   const { manager, store } = await fixture(t, 'SUCCEEDED');
   await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', message: 'опечатко', data: { text: 'опечатко' } });
-  // An answer is re-run, not edited; and an edit always re-sends something.
-  await assert.rejects(() => manager.editTurn('a', { turnId: 'assistant-1', text: 'x' }), err => err.code === 'INPUT_INVALID');
+  // An answer may now be edited in place (no model is asked, nothing is re-run).
+  const edited = await manager.editTurn('a', { turnId: 'assistant-1', text: 'ответ (исправлен)' });
+  assert.deepEqual(edited, { ok: true, turnId: 'assistant-1', role: 'assistant', branch: false });
   await assert.rejects(() => manager.editTurn('a', { turnId: 'nope', text: 'x' }), err => err.code === 'INPUT_INVALID');
   await assert.rejects(() => manager.editTurn('a', { turnId: 'user-1', text: null }), err => err.code === 'INPUT_INVALID');
   await assert.rejects(() => manager.editTurn('a', { turnId: 'user-1', text: '   ' }), err => err.code === 'INPUT_INVALID');
-  assert.equal((await store.readEvents('a', 0)).length, 1, 'nothing was written by any refusal');
+  assert.equal((await store.readEvents('a', 0)).filter(event => event.type === 'TURN_EDITED').length, 1, 'only the real edit was written');
 });
 
 test('forkTask branches the conversation through the chosen exchange and leaves the source alone', async t => {
@@ -198,3 +199,25 @@ test('forkTask branches the conversation through the chosen exchange and leaves 
     expected.map(e => `${e.type}|${JSON.stringify(e.data)}`)
   );
 });
+
+test('the operator message frame is not mistaken for the model answer', async t => {
+  const { manager, store } = await fixture(t, 'CANCELLED');
+  // Pi persists the user's own message as a frame too; only role=assistant
+  // content may block a retry.
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_start', message: { role: 'user' } } } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: 'original' }] } } } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [] } } } });
+  await store.appendEvent('a', { ...at(), type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  const result = await manager.undoLastTurn('a');
+  assert.deepEqual(result, { ok: true, text: 'original', fromSeq: 1, dropInitial: true });
+  assert.equal((await store.readEvents('a', 0)).length, 1, 'the empty exchange is gone');
+});
+
+test('an assistant message_end with real text still blocks the retry', async t => {
+  const { manager, store } = await fixture(t, 'CANCELLED');
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'готово' }] } } } });
+  await store.appendEvent('a', { ...at(), type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  await assert.rejects(() => manager.undoLastTurn('a'), err => err.code === 'NOT_ALLOWED');
+});
+

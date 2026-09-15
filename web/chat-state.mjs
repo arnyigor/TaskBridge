@@ -22,8 +22,14 @@ export class ChatState {
     this.turns = [];
     this.tools = new Map();
     this.notes = new Set();
+    // exchange key (0 = the session's own first prompt, else the seq of its
+    // USER_MESSAGE) → { ids: [assistant turn ids], selected }: a regenerated
+    // answer is another variant of the same exchange, and all of them stay in
+    // the log, so this is what tells the view which one to show.
+    this.variants = new Map();
     this.messageTurn = null;
     this.messageOpen = false;
+    this.orphanMessage = null;
     this.executionTurn = null;
     if (seedInitial) this.addUser(task.prompt, task.files || [], 'initial');
   }
@@ -37,28 +43,61 @@ export class ChatState {
     for (const event of events) scratch.apply(event);
     this.turns.unshift(...scratch.turns);
     for (const [id, tool] of scratch.tools) if (!this.tools.has(id)) this.tools.set(id, tool);
+    for (const [key, entry] of scratch.variants) if (!this.variants.has(key)) this.variants.set(key, entry);
     return scratch.turns;
   }
 
-  addUser(text, files, id) {
+  addUser(text, files, id, at = null) {
     // Older logs embedded upload instructions in the visible message.
     const marker = '\n\nAdditional files from the phone are in .taskbridge-input/:\n';
     const split = String(text || '').split(marker);
     if (!files.length && split[1]) files = split[1].split('\n').filter(x => x.startsWith('- ')).map(x => ({ name: x.slice(2) }));
-    this.turns.push({ id: `user-${id}`, role: 'user', text: split[0], files });
-    this.current = { id: `assistant-${id}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null };
+    // `at` — when the message was sent/recorded; the answer gets its own start
+    // (`at`) and end (`endedAt`) without touching it.
+    this.turns.push({ id: `user-${id}`, role: 'user', text: split[0], files, at });
+    const key = id === 'initial' ? 0 : Number(id);
+    this.current = { id: `assistant-${id}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: key, at: null, endedAt: null };
     this.turns.push(this.current);
+    this.variants.set(key, { ids: [`assistant-${id}`], selected: `assistant-${id}` });
   }
 
-  finish(status, error = null) {
+  finish(status, error = null, at = null) {
+    const running = this.turns.filter(turn => turn.role === 'assistant' && (turn.active || !turn.status));
+    // An answer that was CUT OFF without saying anything is a failure: Pi's
+    // «Request was aborted» (an error), a stop, or a message that superseded the
+    // answer. A run that completed on its own is a different thing — an agent
+    // that did its work with tools and wrote no prose still SUCCEEDED — so the
+    // rule keys on the interruption, not merely on empty text.
+    const answered = (turn) => String(turn.text || '').trim().length > 0;
+    const cutOff = (turn) => !answered(turn) && (turn.superseded || status === 'CANCELLED');
+    const labelFor = (turn) => (turn.error || cutOff(turn) ? 'FAILED' : status);
     for (const turn of this.turns) {
       if (turn.role !== 'assistant') continue;
-      if (turn.active || !turn.status) turn.status = status;
+      // `DONE` (from agent_settled) is an INTERIM label: when the run's real
+      // terminal event arrives afterwards — cancelled by the operator, failed —
+      // it must replace it. Otherwise a stop showed DONE, because Pi settles
+      // before TaskBridge records TASK_CANCELLED.
+      const interim = !turn.status || turn.status === 'DONE';
+      if (turn.active || (interim && !turn.superseded)) turn.status = labelFor(turn);
       turn.active = false;
+      // `final` is the turn's own "the answer is as complete as it will get":
+      // an empty final turn really was not answered, while a turn that has not
+      // finished yet shows the typing animation. Consulting the TASK status for
+      // that (it arrives a poll later) is what made the placeholder flash.
+      turn.final = true;
       for (const tool of turn.tools) if (tool.state === 'run') tool.state = 'interrupted';
     }
-    this.current.status = status;
+    this.current.status = (error || this.current.error || cutOff(this.current)) ? 'FAILED' : status;
+    this.current.final = true;
     if (error) this.current.error = error;
+    // The answer that just ended gets its end time — only that one: older turns
+    // were finished by their own event. A marker that predates the turn it would
+    // close (an overlapping cancel finalizing after the next message started) is
+    // ignored: it produced ranges like «15:39:34–15:39:31».
+    if (at) for (const turn of (running.length ? running : [this.current])) {
+      if (turn.at && Date.parse(at) < Date.parse(turn.at)) continue;
+      turn.endedAt = turn.endedAt || at;
+    }
   }
 
   // The failed exchange was permanently removed from history by the server
@@ -70,6 +109,53 @@ export class ChatState {
   // operator's own line stays exactly where it was and gets a fresh (empty,
   // active) assistant turn to stream into. Rebuilding it from a new
   // USER_MESSAGE would have looked like "my message was erased and duplicated".
+  // A regenerated answer: the exchange keeps every answer it ever had, and the
+  // new one becomes the visible one. The incoming frames are bound to the new
+  // turn object, which is why a sibling is created rather than the existing
+  // answer being emptied — the view uses that identity to throw away what
+  // belonged to the answer that just went out of view.
+  #startVariant(data) {
+    const key = Number(data?.turnSeq) || 0;
+    const variantId = String(data?.variantId || '');
+    if (!variantId) return;
+    const turnId = `assistant-${variantId}`;
+    const entry = this.variants.get(key) || { ids: [], selected: null };
+    if (!entry.ids.includes(turnId)) entry.ids.push(turnId);
+    this.variants.set(key, entry);
+    const turn = { id: turnId, role: 'assistant', text: '', thinking: '', tools: [], active: true, status: '', error: null, variantKey: key };
+    // An edited answer branching into a variant arrives with its text ready; a
+    // regeneration does not (the text comes from the model).
+    if (typeof data?.editedText === 'string') turn.text = data.editedText;
+    const previousId = entry.ids.at(-2);
+    const at = previousId ? this.turns.findIndex(item => item.id === previousId) : -1;
+    if (at >= 0) this.turns.splice(at + 1, 0, turn);
+    else this.turns.push(turn);
+    this.current = turn;
+    this.#selectVariant(key, turnId);
+  }
+
+  #selectVariant(key, turnId) {
+    const entry = this.variants.get(key);
+    if (!entry || !entry.ids.includes(turnId)) return;
+    entry.selected = turnId;
+    for (const turn of this.turns) {
+      if (turn.role !== 'assistant' || turn.variantKey !== key) continue;
+      turn.hidden = turn.id !== turnId;
+    }
+  }
+
+  // The variant switcher's data for one answer, or null when the exchange has a
+  // single answer (then there is no ‹ n/m › to show).
+  variantsOf(turn) {
+    if (!turn || turn.role !== 'assistant' || turn.variantKey == null) return null;
+    const entry = this.variants.get(turn.variantKey);
+    if (!entry || entry.ids.length < 2) return null;
+    const index = entry.ids.indexOf(turn.id);
+    if (index < 0) return null;
+    const selectedId = entry.selected && entry.ids.includes(entry.selected) ? entry.selected : entry.ids.at(-1);
+    return { key: turn.variantKey, index, total: entry.ids.length, ids: [...entry.ids], selectedId };
+  }
+
   #truncateTurns(fromSeq, { dropInitial = false, keepUser = false } = {}) {
     if (!Number.isSafeInteger(fromSeq) || fromSeq < 0) return;
     const seqOf = (turn) => {
@@ -81,11 +167,13 @@ export class ChatState {
     // entry would later swallow a tool result that belongs to the new answer.
     const forget = (turn) => { for (const tool of turn.tools || []) this.tools.delete(tool.id); };
     this.turns = this.turns.filter(turn => {
-      const seq = seqOf(turn);
-      // seq === null: the turn synthesized from task.prompt, which has no event
-      // of its own. Regeneration keeps them (the trailing answer is dropped by
-      // the loop below); a retry drops the whole log.
-      if (seq === null) {
+      // A regenerated answer (assistant-<variantId>) carries no seq in its id:
+      // it belongs to the exchange its marker named, and that key decides.
+      const seq = turn.variantKey != null ? turn.variantKey : seqOf(turn);
+      // seq === null / 0: the exchange synthesized from task.prompt, which has
+      // no event of its own. Regeneration keeps it (the trailing answer is
+      // dropped by the loop below); a retry drops the whole log.
+      if (seq === null || seq === 0) {
         if (keepUser) return true;
         if (dropInitial) { forget(turn); return false; }
         return true;
@@ -114,8 +202,22 @@ export class ChatState {
         this.current = { id: `assistant-truncated-${fromSeq}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null };
       }
     }
+    // Variant bookkeeping follows the turns: an exchange whose answers were all
+    // dropped disappears, the remaining ones keep only the answers still here.
+    const alive = new Set(this.turns.map(turn => turn.id));
+    if (keepUser && this.current) {
+      const key = this.current.variantKey ?? 0;
+      this.current.variantKey = key;
+      this.variants.set(key, { ids: [this.current.id], selected: this.current.id });
+    }
+    for (const [key, entry] of [...this.variants]) {
+      entry.ids = entry.ids.filter(id => alive.has(id));
+      if (!entry.ids.length) { this.variants.delete(key); continue; }
+      if (!entry.ids.includes(entry.selected)) entry.selected = entry.ids.at(-1);
+    }
     this.messageTurn = null;
     this.messageOpen = false;
+    this.orphanMessage = null;
     this.textSeparator = '';
     this.separatorApplied = false;
   }
@@ -126,8 +228,53 @@ export class ChatState {
     if (Number.isSafeInteger(event.seq)) this.cursor = event.seq;
     const frame = event.data?.pi;
     if (event.type === 'USER_MESSAGE') {
-      this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq);
-      this.current.active = true;
+      // A message that arrives while an answer is still streaming SUPERSEDES it:
+      // Pi ends that assistant message and answers the new one. Close the
+      // previous turn here, at the moment it was pushed aside — otherwise it
+      // stayed "active" and was closed much later by the run's settle event,
+      // which gave it the end time of a whole different answer (a range that
+      // looked wrong next to the message that replaced it).
+      const superseded = this.current;
+      if (superseded && superseded.role === 'assistant' && superseded.active) {
+        superseded.active = false;
+        superseded.final = true;
+        // Its own answer was cut off, so it never got a verdict of its own: it
+        // must not be relabelled as SUCCEEDED when the SESSION finishes later.
+        superseded.superseded = true;
+        if (!superseded.status) {
+          superseded.status = superseded.error || !String(superseded.text || '').trim() ? 'FAILED' : 'DONE';
+        }
+        superseded.final = true;
+        superseded.endedAt = superseded.endedAt || event.at || null;
+        for (const tool of superseded.tools) if (tool.state === 'run') tool.state = 'interrupted';
+      }
+      // Reconcile optimistic user turns: several may sit queued at once, so the
+      // OLDEST pending one is matched with this event's seq — its id is
+      // upgraded in place instead of a duplicate bubble being added.
+      const pendingOptIndex = this.turns.findIndex(t => t.id.startsWith('user-pending-') && t.role === 'user');
+      if (pendingOptIndex >= 0) {
+        const optTurn = this.turns[pendingOptIndex];
+        // The server's receipt time is authoritative (it survives a reload); the
+        // optimistic turn only carried the client's send time until now.
+        if (event.at) optTurn.at = event.at;
+        const optAssistant = this.turns.find(t => t.id === optTurn.id.replace('user-pending-', 'assistant-pending-'));
+        const seqId = event.seq;
+        optTurn.id = `user-${seqId}`;
+        const key = Number(seqId);
+        if (optAssistant) {
+          optAssistant.id = `assistant-${seqId}`;
+          optAssistant.variantKey = key;
+          optAssistant.active = true;
+          this.current = optAssistant;
+          this.variants.set(key, { ids: [`assistant-${seqId}`], selected: `assistant-${seqId}` });
+        } else {
+          this.addUser(event.data?.text ?? event.message, event.data?.files || [], seqId, event.at || null);
+          this.current.active = true;
+        }
+      } else {
+        this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq, event.at || null);
+        this.current.active = true;
+      }
     } else if (event.type === 'TURN_TRUNCATED') {
       this.#truncateTurns(Number(event.data?.fromSeq), {
         dropInitial: event.data?.dropInitial === true,
@@ -138,13 +285,17 @@ export class ChatState {
       // the server stored, so a reload shows the corrected text too.
       const edited = this.turns.find(turn => turn.id === event.data?.id);
       if (edited) edited.text = String(event.data?.text ?? '');
+    } else if (event.type === 'TURN_VARIANT_START') {
+      this.#startVariant(event.data);
+    } else if (event.type === 'TURN_VARIANT_SELECTED') {
+      this.#selectVariant(Number(event.data?.turnSeq) || 0, `assistant-${event.data?.variantId}`);
     } else if (event.type === 'STATUS') {
       if (ACTIVE_STATUSES.has(event.data?.status)) {
         this.current.active = true;
         this.current.status = event.data.status;
       } else this.finish(event.data?.status || 'DONE');
     } else if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(event.type)) {
-      this.finish(event.type.slice(5), event.type === 'TASK_FAILED' ? event.message : null);
+      this.finish(event.type.slice(5), event.type === 'TASK_FAILED' ? event.message : null, event.at);
     }
     if (!frame) return true;
     if (frame.type === 'agent_start') {
@@ -152,6 +303,12 @@ export class ChatState {
       this.current.status = 'RUNNING';
     }
     if (frame.type === 'message_start' && frame.message?.role === 'assistant') {
+      // A previous answer left open by an interrupt: its own end arrives LATE,
+      // after this new answer started, and must not be attributed to it.
+      if (this.messageOpen && this.messageTurn && this.messageTurn !== this.current) {
+        this.orphanMessage = { turn: this.messageTurn, textPrefix: this.textPrefix, thinkingPrefix: this.thinkingPrefix, textSeparator: this.textSeparator };
+      }
+      if (!this.current.at) this.current.at = event.at || null;
       this.messageTurn = this.current;
       this.executionTurn = this.current;
       this.textPrefix = this.current.text;
@@ -179,7 +336,11 @@ export class ChatState {
       if (delta?.type === 'thinking_delta') turn.thinking += delta.delta || '';
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
-      const turn = this.messageTurn || this.current;
+      const sink = this.messageTurn || this.current;
+      const aborted = frame.message.stopReason === 'aborted' || /abort/i.test(String(frame.message.errorMessage || ''));
+      const orphan = this.orphanMessage && this.orphanMessage.turn !== sink && aborted ? this.orphanMessage : null;
+      const turn = orphan?.turn || sink;
+      const context = orphan || this;
       const content = frame.message.content;
       if (Array.isArray(content)) {
         const text = content.filter(x => x.type === 'text').map(x => x.text || '').join('');
@@ -187,10 +348,21 @@ export class ChatState {
         // The message text is rebuilt from the prefix, so the paragraph break
         // must be part of it — whether or not a delta already inserted it for
         // the streaming view.
-        turn.text = (this.messageTurn ? this.textPrefix + (this.textSeparator || '') : turn.text) + text;
-        turn.thinking = (this.messageTurn ? this.thinkingPrefix : turn.thinking) + thinking;
+        turn.text = (orphan || this.messageTurn ? context.textPrefix + (context.textSeparator || '') : turn.text) + text;
+        turn.thinking = (orphan || this.messageTurn ? context.thinkingPrefix : turn.thinking) + thinking;
       }
-      if (frame.message.errorMessage) turn.error = frame.message.errorMessage;
+      if (typeof frame.message.stopReason === 'string') turn.stopReason = frame.message.stopReason;
+      if (frame.message.errorMessage || aborted) turn.error = frame.message.errorMessage || 'Request was aborted';
+      if (orphan) {
+        // Route the WHOLE late end to its original message. In particular, do
+        // not overwrite the fresh answer's deltas or close its streaming sink.
+        turn.status = 'FAILED';
+        turn.active = false;
+        turn.final = true;
+        turn.endedAt = turn.endedAt || event.at || null;
+        this.orphanMessage = null;
+        return true;
+      }
       this.textSeparator = '';
       this.separatorApplied = false;
       this.messageTurn = null;
@@ -215,7 +387,7 @@ export class ChatState {
       }
       tool.state = frame.isError ? 'error' : 'done';
     }
-    if (frame.type === 'agent_settled') this.finish('DONE');
+    if (frame.type === 'agent_settled') this.finish('DONE', null, event.at);
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type)) {
       const note = frame.errorMessage || (frame.result ? 'Контекст сжат.' : null);
       if (note && !this.notes.has(event.seq)) {
@@ -235,7 +407,14 @@ export class ChatState {
       }
     }
     if (!ACTIVE_STATUSES.has(task.status)) this.finish(task.status, task.error);
-    else if (initial) this.current.active = true;
-    this.current.status = task.status;
+    // A task that is working must not revive an ALREADY finished turn: the last
+    // answer may have been interrupted, and marking it active again is what made
+    // an empty turn flip from «Ответ не был получен.» to the typing animation.
+    else if (initial && !this.current.final) this.current.active = true;
+    // The task's status describes the SESSION, not one turn: an interrupted
+    // answer must keep saying it was cancelled (its own text even reads
+    // «Request aborted»), instead of being relabelled SUCCEEDED when the
+    // session as a whole finishes.
+    if (!this.current.final) this.current.status = task.status;
   }
 }

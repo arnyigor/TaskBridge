@@ -6,6 +6,21 @@ import path from 'node:path';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failure = (code, message) => Object.assign(new Error(message), { code });
 
+// Best-effort tree kill: a spawned router that outlived its readiness window
+// must not leak a listening process (and its log file handle) into the next
+// ensureRunning() call.
+function killTree(proc) {
+  if (!proc || proc.exitCode != null || proc.signalCode != null) return Promise.resolve();
+  return new Promise(resolve => {
+    if (process.platform === 'win32') {
+      execFile('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }, resolve);
+    } else {
+      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+      resolve();
+    }
+  });
+}
+
 // llama.cpp router mode (server started without -m, with --models-dir or
 // --models-preset) owns a single port and loads presets on demand. Pi already
 // ships a client for exactly these endpoints, so TaskBridge speaks the same
@@ -100,10 +115,10 @@ export function normalizeModels(payload) {
 // llama.cpp Web UI shows); the counters' cumulative average is the fallback.
 // The gauges are only used as a last resort when counters are absent.
 //
-// `modelKey` scopes the instant-rate delta state per model/server.
-const prevMetricSample = new Map();
-
-export function parsePrometheusMetrics(text, modelKey = '') {
+// `samples` scopes the instant-rate delta state per model/server; it is owned
+// by the caller (service instance) instead of module state, so instances do
+// not leak data to each other and tests stay deterministic.
+export function parsePrometheusMetrics(text, modelKey = '', samples = new Map()) {
   const values = new Map();
   for (const rawLine of String(text || '').split(/\r?\n/u)) {
     const line = rawLine.trim();
@@ -127,7 +142,7 @@ export function parsePrometheusMetrics(text, modelKey = '') {
   if (hasCounters) {
     if (counters.promptSeconds > 0) pp = counters.promptTokens / counters.promptSeconds;
     if (counters.predictedSeconds > 0) tg = counters.predictedTokens / counters.predictedSeconds;
-    const prev = prevMetricSample.get(modelKey);
+    const prev = samples.get(modelKey);
     if (prev) {
       const elapsed = Date.now() - prev.at;
       if (elapsed > 500) {
@@ -139,7 +154,7 @@ export function parsePrometheusMetrics(text, modelKey = '') {
         if (dTt > 0 && dTs > 0) tg = dTt / dTs;
       }
     }
-    prevMetricSample.set(modelKey, { at: Date.now(), c: counters });
+    samples.set(modelKey, { at: Date.now(), c: counters });
   }
   if (pp === null) pp = pick('llamacpp:prompt_tokens_seconds');
   if (tg === null) tg = pick('llamacpp:predicted_tokens_seconds');
@@ -161,6 +176,7 @@ export class LocalModelService extends EventEmitter {
     this.lastError = null;
     this.activeProfileId = null;
     this.watchController = null;
+    this.metricSamples = new Map();
   }
 
   // `managed` = TaskBridge can start/stop this router (a command is configured).
@@ -239,9 +255,27 @@ export class LocalModelService extends EventEmitter {
     const models = await this.listModels().catch(() => null);
     if (!models) return { unknown: true, busy: false, loaded: null };
     // loaded — positively "no model is loaded" lets the caller park a prompt
-    // instead of blocking the request on loading one.
+    // instead of blocking the request on loading one. A model whose status the
+    // router does not report (external server, plain llama.cpp) must NOT count
+    // as "not loaded": it may well be loaded and answering, and parking every
+    // message behind a model-load that cannot even be attempted is what made
+    // the queue look stuck.
     const loaded = models.filter(m => m.status === 'loaded' || m.status === 'sleeping');
-    if (!loaded.length) return { unknown: false, busy: false, loaded: false };
+    if (!loaded.length) {
+      const known = models.some(m => m.status && m.status !== 'unknown');
+      if (known) return { unknown: false, busy: false, loaded: false };
+      // The model list carries no status (an external llama-server owns the
+      // port, or a plain llama.cpp build). Ask its slots directly — that is
+      // where the honest "a generation is running" answer lives for a
+      // single-model server. Without this, a busy local model could not be
+      // detected at all and every prompt was delivered immediately instead of
+      // taking its place in the queue.
+      const slots = await this.request('/slots', { timeout: 1500 }).catch(() => null);
+      if (Array.isArray(slots) && slots.length) {
+        return { unknown: false, busy: slots.some(slot => slot?.is_processing === true), loaded: true };
+      }
+      return { unknown: false, busy: false, loaded: null };
+    }
     let inspected = false;
     for (const model of loaded) {
       let slots;
@@ -296,7 +330,7 @@ export class LocalModelService extends EventEmitter {
         if (response.status === 501) return { available: false, reason: 'metrics-disabled', model: model.id };
         continue;
       }
-      const parsed = parsePrometheusMetrics(await response.text(), model.id);
+      const parsed = parsePrometheusMetrics(await response.text(), model.id, this.metricSamples);
       return { available: true, source: 'llama.cpp', model: model.id, ...parsed };
     }
     return { available: false, reason: 'unreachable' };
@@ -353,6 +387,15 @@ export class LocalModelService extends EventEmitter {
     proc.on('error', (error) => {
       this.lastError = error.message;
       onLog(`[router error] ${error.message}\n`);
+      // A failed spawn (ENOENT, EACCES) never emits 'close': release the slot
+      // and the log handle so the next ensureRunning() does not believe a
+      // router is running and spawn a second process.
+      if (this.proc === proc) {
+        this.proc = null;
+        this.state = 'STOPPED';
+      }
+      log.end();
+      this.emit('status', { state: this.state, error: this.lastError });
     });
 
     const deadline = Date.now() + (management.startTimeoutMs || 120000);
@@ -365,6 +408,13 @@ export class LocalModelService extends EventEmitter {
       }
       await sleep(500);
     }
+    // The router never became healthy: it must not survive this call, or the
+    // next ensureRunning() would spawn a second process while the first keeps
+    // the port and the log file.
+    await killTree(proc).catch(() => {});
+    this.proc = null;
+    this.state = 'STOPPED';
+    log.end();
     throw failure('LOCAL_RUNTIME_FAILED', 'Таймаут ожидания router-сервера.');
   }
 

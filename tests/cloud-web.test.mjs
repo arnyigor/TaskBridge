@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
+import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 
 // One UI for both realities (docs/cloud-ui.md): the machine, the cloud dev host
@@ -38,7 +39,7 @@ test('the legacy cloud UI copy is gone and nothing points at it any more', async
 test('the shell loads the cloud config before the app, and caches only files that exist', async () => {
   const html = await read('web/index.html');
   const config = html.indexOf('/cloud-config.js');
-  const app = html.indexOf('type="module" src="/app.js"');
+  const app = html.indexOf('type="module" src="/app.js?v=20260915-1"');
   assert.ok(config > 0 && app > 0, 'both scripts must be in the shell');
   // A classic script runs before a deferred module: app.js picks its transport
   // from the config, so the order is load-bearing, not cosmetic.
@@ -46,14 +47,57 @@ test('the shell loads the cloud config before the app, and caches only files tha
   // No inline <script> anywhere in the shell: the server sends script-src 'self',
   // so an inline block is blocked by the browser and simply never runs.
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/, 'inline scripts are blocked by the CSP');
-  assert.match(await read('web/cloud-config.js'), /navigator\.serviceWorker\.register\('\/sw\.js'\)/, 'the PWA must install its shell from an external script');
+  assert.match(await read('web/cloud-config.js'), /navigator\.serviceWorker\.register\('\/sw\.js\?v=20260915-1'/, 'the PWA must install the current shell revision from an external script');
 
   const shell = (await read('web/sw.js')).match(/const SHELL = \[([^\]]+)\]/s)[1]
     .split(',').map(entry => entry.trim().replace(/^'|'$/g, '')).filter(Boolean);
   for (const asset of shell) {
     if (asset === '/') continue;
-    assert.ok(await exists(path.join('web', asset)), `sw.js precaches a missing file: ${asset}`);
+    assert.ok(await exists(path.join('web', asset.split('?')[0])), `sw.js precaches a missing file: ${asset}`);
   }
+});
+
+test('a failed service-worker upgrade cannot replace the working offline shell', async () => {
+  const source = await read('web/sw.js');
+  const listeners = {};
+  let skipped = false;
+  const self = {
+    addEventListener: (type, handler) => { listeners[type] = handler; },
+    skipWaiting: () => { skipped = true; },
+    clients: { claim: async () => {} },
+    location: { origin: 'https://taskbridge.test' },
+  };
+  const caches = { open: async () => ({ addAll: async () => { throw new Error('offline'); } }) };
+  vm.runInNewContext(source, { self, caches, URL, Request, fetch: async () => { throw new Error('offline'); } });
+  let installation;
+  listeners.install({ waitUntil: promise => { installation = promise; } });
+  await assert.rejects(installation, /offline/);
+  assert.equal(skipped, false, 'an incomplete cache must not activate');
+});
+
+test('a complete service-worker upgrade activates before removing the old cache', async () => {
+  const source = await read('web/sw.js');
+  const listeners = {};
+  const actions = [];
+  const self = {
+    addEventListener: (type, handler) => { listeners[type] = handler; },
+    skipWaiting: async () => { actions.push('skip'); },
+    clients: { claim: async () => { actions.push('claim'); } },
+    location: { origin: 'https://taskbridge.test' },
+  };
+  const caches = {
+    open: async () => ({ addAll: async () => { actions.push('cached'); } }),
+    keys: async () => ['taskbridge-v1', 'taskbridge-v2'],
+    delete: async key => { actions.push(`delete:${key}`); },
+  };
+  vm.runInNewContext(source, { self, caches, URL, Request, fetch: async () => ({ ok: true, clone() { return this; } }) });
+  let installation;
+  listeners.install({ waitUntil: promise => { installation = promise; } });
+  await installation;
+  let activation;
+  listeners.activate({ waitUntil: promise => { activation = promise; } });
+  await activation;
+  assert.deepEqual(actions, ['cached', 'skip', 'delete:taskbridge-v1', 'claim']);
 });
 
 test('the cloud dev host serves the same shell and the same app.js as the machine', async () => {

@@ -341,8 +341,11 @@ test('send now bypasses the queue, and a queued prompt can be sent or dropped ea
   assert.deepEqual(f.manager.queue, []);
   assert.deepEqual(f.sent, ['потом'], 'nothing extra was sent');
 
-  // Actions on an empty queue are rejected instead of silently doing nothing.
-  await assert.rejects(f.manager.sendPendingNow('a'), { code: 'INPUT_INVALID' });
+  // Actions on an empty queue: «Отправить сейчас» silently no-ops — the pump may
+  // have already delivered the only queued prompt, and an error for a message
+  // that was sent is worse than silence. Dropping still rejects.
+  const idle = await f.manager.sendPendingNow('a');
+  assert.deepEqual(idle.pendingPrompts, [], 'nothing was sent and nothing is queued');
   await assert.rejects(f.manager.dropPending('a'), { code: 'INPUT_INVALID' });
   await settle();
 });
@@ -788,4 +791,185 @@ test('a queued prompt survives the send-now interrupt', async t => {
   assert.ok(pending.includes('потом') || f.sent.includes('потом'), JSON.stringify({ pending, sent: f.sent }));
   assert.ok(f.manager.pendingFiles.has('p1'), 'the staged files of the queued prompt were not released');
   for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('regenerateLastTurn keeps the previous answer as a variant', async t => {
+  const f = await fixture(t); // settled session with a fake Pi
+  // Resolving the settle waiter runs the finalizer while the store is still
+  // open; waiting for the model slot to clear keeps its write from landing
+  // after the test closed the database.
+  const settle = async () => {
+    for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+    for (let i = 0; i < 100 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
+  };
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'PI_EVENT', message: '', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ответ А' } } } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+
+  const task = await f.manager.regenerateLastTurn('a', 'assistant-1');
+  assert.equal(task.status, 'RUNNING', 'the same question goes to the model again');
+  assert.deepEqual(f.sent, ['вопрос'], 'and Pi actually sees it');
+  await settle();
+  const events = await f.store.readEvents('a', 0);
+  const marker = events.find(event => event.type === 'TURN_VARIANT_START');
+  assert.ok(marker, events.map(event => event.type).join(','));
+  assert.deepEqual({ turnSeq: marker.data.turnSeq, text: marker.data.text }, { turnSeq: 1, text: 'вопрос' });
+  assert.ok(events.some(event => event.data?.pi?.assistantMessageEvent?.delta === 'ответ А'), 'the previous answer is not deleted');
+  assert.equal(events.filter(event => event.type === 'USER_MESSAGE').length, 1, 'the question is not duplicated');
+
+  // A second variant may be made from the newest one — but only from a settled session.
+  f.manager.tasks.get('a').status = 'SUCCEEDED';
+  f.sent.length = 0;
+  await f.manager.regenerateLastTurn('a', `assistant-${marker.data.variantId}`);
+  await settle();
+  const marks = (await f.store.readEvents('a', 0)).filter(event => event.type === 'TURN_VARIANT_START');
+  assert.equal(marks.length, 2);
+  assert.equal(new Set(marks.map(mark => mark.data.variantId)).size, 2, 'each variant has its own id');
+  assert.deepEqual(f.sent, ['вопрос']);
+
+  // Anything that is not an answer of the newest exchange is refused, and so is
+  // regenerating while the session works.
+  f.manager.tasks.get('a').status = 'SUCCEEDED';
+  await assert.rejects(() => f.manager.regenerateLastTurn('a', 'assistant-initial'), err => err.code === 'NOT_ALLOWED');
+  f.manager.tasks.get('a').status = 'RUNNING';
+  await assert.rejects(() => f.manager.regenerateLastTurn('a', 'assistant-1'), err => err.code === 'NOT_ALLOWED');
+});
+
+test('selectVariant persists the chosen answer and validates it', async t => {
+  const f = await fixture(t);
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'TURN_VARIANT_START', message: '', data: { turnSeq: 1, variantId: 'v2' } });
+  const result = await f.manager.selectVariant('a', { turnSeq: 1, variantId: '1' });
+  assert.deepEqual(result, { ok: true, turnSeq: 1, variantId: '1', total: 2 });
+  const events = await f.store.readEvents('a', 0);
+  assert.equal(events.at(-1).type, 'TURN_VARIANT_SELECTED');
+  assert.deepEqual(events.at(-1).data, { turnSeq: 1, variantId: '1' });
+  await assert.rejects(() => f.manager.selectVariant('a', { turnSeq: 1, variantId: 'нет' }), err => err.code === 'NOT_FOUND');
+  await assert.rejects(() => f.manager.selectVariant('a', { turnSeq: 9, variantId: '1' }), err => err.code === 'NOT_FOUND');
+});
+
+test('continueTurn appends to the existing answer instead of a new exchange', async t => {
+  const f = await fixture(t);
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Вот причины:' }] } } } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+
+  const task = await f.manager.continueTurn('a', 'assistant-1');
+  assert.equal(task.status, 'RUNNING');
+  assert.deepEqual(f.sent, ['Продолжи свой предыдущий ответ ровно с того места, где он оборвался. Не повторяй уже написанное и не добавляй вступлений — продолжай текст сразу.']);
+  const events = await f.store.readEvents('a', 0);
+  assert.equal(events.filter(event => event.type === 'USER_MESSAGE').length, 1, 'no second question is announced');
+  assert.equal(events.some(event => event.type === 'TURN_VARIANT_START'), false, 'no variant is created: the answer grows');
+  assert.equal(events.some(event => event.type === 'TURN_TRUNCATED'), false, 'nothing is dropped');
+
+  await assert.rejects(() => f.manager.continueTurn('a', 'assistant-999'), err => err.code === 'NOT_ALLOWED');
+  // The run's settle waiter must not keep a 12h timer alive after the test.
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('an answer can be edited in place or branched into another variant', async t => {
+  const f = await fixture(t);
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ответ А' }] } } } });
+
+  // In place: the record is corrected, no model is asked, no variant is made.
+  const inplace = await f.manager.editTurn('a', { turnId: 'assistant-1', text: 'ответ А (исправлен)' });
+  assert.deepEqual(inplace, { ok: true, turnId: 'assistant-1', role: 'assistant', branch: false });
+  const events = await f.store.readEvents('a', 0);
+  assert.ok(events.some(event => event.type === 'TURN_EDITED' && event.data.text === 'ответ А (исправлен)'));
+  assert.equal(events.some(event => event.type === 'TURN_VARIANT_START'), false);
+
+  // As a branch: the edited text becomes another variant of the same exchange.
+  const branched = await f.manager.editTurn('a', { turnId: 'assistant-1', text: 'ответ Б', branch: true });
+  assert.equal(branched.branch, true);
+  assert.ok(branched.variantId);
+  const marks = (await f.store.readEvents('a', 0)).filter(event => event.type === 'TURN_VARIANT_START');
+  assert.equal(marks.length, 1);
+  assert.deepEqual({ turnSeq: marks[0].data.turnSeq, editedText: marks[0].data.editedText }, { turnSeq: 1, editedText: 'ответ Б' });
+
+  // Anything that is not an answer of the newest exchange is refused.
+  await assert.rejects(() => f.manager.editTurn('a', { turnId: 'assistant-initial', text: 'x' }), err => err.code === 'NOT_ALLOWED');
+  await assert.rejects(() => f.manager.editTurn('a', { turnId: 'assistant-1', text: '   ' }), err => err.code === 'INPUT_INVALID');
+});
+
+test('a cancel that overlaps a new delivery does not mark the running answer as stopped', async t => {
+  const f = await fixture(t, true); // RUNNING session, Pi streaming
+  // The interleaving that used to corrupt the turn: while the cancel is still
+  // finalizing, the delivery of the next message starts a new run and resets
+  // the cancel flag. A terminal TASK_CANCELLED written after that would mark the
+  // fresh answer as «прервано».
+  f.pi.abort = async () => {
+    f.runtime.cancelRequested = false;
+    f.manager.tasks.get('a').status = 'RUNNING';
+  };
+  await f.manager.cancel('a');
+  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.equal(types.includes('TASK_CANCELLED'), false, `отмена не должна перебить новый запуск: ${types.join(',')}`);
+  assert.equal(f.manager.getTask('a').status, 'RUNNING');
+});
+
+test('a plain cancel still records TASK_CANCELLED', async t => {
+  const f = await fixture(t, true);
+  f.pi.abort = async () => {};
+  await f.manager.cancel('a');
+  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(types.includes('TASK_CANCELLED'), types.join(','));
+  assert.equal(f.manager.getTask('a').status, 'CANCELLED');
+});
+
+// The finalizer of turn 1 must not release the machine slot after a newer turn
+// has already taken the session over. Reproduced deterministically: the last
+// artifact write of the finalizer is slowed down, and TASK_SUCCEEDED triggers a
+// follow-up — exactly the race window a remote FOLLOW_UP hits in production.
+test('a follow-up accepted while the turn is finalizing keeps the queue slot', async t => {
+  const f = await fixture(t);
+  const { manager, store, runtime, sent, task } = f;
+  manager.queuePollMs = 20;
+
+  // Slow down the finalizer's last artifact write (result.json): at that point
+  // task.status is already SUCCEEDED, but the finalizer has not released the
+  // slot yet — the exact window a follow-up enters through alreadyFinished.
+  let armed = false;
+  let slowedResolve;
+  const slowed = new Promise(resolve => { slowedResolve = resolve; });
+  const original = store.writeArtifact.bind(store);
+  store.writeArtifact = async (...args) => {
+    if (armed) {
+      armed = false;
+      await new Promise(r => setTimeout(r, 25));
+      slowedResolve();
+    }
+    return original(...args);
+  };
+
+  let followUpStarted = false;
+  manager.on('task-event', event => {
+    if (event.type === 'TASK_SUCCEEDED' && !followUpStarted) {
+      followUpStarted = true;
+      armed = true;
+      manager.message('a', 'второе').catch(() => {});
+    }
+  });
+
+  const first = await manager.message('a', 'первое');
+  assert.equal(first.status, 'RUNNING');
+  for (const waiter of runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+
+  await slowed;
+  for (let i = 0; i < 200 && task._turn !== 2; i++) await new Promise(r => setTimeout(r, 5));
+  assert.equal(task._turn, 2, 'the follow-up must start a new turn during finalization');
+
+  // The new turn owns the machine: the old finalizer must not have released it.
+  assert.equal(manager.activeTaskId, 'a', 'the slot must stay with the live turn');
+
+  // While turn 2 is generating, another session must not start in parallel.
+  const queued = await manager.createTask({ prompt: 'новая сессия', projectId: 'p' });
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(manager.getTask(queued.id).status, 'QUEUED', 'no parallel task may start while the turn is live');
+
+  await manager.deleteTask(queued.id).catch(() => {});
+  for (const waiter of runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  for (let i = 0; i < 200 && manager.getTask('a').status !== 'SUCCEEDED'; i++) await new Promise(r => setTimeout(r, 5));
+  assert.deepEqual(sent, ['первое', 'второе']);
+  assert.equal(manager.getTask('a').status, 'SUCCEEDED');
 });

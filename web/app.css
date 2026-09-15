@@ -544,15 +544,6 @@ body {
 }
 .turnError button:hover { background: rgba(251, 113, 133, 0.14); }
 
-/* repeat/copy actions under a failed turn */
-.turnActions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-
 /* Per-message actions, each an inline SVG mark: a pencil fixes the text in
    place, a branch forks a new session from the message, a trash can drops it
    with everything after, a refresh re-runs the newest answer. They follow the
@@ -560,6 +551,13 @@ body {
    invisible. */
 .turnActionBar { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; }
 .turnActionBar.hidden { display: none; }
+/* ‹ n/m › switcher between the answers of one exchange (regenerate keeps the
+   previous answer as a sibling). */
+.variantNav { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; margin-right: 4px; }
+.variantNav.hidden { display: none; }
+.variantNav .actionBtn { padding: 3px 7px; font-size: 14px; }
+.variantNav .actionBtn:disabled { opacity: .35; cursor: default; }
+.variantCount { font-size: 11.5px; color: var(--muted); min-width: 26px; text-align: center; }
 /* Copy + message actions share a single row under the operator's bubble, so the
    icons never stack onto separate lines. */
 .msgActions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -1230,4 +1228,13 @@ body.cloud-mode [data-pc-only] { display: none; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Message times: when it was sent (operator) and when it started/ended (answer). */
+.msgTime {
+  font-size: 11px;
+  color: var(--muted);
+  opacity: .75;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }

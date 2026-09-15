@@ -29,6 +29,15 @@ let selectionVersion = 0;
 let refreshingVersion = null;
 let turnNodes = new Map();
 let liveActive = false;
+// An empty newest turn is not a failure while the session still works: the
+// answer may simply not have started yet (queued, just steered, mid-interrupt).
+// Without this the placeholder «Ответ не был получен.» flashed and was replaced
+// by the real answer a moment later.
+let liveAwaiting = false;
+// An answer may have no text yet still have done real work (reasoning, tool
+// calls): «Ответ не был получен.» is for a turn that produced NOTHING.
+let liveHasWork = false;
+let liveCutOff = false;
 let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 4s
 
 // Interactive tool approvals (§52–§55). The Pi extension asks TaskBridge before
@@ -37,6 +46,12 @@ let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed
 let pendingApprovals = new Map();
 
 const HISTORY_PAGE_TURNS = 20;
+
+// A refresh whose requests never answer used to freeze the chat until a page
+// reload: refreshingVersion stayed set and every later refresh skipped itself.
+// These are refresh-only timeouts — a SEND may legitimately wait minutes for a
+// model to load, so it is never aborted by them.
+const REFRESH_TIMEOUT_MS = 20000;
 let currentTask = null;
 let reachedHistoryStart = true;
 let oldestLoadedSeq = null;
@@ -66,11 +81,12 @@ async function copyText(text) {
 async function api(path, options = {}) {
   const method = options.method || (options.body === undefined ? 'GET' : 'POST');
   const raw = options.body;
+  const timeoutMs = Number.isSafeInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : null;
   // Call sites hand over an already serialized body; the transport takes objects
   // (and the cloud transport needs the structure, not a string).
   const body = raw === undefined ? undefined : (typeof raw === 'string' ? safeParse(raw) : raw);
   try {
-    return await transport.request(method, path, body);
+    return await transport.request(method, path, body, timeoutMs);
   } catch (error) {
     if (error.code === 'AUTH_REQUIRED') showAuthGate();
     throw new Error(`${error.code || 'HTTP_ERROR'}: ${error.message}`);
@@ -179,7 +195,51 @@ function copyButton(text = '', label = 'Скопировать сообщени�
   return btn;
 }
 
-function appendUserTurn(text, files = [], before = null) {
+// Message times: HH:MM locally, with the full stamp in the tooltip. Nothing is
+// invented — a turn without a recorded time shows nothing.
+function timeLabel(value) {
+  if (!value) return null;
+  const at = new Date(value);
+  if (Number.isNaN(at.getTime())) return null;
+  return {
+    text: at.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    full: at.toLocaleString('ru-RU')
+  };
+}
+
+function timeEl(value, { range = null } = {}) {
+  const start = timeLabel(value);
+  if (!start) return null;
+  // An end that precedes the start is a stale marker (an overlapping cancel
+  // finalizing after the next message started), not a real duration.
+  let end = range ? timeLabel(range) : null;
+  if (end && Date.parse(range) < Date.parse(value)) end = null;
+  const span = document.createElement('span');
+  span.className = 'msgTime';
+  span.textContent = end && end.text !== start.text ? `${start.text}–${end.text}` : start.text;
+  span.title = end ? `${start.full} → ${end.full}` : start.full;
+  span._shown = span.textContent;
+  span._title = span.title;
+  return span;
+}
+
+// Updates a turn's time in place (a streaming answer must not rebuild its row)
+// and hides it when the turn carries no recorded time at all.
+function setTurnTime(node, turn, host) {
+  if (!host) return;
+  const next = timeEl(turn.at, { range: turn.endedAt });
+  if (!next) { node.timeEl?.remove(); node.timeEl = null; return; }
+  if (node.timeEl && node.timeEl.parentElement === host) {
+    if (node.timeEl._shown !== next.textContent) { node.timeEl.textContent = next.textContent; node.timeEl._shown = next.textContent; }
+    if (node.timeEl._title !== next.title) { node.timeEl.title = next.title; node.timeEl._title = next.title; }
+    return;
+  }
+  node.timeEl?.remove();
+  node.timeEl = next;
+  host.append(next);
+}
+
+function appendUserTurn(text, files = [], before = null, at = null) {
   hideEmptyState();
   const turn = document.createElement('div');
   turn.className = 'turn me';
@@ -204,6 +264,8 @@ function appendUserTurn(text, files = [], before = null) {
   const msgActions = document.createElement('div');
   msgActions.className = 'msgActions';
   msgActions.append(copyButton(text, 'Скопировать сообщение'));
+  const sentAt = timeEl(at);
+  if (sentAt) msgActions.append(sentAt);
   body.append(msgActions);
   turn.append(body);
   $('msgsInner').insertBefore(turn, before);
@@ -284,12 +346,33 @@ function resetTurnDom(node) {
   node.text = node.thinking = node.status = node.error = node.active = undefined;
 }
 
+// A turn that was cut off without an answer (a stop, or a message that
+// superseded it) says so — «Request was aborted» when Pi gave a reason, an
+// explicit note when it did not.
+function turnCutOff(turn) {
+  if (!turn || turn.role !== 'assistant' || !turn.final) return false;
+  if (String(turn.text || '').trim()) return false;
+  return turn.superseded === true || turn.status === 'FAILED';
+}
+
 function updateText() {
   if (!liveTurn) return;
   const text = liveText.trim();
   if (text) renderMarkdown(liveTurn.md, text);
-  else liveTurn.md.innerHTML = liveActive ? TYPING_HTML : '<span class="muted">Ответ не был получен.</span>';
+  else if (liveActive || liveAwaiting) liveTurn.md.innerHTML = TYPING_HTML;
+  else if (liveCutOff) liveTurn.md.innerHTML = '<span class="muted">Запрос прерван</span>';
+  else if (liveHasWork) liveTurn.md.innerHTML = '<span class="muted">Без текста</span>';
+  else liveTurn.md.innerHTML = '<span class="muted">Ответ не был получен.</span>';
   scrollBottom();
+}
+
+// Whether an empty assistant turn is still waiting for its answer. Both signals
+// belong to the TURN, never to the lagging task status: `active` while it is
+// generating, and "not final yet" for one that never finished. Guessing from the
+// task status flipped a poll late — «Ответ не был получен.» flashed and then
+// became the typing animation.
+function answerMayStillCome(turn) {
+  return turn.active === true || turn.final !== true;
 }
 
 function toolIcon(state) {
@@ -549,9 +632,15 @@ function renderChat() {
   const newest = newestTurn();
   for (const turn of chatState.turns) {
     let node = turnNodes.get(turn.id);
+    // A regenerated answer keeps its siblings hidden: only the selected variant
+    // is on screen, and a hidden one must not stay in the DOM.
+    if (turn.hidden) {
+      if (node) { (node.wrap || node.turn)?.remove(); turnNodes.delete(turn.id); }
+      continue;
+    }
     if (!node) {
       if (turn.role === 'user') {
-        node = { wrap: appendUserTurn(turn.text, turn.files), text: turn.text };
+        node = { wrap: appendUserTurn(turn.text, turn.files, null, turn.at), text: turn.text };
         turnNodes.set(turn.id, node);
       } else if (turn.role === 'note') {
         turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text) });
@@ -559,6 +648,9 @@ function renderChat() {
       } else {
         liveText = liveThinking = '';
         liveActive = false;
+        liveAwaiting = false;
+        liveHasWork = false;
+        liveCutOff = false;
         appendBotTurn();
         node = { ...liveTurn, tools: new Map() };
         turnNodes.set(turn.id, node);
@@ -585,7 +677,11 @@ function renderChat() {
     liveText = turn.text;
     liveThinking = turn.thinking;
     liveActive = turn.active;
-    if (node.text !== turn.text || node.active !== turn.active || node.error !== turn.error) {
+    liveHasWork = Boolean(turn.thinking) || turn.tools.length > 0;
+    liveCutOff = turnCutOff(turn);
+    const awaiting = answerMayStillCome(turn);
+    liveAwaiting = awaiting;
+    if (node.text !== turn.text || node.active !== turn.active || node.awaiting !== awaiting || node.error !== turn.error) {
       updateText();
       node.copyBtn._text = turn.text;
       if (turn.error) {
@@ -596,9 +692,10 @@ function renderChat() {
       }
       node.text = turn.text;
       node.active = turn.active;
+      node.awaiting = awaiting;
       node.error = turn.error;
     }
-    updateTurnFailureActions(node, turn);
+    setTurnTime(node, turn, node.metaRow);
     if (node.thinking !== turn.thinking) {
       updateThinking();
       node.thinking = turn.thinking;
@@ -640,56 +737,6 @@ function renderChat() {
   scrollBottom();
 }
 
-/* ---------------- recover a failed message ---------------- */
-
-// Only the exchange that failed last can be recovered — a failure buried under
-// newer messages cannot be taken back. A run that produced nothing needs no
-// button at all: the operator's own line carries "fix and resend" and the newest
-// answer carries "regenerate", so a separate repeat button was just duplication
-// of those two icons. What is left is the case the inline icons cannot cover:
-// the model did answer (text or a tool call), so the turn cannot be retracted and
-// the only way back is to copy the message into the composer.
-function updateTurnFailureActions(node, turn) {
-  if (turn !== chatState.current) return; // only the newest exchange can be retracted
-  const status = currentTask?.status;
-  if (!turn.error && !['FAILED', 'CANCELLED'].includes(status)) return;
-  let lastReal = chatState.turns.length - 1;
-  while (lastReal >= 0 && chatState.turns[lastReal].role === 'note') lastReal--;
-  const visible = ['FAILED', 'CANCELLED'].includes(status)
-    && chatState.turns[lastReal] === turn;
-  if (!node.failureActions) {
-    if (!visible) return;
-    // "Nothing was produced" = no visible answer and no tool call. Reasoning
-    // alone does not change this: the edit and regenerate icons still cover the
-    // retry, so no button is added here.
-    if (!turn.text && !turn.tools.length) return;
-    let userTurn = null;
-    for (let i = lastReal - 1; i >= 0; i--) {
-      if (chatState.turns[i].role === 'user') { userTurn = chatState.turns[i]; break; }
-    }
-    if (!userTurn) return;
-    const actions = document.createElement('div');
-    actions.className = 'turnActions';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'small';
-    button.textContent = '⧉ Скопировать сообщение';
-    button.title = 'Модель успела ответить — можно только вернуть текст сообщения в поле ввода';
-    button.onclick = () => copyToComposer(userTurn.text);
-    actions.append(button);
-    node.md.append(actions);
-    node.failureActions = actions;
-  }
-  node.failureActions.classList.toggle('hidden', !visible);
-}
-
-function copyToComposer(text) {
-  promptEl.value = text || '';
-  promptEl.style.height = 'auto';
-  updateClearButton();
-  if (!isTouchDevice()) promptEl.focus();
-}
-
 /* ---------------- message actions: fix in place, drop, branch, repeat ---------------- */
 
 // Icons on every settled message: a pencil fixes the text without asking the
@@ -722,10 +769,14 @@ function updateTurnActions(node, turn, isNewest) {
       bar.append(node.buttons.edit, node.buttons.fork, node.buttons.drop);
     } else {
       // An answer is a branch point too — "continue differently from here" —
-      // and both ends of an exchange name the same fork.
+      // and both ends of an exchange name the same fork. It can also be edited
+      // (in place, or as another variant of the exchange) and continued: what
+      // the model writes next is appended to this very message.
+      node.buttons.edit = turnAction('edit', messageIcon('edit'), 'Изменить ответ (можно сохранить как вариант)', () => beginEditAnswer(node, turn));
       node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Ответвить новую сессию от этого ответа', () => forkTurn(turn));
       node.buttons.regen = turnAction('regen', messageIcon('regen'), 'Перегенерировать ответ', () => regenerateTurn(turn));
-      bar.append(node.buttons.fork, node.buttons.regen);
+      node.buttons.more = turnAction('continue', messageIcon('continue'), 'Продолжить этот ответ', () => continueTurn(turn));
+      bar.append(node.buttons.edit, node.buttons.fork, node.buttons.regen, node.buttons.more);
     }
     host.append(bar);
     node.actionBar = bar;
@@ -736,15 +787,155 @@ function updateTurnActions(node, turn, isNewest) {
   node.actionBar.classList.toggle('hidden', busy);
   node.buttons.fork?.classList.toggle('hidden', busy);
   node.buttons.drop?.classList.toggle('hidden', busy);
-  // Regenerating only ever touches the newest answer.
+  // Regenerating, continuing and editing only ever touch the newest answer.
   node.buttons.regen?.classList.toggle('hidden', busy || isNewest !== true);
+  node.buttons.more?.classList.toggle('hidden', busy || isNewest !== true);
+  node.buttons.edit?.classList.toggle('hidden', busy || (turn.role === 'assistant' && isNewest !== true));
+  updateVariantNav(node, turn, busy);
 }
 
-// The newest turn that is not an internal note — the only one "regenerate" may touch.
+// ‹ n/m › — the switcher between the answers of one exchange. Regenerate keeps
+// the previous answer as a sibling (nothing is deleted), so the operator can go
+// back to the version that was better. The choice is stored server-side, so a
+// reload shows the same variant.
+function updateVariantNav(node, turn, busy) {
+  if (!node.buttons) return; // the action row was never built for this turn
+  const info = turn.role === 'assistant' ? chatState.variantsOf(turn) : null;
+  if (!info) { node.variantNav?.remove(); node.variantNav = null; return; }
+  if (!node.variantNav) {
+    const nav = document.createElement('span');
+    nav.className = 'variantNav';
+    nav.dataset.turnId = turn.id;
+    node.buttons.prev = turnAction('variant-prev', '‹', 'Предыдущий вариант ответа', () => selectVariantTurn(info, -1));
+    node.buttons.next = turnAction('variant-next', '›', 'Следующий вариант ответа', () => selectVariantTurn(info, 1));
+    const count = document.createElement('span');
+    count.className = 'variantCount';
+    nav.append(node.buttons.prev, count, node.buttons.next);
+    node.variantNav = nav;
+    node.variantCount = count;
+    // Inside the answer's meta row, next to the status: the switcher belongs to
+    // the answer it switches.
+    if (node.metaRow) node.metaRow.insertBefore(nav, node.metaRow.firstChild);
+  }
+  node.variantNav.classList.toggle('hidden', busy);
+  node.variantCount.textContent = `${info.index + 1}/${info.total}`;
+  node.buttons.prev.disabled = info.index === 0;
+  node.buttons.next.disabled = info.index >= info.total - 1;
+}
+
+// Editing an ANSWER: no model is asked. "Сохранить" corrects the text in
+// place; "Сохранить как ветку" turns it into another variant of the same
+// exchange, keeping the previous answer switchable (‹ n/m ›).
+function beginEditAnswer(node, turn) {
+  if (!selectedTaskId) return;
+  const host = node.body;
+  const view = node.bubble;
+  if (!host || !view || host.querySelector('.editBox')) return;
+  const box = document.createElement('div');
+  box.className = 'editBox';
+  const area = document.createElement('textarea');
+  area.className = 'editArea';
+  area.value = turn.text ?? view.textContent ?? '';
+  const row = document.createElement('div');
+  row.className = 'editRow';
+  const save = document.createElement('button');
+  save.type = 'button';
+  save.className = 'small';
+  save.textContent = 'Сохранить';
+  save.title = 'Изменить этот ответ в истории, не отправляя модель заново';
+  const branch = document.createElement('button');
+  branch.type = 'button';
+  branch.className = 'small';
+  branch.textContent = 'Сохранить как ветку';
+  branch.title = 'Сохранить правку как ещё один вариант этого ответа — предыдущий останется в ‹ n/m ›';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'small';
+  cancel.textContent = 'Отмена';
+  const note = document.createElement('span');
+  note.className = 'muted small';
+  row.append(save, branch, cancel, note);
+  box.append(area, row);
+  view.classList.add('hidden');
+  host.insertBefore(box, view.nextSibling);
+  const close = () => { box.remove(); view.classList.remove('hidden'); };
+  const reopen = (message) => {
+    area.value = area.value;
+    view.classList.add('hidden');
+    host.insertBefore(box, view.nextSibling);
+    note.textContent = message;
+  };
+  cancel.onclick = close;
+  save.onclick = async () => {
+    const newText = area.value;
+    close();
+    save.disabled = branch.disabled = true;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/turns/${encodeURIComponent(turn.id)}/edit`, {
+        method: 'POST', body: JSON.stringify({ text: newText })
+      });
+      turn.text = newText; // instant; the server stores exactly this text
+      await refreshTask();
+    } catch (error) {
+      save.disabled = branch.disabled = false;
+      reopen(error.message);
+    }
+  };
+  branch.onclick = async () => {
+    const newText = area.value;
+    close();
+    save.disabled = branch.disabled = true;
+    try {
+      await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/turns/${encodeURIComponent(turn.id)}/edit`, {
+        method: 'POST', body: JSON.stringify({ text: newText, branch: true })
+      });
+      await refreshTask();
+    } catch (error) {
+      save.disabled = branch.disabled = false;
+      reopen(error.message);
+    }
+  };
+  area.focus();
+}
+
+// "Continue": the model is asked to go on, and what it writes next is appended
+// to the very message this belongs to — the answer grows, nothing is replaced.
+async function continueTurn(turn) {
+  if (!selectedTaskId) return;
+  if (!confirm('Продолжить этот ответ? Модель допишет его с того места, где остановилась.')) return;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/continue`, {
+      method: 'POST', body: JSON.stringify({ turnId: turn.id })
+    });
+    await refreshTask();
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
+}
+
+async function selectVariantTurn(info, step) {
+  if (!selectedTaskId) return;
+  const target = info.ids[info.index + step];
+  if (!target) return;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/variant`, {
+      method: 'POST', body: JSON.stringify({ turnSeq: info.key, variantId: target.slice('assistant-'.length) })
+    });
+    await refreshTask();
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
+}
+
+// The newest turn that is not an internal note — the only one "regenerate" may
+// touch. Hidden variants are skipped: the operator is looking at the selected
+// answer, and that is the one a re-run should replace.
 function newestTurn() {
   if (!chatState) return null;
   for (let i = chatState.turns.length - 1; i >= 0; i--) {
-    if (chatState.turns[i].role !== 'note') return chatState.turns[i];
+    if (chatState.turns[i].role !== 'note' && !chatState.turns[i].hidden) return chatState.turns[i];
   }
   return null;
 }
@@ -761,6 +952,7 @@ const MESSAGE_ICONS = {
   fork: [['path', { d: 'M6 3v12' }], ['circle', { cx: '18', cy: '6', r: '3' }], ['circle', { cx: '6', cy: '18', r: '3' }], ['path', { d: 'M18 9a9 9 0 0 1-9 9' }]],
   drop: [['polyline', { points: '3 6 5 6 21 6' }], ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }], ['line', { x1: '10', y1: '11', x2: '10', y2: '17' }], ['line', { x1: '14', y1: '11', x2: '14', y2: '17' }]],
   regen: [['polyline', { points: '23 4 23 10 17 10' }], ['polyline', { points: '1 20 1 14 7 14' }], ['path', { d: 'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15' }]],
+  continue: [['path', { d: 'M5 12h14' }], ['polyline', { points: '13 6 19 12 13 18' }]],
   copy: [['rect', { x: '9', y: '9', width: '13', height: '13', rx: '2', ry: '2' }], ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }]],
   check: [['polyline', { points: '20 6 9 17 4 12' }]],
   cross: [['line', { x1: '18', y1: '6', x2: '6', y2: '18' }], ['line', { x1: '6', y1: '6', x2: '18', y2: '18' }]],
@@ -901,8 +1093,14 @@ async function deleteTurn(turn) {
 
 function applyEvents(events) {
   let approvalsChanged = false;
+  let queueChanged = false;
   for (const event of events) {
     chatState.apply(event);
+    // A delivered message leaves the queue at the very moment it enters the
+    // conversation. The badge is drawn from task.pendingPrompts, which only the
+    // next poll refreshes — so without this the message sat in the queue and in
+    // the chat at the same time for up to two seconds.
+    if (event.type === 'USER_MESSAGE') queueChanged = dropDeliveredFromQueue(event) || queueChanged;
     if (event.type === 'APPROVAL_REQUIRED' && event.data?.approvalId) {
       pendingApprovals.set(event.data.approvalId, { ...event.data, status: 'PENDING' });
       approvalsChanged = true;
@@ -914,7 +1112,22 @@ function applyEvents(events) {
     }
   }
   renderChat();
+  if (queueChanged) renderQueuedPrompt();
   if (approvalsChanged) renderApprovals();
+}
+
+// Removes the delivered message from the local view of the queue. A queued entry
+// carries the text plus the "additional files" note, so the event text is a
+// prefix of it.
+function dropDeliveredFromQueue(event) {
+  const queued = currentTask?.pendingPrompts || [];
+  if (!queued.length) return false;
+  const text = String(event.data?.text ?? event.message ?? '');
+  if (!text) return false;
+  const index = queued.findIndex(entry => String(entry?.text || '') === text || String(entry?.text || '').startsWith(text));
+  if (index < 0) return false;
+  currentTask.pendingPrompts = queued.filter((_, i) => i !== index);
+  return true;
 }
 
 function renderApprovals() {
@@ -990,6 +1203,8 @@ function renderSettledTurn(turn, before) {
   if (turn.thinking) body.insertBefore(reasoningEl(turn.thinking), body.firstChild);
   const text = (turn.text || '').trim();
   if (text) renderMarkdown(md, text);
+  else if (turnCutOff(turn)) md.innerHTML = '<span class="muted">Запрос прерван</span>';
+  else if (turn.thinking || turn.tools.length) md.innerHTML = '<span class="muted">Без текста</span>';
   else md.innerHTML = '<span class="muted">Ответ не был получен.</span>';
   if (turn.error) {
     const error = document.createElement('div');
@@ -1030,8 +1245,12 @@ function renderSettledTurn(turn, before) {
   }
   meta.textContent = turn.status || '';
 
+  // Historical turns carry their own times too (a reloaded session must show
+  // when each answer started and finished).
+  const settledNode = { timeEl: null };
+  setTurnTime(settledNode, turn, metaRow);
   $('msgsInner').insertBefore(wrap, before);
-  return { wrap, body, bubble, md, meta, metaRow, copyBtn, tools, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
+  return { wrap, body, bubble, md, meta, metaRow, copyBtn, tools, timeEl: settledNode.timeEl, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
 }
 
 function renderPrependedTurns(turns) {
@@ -1042,7 +1261,7 @@ function renderPrependedTurns(turns) {
   for (const turn of turns) {
     if (turnNodes.has(turn.id)) continue;
     if (turn.role === 'user') {
-      const userNode = { wrap: appendUserTurn(turn.text, turn.files, reference), text: turn.text };
+      const userNode = { wrap: appendUserTurn(turn.text, turn.files, reference, turn.at), text: turn.text };
       turnNodes.set(turn.id, userNode);
       updateTurnActions(userNode, turn, false);
       continue;
@@ -1294,17 +1513,21 @@ async function refreshTask() {
   const initialCursor = chatState.cursor;
   refreshingVersion = version;
   try {
-    // Fetch metadata first, then all events that may have arrived while it loaded.
-    const t = await api(`/api/tasks/${encodeURIComponent(id)}`);
-    const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=0&after=${chatState.cursor}`);
+    // Every fetch here carries a hard timeout: a request that never answers
+    // (a wedged server, a lost connection) used to leave refreshingVersion set
+    // forever, and the chat stopped updating until a page reload. An aborted
+    // request lands in the catch, the lock is released, and the next tick
+    // carries on.
+    const t = await api(`/api/tasks/${encodeURIComponent(id)}`, { timeoutMs: REFRESH_TIMEOUT_MS });
+    const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=0&after=${chatState.cursor}`, { timeoutMs: REFRESH_TIMEOUT_MS });
     if (version !== selectionVersion) return;
     applyEvents(events);
     // A stale metadata response must not stop a newer streaming event.
     if (chatState.cursor === initialCursor) chatState.snapshot(t);
     renderChat();
     renderTaskDetails(t); // also refreshes the stop button and the activity strip
-    await loadArtifacts();
-    await loadTasks();
+    await loadArtifacts(REFRESH_TIMEOUT_MS);
+    await loadTasks(REFRESH_TIMEOUT_MS);
   } catch (error) {
     if (version === selectionVersion) $('createError').textContent = `Связь прервана: ${error.message}`;
   } finally {
@@ -1506,8 +1729,8 @@ $('taskSearch').addEventListener('input', () => {
   renderTaskList();
 });
 
-async function loadTasks() {
-  lastTasks = await api('/api/tasks');
+async function loadTasks(timeoutMs = null) {
+  lastTasks = await api('/api/tasks', timeoutMs ? { timeoutMs } : {});
   renderTaskFilter();
   renderTaskList();
   // A session can be running while another one is selected: keep the stop
@@ -1516,12 +1739,12 @@ async function loadTasks() {
   return lastTasks;
 }
 
-async function loadArtifacts() {
+async function loadArtifacts(timeoutMs = null) {
   if (!selectedTaskId) return;
   const id = selectedTaskId;
   const version = selectionVersion;
   try {
-    const list = await api(`/api/tasks/${id}/artifacts`);
+    const list = await api(`/api/tasks/${id}/artifacts`, timeoutMs ? { timeoutMs } : {});
     if (version !== selectionVersion) return;
     $('artifacts').innerHTML = list.length
       ? list.map((name) => `<a target="_blank" href="/api/tasks/${selectedTaskId}/artifacts/${encodeURIComponent(name)}">${escapeHtml(name)}</a>`).join('')
@@ -1650,6 +1873,9 @@ $('form').addEventListener('submit', async (e) => {
   $('createError').textContent = '';
   $('createError').classList.remove('error');
   setBusy(true);
+  // A send can legitimately wait minutes for a model to load: after two seconds
+  // the operator must see WHY the composer is quiet, not just a disabled button.
+  let slowTimer = setTimeout(() => showNotice('Отправляю… ждём модель. Это может занять минуту-другую.'), 2000);
   if (isTouchDevice()) promptEl.blur();
   try {
     const taskId = selectedTaskId;
@@ -1667,17 +1893,46 @@ $('form').addEventListener('submit', async (e) => {
       updateClearButton();
     };
     if (taskId) {
+      // Optimistic render: instantly add the user message into the chat (0ms feedback).
+      // The assistant turn is marked active so it shows the typing indicator,
+      // not «Ответ не был получен.» — nothing has failed yet, the model just
+      // has not started (or the message is queued). Each optimistic turn carries
+      // a unique id: several messages may sit queued at once, and the reducer
+      // reconciles the OLDEST pending one when its event arrives.
+      const pendingId = `pending-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+      const dropOptimistic = () => {
+        if (!chatState) return;
+        chatState.turns = chatState.turns.filter(t => !t.id.startsWith(`user-${pendingId}`) && !t.id.startsWith(`assistant-${pendingId}`));
+        if (chatState.current && chatState.current.id.startsWith(`assistant-${pendingId}`)) {
+          chatState.current = [...chatState.turns].reverse().find(t => t.role === 'assistant') || chatState.current;
+        }
+        renderChat();
+      };
+      if (chatState && prompt) {
+        chatState.addUser(prompt, files, pendingId);
+        chatState.current.active = true;
+        renderChat();
+        scrollBottom();
+      }
+      clearComposer();
       let sent;
       try {
         sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow, queue: !sendNow });
       } catch (error) {
+        // Remove the optimistic turn if the send failed
+        dropOptimistic();
         // The machine runs one generation at a time. If it refused only because
         // the model is busy, the text goes to the queue instead of being lost
         // (the wording check keeps genuine failures visible).
         if (!/занят/i.test(error.message)) throw error;
         sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: false, queue: true });
       }
-      clearComposer();
+      // A parked message is NOT in the conversation yet: it waits in the queue
+      // badge, with «Отправить сейчас» / «Убрать». Showing it in both places read
+      // as the same message appearing twice. When the queue delivers it, the
+      // USER_MESSAGE event draws its bubble as usual.
+      const parked = (sent?.pendingPrompts || []).some(entry => String(entry?.text || '').startsWith(prompt));
+      if (parked) dropOptimistic();
       lastPrompt = { id: taskId, text: prompt, failedSend: false };
       renderQueuedPrompt();
       if (sent?.queueReason) showNotice(sent.queueReason === 'MODEL_LOADING'
@@ -1704,6 +1959,10 @@ $('form').addEventListener('submit', async (e) => {
     lastPrompt = { id: selectedTaskId, text: prompt, failedSend: true };
   } finally {
     setBusy(false);
+    clearTimeout(slowTimer);
+    // The "Отправляю…" notice is cleared once the send is over — unless an
+    // error replaced it or a queued prompt notice took its place.
+    if ($('createError').textContent.startsWith('Отправляю')) $('createError').textContent = '';
     updateRetryButton();
     if (!isTouchDevice()) promptEl.focus();
   }

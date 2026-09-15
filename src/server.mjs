@@ -591,6 +591,7 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/runtime') return json(res, 200, await runtimeControl.status());
     if (req.method === 'POST' && pathname === '/api/runtime/start') {
+      if (manager.localModels.enabled) return errorJson(res, 409, Object.assign(new Error('Активен router-режим (localRuntime.router): управление локальными моделями — через /api/local/*.'), { code: 'NOT_CONFIGURED' }));
       const { profileId } = await readJson(req);
       if (manager.activeTaskId || manager.admitting || manager.runtimeChanging) throw Object.assign(new Error('Дождитесь завершения текущей операции.'), { code: 'MODEL_BUSY' });
       manager.runtimeChanging = true;
@@ -599,6 +600,7 @@ async function handleRequest(req, res) {
       return json(res, 200, await runtimeControl.status());
     }
     if (req.method === 'POST' && pathname === '/api/runtime/restart') {
+      if (manager.localModels.enabled) return errorJson(res, 409, Object.assign(new Error('Активен router-режим (localRuntime.router): управление локальными моделями — через /api/local/*.'), { code: 'NOT_CONFIGURED' }));
       const { profileId } = await readJson(req);
       await runtimeControl.restart(profileId);
       return json(res, 200, await runtimeControl.status());
@@ -842,7 +844,7 @@ async function handleRequest(req, res) {
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/runs$/);
     if (req.method === 'GET' && match) {
-      return json(res, 200, { runs: manager.listRuns(match[1], Number(q.get('limit')) || 50) });
+      return json(res, 200, { runs: manager.listRuns(match[1], Number(url.searchParams.get('limit')) || 50) });
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
@@ -860,15 +862,33 @@ async function handleRequest(req, res) {
         { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId }));
     }
 
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)$/);
+    if (req.method === 'DELETE' && match) return json(res, 200, await manager.deleteTurns(match[1], decodeURIComponent(match[2])));
+    if (req.method === 'PATCH' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.editTurn(match[1], { turnId: decodeURIComponent(match[2]), text: body.text }));
+    }
+
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/undo-last-turn$/);
     if (req.method === 'POST' && match) return json(res, 200, await manager.undoLastTurn(match[1]));
 
     // In-place correction of an already settled message: the record is fixed,
-    // the model is NOT asked again and no answer is regenerated.
+    // the model is NOT asked again and no answer is regenerated. branch: true
+    // turns the edited answer into another variant of the same exchange.
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)\/edit$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 200, await manager.editTurn(match[1], { turnId: decodeURIComponent(match[2]), text: body.text }));
+      return json(res, 200, await manager.editTurn(match[1], {
+        turnId: decodeURIComponent(match[2]), text: body.text, branch: body.branch === true
+      }));
+    }
+
+    // "Continue": the newest answer is asked to go on, and what the model writes
+    // next is appended to that same message.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/continue$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.continueTurn(match[1], body.turnId));
     }
 
     // A message and everything that came after it. The log is linear, so a
@@ -877,12 +897,20 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)\/delete$/);
     if (req.method === 'POST' && match) return json(res, 200, await manager.deleteTurns(match[1], decodeURIComponent(match[2])));
 
-    // Regenerate: the last answer (and anything after it) is dropped and the
-    // same question is put to the model again.
+    // Regenerate: the same question is put to the model again as another answer
+    // of the same exchange — the previous one stays in history as a sibling.
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/regenerate$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
       return json(res, 200, await manager.regenerateLastTurn(match[1], body.turnId));
+    }
+
+    // Switching between the answers of one exchange: a reading preference, so
+    // nothing is rewritten and no model is asked.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/variant$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.selectVariant(match[1], { turnSeq: body.turnSeq, variantId: body.variantId }));
     }
 
     // Fork: a new session in the same project whose conversation is a copy of

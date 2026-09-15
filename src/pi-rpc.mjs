@@ -61,8 +61,7 @@ export class PiRpcSession extends EventEmitter {
       env: env ? { ...process.env, ...env } : process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      shell: process.platform === 'win32',
-      ...(env ? { env: { ...process.env, ...env } } : {})
+      shell: process.platform === 'win32'
     });
     this.proc = proc;
 
@@ -276,11 +275,6 @@ export class PiRpcSession extends EventEmitter {
     return response.data?.models || [];
   }
 
-  async setModel(provider, modelId) {
-    const response = await this.request({ type: 'set_model', provider, modelId }, 30000);
-    return response.data || null;
-  }
-
   async cycleModel(direction = 'forward') {
     const response = await this.request({ type: 'cycle_model', direction });
     return response.data || null;
@@ -289,10 +283,6 @@ export class PiRpcSession extends EventEmitter {
   async getAvailableThinkingLevels() {
     const response = await this.request({ type: 'get_available_thinking_levels' }, 30000);
     return response.data?.levels || [];
-  }
-
-  async setThinkingLevel(level) {
-    return this.request({ type: 'set_thinking_level', level });
   }
 
   async abort(timeoutMs = 10000) {

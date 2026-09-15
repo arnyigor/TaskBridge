@@ -2,21 +2,23 @@
 // cached: session data is never stored here, because a stale task list is worse
 // than an honest "machine offline" — the app always re-syncs after its cursor.
 
-const CACHE = 'taskbridge-v1';
+const CACHE = 'taskbridge-v2';
 const SHELL = [
-  '/', '/index.html', '/app.js', '/app.css', '/chat-state.mjs', '/transport.mjs',
+  '/', '/index.html', '/app.js?v=20260915-1', '/app.css', '/chat-state.mjs', '/transport.mjs',
   '/cloud-config.js', '/manifest.webmanifest', '/icon.svg',
   '/vendor/marked.js', '/vendor/purify.mjs'
 ];
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).catch(() => {}));
-  self.skipWaiting();
+  // A failed upgrade must keep the working worker/cache, not activate an
+  // incomplete shell and delete the only offline copy.
+  event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key)))));
-  self.clients.claim();
+  event.waitUntil(caches.keys()
+    .then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
+    .then(() => self.clients.claim()));
 });
 
 self.addEventListener('fetch', (event) => {
