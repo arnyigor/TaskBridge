@@ -84,14 +84,19 @@ export function normalizeModels(payload) {
       const status = model.status && typeof model.status === 'object' ? model.status : {};
       const modalities = model.architecture?.input_modalities;
       const args = Array.isArray(status.args) ? status.args : [];
-      const modelPath = argValue(args, '--model') || model.path || null;
+      const isPath = String(model.id || '').includes('\\') || String(model.id || '').includes('/');
+      const modelPath = argValue(args, '--model') || model.path || (isPath ? model.id : null);
       const ctxArg = Number(argValue(args, '--ctx-size'));
       const contextWindow = Number.isFinite(model.meta?.n_ctx) ? model.meta.n_ctx
         : (Number.isFinite(model.meta?.n_ctx_train) ? model.meta.n_ctx_train
           : (Number.isFinite(ctxArg) ? ctxArg : null));
+      let displayName = typeof model.name === 'string' && model.name ? model.name : model.id;
+      if (displayName.includes('\\') || displayName.includes('/')) {
+        displayName = displayName.split(/[\\/]/).pop().replace(/\.gguf$/i, '');
+      }
       return {
         id: model.id,
-        name: typeof model.name === 'string' && model.name ? model.name : model.id,
+        name: displayName,
         status: typeof status.value === 'string' ? status.value : (typeof model.status === 'string' ? model.status : 'unknown'),
         progress: status.progress ?? null,
         failed: status.failed === true,
