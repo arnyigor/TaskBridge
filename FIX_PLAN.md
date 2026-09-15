@@ -70,13 +70,17 @@
 **Fix:** сброс слота только если `task._turn === turn` (та же защита, которую уже использует `#verifyAndFinalize`).
 **Тест:** `tests/manager.test.mjs` — «a follow-up accepted while the turn is finalizing keeps the queue slot» (детерминированное воспроизведение через замедленный `writeArtifact`).
 
-## Замечания верификации (без правок, осознанные trade-offs)
+## 12. [x] [V1] (найдено при верификации) dropPending: порядок событий и терминальный TASK_SUCCEEDED
+**Файл:** `src/task-manager.mjs`, `dropPending()`.
+**Fix:** терминальное событие `TASK_CANCELLED` / `TASK_SUCCEEDED` теперь всегда пишется **до** сохранения статуса; для сессии с workspace публикуется явный `TASK_SUCCEEDED`.
 
-1. `dropPending` (SUCCEEDED-путь с workspace) публикует `QUEUE_DROPPED`, а не `TASK_SUCCEEDED` — ответ API несёт статус, клиенты на событиях полагаются на ответ/пул.
-2. Узкое окно `cancel` между извлечением из очереди и `setStatus('PREPARING')` (микросекунды, через API; последующие `#executeInitial` уже защищены guard'ом).
-3. `pendingFiles` — в памяти: рестарт теряет вложения у задач, ещё не начавших запуск (текст доставляется; `staged`-файлы сохраняются на диск).
-4. `agent_start` в `#handlePiEvent` пишет RUNNING напрямую в store без события `STATUS` (UI видит через PI_EVENT).
-5. Возможный тайминг-флак `queue-http` «delivery order» под высокой CPU-нагрузке (наблюдался 1 из 10 прогонов, не воспроизведён).
+## 13. [x] [V2] (найдено при верификации) pendingFiles: персистенция вложений при рестарте
+**Файл:** `src/task-manager.mjs`.
+**Fix:** вложения задач, ожидающих первого запуска, сохраняются на диск (`pending-files.json` в `taskDir`), а `init()` восстанавливает их и стартует очередь через `#schedulePump()`. Добавлен юнит-тест.
+
+## 14. [x] [V3] (найдено при верификации) restart-lan-now.mjs и npm test concurrency
+**Файлы:** `scripts/restart-lan-now.mjs`, `package.json`.
+**Fix:** переданы переменные `TASKBRIDGE_BIND_HOST/PORT/PUBLIC_PORT/DISABLE_TLS` в скрипт рестарта; в `package.json` ограничен параллелизм тестов (`--test-concurrency=4`), устранивший зависание Windows при 52 одновременных серверах.
 
 ## Чеклист регрессии после каждого пункта
 

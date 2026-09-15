@@ -150,6 +150,7 @@ export class TaskManager extends EventEmitter {
         task.updatedAt = now();
         await this.store.save(task);
         this.queue.push(task.id);
+        await this.#restorePendingFiles(task.id);
       } else if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
         task.status = 'FAILED';
         task.errorCode = 'FAILED_RECOVERY';
@@ -161,6 +162,7 @@ export class TaskManager extends EventEmitter {
     }
     if (trimmed) await this.store.vacuum().catch(() => {});
     await this.#sweepOrphans();
+    if (this.queue.length) this.#schedulePump();
   }
 
   // Graceful shutdown of the agent side: stop taking new work, stop the queue
@@ -596,12 +598,61 @@ export class TaskManager extends EventEmitter {
     };
   }
 
+  #pendingFilesPath(taskId) {
+    return path.join(this.store.taskDir(taskId), 'pending-files.json');
+  }
+
+  async #savePendingFiles(taskId, pendingId, data) {
+    this.pendingFiles.set(pendingId, data);
+    try {
+      const file = this.#pendingFilesPath(taskId);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      let map = {};
+      try { map = JSON.parse(await fs.readFile(file, 'utf8')); } catch {}
+      map[pendingId] = data;
+      await fs.writeFile(file, JSON.stringify(map, null, 2), 'utf8');
+    } catch { /* best effort disk persistence */ }
+  }
+
+  async #getPendingFiles(taskId, pendingId) {
+    if (this.pendingFiles.has(pendingId)) return this.pendingFiles.get(pendingId);
+    try {
+      const file = this.#pendingFilesPath(taskId);
+      const map = JSON.parse(await fs.readFile(file, 'utf8'));
+      const data = map[pendingId];
+      if (data) { this.pendingFiles.set(pendingId, data); return data; }
+    } catch {}
+    return null;
+  }
+
+  async #deletePendingFiles(taskId, pendingId) {
+    this.pendingFiles.delete(pendingId);
+    try {
+      const file = this.#pendingFilesPath(taskId);
+      let map = {};
+      try { map = JSON.parse(await fs.readFile(file, 'utf8')); } catch {}
+      delete map[pendingId];
+      if (Object.keys(map).length) await fs.writeFile(file, JSON.stringify(map, null, 2), 'utf8');
+      else await fs.unlink(file).catch(() => {});
+    } catch {}
+  }
+
+  async #restorePendingFiles(taskId) {
+    try {
+      const file = this.#pendingFilesPath(taskId);
+      const map = JSON.parse(await fs.readFile(file, 'utf8'));
+      for (const [pendingId, data] of Object.entries(map || {})) {
+        if (!this.pendingFiles.has(pendingId)) this.pendingFiles.set(pendingId, data);
+      }
+    } catch {}
+  }
+
   // A queued prompt that never ran releases the files that were waiting with it.
-  #releasePendingFiles(prompts) {
+  async #releasePendingFiles(taskId, prompts) {
     for (const prompt of prompts || []) {
-      const waiting = this.pendingFiles.get(prompt?.id);
+      const waiting = await this.#getPendingFiles(taskId, prompt?.id);
       if (!waiting) continue;
-      this.pendingFiles.delete(prompt.id);
+      await this.#deletePendingFiles(taskId, prompt.id);
       if (waiting.uploadToken) this.uploads.discard(waiting.uploadToken).catch(() => {});
     }
   }
@@ -611,9 +662,9 @@ export class TaskManager extends EventEmitter {
     // The next prompt waits for this turn to end, which is what capacity 1 means.
     if ((task.pendingPrompts || []).length && !this.queue.includes(task.id)) this.queue.push(task.id);
     try {
-      const waiting = this.pendingFiles.get(pending.id) || { files: [], uploadToken: null };
+      const waiting = (await this.#getPendingFiles(task.id, pending.id)) || { files: [], uploadToken: null };
       await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
-      this.pendingFiles.delete(pending.id);
+      await this.#deletePendingFiles(task.id, pending.id);
       return true;
     } catch (error) {
       // Never die silently inside the pump: explain the retry and keep the text.
@@ -1877,7 +1928,7 @@ export class TaskManager extends EventEmitter {
     if (keepPending) {
       if ((task.pendingPrompts || []).length && !this.queue.includes(id)) this.queue.push(id);
     } else {
-      this.#releasePendingFiles(task.pendingPrompts);
+      await this.#releasePendingFiles(id, task.pendingPrompts);
       task.pendingPrompts = null;
       task.queueReason = null;
       this.queue = this.queue.filter(x => x !== id);
@@ -2118,9 +2169,9 @@ export class TaskManager extends EventEmitter {
       }
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
       try {
-        const waiting = this.pendingFiles.get(pending.id) || { files: [], uploadToken: null };
+        const waiting = (await this.#getPendingFiles(id, pending.id)) || { files: [], uploadToken: null };
         const result = await this.#message(id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
-        this.pendingFiles.delete(pending.id);
+        await this.#deletePendingFiles(id, pending.id);
         return result;
       } catch (error) {
         await restore().catch(() => {});
@@ -2137,7 +2188,7 @@ export class TaskManager extends EventEmitter {
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
       const [dropped, ...rest] = task.pendingPrompts || [];
       if (!dropped) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
-      this.#releasePendingFiles([dropped]);
+      await this.#releasePendingFiles(id, [dropped]);
       task.pendingPrompts = rest;
       if (rest.length) { await this.store.save(this.#publicTask(task)); return this.#publicTask(task); }
       task.queueReason = null;
@@ -2145,13 +2196,18 @@ export class TaskManager extends EventEmitter {
       if (!task.workspacePath) {
         task.status = 'CANCELLED';
         task.current = 'Cancelled';
-        await this.store.save(this.#publicTask(task));
+        task.updatedAt = now();
+        // Terminal event before terminal status is readable (same ordering rule
+        // as #verifyAndFinalize and #fail).
         await this.#event(task, 'TASK_CANCELLED', 'Queued prompt removed');
+        await this.store.save(this.#publicTask(task));
       } else {
         task.status = 'SUCCEEDED';
         task.current = 'Сообщение убрано из очереди';
-        await this.store.save(this.#publicTask(task));
+        task.updatedAt = now();
         await this.#event(task, 'QUEUE_DROPPED', task.current);
+        await this.#event(task, 'TASK_SUCCEEDED', task.current);
+        await this.store.save(this.#publicTask(task));
       }
       return this.#publicTask(task);
     });
@@ -2221,7 +2277,9 @@ export class TaskManager extends EventEmitter {
         task.files = [...(task.files || []), ...attached.map(metadata)];
       }
       if (stageNow && uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
-      if (!stageNow && ((files || []).length || uploadToken)) this.pendingFiles.set(pendingId, { files: files || [], uploadToken: uploadToken || null });
+      if (!stageNow && ((files || []).length || uploadToken)) {
+        await this.#savePendingFiles(id, pendingId, { files: files || [], uploadToken: uploadToken || null });
+      }
       const note = attached.length
         ? '\n\nAdditional files from the phone are in .taskbridge-input/:\n' + attached.map(f => `- ${f.path}`).join('\n')
         : '';

@@ -48,7 +48,13 @@ if (!(await portFree(publicPort))) throw new Error(`Порт ${publicPort} вс�
 // 2. Start the app and the proxy back, exactly like scripts/start-lan.mjs does.
 const appLog = await fs.open(path.join(DATA, 'lan-restart-app.log'), 'a');
 const proxyLog = await fs.open(path.join(DATA, 'lan-restart-proxy.log'), 'a');
-const env = { ...process.env };
+const env = {
+  ...process.env,
+  TASKBRIDGE_BIND_HOST: '127.0.0.1',
+  TASKBRIDGE_PORT: String(internalPort),
+  TASKBRIDGE_PUBLIC_PORT: String(publicPort),
+  TASKBRIDGE_DISABLE_TLS: '1',
+};
 for (const key of Object.keys(env)) {
   if (['PI_SESSION_FILE', 'TASKBRIDGE_TASK_ID'].includes(key) || key.startsWith('TASKBRIDGE_APPROVAL_')) delete env[key];
 }

@@ -11,7 +11,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
+    "test": "node --test --test-concurrency=4 tests/*.test.mjs",
     "test:cloud": "node --test tests/cloud-*.test.mjs",
     "test:postgres": "node --test tests/cloud-postgres.test.mjs",
     "start": "node scripts/start-lan.mjs run",

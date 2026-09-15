@@ -10,8 +10,12 @@ import { prepareProjectWorkspace, collectGitState, git } from '../src/git.mjs';
 async function fixture(t, streaming = false) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-manager-test-'));
   const store = new TaskStore(root);
-  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
   const manager = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store);
+  t.after(async () => {
+    await manager.close().catch(() => {});
+    store.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
   const task = { id: 'a', createdAt: new Date().toISOString(), status: streaming ? 'RUNNING' : 'SUCCEEDED', workspacePath: root, prompt: 'original', files: [], assistantText: 'saved', thinkingText: '', compaction: { count: 0 } };
   await store.create(task);
   manager.tasks.set('a', task);
@@ -968,8 +972,74 @@ test('a follow-up accepted while the turn is finalizing keeps the queue slot', a
   assert.equal(manager.getTask(queued.id).status, 'QUEUED', 'no parallel task may start while the turn is live');
 
   await manager.deleteTask(queued.id).catch(() => {});
+  for (let i = 0; i < 200 && !runtime.settleResolvers.length; i++) await new Promise(r => setTimeout(r, 5));
   for (const waiter of runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
   for (let i = 0; i < 200 && manager.getTask('a').status !== 'SUCCEEDED'; i++) await new Promise(r => setTimeout(r, 5));
   assert.deepEqual(sent, ['первое', 'второе']);
   assert.equal(manager.getTask('a').status, 'SUCCEEDED');
+});
+
+test('pending prompt files survive TaskBridge restart without being dropped', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-restart-files-test-'));
+  const store = new TaskStore(root);
+  const m1 = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store);
+  const m2 = new TaskManager({ projects: [{ id: 'p', path: root, useWorktree: false }] }, root, store);
+  t.after(async () => {
+    await m1.close().catch(() => {});
+    await m2.close().catch(() => {});
+    store.close();
+    for (let i = 0; i < 10; i++) {
+      try { await fs.rm(root, { recursive: true, force: true }); break; }
+      catch { await new Promise(r => setTimeout(r, 100)); }
+    }
+  });
+
+  // 1. TaskManager instance 1: session queues a prompt with files while model is busy
+  m1.runtimeManager.isReady = async () => true;
+  m1.runtimeManager.getBusyStatus = async () => ({ busy: true });
+  m1.queuePollMs = 10000;
+
+  const task = { id: 'restart-files-task', createdAt: new Date().toISOString(), status: 'QUEUED', workspacePath: null, prompt: 'init', files: [], assistantText: '', thinkingText: '', compaction: { count: 0 } };
+  await store.create(task);
+  m1.tasks.set('restart-files-task', task);
+
+  const filePayload = [{ name: 'important.txt', size: 4, base64: Buffer.from('data').toString('base64') }];
+  const queued = await m1.message('restart-files-task', 'документ в очереди', 'auto', filePayload);
+  assert.equal(queued.pendingPrompts.length, 1);
+
+  // Verify pending-files.json exists on disk
+  const pendingDiskFile = path.join(store.taskDir('restart-files-task'), 'pending-files.json');
+  const diskData = JSON.parse(await fs.readFile(pendingDiskFile, 'utf8'));
+  assert.ok(diskData[queued.pendingPrompts[0].id], 'pending files must be written to disk');
+
+  // 2. TaskManager instance 2: simulates process restart over same store/data
+  m2.runtimeManager.isReady = async () => true;
+  m2.runtimeManager.getBusyStatus = async () => ({ busy: false });
+  m2.queuePollMs = 10;
+
+  // Mock Pi for delivery
+  const sent = [];
+  const pi = { closed: false, getState: async () => ({ isStreaming: false }), prompt: async text => { sent.push(text); }, sendFollowUp: async text => { sent.push(text); }, abort: async () => {}, killTree: async () => {} };
+  m2.runtimes.set('restart-files-task', { pi, eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false });
+
+  await m2.init();
+  assert.ok(m2.queue.includes('restart-files-task'), 'task must be restored to queue');
+  // Workspace exists once session is about to run
+  m2.tasks.get('restart-files-task').workspacePath = root;
+
+  // Wait for delivery by pump
+  for (let i = 0; i < 100 && !sent.length; i++) await new Promise(r => setTimeout(r, 20));
+  assert.equal(sent.length, 1, 'queued message must be delivered after restart');
+  assert.ok(sent[0].includes('документ в очереди'), 'prompt text preserved');
+  assert.ok(sent[0].includes('important.txt'), 'attached file must be preserved after restart');
+
+  // pending-files.json should be cleaned up after successful delivery
+  const fileLeft = await fs.access(pendingDiskFile).then(() => true, () => false);
+  assert.equal(fileLeft, false, 'pending-files.json must be removed once delivered');
+
+  for (const waiter of m2.runtimes.get('restart-files-task').settleResolvers.splice(0)) {
+    clearTimeout(waiter.timer);
+    waiter.resolve();
+  }
+  await m2.close();
 });
