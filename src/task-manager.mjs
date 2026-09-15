@@ -1411,15 +1411,15 @@ export class TaskManager extends EventEmitter {
     await this.store.writeArtifact(task.id, 'result.md', md);
   }
 
-  async #finalizeCancelled(task) {
+  async #finalizeCancelled(task, forTurn = null) {
     const runtime = this.runtimes.get(task.id);
     if (runtime?.cancelFinalizing) return runtime.cancelFinalizing;
-    const pending = this.#writeCancelled(task);
+    const pending = this.#writeCancelled(task, forTurn ?? task._turn);
     if (runtime) runtime.cancelFinalizing = pending;
     return pending;
   }
 
-  async #writeCancelled(task) {
+  async #writeCancelled(task, forTurn = null) {
     if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
     // A cancel can overlap a delivery: «Отправить сейчас» stops the run, and the
     // queue pump delivers the message while that stop is still finalizing. The
@@ -1427,6 +1427,7 @@ export class TaskManager extends EventEmitter {
     // TASK_CANCELLED written after it would mark a RUNNING answer as stopped
     // (the chat then shows the fresh turn as «прервано»).
     const runtime = this.runtimes.get(task.id);
+    if (runtime && (runtime.cancelRequested !== true || (forTurn !== null && task._turn !== forTurn))) return;
     if (runtime && runtime.cancelRequested !== true && task.status === 'RUNNING') return;
     const gitState = task.workspacePath ? await collectGitState(task.workspacePath).catch(() => null) : null;
     if (gitState) {
@@ -2319,11 +2320,13 @@ export class TaskManager extends EventEmitter {
     let settled;
     let accepted = false;
     let turn = null;
+    // Any incoming user turn (prompt or steer) supersedes a previous cancel request:
+    // the operator is sending new work and expects an answer, not a late CANCELLED.
+    runtime.cancelRequested = false;
+    runtime.cancelFinalizing = null;
     if (!streaming) {
       this.activeTaskId = id;
       turn = this.#beginTurn(task);
-      runtime.cancelRequested = false;
-      runtime.cancelFinalizing = null;
       settled = this.#waitForSettle(id, 12 * 60 * 60 * 1000);
       settled.catch(() => {});
     }
@@ -2339,15 +2342,7 @@ export class TaskManager extends EventEmitter {
       // second USER_MESSAGE would show the operator's own line twice.
       if (announce) await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
-      else if (task.status !== 'CANCELLING') {
-        // A steer lands inside the answer that is already streaming, so the
-        // `if (!streaming)` branch above never runs: a prompt that was parked as
-        // "queued" kept that stale status on screen while the model was in fact
-        // answering it — which reads exactly like a stuck queue. The same is
-        // true after an interrupt («Отправить сейчас» cancels the run, then
-        // delivers): the task must not stay CANCELLED while it is generating.
-        await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
-      }
+      else await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
       // Release gate immediately after USER_MESSAGE is safely persisted so the
       // HTTP response returns to client without waiting for subsequent background ticks.
       release();

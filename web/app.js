@@ -1331,12 +1331,19 @@ function maybeNotify(t) {
 }
 
 // One generation runs at a time, so "Стоп" must reach the session that actually
-// works — not only the one that happens to be selected.
+// works — not only the one that happens to be selected. Also considers active
+// assistant streaming in the chat even if a stale terminal status landed earlier.
 function stopTarget() {
-  const stoppable = (task) => Boolean(task) && ACTIVE_STATUSES.has(task.status) && task.status !== 'CANCELLING';
+  const isWorking = (task) => {
+    if (!task) return false;
+    if (task.status === 'CANCELLING') return false;
+    if (ACTIVE_STATUSES.has(task.status)) return true;
+    if (task.id === selectedTaskId && chatState?.current?.active) return true;
+    return false;
+  };
   const selected = lastTasks.find(task => task.id === selectedTaskId) || currentTask;
-  if (stoppable(selected)) return selected;
-  return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(stoppable) || null;
+  if (isWorking(selected)) return selected;
+  return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(isWorking) || null;
 }
 
 // What the machine is doing, in one line: a running session must be obvious
