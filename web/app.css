@@ -1,7 +1,8 @@
 :root {
   color-scheme: dark;
   /* Interface preferences (set from the UI settings panel, persisted in
-     localStorage). --ui-scale is a whole-UI zoom; the layout widths follow, so
+     localStorage). --ui-scale multiplies the root font size (every font-size
+     below is in rem, so text grows as a whole); the layout widths follow, so
      "font bigger" and "window wider" are independent choices. */
   --ui-scale: 1;
   --app-max: 1100px;
@@ -27,7 +28,16 @@
 }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+html {
+  height: 100%;
+  /* Text scaling is a root font size, NOT `zoom`. `zoom` on the body either
+     overflows the viewport (the app is laid out at 100dvh and then drawn 1.15x
+     taller, pushing the composer off screen) or, with the box divided by the
+     factor, leaves the app ~87% wide, hugging the left edge. A `font-size` on
+     the root has neither problem: the layout box stays exactly the viewport.
+     Every `font-size` in this file is in rem, so all text follows. */
+  font-size: calc(16px * var(--ui-scale, 1));
+}
 body {
   margin: 0;
   font-family: var(--font);
@@ -40,12 +50,6 @@ body {
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
-  /* Zoom scales text and controls together (they are sized in px, so a root
-     font-size would not reach them). Dividing the box by the same factor keeps
-     the app exactly viewport-sized instead of overflowing when zoomed. */
-  zoom: var(--ui-scale, 1);
-  width: calc(100% / var(--ui-scale, 1));
-  height: calc(100dvh / var(--ui-scale, 1));
   overflow: hidden;
 }
 
@@ -74,9 +78,9 @@ body {
   border: 1px solid rgba(167, 139, 250, 0.35);
   flex-shrink: 0;
 }
-.brand .n { font-weight: 700; font-size: 15px; letter-spacing: 0.2px; }
-.buildInfo { font-family: var(--mono); font-weight: 400; font-size: 10.5px; color: var(--muted); vertical-align: middle; }
-.brand .s { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+.brand .n { font-weight: 700; font-size: 0.9375rem; letter-spacing: 0.2px; }
+.buildInfo { font-family: var(--mono); font-weight: 400; font-size: 0.65625rem; color: var(--muted); vertical-align: middle; }
+.brand .s { font-size: 0.71875rem; color: var(--muted); margin-top: 1px; }
 
 
 .headerActions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -87,7 +91,7 @@ body {
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-s);
   padding: 5px 8px;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   outline: none;
   /* Keep the profile picker narrow so the header stays on one row. */
   max-width: 96px;
@@ -95,7 +99,7 @@ body {
 }
 
 .pill {
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   padding: 5px 11px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
@@ -113,7 +117,7 @@ body {
   display: grid;
   place-items: center;
   padding: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   border-radius: var(--radius-s);
 }
 #notifyButton.granted { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); }
@@ -161,7 +165,7 @@ body {
   list-style: none;
 }
 .controlsSpoiler summary::-webkit-details-marker { display: none; }
-.controlsSpoiler summary h2 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.3px; }
+.controlsSpoiler summary h2 { margin: 0; font-size: 0.8125rem; font-weight: 600; color: var(--muted); letter-spacing: 0.3px; }
 .controlsSpoiler summary h2::before { content: '▸ '; color: var(--muted); }
 .controlsSpoiler[open] summary h2::before { content: '▾ '; }
 .subheader {
@@ -172,9 +176,9 @@ body {
   gap: 10px;
   padding: 0 20px 12px;
 }
-.subheader #newTaskButton { font-size: 11.5px; padding: 6px 12px; flex-shrink: 0; }
+.subheader #newTaskButton { font-size: 0.71875rem; padding: 6px 12px; flex-shrink: 0; }
 .subheader #continueBadge { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 60%; }
-.subheader button.small { font-size: 11.5px; padding: 6px 12px; }
+.subheader button.small { font-size: 0.71875rem; padding: 6px 12px; }
 
 /* ---------- modal overlays ---------- */
 .authGate {
@@ -203,7 +207,7 @@ body {
 /* Restart progress: the overlay explains the silent seconds between "the app
    died" and "the app is back", and the header glyph keeps spinning meanwhile. */
 .restartCard { align-items: center; text-align: center; }
-.restartCard h2 { font-size: 16px; }
+.restartCard h2 { font-size: 1rem; }
 .restartSpinner {
   width: 34px;
   height: 34px;
@@ -221,7 +225,7 @@ body {
 .authCard.wide { max-width: 520px; }
 .sessionDetailsCard { max-width: 580px; }
 .dialogHeader { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.dialogHeader h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.dialogHeader h2 { margin: 0; font-size: 1rem; font-weight: 600; }
 .sessionDetailsCard .detailBody { max-height: 70vh; overflow-y: auto; padding-right: 4px; }
 .dialogFooter { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
 
@@ -230,7 +234,17 @@ body {
    desktop and in the Android browser), pictures zoom in, and a PDF is embedded
    where the browser can render it. Only files nothing can display fall back to
    the browser's own handling. */
-.fileViewerCard { max-width: 900px; width: 100%; }
+/* Two classes on purpose: the card also carries `.authCard.wide`, whose
+   `max-width: 520px` outranks a single-class `.fileViewerCard` — which is why the
+   dialog stayed small no matter what this rule said. */
+.authCard.fileViewerCard { max-width: 900px; }
+/* On a desktop screen the viewer and the confirmation were needlessly small. */
+@media (min-width: 900px) {
+  .authCard.fileViewerCard { max-width: min(1300px, 94vw); }
+  .fileViewerBody { max-height: 80vh; }
+  .authCard.confirmCard { max-width: 640px; }
+  .confirmCard .confirmText { max-height: 60vh; }
+}
 .fileViewerBody {
   min-height: 120px;
   max-height: 72vh;
@@ -248,7 +262,7 @@ body {
 .fileViewerBody pre.fileViewerText {
   margin: 0;
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   line-height: 1.5;
   white-space: pre;
   overflow: auto;
@@ -265,14 +279,14 @@ body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   background: #0d1220;
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
   padding: 8px 10px;
 }
-.authCard h2 { margin: 0; font-size: 16px; }
+.authCard h2 { margin: 0; font-size: 1rem; }
 .authCard form { display: flex; gap: 8px; }
 .authCard input {
   flex: 1;
@@ -283,14 +297,14 @@ body {
   border-radius: var(--radius-s);
   padding: 9px 10px;
   font: inherit;
-  font-size: 15px;
+  font-size: 0.9375rem;
   letter-spacing: 1px;
   outline: none;
 }
 .authCard input:focus { border-color: var(--accent); }
 .pairingCode {
   font-family: var(--mono);
-  font-size: 28px;
+  font-size: 1.75rem;
   letter-spacing: 4px;
   text-align: center;
   padding: 10px;
@@ -300,15 +314,15 @@ body {
 }
 .sessionPickerList { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
 .helpCard { max-width: 620px; }
-.helpBody { max-height: 65vh; overflow-y: auto; padding-right: 4px; font-size: 13px; line-height: 1.55; }
-.helpBody h3 { font-size: 13.5px; margin: 16px 0 4px; color: var(--accent); }
+.helpBody { max-height: 65vh; overflow-y: auto; padding-right: 4px; font-size: 0.8125rem; line-height: 1.55; }
+.helpBody h3 { font-size: 0.84375rem; margin: 16px 0 4px; color: var(--accent); }
 .helpBody h3:first-child { margin-top: 0; }
 .helpBody p { margin: 4px 0 10px; }
 .helpBody ul { margin: 4px 0 10px; padding-left: 20px; }
 .helpBody li { margin: 3px 0; }
 .helpBody code {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   background: rgba(94, 231, 247, 0.1);
   border: 1px solid rgba(94, 231, 247, 0.18);
   padding: 1px 5px;
@@ -329,8 +343,8 @@ body {
 }
 .sessionPickerItem:hover { border-color: var(--accent); }
 .sessionPickerItem.active { border-color: var(--accent); background: rgba(167, 139, 250, 0.12); }
-.sessionPickerItem .name { font-size: 13px; font-weight: 600; }
-.sessionPickerItem .meta { font-size: 11px; color: var(--muted); padding: 0; }
+.sessionPickerItem .name { font-size: 0.8125rem; font-weight: 600; }
+.sessionPickerItem .meta { font-size: 0.6875rem; color: var(--muted); padding: 0; }
 
 /* Native Pi session importer: the selected session is previewed below the list
    so the operator confirms a real conversation, not a name. */
@@ -345,12 +359,12 @@ body {
   max-height: 40vh;
   overflow-y: auto;
 }
-.importTitle { font-size: 13.5px; font-weight: 600; }
+.importTitle { font-size: 0.84375rem; font-weight: 600; }
 .importDetails { display: flex; flex-direction: column; gap: 3px; }
-.importDetails .r { display: flex; gap: 8px; font-size: 12px; }
+.importDetails .r { display: flex; gap: 8px; font-size: 0.75rem; }
 .importDetails .r span { color: var(--muted); flex-shrink: 0; min-width: 84px; }
 .importDetails .r b { font-weight: 500; overflow-wrap: anywhere; }
-.importText p { margin: 3px 0 0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.importText p { margin: 3px 0 0; font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .importPreview button.primary { border-color: var(--accent); }
 
 .projectRow {
@@ -363,8 +377,8 @@ body {
   padding: 10px 12px;
 }
 .projectRow .projectRowInfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.projectRow .name { font-size: 13px; font-weight: 600; }
-.projectRow .meta { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.projectRow .name { font-size: 0.8125rem; font-weight: 600; }
+.projectRow .meta { font-size: 0.6875rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .projectRow .projectRowDelete {
   flex-shrink: 0;
   border: 1px solid rgba(251, 113, 133, 0.4);
@@ -403,7 +417,7 @@ body {
   margin: auto;
   text-align: center;
   color: var(--muted);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.6;
   padding: 40px 20px;
   border: 1px dashed var(--border-strong);
@@ -412,7 +426,7 @@ body {
 
 .systemNote {
   align-self: center;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   color: var(--warn);
   background: rgba(251, 191, 36, 0.08);
   border: 1px solid rgba(251, 191, 36, 0.25);
@@ -423,7 +437,7 @@ body {
 
 .loadOlderButton {
   align-self: center;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   color: var(--muted);
   background: var(--surface-2);
   border: 1px dashed var(--border-strong);
@@ -451,7 +465,7 @@ body {
 .msg {
   padding: 10px 13px;
   border-radius: var(--radius-m);
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
 }
@@ -471,12 +485,12 @@ body {
 .md > p:first-child { margin-top: 0; }
 .md > p:last-child { margin-bottom: 0; }
 .md p { margin: 8px 0; }
-.md h3, .md h4, .md h5, .md h6 { margin: 12px 0 6px; font-size: 13.5px; }
+.md h3, .md h4, .md h5, .md h6 { margin: 12px 0 6px; font-size: 0.84375rem; }
 .md ul, .md ol { margin: 8px 0; padding-left: 20px; }
 .md li { margin: 3px 0; }
 .md code {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 0.75rem;
   background: rgba(94, 231, 247, 0.1);
   border: 1px solid rgba(94, 231, 247, 0.18);
   padding: 1px 5px;
@@ -489,18 +503,32 @@ body {
   padding: 10px 12px;
   overflow-x: auto;
   margin: 8px 0;
+  /* Code never soft-wraps: a long line scrolls sideways, it does not fold. */
+  white-space: pre;
+  overflow-wrap: normal;
 }
-.md pre code { background: none; border: none; padding: 0; font-size: 12px; line-height: 1.5; }
+.md pre code {
+  background: none; border: none; padding: 0; font-size: 0.75rem; line-height: 1.5;
+  white-space: pre; overflow-wrap: normal;
+}
+/* Light syntax highlighting: the same characters, wrapped in spans. */
+.md pre .tok-comment { color: #6b7b98; font-style: italic; }
+.md pre .tok-string { color: #9fe0a8; }
+.md pre .tok-number { color: #f0b072; }
+.md pre .tok-keyword { color: #c9a2ff; }
 .md a { color: var(--cyan); }
 .md img { max-width: 100%; max-height: 320px; border-radius: var(--radius-s); border: 1px solid var(--border); display: block; margin: 8px 0; }
 .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--border-strong); color: var(--muted); }
 /* Tables scroll inside their own box instead of stretching the bubble: on a
-   phone a wide table used to push the whole chat sideways. min-width: 100% lets
-   a normal table fill the bubble; a wider one keeps its natural width inside
-   the scroll box. */
+   phone a wide table used to push the whole chat sideways. The table keeps its
+   content width (`width: max-content`) so its columns are never squeezed to a
+   few characters per line; a cell wraps only at its own cap, and anything wider
+   than the bubble scrolls horizontally. `overflow-wrap: break-word` (not
+   `anywhere`) matters: `anywhere` would let the browser shrink a column to one
+   character. */
 .md .tableWrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 8px 0; }
-.md table { border-collapse: collapse; margin: 0; font-size: 12.5px; min-width: 100%; }
-.md th, .md td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; overflow-wrap: anywhere; }
+.md table { border-collapse: collapse; margin: 0; font-size: 0.78125rem; width: max-content; }
+.md th, .md td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; max-width: 36ch; overflow-wrap: break-word; }
 .md th { background: var(--surface-2); }
 
 /* reasoning spoiler */
@@ -512,7 +540,7 @@ body {
 }
 .reasoning summary {
   cursor: pointer;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--cyan);
   padding: 8px 12px;
   user-select: none;
@@ -523,7 +551,7 @@ body {
 .reasoning[open] summary::before { content: '▾ '; }
 .reasoning .r-text {
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   line-height: 1.5;
   color: #b9c2d4;
   white-space: pre-wrap;
@@ -538,7 +566,7 @@ body {
 /* tool chips */
 .tool {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   border-left: 2px solid var(--border-strong);
   background: var(--surface-2);
   border-radius: 0 6px 6px 0;
@@ -597,39 +625,46 @@ body {
   color: var(--text);
   border-radius: var(--radius-s);
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
 }
 .imageMenuItem:hover { background: rgba(255, 255, 255, 0.1); }
 
 .metaRow { display: flex; align-items: center; gap: 6px; width: 100%; }
-.meta { font-size: 11px; color: var(--muted); padding: 0 2px; flex: 1; min-width: 0; }
+.meta { font-size: 0.6875rem; color: var(--muted); padding: 0 2px; flex: 1; min-width: 0; }
 .copyBtn {
   flex-shrink: 0;
   border: none;
   background: var(--surface-2);
   color: var(--text);
   padding: 5px 8px;
-  font-size: 16px;
+  font-size: 1rem;
   border-radius: 8px;
   line-height: 1;
   cursor: pointer;
 }
 .copyBtn svg { display: block; }
 .copyBtn:hover { color: var(--accent); background: var(--accent-soft); }
-.md pre { position: relative; }
-/* The block actions live side by side in one row, anchored top-right. A flex row
+/* The actions live in a NON-scrolling wrapper around the code. Placed inside the
+   <pre> (which scrolls sideways) an absolutely positioned button scrolled away
+   together with the code; here it stays put while the code scrolls under it. */
+.md .codeWrap { position: relative; margin: 8px 0; }
+.md .codeWrap > pre { margin: 0; }
+/* The block actions sit side by side in one row, anchored top-right. A flex row
    with a gap means neither button's position depends on a guessed width of the
    other, which is what made them overlap on a narrow phone. */
 .codeActions {
   position: absolute;
   top: 6px;
-  right: 6px;
+  /* Pulled off the right edge so the panel's scrollbar does not sit on top of
+     the buttons. */
+  right: 16px;
   display: flex;
   gap: 6px;
+  z-index: 1;
 }
 .codeActions > button {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   padding: 3px 7px;
   background: rgba(255, 255, 255, 0.06);
   border-color: var(--border-strong);
@@ -638,7 +673,7 @@ body {
   transition: opacity .12s ease;
   white-space: nowrap;
 }
-.md pre:hover .codeActions > button { opacity: 1; }
+.md .codeWrap:hover .codeActions > button { opacity: 1; }
 /* "Выполнить" only where running is possible (body.machine-exec: the machine or
    an authenticated client) and only on command blocks — built in
    addCodeCopyButtons. */
@@ -649,9 +684,9 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
 @media (hover: none) {
   /* Reserve room above the code, otherwise the always-visible actions sit on
      the first line. */
-  .md pre { padding-top: 32px; }
-  .md pre .codeActions > .codeCopyBtn,
-  .md pre .codeActions > .codeRunBtn { opacity: 1; }
+  .md .codeWrap > pre { padding-top: 32px; }
+  .md .codeWrap .codeActions > .codeCopyBtn,
+  .md .codeWrap .codeActions > .codeRunBtn { opacity: 1; }
 }
 
 /* inline turn error + retry */
@@ -661,13 +696,13 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
   gap: 10px;
   flex-wrap: wrap;
   color: var(--danger);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .turnError button {
   border-color: rgba(251, 113, 133, 0.5);
   color: var(--danger);
   padding: 5px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 .turnError button:hover { background: rgba(251, 113, 133, 0.14); }
 
@@ -682,9 +717,9 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
    previous answer as a sibling). */
 .variantNav { display: inline-flex; align-items: center; gap: 2px; flex-shrink: 0; margin-right: 4px; }
 .variantNav.hidden { display: none; }
-.variantNav .actionBtn { padding: 3px 7px; font-size: 14px; }
+.variantNav .actionBtn { padding: 3px 7px; font-size: 0.875rem; }
 .variantNav .actionBtn:disabled { opacity: .35; cursor: default; }
-.variantCount { font-size: 11.5px; color: var(--muted); min-width: 26px; text-align: center; }
+.variantCount { font-size: 0.71875rem; color: var(--muted); min-width: 26px; text-align: center; }
 /* Copy + message actions share a single row under the operator's bubble, so the
    icons never stack onto separate lines. */
 .msgActions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -697,7 +732,7 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
   background: var(--surface-2);
   color: var(--text);
   padding: 5px 8px;
-  font-size: 16px;
+  font-size: 1rem;
   border-radius: 8px;
   line-height: 1;
   cursor: pointer;
@@ -705,7 +740,7 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
 .actionBtn svg { display: block; }
 .actionBtn:hover { color: var(--accent); background: var(--accent-soft); }
 @media (min-width: 900px) {
-  .actionBtn, .copyBtn { font-size: 18px; padding: 6px 10px; }
+  .actionBtn, .copyBtn { font-size: 1.125rem; padding: 6px 10px; }
   .turnActionBar { gap: 6px; }
 }
 .editBox { display: grid; gap: 6px; width: 100%; }
@@ -746,7 +781,7 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-s);
   padding: 7px 10px;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   outline: none;
 }
 #project:focus { border-color: var(--accent); }
@@ -760,7 +795,7 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
 
 /* Полоса состояния: заметная, с таймером и причиной ожидания. */
 #activity:not(.hidden) { display: flex; align-items: center; gap: 6px; }
-#activity { font-size: 12px; padding: 2px 2px 4px; color: var(--accent); }
+#activity { font-size: 0.75rem; padding: 2px 2px 4px; color: var(--accent); }
 #activity.waiting { color: var(--muted); }
 #activity::before {
   content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%;
@@ -787,7 +822,7 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   color: var(--muted);
   background: var(--surface-2);
   border: 1px solid var(--border-strong);
@@ -801,7 +836,7 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
   background: transparent;
   color: var(--muted);
   padding: 2px 4px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   border-radius: 50%;
   line-height: 1;
 }
@@ -829,6 +864,17 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
 }
 body.machine-local .fileChip a.revealIcon { display: inline-flex; }
 .fileChip a.revealIcon:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); text-decoration: none; }
+/* Opening with a desktop application only makes sense on the machine itself. */
+.fileChip a.openIcon {
+  display: none;
+  text-decoration: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: 50%;
+  line-height: 1;
+}
+body.machine-local .fileChip a.openIcon { display: inline-flex; }
+.fileChip a.openIcon:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); text-decoration: none; }
 /* Running a script happens on the machine. That is allowed on the machine and
    for an authenticated client (a paired phone), so it hinges on body.machine-exec
    — not on being on the machine locally. */
@@ -869,7 +915,7 @@ body.machine-exec .fileChip a.runIcon { display: inline-flex; }
   border-radius: 50%;
   background: transparent;
   color: var(--muted);
-  font-size: 15px;
+  font-size: 0.9375rem;
   line-height: 1;
 }
 .clearPrompt:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
@@ -884,7 +930,7 @@ body.machine-exec .fileChip a.runIcon { display: inline-flex; }
   padding: 7px 12px;
   padding-right: 30px;
   font: inherit;
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   line-height: 1.4;
   outline: none;
   max-height: 200px;
@@ -900,7 +946,7 @@ button {
   color: var(--text);
   border-radius: var(--radius-s);
   padding: 8px 12px;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .4; cursor: default; }
@@ -918,8 +964,8 @@ button:disabled { opacity: .4; cursor: default; }
 .stop { background: rgba(251, 113, 133, 0.14); border-color: rgba(251, 113, 133, 0.5); color: var(--danger); }
 .stop:hover:not(:disabled) { border-color: var(--danger); }
 
-#retryPrompt { margin-top: 6px; font-size: 11.5px; padding: 5px 10px; }
-.hint { font-size: 11px; color: var(--muted); margin-top: 7px; min-height: 14px; white-space: pre-wrap; }
+#retryPrompt { margin-top: 6px; font-size: 0.71875rem; padding: 5px 10px; }
+.hint { font-size: 0.6875rem; color: var(--muted); margin-top: 7px; min-height: 14px; white-space: pre-wrap; }
 .hint.error { color: var(--danger); }
 
 /* ---------- side panel ---------- */
@@ -944,7 +990,7 @@ button:disabled { opacity: .4; cursor: default; }
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-s);
   padding: 7px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   outline: none;
   font-family: inherit;
 }
@@ -966,7 +1012,7 @@ button:disabled { opacity: .4; cursor: default; }
 .taskRow:hover { border-color: var(--border-strong); }
 .taskRow.active { border-color: rgba(167, 139, 250, 0.55); background: rgba(167, 139, 250, 0.08); }
 .taskRow .t-prompt {
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -974,8 +1020,8 @@ button:disabled { opacity: .4; cursor: default; }
   padding-right: 20px;
 }
 .taskRow .t-sub { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.taskRow .t-project { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
-.taskRow .t-time { font-size: 11px; color: var(--muted); flex-shrink: 0; }
+.taskRow .t-project { font-size: 0.6875rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.taskRow .t-time { font-size: 0.6875rem; color: var(--muted); flex-shrink: 0; }
 .taskRow .t-delete {
   position: absolute;
   top: 8px;
@@ -989,7 +1035,7 @@ button:disabled { opacity: .4; cursor: default; }
   background: transparent;
   color: var(--muted);
   border-radius: 6px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1;
 }
 .taskRow .t-delete:hover { color: var(--danger); background: rgba(251, 113, 133, 0.14); }
@@ -1006,11 +1052,11 @@ button:disabled { opacity: .4; cursor: default; }
   background: transparent;
   color: var(--muted);
   border-radius: 6px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1;
 }
 .taskRow .t-link:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); }
-.taskRow .t-model { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.taskRow .t-model { font-size: 0.6875rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
 /* A prompt waiting for the local model keeps its own actions. */
 .queuedPrompt {
   display: flex;
@@ -1025,11 +1071,11 @@ button:disabled { opacity: .4; cursor: default; }
 }
 /* One line only: a queued message can be long and the banner must not grow.
    Display only — the whole text is still what gets sent. */
-.queuedPrompt .queuedText { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.queuedPrompt .queuedText { flex: 1; min-width: 0; font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queuedPrompt button { flex-shrink: 0; }
 
 .taskRow .t-queue {
-  font-size: 10px;
+  font-size: 0.625rem;
   color: #fbbf24;
   border: 1px solid rgba(251, 191, 36, 0.45);
   border-radius: 999px;
@@ -1040,14 +1086,14 @@ button:disabled { opacity: .4; cursor: default; }
 
 /* Sessions screen: what is running now, then recent history (§ TZ Sessions). */
 .taskGroup {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--muted);
   margin: 10px 2px 2px;
 }
 .taskGroup:first-child { margin-top: 2px; }
-.tasks .none { font-size: 12.5px; color: var(--muted); padding: 8px 2px; }
+.tasks .none { font-size: 0.78125rem; color: var(--muted); padding: 8px 2px; }
 
 .detail {
   background: var(--surface);
@@ -1061,7 +1107,7 @@ button:disabled { opacity: .4; cursor: default; }
   list-style: none;
 }
 .detail summary::-webkit-details-marker { display: none; }
-.detail summary h2 { margin: 0; font-size: 14px; letter-spacing: 0.3px; }
+.detail summary h2 { margin: 0; font-size: 0.875rem; letter-spacing: 0.3px; }
 .detail summary h2::before { content: '▸ '; color: var(--muted); }
 .detail[open] summary h2::before { content: '▾ '; }
 .detailBody {
@@ -1080,12 +1126,12 @@ button:disabled { opacity: .4; cursor: default; }
   padding: 10px;
 }
 .session .r { min-width: 0; }
-.session .r span { display: block; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
-.session .r b { display: block; font-size: 12px; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
+.session .r span { display: block; font-size: 0.65625rem; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); }
+.session .r b { display: block; font-size: 0.75rem; font-weight: 600; margin-top: 2px; overflow-wrap: anywhere; }
 .session .r.taskNameRow { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
 .session .r.taskNameRow span { flex-shrink: 0; }
 .session .r.taskNameRow b { flex: 1; min-width: 0; margin-top: 0; }
-.session .r.taskNameRow button { flex-shrink: 0; padding: 3px 7px; font-size: 12px; }
+.session .r.taskNameRow button { flex-shrink: 0; padding: 3px 7px; font-size: 0.75rem; }
 
 .contextBar {
   height: 5px;
@@ -1102,7 +1148,7 @@ button:disabled { opacity: .4; cursor: default; }
 .contextBarFill.warn { background: var(--warn); }
 .contextBarFill.danger { background: var(--danger); }
 
-.fieldLabel { font-size: 11.5px; color: var(--muted); }
+.fieldLabel { font-size: 0.71875rem; color: var(--muted); }
 .inline { display: flex; gap: 8px; }
 .inline input {
   flex: 1;
@@ -1113,7 +1159,7 @@ button:disabled { opacity: .4; cursor: default; }
   border-radius: var(--radius-s);
   padding: 8px 10px;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 0.78125rem;
   outline: none;
 }
 .inline input:focus { border-color: var(--accent); }
@@ -1124,7 +1170,7 @@ button:disabled { opacity: .4; cursor: default; }
 .artifacts { display: flex; flex-wrap: wrap; gap: 6px; }
 .fileCards { display: flex; flex-wrap: wrap; gap: 6px; }
 .artifacts a {
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   color: var(--cyan);
   text-decoration: none;
   border: 1px solid rgba(94, 231, 247, 0.3);
@@ -1133,14 +1179,14 @@ button:disabled { opacity: .4; cursor: default; }
 }
 .artifacts a:hover { background: rgba(94, 231, 247, 0.08); }
 
-details summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+details summary { cursor: pointer; font-size: 0.75rem; color: var(--muted); }
 pre {
   background: #0a0e18;
   border: 1px solid var(--border);
   border-radius: var(--radius-s);
   padding: 10px 12px;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -1151,7 +1197,7 @@ pre {
 
 .hidden { display: none; }
 .muted { color: var(--muted); }
-.small { font-size: 11.5px; }
+.small { font-size: 0.71875rem; }
 
 /* ---------- responsive ---------- */
 /* Only .msgs and .panel scroll internally, at every width — the page itself
@@ -1171,7 +1217,7 @@ pre {
 
   .headerActions { flex-basis: 100%; justify-content: flex-start; }
   .runtimeControl select { max-width: 84px; }
-  #pairButton { padding: 6px 8px; font-size: 11px; }
+  #pairButton { padding: 6px 8px; font-size: 0.6875rem; }
 }
 
 /* Interactive tool approvals (§52–§55) */
@@ -1186,7 +1232,7 @@ pre {
 }
 .approvalCard code {
   display: block;
-  font-size: 12px;
+  font-size: 0.75rem;
   word-break: break-all;
   background: rgba(0, 0, 0, 0.25);
   padding: 6px 8px;
@@ -1210,7 +1256,7 @@ body.cloud-mode [data-pc-only] { display: none; }
 .modelBar { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .modelChip {
   max-width: 100%;
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   color: var(--text);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-strong);
@@ -1225,12 +1271,12 @@ body.cloud-mode [data-pc-only] { display: none; }
 
 /* Live system/model state chip (see renderSysState): GPU/RAM/CPU plus the
    loaded model's PP/TG, so a slow answer can be told apart from a slow PC. */
-.sysState { position: relative; font-size: 11.5px; }
+.sysState { position: relative; font-size: 0.71875rem; }
 .sysState > summary {
   list-style: none;
   cursor: pointer;
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--muted);
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid var(--border-strong);
@@ -1255,7 +1301,7 @@ body.cloud-mode [data-pc-only] { display: none; }
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.5);
   padding: 10px 12px;
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   line-height: 1.55;
   color: var(--text);
 }
@@ -1267,12 +1313,12 @@ body.cloud-mode [data-pc-only] { display: none; }
   border-radius: var(--radius-s);
   padding: 9px 10px;
   font: inherit;
-  font-size: 13px;
+  font-size: 0.8125rem;
   outline: none;
 }
 #modelSearch:focus, #modelThinking:focus, #mcpMode:focus { border-color: var(--accent); }
 .modelGroup {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   text-transform: uppercase;
   letter-spacing: 0.6px;
   color: var(--muted);
@@ -1293,12 +1339,12 @@ body.cloud-mode [data-pc-only] { display: none; }
 }
 .modelItem:hover { border-color: var(--accent); }
 .modelItem.active { border-color: var(--accent); background: rgba(167, 139, 250, 0.12); }
-.modelItem .modelId { font-size: 12.5px; font-weight: 600; overflow-wrap: anywhere; }
-.modelItem .modelMeta { font-size: 10.5px; color: var(--muted); }
+.modelItem .modelId { font-size: 0.78125rem; font-weight: 600; overflow-wrap: anywhere; }
+.modelItem .modelMeta { font-size: 0.65625rem; color: var(--muted); }
 .session .r.taskModelRow { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; }
 .session .r.taskModelRow span { flex-shrink: 0; }
 .session .r.taskModelRow b { flex: 1; min-width: 0; margin-top: 0; }
-.session .r.taskModelRow button { flex-shrink: 0; padding: 3px 7px; font-size: 12px; }
+.session .r.taskModelRow button { flex-shrink: 0; padding: 3px 7px; font-size: 0.75rem; }
 
 /* ---------------- local llama.cpp router ---------------- */
 
@@ -1309,7 +1355,7 @@ body.cloud-mode [data-pc-only] { display: none; }
   border: 1px solid rgba(251, 191, 36, 0.45);
   background: rgba(251, 191, 36, 0.1);
   color: var(--text);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.45;
 }
 .localProgress { display: flex; flex-direction: column; gap: 4px; }
@@ -1352,13 +1398,13 @@ body.cloud-mode [data-pc-only] { display: none; }
   gap: 2px;
 }
 .localModel .name {
-  font-size: 13.5px;
+  font-size: 0.84375rem;
   font-weight: 600;
   color: var(--fg);
   overflow-wrap: anywhere;
 }
 .localModel .modelSubpath {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   color: var(--muted);
   opacity: 0.75;
@@ -1377,7 +1423,7 @@ body.cloud-mode [data-pc-only] { display: none; }
 .badge {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 500;
   padding: 2px 7px;
   border-radius: 999px;
@@ -1417,13 +1463,13 @@ body.cloud-mode [data-pc-only] { display: none; }
   background: rgba(255, 255, 255, 0.03);
 }
 .ctxBadge {
-  font-size: 10.5px;
+  font-size: 0.65625rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
 
 .modelGroup {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1439,7 +1485,7 @@ body.cloud-mode [data-pc-only] { display: none; }
   flex-shrink: 0;
 }
 .localModel .rowActions button {
-  font-size: 11.5px;
+  font-size: 0.71875rem;
   padding: 5px 11px;
   border-radius: 6px;
 }
@@ -1483,8 +1529,8 @@ body.cloud-mode [data-pc-only] { display: none; }
 
 .mcpServer { display: flex; flex-direction: column; gap: 4px; }
 .mcpTools { margin-left: 2px; }
-.mcpTools summary { cursor: pointer; font-size: 11.5px; color: var(--muted); }
-.toolLine { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 12px; }
+.mcpTools summary { cursor: pointer; font-size: 0.71875rem; color: var(--muted); }
+.toolLine { display: flex; align-items: center; gap: 8px; padding: 3px 0 3px 14px; font-size: 0.75rem; }
 .toolLine input { flex-shrink: 0; }
 .toolLine span { overflow-wrap: anywhere; }
 
@@ -1492,7 +1538,7 @@ body.cloud-mode [data-pc-only] { display: none; }
 .liveMetrics {
   margin: 0 0 4px;
   padding: 3px 10px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -1502,7 +1548,7 @@ body.cloud-mode [data-pc-only] { display: none; }
 
 /* Message times: when it was sent (operator) and when it started/ended (answer). */
 .msgTime {
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--muted);
   opacity: .75;
   font-variant-numeric: tabular-nums;

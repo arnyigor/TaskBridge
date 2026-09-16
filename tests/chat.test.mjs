@@ -250,7 +250,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, openFileViewer, closeFileViewer, viewerKind, openWithMachine, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings(); }, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -343,9 +343,10 @@ test('DOM: a text file opens in the built-in viewer instead of downloading', asy
   await new Promise(resolve => setTimeout(resolve, 0));
   const overlay = app.document.getElementById('fileViewerOverlay');
   assert.equal(overlay.classList.contains('hidden'), false, 'the viewer opens');
-  const pre = overlay.querySelector('pre.fileViewerText');
-  assert.ok(pre, 'the text is rendered in the viewer');
-  assert.equal(pre.textContent, 'hello from notes');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const rendered = overlay.querySelector('.md');
+  assert.ok(rendered, 'the text is rendered in the viewer (as a code block)');
+  assert.match(rendered.textContent, /hello from notes/);
 });
 
 test('DOM: an unrenderable file is handed to the browser instead of the viewer', async () => {
@@ -355,15 +356,15 @@ test('DOM: an unrenderable file is handed to the browser instead of the viewer',
   assert.equal(app.document.getElementById('fileViewerOverlay').classList.contains('hidden'), true, 'binary files skip the in-app viewer');
 });
 
-test('DOM: on the machine a file chip opens natively instead of in the viewer', async () => {
+test('DOM: a plain click opens the viewer on every platform; native open is its own icon', async () => {
   const app = await ui();
   app.setServerLocal(true);
   app.tasks.a.files = [{ id: '11111111-1111-1111-1111-111111111111', name: 'notes.txt', mimeType: 'text/plain', path: '.taskbridge-input/a/f/notes.txt' }];
   const calls = [];
   app.setFetchHook(async (url, options = {}) => {
-    if (!url.includes('/open')) return null;
-    calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') });
-    return { ok: true, json: async () => ({ opened: true }) };
+    if (url.includes('/open')) { calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') }); return { ok: true, json: async () => ({ opened: true }) }; }
+    if (url.includes('/files/')) return { ok: true, text: async () => 'file text' };
+    return null;
   });
   await app.selectTask('a');
   const chip = app.document.querySelector('.turn.me .fileChip');
@@ -373,12 +374,20 @@ test('DOM: on the machine a file chip opens natively instead of in the viewer', 
   await new Promise(resolve => setTimeout(resolve, 0));
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(click.defaultPrevented, true, 'the browser must not navigate');
-  assert.equal(calls.length, 1, 'exactly one open request');
-  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls.length, 0, 'a plain click does not open natively anymore');
+  assert.equal(app.document.getElementById('fileViewerOverlay').classList.contains('hidden'), false, 'the viewer opens, as on a phone');
+
+  // Native open is an explicit, machine-only icon (↗).
+  const openNative = chip.querySelector('a.openIcon');
+  assert.ok(openNative, 'the machine has an open-in-app control');
+  const event = new app.window.Event('click', { cancelable: true });
+  openNative.dispatchEvent(event);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/api\/tasks\/a\/files\/11111111-1111-1111-1111-111111111111\/open$/);
-  assert.equal(calls[0].body.confirm, true);
   assert.equal(calls[0].body.reveal, false);
-  assert.equal(app.document.getElementById('fileViewerOverlay').classList.contains('hidden'), true, 'the viewer is not used on the machine');
+  assert.equal(calls[0].body.confirm, true);
 });
 
 test('DOM: the reveal control asks the machine to show the folder', async () => {
@@ -600,6 +609,88 @@ test('DOM: a markdown table is wrapped in its own scroll box', async () => {
   assert.equal(box.querySelectorAll('.tableWrap').length, 1, 'wrapping is idempotent');
 });
 
+test('DOM: a markdown file in the viewer is rendered, not shown as its source', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.setFetchHook(async url => (url.includes('readme.md') ? { ok: true, text: async () => '# Заголовок\n\nтекст' } : null));
+  app.openFileViewer({ url: '/api/tasks/a/workspace-file?path=readme.md', name: 'readme.md' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const body = app.document.getElementById('fileViewerBody');
+  assert.ok(body.querySelector('.md'), 'rendered as markdown');
+  assert.equal(body.querySelector('pre.fileViewerText'), null, 'not as raw source');
+});
+
+test('DOM: a code file renders as a code block, a CSV as a table', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.setFetchHook(async url => {
+    if (url.includes('main.js')) return { ok: true, text: async () => 'const a = 1;\n' };
+    if (url.includes('data.csv')) return { ok: true, text: async () => 'name,age\nа,1\nб,2\n' };
+    return null;
+  });
+  app.openFileViewer({ url: '/api/tasks/a/workspace-file?path=main.js', name: 'main.js' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const body = app.document.getElementById('fileViewerBody');
+  assert.ok(body.querySelector('.md'), 'code is shown like a code block');
+  assert.equal(body.querySelector('pre.fileViewerText'), null, 'not as a plain raw pre');
+
+  app.openFileViewer({ url: '/api/tasks/a/workspace-file?path=data.csv', name: 'data.csv' });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const table = app.document.getElementById('fileViewerBody').querySelector('table');
+  assert.ok(table, 'csv rendered as a table');
+  assert.deepEqual([...table.querySelectorAll('thead th')].map(cell => cell.textContent), ['name', 'age']);
+  assert.equal(table.querySelectorAll('tbody tr').length, 2);
+});
+
+test('DOM: the viewer shows the folder on the machine and Download on a phone', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const openCalls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (url.includes('/open')) { openCalls.push(JSON.parse(options.body || '{}')); return { ok: true, json: async () => ({ opened: true }) }; }
+    return { ok: true, text: async () => 'text' };
+  });
+  const openIt = async () => {
+    app.openFileViewer({ url: '/api/tasks/a/workspace-file?path=readme.txt', name: 'readme.txt' });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    await new Promise(resolve => setTimeout(resolve, 0));
+  };
+  await openIt();
+  assert.equal(app.document.getElementById('fileViewerDownload').classList.contains('hidden'), false, 'a phone keeps Download');
+  assert.equal(app.document.getElementById('fileViewerReveal').classList.contains('hidden'), true, 'a phone has no folder button');
+
+  app.setServerLocal(true);
+  await openIt();
+  assert.equal(app.document.getElementById('fileViewerDownload').classList.contains('hidden'), true, 'the machine replaces Download with the folder');
+  const reveal = app.document.getElementById('fileViewerReveal');
+  assert.equal(reveal.classList.contains('hidden'), false, 'the machine shows the folder button');
+  await reveal.onclick();
+  assert.equal(openCalls.at(-1).reveal, true, 'and it asks the machine to reveal the file');
+});
+
+test('DOM: a fresh desktop gets a wider default than a phone, at the normal font size', async () => {
+  const app = await ui();
+  app.localStorage.store = {}; // nothing saved yet
+  app.window.innerWidth = 1600;
+  const desktop = app.loadUiSettings();
+  assert.equal(desktop.scale, 1, 'desktop keeps the normal font');
+  assert.equal(desktop.width, 'wide', 'desktop width');
+  app.localStorage.store = {};
+  app.window.innerWidth = 380;
+  const phone = app.loadUiSettings();
+  assert.equal(phone.scale, 1, 'phone scale');
+  assert.equal(phone.width, 'normal', 'phone width');
+  // A saved choice always wins over the screen-based default.
+  app.window.innerWidth = 1600;
+  app.localStorage.setItem('taskbridge-ui', JSON.stringify({ scale: 1, width: 'normal', v: 2 }));
+  const saved = app.loadUiSettings();
+  assert.equal(saved.scale, 1);
+  assert.equal(saved.width, 'normal');
+});
+
 test('DOM: interface settings change the scale and width, and persist', async () => {
   const app = await ui();
   const root = app.document.documentElement;
@@ -608,11 +699,11 @@ test('DOM: interface settings change the scale and width, and persist', async ()
   app.setUiSettings({ width: 'wide' });
   assert.equal(root.style.getPropertyValue('--app-max'), '1500px');
   assert.equal(root.style.getPropertyValue('--msgs-max'), '1000px');
-  assert.deepEqual(JSON.parse(app.localStorage.getItem('taskbridge-ui')), { scale: 1.3, width: 'wide' });
+  assert.deepEqual(JSON.parse(app.localStorage.getItem('taskbridge-ui')), { scale: 1.3, width: 'wide', v: 2 });
   app.document.getElementById('uiSettingsReset').onclick();
   assert.equal(root.style.getPropertyValue('--ui-scale'), '1', 'reset restores the default scale');
   assert.equal(root.style.getPropertyValue('--app-max'), '1100px');
-  assert.deepEqual(JSON.parse(app.localStorage.getItem('taskbridge-ui')), { scale: 1, width: 'normal' });
+  assert.deepEqual(JSON.parse(app.localStorage.getItem('taskbridge-ui')), { scale: 1, width: 'normal', v: 2 });
 });
 
 test('DOM: a queued prompt for a waiting session cannot jump ahead of the busy one', async () => {
@@ -640,6 +731,42 @@ test('DOM: a queued prompt for a waiting session cannot jump ahead of the busy o
   await app.refreshTask();
   const own = [...app.document.getElementById('queuedPrompt').querySelectorAll('button')].find(button => button.textContent === 'Отправить сейчас');
   assert.equal(own.disabled, false, 'the owner can send into its own turn');
+});
+
+test('DOM: code is highlighted without changing the text that gets copied', async () => {
+  const app = await ui();
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-js">const a = "hi"; // note</code></pre>';
+  const code = box.querySelector('code');
+  const before = code.textContent;
+  app.highlightCode(box);
+  assert.equal(code.textContent, before, 'the characters are unchanged');
+  assert.ok(code.querySelector('.tok-keyword'), 'keywords are wrapped');
+  assert.ok(code.querySelector('.tok-string'), 'strings are wrapped');
+  assert.ok(code.querySelector('.tok-comment'), 'comments are wrapped');
+});
+
+test('DOM: a code block copies its declared source, not the rendered text', async () => {
+  const app = await ui();
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-json">pretty()</code></pre>';
+  app.addCodeCopyButtons(box);
+  box.querySelector('code').setAttribute('data-copy', 'ORIGINAL JSON');
+  await box.querySelector('.codeCopyBtn').onclick();
+  assert.equal(app.copied.at(-1), 'ORIGINAL JSON', 'the original text is copied');
+});
+
+test('DOM: code-block actions sit outside the scrolling pre, so they stay put', async () => {
+  const app = await ui();
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-bash">echo hi</code></pre>';
+  app.addCodeCopyButtons(box);
+  const wrap = box.querySelector('.codeWrap');
+  assert.ok(wrap, 'the code has a wrapper');
+  const actions = box.querySelector('.codeActions');
+  assert.equal(actions.parentElement, wrap, 'the actions live in the wrapper');
+  assert.equal(box.querySelector('pre .codeActions'), null, 'not inside the scrolling pre');
+  assert.ok(wrap.querySelector('pre'), 'the code itself stays in the wrapper');
 });
 
 test('DOM: code-block actions share one flex row, so they cannot overlap', async () => {

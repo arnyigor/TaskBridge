@@ -123,6 +123,58 @@ function botBadge() {
 const IMAGE_MIME_RE = /^image\//;
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
 const PDF_EXT_RE = /\.pdf$/i;
+// Markdown shown in the built-in viewer is rendered, not dumped as raw text.
+const MARKDOWN_EXT_RE = /\.(?:md|markdown|mdx)$/i;
+const isMarkdownFile = name => MARKDOWN_EXT_RE.test(String(name || ''));
+const CSV_EXT_RE = /\.(?:csv|tsv)$/i;
+const viewerLanguage = name => (String(name).match(/\.([a-z0-9]+)$/i) || [])[1]?.toLowerCase() || '';
+
+// Minimal CSV/TSV reader: handles quoted fields (with "" escapes) so a cell that
+// contains the delimiter is not split.
+function parseDelimited(text, delimiter) {
+  const rows = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (quoted) {
+      if (char === '"') {
+        if (text[index + 1] === '"') { field += '"'; index++; }
+        else quoted = false;
+      } else field += char;
+    } else if (char === '"') quoted = true;
+    else if (char === delimiter) { row.push(field); field = ''; }
+    else if (char === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (char !== '\r') field += char;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function delimitedTable(name, text) {
+  const rows = parseDelimited(text, /\.tsv$/i.test(name) ? '\t' : ',').filter(row => row.some(cell => cell !== ''));
+  const wrap = document.createElement('div');
+  wrap.className = 'tableWrap';
+  const table = document.createElement('table');
+  const [header, ...body] = rows;
+  if (header) {
+    const thead = document.createElement('thead');
+    const tr = document.createElement('tr');
+    for (const cell of header) { const th = document.createElement('th'); th.textContent = cell; tr.append(th); }
+    thead.append(tr);
+    table.append(thead);
+  }
+  const tbody = document.createElement('tbody');
+  for (const row of body) {
+    const tr = document.createElement('tr');
+    for (const cell of row) { const td = document.createElement('td'); td.textContent = cell; tr.append(td); }
+    tbody.append(tr);
+  }
+  table.append(tbody);
+  wrap.append(table);
+  return wrap;
+}
 // Files the machine can run as scripts (mirror of scriptCommand on the server).
 // Only these get the "выполнить" action.
 const RUNNABLE_EXT_RE = /\.(?:bat|cmd|ps1|sh|bash|py|js|mjs|cjs|rb|pl)$/i;
@@ -174,10 +226,12 @@ function fileCard(file, taskId) {
   // On the machine a plain click opens the file with its own application (the
   // localhost-only route). Everywhere else, and as a fallback, it opens the
   // built-in viewer. A modifier click still opens a new tab.
+  // A plain click always opens the built-in viewer — the same behaviour on the
+  // phone and on the PC. Native actions live on their own icons below.
   open.onclick = (event) => {
     if (event.ctrlKey || event.metaKey || event.shiftKey) return;
     event.preventDefault();
-    openWithMachine(viewUrl, file.name);
+    openFileViewer({ url: viewUrl, name: file.name });
   };
   const download = document.createElement('a');
   download.href = fileUrl(taskId, file.id, true);
@@ -199,7 +253,16 @@ function fileCard(file, taskId) {
   // machine — allowed on the machine and for an authenticated client (a phone)
   // — so it is hidden only where running is impossible (CSS, body.machine-exec)
   // and always asks before running anything.
-  const actions = [reveal];
+  // Machine-only: open with the OS application (↗). The folder icon (📂) is the
+  // reveal action; both are explicit so a plain click stays consistent.
+  const openNative = document.createElement('a');
+  openNative.href = '#';
+  openNative.className = 'openIcon';
+  openNative.title = 'Открыть в приложении';
+  openNative.setAttribute('aria-label', `Открыть ${file.name} в приложении`);
+  openNative.append(messageIcon('external'));
+  openNative.onclick = (event) => { event.preventDefault(); machineActionAlert(machineOpenPath(viewUrl), false); };
+  const actions = [openNative, reveal];
   if (isRunnableFile(file.name)) {
     const run = document.createElement('a');
     run.href = '#';
@@ -607,17 +670,6 @@ async function machineActionAlert(openPath, reveal = false) {
   return !error;
 }
 
-// Plain click on a file when the UI runs on the machine: open it natively. If
-// the OS refuses (no application for the extension, file gone), fall back to the
-// built-in viewer so the click still shows something.
-async function openWithMachine(viewUrl, name) {
-  if (serverIsLocal) {
-    const error = await machineAction(machineOpenPath(viewUrl), false);
-    if (!error) return;
-  }
-  openFileViewer({ url: viewUrl, name });
-}
-
 // Run a script on the machine and show what it printed. Machine-only, and the
 // caller has already asked for confirmation: running a file is a real action,
 // not a preview.
@@ -745,10 +797,12 @@ function showRunResult(title, result) {
     body.append(actions);
   }
   body.append(pre);
-  // No download/new-tab here: this panel shows a command's output. The one
-  // action that belongs is copying the text the operator is looking at.
+  // No download/new-tab/folder here: this panel shows a command's output. The
+  // one action that belongs is copying the text the operator is looking at.
   $('fileViewerDownload').classList.add('hidden');
   $('fileViewerExternal').classList.add('hidden');
+  const runReveal = $('fileViewerReveal');
+  if (runReveal) runReveal.classList.add('hidden');
   const copy = $('fileViewerCopy');
   if (copy) {
     copy.classList.remove('hidden');
@@ -774,10 +828,17 @@ function openFileViewer({ url, name = '', downloadUrl = null } = {}) {
   $('fileViewerName').textContent = name || 'Файл';
   const body = $('fileViewerBody');
   body.textContent = '';
-  $('fileViewerDownload').classList.remove('hidden');
   $('fileViewerExternal').classList.remove('hidden');
   const copyButton = $('fileViewerCopy');
   if (copyButton) { copyButton.classList.add('hidden'); copyButton.onclick = null; }
+  // On the machine the file's folder is one click away, so it replaces Download;
+  // a phone has no local folder, so it keeps Download.
+  const revealButton = $('fileViewerReveal');
+  if (revealButton) {
+    revealButton.classList.toggle('hidden', !serverIsLocal);
+    revealButton.onclick = () => machineActionAlert(machineActionPath(url, 'open'), true);
+  }
+  $('fileViewerDownload').classList.toggle('hidden', serverIsLocal);
   $('fileViewerDownload').onclick = () => triggerDownload(downloadUrl || downloadUrlFor(url), name);
   $('fileViewerExternal').onclick = () => openExternal(url);
   overlay.classList.remove('hidden');
@@ -808,11 +869,36 @@ function openFileViewer({ url, name = '', downloadUrl = null } = {}) {
     return response.text();
   }).then(text => {
     if (request !== fileViewerRequest) return; // a newer file replaced this one
-    const pre = document.createElement('pre');
-    pre.className = 'fileViewerText';
-    pre.textContent = text;
     body.textContent = '';
-    body.append(pre);
+    const md = document.createElement('div');
+    md.className = 'md';
+    // Markdown is rendered (headings, tables, code, links).
+    if (isMarkdownFile(name)) {
+      body.append(md);
+      renderMarkdown(md, text);
+      return;
+    }
+    // A table-shaped file is shown as a table.
+    if (CSV_EXT_RE.test(name)) {
+      md.append(delimitedTable(name, text));
+      body.append(md);
+      return;
+    }
+    // Everything else textual is shown as a code block: monospace, horizontal
+    // scroll, a copy button — the same look as code in the chat. JSON is
+    // pretty-printed first. The block is read-only here, so its "Выполнить"
+    // button (added for shell languages) is dropped.
+    let source = text;
+    if (/\.json$/i.test(name)) {
+      try { source = JSON.stringify(JSON.parse(text), null, 2); } catch { /* keep the raw text */ }
+    }
+    body.append(md);
+    renderMarkdown(md, '```' + viewerLanguage(name) + '\n' + source.replace(/\n+$/, '') + '\n```');
+    // The block is read-only here, and the clipboard must hold the original file
+    // — not the fence and not the pretty-printed JSON. `data-copy` says so.
+    const block = md.querySelector('code');
+    if (block) block.setAttribute('data-copy', text);
+    for (const run of md.querySelectorAll('.codeRunBtn')) run.remove();
   }).catch(error => {
     if (request === fileViewerRequest) message.textContent = `Не удалось показать файл: ${error.message}`;
   });
@@ -1317,7 +1403,8 @@ const MESSAGE_ICONS = {
   cross: [['line', { x1: '18', y1: '6', x2: '6', y2: '18' }], ['line', { x1: '6', y1: '6', x2: '18', y2: '18' }]],
   download: [['polyline', { points: '21 15 21 19 21 19 3 19 3 15' }], ['line', { x1: '7', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '17', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '12', y1: '15', x2: '12', y2: '3' }]],
   folder: [['path', { d: 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z' }]],
-  run: [['polygon', { points: '6 3 20 12 6 21 6 3' }]]
+  run: [['polygon', { points: '6 3 20 12 6 21 6 3' }]],
+  external: [['path', { d: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6' }], ['polyline', { points: '15 3 21 3 21 9' }], ['line', { x1: '10', y1: '14', x2: '21', y2: '3' }]]
 };
 function messageIcon(name) {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -2144,7 +2231,7 @@ async function loadArtifacts(timeoutMs = null) {
       a.onclick = (event) => {
         if (event.ctrlKey || event.metaKey || event.shiftKey) return;
         event.preventDefault();
-        openWithMachine(url, a.textContent);
+        openFileViewer({ url, name: a.textContent });
       };
     }
   } catch {}
@@ -2246,7 +2333,7 @@ function updateClearButton() {
 
 function clearComposerInput() {
   promptEl.value = '';
-  promptEl.style.height = 'auto';
+  promptEl.style.height = '';
   $('files').value = '';
   $('fileList').textContent = '';
   drafts.delete(selectedTaskId || '__new__');
@@ -2268,18 +2355,39 @@ const UI_WIDTHS = {
 };
 let uiSettings = { scale: 1, width: 'normal' };
 
+// Never-saved defaults follow the screen: a desktop has the room for larger text
+// and a wider column, a phone does not. A saved choice always wins.
+function isWideScreen() {
+  if (typeof window === 'undefined') return false;
+  if (Number.isFinite(window.innerWidth) && window.innerWidth >= 1100) return true;
+  return Boolean(window.matchMedia && window.matchMedia('(min-width: 1100px)').matches);
+}
+
 function loadUiSettings() {
   let saved = {};
   try { saved = JSON.parse((typeof localStorage === 'undefined' ? null : localStorage.getItem(UI_SETTINGS_KEY)) || '{}') || {}; } catch { saved = {}; }
   const scale = Number(saved.scale);
+  // Only a record written by the settings panel (`v: 2`) counts as a choice. An
+  // older record is the implicit old default, not a decision, so it must not
+  // pin a desktop to the small layout any more.
+  const chosen = saved.v === 2;
+  const knownScale = chosen && Number.isFinite(scale) && scale >= 0.8 && scale <= 2 ? scale : null;
+  const knownWidth = chosen && UI_WIDTHS[saved.width] ? saved.width : null;
+  if (knownScale !== null && knownWidth !== null) {
+    uiSettings = { scale: knownScale, width: knownWidth };
+    return uiSettings;
+  }
+  const wide = isWideScreen();
   uiSettings = {
-    scale: Number.isFinite(scale) && scale >= 0.8 && scale <= 2 ? scale : 1,
-    width: UI_WIDTHS[saved.width] ? saved.width : 'normal'
+    // Font stays at its normal size by default (the larger one was too much);
+    // only the column is wider on a desktop screen.
+    scale: knownScale ?? 1,
+    width: knownWidth ?? (wide ? 'wide' : 'normal')
   };
   return uiSettings;
 }
 
-function applyUiSettings() {
+function applyUiSettings({ persist = false } = {}) {
   const style = document.documentElement.style;
   style.setProperty('--ui-scale', String(uiSettings.scale));
   const width = UI_WIDTHS[uiSettings.width] || UI_WIDTHS.normal;
@@ -2287,34 +2395,64 @@ function applyUiSettings() {
   style.setProperty('--msgs-max', width.msgs);
   if ($('uiScaleSelect')) $('uiScaleSelect').value = String(uiSettings.scale);
   if ($('uiWidthSelect')) $('uiWidthSelect').value = uiSettings.width;
-  try { if (typeof localStorage !== 'undefined') localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(uiSettings)); } catch { /* private mode */ }
+  // Only an explicit choice is remembered; the screen-based default must not
+  // freeze itself into storage (a desktop would then stay small forever).
+  if (persist) {
+    try { if (typeof localStorage !== 'undefined') localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify({ ...uiSettings, v: 2 })); } catch { /* private mode */ }
+  }
   return uiSettings;
 }
 
-$('uiSettingsButton').onclick = () => $('uiSettingsOverlay').classList.remove('hidden');
-$('uiSettingsClose').onclick = () => $('uiSettingsOverlay').classList.add('hidden');
-$('uiSettingsReset').onclick = () => { uiSettings = { scale: 1, width: 'normal' }; applyUiSettings(); };
-$('uiScaleSelect').onchange = () => { uiSettings.scale = Number($('uiScaleSelect').value) || 1; applyUiSettings(); };
-$('uiWidthSelect').onchange = () => { uiSettings.width = $('uiWidthSelect').value; applyUiSettings(); };
+// Guarded: a stale cached shell (old index.html) can arrive with this new app.js,
+// and a bare `$('id').onclick = …` on a missing element would throw at load and
+// leave the page blank. Every top-level binding that touches shell markup checks
+// the element first.
+const uiSettingsButton = $('uiSettingsButton');
+if (uiSettingsButton) uiSettingsButton.onclick = () => $('uiSettingsOverlay').classList.remove('hidden');
+const uiSettingsClose = $('uiSettingsClose');
+if (uiSettingsClose) uiSettingsClose.onclick = () => $('uiSettingsOverlay').classList.add('hidden');
+const uiSettingsReset = $('uiSettingsReset');
+if (uiSettingsReset) uiSettingsReset.onclick = () => { uiSettings = { scale: 1, width: 'normal' }; applyUiSettings({ persist: true }); };
+const uiScaleSelect = $('uiScaleSelect');
+if (uiScaleSelect) uiScaleSelect.onchange = () => { uiSettings.scale = Number(uiScaleSelect.value) || 1; applyUiSettings({ persist: true }); };
+const uiWidthSelect = $('uiWidthSelect');
+if (uiWidthSelect) uiWidthSelect.onchange = () => { uiSettings.width = uiWidthSelect.value; applyUiSettings({ persist: true }); };
 
 // Applied at load (not only in init) so the first paint already has them and the
 // shell is not briefly shown at the default size.
 loadUiSettings();
 applyUiSettings();
 
-promptEl.addEventListener('input', () => {
+// Grow-only auto-height, batched to one resize per frame and skipped while an
+// IME composition is running. The old code reset the height to `auto` on every
+// keystroke; on a phone that made the composer twitch up and down under the
+// caret. It is cleared back to the default only when the box is emptied.
+let promptResizeFrame = null;
+function growPrompt() {
+  if (promptResizeFrame) return;
+  const schedule = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 0);
+  promptResizeFrame = schedule(() => {
+    promptResizeFrame = null;
+    const cap = 240;
+    const needed = promptEl.scrollHeight + 2; // + top/bottom border (border-box)
+    if (needed > promptEl.offsetHeight + 1 && promptEl.offsetHeight < cap) {
+      promptEl.style.height = `${Math.min(needed, cap)}px`;
+    }
+  });
+}
+
+promptEl.addEventListener('input', (event) => {
   // Third chance, and the one that always fires: whatever route the text took
   // (a paste without data, an autofill, a keyboard), a wall of text in the box is
   // moved into a file the moment it lands. This is the phone-safe path.
   if (promptEl.value.length > PASTE_FILE_THRESHOLD) {
     const text = promptEl.value;
     promptEl.value = '';
-    promptEl.style.height = 'auto';
+    promptEl.style.height = '';
     attachPastedText(text);
     return;
   }
-  promptEl.style.height = 'auto';
-  promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
+  if (!event.isComposing) growPrompt();
   // Saved on every keystroke: refreshing the same session must not wipe it.
   saveDraft(selectedTaskId || '__new__');
   updateClearButton();
@@ -2385,7 +2523,7 @@ $('form').addEventListener('submit', async (e) => {
       drafts.delete(draftKey);
       if (promptEl.value.trim() === prompt) {
         promptEl.value = '';
-        promptEl.style.height = 'auto';
+        promptEl.style.height = '';
         $('files').value = '';
         $('fileList').textContent = '';
       }
@@ -2622,7 +2760,7 @@ function rewriteMarkdownLinks(container) {
       a.onclick = (event) => {
         if (event.ctrlKey || event.metaKey || event.shiftKey) return;
         event.preventDefault();
-        openWithMachine(url, a.textContent || href);
+        openFileViewer({ url, name: a.textContent || href });
       };
     } else a.removeAttribute('href');
   }
@@ -2647,8 +2785,16 @@ function addCodeCopyButtons(container) {
   for (const pre of container.querySelectorAll('pre')) {
     const code = pre.querySelector('code');
     // Read the code from <code>, never from the <pre>: the buttons live inside
-    // the <pre>, so pre.textContent would copy their labels along with the code.
+    // the wrapper, so pre.textContent would copy their labels along with the code.
     const source = code ? code.textContent : pre.textContent;
+
+    // The actions must not scroll with the code: the <pre> is the scroll
+    // container, so a button inside it slid away on a horizontal scroll. They
+    // live in a wrapper around the <pre> instead.
+    const wrap = document.createElement('div');
+    wrap.className = 'codeWrap';
+    pre.replaceWith(wrap);
+    wrap.append(pre);
 
     // One wrapper holds the actions in a row: two absolutely positioned buttons
     // at guessed offsets overlapped on a narrow phone. The row lays them out with
@@ -2661,7 +2807,11 @@ function addCodeCopyButtons(container) {
     copy.className = 'codeCopyBtn';
     copy.textContent = 'Копировать';
     copy.onclick = async () => {
-      const ok = await copyText(source);
+      // Read at click time, and honour an explicit source (`data-copy`): syntax
+      // highlighting rewrites the inner HTML and a viewer's code fence adds a
+      // trailing newline — neither should change what lands in the clipboard.
+      const text = (code && code.getAttribute('data-copy')) ?? (code ? code.textContent : pre.textContent);
+      const ok = await copyText(text);
       copy.textContent = ok ? 'Скопировано' : 'Ошибка';
       setTimeout(() => { copy.textContent = 'Копировать'; }, 1500);
     };
@@ -2678,7 +2828,74 @@ function addCodeCopyButtons(container) {
       run.onclick = () => runShellCommand(source);
       actions.append(run);
     }
-    pre.append(actions);
+    wrap.append(actions);
+  }
+}
+
+/* ---------------- light syntax highlighting ---------------- */
+
+// A small, dependency-free highlighter: strings, comments, numbers and
+// keywords. It is deliberately conservative — an unknown language is left
+// plain — and it only rewrites the inner HTML with the *same* characters, so
+// `code.textContent` (and therefore the copy button) is untouched.
+const HL_KEYWORD_RE = /\b(?:const|let|var|function|return|if|else|for|while|do|switch|case|default|break|continue|new|delete|typeof|instanceof|in|of|void|yield|class|extends|super|this|import|export|from|as|async|await|try|catch|finally|throw|static|get|set|public|private|protected|interface|implements|abstract|final|enum|package|def|elif|lambda|pass|raise|with|global|nonlocal|and|or|not|is|None|True|False|self|fn|mut|pub|impl|trait|struct|use|mod|crate|match|where|unsafe|dyn|ref|val|fun|object|when|override|open|data|sealed|suspend|companion|init|by|end|then|begin|local|nil|elsif|unless|module|require|true|false|null|undefined|SELECT|FROM|WHERE|INSERT|INTO|VALUES|UPDATE|DELETE|CREATE|TABLE|JOIN|ON|GROUP|BY|ORDER|LIMIT|AND|OR|NOT|NULL)\b/;
+const HL_RULES = {
+  slash: [
+    { cls: 'string', re: /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/ },
+    { cls: 'comment', re: /\/\/[^\n]*|\/\*[\s\S]*?\*\// },
+    { cls: 'number', re: /\b(?:0[xX][0-9a-fA-F]+|\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\b/ },
+    { cls: 'keyword', re: HL_KEYWORD_RE }
+  ],
+  hash: [
+    { cls: 'string', re: /"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/ },
+    { cls: 'comment', re: /#[^\n]*/ },
+    { cls: 'number', re: /\b\d[\d_]*(?:\.\d+)?\b/ },
+    { cls: 'keyword', re: HL_KEYWORD_RE }
+  ],
+  sql: [
+    { cls: 'string', re: /'(?:''|[^'])*'/ },
+    { cls: 'comment', re: /--[^\n]*|\/\*[\s\S]*?\*\// },
+    { cls: 'number', re: /\b\d+(?:\.\d+)?\b/ },
+    { cls: 'keyword', re: HL_KEYWORD_RE }
+  ],
+  markup: [
+    { cls: 'comment', re: /<!--[\s\S]*?-->/ },
+    { cls: 'string', re: /"[^"]*"|'[^']*'/ },
+    { cls: 'keyword', re: /<\/?[a-zA-Z][\w:-]*|\/?>/ }
+  ]
+};
+const HL_LANGS = {
+  js: 'slash', mjs: 'slash', cjs: 'slash', jsx: 'slash', ts: 'slash', tsx: 'slash', java: 'slash', kt: 'slash', kts: 'slash',
+  c: 'slash', h: 'slash', cc: 'slash', cpp: 'slash', cxx: 'slash', hpp: 'slash', cs: 'slash', go: 'slash', rs: 'slash',
+  swift: 'slash', dart: 'slash', php: 'slash', scala: 'slash', groovy: 'slash', gradle: 'slash', css: 'slash', scss: 'slash', less: 'slash',
+  py: 'hash', rb: 'hash', pl: 'hash', sh: 'hash', bash: 'hash', zsh: 'hash', yaml: 'hash', yml: 'hash', toml: 'hash',
+  ini: 'hash', cfg: 'hash', conf: 'hash', properties: 'hash', env: 'hash', r: 'hash', ps1: 'hash', powershell: 'hash', pwsh: 'hash', dockerfile: 'hash', make: 'hash', mk: 'hash',
+  sql: 'sql', html: 'markup', htm: 'markup', xml: 'markup', svg: 'markup', vue: 'markup', svelte: 'markup'
+};
+
+function highlightText(text, family) {
+  const rules = HL_RULES[family];
+  if (!rules) return escapeHtml(text);
+  const master = new RegExp(rules.map(rule => `(${rule.re.source})`).join('|'), 'gm');
+  let out = '';
+  let last = 0;
+  let match;
+  while ((match = master.exec(text)) !== null) {
+    if (match[0] === '') { master.lastIndex++; continue; }
+    out += escapeHtml(text.slice(last, match.index));
+    const group = match.slice(1).findIndex(value => value !== undefined);
+    out += `<span class="tok-${rules[group]?.cls || ''}">${escapeHtml(match[0])}</span>`;
+    last = match.index + match[0].length;
+    if (master.lastIndex === match.index) master.lastIndex++;
+  }
+  return out + escapeHtml(text.slice(last));
+}
+
+function highlightCode(container) {
+  for (const code of container.querySelectorAll('pre code')) {
+    const family = HL_LANGS[codeLanguage(code)];
+    if (!family) continue;
+    code.innerHTML = highlightText(code.textContent, family);
   }
 }
 
@@ -2699,6 +2916,7 @@ function wrapTables(container) {
 function renderMarkdown(container, text) {
   container.innerHTML = DOMPurify.sanitize(marked.parse(text));
   rewriteMarkdownLinks(container);
+  highlightCode(container);
   addCodeCopyButtons(container);
   wrapTables(container);
 }
