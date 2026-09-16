@@ -1,9 +1,13 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 const fail = (message, code = 'AUTH_REQUIRED') => Object.assign(new Error(message), { code });
-const isLoopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(address);
+// An address as the OS reports it: IPv4-mapped IPv6 is unwrapped and an IPv6
+// zone id is dropped, so two spellings of the same host compare equal.
+const normalizeAddress = value => String(value || '').trim().replace(/^::ffff:/i, '').replace(/%.*$/, '');
+const isLoopback = address => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(normalizeAddress(address));
 const same = (a, b) => {
   const aa = Buffer.from(String(a)), bb = Buffer.from(String(b));
   return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
@@ -32,6 +36,41 @@ export class AccessControl {
     let host;
     try { host = new URL(`http://${req.headers.host}`).hostname; } catch { return false; }
     return isLoopback(req.socket.remoteAddress) && ['localhost', '127.0.0.1', '[::1]'].includes(host.toLowerCase());
+  }
+
+  // The address the request really came from. A loopback peer is either the
+  // browser on this machine or our own reverse proxy; the proxy appends the
+  // address it saw the request from as the LAST X-Forwarded-For entry, and that
+  // entry is the only one a client cannot forge (its own header is prepended).
+  clientAddress(req) {
+    const peer = normalizeAddress(req.socket?.remoteAddress);
+    if (isLoopback(peer)) {
+      const forwarded = String(req.headers['x-forwarded-for'] || '')
+        .split(',').map(normalizeAddress).filter(Boolean).pop();
+      if (forwarded) return forwarded;
+    }
+    return peer;
+  }
+
+  // True when the request came from the machine itself — a browser opened on
+  // 127.0.0.1, or one opened on the machine's own LAN address while a phone on
+  // the same network does not qualify. Needed for actions that run on the host
+  // (opening a file with its OS application), where the Host-only `local` check
+  // is too strict: on the LAN proxy every peer is loopback and Host is the only
+  // leg, so a PC using its LAN address would be mistaken for a phone.
+  isThisMachine(address) {
+    const value = normalizeAddress(address);
+    if (!value) return false;
+    if (isLoopback(value)) return true;
+    if (!this.ownAddresses) {
+      this.ownAddresses = new Set();
+      for (const list of Object.values(os.networkInterfaces())) for (const item of list || []) this.ownAddresses.add(normalizeAddress(item.address));
+    }
+    return this.ownAddresses.has(value);
+  }
+
+  machine(req) {
+    return this.isThisMachine(this.clientAddress(req));
   }
 
   sign(text) { return crypto.createHmac('sha256', this.secret).update(text).digest('hex'); }

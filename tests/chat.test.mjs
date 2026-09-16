@@ -190,15 +190,21 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
   const sockets = [];
   const tasks = { a: task('a'), b: { ...task('b'), prompt: 'Другой чат' } };
   let fetchHook;
+  // A spy for window.confirm so a test can assert that a destructive control
+  // asks first; default true keeps every other test's behaviour unchanged.
+  const confirms = [];
+  let confirmAnswer = true;
   // Sessions have their own address, so the app reads location and writes
   // history; linkedom provides neither.
   const urls = [];
+  // location.reload is called when the restarted server answers again.
+  const reloads = [];
   // Named *_stub to avoid shadowing this file's own history() event helper.
   const historyStub = {
     pushState: (state, title, url) => urls.push({ method: 'push', url }),
     replaceState: (state, title, url) => urls.push({ method: 'replace', url })
   };
-  const locationStub = { pathname: '/', href: 'http://localhost/', hostname: cloud ? 'taskbridge.example.app' : 'localhost' };
+  const locationStub = { pathname: '/', href: 'http://localhost/', hostname: cloud ? 'taskbridge.example.app' : 'localhost', reload: () => reloads.push(true) };
   if (cloud) {
     globalThis.__taskbridgeTestCloud = { url: 'wss://relay.example.app/api/relay', machineId: 'home-pc', deviceToken: 'device-token' };
   }
@@ -234,11 +240,11 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
       else if (path.pathname.endsWith('/artifacts')) body = [];
       else body = tasks[path.pathname.split('/')[3]];
       return { ok: true, json: async () => body };
-    }, alert() {}, confirm: () => true,
+    }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, setLastTasks: (list) => { lastTasks = list; }};', context);
-  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, location: locationStub, setFetchHook: hook => { fetchHook = hook; } };
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, addCodeCopyButtons, openFileViewer, closeFileViewer, viewerKind, openWithMachine, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, setLastTasks: (list) => { lastTasks = list; }};', context);
+  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -306,9 +312,249 @@ test('DOM: a model link to a picture renders inline instead of a download link',
   assert.ok(img, 'the image link becomes an inline <img>');
   assert.match(img.getAttribute('src'), /\/api\/tasks\/a\/workspace-file\?path=telegram_window\.png$/);
   assert.doesNotMatch(img.getAttribute('src'), /download=1/);
-  // A non-image link stays a download link as before.
+  // A non-image link now opens the file inline (no attachment switch) instead
+  // of pushing a download; the viewer is behind a plain click.
   const pdf = box.querySelector('a[href*="report.pdf"]');
-  assert.match(pdf.getAttribute('href'), /download=1/);
+  assert.match(pdf.getAttribute('href'), /workspace-file\?path=report\.pdf$/);
+  assert.doesNotMatch(pdf.getAttribute('href'), /download=1/);
+  assert.equal(typeof pdf.onclick, 'function', 'a plain click is intercepted');
+});
+
+test('DOM: a text file opens in the built-in viewer instead of downloading', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const box = app.document.createElement('div');
+  box.innerHTML = '<p><a href="notes.txt">notes.txt</a></p>';
+  app.rewriteMarkdownLinks(box);
+  const link = box.querySelector('a');
+  assert.match(link.getAttribute('href'), /workspace-file\?path=notes\.txt$/);
+  assert.doesNotMatch(link.getAttribute('href'), /download=1/);
+  app.setFetchHook(async url => (url.includes('notes.txt') ? { ok: true, text: async () => 'hello from notes' } : null));
+  const click = new app.window.Event('click', { bubbles: true, cancelable: true });
+  link.dispatchEvent(click);
+  assert.equal(click.defaultPrevented, true, 'the browser does not navigate/download');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const overlay = app.document.getElementById('fileViewerOverlay');
+  assert.equal(overlay.classList.contains('hidden'), false, 'the viewer opens');
+  const pre = overlay.querySelector('pre.fileViewerText');
+  assert.ok(pre, 'the text is rendered in the viewer');
+  assert.equal(pre.textContent, 'hello from notes');
+});
+
+test('DOM: an unrenderable file is handed to the browser instead of the viewer', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.openFileViewer({ url: '/api/tasks/a/files/x?x=1', name: 'archive.zip' });
+  assert.equal(app.document.getElementById('fileViewerOverlay').classList.contains('hidden'), true, 'binary files skip the in-app viewer');
+});
+
+test('DOM: on the machine a file chip opens natively instead of in the viewer', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  app.tasks.a.files = [{ id: '11111111-1111-1111-1111-111111111111', name: 'notes.txt', mimeType: 'text/plain', path: '.taskbridge-input/a/f/notes.txt' }];
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (!url.includes('/open')) return null;
+    calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') });
+    return { ok: true, json: async () => ({ opened: true }) };
+  });
+  await app.selectTask('a');
+  const chip = app.document.querySelector('.turn.me .fileChip');
+  const name = chip.querySelector('a'); // the first anchor is the file name
+  const click = new app.window.Event('click', { bubbles: true, cancelable: true });
+  name.dispatchEvent(click);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(click.defaultPrevented, true, 'the browser must not navigate');
+  assert.equal(calls.length, 1, 'exactly one open request');
+  assert.equal(calls[0].method, 'POST');
+  assert.match(calls[0].url, /\/api\/tasks\/a\/files\/11111111-1111-1111-1111-111111111111\/open$/);
+  assert.equal(calls[0].body.confirm, true);
+  assert.equal(calls[0].body.reveal, false);
+  assert.equal(app.document.getElementById('fileViewerOverlay').classList.contains('hidden'), true, 'the viewer is not used on the machine');
+});
+
+test('DOM: the reveal control asks the machine to show the folder', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  app.tasks.a.files = [{ id: '22222222-2222-2222-2222-222222222222', name: 'photo.png', mimeType: 'image/png', path: '.taskbridge-input/a/f/photo.png' }];
+  const bodies = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (!url.includes('/open')) return null;
+    bodies.push(JSON.parse(options.body || '{}'));
+    return { ok: true, json: async () => ({ opened: true }) };
+  });
+  await app.selectTask('a');
+  const reveal = app.document.querySelector('.turn.me .fileChip a.revealIcon');
+  assert.ok(reveal, 'the reveal control exists');
+  assert.equal(reveal.textContent.trim(), '', 'rendered as an SVG mark, not a glyph');
+  const click = new app.window.Event('click', { bubbles: true, cancelable: true });
+  reveal.dispatchEvent(click);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(click.defaultPrevented, true);
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0].reveal, true);
+  assert.equal(bodies[0].confirm, true);
+});
+
+test('DOM: a script file chip offers a run action that runs it on the machine', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  app.tasks.a.files = [{ id: '33333333-3333-3333-3333-333333333333', name: 'deploy.sh', mimeType: 'text/plain', path: 'scripts/deploy.sh' }];
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (!url.includes('/run')) return null;
+    calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') });
+    return { ok: true, json: async () => ({ command: 'deploy.sh', exitCode: 0, stdout: 'done\n', stderr: '', timedOut: false }) };
+  });
+  await app.selectTask('a');
+  const run = app.document.querySelector('.turn.me .fileChip a.runIcon');
+  assert.ok(run, 'the run control exists');
+  assert.equal(run.textContent.trim(), '', 'rendered as an SVG mark, not a glyph');
+  const click = new app.window.Event('click', { bubbles: true, cancelable: true });
+  run.dispatchEvent(click);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(click.defaultPrevented, true, 'the browser must not navigate');
+  assert.ok(app.confirms.some(message => /Выполнить deploy\.sh/.test(message)), 'the operator is asked before running');
+  assert.equal(calls.length, 1, 'exactly one run request');
+  assert.equal(calls[0].method, 'POST');
+  assert.match(calls[0].url, /\/api\/tasks\/a\/files\/33333333-3333-3333-3333-333333333333\/run$/);
+  assert.equal(calls[0].body.confirm, true);
+  const overlay = app.document.getElementById('fileViewerOverlay');
+  assert.equal(overlay.classList.contains('hidden'), false, 'the output panel opens');
+  assert.match(overlay.textContent, /Код выхода: 0/);
+  assert.match(overlay.textContent, /done/);
+});
+
+test('DOM: copying a code block omits the button label', async () => {
+  const app = await ui();
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-bash">cd /tmp\nls -la\n</code></pre>';
+  app.addCodeCopyButtons(box);
+  const copy = box.querySelector('.codeCopyBtn');
+  assert.ok(copy, 'the copy control exists');
+  await copy.onclick();
+  assert.equal(app.copied.at(-1), 'cd /tmp\nls -la\n', 'only the code is copied');
+  assert.doesNotMatch(app.copied.at(-1), /Копировать/, 'never the button label');
+});
+
+test('DOM: a command code block offers a run button that confirms and runs on the machine', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  await app.selectTask('a');
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (!url.endsWith('/shell')) return null;
+    calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') });
+    return { ok: true, json: async () => ({ exitCode: 0, stdout: 'moved 20 files\n', stderr: '', timedOut: false }) };
+  });
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-powershell">apply-move-list.ps1 -Csv fix-3d.csv -Execute</code></pre>';
+  app.addCodeCopyButtons(box);
+  const run = box.querySelector('.codeRunBtn');
+  assert.ok(run, 'the run control exists');
+  assert.equal(run.textContent, 'Выполнить');
+  await run.onclick();
+  assert.ok(app.confirms.some(message => /Выполнить команду/.test(message)), 'the operator is asked first');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].method, 'POST');
+  assert.match(calls[0].url, /\/api\/tasks\/a\/shell$/);
+  assert.equal(calls[0].body.confirm, true);
+  assert.equal(calls[0].body.command, 'apply-move-list.ps1 -Csv fix-3d.csv -Execute');
+  const overlay = app.document.getElementById('fileViewerOverlay');
+  assert.equal(overlay.classList.contains('hidden'), false, 'the output panel opens');
+  assert.match(overlay.textContent, /Код выхода: 0/);
+  assert.match(overlay.textContent, /moved 20 files/);
+  // The result is visible and can be copied as-is.
+  const copy = app.document.getElementById('fileViewerCopy');
+  assert.equal(copy.classList.contains('hidden'), false, 'the result offers a copy action');
+  await copy.onclick();
+  assert.equal(app.copied.at(-1), 'moved 20 files\n', 'the output text is copied');
+});
+
+test('DOM: a long command output points at the artifact instead of pasting it all', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  await app.selectTask('a');
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (url.endsWith('/shell')) {
+      return { ok: true, json: async () => ({ exitCode: 0, stdout: 'last line\n', stderr: '', timedOut: false, truncated: true, outputName: 'cmd-output-1.log', outputBytes: 204800 }) };
+    }
+    if (url.includes('/artifacts/')) { calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') }); return { ok: true, json: async () => ({ opened: true }) }; }
+    return null;
+  });
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-bash">long-running</code></pre>';
+  app.addCodeCopyButtons(box);
+  await box.querySelector('.codeRunBtn').onclick();
+  const overlay = app.document.getElementById('fileViewerOverlay');
+  assert.match(overlay.textContent, /Показан конец вывода/);
+  assert.match(overlay.textContent, /cmd-output-1\.log/, 'the artifact is named');
+  assert.match(overlay.textContent, /200\.0 КиБ/, 'and its size is shown');
+  const openFull = [...overlay.querySelectorAll('button')].find(button => button.textContent === 'Открыть полный вывод');
+  assert.ok(openFull, 'the full output can be opened');
+  await openFull.onclick();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/api\/tasks\/a\/artifacts\/cmd-output-1\.log\/open$/);
+  assert.equal(calls[0].body.confirm, true);
+});
+
+test('DOM: code-block actions share one flex row, so they cannot overlap', async () => {
+  const app = await ui();
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-bash">echo hi</code></pre>';
+  app.addCodeCopyButtons(box);
+  const row = box.querySelector('.codeActions');
+  assert.ok(row, 'both actions live in one row');
+  assert.deepEqual([...row.children].map(child => child.className), ['codeCopyBtn', 'codeRunBtn']);
+});
+
+test('DOM: a non-command code block gets a copy button but no run button', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-json">{"a":1}</code></pre>';
+  app.addCodeCopyButtons(box);
+  assert.ok(box.querySelector('.codeCopyBtn'));
+  assert.equal(box.querySelector('.codeRunBtn'), null, 'json is not a command');
+});
+
+test('DOM: an authenticated phone can run a command block, but not open files natively', async () => {
+  const app = await ui();
+  app.setExecute(true); // signed in / paired, but not on the machine itself
+  await app.selectTask('a');
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (!url.endsWith('/shell')) return null;
+    calls.push({ url, body: JSON.parse(options.body || '{}') });
+    return { ok: true, json: async () => ({ exitCode: 0, stdout: 'ok\n', stderr: '', timedOut: false }) };
+  });
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-bash">echo hi</code></pre>';
+  app.addCodeCopyButtons(box);
+  const run = box.querySelector('.codeRunBtn');
+  assert.ok(run, 'an authenticated client still gets the run control');
+  await run.onclick();
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/api\/tasks\/a\/shell$/);
+  // Opening files with desktop apps remains machine-only: the phone gets an error.
+  const reveal = await app.machineAction('/api/tasks/a/files/x/open', true);
+  // An Error from the sandbox realm, so check its shape, not instanceof.
+  assert.ok(reveal && typeof reveal.message === 'string', 'native reveal is refused off the machine');
+});
+
+test('DOM: on the machine the image menu also offers native open and reveal', async () => {
+  const app = await ui();
+  app.setServerLocal(true);
+  app.tasks.a.files = [{ id: '11111111-1111-1111-1111-111111111111', name: 'photo.png', mimeType: 'image/png' }];
+  await app.selectTask('a');
+  const img = app.document.querySelector('.turn.me .chatImage img');
+  assert.ok(img, 'the attachment preview exists');
+  img.dispatchEvent(new app.window.Event('click', { bubbles: true, cancelable: true }));
+  const labels = [...app.document.querySelectorAll('.imageMenuItem')].map(button => button.textContent);
+  assert.deepEqual(labels, ['Посмотреть', 'Скачать', 'Копировать ссылку', 'Открыть в приложении', 'Показать в папке']);
 });
 
 test('DOM: a single click on a chat image opens a menu like long-press', async () => {
@@ -1573,6 +1819,24 @@ test('an interrupted answer keeps its own status when the session finishes later
   assert.equal(interrupted.error, 'Request aborted', 'и его ошибка остаётся видимой');
 });
 
+test('a provider JSON error body is shown as one readable line, not raw JSON', () => {
+  const envelope = '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}';
+  const readable = 'The following parameters are not supported for this model: tools (UNSUPPORTED_OPENAI_PARAMS)';
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-16T10:00:00.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({
+    taskId: 'a', seq: 2, at: '2026-09-16T10:00:01.000Z', type: 'PI_EVENT',
+    data: { pi: { type: 'message_end', message: { role: 'assistant', stopReason: 'error', content: [], errorMessage: envelope } } }
+  });
+  assert.equal(state.current.error, readable);
+  // The terminal event carries the SERVER's stored message, which for events
+  // recorded before the fix is the raw JSON body — it must not overwrite the
+  // readable line (this is what left JSON on screen in the live session).
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-16T10:00:02.000Z', type: 'TASK_FAILED', message: envelope, data: { errorCode: 'MODEL_ERROR' } });
+  assert.equal(state.current.error, readable);
+  assert.equal(state.current.status, 'FAILED');
+});
+
 test('an aborted answer is not labelled DONE, and its range is never inverted', () => {
   const state = new ChatState(task());
   state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:39:27.000Z', message: 'вопрос', data: { text: 'вопрос' } });
@@ -1769,4 +2033,51 @@ test('a structured late aborted end without error text preserves the fresh strea
   assert.equal(fresh.error, null);
   assert.equal(state.messageTurn, fresh);
   assert.equal(state.messageOpen, true);
+});
+
+test('DOM: the restart icon asks first, shows progress and reloads when the server is back', async () => {
+  const app = await ui();
+  const doc = app.document;
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  const calls = [];
+  let healthCalls = 0;
+  app.setFetchHook(async (url, options = {}) => {
+    const target = String(url);
+    if (target.includes('/api/server/restart')) {
+      calls.push({ method: options.method, body: options.body });
+      return { ok: true, json: async () => ({ restarting: true, mode: 'lan' }) };
+    }
+    if (target.includes('/api/health')) {
+      healthCalls += 1;
+      // The old process is gone for the first polls, then the new one answers.
+      if (healthCalls <= 2) throw new Error('connection refused');
+      return { ok: true, json: async () => ({ status: 'ok' }) };
+    }
+    return undefined;
+  });
+
+  const button = doc.getElementById('serverRestartButton');
+  assert.ok(button, 'the restart control must be in the header');
+
+  // Declining the confirmation must not touch the server at all.
+  app.setConfirmAnswer(false);
+  button.onclick();
+  await settle();
+  assert.equal(calls.length, 0, 'a declined confirmation must not restart the server');
+  assert.match(app.confirms.at(-1) || '', /Перезагрузить сервер/);
+
+  // Confirming sends the explicit flag the server requires and starts the
+  // progress UI.
+  app.setConfirmAnswer(true);
+  button.onclick();
+  await settle();
+  assert.equal(calls.length, 1, 'a confirmed click calls the route exactly once');
+  assert.equal(calls[0].method, 'POST');
+  assert.deepEqual(JSON.parse(calls[0].body), { confirm: true });
+  assert.equal(button.classList.contains('restarting'), true, 'the glyph spins while restarting');
+  assert.equal(doc.getElementById('restartOverlay').classList.contains('hidden'), false, 'progress overlay is shown');
+
+  // It waits for the server to disappear and return, then reloads the page.
+  for (let i = 0; i < 80 && !app.reloads.length; i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(app.reloads.length, 1, 'the page reloads itself once the server answers again');
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyEngineError, parseRetryAfterMs } from '../src/engine.mjs';
+import { humanizeError } from '../web/errors.mjs';
 import { chooseEngine, profileList, usesLocalRuntime, resolveRouterModel } from '../src/dispatcher.mjs';
 
 test('provider failures map to stable engine codes', () => {
@@ -15,6 +16,28 @@ test('provider failures map to stable engine codes', () => {
   assert.equal(classifyEngineError('the engine is overloaded right now').code, 'ENGINE_OVERLOADED');
   assert.equal(classifyEngineError(new Error('some unrelated failure')), null);
   assert.equal(classifyEngineError(''), null);
+});
+
+test('provider JSON error bodies are flattened into one readable line', () => {
+  // Hugging Face router envelope, prefixed with the HTTP status Pi forwards.
+  const hf = '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}';
+  assert.equal(humanizeError(hf), 'The following parameters are not supported for this model: tools (UNSUPPORTED_OPENAI_PARAMS)');
+  // OpenAI-style nested envelope; `param` is already in the sentence, so it is
+  // not repeated.
+  assert.equal(
+    humanizeError('{"error":{"message":"Invalid value for temperature","type":"invalid_request_error","param":"temperature"}}'),
+    'Invalid value for temperature (invalid_request_error)'
+  );
+  assert.equal(humanizeError('Request aborted'), 'Request aborted');
+  // A param not mentioned in the message is kept.
+  assert.equal(
+    humanizeError('{"message":"Bad request","type":"invalid_request_error","param":"tools"}'),
+    'Bad request (param: tools · invalid_request_error)'
+  );
+  assert.equal(humanizeError(''), '');
+  assert.equal(humanizeError(null), '');
+  assert.equal(humanizeError('{"foo":1}'), '{"foo":1}', 'JSON without a message falls back to the original text');
+  assert.equal(humanizeError(new Error('boom')), 'boom');
 });
 
 test('retry-after hints are parsed and bounded', () => {

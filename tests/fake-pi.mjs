@@ -49,14 +49,14 @@ async function approvalGate(toolCallId, toolName, args) {
 // The answer arrives as several deltas a few ms apart, like a streamed
 // response: that is what lets TaskBridge measure TG from usage (output tokens
 // over the time the deltas actually spanned).
-function finish(text, fail = false) {
+function finish(text, fail = false, errorMessage = 'Fixture model error') {
   const parts = text.length >= 3 ? [text.slice(0, 1), text.slice(1, 2), text.slice(2)] : [text];
   let index = 0;
   const emit = () => {
     send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: parts[index] } });
     index += 1;
     if (index < parts.length) { setTimeout(emit, 25); return; }
-    const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage: 'Fixture model error' } : {}) };
+    const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage } : {}) };
     persist(message);
     send({ type: 'message_end', message });
     streaming = false;
@@ -137,6 +137,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       return;
     }
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false });
-    pending = setTimeout(() => finish(`Ответ ${turn}`, command.message.includes('model-error')), command.message.includes('slow') ? 10000 : 80);
+    // A provider that answers with a JSON error envelope (as Pi forwards it
+    // verbatim) is a separate case from a plain-text failure.
+    const modelError = command.message.includes('model-error-json')
+      ? '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}'
+      : 'Fixture model error';
+    pending = setTimeout(() => finish(`Ответ ${turn}`, command.message.includes('model-error'), modelError), command.message.includes('slow') ? 10000 : 80);
   }
 });

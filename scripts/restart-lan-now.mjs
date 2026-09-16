@@ -1,7 +1,13 @@
 #!/usr/bin/env node
 // Restart the LAN pair (app + proxy) so fresh server code is actually loaded.
-// Detached on purpose: the asking session is a child of the app, so the restart
-// must outlive it. Report: data/restart-report.md, logs: data/lan-restart-*.log
+//
+// Orphaned on purpose: this script kills the app with `taskkill /T`, which
+// follows the parent chain. When the server spawns it for
+// POST /api/server/restart it is a DIRECT child of that app, so /T would kill
+// the restarter itself on the first kill and leave nothing listening. So it
+// re-execs itself through a launcher that exits at once: the worker we keep is
+// then orphaned and `/T` on the app can no longer reach it.
+// Report: data/restart-report.md, logs: data/lan-restart-*.log
 import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
@@ -19,6 +25,32 @@ const delayMs = Number(process.argv.find(arg => arg.startsWith('--delay-ms'))?.s
 const parseArg = (key) => { const i = process.argv.indexOf(key); return i >= 0 ? process.argv[i + 1] : null; };
 const reportPath = path.join(DATA, parseArg('--report') || 'restart-report.md');
 
+// Leave the app's process tree before killing it (see the header). The launcher
+// exits immediately, so the re-exec'd worker's only link to the app is a PID
+// that is already gone — `taskkill /T` cannot walk through it. `--dry-run` only
+// inspects, so it must stay in the foreground.
+if (!process.env.TASKBRIDGE_RESTART_ORPHAN && !process.argv.includes('--dry-run')) {
+  const launcher = spawn(process.execPath, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
+    detached: true,
+    windowsHide: true,
+    stdio: 'ignore',
+    env: { ...process.env, TASKBRIDGE_RESTART_ORPHAN: '1' }
+  });
+  launcher.unref();
+  process.exit(0);
+}
+
+// This script runs detached with its stdio discarded, so a throw from the flow
+// below would vanish and a failed restart would look exactly like a restart
+// that never ran — while the old pair is already dead. Persist the reason in
+// the same report file the success path writes.
+process.on('unhandledRejection', async (error) => {
+  const message = `# TaskBridge: перезапуск LAN-пары не удался\n\n${new Date().toISOString()}\n\n\`\`\`\n${error?.stack || error?.message || String(error)}\n\`\`\`\n`;
+  await fs.writeFile(reportPath, message, 'utf8').catch(() => {});
+  console.error(message);
+  process.exit(1);
+});
+
 const state = JSON.parse(await fs.readFile(STATE, 'utf8'));
 const { appPid, proxyPid, internalPort, publicPort } = state;
 
@@ -31,19 +63,38 @@ if (argv.includes('--dry-run')) { console.log(`dry-run: app=${appPid} proxy=${pr
 
 if (delayMs > 0) { console.log(`Ждём ${Math.round(delayMs / 1000)} с, чтобы текущая сессия успела получить ответ…`); await sleep(delayMs); }
 
-// 1. Stop the proxy first (it points clients at the app), then the app itself.
-for (const pid of [proxyPid, appPid]) {
-  try { await execFileAsync('taskkill', ['/PID', String(pid), '/T', '/F']); } catch { /* already gone */ }
-}
-await sleep(1000);
-
 const portFree = (port) => new Promise(resolve => {
   const server = net.createServer();
   server.once('error', () => resolve(false));
   server.once('listening', () => server.close(() => resolve(true)));
   server.listen(port, '0.0.0.0');
 });
-if (!(await portFree(publicPort))) throw new Error(`Порт ${publicPort} всё ещё занят — не перезапускаю.`);
+
+// 1. Stop the proxy first (it points clients at the app), then the app itself.
+//
+// `/T` matters: it takes the app's Pi sessions and an app-spawned llama.cpp
+// router with it, so nothing keeps a port or a model loaded after the restart.
+// It is safe here only because the worker doing the killing was orphaned first
+// (see the header): as a direct child of the app, `/T` used to terminate this
+// restarter on its own first kill and leave the machine with nothing listening.
+try { await execFileAsync('taskkill', ['/PID', String(proxyPid), '/T', '/F']); } catch { /* already gone */ }
+try { await execFileAsync('taskkill', ['/PID', String(appPid), '/T', '/F']); } catch { /* already gone */ }
+
+// A killed listener can hold its port for a moment on Windows. A single
+// one-shot check here is what left the machine with no server at all: the pair
+// was already killed, the check said "busy", and the script refused to restart.
+// Poll both ports instead of giving up on the first look.
+const waitPortFree = async (port, timeoutMs = 15000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await portFree(port)) return true;
+    await sleep(250);
+  }
+  return false;
+};
+for (const port of [publicPort, internalPort]) {
+  if (!(await waitPortFree(port))) throw new Error(`Порт ${port} всё ещё занят — не перезапускаю.`);
+}
 
 // 2. Start the app and the proxy back, exactly like scripts/start-lan.mjs does.
 const appLog = await fs.open(path.join(DATA, 'lan-restart-app.log'), 'a');
@@ -56,7 +107,7 @@ const env = {
   TASKBRIDGE_DISABLE_TLS: '1',
 };
 for (const key of Object.keys(env)) {
-  if (['PI_SESSION_FILE', 'TASKBRIDGE_TASK_ID'].includes(key) || key.startsWith('TASKBRIDGE_APPROVAL_')) delete env[key];
+  if (['PI_SESSION_FILE', 'TASKBRIDGE_TASK_ID', 'TASKBRIDGE_RESTART_ORPHAN'].includes(key) || key.startsWith('TASKBRIDGE_APPROVAL_')) delete env[key];
 }
 await appLog.write(`\n=== restart ${new Date().toISOString()} ===\n`);
 const app = spawn(process.execPath, ['src/server.mjs'], { cwd: root, detached: true, windowsHide: true, env, stdio: ['ignore', appLog.fd, appLog.fd] });

@@ -10,6 +10,7 @@ import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles,
 import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
+import { humanizeError } from '../web/errors.mjs';
 import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
 import { LocalModelService, quantFromPath } from './local-models.mjs';
@@ -1027,27 +1028,27 @@ export class TaskManager extends EventEmitter {
 
   // Translates a raw file path or alias into the exact model id Pi lists in its
   // catalog (e.g. G:\...\Qwen3.8-27B-UD-Q3_K_XL.gguf -> qwen-27b-q3).
-  #resolvePiModelId(provider, modelId) {
+  async #resolvePiModelId(provider, modelId) {
     if (!modelId) return modelId;
-    const known = this.modelCatalog.peek()?.models || [];
+    let known = this.modelCatalog.peek()?.models || [];
+    if (!known.length) {
+      const catalog = await this.modelCatalog.list().catch(() => null);
+      known = catalog?.models || [];
+    }
     if (known.some(m => m.provider === provider && m.id === modelId)) return modelId;
 
     const isPath = modelId.includes('\\') || modelId.includes('/') || modelId.endsWith('.gguf');
     const baseName = isPath ? modelId.split(/[\\/]/).pop().replace(/\.gguf$/i, '').toLowerCase() : modelId.toLowerCase();
+    const parts = baseName.split(/[-_]/);
+    const quant = (parts[parts.length - 1] || quantFromPath(modelId) || '').toLowerCase();
     const providerModels = known.filter(m => m.provider === provider);
 
     const match = providerModels.find(m => {
       const mid = m.id.toLowerCase();
       const mname = (m.name || '').toLowerCase();
-      return mid === baseName || baseName.includes(mid) || mname.includes(baseName);
+      return mid === baseName || baseName.includes(mid) || mname.includes(baseName) || (quant && (mid.includes(quant) || mname.includes(quant)));
     });
     if (match) return match.id;
-
-    const quant = quantFromPath(modelId)?.toLowerCase();
-    if (quant) {
-      const quantMatch = providerModels.find(m => m.id.toLowerCase().includes(quant) || (m.name || '').toLowerCase().includes(quant));
-      if (quantMatch) return quantMatch.id;
-    }
 
     return modelId;
   }
@@ -1063,7 +1064,7 @@ export class TaskManager extends EventEmitter {
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState().catch(() => null);
     if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Дождитесь завершения ответа перед сменой модели.'), { code: 'BUSY' });
-    const targetModelId = this.#resolvePiModelId(model.provider, model.id);
+    const targetModelId = await this.#resolvePiModelId(model.provider, model.id);
     const applied = await runtime.pi.setModel(model.provider, targetModelId).catch((error) => {
       throw Object.assign(new Error(`Pi не принял модель ${model.provider}/${targetModelId}: ${error.message}`), { code: 'MODEL_NOT_FOUND' });
     });
@@ -2496,7 +2497,10 @@ export class TaskManager extends EventEmitter {
     task.errorCode = explicit || classified?.code || error?.code || 'INTERNAL_ERROR';
     task.retryable = classified ? classified.retryable : null;
     task.retryAfterMs = classified?.retryAfterMs ?? null;
-    task.error = error.message || String(error);
+    // Store a readable line, not the provider's raw JSON body: this text goes to
+    // the UI, result.md and push notifications. Classification above still ran
+    // against the untouched error.
+    task.error = humanizeError(error.message || String(error));
     task.current = 'Failed';
     task.updatedAt = now();
     // Publish the event before the failed status is observable (see

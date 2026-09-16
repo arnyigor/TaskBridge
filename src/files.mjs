@@ -169,7 +169,12 @@ export async function serveFile(req, res, target, name, download = false) {
   const disposition = (download || active || mime === 'application/octet-stream' || mime === 'application/zip') ? 'attachment' : 'inline';
   const fallback = name.replace(/[^\x20-\x7e]|["\\]/g, '_');
   const encoded = encodeURIComponent(name).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16));
-  const headers = { 'content-type': mime, 'content-disposition': `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`, 'x-content-type-options': 'nosniff', 'cache-control': 'private, no-store', 'content-security-policy': "sandbox; default-src 'none'", 'accept-ranges': 'bytes' };
+  // The `sandbox` directive exists to neutralise a script inside served HTML/SVG
+  // (which are forced to attachment anyway). On every other type it can stop a
+  // PDF viewer or frame from rendering at all, turning "open" back into
+  // "download", so it is only sent for active documents.
+  const csp = `${active ? 'sandbox; ' : ''}default-src 'none'`;
+  const headers = { 'content-type': mime, 'content-disposition': `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`, 'x-content-type-options': 'nosniff', 'cache-control': 'private, no-store', 'content-security-policy': csp, 'accept-ranges': 'bytes' };
   let start = 0, end = stat.size - 1, status = 200;
   if (req.headers.range) {
     const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range);

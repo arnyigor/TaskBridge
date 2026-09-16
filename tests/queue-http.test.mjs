@@ -122,8 +122,13 @@ test('the queued prompt is delivered by itself when the model frees up', { timeo
   assert.equal((finished.pendingPrompts || []).length, 0, 'the queue drained');
 
   // The initial prompt starts the session (it is the run's input, not a
-  // USER_MESSAGE event), and both queued follow-ups reached Pi in order.
-  const events = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+  // USER_MESSAGE event), and both queued follow-ups reached Pi in order. The
+  // last USER_MESSAGE is written just after the queue empties, so wait for both
+  // events rather than reading them the instant the queue drains.
+  const events = await waitFor(async () => {
+    const list = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+    return list.filter(event => event.type === 'USER_MESSAGE').length >= 2 ? list : null;
+  }, { tries: 100, delay: 50 });
   const userMessages = events.filter(event => event.type === 'USER_MESSAGE').map(event => event.data?.text);
   assert.deepEqual(userMessages, ['второе', 'третье'], `delivery order: ${JSON.stringify(userMessages)}`);
   // Pi saw all three prompts: the run itself used the initial prompt, and both

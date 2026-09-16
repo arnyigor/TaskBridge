@@ -14,7 +14,10 @@ async function fixture(t, streaming = false) {
   t.after(async () => {
     await manager.close().catch(() => {});
     store.close();
-    await fs.rm(root, { recursive: true, force: true });
+    for (let i = 0; i < 10; i++) {
+      try { await fs.rm(root, { recursive: true, force: true }); break; }
+      catch { await new Promise(r => setTimeout(r, 60)); }
+    }
   });
   const task = { id: 'a', createdAt: new Date().toISOString(), status: streaming ? 'RUNNING' : 'SUCCEEDED', workspacePath: root, prompt: 'original', files: [], assistantText: 'saved', thinkingText: '', compaction: { count: 0 } };
   await store.create(task);
@@ -1012,6 +1015,10 @@ test('pending prompt files survive TaskBridge restart without being dropped', as
   const diskData = JSON.parse(await fs.readFile(pendingDiskFile, 'utf8'));
   assert.ok(diskData[queued.pendingPrompts[0].id], 'pending files must be written to disk');
 
+  // Once workspace is prepared, session can deliver on restart
+  task.workspacePath = root;
+  await store.save(task);
+
   // 2. TaskManager instance 2: simulates process restart over same store/data
   m2.runtimeManager.isReady = async () => true;
   m2.runtimeManager.getBusyStatus = async () => ({ busy: false });
@@ -1024,8 +1031,6 @@ test('pending prompt files survive TaskBridge restart without being dropped', as
 
   await m2.init();
   assert.ok(m2.queue.includes('restart-files-task'), 'task must be restored to queue');
-  // Workspace exists once session is about to run
-  m2.tasks.get('restart-files-task').workspacePath = root;
 
   // Wait for delivery by pump
   for (let i = 0; i < 100 && !sent.length; i++) await new Promise(r => setTimeout(r, 20));
@@ -1033,8 +1038,14 @@ test('pending prompt files survive TaskBridge restart without being dropped', as
   assert.ok(sent[0].includes('документ в очереди'), 'prompt text preserved');
   assert.ok(sent[0].includes('important.txt'), 'attached file must be preserved after restart');
 
-  // pending-files.json should be cleaned up after successful delivery
-  const fileLeft = await fs.access(pendingDiskFile).then(() => true, () => false);
+  // pending-files.json is cleaned up after the delivered prompt is persisted;
+  // that write/delete happens a tick after Pi accepted the prompt, so poll
+  // briefly instead of racing it.
+  let fileLeft = true;
+  for (let i = 0; i < 50 && fileLeft; i++) {
+    fileLeft = await fs.access(pendingDiskFile).then(() => true, () => false);
+    if (fileLeft) await new Promise(r => setTimeout(r, 20));
+  }
   assert.equal(fileLeft, false, 'pending-files.json must be removed once delivered');
 
   for (const waiter of m2.runtimes.get('restart-files-task').settleResolvers.splice(0)) {

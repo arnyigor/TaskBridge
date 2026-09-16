@@ -17,6 +17,13 @@ const transport = selectTransport({
 marked.setOptions({ gfm: true, breaks: true });
 
 let selectedTaskId = null;
+// Set from /api/auth. `serverIsLocal` means native open/reveal is possible —
+// this page runs on the machine itself, so a desktop application would actually
+// be the operator's. `canExecute` means running on the machine is possible —
+// true on the machine and for an authenticated client too, so a paired phone can
+// run a command on the PC (the PC does the work; the phone just asks).
+let serverIsLocal = false;
+let canExecute = false;
 let source = null;
 let refreshTimer = null;
 let liveTurn = null;        // { body, md, meta } of the current bot turn
@@ -115,6 +122,14 @@ function botBadge() {
 
 const IMAGE_MIME_RE = /^image\//;
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg)$/i;
+const PDF_EXT_RE = /\.pdf$/i;
+// Files the machine can run as scripts (mirror of scriptCommand on the server).
+// Only these get the "выполнить" action.
+const RUNNABLE_EXT_RE = /\.(?:bat|cmd|ps1|sh|bash|py|js|mjs|cjs|rb|pl)$/i;
+// Text and source files are rendered in the built-in viewer. The list is by
+// extension because the name is all a chat chip has; anything unknown is handed
+// to the browser instead of guessing it is text and dumping binary noise.
+const TEXT_EXT_RE = /\.(?:txt|text|md|markdown|log|csv|tsv|json|jsonl|ndjson|xml|ya?ml|toml|ini|cfg|conf|properties|env|patch|diff|sh|bash|zsh|bat|cmd|ps1|sql|c|h|cc|cpp|cxx|hpp|cs|java|kt|kts|gradle|py|rb|go|rs|swift|php|pl|lua|dart|ts|tsx|js|mjs|cjs|jsx|css|scss|less|sass|vue|svelte|html?|svg|gitignore|editorconfig)$/i;
 
 // An attached file is treated as a picture when the server said its MIME type is
 // an image or, failing that, when the name carries a known image extension.
@@ -150,11 +165,20 @@ function imagePreview(file, taskId) {
 function fileCard(file, taskId) {
   const card = document.createElement('span');
   card.className = 'fileChip';
+  const viewUrl = fileUrl(taskId, file.id, false);
   const open = document.createElement('a');
-  open.href = fileUrl(taskId, file.id, false);
+  open.href = viewUrl;
   open.target = '_blank';
   open.rel = 'noopener';
   open.textContent = `📎 ${file.name}`;
+  // On the machine a plain click opens the file with its own application (the
+  // localhost-only route). Everywhere else, and as a fallback, it opens the
+  // built-in viewer. A modifier click still opens a new tab.
+  open.onclick = (event) => {
+    if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+    event.preventDefault();
+    openWithMachine(viewUrl, file.name);
+  };
   const download = document.createElement('a');
   download.href = fileUrl(taskId, file.id, true);
   download.className = 'downloadIcon';
@@ -162,7 +186,35 @@ function fileCard(file, taskId) {
   download.setAttribute('aria-label', `Скачать ${file.name}`);
   // Inline SVG, not the glyph U+2B73: that rare codepoint is missing from many fonts and rendered as a tofu box instead of a download arrow.
   download.append(messageIcon('download'));
-  card.append(open, download);
+  // Reveal the file in the machine's file manager (Explorer/Finder/…). Only
+  // shown where it can work — CSS keeps it hidden unless body.machine-local.
+  const reveal = document.createElement('a');
+  reveal.href = '#';
+  reveal.className = 'revealIcon';
+  reveal.title = 'Показать в папке';
+  reveal.setAttribute('aria-label', `Показать ${file.name} в папке`);
+  reveal.append(messageIcon('folder'));
+  reveal.onclick = (event) => { event.preventDefault(); machineActionAlert(machineOpenPath(viewUrl), true); };
+  // Script files get a "выполнить" action next to open/reveal. It runs on the
+  // machine — allowed on the machine and for an authenticated client (a phone)
+  // — so it is hidden only where running is impossible (CSS, body.machine-exec)
+  // and always asks before running anything.
+  const actions = [reveal];
+  if (isRunnableFile(file.name)) {
+    const run = document.createElement('a');
+    run.href = '#';
+    run.className = 'runIcon';
+    run.title = 'Выполнить скрипт';
+    run.setAttribute('aria-label', `Выполнить ${file.name}`);
+    run.append(messageIcon('run'));
+    run.onclick = (event) => {
+      event.preventDefault();
+      if (!confirm(`Выполнить ${file.name} на компьютере?`)) return;
+      runOnMachine(viewUrl, file.name);
+    };
+    actions.push(run);
+  }
+  card.append(open, ...actions, download);
   return card;
 }
 
@@ -413,18 +465,19 @@ function closeImageMenu() {
 function imageMenuItems(src, alt) {
   const downloadUrl = `${src}${src.includes('?') ? '&' : '?'}download=1`;
   const absolute = new URL(src, location.href).href;
-  return [
-    ['Посмотреть', () => { if (window.open) window.open(absolute, '_blank', 'noopener'); }],
-    ['Скачать', () => {
-      const a = document.createElement('a');
-      a.href = downloadUrl;
-      if (alt) a.download = alt;
-      document.body.append(a);
-      a.click();
-      a.remove();
-    }],
+  const items = [
+    ['Посмотреть', () => { openFileViewer({ url: src, name: alt }); }],
+    ['Скачать', () => triggerDownload(downloadUrl, alt)],
     ['Копировать ссылку', () => { copyText(absolute); }]
   ];
+  // On the machine the same picture can be opened in the OS image viewer or
+  // revealed in the file manager; on a phone/cloud these do not apply.
+  const openPath = serverIsLocal ? machineOpenPath(src) : null;
+  if (openPath) {
+    items.push(['Открыть в приложении', () => machineActionAlert(openPath, false)]);
+    items.push(['Показать в папке', () => machineActionAlert(openPath, true)]);
+  }
+  return items;
 }
 
 function openImageMenu(x, y, src, alt = '') {
@@ -457,6 +510,10 @@ function openImageMenu(x, y, src, alt = '') {
 // delegation keeps this working for images added later (streaming, history).
 document.addEventListener('click', (event) => {
   if (imageMenu && imageMenu.contains(event.target)) return;
+  // A picture shown by the file viewer is not a chat picture: its clicks belong
+  // to the viewer, not to the chat context menu.
+  const viewer = $('fileViewerOverlay');
+  if (viewer && viewer.contains(event.target)) return;
   const target = event.target;
   if (target && target.tagName === 'IMG') {
     const src = target.getAttribute('src') || '';
@@ -469,6 +526,254 @@ document.addEventListener('click', (event) => {
   closeImageMenu();
 });
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeImageMenu(); });
+
+/* ---------------- in-app file viewer ---------------- */
+
+// Opening a file means seeing it, not being offered a download. Text and source
+// files render inside the app (identical on desktop and in the Android
+// browser), pictures zoom in, and a PDF is embedded where the browser can render
+// it. Only files nothing can display fall back to the browser's own handling.
+function isAndroid() {
+  return typeof navigator !== 'undefined' && /android/i.test(navigator.userAgent || '');
+}
+
+// A slow text fetch must not paint over the file opened after it.
+let fileViewerRequest = 0;
+function viewerKind(name) {
+  if (isImageFile({ name })) return 'image';
+  if (PDF_EXT_RE.test(String(name || ''))) return 'pdf';
+  if (TEXT_EXT_RE.test(String(name || ''))) return 'text';
+  return 'binary';
+}
+
+function downloadUrlFor(url) {
+  return `${url}${url.includes('?') ? '&' : '?'}download=1`;
+}
+
+function triggerDownload(url, name) {
+  if (!url) return;
+  const a = document.createElement('a');
+  a.href = url;
+  if (name) a.download = name;
+  document.body.append(a);
+  a.click();
+  a.remove();
+}
+
+// A new tab the browser owns: it renders what it can (image, PDF, text) and
+// downloads what it cannot. Used when the in-app viewer has nothing to add, and
+// by the "open in a new tab" action.
+function openExternal(url) {
+  if (!url) return;
+  if (window.open) window.open(url, '_blank', 'noopener');
+  else if (location && typeof location.assign === 'function') location.assign(url);
+}
+
+function closeFileViewer() {
+  const overlay = $('fileViewerOverlay');
+  if (overlay) overlay.classList.add('hidden');
+  const body = $('fileViewerBody');
+  if (body) body.textContent = '';
+}
+
+/* ---------------- open on the machine (localhost only) ---------------- */
+
+// The POST address for a machine action (open / run) on a task file. Derived
+// from the read URL so one mapping covers uploads, artifacts and workspace
+// files. Returns null for anything that is not a task file.
+function machineActionPath(viewUrl, action) {
+  if (!viewUrl) return null;
+  let parsed;
+  try { parsed = new URL(viewUrl, location.href); } catch { return null; }
+  if (/^\/api\/tasks\/[^/]+\/workspace-file$/.test(parsed.pathname)) return `${parsed.pathname}/${action}?${parsed.searchParams.toString()}`;
+  if (/^\/api\/tasks\/[^/]+\/(?:files\/[^/]+|artifacts\/[^/]+)$/.test(parsed.pathname)) return `${parsed.pathname}/${action}`;
+  return null;
+}
+const machineOpenPath = viewUrl => machineActionPath(viewUrl, 'open');
+const machineRunPath = viewUrl => machineActionPath(viewUrl, 'run');
+const isRunnableFile = name => RUNNABLE_EXT_RE.test(String(name || ''));
+
+// Ask the machine to open a file in its OS application or reveal it in the file
+// manager. Returns null on success, or the error to show. The server accepts
+// these only from a loopback Host, so this does nothing on a phone or in the
+// cloud, where serverIsLocal is false.
+async function machineAction(openPath, reveal = false) {
+  if (!serverIsLocal || !openPath) return new Error('Открытие приложением доступно только на самом компьютере.');
+  try { await api(openPath, { method: 'POST', body: { confirm: true, reveal } }); return null; }
+  catch (error) { return error; }
+}
+
+// Fire-and-report variant for the menu/icon actions, which have nothing to fall
+// back on: a failure is shown, not swallowed.
+async function machineActionAlert(openPath, reveal = false) {
+  const error = await machineAction(openPath, reveal);
+  if (error) alert(error.message);
+  return !error;
+}
+
+// Plain click on a file when the UI runs on the machine: open it natively. If
+// the OS refuses (no application for the extension, file gone), fall back to the
+// built-in viewer so the click still shows something.
+async function openWithMachine(viewUrl, name) {
+  if (serverIsLocal) {
+    const error = await machineAction(machineOpenPath(viewUrl), false);
+    if (!error) return;
+  }
+  openFileViewer({ url: viewUrl, name });
+}
+
+// Run a script on the machine and show what it printed. Machine-only, and the
+// caller has already asked for confirmation: running a file is a real action,
+// not a preview.
+async function runOnMachine(viewUrl, name) {
+  const runPath = machineRunPath(viewUrl);
+  if (!canExecute || !runPath) { alert('Выполнение скрипта на компьютере недоступно.'); return; }
+  try {
+    const result = await api(runPath, { method: 'POST', body: { confirm: true } });
+    showRunResult(`Выполнение: ${name}`, result);
+  } catch (error) { alert(error.message); }
+}
+
+// Run a shell command line from a code block, in the current session's workspace,
+// after asking. Machine-only: a command line is arbitrary code.
+async function runShellCommand(command) {
+  if (!canExecute) { alert('Выполнение команд на компьютере недоступно.'); return; }
+  if (!selectedTaskId) { alert('Выберите сессию — команда выполняется в её рабочей папке.'); return; }
+  if (!String(command || '').trim()) return;
+  if (!confirm(`Выполнить команду на компьютере?\n\n${command}`)) return;
+  try {
+    const result = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/shell`, { method: 'POST', body: { confirm: true, command } });
+    showRunResult('Выполнение команды', result);
+  } catch (error) { alert(error.message); }
+}
+
+function formatBytes(bytes) {
+  const value = Number(bytes) || 0;
+  if (value < 1024) return `${value} Б`;
+  if (value < 1048576) return `${(value / 1024).toFixed(1)} КиБ`;
+  return `${(value / 1048576).toFixed(1)} МиБ`;
+}
+
+function showRunResult(title, result) {
+  const overlay = $('fileViewerOverlay');
+  const output = [result.stdout, result.stderr].filter(part => part && part.length).join('\n--- stderr ---\n') || '(нет вывода)';
+  if (!overlay) { alert(`${title}\n${output}`); return; }
+  $('fileViewerName').textContent = title;
+  const body = $('fileViewerBody');
+  body.textContent = '';
+  const head = document.createElement('div');
+  head.className = 'fileViewerMessage';
+  head.textContent = result.timedOut || result.exitCode == null
+    ? 'Прервано (таймаут)'
+    : `Код выхода: ${result.exitCode}`;
+  const pre = document.createElement('pre');
+  pre.className = 'fileViewerText';
+  pre.textContent = output;
+  body.append(head, pre);
+  // A long run is not pasted into the chat: only its tail is shown, the whole
+  // output lives in the session's artifacts. Point at it and let it be opened.
+  if (result.truncated && result.outputName) {
+    const note = document.createElement('div');
+    note.className = 'fileViewerMessage';
+    note.textContent = `Показан конец вывода. Полный вывод (${formatBytes(result.outputBytes)}) сохранён в файл «${result.outputName}» — раздел Artifacts.`;
+    body.append(note);
+    const artifact = selectedTaskId ? `/api/tasks/${encodeURIComponent(selectedTaskId)}/artifacts/${encodeURIComponent(result.outputName)}` : null;
+    if (serverIsLocal && artifact) {
+      const actions = document.createElement('div');
+      actions.className = 'inline wrap';
+      const openFull = document.createElement('button');
+      openFull.type = 'button';
+      openFull.textContent = 'Открыть полный вывод';
+      openFull.onclick = () => machineActionAlert(machineActionPath(artifact, 'open'), false);
+      const revealFull = document.createElement('button');
+      revealFull.type = 'button';
+      revealFull.textContent = 'Показать в папке';
+      revealFull.onclick = () => machineActionAlert(machineActionPath(artifact, 'open'), true);
+      actions.append(openFull, revealFull);
+      body.append(actions);
+    }
+  }
+  // No download/new-tab here: this panel shows a command's output. The one
+  // action that belongs is copying the text the operator is looking at.
+  $('fileViewerDownload').classList.add('hidden');
+  $('fileViewerExternal').classList.add('hidden');
+  const copy = $('fileViewerCopy');
+  if (copy) {
+    copy.classList.remove('hidden');
+    copy.textContent = 'Копировать';
+    copy.onclick = async () => {
+      const ok = await copyText(output);
+      copy.textContent = ok ? 'Скопировано' : 'Ошибка';
+      setTimeout(() => { copy.textContent = 'Копировать'; }, 1500);
+    };
+  }
+  overlay.classList.remove('hidden');
+}
+
+function openFileViewer({ url, name = '', downloadUrl = null } = {}) {
+  if (!url) return;
+  const kind = viewerKind(name);
+  const overlay = $('fileViewerOverlay');
+  // No viewer in an older cached shell, a file nothing can render, or a PDF on
+  // Android (Chrome there does not embed PDFs): let the browser open it, exactly
+  // as before.
+  if (!overlay || kind === 'binary' || (kind === 'pdf' && isAndroid())) { openExternal(url); return; }
+  const request = ++fileViewerRequest;
+  $('fileViewerName').textContent = name || 'Файл';
+  const body = $('fileViewerBody');
+  body.textContent = '';
+  $('fileViewerDownload').classList.remove('hidden');
+  $('fileViewerExternal').classList.remove('hidden');
+  const copyButton = $('fileViewerCopy');
+  if (copyButton) { copyButton.classList.add('hidden'); copyButton.onclick = null; }
+  $('fileViewerDownload').onclick = () => triggerDownload(downloadUrl || downloadUrlFor(url), name);
+  $('fileViewerExternal').onclick = () => openExternal(url);
+  overlay.classList.remove('hidden');
+  if (kind === 'image') {
+    const img = document.createElement('img');
+    img.src = url;
+    img.alt = name;
+    body.append(img);
+    return;
+  }
+  if (kind === 'pdf') {
+    // Desktop browsers render a PDF in a frame; Android Chrome is branched off
+    // above, so this is desktop-only.
+    const frame = document.createElement('iframe');
+    frame.src = url;
+    frame.title = name || 'PDF';
+    body.append(frame);
+    return;
+  }
+  // Text: fetch and show it, so the disposition header never turns "open" into
+  // "save". A failed fetch leaves the new-tab action as the way out.
+  const message = document.createElement('div');
+  message.className = 'fileViewerMessage';
+  message.textContent = 'Загрузка…';
+  body.append(message);
+  fetch(url).then(response => {
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.text();
+  }).then(text => {
+    if (request !== fileViewerRequest) return; // a newer file replaced this one
+    const pre = document.createElement('pre');
+    pre.className = 'fileViewerText';
+    pre.textContent = text;
+    body.textContent = '';
+    body.append(pre);
+  }).catch(error => {
+    if (request === fileViewerRequest) message.textContent = `Не удалось показать файл: ${error.message}`;
+  });
+}
+
+// Close on the buttons, the backdrop and Escape, like the other overlays.
+for (const id of ['fileViewerClose', 'fileViewerCloseIcon']) {
+  const button = $(id);
+  if (button) button.onclick = closeFileViewer;
+}
+const fileViewerOverlayEl = $('fileViewerOverlay');
+if (fileViewerOverlayEl) fileViewerOverlayEl.onclick = (event) => { if (event.target === fileViewerOverlayEl) closeFileViewer(); };
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeFileViewer(); });
 
 
 function appendSystemNote(text, before = null) {
@@ -958,7 +1263,9 @@ const MESSAGE_ICONS = {
   copy: [['rect', { x: '9', y: '9', width: '13', height: '13', rx: '2', ry: '2' }], ['path', { d: 'M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1' }]],
   check: [['polyline', { points: '20 6 9 17 4 12' }]],
   cross: [['line', { x1: '18', y1: '6', x2: '6', y2: '18' }], ['line', { x1: '6', y1: '6', x2: '18', y2: '18' }]],
-  download: [['polyline', { points: '21 15 21 19 21 19 3 19 3 15' }], ['line', { x1: '7', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '17', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '12', y1: '15', x2: '12', y2: '3' }]]
+  download: [['polyline', { points: '21 15 21 19 21 19 3 19 3 15' }], ['line', { x1: '7', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '17', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '12', y1: '15', x2: '12', y2: '3' }]],
+  folder: [['path', { d: 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z' }]],
+  run: [['polygon', { points: '6 3 20 12 6 21 6 3' }]]
 };
 function messageIcon(name) {
   const svg = document.createElementNS(SVG_NS, 'svg');
@@ -1755,9 +2062,21 @@ async function loadArtifacts(timeoutMs = null) {
   try {
     const list = await api(`/api/tasks/${id}/artifacts`, timeoutMs ? { timeoutMs } : {});
     if (version !== selectionVersion) return;
-    $('artifacts').innerHTML = list.length
-      ? list.map((name) => `<a target="_blank" href="/api/tasks/${selectedTaskId}/artifacts/${encodeURIComponent(name)}">${escapeHtml(name)}</a>`).join('')
+    const artifacts = $('artifacts');
+    artifacts.innerHTML = list.length
+      ? list.map((name) => `<a target="_blank" rel="noopener" href="/api/tasks/${selectedTaskId}/artifacts/${encodeURIComponent(name)}">${escapeHtml(name)}</a>`).join('')
       : '—';
+    // An artifact opens natively on the machine (or in the viewer elsewhere) on
+    // a plain click, and in a new tab on a modifier click — same rule as the
+    // file chips and model-authored links.
+    for (const a of artifacts.querySelectorAll('a')) {
+      const url = a.getAttribute('href');
+      a.onclick = (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+        event.preventDefault();
+        openWithMachine(url, a.textContent);
+      };
+    }
   } catch {}
 }
 
@@ -2119,8 +2438,22 @@ function rewriteMarkdownLinks(container) {
       a.rel = 'noopener';
       continue;
     }
-    const url = workspaceFileUrl(href, true);
-    if (url) { a.href = url; a.target = '_blank'; a.rel = 'noopener'; } else a.removeAttribute('href');
+    // A relative link to a file the model produced: open it, do not push a
+    // download. `download=1` is the server's attachment switch, so the link
+    // points at the inline URL, and a plain click opens the file natively on the
+    // machine or in the built-in viewer elsewhere. A modifier click still opens
+    // a new tab.
+    const url = workspaceFileUrl(href, false);
+    if (url) {
+      a.href = url;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.onclick = (event) => {
+        if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+        event.preventDefault();
+        openWithMachine(url, a.textContent || href);
+      };
+    } else a.removeAttribute('href');
   }
   for (const img of container.querySelectorAll('img[src]')) {
     const src = img.getAttribute('src');
@@ -2131,18 +2464,50 @@ function rewriteMarkdownLinks(container) {
   }
 }
 
+// Languages whose blocks are commands, plus untagged blocks (a command is often
+// pasted without a language tag) — only those get the "Выполнить" button.
+const SHELL_LANGS = new Set(['bash', 'sh', 'shell', 'zsh', 'console', 'powershell', 'ps', 'ps1', 'pwsh', 'cmd', 'bat', 'batch', 'cmd.exe', 'dos']);
+function codeLanguage(code) {
+  const match = String(code && code.className || '').match(/language-([\w.+-]+)/);
+  return match ? match[1].toLowerCase() : '';
+}
+
 function addCodeCopyButtons(container) {
   for (const pre of container.querySelectorAll('pre')) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'codeCopyBtn';
-    btn.textContent = 'Копировать';
-    btn.onclick = async () => {
-      const ok = await copyText(pre.textContent);
-      btn.textContent = ok ? 'Скопировано' : 'Ошибка';
-      setTimeout(() => { btn.textContent = 'Копировать'; }, 1500);
+    const code = pre.querySelector('code');
+    // Read the code from <code>, never from the <pre>: the buttons live inside
+    // the <pre>, so pre.textContent would copy their labels along with the code.
+    const source = code ? code.textContent : pre.textContent;
+
+    // One wrapper holds the actions in a row: two absolutely positioned buttons
+    // at guessed offsets overlapped on a narrow phone. The row lays them out with
+    // a gap instead, so their widths do not have to be predicted.
+    const actions = document.createElement('div');
+    actions.className = 'codeActions';
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'codeCopyBtn';
+    copy.textContent = 'Копировать';
+    copy.onclick = async () => {
+      const ok = await copyText(source);
+      copy.textContent = ok ? 'Скопировано' : 'Ошибка';
+      setTimeout(() => { copy.textContent = 'Копировать'; }, 1500);
     };
-    pre.append(btn);
+    actions.append(copy);
+
+    const language = codeLanguage(code);
+    if (language === '' || SHELL_LANGS.has(language)) {
+      const run = document.createElement('button');
+      run.type = 'button';
+      run.className = 'codeRunBtn';
+      run.textContent = 'Выполнить';
+      run.title = 'Выполнить на компьютере';
+      run.setAttribute('aria-label', 'Выполнить на компьютере');
+      run.onclick = () => runShellCommand(source);
+      actions.append(run);
+    }
+    pre.append(actions);
   }
 }
 
@@ -2188,6 +2553,15 @@ $('authForm').addEventListener('submit', async (e) => {
 async function checkAuth() {
   const info = await api('/api/auth');
   $('pairButton').classList.toggle('hidden', !(info.enabled && info.local));
+  // `info.machine` is the server's verdict that this request came from the
+  // machine itself (its own address, whether the browser used localhost or the
+  // LAN address). Opening files with desktop apps only makes sense there.
+  serverIsLocal = Boolean(info.machine);
+  // Running commands on the machine is also fine for an authenticated client
+  // (a paired phone): the PC executes, the phone receives the output.
+  canExecute = Boolean(info.machine || info.authenticated);
+  document.body.classList.toggle('machine-local', serverIsLocal);
+  document.body.classList.toggle('machine-exec', canExecute);
   if (info.enabled && !info.authenticated) { showAuthGate(); return false; }
   return true;
 }
@@ -2549,6 +2923,97 @@ $('importSearch').addEventListener('input', () => { importQuery = $('importSearc
 
 $('helpButton').onclick = () => $('helpOverlay').classList.remove('hidden');
 $('helpClose').onclick = () => $('helpOverlay').classList.add('hidden');
+
+/* ---------------- server restart ---------------- */
+
+// Restarts the whole TaskBridge process, not a model profile. The server answers
+// 202 at once and relaunches itself in a detached helper (POST /api/server/restart).
+// The page then loses its stream for a few seconds, so it shows progress, waits
+// for the server to actually go away and come back, and reloads itself.
+let restarting = false;
+
+function fetchWithTimeout(url, ms) {
+  let timer;
+  return Promise.race([
+    fetch(url, { cache: 'no-store' }),
+    new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+
+// The page's own origin is the proxy in LAN mode, so "health answers" means the
+// whole pair is up again — not just the app.
+async function serverIsUp() {
+  try { return (await fetchWithTimeout('/api/health', 2500)).ok; }
+  catch { return false; }
+}
+
+async function waitUntil(predicate, timeoutMs, stepMs = 700) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, stepMs));
+  }
+}
+
+function showRestart({ title, detail, retry }) {
+  $('serverRestartButton').classList.add('restarting');
+  $('restartTitle').textContent = title;
+  $('restartDetail').textContent = detail;
+  $('restartRetry').classList.toggle('hidden', !retry);
+  $('restartOverlay').classList.remove('hidden');
+}
+
+function stopRestartProgress() {
+  restarting = false;
+  $('serverRestartButton').classList.remove('restarting');
+}
+
+async function reloadWhenServerIsBack() {
+  const up = await waitUntil(serverIsUp, 120000);
+  if (!up) {
+    stopRestartProgress();
+    showRestart({ title: 'Сервер не отвечает', detail: 'Проверь окно запуска TaskBridge и попробуй ещё раз.', retry: true });
+    return;
+  }
+  $('restartTitle').textContent = 'Сервер вернулся';
+  $('restartDetail').textContent = 'Обновляем страницу…';
+  await new Promise(resolve => setTimeout(resolve, 500));
+  location.reload();
+}
+
+$('serverRestartButton').onclick = async () => {
+  if (restarting) return;
+  if (!confirm('Перезагрузить сервер TaskBridge?\n\nАктивные сессии будут прерваны, страница переподключится автоматически через несколько секунд.')) return;
+  restarting = true;
+  $('serverRestartButton').classList.add('restarting');
+  try {
+    await api('/api/server/restart', { method: 'POST', body: { confirm: true } });
+  } catch (error) {
+    stopRestartProgress();
+    $('createError').textContent = `Не удалось перезагрузить сервер: ${error.message}`;
+    $('createError').classList.add('error');
+    return;
+  }
+  showRestart({ title: 'Перезагрузка сервера…', detail: 'Сервер получил команду. Ждём остановки, затем — запуска.', retry: false });
+  // The command is accepted BEFORE the process actually dies, so wait for it to
+  // go away first: otherwise the very first poll would still hit the old server
+  // and the page would reload straight back into it.
+  const wentDown = await waitUntil(async () => !(await serverIsUp()), 30000);
+  if (!wentDown) {
+    stopRestartProgress();
+    showRestart({ title: 'Сервер не перезапустился', detail: 'Процесс не остановился. Смотри окно запуска TaskBridge.', retry: true });
+    return;
+  }
+  $('restartDetail').textContent = 'Сервер остановлен. Ждём запуска…';
+  await reloadWhenServerIsBack();
+};
+
+$('restartRetry').onclick = async () => {
+  $('restartRetry').classList.add('hidden');
+  $('restartDetail').textContent = 'Ждём, пока сервер вернётся…';
+  await reloadWhenServerIsBack();
+};
 
 /* ---------------- MCP (pi-mcp-adapter) ---------------- */
 

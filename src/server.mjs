@@ -3,7 +3,7 @@ import https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
@@ -12,6 +12,8 @@ import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
 import { AccessControl } from './auth.mjs';
 import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs';
+import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
+import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
 import { ensureTlsCert } from './tls.mjs';
 import { trimStreamingDeltas } from './event-trim.mjs';
@@ -281,6 +283,27 @@ async function readJson(req) {
   return text ? JSON.parse(text) : {};
 }
 
+// How this process was started, so a restart relaunches the same shape. LAN mode
+// runs an app + proxy pair (scripts/start-lan.mjs) and writes data/lan.json; a
+// bare `node src/server.mjs` is the monolith.
+async function detectServerMode() {
+  try {
+    const state = JSON.parse(await fs.readFile(path.join(dataRoot, 'lan.json'), 'utf8'));
+    if (state && Number(state.appPid) === process.pid) return 'lan';
+  } catch { /* no LAN state: monolith */ }
+  return 'monolith';
+}
+
+// A task's Pi process env names this session, its approval endpoint and its task
+// id; those must never leak into the restarted server.
+function restartEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (['PI_SESSION_FILE', 'TASKBRIDGE_TASK_ID'].includes(key) || key.startsWith('TASKBRIDGE_APPROVAL_')) delete env[key];
+  }
+  return env;
+}
+
 function uniqueProjectId(manager, name) {
   const base = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'project';
   let id = base;
@@ -332,6 +355,27 @@ async function listArtifacts(taskId) {
   return entries.filter((e) => e.isFile()).map((e) => e.name);
 }
 
+// Only a bounded tail of a command's output is sent to the browser. A larger
+// run does not flood the chat: the full text is written to the session's
+// artifacts (so it shows up there and can be opened or copied later) and the
+// reply carries the tail plus a reference to it.
+const SHELL_PREVIEW_BYTES = 16 * 1024;
+async function boundShellOutput(result, taskId) {
+  const total = Buffer.byteLength(result.stdout, 'utf8') + Buffer.byteLength(result.stderr, 'utf8');
+  if (total <= SHELL_PREVIEW_BYTES) return { ...result, truncated: false };
+  const full = result.stderr ? `${result.stdout}\n--- stderr ---\n${result.stderr}` : result.stdout;
+  const name = `cmd-output-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+  await store.writeArtifact(taskId, name, full);
+  return {
+    ...result,
+    stdout: tailBytes(result.stdout, SHELL_PREVIEW_BYTES),
+    stderr: tailBytes(result.stderr, SHELL_PREVIEW_BYTES),
+    truncated: true,
+    outputName: name,
+    outputBytes: Buffer.byteLength(full, 'utf8')
+  };
+}
+
 async function handleRequest(req, res) {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -340,7 +384,7 @@ async function handleRequest(req, res) {
     res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     const pathname = decodeURIComponent(url.pathname);
     access.checkOrigin(req);
-    if (req.method === 'GET' && pathname === '/api/auth') return json(res, 200, { authenticated: access.authenticated(req), enabled: access.enabled, local: access.local(req) });
+    if (req.method === 'GET' && pathname === '/api/auth') return json(res, 200, { authenticated: access.authenticated(req), enabled: access.enabled, local: access.local(req), machine: access.machine(req) });
     if (req.method === 'POST' && pathname === '/api/auth/pair') {
       const body = await readJson(req);
       access.pair(req, res, body.code);
@@ -604,6 +648,27 @@ async function handleRequest(req, res) {
       const { profileId } = await readJson(req);
       await runtimeControl.restart(profileId);
       return json(res, 200, await runtimeControl.status());
+    }
+
+    // Restart the whole TaskBridge process (not a model profile). The HTTP
+    // response must reach the client before the server dies, so the real work
+    // runs in a detached helper with a short delay. Confirmation is a body flag,
+    // not just a button: without it the probe in tests/api-contract.test.mjs
+    // would restart the server it is checking.
+    if (req.method === 'POST' && pathname === '/api/server/restart') {
+      const body = await readJson(req).catch(() => ({}));
+      if (body?.confirm !== true) {
+        return errorJson(res, 400, Object.assign(new Error('Перезапуск сервера требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' }));
+      }
+      if (manager.activeTaskId || manager.admitting || manager.runtimeChanging) {
+        return errorJson(res, 409, Object.assign(new Error('Дождитесь завершения текущей операции перед перезапуском.'), { code: 'MODEL_BUSY' }));
+      }
+      const mode = await detectServerMode();
+      const script = mode === 'lan' ? 'scripts/restart-lan-now.mjs' : 'scripts/restart-and-verify.mjs';
+      const args = mode === 'lan' ? [script, '--delay-ms=1500'] : [script, '--delay-ms=1500', `--port=${port}`];
+      const child = spawn(process.execPath, args, { cwd: rootDir, detached: true, windowsHide: true, stdio: 'ignore', env: restartEnv() });
+      child.unref();
+      return json(res, 202, { restarting: true, mode, pid: child.pid });
     }
 
     if (req.method === 'GET' && pathname === '/api/models') {
@@ -1021,16 +1086,130 @@ async function handleRequest(req, res) {
       return;
     }
 
+    // --- open on the machine (browser cannot start an app; the machine can) ---
+    // Clicking a file on the PC opens it with the program registered for its
+    // extension (or reveals it in the file manager). That is an action on the
+    // computer, so it is allowed only for a request whose client address is the
+    // machine itself (loopback, or one of this host's own addresses — see
+    // AccessControl.machine). A phone on the LAN does not qualify. A body flag
+    // is required, too: without it the contract probe in
+    // tests/api-contract.test.mjs would launch windows on the build machine.
+    const assertMachineLocal = () => {
+      if (!access.machine(req)) throw Object.assign(new Error('Открыть файл приложением можно только с самого компьютера.'), { code: 'FILE_OPEN_LOCAL_ONLY' });
+    };
+    // Running is also allowed to an authenticated client (a paired phone): the PC
+    // does the work and the phone reads the output, which is the point of a
+    // remote session. Opening files with desktop apps stays machine-only, since
+    // nobody but the operator at the PC would see that.
+    const assertCanExecute = () => {
+      if (!access.machine(req) && !access.authenticated(req)) throw Object.assign(new Error('Выполнение на компьютере недоступно этому клиенту.'), { code: 'MACHINE_ACTION_FORBIDDEN' });
+    };
+    const openConfirmed = async () => {
+      const body = await readJson(req).catch(() => ({}));
+      if (body?.confirm !== true) throw Object.assign(new Error('Открытие файла требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' });
+      return body;
+    };
+    // Prefer the workspace copy of an attachment: it carries the real name and
+    // extension, so the OS association is right. The stored copy is a bare id
+    // with no extension and would not open in any application.
+    const attachmentPath = async (task, file) => {
+      if (task.workspacePath && file.path) {
+        const copy = await containedFile(task.workspacePath, file.path, { allowPrivate: true }).catch(() => null);
+        if (copy) return copy;
+      }
+      return containedFile(path.join(store.taskDir(task.id), 'files'), file.id, { allowPrivate: true });
+    };
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/files\/([a-f0-9-]{36})\/open$/);
+    if (req.method === 'POST' && match) {
+      assertMachineLocal();
+      const body = await openConfirmed();
+      const task = manager.getTask(match[1]);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const file = [...(task.attachments || []), ...(task.outputFiles || [])].find(f => f.id === match[2]);
+      if (!file) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
+      await openLocalPath(await attachmentPath(task, file), { reveal: body.reveal === true });
+      return json(res, 200, { opened: true, reveal: body.reveal === true, name: file.name });
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts\/([^/]+)\/open$/);
+    if (req.method === 'POST' && match) {
+      assertMachineLocal();
+      const body = await openConfirmed();
+      if (!manager.getTask(match[1])) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const name = path.basename(match[2]);
+      await openLocalPath(await containedFile(path.join(store.taskDir(match[1]), 'artifacts'), name), { reveal: body.reveal === true });
+      return json(res, 200, { opened: true, reveal: body.reveal === true, name });
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace-file\/open$/);
+    if (req.method === 'POST' && match) {
+      assertMachineLocal();
+      const body = await openConfirmed();
+      const task = manager.getTask(match[1]);
+      if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
+      const target = await containedFile(task.workspacePath, String(body.path || ''));
+      await openLocalPath(target, { reveal: body.reveal === true });
+      return json(res, 200, { opened: true, reveal: body.reveal === true, name: path.basename(target) });
+    }
+
+    // Run a script on the machine. Same guards as opening (machine only,
+    // confirmation required); the output and exit code come back to the UI.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/files\/([a-f0-9-]{36})\/run$/);
+    if (req.method === 'POST' && match) {
+      assertCanExecute();
+      await openConfirmed();
+      const task = manager.getTask(match[1]);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const file = [...(task.attachments || []), ...(task.outputFiles || [])].find(f => f.id === match[2]);
+      if (!file) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
+      return json(res, 200, { ...await runLocalScript(await attachmentPath(task, file)), name: file.name });
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts\/([^/]+)\/run$/);
+    if (req.method === 'POST' && match) {
+      assertCanExecute();
+      await openConfirmed();
+      if (!manager.getTask(match[1])) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const name = path.basename(match[2]);
+      const target = await containedFile(path.join(store.taskDir(match[1]), 'artifacts'), name);
+      return json(res, 200, { ...await runLocalScript(target), name });
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace-file\/run$/);
+    if (req.method === 'POST' && match) {
+      assertCanExecute();
+      const body = await openConfirmed();
+      const task = manager.getTask(match[1]);
+      if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
+      const target = await containedFile(task.workspacePath, String(body.path || ''));
+      return json(res, 200, { ...await runLocalScript(target), name: path.basename(target) });
+    }
+
+    // Run a shell command line (a fenced command block the operator chose) in the
+    // session workspace. Confirmation is required; running is allowed on the
+    // machine and for an authenticated client (a paired phone).
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/shell$/);
+    if (req.method === 'POST' && match) {
+      assertCanExecute();
+      const body = await openConfirmed();
+      const task = manager.getTask(match[1]);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const cwd = task.workspacePath ? await fs.realpath(task.workspacePath).catch(() => null) : null;
+      const result = await runShellCommand(String(body.command || ''), { cwd: cwd || rootDir });
+      return json(res, 200, await boundShellOutput(result, task.id));
+    }
+
     if (req.method === 'GET' && await serveStatic(pathname, res)) return;
     errorJson(res, 404, Object.assign(new Error('Not found'), { code: 'NOT_FOUND' }));
   } catch (error) {
     if (res.headersSent) { res.destroy(); return; }
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
-      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED'].includes(error.code) ? 400
+      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
-      : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN'].includes(error.code) ? 403
+      : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429
       : ['NOT_FOUND', 'ENOENT'].includes(error.code) ? 404
       : 500;

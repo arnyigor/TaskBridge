@@ -66,6 +66,18 @@ test('the original Host header reaches the app untouched', async (t) => {
   assert.equal(res.body, '192.168.1.212:8787|127.0.0.1');
 });
 
+test('the proxy appends the real client address to X-Forwarded-For', async (t) => {
+  // A client-supplied value is preserved in front; the entry this hop appends
+  // goes last and is the trustworthy one — that is how the app tells a PC using
+  // its own LAN address from a phone when both arrive via loopback.
+  const { proxy } = await withProxy(t, (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end(req.headers['x-forwarded-for'] || '');
+  });
+  const res = await request(proxy.port, { path: '/', headers: { 'x-forwarded-for': '198.51.100.7' } });
+  assert.equal(res.body, '198.51.100.7, 127.0.0.1');
+});
+
 test('an event stream is forwarded as it is written, not held until its end', async (t) => {
   const { proxy } = await withProxy(t, (req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache' });

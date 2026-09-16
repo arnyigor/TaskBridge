@@ -22,6 +22,16 @@ test('no id rule with display can defeat the hidden class', async () => {
   assert.deepEqual(offenders, [], `guard these with :not(.hidden) or remove the display rule:\n${offenders.join('\n')}`);
 });
 
+test('code-block actions are reachable without a hover (touch screens)', async () => {
+  // On desktop they fade in on hover; a phone has no hover, so without this the
+  // copy/run controls would be invisible there.
+  const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
+  const block = css.match(/@media \(hover:\s*none\)\s*\{([\s\S]*?)\n\}/);
+  assert.ok(block, 'a hover:none block exists');
+  assert.match(block[1], /codeCopyBtn/);
+  assert.match(block[1], /opacity:\s*1/);
+});
+
 test('an element hidden in the markup starts hidden in every mode', async () => {
   const { document } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
   // The mode banner only ever gets text from startCloudMode(); in a local page it

@@ -86,6 +86,16 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/tasks/:id/artifacts/:name', summary: 'download one artifact', binary: true },
   { method: 'GET', path: '/api/tasks/:id/files/:fileId', summary: 'download an upload', binary: true },
   { method: 'GET', path: '/api/tasks/:id/workspace-file', summary: 'read a file from the task workspace (?path=)', binary: true },
+  // Opening on the machine: localhost only, body {confirm:true, reveal?}. These
+  // launch an OS application, so the contract probe must never be able to run
+  // them — the confirm flag is what keeps it harmless.
+  { method: 'POST', path: '/api/tasks/:id/files/:fileId/open', summary: 'open an upload with its OS application (or reveal it); the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/artifacts/:name/open', summary: 'open an artifact with its OS application (or reveal it); the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/workspace-file/open', summary: 'open a workspace file with its OS application (or reveal it); the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/files/:fileId/run', summary: 'run an upload as a script and return its output; the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/artifacts/:name/run', summary: 'run an artifact as a script and return its output; the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/workspace-file/run', summary: 'run a workspace file as a script and return its output; the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/shell', summary: 'run a shell command line in the session workspace and return its output; the machine itself only' },
   { method: 'GET', path: '/api/tasks/:id/tools/:toolCallId/output', summary: 'full tool output kept on the machine' },
   { method: 'POST', path: '/api/tasks/:id/apply', summary: 'apply diff.patch to the source checkout' },
   { method: 'DELETE', path: '/api/tasks/:id/worktree', summary: 'remove the task worktree' },
@@ -100,6 +110,9 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/local/stop', summary: 'stop a TaskBridge-started router' },
   { method: 'POST', path: '/api/local/start', summary: 'start the router' },
   { method: 'GET', path: '/api/local/events', summary: 'SSE router status and load progress', sse: true },
+
+  // --- server administration ------------------------------------------------
+  { method: 'POST', path: '/api/server/restart', summary: 'restart the TaskBridge process (body {confirm:true}); answers 202, the relaunch is detached' },
 
   // --- mcp ------------------------------------------------------------------
   { method: 'GET', path: '/api/mcp', summary: 'MCP servers and mode' },

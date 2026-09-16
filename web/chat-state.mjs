@@ -1,3 +1,5 @@
+import { humanizeError } from './errors.mjs';
+
 export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING']);
 
 // Both disk replay and live delivery use the same reducer. Polling never replaces
@@ -74,6 +76,10 @@ export class ChatState {
   }
 
   finish(status, error = null, at = null) {
+    // Every terminal path funnels through here — a TASK_FAILED event carries the
+    // server's stored message, which may be a provider JSON body (older events
+    // kept it verbatim). Flatten once so no caller can put raw JSON on screen.
+    error = error ? humanizeError(error) : null;
     const answered = (turn) => String(turn.text || '').trim().length > 0;
     const cutOff = (turn) => !answered(turn) && (turn.superseded || status === 'CANCELLED');
     const labelFor = (turn) => (turn.error || cutOff(turn) ? 'FAILED' : status);
@@ -381,7 +387,9 @@ export class ChatState {
         turn.thinking = (orphan || this.messageTurn ? context.thinkingPrefix : turn.thinking) + thinking;
       }
       if (typeof frame.message.stopReason === 'string') turn.stopReason = frame.message.stopReason;
-      if (frame.message.errorMessage || aborted) turn.error = frame.message.errorMessage || 'Request was aborted';
+      // Pi forwards the provider's error body verbatim; a JSON envelope is not a
+      // message a human can read, so it is flattened to one line here.
+      if (frame.message.errorMessage || aborted) turn.error = humanizeError(frame.message.errorMessage) || 'Request was aborted';
       if (orphan) {
         // Route the WHOLE late end to its original message. In particular, do
         // not overwrite the fresh answer's deltas or close its streaming sink.
@@ -418,7 +426,7 @@ export class ChatState {
     }
     if (frame.type === 'agent_settled') this.finish('DONE', null, event.at);
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type)) {
-      const note = frame.errorMessage || (frame.result ? 'Контекст сжат.' : null);
+      const note = humanizeError(frame.errorMessage) || (frame.result ? 'Контекст сжат.' : null);
       if (note && !this.notes.has(event.seq)) {
         this.notes.add(event.seq);
         this.turns.push({ id: `note-${event.seq}`, role: 'note', text: note });

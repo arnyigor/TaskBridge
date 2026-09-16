@@ -294,6 +294,11 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   task = await terminal(api, id);
   assert.equal(task.status, 'FAILED');
   assert.equal(task.errorCode, 'MODEL_ERROR');
+  // A JSON error body from the provider is stored and shown as one readable line.
+  await api(`/api/tasks/${id}/message`, { text: 'model-error-json' });
+  task = await terminal(api, id);
+  assert.equal(task.status, 'FAILED');
+  assert.equal(task.error, 'The following parameters are not supported for this model: tools (UNSUPPORTED_OPENAI_PARAMS)');
   await api(`/api/tasks/${id}`, undefined, 'DELETE');
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal((await api('/api/tasks')).length, 0);
@@ -609,4 +614,28 @@ test('fork over HTTP copies the conversation and leaves the source alone', { tim
   const fromAnswer = await api(`/api/tasks/${id}/fork`, { turnId: `assistant-${users[0].seq}` });
   const answerCopy = await api(`/api/tasks/${fromAnswer.id}/events?limit=0`);
   assert.deepEqual(answerCopy.slice(0, -1).map(e => e.type), source.map(e => e.type));
+});
+
+test('POST /api/server/restart needs confirmation and refuses a busy machine', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+
+  // Without the explicit flag the request is refused — and, above all, the
+  // server the test is talking to is not restarted.
+  const denied = await fetch(`${fixture.base}/api/server/restart`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(denied.status, 400);
+  assert.equal((await denied.json()).code, 'INPUT_INVALID');
+  assert.equal((await fetch(`${fixture.base}/api/health`)).status, 200, 'сервер не перезапустился без подтверждения');
+
+  // A turn in flight owns the session: restarting now would rip it away.
+  const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'slow' });
+  let status = '';
+  for (let i = 0; i < 80 && status !== 'RUNNING'; i++) {
+    status = (await fixture.api(`/api/tasks/${created.id}`)).status;
+    if (status !== 'RUNNING') await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(status, 'RUNNING');
+  const busy = await fetch(`${fixture.base}/api/server/restart`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true }) });
+  assert.equal(busy.status, 409);
+  assert.equal((await busy.json()).code, 'MODEL_BUSY');
 });

@@ -106,6 +106,23 @@ body {
 }
 #notifyButton.granted { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); }
 
+/* A bare glyph in the header: no border, no background, no text — it must not
+   take space. It is still a <button> so it stays keyboard- and screen-reader
+   reachable. */
+.bareIcon {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  border-radius: var(--radius-s);
+}
+.bareIcon:hover:not(:disabled) { color: var(--accent); background: rgba(167, 139, 250, 0.12); }
+
 .statusDot {
   width: 12px;
   height: 12px;
@@ -170,12 +187,62 @@ body {
   flex-direction: column;
   gap: 10px;
 }
+
+/* Restart progress: the overlay explains the silent seconds between "the app
+   died" and "the app is back", and the header glyph keeps spinning meanwhile. */
+.restartCard { align-items: center; text-align: center; }
+.restartCard h2 { font-size: 16px; }
+.restartSpinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid var(--border-strong);
+  border-top-color: var(--accent);
+  animation: restartSpin 0.9s linear infinite;
+}
+@keyframes restartSpin { to { transform: rotate(360deg); } }
+.bareIcon.restarting { color: var(--accent); }
+.bareIcon.restarting svg { animation: restartSpin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .restartSpinner, .bareIcon.restarting svg { animation-duration: 2.4s; }
+}
 .authCard.wide { max-width: 520px; }
 .sessionDetailsCard { max-width: 580px; }
 .dialogHeader { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .dialogHeader h2 { margin: 0; font-size: 16px; font-weight: 600; }
 .sessionDetailsCard .detailBody { max-height: 70vh; overflow-y: auto; padding-right: 4px; }
 .dialogFooter { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+
+/* In-app file viewer. Opening a file must show it, not silently hand the
+   operator a download: text and source files are rendered here (identical on
+   desktop and in the Android browser), pictures zoom in, and a PDF is embedded
+   where the browser can render it. Only files nothing can display fall back to
+   the browser's own handling. */
+.fileViewerCard { max-width: 900px; width: 100%; }
+.fileViewerBody {
+  min-height: 120px;
+  max-height: 72vh;
+  overflow: auto;
+  background: #0d1220;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-m);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.fileViewerBody img { max-width: 100%; height: auto; align-self: center; border-radius: var(--radius-s); }
+.fileViewerBody iframe { width: 100%; height: 68vh; border: 0; background: #fff; border-radius: var(--radius-s); }
+.fileViewerBody pre.fileViewerText {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+.fileViewerBody .fileViewerMessage { color: var(--muted); }
 .authCard h2 { margin: 0; font-size: 16px; }
 .authCard form { display: flex; gap: 8px; }
 .authCard input {
@@ -517,10 +584,17 @@ body {
 .copyBtn svg { display: block; }
 .copyBtn:hover { color: var(--accent); background: var(--accent-soft); }
 .md pre { position: relative; }
-.codeCopyBtn {
+/* The block actions live side by side in one row, anchored top-right. A flex row
+   with a gap means neither button's position depends on a guessed width of the
+   other, which is what made them overlap on a narrow phone. */
+.codeActions {
   position: absolute;
   top: 6px;
   right: 6px;
+  display: flex;
+  gap: 6px;
+}
+.codeActions > button {
   font-size: 10.5px;
   padding: 3px 7px;
   background: rgba(255, 255, 255, 0.06);
@@ -528,8 +602,23 @@ body {
   color: var(--muted);
   opacity: 0;
   transition: opacity .12s ease;
+  white-space: nowrap;
 }
-.md pre:hover .codeCopyBtn { opacity: 1; }
+.md pre:hover .codeActions > button { opacity: 1; }
+/* "Выполнить" only where running is possible (body.machine-exec: the machine or
+   an authenticated client) and only on command blocks — built in
+   addCodeCopyButtons. */
+body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
+.codeRunBtn:hover { color: #6ee7b7; }
+/* A touch screen has no hover, so the block actions must not wait for one: on
+   such devices they are always visible (on desktop they still appear on hover). */
+@media (hover: none) {
+  /* Reserve room above the code, otherwise the always-visible actions sit on
+     the first line. */
+  .md pre { padding-top: 32px; }
+  .md pre .codeActions > .codeCopyBtn,
+  .md pre .codeActions > .codeRunBtn { opacity: 1; }
+}
 
 /* inline turn error + retry */
 .turnError {
@@ -693,6 +782,32 @@ body {
   line-height: 1;
 }
 .fileChip a[title="Скачать"]:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); text-decoration: none; }
+/* Reveal-in-folder works only when the UI runs on the machine itself, so the
+   control stays hidden on a phone or in the cloud (body.machine-local is set
+   from /api/auth). */
+.fileChip a.revealIcon {
+  display: none;
+  text-decoration: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: 50%;
+  line-height: 1;
+}
+body.machine-local .fileChip a.revealIcon { display: inline-flex; }
+.fileChip a.revealIcon:hover { color: var(--accent); background: rgba(167, 139, 250, 0.14); text-decoration: none; }
+/* Running a script happens on the machine. That is allowed on the machine and
+   for an authenticated client (a paired phone), so it hinges on body.machine-exec
+   — not on being on the machine locally. */
+.fileChip a.runIcon {
+  display: none;
+  text-decoration: none;
+  color: var(--muted);
+  padding: 2px 4px;
+  border-radius: 50%;
+  line-height: 1;
+}
+body.machine-exec .fileChip a.runIcon { display: inline-flex; }
+.fileChip a.runIcon:hover { color: #6ee7b7; background: rgba(110, 231, 183, 0.14); text-decoration: none; }
 
 .attachedFiles {
   display: flex;

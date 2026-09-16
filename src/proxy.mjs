@@ -31,17 +31,20 @@ const HOP_BY_HOP = new Set([
   'te', 'trailer', 'transfer-encoding', 'upgrade',
 ]);
 
-function forwardRequestHeaders(headers) {
+function forwardRequestHeaders(headers, clientAddress) {
   const out = {};
   for (const [name, value] of Object.entries(headers)) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
     out[name] = value;
   }
-  // The app sees the connection coming from loopback (this process). Tell it
-  // where the request really came from without pretending it is a substitute
-  // for the Host check above.
+  // The app sees every connection coming from loopback (this process), so a
+  // Host check alone cannot tell the PC (using its LAN address) from a phone.
+  // Append the address this hop actually received the request from as the last
+  // X-Forwarded-For entry: a client may prepend its own value, but it cannot
+  // change the entry we add, so the last one is trustworthy.
+  const client = clientAddress ? String(clientAddress) : '127.0.0.1';
   const existing = headers['x-forwarded-for'];
-  out['x-forwarded-for'] = existing ? `${existing}, 127.0.0.1` : '127.0.0.1';
+  out['x-forwarded-for'] = existing ? `${existing}, ${client}` : client;
   return out;
 }
 
@@ -68,7 +71,7 @@ export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, p
       port: upstreamPort,
       method: req.method,
       path: req.url,
-      headers: forwardRequestHeaders(req.headers),
+      headers: forwardRequestHeaders(req.headers, req.socket?.remoteAddress),
     });
 
     upstream.on('response', (up) => {

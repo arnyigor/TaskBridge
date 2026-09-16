@@ -33,6 +33,9 @@
       <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi">Модель: —</button>
       <button id="localModelsButton" data-pc-only type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
       <button id="mcpButton" data-pc-only type="button" class="small" title="MCP-серверы для задач">MCP</button>
+      <button id="serverRestartButton" data-pc-only type="button" class="bareIcon" title="Перезагрузить сервер" aria-label="Перезагрузить сервер">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      </button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
       <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
       <details id="sysState" class="sysState hidden">
@@ -86,6 +89,15 @@
       <div id="pairingCode" class="pairingCode">—</div>
       <p class="muted small" id="pairingExpiry"></p>
       <button id="pairingClose" type="button">Закрыть</button>
+    </div>
+  </div>
+
+  <div id="restartOverlay" class="authGate hidden" role="status" aria-live="polite">
+    <div class="authCard restartCard">
+      <div class="restartSpinner" aria-hidden="true"></div>
+      <h2 id="restartTitle">Перезагрузка сервера…</h2>
+      <p class="muted small" id="restartDetail">Сервер получил команду. Ждём остановки, затем — запуска.</p>
+      <button id="restartRetry" type="button" class="hidden">Попробовать снова</button>
     </div>
   </div>
 
@@ -351,6 +363,22 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260915-1"></script>
+  <div id="fileViewerOverlay" class="authGate hidden">
+    <div class="authCard wide fileViewerCard">
+      <div class="dialogHeader">
+        <h2 id="fileViewerName">Файл</h2>
+        <button id="fileViewerCloseIcon" type="button" class="iconButton" title="Закрыть" aria-label="Закрыть">✕</button>
+      </div>
+      <div id="fileViewerBody" class="fileViewerBody">Загрузка…</div>
+      <div class="inline wrap dialogFooter">
+        <button id="fileViewerCopy" type="button" class="hidden">Копировать</button>
+        <button id="fileViewerDownload" type="button">Скачать</button>
+        <button id="fileViewerExternal" type="button">Открыть в новой вкладке</button>
+        <button id="fileViewerClose" type="button">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/app.js?v=20260916-4"></script>
 </body>
 </html>
