@@ -54,8 +54,24 @@
 // PWA would never install (found by running it, not by reading it).
 (function () {
   if (!('serviceWorker' in navigator)) return;
+  // The phone kept running a stale shell after a deploy — the code-block actions
+  // and the paste handling simply "did not exist" there until the cache was
+  // cleared by hand. Reload once when a new worker takes control, so a deploy
+  // reaches the phone by itself. `hadController` keeps the very first install
+  // (which also fires controllerchange) from reloading a freshly opened page.
+  var hadController = !!navigator.serviceWorker.controller;
+  var reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', function () {
+    if (!hadController || reloaded) return;
+    reloaded = true;
+    location.reload();
+  });
   addEventListener('load', function () {
-    navigator.serviceWorker.register('/sw.js?v=20260916-4', { updateViaCache: 'none' }).catch(function (error) {
+    navigator.serviceWorker.register('/sw.js?v=20260916-12', { updateViaCache: 'none' }).then(function (registration) {
+      // Ask for a fresh sw.js on every load; it is tiny and the browser otherwise
+      // only re-checks it on its own schedule.
+      if (registration.update) registration.update().catch(function () {});
+    }).catch(function (error) {
       console.warn('service worker registration failed', error);
     });
   });

@@ -216,7 +216,13 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
     './vendor/purify.mjs': { default: { sanitize: html => html } }
   });
-  const context = vm.createContext({ document, window, console, URL, history: historyStub, location: locationStub,
+  const localStorageStub = {
+    store: {},
+    getItem(key) { return Object.prototype.hasOwnProperty.call(this.store, key) ? this.store[key] : null; },
+    setItem(key, value) { this.store[key] = String(value); },
+    removeItem(key) { delete this.store[key]; }
+  };
+  const context = vm.createContext({ document, window, console, URL, history: historyStub, location: locationStub, localStorage: localStorageStub,
     WebSocket: TestWebSocket,
     __TASKBRIDGE_CLOUD__: cloud ? globalThis.__taskbridgeTestCloud : undefined,
     ...imported,
@@ -224,6 +230,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     EventSource: class { constructor(url) { this.url = url; streams.push(this); } close() { this.closed = true; } },
     navigator: { clipboard: { writeText: async text => { copied.push(text); } } },
     DataTransfer: class { items = { add: (file) => this.files.push(file) }; files = []; },
+    File,
     fetch: async (url, options) => {
       if (fetchHook) { const intercepted = await fetchHook(url, options); if (intercepted) return intercepted; }
       const path = new URL(url, 'http://localhost');
@@ -243,8 +250,8 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, addCodeCopyButtons, openFileViewer, closeFileViewer, viewerKind, openWithMachine, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, setLastTasks: (list) => { lastTasks = list; }};', context);
-  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, openFileViewer, closeFileViewer, viewerKind, openWithMachine, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings(); }, setLastTasks: (list) => { lastTasks = list; }};', context);
+  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -397,6 +404,14 @@ test('DOM: the reveal control asks the machine to show the folder', async () => 
   assert.equal(bodies[0].confirm, true);
 });
 
+// Presses "Выполнить" in the in-app confirmation (window.confirm is unreliable
+// on mobile/PWA, so the page draws its own dialog).
+function confirmRun(app) {
+  const overlay = app.document.getElementById('confirmOverlay');
+  assert.equal(overlay.classList.contains('hidden'), false, 'a confirmation is shown');
+  app.document.getElementById('confirmOk').onclick();
+}
+
 test('DOM: a script file chip offers a run action that runs it on the machine', async () => {
   const app = await ui();
   app.setServerLocal(true);
@@ -414,9 +429,11 @@ test('DOM: a script file chip offers a run action that runs it on the machine', 
   const click = new app.window.Event('click', { bubbles: true, cancelable: true });
   run.dispatchEvent(click);
   await new Promise(resolve => setTimeout(resolve, 0));
-  await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(click.defaultPrevented, true, 'the browser must not navigate');
-  assert.ok(app.confirms.some(message => /Выполнить deploy\.sh/.test(message)), 'the operator is asked before running');
+  assert.match(app.document.getElementById('confirmText').textContent, /deploy\.sh/, 'the operator is asked first');
+  confirmRun(app);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(calls.length, 1, 'exactly one run request');
   assert.equal(calls[0].method, 'POST');
   assert.match(calls[0].url, /\/api\/tasks\/a\/files\/33333333-3333-3333-3333-333333333333\/run$/);
@@ -455,8 +472,10 @@ test('DOM: a command code block offers a run button that confirms and runs on th
   const run = box.querySelector('.codeRunBtn');
   assert.ok(run, 'the run control exists');
   assert.equal(run.textContent, 'Выполнить');
-  await run.onclick();
-  assert.ok(app.confirms.some(message => /Выполнить команду/.test(message)), 'the operator is asked first');
+  const pending = run.onclick();
+  assert.match(app.document.getElementById('confirmText').textContent, /apply-move-list\.ps1/, 'the operator is asked first');
+  confirmRun(app);
+  await pending;
   assert.equal(calls.length, 1);
   assert.equal(calls[0].method, 'POST');
   assert.match(calls[0].url, /\/api\/tasks\/a\/shell$/);
@@ -473,7 +492,7 @@ test('DOM: a command code block offers a run button that confirms and runs on th
   assert.equal(app.copied.at(-1), 'moved 20 files\n', 'the output text is copied');
 });
 
-test('DOM: a long command output points at the artifact instead of pasting it all', async () => {
+test('DOM: a long command output is offered as a file — download, attach, open', async () => {
   const app = await ui();
   app.setServerLocal(true);
   await app.selectTask('a');
@@ -482,23 +501,145 @@ test('DOM: a long command output points at the artifact instead of pasting it al
     if (url.endsWith('/shell')) {
       return { ok: true, json: async () => ({ exitCode: 0, stdout: 'last line\n', stderr: '', timedOut: false, truncated: true, outputName: 'cmd-output-1.log', outputBytes: 204800 }) };
     }
-    if (url.includes('/artifacts/')) { calls.push({ url, method: options.method, body: JSON.parse(options.body || '{}') }); return { ok: true, json: async () => ({ opened: true }) }; }
+    if (url.endsWith('/open')) { calls.push({ url, body: JSON.parse(options.body || '{}') }); return { ok: true, json: async () => ({ opened: true }) }; }
+    if (url.includes('/artifacts/')) return { ok: true, text: async () => 'full output body' };
     return null;
   });
   const box = app.document.createElement('div');
   box.innerHTML = '<pre><code class="language-bash">long-running</code></pre>';
   app.addCodeCopyButtons(box);
-  await box.querySelector('.codeRunBtn').onclick();
+  const pending = box.querySelector('.codeRunBtn').onclick();
+  confirmRun(app);
+  await pending;
   const overlay = app.document.getElementById('fileViewerOverlay');
   assert.match(overlay.textContent, /Показан конец вывода/);
   assert.match(overlay.textContent, /cmd-output-1\.log/, 'the artifact is named');
   assert.match(overlay.textContent, /200\.0 КиБ/, 'and its size is shown');
-  const openFull = [...overlay.querySelectorAll('button')].find(button => button.textContent === 'Открыть полный вывод');
+  const buttons = [...overlay.querySelectorAll('button')];
+  assert.ok(buttons.find(button => button.textContent === 'Скачать'), 'the file can be downloaded');
+
+  // Opening the full output with a desktop app is a machine action.
+  const openFull = buttons.find(button => button.textContent === 'Открыть полный вывод');
   assert.ok(openFull, 'the full output can be opened');
   await openFull.onclick();
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/api\/tasks\/a\/artifacts\/cmd-output-1\.log\/open$/);
   assert.equal(calls[0].body.confirm, true);
+
+  // "В чат" attaches the whole output to the composer as a file to send, so the
+  // operator never has to paste a wall of text into the (bounded) prompt field.
+  const toChat = [...app.document.getElementById('fileViewerOverlay').querySelectorAll('button')].find(button => button.textContent === 'В чат');
+  assert.ok(toChat, 'the output can be attached to a message');
+  await toChat.onclick();
+  const attached = app.document.getElementById('files').files;
+  assert.equal(attached.length, 1);
+  assert.equal(attached[0].name, 'cmd-output-1.log');
+  assert.equal(app.document.getElementById('fileViewerOverlay').classList.contains('hidden'), true, 'the panel closes after attaching');
+});
+
+test('DOM: a large paste becomes an attachment instead of filling the prompt', async () => {
+  const app = await ui();
+  const prompt = app.document.getElementById('prompt');
+  const big = new app.window.Event('paste', { bubbles: true, cancelable: true });
+  big.clipboardData = { getData: () => 'x'.repeat(9000) };
+  prompt.dispatchEvent(big);
+  assert.equal(big.defaultPrevented, true, 'the large paste is intercepted');
+  assert.equal(prompt.value, '', 'nothing is poured into the prompt');
+  const attached = app.document.getElementById('files').files;
+  assert.equal(attached.length, 1, 'the text becomes an attachment');
+  assert.match(attached[0].name, /^pasted-.*\.txt$/);
+
+  const small = new app.window.Event('paste', { bubbles: true, cancelable: true });
+  small.clipboardData = { getData: () => 'короткий текст' };
+  prompt.dispatchEvent(small);
+  assert.equal(small.defaultPrevented, false, 'a short paste is left alone');
+  assert.equal(app.document.getElementById('files').files.length, 1, 'and adds no attachment');
+});
+
+test('DOM: a large text that lands in the prompt becomes a file even without a paste event', async () => {
+  const app = await ui();
+  const prompt = app.document.getElementById('prompt');
+  // The phone case: no usable `paste` event, the text is simply in the field.
+  prompt.value = 'y'.repeat(9000);
+  prompt.dispatchEvent(new app.window.Event('input', { bubbles: true }));
+  assert.equal(prompt.value, '', 'the wall of text is taken out of the prompt');
+  const files = app.document.getElementById('files').files;
+  assert.equal(files.length, 1);
+  assert.match(files[0].name, /^pasted-.*\.txt$/);
+
+  // beforeinput catches the paste payload before it is inserted.
+  const event = new app.window.Event('beforeinput', { bubbles: true, cancelable: true });
+  event.inputType = 'insertFromPaste';
+  event.dataTransfer = { getData: () => 'z'.repeat(9000) };
+  prompt.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true, 'intercepted before it lands');
+  assert.equal(app.document.getElementById('files').files.length, 2);
+});
+
+test('DOM: a multi-line queued prompt shows one line, the whole text is still queued', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.tasks.a = { ...app.tasks.a, status: 'QUEUED', queueReason: 'QUEUED', pendingPrompts: [{ id: 'p1', text: 'первая строка\nвторая строка' }] };
+  await app.refreshTask();
+  const banner = app.document.getElementById('queuedPrompt').querySelector('.queuedText');
+  assert.equal(banner.textContent, 'В очереди: первая строка', 'only the first line is shown');
+  // The reducer keeps the full text; only the display is trimmed.
+  assert.equal(app.tasks.a.pendingPrompts[0].text, 'первая строка\nвторая строка');
+});
+
+test('DOM: a markdown table is wrapped in its own scroll box', async () => {
+  const app = await ui();
+  const box = app.document.createElement('div');
+  box.innerHTML = '<table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>';
+  app.wrapTables(box);
+  const wrap = box.querySelector('.tableWrap');
+  assert.ok(wrap, 'the table has a scroll box');
+  assert.ok(wrap.querySelector('table'), 'and the table is inside it');
+  assert.equal(box.querySelectorAll('table').length, 1, 'no duplicate');
+  app.wrapTables(box);
+  assert.equal(box.querySelectorAll('.tableWrap').length, 1, 'wrapping is idempotent');
+});
+
+test('DOM: interface settings change the scale and width, and persist', async () => {
+  const app = await ui();
+  const root = app.document.documentElement;
+  app.setUiSettings({ scale: 1.3 });
+  assert.equal(root.style.getPropertyValue('--ui-scale'), '1.3');
+  app.setUiSettings({ width: 'wide' });
+  assert.equal(root.style.getPropertyValue('--app-max'), '1500px');
+  assert.equal(root.style.getPropertyValue('--msgs-max'), '1000px');
+  assert.deepEqual(JSON.parse(app.localStorage.getItem('taskbridge-ui')), { scale: 1.3, width: 'wide' });
+  app.document.getElementById('uiSettingsReset').onclick();
+  assert.equal(root.style.getPropertyValue('--ui-scale'), '1', 'reset restores the default scale');
+  assert.equal(root.style.getPropertyValue('--app-max'), '1100px');
+  assert.deepEqual(JSON.parse(app.localStorage.getItem('taskbridge-ui')), { scale: 1, width: 'normal' });
+});
+
+test('DOM: a queued prompt for a waiting session cannot jump ahead of the busy one', async () => {
+  const app = await ui();
+  await app.selectTask('b');
+  app.tasks.a = { ...app.tasks.a, status: 'RUNNING', title: 'Работа' };
+  app.tasks.b = { ...app.tasks.b, status: 'QUEUED', queueReason: 'BUSY', pendingPrompts: [{ id: 'p1', text: 'моё сообщение' }] };
+  app.setLastTasks([app.tasks.a, app.tasks.b]);
+  await app.refreshTask();
+  const host = app.document.getElementById('queuedPrompt');
+  assert.equal(host.classList.contains('hidden'), false, 'the queue banner is shown');
+  assert.match(host.querySelector('.queuedText').textContent, /ждёт «Работа»/, 'it names the session in the way');
+  const send = [...host.querySelectorAll('button')].find(button => button.textContent === 'Отправить сейчас');
+  assert.ok(send, 'the send control exists');
+  assert.equal(send.disabled, false, 'kept pressable so it can explain');
+  // Pressing it says it cannot happen now; the message stays queued.
+  send.onclick();
+  assert.match(app.document.getElementById('createError').textContent, /Сейчас нельзя/, 'and explains why');
+  assert.deepEqual(app.tasks.b.pendingPrompts.map(entry => entry.text), ['моё сообщение'], 'the prompt is not lost');
+
+  // The session that owns the machine may still cut in.
+  app.tasks.a = { ...app.tasks.a, status: 'RUNNING', pendingPrompts: [{ id: 'p1', text: 'моё сообщение' }] };
+  app.setLastTasks([app.tasks.a, app.tasks.b]);
+  await app.selectTask('a');
+  await app.refreshTask();
+  const own = [...app.document.getElementById('queuedPrompt').querySelectorAll('button')].find(button => button.textContent === 'Отправить сейчас');
+  assert.equal(own.disabled, false, 'the owner can send into its own turn');
 });
 
 test('DOM: code-block actions share one flex row, so they cannot overlap', async () => {
@@ -536,7 +677,9 @@ test('DOM: an authenticated phone can run a command block, but not open files na
   app.addCodeCopyButtons(box);
   const run = box.querySelector('.codeRunBtn');
   assert.ok(run, 'an authenticated client still gets the run control');
-  await run.onclick();
+  const pending = run.onclick();
+  confirmRun(app);
+  await pending;
   assert.equal(calls.length, 1);
   assert.match(calls[0].url, /\/api\/tasks\/a\/shell$/);
   // Opening files with desktop apps remains machine-only: the phone gets an error.

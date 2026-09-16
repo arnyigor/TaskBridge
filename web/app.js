@@ -207,11 +207,7 @@ function fileCard(file, taskId) {
     run.title = 'Выполнить скрипт';
     run.setAttribute('aria-label', `Выполнить ${file.name}`);
     run.append(messageIcon('run'));
-    run.onclick = (event) => {
-      event.preventDefault();
-      if (!confirm(`Выполнить ${file.name} на компьютере?`)) return;
-      runOnMachine(viewUrl, file.name);
-    };
+    run.onclick = (event) => { event.preventDefault(); runOnMachine(viewUrl, file.name); };
     actions.push(run);
   }
   card.append(open, ...actions, download);
@@ -627,24 +623,62 @@ async function openWithMachine(viewUrl, name) {
 // not a preview.
 async function runOnMachine(viewUrl, name) {
   const runPath = machineRunPath(viewUrl);
-  if (!canExecute || !runPath) { alert('Выполнение скрипта на компьютере недоступно.'); return; }
+  if (!runPath) return;
+  if (!await confirmDialog(name, { title: 'Выполнить скрипт на компьютере?' })) return;
   try {
     const result = await api(runPath, { method: 'POST', body: { confirm: true } });
     showRunResult(`Выполнение: ${name}`, result);
-  } catch (error) { alert(error.message); }
+  } catch (error) {
+    showRunResult(`Выполнение: ${name}`, { error: true, exitCode: null, stdout: '', stderr: error.message, timedOut: false });
+  }
+}
+
+// A confirmation drawn by the page itself, not window.confirm: some mobile/PWA
+// contexts suppress native dialogs, which made the run action look dead on a
+// phone. Falls back to confirm() only when the shell has no dialog (old cache).
+function confirmDialog(message, { title = 'Подтвердите действие', ok = 'Выполнить' } = {}) {
+  const overlay = $('confirmOverlay');
+  if (!overlay) return Promise.resolve(typeof confirm === 'function' ? confirm(`${title}\n\n${message}`) : true);
+  return new Promise(resolve => {
+    $('confirmTitle').textContent = title;
+    $('confirmText').textContent = message;
+    $('confirmOk').textContent = ok;
+    const finish = value => { overlay.classList.add('hidden'); resolve(value); };
+    $('confirmOk').onclick = () => finish(true);
+    $('confirmCancel').onclick = () => finish(false);
+    overlay.classList.remove('hidden');
+  });
 }
 
 // Run a shell command line from a code block, in the current session's workspace,
 // after asking. Machine-only: a command line is arbitrary code.
 async function runShellCommand(command) {
-  if (!canExecute) { alert('Выполнение команд на компьютере недоступно.'); return; }
-  if (!selectedTaskId) { alert('Выберите сессию — команда выполняется в её рабочей папке.'); return; }
   if (!String(command || '').trim()) return;
-  if (!confirm(`Выполнить команду на компьютере?\n\n${command}`)) return;
+  if (!selectedTaskId) {
+    showRunResult('Выполнение команды', { error: true, exitCode: null, stdout: '', stderr: 'Сначала выберите сессию — команда выполняется в её рабочей папке.', timedOut: false });
+    return;
+  }
+  if (!await confirmDialog(command, { title: 'Выполнить команду на компьютере?' })) return;
   try {
     const result = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/shell`, { method: 'POST', body: { confirm: true, command } });
     showRunResult('Выполнение команды', result);
-  } catch (error) { alert(error.message); }
+  } catch (error) {
+    showRunResult('Выполнение команды', { error: true, exitCode: null, stdout: '', stderr: error.message, timedOut: false });
+  }
+}
+
+// Attach a run's output to the composer, so the operator can send it to the
+// agent as a file instead of pasting a wall of text into the message box — the
+// prompt field is bounded, and a big paste silently hits that bound.
+async function attachOutputToChat(artifactUrl, name) {
+  try {
+    const response = await fetch(artifactUrl);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    addFilesToComposer([new File([await response.text()], name, { type: 'text/plain' })]);
+    closeFileViewer();
+  } catch (error) {
+    alert(error.message);
+  }
 }
 
 function formatBytes(bytes) {
@@ -663,24 +697,41 @@ function showRunResult(title, result) {
   body.textContent = '';
   const head = document.createElement('div');
   head.className = 'fileViewerMessage';
-  head.textContent = result.timedOut || result.exitCode == null
-    ? 'Прервано (таймаут)'
-    : `Код выхода: ${result.exitCode}`;
+  head.textContent = result.error
+    ? 'Ошибка'
+    : result.timedOut
+      ? 'Прервано (таймаут)'
+      : `Код выхода: ${result.exitCode}`;
   const pre = document.createElement('pre');
   pre.className = 'fileViewerText';
   pre.textContent = output;
-  body.append(head, pre);
+  body.append(head);
+  // The file actions go ABOVE the output: a long run fills the panel, and on a
+  // phone the button under it was off-screen — it looked like it was missing.
   // A long run is not pasted into the chat: only its tail is shown, the whole
   // output lives in the session's artifacts. Point at it and let it be opened.
-  if (result.truncated && result.outputName) {
+  if (result.outputName && selectedTaskId) {
+    const artifact = `/api/tasks/${encodeURIComponent(selectedTaskId)}/artifacts/${encodeURIComponent(result.outputName)}`;
     const note = document.createElement('div');
     note.className = 'fileViewerMessage';
-    note.textContent = `Показан конец вывода. Полный вывод (${formatBytes(result.outputBytes)}) сохранён в файл «${result.outputName}» — раздел Artifacts.`;
+    note.textContent = result.truncated
+      ? `Показан конец вывода. Полный вывод (${formatBytes(result.outputBytes)}) сохранён в файл «${result.outputName}».`
+      : `Вывод (${formatBytes(result.outputBytes)}) сохранён в файл «${result.outputName}».`;
     body.append(note);
-    const artifact = selectedTaskId ? `/api/tasks/${encodeURIComponent(selectedTaskId)}/artifacts/${encodeURIComponent(result.outputName)}` : null;
-    if (serverIsLocal && artifact) {
-      const actions = document.createElement('div');
-      actions.className = 'inline wrap';
+    const actions = document.createElement('div');
+    actions.className = 'inline wrap';
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.textContent = 'Скачать';
+    download.onclick = () => triggerDownload(downloadUrlFor(artifact), result.outputName);
+    const toChat = document.createElement('button');
+    toChat.type = 'button';
+    toChat.textContent = 'В чат';
+    toChat.title = 'Прикрепить вывод к сообщению';
+    toChat.onclick = () => attachOutputToChat(artifact, result.outputName);
+    actions.append(download, toChat);
+    // Opening with a desktop application only makes sense on the machine itself.
+    if (serverIsLocal) {
       const openFull = document.createElement('button');
       openFull.type = 'button';
       openFull.textContent = 'Открыть полный вывод';
@@ -690,9 +741,10 @@ function showRunResult(title, result) {
       revealFull.textContent = 'Показать в папке';
       revealFull.onclick = () => machineActionAlert(machineActionPath(artifact, 'open'), true);
       actions.append(openFull, revealFull);
-      body.append(actions);
     }
+    body.append(actions);
   }
+  body.append(pre);
   // No download/new-tab here: this panel shows a command's output. The one
   // action that belongs is copying the text the operator is looking at.
   $('fileViewerDownload').classList.add('hidden');
@@ -1870,16 +1922,30 @@ function renderQueuedPrompt() {
   if (!queue.length) { host.classList.add('hidden'); host.innerHTML = ''; return; }
   host.classList.remove('hidden');
   host.innerHTML = '';
+  // The machine runs one generation at a time. A session that does NOT hold it
+  // cannot force its queued prompt to the front — that would mean two parallel
+  // runs. Its prompt goes out by itself when the busy session finishes, so the
+  // control is disabled and names the session in the way instead of failing with
+  // «машина занята» afterwards.
+  const busy = lastTasks.find(task => task.status === 'RUNNING' && task.id !== selectedTaskId) || null;
   const text = document.createElement('div');
   text.className = 'queuedText';
   const first = String(queue[0].text || '').split('\n')[0];
-  text.textContent = queue.length > 1 ? `В очереди (${queue.length}): ${first}` : `В очереди: ${first}`;
+  const head = queue.length > 1 ? `В очереди (${queue.length}): ${first}` : `В очереди: ${first}`;
+  text.textContent = busy ? `${head} — ждёт «${busy.title || busy.id}»` : head;
   const send = document.createElement('button');
   send.type = 'button';
   send.className = 'small';
   send.textContent = 'Отправить сейчас';
-  send.title = 'Прервать текущий ответ и отправить это сообщение сразу';
-  send.onclick = () => actOnPending('send');
+  send.title = busy
+    ? `Сейчас нельзя: идёт сессия «${busy.title || busy.id}».`
+    : 'Прервать текущий ответ и отправить это сообщение сразу';
+  // Kept pressable on purpose: a dead button explains nothing. Pressing it says
+  // why it cannot happen now; the prompt stays queued meanwhile.
+  send.onclick = () => {
+    if (busy) { showNotice(`Сейчас нельзя: идёт сессия «${busy.title || busy.id}». Сообщение отправится само, когда она завершится.`); return; }
+    actOnPending('send');
+  };
   const drop = document.createElement('button');
   drop.type = 'button';
   drop.className = 'small';
@@ -1894,7 +1960,11 @@ async function actOnPending(action) {
     if (action === 'send') await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending/send`, { method: 'POST', body: '{}' });
     else await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending`, { method: 'DELETE' });
     await refreshTask();
-  } catch (error) { alert(error.message); }
+  } catch (error) {
+    // A refusal here is not a crash: the prompt stays queued. Show it in the app
+    // (alerts can be suppressed on a phone) instead of a dead-looking button.
+    showNotice(error.message);
+  }
 }
 
 // Neutral notice (the error styling stays for real failures).
@@ -2121,7 +2191,52 @@ function removeFile(index) {
 
 $('files').addEventListener('change', renderFileList);
 
+// Add files to the composer's attachment input. A file input's `files` cannot be
+// assigned directly; a DataTransfer is the supported way, and the same trick is
+// already used to remove one.
+function addFilesToComposer(files) {
+  const input = $('files');
+  const transfer = new DataTransfer();
+  for (const existing of Array.from(input.files || [])) transfer.items.add(existing);
+  for (const file of files) transfer.items.add(file);
+  input.files = transfer.files;
+  renderFileList();
+}
+
 const promptEl = $('prompt');
+
+// A wall of text pasted into the message box belongs in a file, not in the
+// prompt: the box is bounded, and the agent reads attachments just as well. Above
+// this many characters the text becomes a `.txt` attachment instead.
+const PASTE_FILE_THRESHOLD = 8000;
+
+function attachPastedText(text) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  addFilesToComposer([new File([text], `pasted-${stamp}.txt`, { type: 'text/plain' })]);
+}
+
+// The pasted text lives in a different field per event kind.
+function clipText(event) {
+  return event.clipboardData?.getData?.('text') ?? event.dataTransfer?.getData?.('text') ?? event.data ?? '';
+}
+
+promptEl.addEventListener('paste', (event) => {
+  const text = clipText(event);
+  const limit = Number(promptEl.maxLength) || PASTE_FILE_THRESHOLD;
+  const replaced = (promptEl.selectionEnd ?? 0) - (promptEl.selectionStart ?? 0);
+  if (text.length <= PASTE_FILE_THRESHOLD && promptEl.value.length - replaced + text.length <= limit) return;
+  event.preventDefault();
+  attachPastedText(text);
+});
+
+// Android/iOS browsers do not always fire `paste` with the clipboard text — the
+// OS paste UI can insert it straight into the field. `beforeinput` carries the
+// same data on Chromium, so it is the second chance to catch a large paste.
+promptEl.addEventListener('beforeinput', (event) => {
+  if (event.inputType !== 'insertFromPaste') return;
+  const text = clipText(event);
+  if (text.length > PASTE_FILE_THRESHOLD) { event.preventDefault(); attachPastedText(text); }
+});
 
 function updateClearButton() {
   const hasText = Boolean(promptEl.value.trim());
@@ -2141,7 +2256,63 @@ function clearComposerInput() {
 
 $('clearPrompt').onclick = clearComposerInput;
 
+/* ---------------- interface settings ---------------- */
+
+// Font scale and window width, applied as CSS variables and remembered between
+// visits. Width preset is the container max-width and the message column width.
+const UI_SETTINGS_KEY = 'taskbridge-ui';
+const UI_WIDTHS = {
+  normal: { app: '1100px', msgs: '780px' },
+  wide: { app: '1500px', msgs: '1000px' },
+  full: { app: '100%', msgs: '100%' }
+};
+let uiSettings = { scale: 1, width: 'normal' };
+
+function loadUiSettings() {
+  let saved = {};
+  try { saved = JSON.parse((typeof localStorage === 'undefined' ? null : localStorage.getItem(UI_SETTINGS_KEY)) || '{}') || {}; } catch { saved = {}; }
+  const scale = Number(saved.scale);
+  uiSettings = {
+    scale: Number.isFinite(scale) && scale >= 0.8 && scale <= 2 ? scale : 1,
+    width: UI_WIDTHS[saved.width] ? saved.width : 'normal'
+  };
+  return uiSettings;
+}
+
+function applyUiSettings() {
+  const style = document.documentElement.style;
+  style.setProperty('--ui-scale', String(uiSettings.scale));
+  const width = UI_WIDTHS[uiSettings.width] || UI_WIDTHS.normal;
+  style.setProperty('--app-max', width.app);
+  style.setProperty('--msgs-max', width.msgs);
+  if ($('uiScaleSelect')) $('uiScaleSelect').value = String(uiSettings.scale);
+  if ($('uiWidthSelect')) $('uiWidthSelect').value = uiSettings.width;
+  try { if (typeof localStorage !== 'undefined') localStorage.setItem(UI_SETTINGS_KEY, JSON.stringify(uiSettings)); } catch { /* private mode */ }
+  return uiSettings;
+}
+
+$('uiSettingsButton').onclick = () => $('uiSettingsOverlay').classList.remove('hidden');
+$('uiSettingsClose').onclick = () => $('uiSettingsOverlay').classList.add('hidden');
+$('uiSettingsReset').onclick = () => { uiSettings = { scale: 1, width: 'normal' }; applyUiSettings(); };
+$('uiScaleSelect').onchange = () => { uiSettings.scale = Number($('uiScaleSelect').value) || 1; applyUiSettings(); };
+$('uiWidthSelect').onchange = () => { uiSettings.width = $('uiWidthSelect').value; applyUiSettings(); };
+
+// Applied at load (not only in init) so the first paint already has them and the
+// shell is not briefly shown at the default size.
+loadUiSettings();
+applyUiSettings();
+
 promptEl.addEventListener('input', () => {
+  // Third chance, and the one that always fires: whatever route the text took
+  // (a paste without data, an autofill, a keyboard), a wall of text in the box is
+  // moved into a file the moment it lands. This is the phone-safe path.
+  if (promptEl.value.length > PASTE_FILE_THRESHOLD) {
+    const text = promptEl.value;
+    promptEl.value = '';
+    promptEl.style.height = 'auto';
+    attachPastedText(text);
+    return;
+  }
   promptEl.style.height = 'auto';
   promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
   // Saved on every keystroke: refreshing the same session must not wipe it.
@@ -2511,10 +2682,25 @@ function addCodeCopyButtons(container) {
   }
 }
 
+// A wide table (many columns, long cells) would otherwise stretch the message
+// bubble and push the whole chat sideways on a phone. Wrap each one in a
+// horizontally scrollable box so the table keeps its natural width and only its
+// own area scrolls.
+function wrapTables(container) {
+  for (const table of container.querySelectorAll('table')) {
+    if (table.parentElement && table.parentElement.classList.contains('tableWrap')) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'tableWrap';
+    table.replaceWith(wrap);
+    wrap.append(table);
+  }
+}
+
 function renderMarkdown(container, text) {
   container.innerHTML = DOMPurify.sanitize(marked.parse(text));
   rewriteMarkdownLinks(container);
   addCodeCopyButtons(container);
+  wrapTables(container);
 }
 
 function escapeHtml(value) {

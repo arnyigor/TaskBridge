@@ -362,15 +362,20 @@ async function listArtifacts(taskId) {
 const SHELL_PREVIEW_BYTES = 16 * 1024;
 async function boundShellOutput(result, taskId) {
   const total = Buffer.byteLength(result.stdout, 'utf8') + Buffer.byteLength(result.stderr, 'utf8');
-  if (total <= SHELL_PREVIEW_BYTES) return { ...result, truncated: false };
+  if (total === 0) return { ...result, truncated: false };
+  // The whole output is always kept as a file, not only when it is long: the
+  // operator can then download it or attach it to a message instead of pasting
+  // a wall of text into the composer. Only the preview sent to the browser is
+  // bounded (a tail) once the run is large.
   const full = result.stderr ? `${result.stdout}\n--- stderr ---\n${result.stderr}` : result.stdout;
   const name = `cmd-output-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
   await store.writeArtifact(taskId, name, full);
+  const truncated = total > SHELL_PREVIEW_BYTES;
   return {
     ...result,
-    stdout: tailBytes(result.stdout, SHELL_PREVIEW_BYTES),
-    stderr: tailBytes(result.stderr, SHELL_PREVIEW_BYTES),
-    truncated: true,
+    stdout: truncated ? tailBytes(result.stdout, SHELL_PREVIEW_BYTES) : result.stdout,
+    stderr: truncated ? tailBytes(result.stderr, SHELL_PREVIEW_BYTES) : result.stderr,
+    truncated,
     outputName: name,
     outputBytes: Buffer.byteLength(full, 'utf8')
   };

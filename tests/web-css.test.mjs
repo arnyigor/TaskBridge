@@ -32,6 +32,21 @@ test('code-block actions are reachable without a hover (touch screens)', async (
   assert.match(block[1], /opacity:\s*1/);
 });
 
+test('a queued prompt is shown on one line, however long it is', async () => {
+  const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
+  const rule = css.match(/\.queuedPrompt \.queuedText\s*\{([^}]*)\}/);
+  assert.ok(rule, 'the queued text has a rule');
+  assert.match(rule[1], /white-space:\s*nowrap/, 'no wrapping');
+  assert.match(rule[1], /text-overflow:\s*ellipsis/, 'truncated with an ellipsis');
+});
+
+test('a wide table scrolls inside its own box, not the whole chat', async () => {
+  const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
+  const rule = css.match(/\.md \.tableWrap\s*\{([^}]*)\}/);
+  assert.ok(rule, 'the table wrapper has a rule');
+  assert.match(rule[1], /overflow-x:\s*auto/, 'horizontal scroll for a wide table');
+});
+
 test('an element hidden in the markup starts hidden in every mode', async () => {
   const { document } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
   // The mode banner only ever gets text from startCloudMode(); in a local page it

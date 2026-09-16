@@ -1,5 +1,11 @@
 :root {
   color-scheme: dark;
+  /* Interface preferences (set from the UI settings panel, persisted in
+     localStorage). --ui-scale is a whole-UI zoom; the layout widths follow, so
+     "font bigger" and "window wider" are independent choices. */
+  --ui-scale: 1;
+  --app-max: 1100px;
+  --msgs-max: 780px;
   --bg: #080b14;
   --surface: rgba(17, 22, 38, 0.86);
   --surface-2: rgba(255, 255, 255, 0.045);
@@ -34,6 +40,12 @@ body {
   flex-direction: column;
   height: 100vh;
   height: 100dvh;
+  /* Zoom scales text and controls together (they are sized in px, so a root
+     font-size would not reach them). Dividing the box by the same factor keeps
+     the app exactly viewport-sized instead of overflowing when zoomed. */
+  zoom: var(--ui-scale, 1);
+  width: calc(100% / var(--ui-scale, 1));
+  height: calc(100dvh / var(--ui-scale, 1));
   overflow: hidden;
 }
 
@@ -243,6 +255,23 @@ body {
   tab-size: 2;
 }
 .fileViewerBody .fileViewerMessage { color: var(--muted); }
+
+/* In-app confirmation: window.confirm/alert are suppressed in some mobile and
+   PWA contexts, so a run confirmation must be drawn by the page itself. */
+.confirmText {
+  margin: 0;
+  max-height: 45vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  background: #0d1220;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+}
 .authCard h2 { margin: 0; font-size: 16px; }
 .authCard form { display: flex; gap: 8px; }
 .authCard input {
@@ -352,7 +381,7 @@ body {
   grid-template-columns: minmax(0, 1fr);
   padding: 16px 20px 20px;
   width: 100%;
-  max-width: 1100px;
+  max-width: var(--app-max, 1100px);
   margin: 0 auto;
   min-height: 0;
 }
@@ -368,7 +397,7 @@ body {
   overflow: hidden;
 }
 .msgs { flex: 1; overflow-y: auto; padding: 18px 16px 8px; }
-.msgs-inner { display: flex; flex-direction: column; gap: 18px; max-width: 780px; margin: 0 auto; width: 100%; }
+.msgs-inner { display: flex; flex-direction: column; gap: 18px; max-width: var(--msgs-max, 780px); margin: 0 auto; width: 100%; }
 
 .empty {
   margin: auto;
@@ -465,8 +494,13 @@ body {
 .md a { color: var(--cyan); }
 .md img { max-width: 100%; max-height: 320px; border-radius: var(--radius-s); border: 1px solid var(--border); display: block; margin: 8px 0; }
 .md blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--border-strong); color: var(--muted); }
-.md table { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; }
-.md th, .md td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; }
+/* Tables scroll inside their own box instead of stretching the bubble: on a
+   phone a wide table used to push the whole chat sideways. min-width: 100% lets
+   a normal table fill the bubble; a wider one keeps its natural width inside
+   the scroll box. */
+.md .tableWrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 8px 0; }
+.md table { border-collapse: collapse; margin: 0; font-size: 12.5px; min-width: 100%; }
+.md th, .md td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; overflow-wrap: anywhere; }
 .md th { background: var(--surface-2); }
 
 /* reasoning spoiler */
@@ -989,7 +1023,9 @@ button:disabled { opacity: .4; cursor: default; }
   background: rgba(251, 191, 36, 0.08);
   border-radius: var(--radius-m);
 }
-.queuedPrompt .queuedText { flex: 1; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+/* One line only: a queued message can be long and the banner must not grow.
+   Display only — the whole text is still what gets sent. */
+.queuedPrompt .queuedText { flex: 1; min-width: 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .queuedPrompt button { flex-shrink: 0; }
 
 .taskRow .t-queue {
