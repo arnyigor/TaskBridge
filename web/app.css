@@ -269,6 +269,15 @@ body {
   tab-size: 2;
 }
 .fileViewerBody .fileViewerMessage { color: var(--muted); }
+/* Busy state while a command or script runs: the panel opens at once with a
+   spinner, so pressing «Выполнить» never looks like nothing happened. */
+.runPending { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 28px 10px; }
+.runSpinner {
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 3px solid var(--border-strong); border-top-color: var(--accent);
+  animation: restartSpin 0.9s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .runSpinner { animation-duration: 2.4s; } }
 
 /* In-app confirmation: window.confirm/alert are suppressed in some mobile and
    PWA contexts, so a run confirmation must be drawn by the page itself. */

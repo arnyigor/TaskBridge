@@ -501,6 +501,35 @@ test('DOM: a command code block offers a run button that confirms and runs on th
   assert.equal(app.copied.at(-1), 'moved 20 files\n', 'the output text is copied');
 });
 
+test('DOM: running a command shows a busy panel until the result arrives', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  app.setFetchHook(async (url) => {
+    if (!url.endsWith('/shell')) return null;
+    await gate;
+    return { ok: true, json: async () => ({ exitCode: 0, stdout: 'done\n', stderr: '', timedOut: false }) };
+  });
+  const box = app.document.createElement('div');
+  box.innerHTML = '<pre><code class="language-bash">echo hi</code></pre>';
+  app.addCodeCopyButtons(box);
+  const runButton = box.querySelector('.codeRunBtn');
+  const pending = runButton.onclick();
+  confirmRun(app);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  const overlay = app.document.getElementById('fileViewerOverlay');
+  assert.equal(overlay.classList.contains('hidden'), false, 'the panel opens immediately');
+  assert.ok(overlay.querySelector('.runSpinner'), 'a spinner is shown while running');
+  assert.match(overlay.textContent, /Выполняется/);
+  assert.equal(runButton.disabled, true, 'the button is busy meanwhile');
+  release();
+  await pending;
+  assert.equal(overlay.querySelector('.runSpinner'), null, 'the spinner is replaced by the result');
+  assert.match(overlay.textContent, /Код выхода: 0/);
+  assert.equal(runButton.disabled, false, 'the button is usable again');
+});
+
 test('DOM: a long command output is offered as a file — download, attach, open', async () => {
   const app = await ui();
   app.setServerLocal(true);

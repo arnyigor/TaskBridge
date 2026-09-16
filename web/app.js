@@ -270,7 +270,7 @@ function fileCard(file, taskId) {
     run.title = 'Выполнить скрипт';
     run.setAttribute('aria-label', `Выполнить ${file.name}`);
     run.append(messageIcon('run'));
-    run.onclick = (event) => { event.preventDefault(); runOnMachine(viewUrl, file.name); };
+    run.onclick = (event) => { event.preventDefault(); runOnMachine(viewUrl, file.name, run); };
     actions.push(run);
   }
   card.append(open, ...actions, download);
@@ -673,16 +673,49 @@ async function machineActionAlert(openPath, reveal = false) {
 // Run a script on the machine and show what it printed. Machine-only, and the
 // caller has already asked for confirmation: running a file is a real action,
 // not a preview.
-async function runOnMachine(viewUrl, name) {
+async function runOnMachine(viewUrl, name, button = null) {
   const runPath = machineRunPath(viewUrl);
   if (!runPath) return;
   if (!await confirmDialog(name, { title: 'Выполнить скрипт на компьютере?' })) return;
+  await runWithProgress(`Выполнение: ${name}`, () => api(runPath, { method: 'POST', body: { confirm: true } }), button);
+}
+
+// A run can take a while, so the panel opens at once with a spinner and the
+// clicked control goes busy — pressing «Выполнить» must never look like nothing
+// happened. The result (or the error) then replaces the spinner.
+async function runWithProgress(title, action, button = null) {
+  if (button) { button.classList.add('running'); if ('disabled' in button) button.disabled = true; }
+  showRunPending(title);
   try {
-    const result = await api(runPath, { method: 'POST', body: { confirm: true } });
-    showRunResult(`Выполнение: ${name}`, result);
+    showRunResult(title, await action());
   } catch (error) {
-    showRunResult(`Выполнение: ${name}`, { error: true, exitCode: null, stdout: '', stderr: error.message, timedOut: false });
+    showRunResult(title, { error: true, exitCode: null, stdout: '', stderr: error.message, timedOut: false });
+  } finally {
+    if (button) { button.classList.remove('running'); if ('disabled' in button) button.disabled = false; }
   }
+}
+
+function showRunPending(title) {
+  const overlay = $('fileViewerOverlay');
+  if (!overlay) return;
+  $('fileViewerName').textContent = title;
+  const body = $('fileViewerBody');
+  body.textContent = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'runPending';
+  const spinner = document.createElement('div');
+  spinner.className = 'runSpinner';
+  const label = document.createElement('div');
+  label.className = 'fileViewerMessage';
+  label.textContent = 'Выполняется…';
+  wrap.append(spinner, label);
+  body.append(wrap);
+  // No file actions while a command runs: there is nothing to act on yet.
+  $('fileViewerDownload').classList.add('hidden');
+  $('fileViewerExternal').classList.add('hidden');
+  const copy = $('fileViewerCopy'); if (copy) copy.classList.add('hidden');
+  const reveal = $('fileViewerReveal'); if (reveal) reveal.classList.add('hidden');
+  overlay.classList.remove('hidden');
 }
 
 // A confirmation drawn by the page itself, not window.confirm: some mobile/PWA
@@ -704,19 +737,14 @@ function confirmDialog(message, { title = 'Подтвердите действи
 
 // Run a shell command line from a code block, in the current session's workspace,
 // after asking. Machine-only: a command line is arbitrary code.
-async function runShellCommand(command) {
+async function runShellCommand(command, button = null) {
   if (!String(command || '').trim()) return;
   if (!selectedTaskId) {
     showRunResult('Выполнение команды', { error: true, exitCode: null, stdout: '', stderr: 'Сначала выберите сессию — команда выполняется в её рабочей папке.', timedOut: false });
     return;
   }
   if (!await confirmDialog(command, { title: 'Выполнить команду на компьютере?' })) return;
-  try {
-    const result = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/shell`, { method: 'POST', body: { confirm: true, command } });
-    showRunResult('Выполнение команды', result);
-  } catch (error) {
-    showRunResult('Выполнение команды', { error: true, exitCode: null, stdout: '', stderr: error.message, timedOut: false });
-  }
+  await runWithProgress('Выполнение команды', () => api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/shell`, { method: 'POST', body: { confirm: true, command } }), button);
 }
 
 // Attach a run's output to the composer, so the operator can send it to the
@@ -2825,7 +2853,7 @@ function addCodeCopyButtons(container) {
       run.textContent = 'Выполнить';
       run.title = 'Выполнить на компьютере';
       run.setAttribute('aria-label', 'Выполнить на компьютере');
-      run.onclick = () => runShellCommand(source);
+      run.onclick = () => runShellCommand(source, run);
       actions.append(run);
     }
     wrap.append(actions);
