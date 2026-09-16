@@ -263,6 +263,10 @@
     <!-- Chat: live stream of the selected task -->
     <section class="chat">
       <div class="msgs" id="msgs">
+        <div id="sessionLoader" class="sessionLoader hidden" role="status" aria-live="polite">
+          <div class="runSpinner" aria-hidden="true"></div>
+          <span>Загрузка сессии…</span>
+        </div>
         <div class="msgs-inner" id="msgsInner">
           <div class="empty" id="emptyState">
             Выбери сессию из списка или создай новую —<br>рассуждение, инструменты и ответ Pi появятся здесь вживую.
@@ -425,6 +429,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260916-28"></script>
+  <script type="module" src="/app.js?v=20260916-29"></script>
 </body>
 </html>

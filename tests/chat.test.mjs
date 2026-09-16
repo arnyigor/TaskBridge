@@ -270,6 +270,19 @@ test('DOM: saved answers survive repeated polls, context loads immediately, reco
   assert.match(app.streams[0].url, /after=12$/);
 });
 
+test('DOM: a loader is shown while a session loads, and hidden when it is ready', async () => {
+  const app = await ui();
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  app.setFetchHook(async url => { if (url.includes('/events')) await gate; return null; });
+  const loading = app.selectTask('a');
+  await new Promise(resolve => setTimeout(resolve, 220));
+  assert.equal(app.document.getElementById('sessionLoader').classList.contains('hidden'), false, 'the loader is visible while loading');
+  release();
+  await loading;
+  assert.equal(app.document.getElementById('sessionLoader').classList.contains('hidden'), true, 'and hidden once the session is ready');
+});
+
 test('DOM: a slow history response cannot replace a newer selected chat', async () => {
   const app = await ui();
   let release;

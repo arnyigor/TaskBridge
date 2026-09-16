@@ -1944,8 +1944,25 @@ async function routeFromLocation() {
   return selectTask(id);
 }
 
+// Switching a session clears the chat, so a spinner appears if the load is not
+// instant — a blank area read as a hang. Delayed a moment so a quick switch does
+// not flash it.
+let sessionLoaderTimer = null;
+function showSessionLoader() {
+  hideSessionLoader();
+  const el = $('sessionLoader');
+  if (!el) return;
+  sessionLoaderTimer = setTimeout(() => { sessionLoaderTimer = null; el.classList.remove('hidden'); }, 150);
+}
+function hideSessionLoader() {
+  if (sessionLoaderTimer) { clearTimeout(sessionLoaderTimer); sessionLoaderTimer = null; }
+  const el = $('sessionLoader');
+  if (el) el.classList.add('hidden');
+}
+
 async function selectTask(id) {
   const version = resetSelection(id);
+  showSessionLoader();
   try {
     const initial = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}`);
     const t = await api(`/api/tasks/${encodeURIComponent(id)}`);
@@ -1982,8 +1999,10 @@ async function selectTask(id) {
     });
     refreshTimer = setInterval(refreshTask, 2000);
     await loadArtifacts();
+    if (version === selectionVersion) hideSessionLoader();
   } catch (error) {
     if (version !== selectionVersion) return;
+    hideSessionLoader();
     $('createError').textContent = `Не удалось загрузить сессию: ${error.message}`;
     $('createError').classList.add('error');
   }
