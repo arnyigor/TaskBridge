@@ -7,6 +7,26 @@
 // follow-ups and imported native sessions do, see task-manager.mjs and
 // native-sessions.mjs). So "reachedStart: true" means the caller should seed
 // that first turn from task.prompt; it does not mean the window is empty.
+// A window is bounded by turns, but a turn can be tens of megabytes (a long
+// tool log, a big assistant message). Sending that to a browser freezes it while
+// it parses, so the payload is also bounded by size: keep whole events from the
+// end until the budget is reached. At least one event is always kept (a single
+// event over the budget still shows something rather than an empty chat). The
+// slice may begin mid-turn — cosmetic, and far better than an empty or a frozen
+// chat.
+export function capEventsByBytes(events, maxBytes) {
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) return events;
+  let total = 0;
+  let start = events.length;
+  for (let index = events.length - 1; index >= 0; index--) {
+    const size = Buffer.byteLength(JSON.stringify(events[index]), 'utf8') + 1;
+    if (total + size > maxBytes && start < events.length) break;
+    total += size;
+    start = index;
+  }
+  return events.slice(start);
+}
+
 export function windowByTurns(events, count, before) {
   const scoped = before != null ? events.filter(e => e.seq < before) : events;
   if (!Number.isSafeInteger(count) || count <= 0) return { events: scoped, reachedStart: true };

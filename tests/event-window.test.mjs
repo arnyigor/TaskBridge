@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { windowByTurns } from '../src/event-window.mjs';
+import { windowByTurns, capEventsByBytes } from '../src/event-window.mjs';
 
 const user = (seq) => ({ seq, type: 'USER_MESSAGE', message: `msg ${seq}` });
 const other = (seq, type = 'STATUS') => ({ seq, type });
@@ -60,4 +60,21 @@ test('an events list with no USER_MESSAGE at all always reachedStart', () => {
 
 test('empty input', () => {
   assert.deepEqual(windowByTurns([], 5), { events: [], reachedStart: true });
+});
+
+test('capEventsByBytes bounds the payload by size, from the newest end', () => {
+  const big = (size, count) => Array.from({ length: count }, (_, i) => ({ seq: i + 1, type: i % 3 === 0 ? 'USER_MESSAGE' : 'PI_EVENT', text: 'x'.repeat(size) }));
+  const events = big(1000, 12);
+  const capped = capEventsByBytes(events, 4000);
+  assert.ok(capped.length > 0 && capped.length < events.length, `kept ${capped.length} of ${events.length}`);
+  assert.equal(capped.at(-1), events.at(-1), 'the newest event is always kept');
+  assert.deepEqual(capped, events.slice(events.length - capped.length), 'a contiguous tail');
+
+  // A single event larger than the budget is still returned, so the chat shows
+  // something instead of an empty page (the turn-alignment step must not clear
+  // the only kept event).
+  assert.equal(capEventsByBytes([{ seq: 1, type: 'PI_EVENT', text: 'x'.repeat(9000) }], 1000).length, 1);
+  assert.equal(capEventsByBytes([user(1), other(2), { seq: 3, type: 'PI_EVENT', text: 'x'.repeat(90000) }], 1000).at(-1).seq, 3);
+  // Under the budget, nothing is dropped.
+  assert.equal(capEventsByBytes(events.slice(0, 1), 100000).length, 1);
 });

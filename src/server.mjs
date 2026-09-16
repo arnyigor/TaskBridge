@@ -17,7 +17,7 @@ import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
 import { ensureTlsCert } from './tls.mjs';
 import { trimStreamingDeltas } from './event-trim.mjs';
-import { windowByTurns } from './event-window.mjs';
+import { windowByTurns, capEventsByBytes } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
 import { resolveCloudConfig, validateCloudConfig } from './cloud/cloud-config.mjs';
@@ -209,6 +209,10 @@ const sseClients = new Map();
 // A single request must not materialize an unbounded history in memory. Older
 // pages are reached with ?tail/?before; this is the hard ceiling per request.
 const maxEventsPerRequest = Math.min(Math.max(Number(config.server?.maxEventsPerRequest || 20000), 1), 200000);
+// Hard ceiling on one history response body. A window is bounded by turns, but a
+// turn can be tens of megabytes; sending that freezes the browser while it
+// parses. Overridable with server.maxHistoryMb.
+const maxHistoryBytes = Math.min(Math.max(Number(config.server?.maxHistoryMb || 6) * 1024 * 1024, 256 * 1024), 64 * 1024 * 1024);
 
 function addSseClient(taskId, res, cursor = 0) {
   const client = { res, cursor, pending: [], replaying: true };
@@ -885,7 +889,13 @@ async function handleRequest(req, res) {
         const before = url.searchParams.has('before') ? Number(url.searchParams.get('before')) : null;
         if (!Number.isSafeInteger(tail) || tail <= 0) throw Object.assign(new Error('Invalid tail count'), { code: 'INPUT_INVALID' });
         if (before != null && (!Number.isSafeInteger(before) || before < 0)) throw Object.assign(new Error('Invalid before cursor'), { code: 'INPUT_INVALID' });
-        return json(res, 200, windowByTurns(events, tail, before));
+        const window = windowByTurns(events, tail, before);
+        // Also bound by size: a turn (or the events read for it) can be tens of
+        // megabytes, which the browser then cannot parse — that is what froze
+        // the chat when switching to a very long session.
+        const bounded = capEventsByBytes(window.events, maxHistoryBytes);
+        const cut = bounded.length !== window.events.length;
+        return json(res, 200, { events: bounded, reachedStart: window.reachedStart && !cut });
       }
       return json(res, 200, events);
     }
