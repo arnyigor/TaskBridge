@@ -262,7 +262,12 @@ export class TaskManager extends EventEmitter {
   }
 
   listTasks() {
-    return Array.from(this.tasks.values()).map(t => this.#publicTask(t)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // `events` lets the sessions screen show and sort by size; one grouped count
+    // keeps it cheap even with hundreds of sessions.
+    const counts = this.store.eventCounts();
+    return Array.from(this.tasks.values())
+      .map(t => ({ ...this.#publicTask(t), events: counts.get(t.id) || 0 }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   getTask(id) {
@@ -1653,7 +1658,8 @@ export class TaskManager extends EventEmitter {
     const chain = prior.then(async () => {
       const markerSeq = (await this.store.maxSeq(id)) + 1;
       await this.store.truncateEvents(id, fromSeq);
-      const message = reason === 'delete' ? 'Сообщение удалено из истории.'
+      const message = reason === 'clear' ? 'Чат очищен.'
+        : reason === 'delete' ? 'Сообщение удалено из истории.'
         : reason === 'regenerate' ? 'Ответ удалён: запрос отправлен заново.'
         : reason === 'edit' ? 'Сообщение изменено: отправлено заново.'
         : 'Неудачный ход удалён: сообщение возвращено в поле ввода.';
@@ -1687,6 +1693,28 @@ export class TaskManager extends EventEmitter {
       }
       await this.#truncateFrom(task, fromSeq, { dropInitial, reason: 'delete' });
       return { ok: true, fromSeq, dropInitial };
+    });
+  }
+
+  // "Очистить чат": drop every message but keep the session itself (name, project,
+  // model). It reuses the truncation machinery — a marker at the pre-clear
+  // high-water mark — so a live client retracts the whole log rather than
+  // keeping a stale view.
+  async clearConversation(id) {
+    return this.#admit(async () => {
+      const task = this.#mutableTask(id);
+      task.prompt = '';
+      task.assistantText = '';
+      task.thinkingText = '';
+      task.error = null;
+      task.errorCode = null;
+      task.current = 'Чат очищен';
+      task.status = 'SUCCEEDED';
+      task.queueReason = null;
+      task.lastUsage = null;
+      task.pendingPrompts = [];
+      await this.#truncateFrom(task, 1, { dropInitial: true, reason: 'clear' });
+      return { ok: true };
     });
   }
 

@@ -942,6 +942,15 @@ async function handleRequest(req, res) {
       return json(res, 200, await manager.cancel(match[1], { commandId: c.commandId, clientId: c.clientId }));
     }
 
+    // Erase every message of a session, keeping the session itself. Destructive,
+    // so the body must say `confirm: true` (also keeps the contract probe safe).
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/clear$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req).catch(() => ({}));
+      if (body?.confirm !== true) throw Object.assign(new Error('Очистка чата требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await manager.clearConversation(match[1]));
+    }
+
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/message$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);

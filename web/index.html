@@ -70,6 +70,10 @@
     <div class="taskListArea">
       <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
       <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>
+      <select id="taskSort" title="Сортировка" aria-label="Сортировка сессий">
+        <option value="recent">Недавние</option>
+        <option value="size">Крупные</option>
+      </select>
       <div id="tasks" class="tasks"></div>
     </div>
   </details>
@@ -342,6 +346,9 @@
           <button id="compact" class="wide" type="button">COMPACT</button>
           <button id="autoCompaction" class="wide" type="button">AUTO: —</button>
         </div>
+        <div class="actions">
+          <button id="clearChat" class="wide" type="button">Очистить чат</button>
+        </div>
 
         <div id="worktreeActions" class="actions hidden">
           <button id="applyChanges" class="wide" type="button">Применить к проекту</button>
@@ -418,6 +425,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260916-27"></script>
+  <script type="module" src="/app.js?v=20260916-28"></script>
 </body>
 </html>

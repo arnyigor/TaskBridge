@@ -250,7 +250,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -718,6 +718,36 @@ test('DOM: a fresh desktop gets a wider default than a phone, at the normal font
   const saved = app.loadUiSettings();
   assert.equal(saved.scale, 1);
   assert.equal(saved.width, 'normal');
+});
+
+test('DOM: «Очистить чат» asks first, then erases the session with confirm', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const calls = [];
+  app.setFetchHook(async (url, options = {}) => {
+    if (url.endsWith('/clear')) { calls.push({ method: options.method, body: JSON.parse(options.body || '{}') }); return { ok: true, json: async () => ({ ok: true }) }; }
+    return null;
+  });
+  const pending = app.document.getElementById('clearChat').onclick();
+  assert.equal(app.document.getElementById('confirmOverlay').classList.contains('hidden'), false, 'a confirmation is shown');
+  app.document.getElementById('confirmOk').onclick();
+  await pending;
+  assert.equal(calls.length, 1, 'one clear request');
+  assert.equal(calls[0].method, 'POST');
+  assert.equal(calls[0].body.confirm, true);
+});
+
+test('DOM: the sessions list shows the size and can sort by it', async () => {
+  const app = await ui();
+  app.setLastTasks([
+    { id: 'a', prompt: 'small', status: 'SUCCEEDED', projectId: 'p', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-02-01T00:00:00Z', events: 5 },
+    { id: 'b', prompt: 'big', status: 'SUCCEEDED', projectId: 'p', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z', events: 9000 }
+  ]);
+  app.setTaskSort('size');
+  const rows = [...app.document.querySelectorAll('.taskRow')];
+  assert.equal(rows[0].dataset.id, 'b', 'the biggest session is first when sorting by size');
+  assert.equal(rows[1].querySelector('.t-count').textContent, '5');
+  assert.equal(rows[0].querySelector('.t-count').textContent, '9.0k', 'a compact count');
 });
 
 test('DOM: interface settings change the scale and width, and persist', async () => {

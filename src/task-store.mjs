@@ -425,6 +425,14 @@ export class TaskStore {
     return this.db.prepare('SELECT data FROM tasks ORDER BY created_at DESC').all().map(row => JSON.parse(row.data));
   }
 
+  // Event count per task, in one cheap GROUP BY (the primary key starts with
+  // task_id). Used by the sessions list to show and sort by size without a
+  // per-task query.
+  eventCounts() {
+    const rows = this.db.prepare('SELECT task_id, COUNT(*) AS n FROM events GROUP BY task_id').all();
+    return new Map(rows.map(row => [String(row.task_id), Number(row.n)]));
+  }
+
   async readEvents(id, limit = 500, after = 0) {
     this.taskDir(id); // keep the id validation of the previous file store
     if (!Number.isSafeInteger(limit) || limit < 0 || !Number.isSafeInteger(after) || after < 0) {

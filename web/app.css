@@ -1031,6 +1031,7 @@ button:disabled { opacity: .4; cursor: default; }
 .taskRow .t-sub { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .taskRow .t-project { font-size: 0.6875rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
 .taskRow .t-time { font-size: 0.6875rem; color: var(--muted); flex-shrink: 0; }
+.taskRow .t-count { font-size: 0.6875rem; color: var(--muted); flex-shrink: 0; opacity: .8; }
 .taskRow .t-delete {
   position: absolute;
   top: 8px;

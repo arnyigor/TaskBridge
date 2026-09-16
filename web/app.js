@@ -2130,6 +2130,8 @@ function projectName(id) {
 let lastTasks = [];
 let taskFilterProjectId = 'all';
 let taskSearchQuery = '';
+let taskSort = 'recent';
+const taskSortSelect = $('taskSort');
 
 function renderTaskFilter() {
   const options = ['<option value="all">Все проекты</option>']
@@ -2155,6 +2157,13 @@ function relativeTime(value) {
   return new Date(at).toLocaleDateString();
 }
 
+// A session's history can be huge; a compact count is enough to spot the big
+// ones in the list without a wide number.
+function compactCount(value) {
+  const n = Number(value) || 0;
+  return n < 1000 ? String(n) : `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+}
+
 function taskRow(t) {
   const model = t.model || t.requestedModel;
   const modelLabel = model ? modelFullLabel(model) : (t.engine?.profileId || null);
@@ -2168,6 +2177,7 @@ function taskRow(t) {
         <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
         ${modelLabel ? `<span class="t-model">${escapeHtml(modelLabel)}</span>` : ''}
         ${t.queueReason ? '<span class="t-queue">ждёт модель</span>' : ''}
+        ${Number.isFinite(t.events) ? `<span class="t-count" title="Событий в истории">${compactCount(t.events)}</span>` : ''}
         <span class="t-time">${escapeHtml(relativeTime(t.updatedAt || t.createdAt))}</span>
       </div>
     </div>`;
@@ -2178,7 +2188,10 @@ function taskRow(t) {
 function renderTaskList() {
   $('taskCount').textContent = lastTasks.length ? `(${lastTasks.length})` : '';
   let tasks = taskFilterProjectId === 'all' ? lastTasks : lastTasks.filter(t => t.projectId === taskFilterProjectId);
-  if (taskSearchQuery) tasks = tasks.filter(t => (t.title || t.prompt || '').toLowerCase().includes(taskSearchQuery));
+  if (taskSearchQuery) {
+    // Search by the session title, its text and its project name alike.
+    tasks = tasks.filter(t => `${t.title || t.prompt || ''} ${projectName(t.projectId)}`.toLowerCase().includes(taskSearchQuery));
+  }
   if (!tasks.length) {
     $('tasks').innerHTML = `<div class="none">${lastTasks.length ? 'Ничего не найдено.' : 'Пока нет сессий.'}</div>`;
     return;
@@ -2186,7 +2199,9 @@ function renderTaskList() {
   const active = tasks.filter(t => ACTIVE_STATUSES.has(t.status))
     .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   const recent = tasks.filter(t => !ACTIVE_STATUSES.has(t.status))
-    .sort((a, b) => Date.parse(b.updatedAt || b.createdAt) - Date.parse(a.updatedAt || a.createdAt));
+    .sort(taskSort === 'size'
+      ? (a, b) => (Number(b.events) || 0) - (Number(a.events) || 0)
+      : (a, b) => Date.parse(b.updatedAt || b.createdAt) - Date.parse(a.updatedAt || a.createdAt));
   const group = (title, items) => items.length
     ? `<div class="taskGroup">${title} · ${items.length}</div>${items.map(taskRow).join('')}`
     : '';
@@ -2229,6 +2244,27 @@ $('taskSearch').addEventListener('input', () => {
   taskSearchQuery = $('taskSearch').value.trim().toLowerCase();
   renderTaskList();
 });
+
+if (taskSortSelect) taskSortSelect.addEventListener('change', () => {
+  taskSort = taskSortSelect.value;
+  renderTaskList();
+});
+
+// Destructive: erase every message of the current session (the session itself
+// stays). Always asks first, in the in-app dialog.
+const clearChatButton = $('clearChat');
+if (clearChatButton) clearChatButton.onclick = async () => {
+  if (!selectedTaskId) return;
+  const confirmed = await confirmDialog('Все сообщения этой сессии будут удалены без возможности восстановления. Сессия, её имя и проект останутся.', { title: 'Очистить чат?', ok: 'Очистить' });
+  if (!confirmed) return;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/clear`, { method: 'POST', body: { confirm: true } });
+    await loadTasks();
+    await selectTask(selectedTaskId);
+  } catch (error) {
+    showNotice(error.message);
+  }
+};
 
 async function loadTasks(timeoutMs = null) {
   lastTasks = await api('/api/tasks', timeoutMs ? { timeoutMs } : {});

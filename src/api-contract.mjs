@@ -70,6 +70,7 @@ export const API_ROUTES = [
 
   // --- tasks: history rewriting --------------------------------------------
   { method: 'POST', path: '/api/tasks/:id/undo-last-turn', summary: 'retract the last clean turn' },
+  { method: 'POST', path: '/api/tasks/:id/clear', summary: 'erase every message of a session, keeping the session (confirm:true)' },
   { method: 'POST', path: '/api/tasks/:id/turns/:turnId/edit', summary: 'rewrite an operator line and re-run from there' },
   { method: 'POST', path: '/api/tasks/:id/turns/:turnId/delete', summary: 'drop a turn and everything after it' },
   { method: 'POST', path: '/api/tasks/:id/regenerate', summary: 'ask for the latest answer again' },
