@@ -2433,8 +2433,8 @@ function applyUiSettings({ persist = false } = {}) {
 
 // Guarded: a stale cached shell (old index.html) can arrive with this new app.js,
 // and a bare `$('id').onclick = …` on a missing element would throw at load and
-// leave the page blank. Every top-level binding that touches shell markup checks
-// the element first.
+// leave the page blank. These new bindings check the element first (the older
+// ones predate this hardening and still assume the shell is current).
 const uiSettingsButton = $('uiSettingsButton');
 if (uiSettingsButton) uiSettingsButton.onclick = () => $('uiSettingsOverlay').classList.remove('hidden');
 const uiSettingsClose = $('uiSettingsClose');

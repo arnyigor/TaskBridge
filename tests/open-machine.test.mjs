@@ -62,6 +62,23 @@ test('open-on-machine routes refuse a missing confirmation and a remote caller',
   }
 });
 
+test('workspace-file open/run read the path from the query, not an empty body', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'workspace open probe' });
+  const route = `/api/tasks/${task.id}/workspace-file/open`;
+
+  // A path in the query is what gets resolved. A missing file 404s — it must not
+  // silently fall back to the workspace folder (which the panel then "opened").
+  const missing = await post(fixture, `${route}?path=does-not-exist.txt`, { body: { confirm: true } });
+  assert.equal(missing.status, 404);
+
+  // No path at all is a client error, not "reveal the folder".
+  const empty = await post(fixture, route, { body: { confirm: true } });
+  assert.equal(empty.status, 400);
+  assert.equal(empty.body.code, 'INPUT_INVALID');
+});
+
 test('run-on-machine routes keep the same guard and never run without it', { timeout: 60000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());

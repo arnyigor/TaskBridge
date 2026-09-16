@@ -17,3 +17,9 @@ cloud/.env*
 !cloud/.env.example
 cloud/public/
 cloud/node_modules/
+
+# Local scratch / generated, never publish these
+downloads-sort/
+docs/project-dump/
+docs/status-review-*.md
+zen_page.html

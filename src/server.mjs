@@ -359,6 +359,15 @@ async function listArtifacts(taskId) {
 // run does not flood the chat: the full text is written to the session's
 // artifacts (so it shows up there and can be opened or copied later) and the
 // reply carries the tail plus a reference to it.
+// The workspace-file path lives in the query string (as the GET route reads it);
+// a body value is accepted for an older client. Empty is an error, never "the
+// workspace folder" — that silent fallback is what opened the folder.
+function workspacePathQuery(url, body) {
+  const requested = String(url.searchParams.get('path') || body?.path || '');
+  if (!requested) throw Object.assign(new Error('Не указан файл.'), { code: 'INPUT_INVALID' });
+  return requested;
+}
+
 const SHELL_PREVIEW_BYTES = 16 * 1024;
 async function boundShellOutput(result, taskId) {
   const total = Buffer.byteLength(result.stdout, 'utf8') + Buffer.byteLength(result.stderr, 'utf8');
@@ -1153,7 +1162,10 @@ async function handleRequest(req, res) {
       const body = await openConfirmed();
       const task = manager.getTask(match[1]);
       if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
-      const target = await containedFile(task.workspacePath, String(body.path || ''));
+      // The path travels in the query string, exactly as the GET route reads it.
+      // Reading it from the body left it empty, so the target resolved to the
+      // workspace folder and "reveal" opened the folder instead of the file.
+      const target = await containedFile(task.workspacePath, workspacePathQuery(url, body));
       await openLocalPath(target, { reveal: body.reveal === true });
       return json(res, 200, { opened: true, reveal: body.reveal === true, name: path.basename(target) });
     }
@@ -1187,7 +1199,7 @@ async function handleRequest(req, res) {
       const body = await openConfirmed();
       const task = manager.getTask(match[1]);
       if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
-      const target = await containedFile(task.workspacePath, String(body.path || ''));
+      const target = await containedFile(task.workspacePath, workspacePathQuery(url, body));
       return json(res, 200, { ...await runLocalScript(target), name: path.basename(target) });
     }
 
