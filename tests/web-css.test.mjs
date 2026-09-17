@@ -47,7 +47,9 @@ test('a wide table scrolls inside its own box, not the whole chat', async () => 
   assert.match(wrapper[1], /overflow-x:\s*auto/, 'horizontal scroll for a wide table');
   const table = css.match(/\.md table\s*\{([^}]*)\}/);
   assert.ok(table, 'the table has a rule');
-  assert.match(table[1], /width:\s*max-content/, 'columns keep their content width instead of being squeezed');
+  assert.match(table[1], /width:\s*100%/, 'a table fills the bubble when the content fits');
+  assert.match(table[1], /min-width:\s*max-content/, 'and is never squeezed below its content');
+  assert.match(css, /\.md tbody tr:nth-child\(even\)/, 'zebra rows keep a wide table readable');
 });
 
 test('the file viewer dialog is not capped by the small wide-card width', async () => {

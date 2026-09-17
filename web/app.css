@@ -543,10 +543,15 @@ body {
    than the bubble scrolls horizontally. `overflow-wrap: break-word` (not
    `anywhere`) matters: `anywhere` would let the browser shrink a column to one
    character. */
-.md .tableWrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 8px 0; }
-.md table { border-collapse: collapse; margin: 0; font-size: 0.78125rem; width: max-content; }
-.md th, .md td { border: 1px solid var(--border); padding: 5px 8px; text-align: left; max-width: 36ch; overflow-wrap: break-word; }
-.md th { background: var(--surface-2); }
+/* Tables: fill the bubble when the content fits, keep their natural width (and
+   scroll sideways) only when it does not, and never squeeze a column to a couple
+   of characters — `min-width: max-content` is what prevents that. A per-cell cap
+   keeps one long cell from making the whole table enormous. */
+.md .tableWrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 10px 0; }
+.md table { border-collapse: collapse; margin: 0; font-size: 0.78125rem; width: 100%; min-width: max-content; }
+.md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; max-width: 48ch; overflow-wrap: break-word; }
+.md th { background: var(--surface-2); font-weight: 600; }
+.md tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.025); }
 
 /* reasoning spoiler */
 .reasoning {
