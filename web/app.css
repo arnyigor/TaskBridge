@@ -548,6 +548,10 @@ body {
    of characters — `min-width: max-content` is what prevents that. A per-cell cap
    keeps one long cell from making the whole table enormous. */
 .md .tableWrap { max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 10px 0; }
+/* A table needs more room than a line of prose: a message that contains one uses
+   the whole chat width, not the narrow text column, so its columns are not
+   squeezed. */
+.turn .body:has(.tableWrap), .turn.me .body:has(.tableWrap) { max-width: 100%; }
 .md table { border-collapse: collapse; margin: 0; font-size: 0.78125rem; width: 100%; min-width: max-content; }
 .md th, .md td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; max-width: 48ch; overflow-wrap: break-word; }
 .md th { background: var(--surface-2); font-weight: 600; }
