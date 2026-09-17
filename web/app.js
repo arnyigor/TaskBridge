@@ -2391,6 +2391,17 @@ function clipText(event) {
 }
 
 promptEl.addEventListener('paste', (event) => {
+  // A screenshot on the clipboard becomes an attachment. Only a paste event
+  // carries the image as a file, so this is the one place it can be done.
+  const images = [...(event.clipboardData?.items || [])]
+    .filter(item => item && typeof item.type === 'string' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile?.())
+    .filter(Boolean);
+  if (images.length) {
+    event.preventDefault();
+    addFilesToComposer(images);
+    return;
+  }
   const text = clipText(event);
   const limit = Number(promptEl.maxLength) || PASTE_FILE_THRESHOLD;
   const replaced = (promptEl.selectionEnd ?? 0) - (promptEl.selectionStart ?? 0);

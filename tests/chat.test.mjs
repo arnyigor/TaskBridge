@@ -607,6 +607,24 @@ test('DOM: a large paste becomes an attachment instead of filling the prompt', a
   assert.equal(app.document.getElementById('files').files.length, 1, 'and adds no attachment');
 });
 
+test('DOM: an image pasted from the clipboard becomes an attachment', async () => {
+  const app = await ui();
+  const prompt = app.document.getElementById('prompt');
+  const event = new app.window.Event('paste', { bubbles: true, cancelable: true });
+  event.clipboardData = {
+    items: [
+      { type: 'text/plain', getAsFile: () => null },
+      { type: 'image/png', getAsFile: () => new File(['x'], 'shot.png', { type: 'image/png' }) }
+    ],
+    getData: () => ''
+  };
+  prompt.dispatchEvent(event);
+  assert.equal(event.defaultPrevented, true, 'the paste is handled here, not inserted as text');
+  const files = app.document.getElementById('files').files;
+  assert.equal(files.length, 1, 'the image is attached');
+  assert.equal(files[0].name, 'shot.png');
+});
+
 test('DOM: a large text that lands in the prompt becomes a file even without a paste event', async () => {
   const app = await ui();
   const prompt = app.document.getElementById('prompt');
