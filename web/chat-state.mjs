@@ -34,6 +34,15 @@ export class ChatState {
     this.orphanMessage = null;
     this.executionTurn = null;
     if (seedInitial) this.addUser(task.prompt, task.files || [], 'initial');
+    // A window that does not reach the session start (seedInitial:false) can
+    // still open mid-turn: the server's size cap cuts at an arbitrary event, so
+    // the first events may belong to a turn whose USER_MESSAGE was dropped.
+    // Live reducer state (finish/snapshot/streaming handlers) writes through
+    // `this.current`; with none it dereferenced undefined and the whole session
+    // failed to load. A detached placeholder gives that state a sink — the first
+    // real USER_MESSAGE replaces it, and, being outside `turns`, it is never
+    // rendered.
+    else this.current = { id: 'assistant-window-start', role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: 0, at: null, endedAt: null, userAt: null };
   }
 
   // Replays an older, already-settled batch of events in an isolated scratch

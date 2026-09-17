@@ -78,3 +78,28 @@ test('capEventsByBytes bounds the payload by size, from the newest end', () => {
   // Under the budget, nothing is dropped.
   assert.equal(capEventsByBytes(events.slice(0, 1), 100000).length, 1);
 });
+
+test('a byte cut is re-aligned forward to the next turn boundary', () => {
+  // budget 600 keeps [lead, user_b, tail], so the slice would open on a
+  // mid-turn event of the earlier turn; it must advance to USER_MESSAGE seq 3.
+  const events = [
+    { seq: 1, type: 'PI_EVENT', text: 'x'.repeat(5000) },
+    { seq: 2, type: 'PI_EVENT', text: 'lead' },
+    { seq: 3, type: 'USER_MESSAGE', message: 'b' },
+    { seq: 4, type: 'PI_EVENT', text: 'tail' }
+  ];
+  const capped = capEventsByBytes(events, 600);
+  assert.equal(capped[0].type, 'USER_MESSAGE');
+  assert.equal(capped[0].seq, 3);
+
+  // When no boundary survives the cut, the slice is kept as-is: one event is
+  // always kept, so the chat is never blank.
+  const noBoundary = capEventsByBytes([user(1), { seq: 2, type: 'PI_EVENT', text: 'x'.repeat(5000) }], 100);
+  assert.equal(noBoundary.length, 1);
+  assert.equal(noBoundary[0].seq, 2);
+
+  // No cut (the whole window fits): a first turn that has no USER_MESSAGE of its
+  // own must be returned untouched, not dropped by the re-alignment.
+  const uncut = [other(1), other(2), user(3), other(4)];
+  assert.deepEqual(capEventsByBytes(uncut, 100000), uncut);
+});

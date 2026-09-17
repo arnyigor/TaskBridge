@@ -72,6 +72,21 @@ test('seedInitial:false starts with no synthetic first turn, and the first real 
   assert.deepEqual(bots.map(x => x.text), ['Второй ответ']);
 });
 
+test('a window that opens mid-turn (no leading USER_MESSAGE) applies without crashing', () => {
+  // The server's byte cap can cut the tail of an earlier turn, so the batch may
+  // open on its events rather than on a USER_MESSAGE. Live reducer state needs a
+  // current turn to write to; before that it dereferenced undefined and the
+  // whole session failed to load.
+  const state = new ChatState(task(), { seedInitial: false });
+  state.apply({ taskId: 'a', seq: 1, type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  state.apply({ taskId: 'a', seq: 2, type: 'TASK_CANCELLED', message: 'stopped', at: '2026-01-01T00:00:01.000Z' });
+  assert.deepEqual(state.turns, []); // nothing from the dropped turn is rendered
+  // The first real user message then bootstraps the live turn as usual.
+  state.apply({ taskId: 'a', seq: 3, type: 'USER_MESSAGE', message: 'Привет', data: { text: 'Привет' } });
+  assert.equal(state.turns[0].role, 'user');
+  assert.equal(state.turns[0].text, 'Привет');
+});
+
 test('prependOlder splices reconstructed older turns onto the front without touching live tail state', () => {
   const events = history();
   const tail = new ChatState(task(), { seedInitial: false });
