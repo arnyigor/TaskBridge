@@ -5,6 +5,7 @@
     "maxBodyMb": 25,
     "maxUploadMb": 64,
     "maxEventsPerRequest": 20000,
+    "maxHistoryMb": 6,
     "sqlite": {
       "synchronous": "NORMAL",
       "busyTimeoutMs": 5000

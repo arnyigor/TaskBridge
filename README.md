@@ -387,6 +387,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `server.maxBodyMb` | максимальный размер JSON-тела запроса |
 | `server.maxUploadMb` | лимит одного файла при потоковой загрузке (суммарно — 2×) |
 | `server.maxEventsPerRequest` | потолок событий на один HTTP-запрос (по умолчанию 20000) |
+| `server.maxHistoryMb` | потолок размера окна истории для `?tail` в мегабайтах (по умолчанию 6) |
 | `server.sqlite.synchronous` | `NORMAL` (быстро) или `FULL` (выживает жёсткое отключение) |
 | `server.sqlite.busyTimeoutMs` | сколько ждать занятую БД (по умолчанию 5000) |
 | `server.auth.enabled` | включить pairing-авторизацию |
@@ -866,7 +867,7 @@ environment variables, Vercel Root Directory и проверке —
 ## Тесты
 
 ```powershell
-npm test            # 495 тестов в 60 файлах (493 pass, 2 skip: живой Postgres и облачный DOM-тест)
+npm test            # 504 теста в 61 файле (502 pass, 2 skip: живой Postgres и облачный DOM-тест)
 npm run test:cloud  # только тесты облачного транспорта
 npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
 npm run check       # синтаксическая проверка основных файлов + аудит секретов
@@ -936,7 +937,7 @@ LAN-режим (турникет + приложение на loopback); `taskbri
 3. Одновременно рассчитан на одну активную inference-задачу.
 4. Apply меняет рабочее дерево без коммита; проверки source-репозитория можно снять через `force`.
 5. Verification commands доверенные и читаются из локального `config.json`.
-6. Один HTTP-запрос отдаёт не более `server.maxEventsPerRequest` событий (по умолчанию 20000); более старая история — через `?tail`/`?before`.
+6. Один HTTP-запрос отдаёт не более `server.maxEventsPerRequest` событий (по умолчанию 20000), а окно `?tail` дополнительно ограничено по размеру — `server.maxHistoryMb` (по умолчанию 6 МиБ), с выравниванием по границе хода; более старая история — через `?tail`/`?before` или «Показать более раннюю историю».
 7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
 8. Claude Code и Codex как отдельные runner'ы пока не подключены.
 9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
