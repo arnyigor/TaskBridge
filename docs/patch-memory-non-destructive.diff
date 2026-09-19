@@ -1,0 +1,64 @@
+diff --git a/src/mcp_tools/core.py b/src/mcp_tools/core.py
+index 8b0bd18..e67ce41 100644
+--- a/src/mcp_tools/core.py
++++ b/src/mcp_tools/core.py
+@@ -26,17 +26,20 @@ MAX_MEMORY_TOKENS_LIMIT = 1500
+ MAX_ACTIVE_PROJECTS = 10
+ 
+ 
+-def _enforce_storage_limits():
+-    """Автоочистка: оставляет не более MAX_ACTIVE_PROJECTS файлов, удаляя самые старые."""
++def _check_storage_limits() -> List[str]:
++    """Контроль размера хранилища БЕЗ удаления.
++
++    Раньше здесь было молчаливое old_file.unlink() для самых старых срезов при
++    превышении MAX_ACTIVE_PROJECTS. Это давало безвозвратную потерю заметок:
++    каталог не версионируется (/data/ в .gitignore), истории нет.
++    Теперь функция только сообщает о превышении - решение принимает человек.
++    """
+     files = sorted(
+         MEMORY_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True
+     )
+     if len(files) > MAX_ACTIVE_PROJECTS:
+-        for old_file in files[MAX_ACTIVE_PROJECTS:]:
+-            try:
+-                old_file.unlink()
+-            except Exception:
+-                pass
++        return [f.stem for f in files[MAX_ACTIVE_PROJECTS:]]
++    return []
+ 
+ 
+ async def manage_project_memory(
+@@ -169,8 +172,8 @@ async def manage_project_memory(
+         header = f"# Проект: {clean_topic} | Срез от {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+         file_path.write_text(header + content.strip(), encoding="utf-8")
+ 
+-        # Проверяем лимит на количество файлов
+-        _enforce_storage_limits()
++        # Контроль размера хранилища: только предупреждение, без удаления файлов
++        over_limit = _check_storage_limits()
+ 
+         return json.dumps(
+             {
+@@ -178,6 +181,20 @@ async def manage_project_memory(
+                 "tokens": tokens,
+                 "status": "SAVED",
+                 "message": f"Срез состояния '{clean_topic}' зафиксирован ({tokens} токенов). Занимает <3% контекста.",
++                **(
++                    {
++                        "warning": {
++                            "code": "MEMORY_LIMIT_EXCEEDED",
++                            "message": (
++                                f"Тем больше лимита ({MAX_ACTIVE_PROJECTS}): {len(over_limit)} "
++                                f"сверх ({', '.join(over_limit)}). Файлы НЕ удалены. "
++                                f"Убери лишние через action='delete' или перенеси в pi-memory-md."
++                            ),
++                        }
++                    }
++                    if over_limit
++                    else {}
++                ),
+             },
+             ensure_ascii=False,
+         )
