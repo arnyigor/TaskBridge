@@ -1,0 +1,34 @@
+diff --git a/src/mcp_tools/core.py b/src/mcp_tools/core.py
+index e67ce41..3fa05c3 100644
+--- a/src/mcp_tools/core.py
++++ b/src/mcp_tools/core.py
+@@ -140,8 +140,28 @@ async def manage_project_memory(
+             ensure_ascii=False,
+         )
+ 
+-    # 3. СОХРАНЕНИЕ С ЖЕСТКИМ КОНТРОЛЕМ РАЗМЕРА
++    # 3. СОХРАНЕНИЕ - ОТКЛЮЧЕНО.
++    # Память переехала в расширение pi-memory-md (git-backed, авто-инъекция индекса).
++    # Два писателя давали бы split-brain - две расходящиеся копии памяти.
++    # Инструмент оставлен только для чтения старых заметок (load/list).
+     if action == "save":
++        mem_dir = Path.home() / ".pi" / "memory-md"
++        return json.dumps(
++            {
++                "error": {
++                    "code": "SAVE_DISABLED",
++                    "message": (
++                        "Запись в это хранилище отключена. Память ведётся в pi-memory-md "
++                        f"({mem_dir}/<Project>/notes/*.md) через skills memory-write/memory-import "
++                        "или обычные файловые инструменты. Здесь доступны только load/list."
++                    ),
++                }
++            },
++            ensure_ascii=False,
++        )
++
++    # Ниже - устаревшая реализация save, оставлена для истории. Недостижима.
++    if False:  # pragma: no cover
+         if not content or not content.strip():
+             return json.dumps(
+                 {
