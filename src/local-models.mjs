@@ -40,6 +40,60 @@ export function normalizeBaseUrl(value) {
   }
 }
 
+// Автоопределение порта llama-server.
+//
+// TaskBridge берёт порт из config.json (`localRuntime.router.args --port N`),
+// но llama-server часто поднимают вручную на другом порту. Тогда `/health` по
+// сконфигурированному адресу молчит и панель показывала «Модель: не загружена»,
+// хотя модель была загружена и работала. Поэтому при недоступности
+// сконфигурированного адреса порт ищется среди запущенных llama-server.exe.
+//
+// Best-effort: там, где командную строку процесса прочитать нечем, список
+// кандидатов просто пуст и поведение остаётся прежним.
+const DETECT_CACHE_MS = 10000;
+const DETECT_ENV = 'TASKBRIDGE_LLAMA_URL';
+
+/** `--port N` из командных строк процессов. Чистая функция — покрыта тестом. */
+export function parseLlamaPorts(commandLines) {
+  const ports = new Set();
+  for (const line of commandLines || []) {
+    const m = /(?:^|\s)--port[=\s]+(\d{2,5})(?:\s|$)/u.exec(String(line));
+    if (!m) continue;
+    const port = Number(m[1]);
+    if (Number.isInteger(port) && port > 0 && port < 65536) ports.add(port);
+  }
+  return [...ports];
+}
+
+/** Кандидаты-адреса: env, затем порты живых llama-server.exe. */
+async function candidateLlamaUrls() {
+  const urls = [];
+  const fromEnv = normalizeBaseUrl(String(process.env[DETECT_ENV] || ''));
+  if (fromEnv) urls.push(fromEnv);
+  if (process.platform !== 'win32') return urls;
+  const lines = await new Promise(resolve => {
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command',
+        "Get-CimInstance Win32_Process -Filter \"Name='llama-server.exe'\" | Select-Object -ExpandProperty CommandLine"],
+      { windowsHide: true, timeout: 4000 },
+      (err, stdout) => resolve(err ? [] : String(stdout || '').split(/\r?\n/u)),
+    );
+  });
+  for (const port of parseLlamaPorts(lines)) urls.push(`http://127.0.0.1:${port}`);
+  return urls;
+}
+
+/** Отвечает ли адрес как llama-эндпоинт. */
+async function llmEndpointAlive(baseUrl) {
+  try {
+    const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1200) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 // Mirrors the shape llama.cpp sends on /models/sse load events. Kept pure and
 // exported so it can be tested without a running server.
 export function parseLoadProgress(payload) {
@@ -167,8 +221,34 @@ export function parsePrometheusMetrics(text, modelKey = '', samples = new Map())
     pp,
     tg,
     requestsProcessing: pick('llamacpp:requests_processing'),
-    requestsDeferred: pick('llamacpp:requests_deferred')
+    requestsDeferred: pick('llamacpp:requests_deferred'),
+    // Context (KV) usage. Not every llama.cpp build emits kv_cache_usage_ratio
+    // (checked against the running server 2026-09: absent), so n_tokens_max is
+    // carried through as the fallback — see contextUsage().
+    kvCacheRatio: pick('llamacpp:kv_cache_usage_ratio'),
+    nTokensMax: pick('llamacpp:n_tokens_max')
   };
+}
+
+/**
+ * Доля занятого контекста (KV), 0..1, или null если данных нет.
+ *
+ * Перенесено из расширения `model-state`, которое выводило это только в консольный
+ * виджет. Предпочитаем `kv_cache_usage_ratio`; если метрики нет, считаем
+ * `n_tokens_max / n_ctx` (самая длинная обработанная последовательность) — то же
+ * правило, что было фолбэком в расширении.
+ *
+ * Ничего не выдумываем: нет данных — null (правило TZ v3 §13: «—», а не ноль).
+ */
+export function contextUsage(parsed, model) {
+  const ctx = Number.isFinite(model?.contextWindow) ? model.contextWindow : null;
+  const raw = parsed?.kvCacheRatio;
+  if (Number.isFinite(raw) && raw >= 0 && raw <= 1) return { kvRatio: raw, contextWindow: ctx };
+  // Some builds report absolute tokens instead of a ratio.
+  if (Number.isFinite(raw) && raw > 1 && ctx) return { kvRatio: Math.min(1, raw / ctx), contextWindow: ctx };
+  const max = parsed?.nTokensMax;
+  if (Number.isFinite(max) && ctx && ctx > 0) return { kvRatio: Math.min(1, max / ctx), contextWindow: ctx };
+  return { kvRatio: null, contextWindow: ctx };
 }
 
 export class LocalModelService extends EventEmitter {
@@ -182,6 +262,9 @@ export class LocalModelService extends EventEmitter {
     this.activeProfileId = null;
     this.watchController = null;
     this.metricSamples = new Map();
+    // Адрес, найденный автодетектом (null = используем сконфигурированный).
+    this.detectedBaseUrl = null;
+    this.detectedAt = 0;
   }
 
   // `managed` = TaskBridge can start/stop this router (a command is configured).
@@ -201,9 +284,34 @@ export class LocalModelService extends EventEmitter {
   }
 
   get baseUrl() {
+    return this.detectedBaseUrl || this.configuredBaseUrl;
+  }
+
+  /** Адрес из конфигурации — прежнее поведение. */
+  get configuredBaseUrl() {
     return normalizeBaseUrl(this.config.router?.baseUrl)
       || normalizeBaseUrl(String(this.config.healthUrl || '').replace(/\/health$/iu, ''))
       || 'http://127.0.0.1:8080';
+  }
+
+  /**
+   * Убедиться, что this.baseUrl указывает на живой сервер.
+   * Если сконфигурированный адрес молчит — ищем порт среди процессов llama-server.
+   * Результат кэшируется: порт может смениться при перезапуске модели.
+   */
+  async ensureBaseUrl() {
+    if (this.detectedAt && Date.now() - this.detectedAt < DETECT_CACHE_MS) return this.baseUrl;
+    this.detectedBaseUrl = null;
+    this.detectedAt = Date.now();
+    if (await llmEndpointAlive(this.configuredBaseUrl)) return this.baseUrl;
+    for (const url of await candidateLlamaUrls()) {
+      if (url === this.configuredBaseUrl) continue;
+      if (await llmEndpointAlive(url)) {
+        this.detectedBaseUrl = url;
+        return this.baseUrl;
+      }
+    }
+    return this.baseUrl;
   }
 
   get management() {
@@ -236,6 +344,7 @@ export class LocalModelService extends EventEmitter {
 
   async isReady() {
     if (!this.managed && !this.config.healthUrl && !this.config.router?.baseUrl) return true;
+    await this.ensureBaseUrl();
     try {
       const response = await fetch(`${this.baseUrl}/health`, { signal: AbortSignal.timeout(1500) });
       return response.ok;
@@ -307,9 +416,14 @@ export class LocalModelService extends EventEmitter {
       reachable: true,
       state: this.state,
       model: loaded[0]?.id ?? null,
+      name: loaded[0]?.name ?? null,
       contextWindow: loaded[0]?.contextWindow ?? null,
       loaded: loaded.map(m => m.id),
       slots: null,
+      // Какой адрес реально опрошен; autoDetected=true означает, что
+      // сконфигурированный порт молчал и порт найден среди процессов.
+      baseUrl: this.baseUrl,
+      autoDetected: Boolean(this.detectedBaseUrl),
       metrics: await this.getMetrics(models)
     };
   }
@@ -336,12 +450,13 @@ export class LocalModelService extends EventEmitter {
         continue;
       }
       const parsed = parsePrometheusMetrics(await response.text(), model.id, this.metricSamples);
-      return { available: true, source: 'llama.cpp', model: model.id, ...parsed };
+      return { available: true, source: 'llama.cpp', model: model.id, name: model.name ?? model.id, ...parsed, ...contextUsage(parsed, model) };
     }
     return { available: false, reason: 'unreachable' };
   }
 
   async getStatus() {
+    await this.ensureBaseUrl();
     if (!this.proc && this.state !== 'STARTING') {
       this.state = (await this.isReady()) ? 'EXTERNAL_RUNNING' : 'STOPPED';
     }
