@@ -5,7 +5,10 @@
  * One-time migration: mcpServer `manage_project_memory` slices
  * (data/persistent_memory/<topic>.md, flat, no frontmatter)
  *   -> pi-memory-md layout
- * (<memoryDir>/<project>/notes/<topic>.md, YAML frontmatter)
+ * (<memoryDir>/<project>/core/project/<topic>.md, YAML frontmatter)
+ *
+ * Target path is NOT arbitrary: pi-memory-md only auto-injects what it finds
+ * under <project>/core (see the note at the write site below).
  *
  * Contract:
  *  - Source files are NEVER modified or deleted (read-only migration).
@@ -176,7 +179,12 @@ function main() {
   const plan = [];
   for (const f of files) {
     const s = parseSlice(path.join(SOURCE, f));
-    const rel = path.join(s.topic, 'notes', `${path.basename(f)}`);
+    // pi-memory-md delivery gate: initDeliveryContent() returns false unless
+    // <project>/core exists, and the injected index scans ONLY <project>/core
+    // (memory-core.ts:584 scanDir = getMemoryCoreDir). Its own skill docs say
+    // "Put project-specific auto-delivered memories under core/project/".
+    // Root-level notes/ is NOT auto-delivered - only reachable via tools.
+    const rel = path.join(s.topic, 'core', 'project', `${path.basename(f)}`);
     plan.push({ src: f, rel, abs: path.join(OUT, rel), slice: s });
   }
 
