@@ -1,0 +1,295 @@
+diff --git a/src/mcp_tools/core.py b/src/mcp_tools/core.py
+index 3fa05c3..6f9f84f 100644
+--- a/src/mcp_tools/core.py
++++ b/src/mcp_tools/core.py
+@@ -25,6 +25,121 @@ MEMORY_DIR = REPO_ROOT / "data" / "persistent_memory"
+ MAX_MEMORY_TOKENS_LIMIT = 1500
+ MAX_ACTIVE_PROJECTS = 10
+ 
++# --- pi-memory-md: единственный ИСТОЧНИК ПРАВДЫ для новой памяти ---
++# Писатель там же (skills memory-write/import). Здесь только чтение:
++# два писателя дали бы split-brain.
++#
++# Зачем этот слой нужен: расширение инжектит индекс ТОЛЬКО текущего проекта и
++# НЕ умеет искать по другим (memory_search: scope=project|global|all — это
++# текущий проект + общий каталог, не другие проекты). Кросс-проектный
++# обзор и поиск закрывает только этот инструмент.
++MEMORY_MD_DIR = Path.home() / ".pi" / "memory-md"
++
++# Бюджет индекса на проект. Расширение инжектит path+description+tags КАЖДОЙ
++# заметки в КАЖДУЮ сессию проекта, без потолка (~216 символов на заметку).
++# Это прямой наследник прежнего MAX_MEMORY_TOKENS_LIMIT, но приложенный к
++# правильной оси: лимитируется не размер заметки (контент не инжектится),
++# а суммарный размер индекса и число заметок.
++MEMORY_MD_INDEX_BUDGET_CHARS = 8000
++
++
++def _parse_md_frontmatter(text: str) -> Dict[str, str]:
++    """Разбор frontmatter pi-memory-md: description / tags / created / updated."""
++    if not text.startswith("---"):
++        return {}
++    end = text.find("\n---", 3)
++    if end == -1:
++        return {}
++    found: Dict[str, str] = {}
++    for line in text[4:end].splitlines():
++        m = re.match(r"^(\w+):\s*(.*)$", line.strip())
++        if m:
++            found[m.group(1)] = m.group(2).strip().strip('"')
++    return found
++
++
++def _render_tags(raw: str) -> str:
++    """tags -> строка как в индексе: массив через ', ' (memoryContextItemTpl)."""
++    raw = (raw or "").strip()
++    if raw.startswith("[") and raw.endswith("]"):
++        items = [x.strip().strip('"').strip("'") for x in raw[1:-1].split(",")]
++        return ", ".join(x for x in items if x)
++    return raw
++
++
++def _memory_md_wrapper_chars(project_dir: Path) -> int:
++    """Размер общей обёртки индекса. Точная копия memoryContextHeaderTpl()
++    и закрывающих тегов (memory-core.ts:494-524) — чтобы сумма по проекту была
++    сравнима с реально инжектируемым размером."""
++    lines = (
++        '<memory_context mode="normal">',
++        "<instructions>",
++        "These memory files can help you better understand the project and the user.",
++        "</instructions>",
++        f'<memory_files source="project" directory="{project_dir}">',
++        "</memory_files>",
++        "</memory_context>",
++    )
++    return sum(len(s) + 1 for s in lines)
++
++
++def _iter_memory_md_notes():
++    """Обход заметок pi-memory-md: (project, relpath, Path, delivered).
++
++    delivered=False — заметка лежит ВНЕ <Project>/core. Она есть на диске, но
++    расширение её НЕ инжектит: гейт index.ts:209-218 требует существования
++    core/, а scanDir (memory-core.ts:584) сканирует только его. Такие заметки
++    надо показывать явно, иначе получается «тихий ноль доставки».
++    """
++    if not MEMORY_MD_DIR.is_dir():
++        return
++    for proj in sorted(MEMORY_MD_DIR.iterdir()):
++        if not proj.is_dir() or proj.name.startswith("."):
++            continue
++        core = proj / "core"
++        for f in sorted(proj.rglob("*.md")):
++            if ".git" in f.parts:
++                continue
++            rel = f.relative_to(proj).as_posix()
++            delivered = str(f).startswith(str(core))
++            yield proj.name, rel, f, delivered
++
++
++def _memory_md_projects() -> Dict[str, Any]:
++    """Размер индекса, который расширение инжектит для каждого проекта."""
++    projects: Dict[str, Any] = {}
++    for project, rel, path, delivered in _iter_memory_md_notes():
++        st = projects.setdefault(
++            project,
++            {"notes": 0, "chars": 0, "undelivered": 0, "detail": []},
++        )
++        if not delivered:
++            st["undelivered"] += 1
++            continue
++        try:
++            fm = _parse_md_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
++        except OSError:
++            continue
++        desc = fm.get("description") or "No description"
++        tags = _render_tags(fm.get("tags") or "none")
++        # Копия шаблона memoryContextItemTpl() (memory-core.ts:479-492).
++        # Путь в индексе абсолютный — это ~65 символов на заметку.
++        st["notes"] += 1
++        st["chars"] += (
++            len(f"- path: {path}\n")
++            + len("  priority: normal\n")
++            + len(f"  description: {desc}\n")
++            + len(f"  tags: {tags}\n")
++        )
++        st["detail"].append({"path": rel, "description": desc[:110]})
++    for name, st in projects.items():
++        # + общая обёртка, иначе цифра не сравнима с реально инжектируемой
++        st["chars"] += _memory_md_wrapper_chars(MEMORY_MD_DIR / name)
++        st["tokens_approx"] = st["chars"] // 4
++        st["over_budget"] = st["chars"] > MEMORY_MD_INDEX_BUDGET_CHARS
++    return projects
++
++
+ 
+ def _check_storage_limits() -> List[str]:
+     """Контроль размера хранилища БЕЗ удаления.
+@@ -46,7 +161,12 @@ async def manage_project_memory(
+         action: Annotated[
+             str,
+             Field(
+-                description="Действие: 'save' (зафиксировать срез), 'load' (загрузить), 'list' (список тем), 'delete' (удалить)."
++                description=(
++                "Действие: 'index' (обзор ВСЕХ проектов pi-memory-md + бюджет индекса), "
++                "'search' (regex по заметкам всех проектов), 'budget' (размер индекса и недоставляемые заметки), "
++                "'load'/'list'/'delete' (legacy-хранилище, только чтение), "
++                "'save' - ОТКЛЮЧЕНО, память пишется в pi-memory-md."
++            )
+             ),
+         ],
+         topic: Annotated[
+@@ -61,6 +181,12 @@ async def manage_project_memory(
+                 description="Плотный структурированный конспект (списки задач, принятые решения, пути). Лимит ~1500 токенов."
+             ),
+         ] = None,
++        query: Annotated[
++            Optional[str],
++            Field(
++                description="Для action='search': regex для поиска по заметкам ВСЕХ проектов pi-memory-md."
++            ),
++        ] = None,
+ ) -> str:
+     """[FAST] [DISK_IO] Изолированная компактная память по проектам с контролем размера.
+ 
+@@ -98,6 +224,141 @@ async def manage_project_memory(
+             )
+         return json.dumps({"active_projects": topics_info}, ensure_ascii=False)
+ 
++
++    # --- КРОСС-ПРОЕКТНЫЕ ОПЕРАЦИИ (pi-memory-md, ТОЛЬКО ЧТЕНИЕ) ---
++    # Их нет в самом расширении: индекс инжектится лишь для текущего проекта,
++    # а memory_search ограничен project|global|all (не другие проекты).
++
++    if action == "index":
++        projects = _memory_md_projects()
++        if not projects:
++            return json.dumps(
++                {
++                    "root": str(MEMORY_MD_DIR),
++                    "projects": [],
++                    "message": "Память pi-memory-md пуста или каталог не найден.",
++                },
++                ensure_ascii=False,
++            )
++        rows = []
++        for name, st in sorted(projects.items()):
++            rows.append(
++                {
++                    "project": name,
++                    "notes": st["notes"],
++                    "index_chars": st["chars"],
++                    "index_tokens_approx": st["tokens_approx"],
++                    "over_budget": st["over_budget"],
++                    "undelivered_notes": st["undelivered"],
++                    "notes_detail": st["detail"],
++                }
++            )
++        return json.dumps(
++            {
++                "root": str(MEMORY_MD_DIR),
++                "budget_chars": MEMORY_MD_INDEX_BUDGET_CHARS,
++                "project_count": len(rows),
++                "note_count": sum(r["notes"] for r in rows),
++                "projects": rows,
++                "hint": "Заметки текущего проекта доставляются автоматически; остальные читай через action='search'.",
++            },
++            ensure_ascii=False,
++            indent=2,
++        )
++
++    if action == "search":
++        if not query or not query.strip():
++            return json.dumps(
++                {
++                    "error": {
++                        "code": "NO_QUERY",
++                        "message": "Для action='search' укажи 'query' — regex по заметкам всех проектов.",
++                    }
++                },
++                ensure_ascii=False,
++            )
++        try:
++            rx = re.compile(query, re.IGNORECASE)
++        except re.error as exc:
++            return json.dumps(
++                {"error": {"code": "BAD_REGEX", "message": f"Некорректный regex: {exc}"}},
++                ensure_ascii=False,
++            )
++
++        hits: List[Dict[str, Any]] = []
++        files_seen = 0
++        MAX_HITS = 100
++        for project, rel, path, delivered in _iter_memory_md_notes():
++            files_seen += 1
++            try:
++                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
++            except OSError:
++                continue
++            for lineno, line in enumerate(lines, 1):
++                if rx.search(line):
++                    hits.append(
++                        {
++                            "project": project,
++                            "path": rel,
++                            "line": lineno,
++                            "text": line.strip()[:200],
++                            "delivered": delivered,
++                        }
++                    )
++                    if len(hits) >= MAX_HITS:
++                        break
++            if len(hits) >= MAX_HITS:
++                break
++        return json.dumps(
++            {
++                "query": query,
++                "root": str(MEMORY_MD_DIR),
++                "files_scanned": files_seen,
++                "hit_count": len(hits),
++                "truncated": len(hits) >= MAX_HITS,
++                "hits": hits,
++            },
++            ensure_ascii=False,
++            indent=2,
++        )
++
++    if action == "budget":
++        projects = _memory_md_projects()
++        over = {
++            name: {"index_chars": st["chars"], "notes": st["notes"]}
++            for name, st in projects.items()
++            if st["over_budget"]
++        }
++        undelivered = {
++            name: st["undelivered"]
++            for name, st in projects.items()
++            if st["undelivered"]
++        }
++        total = sum(st["chars"] for st in projects.values())
++        warnings = []
++        if over:
++            warnings.append(
++                "Индекс превышен — эта плата взимается КАЖДУЮ сессию проекта: "
++                + ", ".join(over)
++            )
++        if undelivered:
++            warnings.append(
++                "Есть заметки ВНЕ core/ — они НЕ доставляются (тихий ноль): "
++                + ", ".join(undelivered)
++            )
++        return json.dumps(
++            {
++                "budget_chars": MEMORY_MD_INDEX_BUDGET_CHARS,
++                "total_index_chars": total,
++                "projects": len(projects),
++                "over_budget": over,
++                "undelivered_notes_by_project": undelivered,
++                "warnings": warnings,
++            },
++            ensure_ascii=False,
++            indent=2,
++        )
++
+     if not topic:
+         return json.dumps(
+             {
