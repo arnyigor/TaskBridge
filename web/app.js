@@ -4177,6 +4177,12 @@ function renderSysState(info) {
   const lines = [];
 
   if (engine.configured) lines.push(`Модель: ${engine.model || 'не загружена'}`);
+  // Занятость контекста (KV) локальной модели. Перенесено из расширения
+  // model-state, которое показывало это только в консольном виджете.
+  if (metrics && metrics.available && metrics.kvRatio != null) {
+    const ctxLabel = metrics.contextWindow ? ` из ${Math.round(metrics.contextWindow / 1024)}K` : '';
+    lines.push(`Контекст (KV): ${Math.round(metrics.kvRatio * 100)}%${ctxLabel}`);
+  }
 
   const ram = sys?.ram;
   if (ram) lines.push(`RAM: ${fmtMetric(mbToGb(ram.used))} / ${fmtMetric(mbToGb(ram.total))} GB (${Math.round(ram.ratio * 100)}%)`);
@@ -4197,14 +4203,30 @@ function renderSysState(info) {
     lines.push('GPU: нет данных (nvidia-smi недоступен)');
   }
 
+  // Порт, который реально опрошен. Показываем, только если он найден автодетектом
+  // (сконфигурированный молчал) — иначе это лишний шум.
+  if (engine.autoDetected && engine.baseUrl) {
+    lines.push(`Сервер (порт определён автоматически): ${engine.baseUrl}`);
+  }
+
+  // Свёрнутая строка — только медленно меняющиеся значения. PP/TG колеблются
+  // каждые пару секунд и, попадая сюда, заставляли всю шапку дёргаться. Скорости
+  // показываются отдельной живой строкой над полем ввода (liveMetrics ниже).
   const compact = [];
+  if (metrics && metrics.available && metrics.kvRatio != null) compact.push(`KV ${Math.round(metrics.kvRatio * 100)}%`);
   if (Array.isArray(gpus) && gpus.length && gpus[0].utilization != null) compact.push(`GPU ${gpus[0].utilization}%`);
   if (cpu?.load != null) compact.push(`CPU ${Math.round(cpu.load * 100)}%`);
   if (ram) compact.push(`RAM ${Math.round(ram.ratio * 100)}%`);
 
   el.classList.toggle('hidden', !sys);
-  el.querySelector('summary').textContent = compact.length ? compact.join(' · ') : 'Система —';
-  body.textContent = lines.join('\n');
+  // В DOM пишем только при реальном изменении текста. Без этого текст
+  // переписывается на каждом опросе (раз в 2 с) и шапка визуально дёргается —
+  // для живой строки ниже такая защита была, для summary/body не было.
+  const summaryText = compact.length ? compact.join(' · ') : 'Система —';
+  const summaryEl = el.querySelector('summary');
+  if (summaryEl.textContent !== summaryText) summaryEl.textContent = summaryText;
+  const bodyText = lines.join('\n');
+  if (body.textContent !== bodyText) body.textContent = bodyText;
 
   // Live line right above the composer: speeds only.
   const live = $('liveMetrics');
