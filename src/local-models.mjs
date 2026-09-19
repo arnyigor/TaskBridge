@@ -296,21 +296,44 @@ export class LocalModelService extends EventEmitter {
 
   /**
    * Убедиться, что this.baseUrl указывает на живой сервер.
+   *
    * Если сконфигурированный адрес молчит — ищем порт среди процессов llama-server.
-   * Результат кэшируется: порт может смениться при перезапуске модели.
+   * Результат кэшируется.
+   *
+   * ВАЖНО: уже найденный живой адрес НИКОГДА не обнуляется до тех пор, пока он
+   * отвечает. Иначе на время повторной проверки `baseUrl` откатывается на мёртвый
+   * сконфигурированный адрес, и параллельный запрос (опрос идёт каждые 2 с) успевает
+   * показать «Модель: не загружена» — панель мигала.
    */
   async ensureBaseUrl() {
-    if (this.detectedAt && Date.now() - this.detectedAt < DETECT_CACHE_MS) return this.baseUrl;
-    this.detectedBaseUrl = null;
-    this.detectedAt = Date.now();
-    if (await llmEndpointAlive(this.configuredBaseUrl)) return this.baseUrl;
+    const now = Date.now();
+    if (now - this.detectedAt < DETECT_CACHE_MS) return this.baseUrl;
+
+    // Сконфигурированный адрес в приоритете: если он ожил — автодетект больше не нужен.
+    if (await llmEndpointAlive(this.configuredBaseUrl)) {
+      this.detectedBaseUrl = null;
+      this.detectedAt = now;
+      return this.baseUrl;
+    }
+
+    // Прошлый найденный адрес ещё жив — оставляем его как есть.
+    if (this.detectedBaseUrl && await llmEndpointAlive(this.detectedBaseUrl)) {
+      this.detectedAt = now;
+      return this.baseUrl;
+    }
+
     for (const url of await candidateLlamaUrls()) {
       if (url === this.configuredBaseUrl) continue;
+      if (url === this.detectedBaseUrl) continue;
       if (await llmEndpointAlive(url)) {
         this.detectedBaseUrl = url;
+        this.detectedAt = now;
         return this.baseUrl;
       }
     }
+
+    // Ничего живого не нашли. Ранее найденный адрес НЕ обнуляем — иначе мигание.
+    this.detectedAt = now;
     return this.baseUrl;
   }
 
