@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { LocalModelService, normalizeModels, parseLoadProgress, parsePrometheusMetrics, quantFromPath } from '../src/local-models.mjs';
+import { LocalModelService, contextUsage, normalizeModels, parseLlamaPorts, parseLoadProgress, parsePrometheusMetrics, quantFromPath } from '../src/local-models.mjs';
 
 test('parseLoadProgress mirrors llama.cpp /models/sse load events', () => {
   assert.equal(parseLoadProgress({ status: 'loading' }), null);
@@ -209,10 +209,12 @@ test('parsePrometheusMetrics keeps only the llama.cpp PP/TG gauges', () => {
     'llamacpp:prompt_tokens_total 5000',
     ''
   ].join('\n');
-  assert.deepEqual(parsePrometheusMetrics(text), { pp: 118.5, tg: 42.25, requestsProcessing: 1, requestsDeferred: 0 });
+  assert.deepEqual(parsePrometheusMetrics(text), {
+    pp: 118.5, tg: 42.25, requestsProcessing: 1, requestsDeferred: 0, kvCacheRatio: null, nTokensMax: null
+  });
   // Missing gauges stay null — a zero would read as "the model is frozen".
   assert.deepEqual(parsePrometheusMetrics('llamacpp:prompt_tokens_total 1\n'), {
-    pp: null, tg: null, requestsProcessing: null, requestsDeferred: null
+    pp: null, tg: null, requestsProcessing: null, requestsDeferred: null, kvCacheRatio: null, nTokensMax: null
   });
 });
 
@@ -241,7 +243,9 @@ test('LocalModelService exposes PP/TG for the loaded model from /metrics', async
   const base = await metricsRouter(t, { metrics: 'llamacpp:prompt_tokens_seconds 118.5\nllamacpp:predicted_tokens_seconds 42.25\n' });
   const service = new LocalModelService({ provider: 'llama.cpp', router: { enabled: true }, healthUrl: `${base}/health` }, t.name);
   assert.deepEqual(await service.getMetrics(), {
-    available: true, source: 'llama.cpp', model: 'm1', pp: 118.5, tg: 42.25, requestsProcessing: null, requestsDeferred: null
+    available: true, source: 'llama.cpp', model: 'm1', name: 'm1', pp: 118.5, tg: 42.25, requestsProcessing: null, requestsDeferred: null,
+    // Context (KV) state — added when it moved here from the model-state extension.
+    kvCacheRatio: null, nTokensMax: null, kvRatio: null, contextWindow: 0
   });
 });
 
@@ -260,4 +264,42 @@ test('LocalModelService refuses to load when the server is not a router catalog'
   t.after(() => new Promise(resolve => server.close(resolve)));
   const service = new LocalModelService({ healthUrl: `http://127.0.0.1:${server.address().port}/health` }, t.name);
   await assert.rejects(service.listModels(), { code: 'LOCAL_NOT_ROUTER' });
+});
+
+test('parseLlamaPorts reads --port from llama-server command lines', () => {
+  // Реальные строки с этой машины: router на 8090 и дочерний сервер на 50695.
+  const lines = [
+    'G:\\AIModels\\llamacpp\\llama-server.exe --host 127.0.0.1 --port 8090 --models-preset G:\\x\\models.ini --models-max 1',
+    'G:\\AIModels\\llamacpp\\llama-server.exe --host 127.0.0.1 --metrics --port 50695 --ctx-size 102400 --model G:\\m.gguf',
+  ];
+  assert.deepEqual(parseLlamaPorts(lines).sort((a, b) => a - b), [8090, 50695]);
+  // Дубли и мусор не должны попадать в результат.
+  assert.deepEqual(parseLlamaPorts(['llama-server --port 8090', 'llama-server --port 8090']), [8090]);
+  assert.deepEqual(parseLlamaPorts(['llama-server --models-preset x.ini']), []);
+  assert.deepEqual(parseLlamaPorts([]), []);
+  assert.deepEqual(parseLlamaPorts([null, undefined, '']), []);
+  // Границы: невалидные порты отбрасываются.
+  assert.deepEqual(parseLlamaPorts(['--port 0', '--port 99999']), []);
+});
+
+test('contextUsage: kv_cache_usage_ratio preferred, n_tokens_max/n_ctx as fallback', () => {
+  const model = { contextWindow: 102400 };
+  // Прямая метрика отсутствует в этой сборке llama.cpp — был реальный случай.
+  assert.equal(contextUsage({ kvCacheRatio: null, nTokensMax: 76543 }, model).kvRatio, 76543 / 102400);
+  // Метрика есть — берём её, фолбэк не нужен.
+  assert.equal(contextUsage({ kvCacheRatio: 0.5, nTokensMax: 99999 }, model).kvRatio, 0.5);
+  // Некоторые сборки отдают абсолютные токены вместо доли.
+  assert.equal(contextUsage({ kvCacheRatio: 51200 }, model).kvRatio, 0.5);
+  // Нет данных — null, а не выдуманный ноль (TZ v3 §13).
+  assert.equal(contextUsage({ kvCacheRatio: null, nTokensMax: null }, model).kvRatio, null);
+  assert.equal(contextUsage({ kvCacheRatio: null, nTokensMax: 76543 }, { contextWindow: null }).kvRatio, null);
+  // Переполнение контекста не даёт >1.
+  assert.equal(contextUsage({ kvCacheRatio: null, nTokensMax: 200000 }, model).kvRatio, 1);
+});
+
+test('parsePrometheusMetrics carries n_tokens_max for the context fallback', () => {
+  const text = ['llamacpp:n_tokens_max 76543', ''].join('\n');
+  const { nTokensMax, kvCacheRatio } = parsePrometheusMetrics(text, 'kv-test');
+  assert.equal(nTokensMax, 76543);
+  assert.equal(kvCacheRatio, null);
 });
