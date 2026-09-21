@@ -821,7 +821,10 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
 
 /* Полоса состояния: заметная, с таймером и причиной ожидания. */
 #activity:not(.hidden) { display: flex; align-items: center; gap: 6px; }
-#activity { font-size: 0.75rem; padding: 2px 2px 4px; color: var(--accent); }
+/* A model id is one unbroken token ("llamacpp/qwen3-…-Q4_K_M") and error text
+   can carry a bare Windows path: without a break opportunity the line grows
+   wider than the phone and pushes the composer around. */
+#activity { font-size: 0.75rem; padding: 2px 2px 4px; color: var(--accent); min-width: 0; overflow-wrap: anywhere; }
 #activity.waiting { color: var(--muted); }
 #activity::before {
   content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%;
@@ -991,7 +994,7 @@ button:disabled { opacity: .4; cursor: default; }
 .stop:hover:not(:disabled) { border-color: var(--danger); }
 
 #retryPrompt { margin-top: 6px; font-size: 0.71875rem; padding: 5px 10px; }
-.hint { font-size: 0.6875rem; color: var(--muted); margin-top: 7px; min-height: 14px; white-space: pre-wrap; }
+.hint { font-size: 0.6875rem; color: var(--muted); margin-top: 7px; min-height: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .hint.error { color: var(--danger); }
 
 /* ---------- side panel ---------- */

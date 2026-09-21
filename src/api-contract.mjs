@@ -113,7 +113,7 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/local/events', summary: 'SSE router status and load progress', sse: true },
 
   // --- server administration ------------------------------------------------
-  { method: 'POST', path: '/api/server/restart', summary: 'restart the TaskBridge process (body {confirm:true}); answers 202, the relaunch is detached' },
+  { method: 'POST', path: '/api/server/restart', summary: 'restart the TaskBridge process (body {confirm:true}); answers 202, the relaunch is detached — works even while a session is running, it is the escape hatch for a stuck state' },
 
   // --- mcp ------------------------------------------------------------------
   { method: 'GET', path: '/api/mcp', summary: 'MCP servers and mode' },

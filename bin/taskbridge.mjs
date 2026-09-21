@@ -183,6 +183,91 @@ async function stopServer(timeoutMs = 9000) {
   else log('stopped');
 }
 
+// --- local models -----------------------------------------------------------
+
+// The router is a single process holding every preset from models.ini; loading
+// is per model, and `--models-max 1` means loading one unloads the previous.
+// These are thin wrappers over /api/local/*, i.e. the same calls the
+// "Локальные модели" window makes.
+async function apiCall(config, pathname, body, timeoutMs = 30 * 60 * 1000) {
+  const res = await fetch(effectiveUrl(config) + pathname, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: body === undefined ? undefined : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* keep the raw body below */ }
+  if (!res.ok) throw new Error(json?.error?.message || json?.message || `${pathname} → HTTP ${res.status}: ${text.slice(0, 200)}`);
+  return json;
+}
+
+function modelLine(model) {
+  const notes = [model.status, model.vision ? 'vision' : null, model.contextWindow ? `ctx ${model.contextWindow}` : null].filter(Boolean);
+  return `  ${String(model.id).padEnd(30)} ${notes.join(', ')}`;
+}
+
+async function cmdModels(config, action, id) {
+  const state = await apiCall(config, '/api/local', undefined, 60000);
+  if (!action || action === 'list') {
+    console.log(`router: ${state.state}${state.pid ? ` (PID ${state.pid})` : ''}  ${state.baseUrl}`);
+    if (!state.models?.length) {
+      console.log(state.state === 'STOPPED'
+        ? '  роутер остановлен - taskbridge models start'
+        : '  моделей нет: проверьте --models-preset в config.json');
+      return;
+    }
+    for (const model of state.models) console.log(modelLine(model));
+    if (state.loaded?.length) console.log(`загружено: ${state.loaded.join(', ')}`);
+    return;
+  }
+  if (action === 'stop') {
+    await apiCall(config, '/api/local/stop', {});
+    console.log('роутер остановлен');
+    return;
+  }
+  if (action === 'start') {
+    // start() is a no-op when a router is already listening, so it must NOT be
+    // advertised as "re-reads models.ini" — a running router keeps the presets
+    // it was started with. reload is the one that actually re-reads the file.
+    const next = await apiCall(config, '/api/local/start', {}, 180000);
+    console.log(`роутер запущен (PID ${next.pid}), моделей: ${next.models?.length ?? 0}`);
+    if (state.state !== 'STOPPED') console.log('роутер уже был поднят — models.ini не перечитан (для этого: taskbridge models reload)');
+    return;
+  }
+  if (action === 'reload') {
+    try {
+      await apiCall(config, '/api/local/stop', {});
+    } catch (error) {
+      // The router outlives the TaskBridge process that spawned it, so a server
+      // restart leaves it listening but unowned — and stop() refuses to kill a
+      // router it did not start. Saying that plainly beats a raw HTTP 500.
+      if (/запущен извне/u.test(error.message)) {
+        throw new Error('роутер поднят не тем процессом TaskBridge, что отвечает на API (state EXTERNAL_RUNNING) — перезапустите TaskBridge: он прочитает models.ini при старте');
+      }
+      throw error;
+    }
+    const next = await apiCall(config, '/api/local/start', {}, 180000);
+    // Every restart re-reads models.ini — this is how a new or edited preset
+    // becomes visible; a running router keeps the presets it started with.
+    console.log(`роутер перезапущен (PID ${next.pid}) — models.ini перечитан, моделей: ${next.models?.length ?? 0}`);
+    return;
+  }
+  if (action === 'load' || action === 'unload') {
+    if (!id) throw new Error(`укажите id: taskbridge models ${action} <id>`);
+    if (!state.models?.some((model) => model.id === id)) {
+      throw new Error(`нет пресета "${id}". Есть: ${(state.models || []).map((model) => model.id).join(', ')}`);
+    }
+    const started = Date.now();
+    log(`${action === 'load' ? 'загружаю' : 'выгружаю'} ${id} (первый раз M64 грузится до ~90 c) …`);
+    const result = await apiCall(config, `/api/local/${action}`, { model: id });
+    console.log(`${action === 'load' ? 'загружено' : 'выгружено'}: ${result?.id ?? id} за ${((Date.now() - started) / 1000).toFixed(1)} c`);
+    return;
+  }
+  throw new Error(`неизвестное действие "${action}" (list | load | unload | start | stop | reload)`);
+}
+
 function projectForPath(config, cwd) {
   const target = path.resolve(cwd);
   const candidates = (config.projects || []).slice().sort((a, b) => (b.path || '').length - (a.path || '').length);
@@ -234,11 +319,21 @@ commands:
   start [--monolith]  start the server (default: LAN mode — the app on loopback
                 plus the LAN proxy; --monolith keeps the old daemon)
   stop          stop whatever is running (LAN mode or single process)
+  models [list] list llama.cpp router presets (from models.ini) and their status
+  models load <id>    load a preset (blocks until ready)
+  models unload <id>  unload a preset
+  models start  start the router if it is down (a running router is left alone,
+                it keeps the presets it was started with)
+  models reload stop + start — the way to pick up models.ini edits, since the
+                file is read at startup and not re-read live
+  models stop   stop the router
   help          show this help
 `;
 
 const command = process.argv[2];
-const arg = process.argv.find((a) => a !== '--monolith' && !a.startsWith('-') && a !== command);
+const rest = process.argv.slice(2).filter((a) => !a.startsWith('-'));
+const arg = rest.find((a) => a !== command);
+const subArg = rest.filter((a) => a !== command)[1] ?? null;
 
 if (!command || command === 'help' || command === '--help' || command === '-h') {
   console.log(USAGE);
@@ -247,18 +342,27 @@ if (!command || command === 'help' || command === '--help' || command === '-h') 
 
 const config = await loadConfig(ROOT_DIR);
 
-switch (command) {
-  case 'open': await cmdOpen(config, arg); break;
-  case 'status': await cmdStatus(config); break;
-  case 'doctor': process.exit(await cmdDoctor(config)); break;
-  case 'start': {
-    const ok = wantsMonolith() ? await startServer(config) : await startLan(config);
-    process.exit(ok ? 0 : 1);
-    break;
+try {
+  switch (command) {
+    case 'open': await cmdOpen(config, arg); break;
+    case 'status': await cmdStatus(config); break;
+    case 'doctor': process.exit(await cmdDoctor(config)); break;
+    case 'start': {
+      const ok = wantsMonolith() ? await startServer(config) : await startLan(config);
+      process.exit(ok ? 0 : 1);
+      break;
+    }
+    case 'stop': await stopServer(); break;
+    case 'models': await cmdModels(config, arg, subArg); break;
+    default:
+      console.error(`unknown command: ${command}`);
+      console.log(USAGE);
+      process.exit(2);
   }
-  case 'stop': await stopServer(); break;
-  default:
-    console.error(`unknown command: ${command}`);
-    console.log(USAGE);
-    process.exit(2);
+} catch (error) {
+  // A raw unhandled rejection prints a stack trace. And process.exit() with an
+  // in-flight fetch handle trips a libuv assertion on Windows, so the code is
+  // only recorded here and the loop is left to drain on its own.
+  console.error(`taskbridge: ${error.message ?? error}`);
+  process.exitCode = 2;
 }

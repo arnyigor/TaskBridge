@@ -265,7 +265,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -2455,4 +2455,34 @@ test('DOM: the restart icon asks first, shows progress and reloads when the serv
   // It waits for the server to disappear and return, then reloads the page.
   for (let i = 0; i < 80 && !app.reloads.length; i++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(app.reloads.length, 1, 'the page reloads itself once the server answers again');
+});
+
+test('DOM: a phone tab reloads itself when the machine is restarted behind it', async () => {
+  const app = await ui();
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  // The tab that pressed the restart button refreshes through its own progress
+  // flow; a tab that did not (the phone) only ever sees /api/info change. The
+  // bootId identifies the process run, so a plain restart is enough —
+  // no build change required.
+  let bootId = 'boot-a';
+  app.setFetchHook(async (url) => (String(url).includes('/api/info') ? { ok: true, json: async () => ({ bootId, build: {} }) } : undefined));
+
+  await app.checkPcState();
+  assert.equal(app.reloads.length, 0, 'the first bootId is the one this page was loaded from');
+  await app.checkPcState();
+  assert.equal(app.reloads.length, 0, 'an unchanged bootId must not reload the page');
+
+  bootId = 'boot-b';
+  await app.checkPcState();
+  await settle();
+  assert.equal(app.reloads.length, 1, 'a new process must refresh the page');
+});
+
+test('DOM: an older server without a bootId never triggers a reload loop', async () => {
+  const app = await ui();
+  app.setFetchHook(async (url) => (String(url).includes('/api/info') ? { ok: true, json: async () => ({ build: { version: '0.9.0' } }) } : undefined));
+  await app.checkPcState();
+  await app.checkPcState();
+  assert.equal(app.reloads.length, 0, 'no bootId, nothing to compare, no reload');
+  assert.equal(app.document.getElementById('buildInfo').textContent.includes('v0.9.0'), true, 'the rest of the poll still runs');
 });

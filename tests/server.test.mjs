@@ -7,6 +7,8 @@ import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
 import { TaskStore } from '../src/task-store.mjs';
 import { ChatState } from '../web/chat-state.mjs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 // Minimal llama.cpp router stand-in for the /api/local tests.
 async function fakeRouter(t) {
@@ -616,7 +618,23 @@ test('fork over HTTP copies the conversation and leaves the source alone', { tim
   assert.deepEqual(answerCopy.slice(0, -1).map(e => e.type), source.map(e => e.type));
 });
 
-test('POST /api/server/restart needs confirmation and refuses a busy machine', { timeout: 30000 }, async t => {
+test('/api/info carries a bootId that changes only when the process restarts', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+
+  // The phone has no restart flow of its own running: it learns that the
+  // machine was restarted behind it by watching this id, so it must identify
+  // the process run and nothing else (a build hash would not change when the
+  // same code is merely restarted).
+  const first = (await fixture.api('/api/info')).bootId;
+  assert.match(String(first), /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.equal((await fixture.api('/api/info')).bootId, first, 'the same process keeps its bootId');
+
+  await fixture.restart();
+  assert.notEqual((await fixture.api('/api/info')).bootId, first, 'a new process must be distinguishable');
+});
+
+test('POST /api/server/restart needs confirmation and works on a busy machine', { timeout: 30000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
 
@@ -627,7 +645,9 @@ test('POST /api/server/restart needs confirmation and refuses a busy machine', {
   assert.equal((await denied.json()).code, 'INPUT_INVALID');
   assert.equal((await fetch(`${fixture.base}/api/health`)).status, 200, 'сервер не перезапустился без подтверждения');
 
-  // A turn in flight owns the session: restarting now would rip it away.
+  // A turn in flight owns the session — and must not block the restart: a
+  // stuck "busy" state is exactly what the restart exists to reset, so the
+  // restart is the one command that may never be refused as busy.
   const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'slow' });
   let status = '';
   for (let i = 0; i < 80 && status !== 'RUNNING'; i++) {
@@ -636,6 +656,12 @@ test('POST /api/server/restart needs confirmation and refuses a busy machine', {
   }
   assert.equal(status, 'RUNNING');
   const busy = await fetch(`${fixture.base}/api/server/restart`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ confirm: true }) });
-  assert.equal(busy.status, 409);
-  assert.equal((await busy.json()).code, 'MODEL_BUSY');
+  assert.equal(busy.status, 202);
+  // The helper script is the only thing that can kill the server; the fixture
+  // root has no scripts/ directory, so the spawned child dies on a missing
+  // module. Kill the returned pid anyway: the health check below must answer
+  // the same fixture, not a restarted one.
+  const { pid } = await busy.json();
+  if (Number.isSafeInteger(pid)) await promisify(execFile)('taskkill', ['/PID', String(pid), '/T', '/F']).catch(() => {});
+  assert.equal((await fetch(`${fixture.base}/api/health`)).status, 200, 'сервер пережил перезапуск в тесте');
 });

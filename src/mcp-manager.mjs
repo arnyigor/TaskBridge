@@ -13,6 +13,28 @@ export const MCP_MODES = ['inherit', 'managed', 'off'];
 
 const EMPTY_CONFIG = { mcpServers: {} };
 
+// Pinned into every TaskBridge-owned config, and applied last in write() so an
+// imported `settings.warnOnLargeDirectTools: true` cannot re-enable it.
+//
+// Why: at 75+ resolved direct tools the adapter prints one ~290-character line
+// with plain `console.warn` (pi-mcp-adapter, direct-tool-surface.ts). A raw
+// write to stdout bypasses any renderer that owns the terminal, so in an
+// interactive Pi TUI the line wraps over several rows on top of the frame and
+// the prompt box is redrawn over/under it (the "input layout breaks" symptom),
+// and in `--mode rpc` the same line arrives as a non-JSON frame and is logged
+// as PI_PROTOCOL_ERROR for a task that is otherwise fine. TaskBridge is the
+// owner of this file, so the advisory is switched off here; the durable fix on
+// the Pi side is fewer direct tools (5-20 per the adapter README) — see
+// docs/mcp-adapter-ui-glitch-2026-09-18.md. Pi's own ~/.pi/agent/mcp.json is
+// never touched, so an interactive session is unaffected by this pin.
+const PINNED_SETTINGS = { warnOnLargeDirectTools: false };
+
+function withPinnedSettings(config) {
+  const source = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+  const settings = isMcpConfig(source.settings) ? { ...source.settings } : {};
+  return { ...source, settings: { ...settings, ...PINNED_SETTINGS } };
+}
+
 export function normalizeServer(name, entry) {
   const value = entry && typeof entry === 'object' ? entry : {};
   const url = typeof value.url === 'string' && value.url ? value.url : null;
@@ -86,7 +108,7 @@ export class McpManager {
 
   async write(config) {
     await fs.mkdir(path.dirname(this.path), { recursive: true });
-    await fs.writeFile(this.path, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+    await fs.writeFile(this.path, `${JSON.stringify(withPinnedSettings(config), null, 2)}\n`, 'utf8');
   }
 
   async servers() {

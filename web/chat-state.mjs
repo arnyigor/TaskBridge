@@ -2,6 +2,26 @@ import { humanizeError } from './errors.mjs';
 
 export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING']);
 
+// The server refuses to hand out files that live under its own private paths
+// (`isPrivatePath` in src/files.mjs): `data/` holds the database, session logs
+// and LAN secrets, `.git`/`.pi`/`node_modules` are noise, and secret-looking
+// names are off limits too. A tool call that names such a path must therefore
+// NOT be advertised as a viewable image — otherwise the chat builds an <img>
+// against `/workspace-file`, gets a 403 and paints a broken picture.
+//
+// The rule is mirrored here because this module is served to the browser as a
+// plain ES module and cannot import the Node-side original. The parity is not
+// left to discipline: tests/chat-image-paths.test.mjs fails if the two ever
+// disagree on any of its sample paths.
+const PRIVATE_PART_RE = /^(?:\.git|\.pi|\.ssh|\.aws|\.codex|node_modules|data)$/i;
+const SECRET_PART_RE = /^(?:\.env(?:\..*)?|secret(?:s)?(?:\..*)?|credentials(?:\..*)?|config\.json|server-auth\.json|auth\.json)$/i;
+const SECRET_EXT_RE = /\.(?:pem|key|p12|pfx|jks|keystore)$/i;
+
+export function isPrivateFilePath(value) {
+  const parts = String(value || '').replaceAll('\\', '/').split('/');
+  return parts.some(part => PRIVATE_PART_RE.test(part) || SECRET_PART_RE.test(part) || SECRET_EXT_RE.test(part));
+}
+
 // Both disk replay and live delivery use the same reducer. Polling never replaces
 // a turn with slices of the session-wide accumulated text.
 // Assistant messages are concatenated into one turn, so the continuation after a
@@ -419,7 +439,8 @@ export class ChatState {
       if (!this.tools.has(id)) {
         const turn = this.executionTurn || this.current;
         const arg = frame.args?.command || frame.args?.path || frame.args?.file_path || frame.args?.filePath || '';
-        const tool = { id, name: frame.toolName || 'tool', label: arg ? String(arg) : event.message, state: 'run', imagePath: frame.args?.path || frame.args?.file_path || frame.args?.filePath };
+        const named = frame.args?.path || frame.args?.file_path || frame.args?.filePath;
+        const tool = { id, name: frame.toolName || 'tool', label: arg ? String(arg) : event.message, state: 'run', imagePath: isPrivateFilePath(named) ? undefined : named };
         turn.tools.push(tool);
         this.tools.set(id, tool);
       }

@@ -2043,23 +2043,26 @@ export class TaskManager extends EventEmitter {
     );
   }
 
-  // True while a tool call has started and has not reported back yet.
-  #toolsInFlight(id) {
-    for (const key of this.toolLogs.keys()) if (key.startsWith(`${id}:`)) return true;
-    return false;
-  }
-
-  // "Send now" has to beat a long reasoning block: Pi injects a steer only
-  // between messages, so text sent while the model is thinking would sit until
-  // that block ends and only then reach the model. Stopping the generation in
-  // flight makes the operator's message the very next thing Pi sees. A tool
-  // call in flight is never interrupted — aborting there leaves half-applied
-  // side effects on disk — and in that case the text simply steers, as before.
+  // "Send now" has to beat a long reasoning block AND a long command: Pi injects
+  // a steer only between messages, so text sent while the turn is in flight
+  // would sit until that turn ends — and with a `bash` tool running that can be
+  // minutes, during which the operator's message is not answered. Stopping the
+  // turn makes the operator's message the very next thing Pi sees.
+  //
+  // A tool call in flight is stopped along with the turn: Pi hands the agent's
+  // abort signal to the bash tool, which kills the whole process tree on abort
+  // (pi-ai dist/core/tools/bash.js), so the command dies with the turn. That is
+  // the deliberate trade of «Отправить сейчас» — an explicit operator decision,
+  // half-applied side effects included — and the reason the queue survives while
+  // the turn does not (see #cancel's keepPending).
+  //
+  // Pi keeps `isStreaming` true for the whole agent run (tools included), so it
+  // alone answers "is there anything to stop".
   async #interruptGeneration(id) {
     const live = this.runtimes.get(id);
     if (!live || live.pi.closed || !this.tasks.get(id)) return false;
     const state = await live.pi.getState().catch(() => null);
-    if (!state?.isStreaming || this.#toolsInFlight(id)) return false;
+    if (!state?.isStreaming) return false;
     // The prompts already queued for this session survive the interrupt: the
     // operator asked to cut in, not to drop their queue.
     await this.#cancel(id, { keepPending: true });
