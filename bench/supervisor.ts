@@ -557,6 +557,10 @@ function decideBlock(i: BlockInput): string | null {
 // ─── Расширение ──────────────────────────────────────────────────────────────
 
 export default function activate(pi: ExtensionAPI) {
+  // Мгновенное выключение без правки файлов: BENCH_SUPERVISOR_OFF=1.
+  // Ни хуков, ни журнала, ни команды — расширение просто не подключается.
+  if (process.env.BENCH_SUPERVISOR_OFF === '1') return;
+
   let S = loadSettings();
 
   let steps = 0;
@@ -1120,7 +1124,20 @@ export default function activate(pi: ExtensionAPI) {
       const info = () => `надзиратель:\n  состояние: ${workspaceState} (гейт ${gateStatus}${gateKind ? '/' + gateKind : ''}, сбой ${failureKind})\n  legacy-режим формулировок: ${legacyMode(workspaceState)}\n  профиль: ${S.profile || 'по умолчанию'}\n  блокировки: ${S.blocking ? 'вкл' : 'выкл'}${S.readOnly ? ', только чтение' : ''}\n  правок без проверки до блокировки: ${S.editsBeforeVerifyBlock}\n  шагов без сдвига до блокировки: ${S.stagnationAfter}`;
       if (!arg) { ctx.ui.notify(info(), 'info'); return; }
       if (arg === 'on') { S = loadSettings(); recomputeWorkspaceState(); ctx.ui.notify(info(), 'info'); return; }
-      if (arg === 'off') { S.blocking = false; S.staleNudges = false; ctx.ui.notify('надзиратель: блокировки и напоминания выключены', 'info'); return; }
+      if (arg === 'off') {
+        // maxNudges = 0 обязателен: `staleNudges = false` выключал только ветку nudge_stale,
+        // а управление уходило в else и nudge_verify начинал срабатывать ЧАЩЕ.
+        // Команда обещала «напоминания выключены», а их становилось больше.
+        S.blocking = false; S.staleNudges = false; S.maxNudges = 0;
+        ctx.ui.notify('надзиратель: блокировки и напоминания выключены (журнал пишется)', 'info');
+        return;
+      }
+      if (arg === 'silent') {
+        // Полная тишина без перезапуска: ни блоков, ни напоминаний, ни журнала.
+        S.blocking = false; S.staleNudges = false; S.maxNudges = 0; S.log = '';
+        ctx.ui.notify('надзиратель: выключен полностью, журнал не пишется', 'info');
+        return;
+      }
       const m = /^(profile|after|work|edits|stagnation|block)=(.+)$/.exec(arg);
       if (!m) { ctx.ui.notify('формат: off | on | profile=build-project | after=24 | edits=4 | stagnation=24 | block=on|off', 'warning'); return; }
       const [, key, value] = m;
