@@ -450,7 +450,8 @@ function resetTurnDom(node) {
   node.tools = new Map();
   if (node.body) {
     node.body.querySelector(':scope > .reasoning')?.remove();
-    for (const stale of [...node.body.querySelectorAll(':scope > .tool, :scope > .chatImage')]) stale.remove();
+    for (const stale of [...node.body.querySelectorAll(':scope > .tool, :scope > .toolGroup, :scope > .chatImage')]) stale.remove();
+    node.toolGroup = null;
   }
   node.md?.querySelector('.turnError')?.remove();
   if (node.copyBtn) node.copyBtn._text = '';
@@ -489,6 +490,122 @@ function answerMayStillCome(turn) {
 
 function toolIcon(state) {
   return state === 'run' ? '…' : state === 'error' ? '✕' : '✓';
+}
+
+// «1 действие», «2 действия», «9 действий»: a count is followed by a declined
+// noun, and the wrong form is the first thing read in a one-line summary.
+function pluralNoun(count, one, few, many) {
+  const mod10 = count % 10;
+  const mod100 = count % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+// From this many calls on, a turn's tool chips collapse into one line.
+const TOOL_GROUP_MIN = 3;
+
+// Calls that never reported success: an error, an interruption, or one that was
+// still running when the turn ended (its end event may never arrive). The fold
+// must not claim a clean run while a chip inside it still shows «…».
+function toolTrouble(turn) {
+  let failed = 0;
+  let unfinished = 0;
+  for (const tool of turn.tools) {
+    if (tool.state === 'error') failed += 1;
+    else if (tool.state === 'interrupted' || tool.state === 'run') unfinished += 1;
+  }
+  return { failed, unfinished };
+}
+
+// The collapsed line: how many calls, what they were, and — while the turn is
+// still running — which one is in flight (the chip for it is inside the folded
+// list, so without this the session would look idle between tool calls).
+function toolGroupSummary(turn) {
+  const total = turn.tools.length;
+  const word = pluralNoun(total, 'действие', 'действия', 'действий');
+  if (turn.active) {
+    // Parallel calls are real, and the finished one may well be the last in the
+    // list: the name belongs to a call still running, or the line lies.
+    const running = [...turn.tools].reverse().find(tool => tool.state === 'run');
+    const current = running || turn.tools[total - 1];
+    // The name first: the folded line is truncated with an ellipsis on a narrow
+    // screen, and what is running now is the part worth the room.
+    return `⚙ ${current.name} ${toolIcon(current.state)} · ${total} ${word}`;
+  }
+  const counts = new Map();
+  for (const tool of turn.tools) counts.set(tool.name, (counts.get(tool.name) || 0) + 1);
+  // The marker and the counts come before the breakdown, so truncation cannot
+  // hide a run that did not come out clean.
+  const { failed, unfinished } = toolTrouble(turn);
+  const mark = failed ? '✕' : unfinished ? '■' : '✓';
+  const trouble = [
+    failed ? `${failed} ${pluralNoun(failed, 'ошибка', 'ошибки', 'ошибок')}` : '',
+    unfinished ? `${unfinished} прервано` : '',
+  ].filter(Boolean).join(' · ');
+  const breakdown = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, count]) => `${count} ${name}`)
+    .join(' · ');
+  return `${mark} ${total} ${word}${trouble ? ` · ${trouble}` : ''} · ${breakdown}`;
+}
+
+// A turn's tools either sit inline or live inside one collapsed group. Both
+// renderChat (live tail) and renderSettledTurn (history backfill) hand their
+// finished turn here, so a turn looks the same whichever path built it.
+function layoutTools(node, turn) {
+  if (!node.body) return;
+  const chips = turn.tools.map(tool => node.tools.get(tool.id)).filter(Boolean);
+  if (chips.length < TOOL_GROUP_MIN) {
+    // Only reachable if a rewritten turn lost tools: a group is created when
+    // the threshold is crossed and never undone by new tools arriving.
+    if (node.toolGroup) {
+      for (const chip of chips) node.body.insertBefore(chip, node.toolGroup.el);
+      node.toolGroup.el.remove();
+      node.toolGroup = null;
+    }
+    return;
+  }
+  if (!node.toolGroup) {
+    const el = document.createElement('details');
+    el.className = 'toolGroup';
+    const summary = document.createElement('summary');
+    const list = document.createElement('div');
+    list.className = 'toolGroupList';
+    el.append(summary, list);
+    // In front of the first chip, so the fold lands where the chips were —
+    // above the answer and below the reasoning block.
+    const anchor = chips[0].parentNode === node.body ? chips[0] : (node.bubble || node.metaRow);
+    node.body.insertBefore(el, anchor);
+    node.toolGroup = { el, summary, list, text: null, signature: null };
+  }
+  const group = node.toolGroup;
+  // Re-appending a chip that is already inside would still mutate the DOM on
+  // every poll — the style recalc this whole branch exists to avoid.
+  for (const chip of chips) if (chip.parentNode !== group.list) group.list.append(chip);
+  // Only a tool starting, ending or the turn settling can change the line, and
+  // building it is a Map, a sort and a join per folded turn per poll. The
+  // signature is what those events move; the text is rebuilt when it changes.
+  const signature = groupSignature(turn);
+  if (group.signature !== signature) {
+    group.signature = signature;
+    group.text = toolGroupSummary(turn);
+  }
+  if (group.summary.textContent !== group.text) group.summary.textContent = group.text;
+}
+
+// The line depends on the count, on the tool in flight, and — once the turn is
+// settled — on how its calls ended. A state can change after the turn settles
+// (an end event arriving late) or never arrive at all, so the settled signature
+// carries those counts and not just the length.
+function groupSignature(turn) {
+  if (!turn.active) {
+    const { failed, unfinished } = toolTrouble(turn);
+    return `done:${turn.tools.length}:${failed}:${unfinished}`;
+  }
+  const running = [...turn.tools].reverse().find(tool => tool.state === 'run');
+  const current = running || turn.tools[turn.tools.length - 1];
+  return `run:${turn.tools.length}:${current.name}:${current.state}`;
 }
 
 function appendInlineImage(relPath) {
@@ -1206,11 +1323,14 @@ function renderChat() {
         chip.dataset.imageShown = 'true';
       }
     }
-    if (node.status !== turn.status) {
-      node.meta.textContent = turn.status || '';
+    layoutTools(node, turn);
+    if (node.status !== turn.status || turn.partial) {
+      node.meta.textContent = turn.partial ? 'часть более раннего обмена' : (turn.status || '');
       node.status = turn.status;
     }
-    updateTurnActions(node, turn, turn === newest);
+    // A partial turn has no id the server knows: edit/fork/drop would address
+    // a message that does not exist.
+    if (!turn.partial) updateTurnActions(node, turn, turn === newest);
   }
   scrollBottom();
 }
@@ -1727,14 +1847,18 @@ function renderSettledTurn(turn, before) {
       chip.dataset.imageShown = 'true';
     }
   }
-  meta.textContent = turn.status || '';
-
+  meta.textContent = turn.partial ? 'часть более раннего обмена' : (turn.status || '');
   // Historical turns carry their own times too (a reloaded session must show
   // when each answer started and finished).
   const settledNode = { timeEl: null };
   setTurnTime(settledNode, turn, metaRow);
   $('msgsInner').insertBefore(wrap, before);
-  return { wrap, body, bubble, md, meta, metaRow, copyBtn, tools, timeEl: settledNode.timeEl, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
+  const node = { wrap, body, bubble, md, meta, metaRow, copyBtn, tools, timeEl: settledNode.timeEl, text: turn.text, active: turn.active, error: turn.error, thinking: turn.thinking, status: turn.status };
+  // The node this is stored on, not a throwaway: renderChat walks the prepended
+  // turns again on every pass, and a fold it cannot find there is built anew
+  // each time — leaving the previous one behind, once per poll.
+  layoutTools(node, turn);
+  return node;
 }
 
 function renderPrependedTurns(turns) {
@@ -1753,7 +1877,9 @@ function renderPrependedTurns(turns) {
     if (turn.role === 'note') { turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, reference) }); continue; }
     const settled = renderSettledTurn(turn, reference);
     turnNodes.set(turn.id, settled);
-    updateTurnActions(settled, turn, false);
+    // A partial turn is not a turn the server knows by id: edit/fork/drop would
+    // address a message that does not exist.
+    if (!turn.partial) updateTurnActions(settled, turn, false);
   }
 }
 
@@ -1778,14 +1904,28 @@ async function loadOlderHistory() {
   const btn = document.getElementById('loadOlderButton');
   if (btn) { btn.disabled = true; btn.textContent = 'Загрузка…'; }
   try {
-    const { events, reachedStart } = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}&before=${oldestLoadedSeq}`);
+    // A page that the server had to cut by size can open mid-turn, with no
+    // USER_MESSAGE of its own: it carries no renderable turn, so one click
+    // showed nothing. Keep paging — the cursor advances with every response —
+    // until a page brings turns or the history ends. The cap bounds a run of
+    // giant turns: the next click continues from the cursor.
+    const PAGE_ATTEMPTS = 12;
+    let prepended = [];
+    let reachedStart = false;
+    for (let attempt = 0; attempt < PAGE_ATTEMPTS; attempt++) {
+      const { events, reachedStart: pageReachedStart } = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}&before=${oldestLoadedSeq}`);
+      if (version !== selectionVersion) return;
+      reachedStart = pageReachedStart;
+      if (!events.length) break; // nothing below: history ends here
+      prepended = chatState.prependOlder(currentTask, events, pageReachedStart);
+      oldestLoadedSeq = events[0].seq;
+      if (prepended.length || pageReachedStart) break;
+    }
     if (version !== selectionVersion) return;
     const msgsEl = $('msgs');
     const prevScrollHeight = msgsEl.scrollHeight;
     const prevScrollTop = msgsEl.scrollTop;
-    const prepended = chatState.prependOlder(currentTask, events, reachedStart);
     reachedHistoryStart = reachedStart;
-    if (events.length) oldestLoadedSeq = events[0].seq;
     renderPrependedTurns(prepended);
     renderLoadOlderIndicator();
     // Keep whatever was on screen in place instead of jumping as content
@@ -1969,6 +2109,10 @@ function hideSessionLoader() {
 }
 
 async function selectTask(id) {
+  // Below 900px the session list is a drawer over the conversation, so picking
+  // a session has to reveal what was behind it instead of staying on top.
+  const spoiler = $('controlsSpoiler');
+  if (spoiler && window.matchMedia(MOBILE_QUERY).matches) spoiler.open = false;
   const version = resetSelection(id);
   showSessionLoader();
   try {
@@ -2601,6 +2745,63 @@ function isTouchDevice() {
   return window.matchMedia('(pointer: coarse)').matches;
 }
 
+/* ---------------- header: the phone's "⋮" menu ---------------- */
+
+// The header a phone got had the profile picker, MCP, restart, pairing, the
+// system chip and five icon buttons on it — with the session list that left the
+// conversation a third of the screen. Below 900px the secondary controls — the
+// model chip included — move into the menu as the SAME nodes, so nothing is
+// duplicated and every listener keeps working. What is left is the title, the
+// status dot and this menu: one row at any phone width, while a model name of
+// any length in the header was not (at 360px even "deepseek-flash · medium"
+// wrapped the header onto a second line). On a wide screen every control goes
+// back into the header in its original order.
+// Nothing is hidden: without JS the header is exactly what index.html says.
+const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
+// Menu order, not header order: the model switcher is what a phone opens this
+// menu for. The status dot stays in the header — 12px of a live indicator costs
+// no row, and the model chip was what pushed the header onto a second line.
+const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
+// The one width the phone layout starts at, shared by the header menu, the
+// session drawer and the CSS (see the media queries in web/app.css).
+const MOBILE_QUERY = '(max-width: 900px)';
+
+function applyHeaderLayout() {
+  const menu = $('headerMenu');
+  const menuBody = $('headerMenuBody');
+  const actions = document.querySelector('.headerActions');
+  if (!menu || !menuBody || !actions) return;
+  const compact = window.matchMedia(MOBILE_QUERY).matches;
+  if (compact) {
+    for (const id of HEADER_MENU_CONTROLS) {
+      const control = document.getElementById(id);
+      if (control) menuBody.append(control);
+    }
+  } else {
+    // Appending in the index.html order leaves the wide-screen header as it was.
+    for (const id of HEADER_CONTROLS) {
+      const control = document.getElementById(id);
+      if (control) actions.insertBefore(control, menu);
+    }
+    // A menu left open while the window grew would come back as a stray popup.
+    menu.open = false;
+  }
+  // The CSS shows the menu only with this flag: a page whose script failed has
+  // the controls still in the header, and an empty "⋮" that does nothing is
+  // worse than no button at all.
+  menu.toggleAttribute('data-ready', compact);
+}
+
+const headerMenuQuery = window.matchMedia(MOBILE_QUERY);
+if (headerMenuQuery && typeof headerMenuQuery.addEventListener === 'function') {
+  headerMenuQuery.addEventListener('change', applyHeaderLayout);
+} else if (headerMenuQuery && typeof headerMenuQuery.addListener === 'function') {
+  // Older MediaQueryList: without this a page opened narrow and then widened
+  // would keep its controls in the menu with no way to reach them.
+  headerMenuQuery.addListener(applyHeaderLayout);
+}
+applyHeaderLayout();
+
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const prompt = promptEl.value.trim();
@@ -3089,30 +3290,23 @@ $('pairButton').onclick = async () => {
 
 /* ---------------- notifications ---------------- */
 
-// The browser never lets a page revoke its own notification permission, so the
-// on/off switch lives in TaskBridge itself: permission may be granted, but we
-// only fire notifications while this flag is not 'off'.
+// The operator's decision (2026-09-21): the 🔔 switch is gone from the header.
+// Over the LAN's plain http:// it could not work anyway — Chrome refuses the
+// Notification API, the service worker and Push outside a secure context and
+// does not even show the permission prompt. The web-push machinery on the
+// machine and in sw.js was left intact on purpose: bringing notifications back
+// is returning the button (#notifyButton) and the handler that used to switch
+// `subscribeToPush` / `unsubscribeFromPush` on — both are kept below, unused.
+//
+// The browser never lets a page revoke its own notification permission, so when
+// the button comes back the on/off switch belongs to TaskBridge itself:
+// permission may be granted, but we only fire notifications while this flag is
+// not 'off'.
 const NOTIFY_KEY = 'tb.notifyEnabled';
 
 function notifyEnabled() {
   if (!('Notification' in window) || Notification.permission !== 'granted') return false;
   return localStorage.getItem(NOTIFY_KEY) !== 'off';
-}
-
-function updateNotifyButton() {
-  const button = $('notifyButton');
-  if (!('Notification' in window)) { button.classList.add('hidden'); return; }
-  button.classList.remove('hidden');
-  const enabled = notifyEnabled();
-  button.textContent = '🔔';
-  button.classList.toggle('granted', enabled);
-  const title = enabled
-    ? 'Уведомления включены — нажмите, чтобы выключить'
-    : Notification.permission === 'granted'
-      ? 'Уведомления выключены — нажмите, чтобы включить'
-      : 'Включить уведомления';
-  button.title = title;
-  button.setAttribute('aria-label', title);
 }
 
 // Web Push (§ notifications): a notification that arrives with the app closed —
@@ -3153,30 +3347,7 @@ async function unsubscribeFromPush() {
   await subscription.unsubscribe().catch(() => {});
 }
 
-$('notifyButton').onclick = async () => {
-  if (!('Notification' in window)) return;
-  if (Notification.permission === 'granted') {
-    const turningOff = notifyEnabled();
-    localStorage.setItem(NOTIFY_KEY, turningOff ? 'off' : 'on');
-    updateNotifyButton();
-    // Turning notifications off must also stop the ones that arrive while the
-    // app is closed — otherwise the switch is a half-truth.
-    if (turningOff) unsubscribeFromPush().catch(() => {});
-    else subscribeToPush().catch(error => console.warn('push subscribe failed', error));
-    return;
-  }
-  const permission = await Notification.requestPermission();
-  if (permission === 'granted') {
-    localStorage.setItem(NOTIFY_KEY, 'on');
-    subscribeToPush().catch(error => console.warn('push subscribe failed', error));
-  }
-  updateNotifyButton();
-  // Chrome blocks the Notification API entirely on plain HTTP origins other
-  // than localhost, so a phone opening TaskBridge over LAN IP may never see
-  // the permission prompt at all — requestPermission then just resolves to
-  // 'denied' without the browser ever asking.
-  if (permission !== 'granted') alert('Не получилось включить уведомления.\n\nПричина: браузер разрешает уведомления только для сайтов с https:// или для localhost. TaskBridge сейчас открыт по обычному http://, поэтому браузер даже не показал запрос на разрешение — это ограничение браузера, а не TaskBridge.\n\nЧтобы уведомления заработали, нужно включить HTTPS для TaskBridge.');
-};
+
 
 /* ---------------- project browser ---------------- */
 
@@ -3724,8 +3895,35 @@ function updateModelChip() {
   const model = currentModel();
   const thinking = currentThinking();
   const chip = $('modelButton');
-  chip.textContent = `Модель: ${modelShortLabel(model)}${thinking ? ` · ${thinking}` : ''}`;
+  const name = `${modelShortLabel(model)}${thinking ? ` · ${thinking}` : ''}`;
+  // The label is its own element so the phone can drop it and keep the name
+  // (web/app.css): writing the whole chip as one string would take the name with
+  // it. The fallback is for a cached older shell without the spans.
+  const nameEl = chip.querySelector('.modelChipName');
+  if (nameEl) nameEl.textContent = name;
+  else chip.textContent = `Модель: ${name}`;
   chip.title = `${model ? modelFullLabel(model) : 'модель Pi по умолчанию'}${thinking ? ` · thinking ${thinking}` : ''} — сменить`;
+  renderModelPanelLine(model, thinking);
+}
+
+// The status panel leads with the model the session actually answers with. The
+// chip in the header shows a short name only (and on a phone it sits in the
+// menu), while "which model am I talking to, and is it this machine or the
+// cloud" is the question the panel is opened for.
+function renderModelPanelLine(model, thinking) {
+  const line = $('pcStateModel');
+  if (!line) return;
+  const provider = model?.provider ? String(model.provider) : null;
+  // "Local" is the machine's own router. Its provider id comes from the server
+  // (localStatus); the fallback is only for a label, and matches the id Pi
+  // actually serves (`llama.cpp/qwen-27b-q3`).
+  const local = Boolean(provider) && (localEnabled && provider === localProviderId() || /llama/i.test(provider));
+  const text = `Модель Pi: ${[
+    model ? modelFullLabel(model) : 'по умолчанию',
+    provider ? (local ? 'локальная' : 'облачная') : null,
+    thinking ? `thinking ${thinking}` : null
+  ].filter(Boolean).join(' · ')}`;
+  if (line.textContent !== text) line.textContent = text;
 }
 
 function renderThinkingOptions() {
@@ -4204,16 +4402,21 @@ const mbToGb = mb => (mb == null ? null : mb / 1024);
 
 // Live PC + model state: the answer to "is the machine the reason the model is
 // slow?". Nothing is invented — a field without data says so (TZ v3 §13).
-function renderSysState(info) {
-  const el = $('sysState');
-  const body = $('sysStateBody');
-  if (!el || !body) return;
+// The load goes into the status dot's panel (tap the dot in the header); the
+// speeds go to the live line above the composer, because they change every
+// couple of seconds and a block that rewrites itself that often made the header
+// twitch (that is why the two are separate at all).
+function renderMachineLoad(info) {
+  const panel = $('pcStateSystem');
   const sys = info.system || null;
   const engine = info.engine || {};
   const metrics = engine.metrics;
   const lines = [];
 
-  if (engine.configured) lines.push(`Модель: ${engine.model || 'не загружена'}`);
+  // "Локальная модель", not "Модель": the panel leads with the model Pi answers
+  // with (a cloud one, usually) and this line is the machine's own llama.cpp —
+  // two different models in one panel must not read as one.
+  if (engine.configured) lines.push(`Локальная модель: ${engine.model || 'не загружена'}`);
   // Занятость контекста (KV) локальной модели. Перенесено из расширения
   // model-state, которое показывало это только в консольном виджете.
   if (metrics && metrics.available && metrics.kvRatio != null) {
@@ -4246,26 +4449,8 @@ function renderSysState(info) {
     lines.push(`Сервер (порт определён автоматически): ${engine.baseUrl}`);
   }
 
-  // Свёрнутая строка — только медленно меняющиеся значения. PP/TG колеблются
-  // каждые пару секунд и, попадая сюда, заставляли всю шапку дёргаться. Скорости
-  // показываются отдельной живой строкой над полем ввода (liveMetrics ниже).
-  const compact = [];
-  if (metrics && metrics.available && metrics.kvRatio != null) compact.push(`KV ${Math.round(metrics.kvRatio * 100)}%`);
-  if (Array.isArray(gpus) && gpus.length && gpus[0].utilization != null) compact.push(`GPU ${gpus[0].utilization}%`);
-  if (cpu?.load != null) compact.push(`CPU ${Math.round(cpu.load * 100)}%`);
-  if (ram) compact.push(`RAM ${Math.round(ram.ratio * 100)}%`);
-
-  el.classList.toggle('hidden', !sys);
-  // В DOM пишем только при реальном изменении текста. Без этого текст
-  // переписывается на каждом опросе (раз в 2 с) и шапка визуально дёргается —
-  // для живой строки ниже такая защита была, для summary/body не было.
-  const summaryText = compact.length ? compact.join(' · ') : 'Система —';
-  const summaryEl = el.querySelector('summary');
-  if (summaryEl.textContent !== summaryText) summaryEl.textContent = summaryText;
-  const bodyText = lines.join('\n');
-  if (body.textContent !== bodyText) body.textContent = bodyText;
-
   // Live line right above the composer: speeds only.
+  if (panel && panel.textContent !== lines.join('\n')) panel.textContent = lines.join('\n');
   const live = $('liveMetrics');
   if (live) {
     const parts = [];
@@ -4287,7 +4472,21 @@ function renderSysState(info) {
 let seenBootId = null;
 
 async function checkPcState() {
+  // The dot is the <summary> of a details now: the colour lives on it, and a tap
+  // opens what the tooltip used to say (unreachable on a touch screen).
   const el = $('pcState');
+  const dot = el?.querySelector('summary');
+  const panel = $('pcStateStatus');
+  if (!el || !dot) return;
+  const paint = (state, text) => {
+    dot.classList.remove('err', 'ok', 'run');
+    if (state) dot.classList.add(state);
+    dot.title = text;
+    dot.setAttribute('aria-label', text.split('\n')[0]);
+    // Same text as the tooltip, written only when it changes: this runs every
+    // 2 seconds and an unchanged write is what made the header twitch before.
+    if (panel && panel.textContent !== text) panel.textContent = text;
+  };
   loadRuntimeStatus();
   try {
     const info = await api('/api/info');
@@ -4309,26 +4508,25 @@ async function checkPcState() {
     ].filter(Boolean).join(', ');
     $('buildInfo').title = buildDetails;
     modelBusy = info.modelBusy;
-    el.classList.remove('err', 'ok', 'run');
     let label;
+    let state;
     if (info.modelReady === false) {
       label = 'Модель недоступна';
-      el.classList.add('err');
+      state = 'err';
     } else if (modelBusy === true) {
       label = 'Модель занята';
-      el.classList.add('run');
+      state = 'run';
     } else {
       label = 'Модель онлайн';
-      el.classList.add('ok');
+      state = 'ok';
     }
     const addresses = (info.addresses || []).map((x) => x.url).join('\n');
     const engine = info.engine || {};
     const engineLine = engine.reachable
       ? [engine.model, engine.contextWindow ? `ctx ${engine.contextWindow}` : null, engine.slots ? `slots ${engine.slots.busy}/${engine.slots.total}` : null].filter(Boolean).join(' · ')
       : null;
-    el.title = [label, engineLine, addresses].filter(Boolean).join('\n');
-    el.setAttribute('aria-label', label);
-    renderSysState(info);
+    paint(state, [label, engineLine, addresses].filter(Boolean).join('\n'));
+    renderMachineLoad(info);
     if (info.local) {
       localStatus = info.local;
       updateLocalVisibility(info.local.enabled);
@@ -4337,10 +4535,7 @@ async function checkPcState() {
     renderWarnings(info.warnings);
   } catch {
     modelBusy = null;
-    el.classList.remove('ok', 'run');
-    el.classList.add('err');
-    el.title = 'Нет связи с сервером';
-    el.setAttribute('aria-label', 'Нет связи с сервером');
+    paint('err', 'Нет связи с сервером');
   }
 }
 
@@ -4396,9 +4591,11 @@ function startCloudMode() {
 if (cloudMode) startCloudMode();
 
 async function init() {
-  updateNotifyButton();
   // Push endpoints rotate (the browser may replace one at any time), so the
-  // machine is told about the current one every time the app opens.
+  // machine is told about the current one every time the app opens. This runs
+  // only for a browser that already granted notifications (the bell that asked
+  // for them was removed by the operator's decision — see below), so it keeps a
+  // working subscription fresh instead of nagging for one.
   if (notifyEnabled()) subscribeToPush().catch(() => {});
   checkPcState();
   setInterval(checkPcState, 2000);

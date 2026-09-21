@@ -2,7 +2,12 @@
 <html lang="ru">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <!-- viewport-fit=cover + env(safe-area-inset-*) in app.css: installed as an app
+       the header sits under the status bar and the composer on the gesture bar.
+       interactive-widget=resizes-content: Android otherwise resizes only the
+       visual viewport, so the on-screen keyboard covers the composer instead of
+       pushing the chat up. Unknown keys are ignored by other browsers. -->
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content" />
   <meta name="theme-color" content="#080b14" />
   <title>TaskBridge</title>
   <link rel="manifest" href="/manifest.webmanifest" />
@@ -30,19 +35,31 @@
         <select id="runtimeProfile" title="Профиль модели" aria-label="Профиль модели"></select>
         <button id="runtimeStart" type="button" class="iconButton" title="Запустить модель" aria-label="Запустить модель">▶</button>
       </div>
-      <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi">Модель: —</button>
+      <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi"><span class="modelChipLabel">Модель: </span><span class="modelChipName">—</span></button>
       <button id="localModelsButton" data-pc-only type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
       <button id="mcpButton" data-pc-only type="button" class="small" title="MCP-серверы для задач">MCP</button>
       <button id="serverRestartButton" data-pc-only type="button" class="bareIcon" title="Перезагрузить сервер" aria-label="Перезагрузить сервер">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       </button>
       <button id="pairButton" type="button" class="small hidden">Подключить телефон</button>
-      <button id="notifyButton" type="button" class="iconButton hidden" title="Уведомления" aria-label="Уведомления">🔔</button>
-      <details id="sysState" class="sysState hidden">
-        <summary title="Состояние системы и модели" aria-label="Состояние системы">—</summary>
-        <div id="sysStateBody" class="sysStateBody">Нет данных</div>
+      <!-- The machine and model state (GPU / CPU / RAM, the loaded model, the
+           auto-detected port) used to be a chip of its own here. It is the same
+           information the status dot opens, so the block was removed: one
+           source, one place to look. app.js writes the load into
+           #pcStateSystem (renderMachineLoad). -->
+      <!-- The status dot is the only live indicator a phone keeps in its header,
+           and a `title` tooltip cannot be reached on a touch screen: tapping it
+           opens what the tooltip used to say. First the model the session runs
+           on (local or cloud — the chip in the header carries only a short name),
+           then the machine's state, addresses and load. app.js fills the texts. -->
+      <details id="pcState" class="pcState">
+        <summary class="statusDot" title="Состояние модели, адреса и нагрузка" aria-label="Статус модели"></summary>
+        <div class="pcStateBody">
+          <div id="pcStateModel" class="pcStateModel"></div>
+          <div id="pcStateStatus"></div>
+          <div id="pcStateSystem" class="pcStateSystem"></div>
+        </div>
       </details>
-      <div id="pcState" class="statusDot" title="Проверка…" aria-label="Статус модели"></div>
       <button id="sessionDetailsButton" type="button" class="iconButton hidden" title="Детали текущей сессии" aria-label="Детали сессии">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
       </button>
@@ -50,6 +67,14 @@
       <button id="uiSettingsButton" type="button" class="iconButton" title="Настройки интерфейса" aria-label="Настройки интерфейса">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
       </button>
+      <!-- Phones: the controls above are moved in here by app.js (the same
+           nodes — nothing duplicated, no listener lost), so the header keeps
+           one row. Wide screens never see this menu: the CSS hides it and the
+           controls stay where they are. Without JS the header is unchanged. -->
+      <details class="headerMenu" id="headerMenu">
+        <summary title="Ещё" aria-label="Ещё">⋮</summary>
+        <div class="headerMenuBody" id="headerMenuBody"></div>
+      </details>
     </div>
   </header>
 
@@ -58,23 +83,25 @@
 
   <details class="controlsSpoiler" id="controlsSpoiler">
     <summary><h2>Проект и сессии <span id="taskCount" class="muted small"></span></h2></summary>
-    <div class="subheader" id="subheader">
-      <select id="project" title="Проект" aria-label="Проект"></select>
-      <button id="addProjectButton" data-pc-only type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
-      <button id="manageProjectsButton" data-pc-only type="button" class="small" title="Удалить проекты">🗑 Проекты</button>
-      <span id="continueBadge" class="pill hidden"></span>
-      <button id="resumeSessionButton" data-pc-only type="button" class="small">Импорт сессии Pi</button>
-      <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
-      <button id="refresh" type="button" class="small">Обновить список</button>
-    </div>
-    <div class="taskListArea">
-      <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
-      <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>
-      <select id="taskSort" title="Сортировка" aria-label="Сортировка сессий">
-        <option value="recent">Недавние</option>
-        <option value="size">Крупные</option>
-      </select>
-      <div id="tasks" class="tasks"></div>
+    <div class="spoilerBody" id="spoilerBody">
+      <div class="subheader" id="subheader">
+        <select id="project" title="Проект" aria-label="Проект"></select>
+        <button id="addProjectButton" data-pc-only type="button" class="small" title="Добавить проект из папки на диске">+ проект</button>
+        <button id="manageProjectsButton" data-pc-only type="button" class="small" title="Удалить проекты">🗑 Проекты</button>
+        <span id="continueBadge" class="pill hidden"></span>
+        <button id="resumeSessionButton" data-pc-only type="button" class="small">Импорт сессии Pi</button>
+        <button id="newTaskButton" type="button" class="hidden">+ Новая сессия</button>
+        <button id="refresh" type="button" class="small">Обновить список</button>
+      </div>
+      <div class="taskListArea">
+        <input id="taskSearch" type="search" placeholder="Поиск по сессиям…" aria-label="Поиск по сессиям" />
+        <select id="taskProjectFilter" title="Фильтр по проекту" aria-label="Фильтр по проекту"></select>
+        <select id="taskSort" title="Сортировка" aria-label="Сортировка сессий">
+          <option value="recent">Недавние</option>
+          <option value="size">Крупные</option>
+        </select>
+        <div id="tasks" class="tasks"></div>
+      </div>
     </div>
   </details>
 
@@ -237,8 +264,7 @@
 
         <h3>Подключение с телефона</h3>
         <p>Если в настройках включена авторизация — на компьютере нужно нажать «Подключить телефон», получить 8-значный код и ввести его на телефоне. Код действует 10 минут.</p>
-        <p>Для уведомлений о завершении задачи и системного буфера обмена браузеру нужен «безопасный контекст» — то есть HTTPS. TaskBridge поднимает свой HTTPS с самоподписанным сертификатом; при первом заходе браузер покажет предупреждение «небезопасно» — это нормально для самоподписанного сертификата в локальной сети, нужно один раз подтвердить «всё равно перейти».</p>
-        <p>Колокольчик в шапке — это переключатель: нажатие включает или выключает уведомления в TaskBridge (включённый колокольчик подсвечен жёлтым, курсор показывает подсказку). Само разрешение браузера так отозвать нельзя — если нужно запретить уведомления полностью, это делается в настройках сайта в браузере.</p>
+        <p>Для уведомлений о завершении задачи и системного буфера обмена браузеру нужен «безопасный контекст» — то есть HTTPS. TaskBridge поднимает свой HTTPS с самоподписанным сертификатом; при первом заходе браузер покажет предупреждение «небезопасно» — это нормально для самоподписанного сертификата в локальной сети, нужно один раз подтвердить «всё равно перейти». <b>Переключателя уведомлений в интерфейсе сейчас нет</b> — по решению оператора кнопку убрали (по http она всё равно не может работать). Механизм web-push на сервере остался рабочим: чтобы вернуть, достаточно вернуть кнопку «🔔» в шапку и её обработчик.</p>
 
         <h3>Поиск и переименование</h3>
         <p>Строка поиска над списком сессий фильтрует по названию/тексту задачи. Карандаш рядом с названием сессии — переименование, чтобы не искать нужный разговор по автоматическому ID.</p>
@@ -429,6 +455,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260918-33"></script>
+  <script type="module" src="/app.js?v=20260921-41"></script>
 </body>
 </html>
