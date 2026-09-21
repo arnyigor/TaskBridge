@@ -1,0 +1,17 @@
+{
+  "tag": "SMOKE",
+  "runId": "SMOKE",
+  "model": "llama.cpp/qwen-27b-q3",
+  "thinking": "medium",
+  "profile": "",
+  "cwd": "G:\\AIModels\\LLMBenchmarks\\MyTests\\anwap_bug",
+  "startedAt": "2026-09-20T17:05:22.206Z",
+  "maxMinutes": 2,
+  "promptFile": "C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\bugtask.txt",
+  "tracePath": "G:\\AIModels\\LLMBenchmarks\\MyTests\\anwap_bug\\runs\\SMOKE\\trace.jsonl",
+  "supervisorLog": "G:\\AIModels\\LLMBenchmarks\\MyTests\\anwap_bug\\runs\\SMOKE\\supervisor.log",
+  "sessionFiles": [
+    "2026-09-20T17-05-22-910Z_01a0bfc7-93dd-764a-a157-ac77b0208b56.jsonl"
+  ],
+  "sessionsBefore": 0
+}

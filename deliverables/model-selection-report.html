@@ -1,0 +1,437 @@
+<!DOCTYPE html><html lang=ru><head><meta charset=utf-8><title>Отчёт по выбору моделей</title><style>
+body{font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;max-width:920px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1a1a1a}
+table{border-collapse:collapse;margin:12px 0;width:100%;font-size:14px}
+th,td{border:1px solid #c8c8c8;padding:6px 10px;text-align:left;vertical-align:top}
+th{background:#f0f0f0}
+code{background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:0.92em}
+pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto}
+pre code{background:none;padding:0}
+h1,h2,h3{line-height:1.25}
+blockquote{border-left:4px solid #999;margin:8px 0;padding:2px 14px;color:#444}
+</style></head><body><h1>Провайдеры Pi: доступные модели и остаток средств</h1>
+<p>Снимок на 2026-09-20 (UTC+3). Локальный провайдер <code>llama.cpp</code> исключён.</p>
+<p>Источники данных:</p>
+<ul>
+<li>список моделей — проба Pi через <code>get_available_models</code> (<code>src/model-catalog.mjs</code>,
+<code>ModelCatalog.list({ refresh: true })</code>), то есть именно то, что Pi реально отдаёт;</li>
+<li>остатки — живой запрос к балансовым эндпоинтам площадок (<code>scripts/provider-balances.mjs</code>).</li>
+</ul>
+<h2>Сводная таблица</h2>
+<table>
+<thead>
+<tr>
+<th>Провайдер</th>
+<th>Доступ</th>
+<th>Моделей</th>
+<th>Остаток</th>
+<th>Чем подтверждён остаток</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>DeepSeek</td>
+<td>API-ключ <code>DEEPSEEK_API_KEY</code></td>
+<td>4 в каталоге, <strong>1 в конфиге</strong></td>
+<td><strong>36.78 CNY + 2.00 USD</strong></td>
+<td><code>GET api.deepseek.com/user/balance</code></td>
+</tr>
+<tr>
+<td>RouterAI</td>
+<td>API-ключ <code>ROUTERAI_API_KEY</code></td>
+<td>3 в конфиге, <strong>497 в каталоге</strong></td>
+<td><strong>2097.61 ₽</strong> (credits)</td>
+<td><code>GET routerai.ru/api/v1/credits</code></td>
+</tr>
+<tr>
+<td>WormSoft</td>
+<td>API-ключ <code>WORMSOFT_API_KEY</code></td>
+<td>10 в конфиге, <strong>39 в API</strong></td>
+<td>нет данных</td>
+<td>по ключу баланс не отдаётся (только кабинет)</td>
+</tr>
+<tr>
+<td>Clodex</td>
+<td>API-ключ <code>CLODEX_API_KEY</code></td>
+<td>9</td>
+<td>нет данных</td>
+<td><code>/api/user/self</code> → 401, нужен access token ЛК</td>
+</tr>
+<tr>
+<td>Hugging Face</td>
+<td>токен <code>HF_TOKEN</code> (fine-grained)</td>
+<td>75</td>
+<td>нет данных</td>
+<td><code>/api/whoami-v2</code>: <code>isPro: false</code>, баланс только в кабинете</td>
+</tr>
+<tr>
+<td>Google (Gemini)</td>
+<td>API-ключ <code>GEMINI_API_KEY</code></td>
+<td>22</td>
+<td>нет данных</td>
+<td>баланс живёт в Google Cloud Billing, не в API-ключе</td>
+</tr>
+<tr>
+<td>OpenAI Codex</td>
+<td>OAuth, подписка ChatGPT</td>
+<td>8 (5 отвечают)</td>
+<td>не деньги</td>
+<td>в access-токене <code>chatgpt_plan_type: &quot;plus&quot;</code></td>
+</tr>
+<tr>
+<td><del>GitHub Copilot</del></td>
+<td><del>OAuth, <code>sku=free_limited_copilot</code></del></td>
+<td>0 (было 28)</td>
+<td>—</td>
+<td><strong>удалён 2026-09-20</strong> (403 <code>trade_restricted_country</code>)</td>
+</tr>
+</tbody></table>
+<p>Итого облачных моделей в каталоге: 131. Локально (<code>llama.cpp</code>) — ещё 6
+профилей, в таблицу не входят. Всего Pi отдаёт 137 моделей.</p>
+<h2>Модели по провайдерам</h2>
+<h3>DeepSeek — оставлен только <code>deepseek-flash</code></h3>
+<p>В <code>~/.pi/agent/models.json</code> провайдер <code>deepseek</code> объявлял четыре модели:
+<code>deepseek-flash</code>, <code>deepseek-v4-pro</code>, <code>deepseek-v4-flash-vision-exp</code>,
+<code>deepseek-v4.1-flash-expires-on-0910</code>. Две последние отсутствуют в
+<code>GET api.deepseek.com/models</code> (там только <code>deepseek-flash</code> и <code>deepseek-v4-pro</code>),
+то есть объявлены впустую. После чистки осталось: <code>deepseek-flash</code>.</p>
+<p>В каталоге Pi (<code>GET /api/models</code>) DeepSeek всё равно даёт 4 id: <code>deepseek-flash</code> плюс три
+<strong>встроенных определения</strong> из <code>pi-ai/dist/providers/data/deepseek.json</code>
+(<code>deepseek-v4-flash</code>, <code>deepseek-v4-flash-vision-exp</code>, <code>deepseek-v4-pro</code>).
+Они не в <code>models.json</code> и конфигом не убираются — Pi объединяет встроенный каталог
+с пользовательским, а не заменяет его. Скрыть их можно только из списка выбора
+(<code>settings.enabledModels</code>), где у DeepSeek и раньше стоял один <code>deepseek/deepseek-flash</code>.</p>
+<h3>RouterAI — 3 в конфиге из 497 в каталоге</h3>
+<p>В <code>models.json</code> объявлены только <code>deepseek/deepseek-v4.1-flash</code>, <code>qwen/qwen3.8-27b</code>,
+<code>z-ai/glm-5.3-flash</code>, но это не граница доступа: <code>GET routerai.ru/api/v1/models</code>
+(аутентификация по докам не нужна) отдаёт <strong>497 моделей от 76 вендоров</strong>, и ключ работает
+со всеми. Проверено реальными запросами к трём моделям, которых нет в <code>models.json</code>:
+<code>anthropic/claude-sonnet-5</code>, <code>x-ai/grok-4.6</code>, <code>openai/gpt-5.4-mini</code> — все три ответили <code>OK</code>.</p>
+<p>Почему Pi показывает только 3: у <code>routerai</code> нет авто-подтягиваемого каталога
+(в <code>~/.pi/agent/models-store.json</code> кеши есть только у <code>openai-codex</code>, <code>google</code>, <code>deepseek</code>,
+<code>huggingface</code>, <code>llama.cpp</code>) — список берётся исключительно из <code>models.json</code>.</p>
+<p>Крупные вендоры в каталоге: <code>openai</code> 75, <code>qwen</code> 63, <code>google</code> 36, <code>mistralai</code> 24,
+<code>deepseek</code> 16, <code>z-ai</code> 16, <code>anthropic</code> 15, <code>minimax</code> 13, <code>x-ai</code> 12, <code>microsoft</code> 10,
+<code>bytedance-seed</code> 9, <code>perplexity</code> 9. Кроме текстовых LLM там же картинки
+(<code>recraft</code>, <code>black-forest-labs</code>, <code>x-ai/grok-imagine-*</code>), эмбеддинги (<code>voyageai</code>,
+<code>google/gemini-embedding-*</code>), аудио (<code>deepgram</code>, <code>openai/whisper-*</code>) и видео
+(<code>google/veo-*</code>, <code>minimax/hailuo-*</code>) — то есть 497 — это весь каталог платформы, а не
+только чат-модели.</p>
+<h3>WormSoft — 10 в конфиге из 39 в API</h3>
+<p><code>anthropic/claude-sonnet-5</code>, <code>deepseek/deepseek-v4.1-flash</code>, <code>google/gemma4:31b</code>,
+<code>minimaxai/minimax-m3</code>, <code>openai/gpt-5.6-luna</code>, <code>openai/gpt-oss:120b</code>,
+<code>openai/gpt-oss:20b</code>, <code>qwen/qwen3.8:27b</code>, <code>zai/glm-5.3-flash:NVFP4</code>, <code>zai/glm-5.3:NVFP4</code></p>
+<p><code>GET ai.wormsoft.ru/api/gpt/v1/models</code> (Bearer-ключ) отдаёт 39 моделей — среди них
+алиасы <code>wormsoft/agent|code|vision/low|medium|high</code>, <code>kimi/kimi-k3</code>, <code>kimi-k2.6</code>,
+<code>kimi-k2.7-code</code>, <code>anthropic/claude-opus-5</code>, <code>claude-fable-5.1</code>, <code>claude-haiku-4.5</code>,
+<code>openai/gpt-5.6-sol|terra</code>, <code>openai/gpt-6-astra</code>, <code>deepseek-ai/deepseek-v4-pro|flash</code>,
+<code>zai/glm-5.3</code>, <code>qwen/qwen3.6:27b</code>, <code>nvidia/nemotron-3-ultra</code>. Живой проверкой
+подтверждено, что ключ работает и с теми, которых нет в конфиге:
+<code>kimi/kimi-k3</code>, <code>anthropic/claude-opus-5</code>, <code>openai/gpt-5.6-sol</code> — все ответили.</p>
+<h4>Цены (публичный прайс, ключ не нужен)</h4>
+<p><code>GET ai.wormsoft.ru/api/money/token-pricing</code> → 18 моделей, поля <code>input</code>/<code>output</code>/<code>cache</code>,
+по документации — за 1 000 000 токенов (валюту/единицу API не указывает):</p>
+<table>
+<thead>
+<tr>
+<th>Модель</th>
+<th>вход</th>
+<th>выход</th>
+<th>кэш</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>wormsoft/agent/low</code>, <code>wormsoft/code/low</code></td>
+<td>0.0005</td>
+<td>0.005</td>
+<td>0.00005</td>
+</tr>
+<tr>
+<td><code>google/gemma4:31b</code></td>
+<td>0.004</td>
+<td>0.05</td>
+<td>0.0005</td>
+</tr>
+<tr>
+<td><code>wormsoft/agent/medium</code>, <code>wormsoft/code/medium</code></td>
+<td>0.03</td>
+<td>1</td>
+<td>0.00005</td>
+</tr>
+<tr>
+<td><code>wormsoft/code/high</code></td>
+<td>0.08</td>
+<td>3</td>
+<td>0.03</td>
+</tr>
+<tr>
+<td><code>wormsoft/agent/high</code></td>
+<td>1</td>
+<td>4</td>
+<td>0.03</td>
+</tr>
+<tr>
+<td><code>openai/gpt-5.4</code></td>
+<td>1</td>
+<td>4</td>
+<td>0.03</td>
+</tr>
+<tr>
+<td><code>openai/gpt-5.4-mini</code></td>
+<td>0.012</td>
+<td>1.2</td>
+<td>0.01</td>
+</tr>
+<tr>
+<td><code>openai/gpt-5.5</code></td>
+<td>30</td>
+<td>150</td>
+<td>2</td>
+</tr>
+<tr>
+<td><code>zai/glm-5.1</code></td>
+<td>1.4</td>
+<td>4.5</td>
+<td>0.1</td>
+</tr>
+<tr>
+<td><code>qwen/qwen3.5-plus</code>, <code>qwen/qwen3.6-plus</code></td>
+<td>0.04</td>
+<td>2.5</td>
+<td>0.02</td>
+</tr>
+<tr>
+<td><code>qwen/qwen3.5-35b</code>, <code>google/gemma4:26b</code></td>
+<td>0.0005</td>
+<td>0.005</td>
+<td>0.00005</td>
+</tr>
+</tbody></table>
+<p>Тарифы (<code>GET /api/user-connector/subscription-limits</code>): free — 5000 кредитов,
+10 запросов / 600 с, 0 ₽; promo — 150 000 кредитов за 1000 ₽; simple — 500 000 за 2000 ₽
+(период 30 дней).</p>
+<p>⚠ Расхождение: 11 из 18 позиций прайса (<code>openai/gpt-5.5</code>, <code>glm-5.1</code>, <code>qwen3.5-plus</code>…)
+в списке <code>v1/models</code> не значатся, и наоборот — большинство рабочих моделей
+(<code>claude-opus-5</code>, <code>kimi-k3</code>, <code>gpt-5.6-sol</code>) в прайсе отсутствуют. Единицу цены
+(кредиты или рубли) API не сообщает, а по тарифам она не сходится: 150 000 кредитов
+за 1000 ₽ дают для <code>gpt-5.4</code> абсурдно низкую цену. Не проверено, что означает число.</p>
+<h3>Clodex — 9</h3>
+<p><code>deepseek-v4.1-flash</code>, <code>gemini-3.7-flash</code>, <code>gemini-3.8-flash</code>, <code>glm-5.3</code>,
+<code>glm-5.3-flash</code>, <code>gpt-5.6-sol</code>, <code>gpt-6-astra</code>, <code>kimi-k3</code>, <code>qwen3.8-flash</code></p>
+<h3>Hugging Face — 75 (обрезать конфигом нельзя)</h3>
+<p>Живая проверка роутера (<code>router.huggingface.co/v1</code>, токен <code>HF_TOKEN</code>):
+<code>deepseek-ai/DeepSeek-V4.1-Flash</code>, <code>Qwen/Qwen3.8-27B</code>, <code>zai-org/GLM-5.3</code> — отвечают.
+Список формируется не конфигом: 71 модель «прошита» в пакете Pi
+(<code>pi-ai/dist/providers/data/huggingface.json</code>), остальные добираются удалённым
+каталогом/кешем <code>models-store.json</code>. Семьи в списке: <code>deepseek-ai/*</code>, <code>google/gemma-*</code>,
+<code>Qwen/*</code>, <code>zai-org/GLM-*</code>, <code>moonshotai/Kimi-*</code>, <code>MiniMaxAI/MiniMax-*</code>,
+<code>openai/gpt-oss-*</code>, <code>thinkingmachines/Inkling*</code>, <code>stepfun-ai/*</code>, <code>XiaomiMiMo/*</code>.
+Полный список даёт сама проба Pi (<code>GET /api/models</code> у TaskBridge).</p>
+<p>Почему «убрать лишнее» в <code>models.json</code> не работает (проверено по коду Pi):
+<code>applyModelsJson()</code> только <strong>добавляет или переопределяет</strong> модели (<code>upsert</code>),
+удалить встроенные нельзя; настройки вида <code>disabledProviders</code>/<code>hiddenModels</code> нет
+(полный список геттеров <code>SettingsManager</code> просмотрен). Заменить список
+провайдера целиком может только <strong>расширение Pi</strong> (<code>applyExtension()</code> возвращает
+ровно <code>config.models</code>), либо фильтр на стороне TaskBridge в <code>GET /api/models</code>.</p>
+<p>Варианты правки (нужен выбор критерия «лишнего»):</p>
+<ol>
+<li>убрать токен <code>HF_TOKEN</code> — провайдер исчезает из каталога целиком;</li>
+<li>оставить allowlist в <code>settings.enabledModels</code> — чистит только список выбора Pi,
+но не выдачу <code>/api/models</code>;</li>
+<li>расширение Pi или фильтр в TaskBridge — единственный способ убрать модели
+из каталога, но это код.</li>
+</ol>
+<h3>OpenRouter — провайдер есть, ключа нет</h3>
+<p>OpenRouter встроен в Pi (<code>pi-ai/dist/providers/openrouter.js</code>, базовый URL
+<code>https://openrouter.ai/api/v1</code>), включается переменной <code>OPENROUTER_API_KEY</code> или
+OAuth («Sign in with OpenRouter»). На этой машине ключа нет: в <code>~/.codex</code>
+встречается только шаблон-заглушка <code>sk-or-v1-xxxx</code> в старом логе сессии.
+Поэтому OpenRouter не появляется в каталоге и повестки в отчёте не имеет;
+баланс и модели без ключа не запросить (каталог — только <code>GET /api/v1/models</code>).</p>
+<h3>Google — 22</h3>
+<p><code>gemini-2.5-pro</code>, <code>gemini-2.5-flash</code>, <code>gemini-2.5-flash-lite</code>,
+<code>gemini-2.5-computer-use-preview-10-2025</code>, <code>gemini-3-flash-preview</code>,
+<code>gemini-3.1-pro-preview</code>, <code>gemini-3.1-pro-preview-customtools</code>,
+<code>gemini-3.1-flash-lite(-preview|-image)</code>, <code>gemini-3.1-flash-live-preview</code>,
+<code>gemini-3.5-flash</code>, <code>gemini-3.5-flash-lite</code>, <code>gemini-3.6-flash</code>,
+<code>gemini-3.7-flash</code>, <code>gemini-3.8-flash</code>, <code>gemini-flash-latest</code>,
+<code>gemini-flash-lite-latest</code>, <code>gemma-4-26b-a4b-it</code>, <code>gemma-4-31b-it</code>,
+<code>deep-research-preview-04-2026</code>, <code>deep-research-max-preview-04-2026</code>.</p>
+<h3>OpenAI Codex — 8</h3>
+<p><code>gpt-5.3-codex-spark</code>, <code>gpt-5.4</code>, <code>gpt-5.4-mini</code>, <code>gpt-5.5</code>, <code>gpt-5.6-luna</code>,
+<code>gpt-5.6-sol</code>, <code>gpt-5.6-terra</code>, <code>gpt-6-astra</code></p>
+<h3>GitHub Copilot — 28 (провайдер удалён, список исторический)</h3>
+<p><code>claude-*</code> (haiku-4.5, sonnet-4.6, sonnet-5, opus-4.7, opus-4.8, opus-5, fable-5, fable-5.1),
+<code>gemini-3.5..3.8-flash</code>, <code>gpt-5-mini</code>, <code>gpt-5.3-codex</code>, <code>gpt-5.4(-mini|-nano)</code>,
+<code>gpt-5.5</code>, <code>gpt-5.6-luna|sol|terra</code>, <code>gpt-6-astra</code>, <code>grok-4.5</code>, <code>grok-4.6</code>,
+<code>kimi-k2.7-code</code>, <code>kimi-k3</code>, <code>mai-code-1-flash-picker</code>, <code>mai-code-1.1-flash</code></p>
+<h2>Отвечают ли модели (живая проверка)</h2>
+<p>Проверка 2026-09-20: <code>pi -p &quot;Reply with exactly: OK&quot; --provider &lt;p&gt; --model &lt;m&gt;</code>
+(<code>--no-session -nt --no-extensions --no-skills --no-prompt-templates --no-context-files --thinking off</code>).</p>
+<h3>OpenAI Codex — отвечает частично, 5 из 8</h3>
+<table>
+<thead>
+<tr>
+<th>Модель</th>
+<th>Ответ</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>gpt-5.5</code></td>
+<td>OK</td>
+</tr>
+<tr>
+<td><code>gpt-5.6-luna</code></td>
+<td>OK</td>
+</tr>
+<tr>
+<td><code>gpt-5.6-sol</code></td>
+<td>OK</td>
+</tr>
+<tr>
+<td><code>gpt-5.6-terra</code></td>
+<td>OK</td>
+</tr>
+<tr>
+<td><code>gpt-6-astra</code></td>
+<td>OK</td>
+</tr>
+<tr>
+<td><code>gpt-5.3-codex-spark</code></td>
+<td>ошибка: <code>model is not supported when using Codex with a ChatGPT account</code></td>
+</tr>
+<tr>
+<td><code>gpt-5.4</code></td>
+<td>та же ошибка</td>
+</tr>
+<tr>
+<td><code>gpt-5.4-mini</code></td>
+<td>та же ошибка</td>
+</tr>
+</tbody></table>
+<p>Это не сбой доступа, а расхождение каталога Pi со списком, который принимает
+Codex-бэкенд для аккаунта ChatGPT: три модели Pi показывает, а сервер их отвергает.</p>
+<h3>GitHub Copilot — не отвечает ни одна</h3>
+<p>Проверены <code>gpt-5-mini</code>, <code>claude-haiku-4.5</code>, <code>grok-4.5</code> — все три падают одинаково
+на обновлении OAuth-токена, ещё до вызова модели:</p>
+<pre><code>OAuth refresh failed for github-copilot: 403 Forbidden:
+&quot;At this time, Copilot is not available in your location.
+ You are currently logged in as arnyigor.&quot;
+notification_id: trade_restricted_country
+</code></pre>
+<p>Сохранённый access-токен был просрочен (<code>exp</code> = 2026-05-04), а refresh упирался в
+географическое ограничение GitHub. То есть 28 моделей провайдера в списке были, но
+нерабочие — провайдер удалён (см. выше). <code>pi auth check --provider github-copilot</code> при этом говорит <code>invalid</code>,
+а с <code>--no-refresh</code> — <code>ready</code> (проверяется только наличие записи, не её валидность).</p>
+<h3>GitHub Copilot — удалён 2026-09-20</h3>
+<p>Раньше провайдер отдавал 28 моделей (<code>claude-*</code>, <code>gemini-3.*-flash</code>, <code>gpt-5*</code>,
+<code>gpt-6-astra</code>, <code>grok-4.5|4.6</code>, <code>kimi-k2.7-code</code>, <code>kimi-k3</code>, <code>mai-code-1*</code>); ни одна не
+отвечала по причине из раздела ниже, поэтому креды убраны:</p>
+<ul>
+<li><code>~/.pi/agent/auth.json</code> — блок <code>github-copilot</code> удалён
+(бэкап: <code>auth.json.bak-before-drop-github-copilot-20260920-081315</code>);</li>
+<li><code>~/.pi/agent/settings.json</code> — из <code>enabledModels</code> убран <code>github-copilot/gpt-5-mini</code>,
+иначе появлялось предупреждение <code>No models match pattern</code>
+(бэкап: <code>settings.json.bak-before-drop-copilot-model-20260920-081341</code>).</li>
+</ul>
+<p>Проверено после правки: <code>pi auth check --provider github-copilot</code> →
+<code>not_ready / credentials_not_configured</code>; в каталоге Pi провайдера больше нет
+(138 моделей против 166), <code>openai-codex</code> по-прежнему <code>ready</code>.
+Вернуть можно из бэкапов или командой <code>/login github-copilot</code> в TUI.</p>
+<h2>GitHub: где обновляется токен и почему это не помогало</h2>
+<p>Учётные данные лежат в <code>~/.pi/agent/auth.json</code>, блок <code>github-copilot</code>:
+<code>refresh</code> = <code>ghu_…</code>, <code>access</code> = выданный Copilot-токен, <code>expires</code> = 2026-05-04 (просрочен).</p>
+<p>Правильный путь обновления — TUI Pi:</p>
+<ul>
+<li><code>/login github-copilot</code> — заново пройти device-code OAuth (аргумент-провайдер
+поддерживается, <code>/login</code> без аргумента открывает селектор);</li>
+<li><code>/logout</code> — удалить сохранённые креды (env и <code>models.json</code> не затрагивает).</li>
+</ul>
+<p>В CLI команды входа нет: <code>pi auth</code> умеет только <code>print-api-key</code>,
+<code>print-bearer-token</code>, <code>check</code>.</p>
+<p>Почему перелогин сам по себе не вернёт Copilot (проверено 2026-09-20):</p>
+<ol>
+<li><code>refresh</code> у этого провайдера — не refresh-token, а сам GitHub-токен: Pi отправляет
+его в <code>GET https://api.github.com/copilot_internal/v2/token</code> и ждёт Copilot-токен.
+Прямой запрос с тем же значением даёт <strong>403 <code>trade_restricted_country</code></strong>
+(«Copilot is not available in your location… currently logged in as arnyigor»).
+То есть отказ приходит с сервера по региону, а не из-за протухшего токена.</li>
+<li>Свежий <code>/login</code> выдаст новый <code>ghu_</code>-токен, но обмен на Copilot-токен с того же
+IP упрётся в тот же 403.</li>
+<li>Дополнительно сам <code>github.com</code> с этой машины отвечает нестабильно: 6 попыток
+<code>https://github.com/login/device</code> → 2×302, 4×таймаут. Device-flow может не дойти
+до конца ещё до шага обмена.</li>
+</ol>
+<p>Вывод: обновить запись можно только через <code>/login github-copilot</code>, но провайдер оживёт
+лишь вместе с сетевым маршрутом и правом аккаунта на Copilot — Pi на это не влияет.
+Поэтому 2026-09-20 креды удалены.</p>
+<h2>Убрано из конфига (2026-09-20)</h2>
+<p>Оставлены только те модели, которые провайдер реально принимает.</p>
+<table>
+<thead>
+<tr>
+<th>Файл</th>
+<th>Что сделано</th>
+<th>Бэкап</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>~/.pi/agent/models.json</code></td>
+<td>у <code>deepseek</code> оставлен только <code>deepseek-flash</code> (было 4)</td>
+<td><code>models.json.bak-before-prune-20260920-083653</code></td>
+</tr>
+<tr>
+<td><code>~/.pi/agent/settings.json</code></td>
+<td>из <code>enabledModels</code> убраны 3 мёртвых записи (23 → 20)</td>
+<td><code>settings.json.bak-before-prune-models-20260920-083700</code></td>
+</tr>
+</tbody></table>
+<p>Из <code>enabledModels</code> убраны:</p>
+<ul>
+<li><code>openai-codex/gpt-5.4</code> — каталог её отдаёт, но Codex-бэкенд отвечает
+<code>not supported when using Codex with a ChatGPT account</code>;</li>
+<li><code>wormsoft/deepseek-ai/deepseek-v4-flash</code> и <code>llama.cpp/Qwen3.8-27B-ZB4.00-MIN-v5.1-IQ4_XS</code> —
+не совпадают ни с одной моделью каталога (давали предупреждение при каждом старте).</li>
+</ul>
+<p>Проверка всех остальных записей <code>enabledModels</code> на совпадение с каталогом — совпадают;
+список моделей в <code>models.json</code> сверен с живыми каталогами провайдеров: у wormsoft (10/10),
+routerai (3/3) и clodex-openai (9/9) все id на месте, у deepseek — только два из четырёх
+(см. выше). Локальные профили <code>llama.cpp</code> не трогались.</p>
+<p>После правки: <code>pi -p &quot;hi&quot;</code> — ни одного предупреждения (до чистки их было два:
+<code>wormsoft/deepseek-ai/deepseek-v4-flash</code>, <code>llama.cpp/Qwen3.8-27B-ZB4.00-MIN-v5.1-IQ4_XS</code>);
+<code>pi -p &quot;...&quot; --provider deepseek --model deepseek-flash</code> → <code>OK</code>.</p>
+<h2>Что проверено и чего нет</h2>
+<p>Проверено запросами (2026-09-20):</p>
+<ul>
+<li><code>api.deepseek.com/user/balance</code> → <code>is_available: true</code>, 36.78 CNY + 2.00 USD.</li>
+<li><code>routerai.ru/api/v1/credits</code> → <code>{&quot;data&quot;:{&quot;credits&quot;:2097.61...}}</code>. Валюта в ответе не
+указана, но в документации (<code>routerai.ru/docs/reference</code>) цены <code>GET /v1/models</code> —
+в рублях (<code>pricing</code> + <code>pricing_units</code>), и там же — те же единицы для лимитов ключа.
+Пересчёт на 1M токенов даёт правдоподобные рублёвые цены: <code>deepseek-v4-pro</code> 64.71 ₽
+вход / 129.43 ₽ выход, <code>gpt-5.6-sol</code> 218.91 / 1094.57 ₽ (в долларах это были бы
+абсурдные суммы). Значит <code>credits</code> ≈ рубли. <code>GET /v1/key</code> показывает расход этого
+ключа: <code>usage_monthly</code> 2.34 и уменьшение <code>credits</code> на ~0.009 за шесть пробных
+запросов — те же единицы.</li>
+<li>WormSoft: перебор <code>/api/user-connector/*</code>, <code>/api/gpt/v1/*</code>, <code>/api/money/*</code> — отвечают только
+<code>/api/user-connector/subscription-limits</code> (публичный каталог тарифов) и публичный
+<code>/api/money/token-pricing</code> (прайс, 18 позиций). Баланса аккаунта по ключу нет — только ЛК (<code>/lk</code>).</li>
+<li>WormSoft, живые вызовы моделей, которых нет в <code>models.json</code>: <code>kimi/kimi-k3</code>,
+<code>anthropic/claude-opus-5</code>, <code>openai/gpt-5.6-sol</code> — ответили.</li>
+<li>Hugging Face, живой вызов роутера: <code>deepseek-ai/DeepSeek-V4.1-Flash</code>, <code>Qwen/Qwen3.8-27B</code>,
+<code>zai-org/GLM-5.3</code> — ответили (токен <code>HF_TOKEN</code>, fine-grained, <code>isPro: false</code>).</li>
+<li>Clodex: <code>/api/user/self</code>, <code>/api/user/dashboard</code>, <code>/api/token/</code> → 401 (нужен access
+token из личного кабинета, <code>sk-</code>-ключ там не принимается).
+<code>/v1/dashboard/billing/subscription</code> отвечает, но это OpenAI-совместимая заглушка
+(<code>hard_limit_usd: 1e8</code>), а не остаток.</li>
+<li>Hugging Face: <code>/api/whoami-v2</code> и <code>/api/billing/usage</code> (404) — остаток по токену не отдаётся.</li>
+<li>Google: у <code>GEMINI_API_KEY</code> нет балансового эндпоинта.</li>
+</ul>
+<p>Не проверено:</p>
+<ul>
+<li>остатки WormSoft / Clodex / Hugging Face / Google — доступны только в веб-кабинетах;</li>
+<li>у Copilot проверены 3 модели из 28 — отказ происходит на refresh&#39;е токена, то есть
+до выбора модели, поэтому остальные 25 отдельно не гонялись;</li>
+<li>Clodex в этот прогон не входил (ни цены, ни живые вызовы моделей помимо конфига);</li>
+<li>единица цены WormSoft (числа прайса с тарифами не сходятся);</li>
+<li>4 из 497 моделей RouterAI — то есть бóльшая часть каталога не вызывалась.</li>
+</ul>
+<p>Воспроизведение остатков: <code>node scripts/provider-balances.mjs</code> (или <code>--json</code>).</p>
+</body></html>

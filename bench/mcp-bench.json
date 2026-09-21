@@ -1,0 +1,176 @@
+{
+  "mcpServers": {
+    "artemis": {
+      "command": "G:/AIModels/MCPs/artemis/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "mcp_server"
+      ],
+      "cwd": "G:/AIModels/MCPs/artemis",
+      "env": {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPATH": "G:/AIModels/MCPs/artemis",
+        "ANDROID_HOME": "C:/Users/ArnyPC/AppData/Local/Android/Sdk",
+        "ANDROID_SDK_ROOT": "C:/Users/ArnyPC/AppData/Local/Android/Sdk",
+        "ARTEMIS_ADB_PATH": "C:/Users/ArnyPC/AppData/Local/Android/Sdk/platform-tools/adb.exe",
+        "ADB_HOST": "127.0.0.1",
+        "ADB_PORT": "5037"
+      },
+      "lifecycle": "keep-alive",
+      "directTools": [
+        "mobile_run_task",
+        "mobile_manage_task",
+        "mobile_get_device_state",
+        "mobile_inspect_trace",
+        "mobile_diagnose"
+      ]
+    },
+    "mcpServer": {
+      "command": "G:/AIModels/MCPs/McpServer/.venv/Scripts/python.exe",
+      "args": [
+        "G:/AIModels/MCPs/McpServer/server.py"
+      ],
+      "cwd": "G:/AIModels/MCPs/McpServer",
+      "directTools": false
+    },
+    "serena": {
+      "command": "serena",
+      "args": [
+        "start-mcp-server",
+        "--context",
+        "oaicompat-agent",
+        "--project-from-cwd",
+        "--open-web-dashboard",
+        "false"
+      ],
+      "directTools": false
+    },
+    "web-search": {
+      "command": "node",
+      "args": [
+        "G:\\AIModels\\MCPs\\web-search-mcp\\dist\\index.js"
+      ],
+      "cwd": "G:\\AIModels\\MCPs\\web-search-mcp",
+      "lifecycle": "keep-alive",
+      "directTools": false,
+      "env": {
+        "MAX_CONTENT_LENGTH": "10000",
+        "BROWSER_HEADLESS": "true",
+        "MAX_BROWSERS": "3",
+        "BROWSER_FALLBACK_THRESHOLD": "3"
+      },
+      "debug": true
+    },
+    "dependency-doctor": {
+      "command": "G:/Android/OpenideProjects/DependencyDoctor/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "dependency_doctor.mcp_server"
+      ],
+      "directTools": false,
+      "env": {
+        "DEPENDENCY_DOCTOR_MODE": "safe"
+      }
+    },
+    "image-description-engine": {
+      "command": "G:/Android/OpenideProjects/LocalImageDescriptionEngine/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "image_description.mcp_server"
+      ],
+      "cwd": "G:/Android/OpenideProjects/LocalImageDescriptionEngine",
+      "directTools": false
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest",
+        "--autoConnect",
+        "--no-usage-statistics",
+        "--no-performance-crux"
+      ],
+      "directTools": false
+    },
+    "context7": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp@latest"
+      ],
+      "directTools": false,
+      "env": {
+        "CONTEXT7_API_KEY": "${CONTEXT7_API_KEY}"
+      }
+    },
+    "clipboard-artifacts": {
+      "command": "G:\\AIModels\\MCPs\\clipboard-artifacts-mcp\\run.cmd",
+      "directTools": false
+    },
+    "deepseek-web": {
+      "command": "G:/Android/OpenideProjects/deepseek-local-server/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "deepseek_local_server",
+        "mcp"
+      ],
+      "cwd": "G:/Android/OpenideProjects/deepseek-local-server",
+      "lifecycle": "keep-alive",
+      "directTools": false,
+      "requestTimeoutMs": 600000
+    },
+    "project-md": {
+      "command": "G:/AIModels/MCPs/md-mcp/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "pi_md_mcp.server"
+      ],
+      "cwd": "G:/AIModels/MCPs/md-mcp",
+      "lifecycle": "lazy",
+      "idleTimeout": 10,
+      "requestTimeoutMs": 120000,
+      "directTools": false
+    },
+    "figma-local": {
+      "command": "python",
+      "args": [
+        "G:/AIModels/MCPs/figma_mcp/figma_mcp_server.py"
+      ],
+      "cwd": "G:/AIModels/MCPs/figma_mcp",
+      "directTools": false,
+      "env": {
+        "FIGMA_TOKEN": "${FIGMA_TOKEN}",
+        "FIGMA_ACCESS_TOKEN": "${FIGMA_ACCESS_TOKEN}",
+        "FIGMA_TOKEN_FILE": "C:/Users/ArnyPC/.figma_token"
+      },
+      "requestTimeoutMs": 120000
+    },
+    "blender": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "G:/AIModels/MCPs/blender_mcp/mcp",
+        "run",
+        "blender-mcp"
+      ],
+      "lifecycle": "keep-alive",
+      "directTools": false,
+      "env": {
+        "BLENDER_MCP_PORT": "9876",
+        "BLENDER_PATH": "C:\\Program Files\\Blender Foundation\\Blender 5.2\\blender.exe"
+      }
+    },
+    "qwen-web": {
+      "cwd": "G:/Android/OpenideProjects/qwen-local-server",
+      "command": "G:/Android/OpenideProjects/qwen-local-server/.venv/Scripts/python.exe",
+      "lifecycle": "keep-alive",
+      "directTools": false,
+      "requestTimeoutMs": 600000,
+      "args": [
+        "-m",
+        "qwen_local_server",
+        "mcp"
+      ]
+    }
+  }
+}

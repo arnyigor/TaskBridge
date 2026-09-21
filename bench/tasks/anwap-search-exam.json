@@ -1,0 +1,105 @@
+{
+  "id": "anwap-search-exam",
+  "project": "anwapvideoplayer",
+  "root": "G:/Android/AndroidStudioProjects/anwapvideoplayer",
+  "scope": "app/src/main/java",
+  "why": [
+    "Задача для A/B обвязки: вопросы типизированные (объявления, зависимости), а не текстовые.",
+    "У каждого — точный ответ, который можно посчитать руками, и ловушка, на которой именно",
+    "текстовый поиск с cut теряет шаги: многострочные заголовки классов, интерфейс в списке",
+    "через запятую, и фильтр по слою. Корректность считается как точное совпадение множеств,",
+    "а не «кажется, стало лучше»."
+  ],
+  "prompt": "Ты работаешь в проекте Android (Kotlin), каталог исходников: app/src/main/java.\nОтветь на 4 вопроса про код этого проекта. Пути указывай относительно каталога app/src/main/java (то есть с com/arny/mobilecinema/…).\n\nQ1. Сколько классов реализуют интерфейс HistoryInteractor? Перечисли файл и строку объявления каждого класса-реализации.\nQ2. Сколько классов реализуют интерфейс IMovieUpdate? Перечисли файл и строку объявления каждого класса-реализации.\nQ3. Какие классы в пакете presentation зависят от HistoryInteractor (используют его как тип)? Перечисли файлы.\nQ4. Какие классы в пакете presentation зависят от MoviesInteractor (используют его как тип)? Перечисли файлы.\n\nФормат итогового ответа — строго так, без пояснений:\nQ1|<число>|<путь>:<строка>[,<путь>:<строка>]\nQ2|<число>|<путь>:<строка>[,<путь>:<строка>]\nQ3|<путь>[,<путь>]\nQ4|<путь>[,<путь>]\n",
+  "questions": [
+    {
+      "id": "Q1",
+      "kind": "impls_with_lines",
+      "count": 1,
+      "expect": [
+        "domain/interactors/history/HistoryInteractorImpl.kt:27"
+      ],
+      "traps": [
+        "Заголовок класса многострочный: ': HistoryInteractor {' стоит на строке 27, далеко от имени класса HistoryInteractorImpl (строка ~26).",
+        "Три места внедрения в конструкторы (DetailsViewModel:115, HistoryViewModel:32, PlayerViewModel:42) — это НЕ реализации."
+      ],
+      "truth_note": "grep -rn ': *HistoryInteractor\\b' даёт 4 попадания, реализация — одно."
+    },
+    {
+      "id": "Q2",
+      "kind": "impls_with_lines",
+      "count": 2,
+      "expect": [
+        "data/db/models/MovieUpdate.kt:10",
+        "domain/models/Movie.kt:24"
+      ],
+      "traps": [
+        "В Movie.kt реализация идёт в списке через запятую: ') : Parcelable, IMovieUpdate' — легко пропустить.",
+        "В UpdateRepositoryImpl.kt четыре упоминания (импорт и типы List<IMovieUpdate>) — это НЕ реализации."
+      ],
+      "truth_note": "Наивный ответ «5–6 реализаций» — типичная ошибка текстового поиска."
+    },
+    {
+      "id": "Q3",
+      "kind": "file_set",
+      "count": 5,
+      "expect": [
+        "presentation/details/DetailsViewModel.kt",
+        "presentation/history/HistoryViewModel.kt",
+        "presentation/playerview/PlayerViewModel.kt",
+        "presentation/tv/home/TvHomeViewModel.kt",
+        "presentation/tv/player/TvPlayerFragment.kt"
+      ],
+      "traps": [
+        "di/KoinModules.kt содержит модуль привязки — это не presentation.",
+        "Сам пакет domain/interactors/history (интерфейс и реализация) — не presentation."
+      ],
+      "truth_note": "Всего упоминаний 8 файлов; после фильтра по слою presentation остаётся 5."
+    },
+    {
+      "id": "Q4",
+      "kind": "file_set",
+      "count": 11,
+      "expect": [
+        "presentation/comments/CommentsViewModel.kt",
+        "presentation/details/DetailsViewModel.kt",
+        "presentation/extendedsearch/ExtendedSearchViewModel.kt",
+        "presentation/favorite/FavoritesViewModel.kt",
+        "presentation/history/HistoryViewModel.kt",
+        "presentation/home/HomeViewModel.kt",
+        "presentation/playerview/PlayerViewModel.kt",
+        "presentation/tv/home/TvHomeViewModel.kt",
+        "presentation/tv/player/TvPlayerFragment.kt",
+        "presentation/tv/search/TvSearchViewModel.kt",
+        "presentation/tv/viewmodel/TvDetailsViewModel.kt"
+      ],
+      "traps": [
+        "Сам интерфейс и реализация (domain/interactors/movies) и di/KoinModules.kt — не presentation.",
+        "Модуль на 14 файлов, из них presentation — 11."
+      ],
+      "truth_note": "grep -rl MoviesInteractor даёт 14 файлов; presentation — 11."
+    }
+  ],
+  "scoring": {
+    "correctness": "Для каждого вопроса — точное сравнение множеств. Считаем precision/recall: лишние пути = ложные, пропущенные = промахи. Вопрос зачтён только при полном совпадении.",
+    "line_rule": "Для Q1/Q2 файл обязателен, а строка принимается в пределах заголовка класса: от строки с 'class <Имя>' до строки с ')' : <Интерфейс>'. Заголовки многострочные, поэтому требовать одну конкретную строку было бы несправедливо; проверяем, что это объявление класса, а не место использования.",
+    "primary_metrics": [
+      "число шагов (вызовов инструментов) до итогового ответа",
+      "состав вызовов: grep / bash / read / ast / sg",
+      "токены на вход, время прогона"
+    ],
+    "note": "«Сколько раз вызвала ast» — НЕ метрика. Смотрим на шаги до правильного ответа и на долю текстового поиска."
+  },
+  "runs": {
+    "arms": {
+      "A": "обвязка выключена: PI_CODE_SEARCH_OFF=1",
+      "B": "включены инструменты ast/sg (инструмент + напоминание)",
+      "C": "B + перехват вызова: PI_CODE_SEARCH_INTERCEPT=1"
+    },
+    "repeats": 3,
+    "model": "llama.cpp/qwen-27b-q3",
+    "thinking": "off",
+    "note": "Один прогон у нас уже оказывался случайностью — минимум 3 на плечо. Промпт одинаковый, различий в дереве нет."
+  },
+  "rel_base": "app/src/main/java/com/arny/mobilecinema"
+}

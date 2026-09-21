@@ -1,0 +1,22 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.3.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+Calculating task graph as no cached configuration is available for tasks: :shared:compileKotlinJvm
+Type-safe project accessors is an incubating feature.
+
+FAILURE: Build failed with an exception.
+
+* Where:
+Build file 'G:\AIModels\LLMBenchmarks\MyTests\kmp_iq4xs\todo-app\androidApp\build.gradle.kts' line: 1
+
+* What went wrong:
+Error resolving plugin [id: 'org.jetbrains.kotlin.android', version: '2.3.20']
+> The request for this plugin could not be satisfied because the plugin is already on the classpath with an unknown version, so compatibility cannot be checked.
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 5s
+Configuration cache entry stored.

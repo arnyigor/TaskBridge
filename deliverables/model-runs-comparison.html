@@ -1,0 +1,458 @@
+<!DOCTYPE html><html lang=ru><head><meta charset=utf-8><title>Сравнение прогонов моделей</title><style>
+body{font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;max-width:920px;margin:24px auto;padding:0 16px;line-height:1.55;color:#1a1a1a}
+table{border-collapse:collapse;margin:12px 0;width:100%;font-size:14px}
+th,td{border:1px solid #c8c8c8;padding:6px 10px;text-align:left;vertical-align:top}
+th{background:#f0f0f0}
+code{background:#f4f4f4;padding:1px 4px;border-radius:3px;font-size:0.92em}
+pre{background:#f4f4f4;padding:10px;border-radius:6px;overflow-x:auto}
+pre code{background:none;padding:0}
+h1,h2,h3{line-height:1.25}
+blockquote{border-left:4px solid #999;margin:8px 0;padding:2px 14px;color:#444}
+</style></head><body><h1>Обвязка pi: что измерено, что исправлено, как работает</h1>
+<p>Отчёт по прогонам надзирателя на двух моделях (<code>qwen-27b-q3</code> и <code>qwen-27b-text</code> = IQ4_XS)
+и трёх типах задач. Все числа — из логов прогонов и <code>timeline.json</code>; где замера нет — это
+сказано прямо. Инструменты измерения перечислены в разделе 5.</p>
+<h2>1. Полигоны и плечи</h2>
+<table>
+<thead>
+<tr>
+<th>полигон</th>
+<th>тип задачи</th>
+<th>профиль</th>
+<th>модель</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>kmp_nudge</code></td>
+<td>новый проект с нуля (KMP TODO)</td>
+<td><code>build-project</code>, <strong>без</strong> автосборки</td>
+<td>Q3</td>
+</tr>
+<tr>
+<td><code>kmp_auto</code></td>
+<td>тот же проект, <strong>с</strong> автосборкой</td>
+<td><code>build-project</code> + <code>autoVerify</code></td>
+<td>Q3</td>
+</tr>
+<tr>
+<td><code>anwap_bug</code></td>
+<td><strong>баг</strong> в существующем проекте (25 тестов, 1 падает)</td>
+<td><code>existing-bug</code></td>
+<td>Q3</td>
+</tr>
+<tr>
+<td><code>kmp_iq4xs2</code></td>
+<td>тот же проект с нуля</td>
+<td><code>build-project</code></td>
+<td>IQ4_XS (ctx 64k)</td>
+</tr>
+</tbody></table>
+<p>Плечи A и B различались <strong>ровно одним</strong> параметром (<code>autoVerify</code>); всё остальное —
+пакет, промпт, модель, контекст, пороги — совпадало.</p>
+<h2>2. Результаты: пороги по прогонам</h2>
+<table>
+<thead>
+<tr>
+<th>плечо</th>
+<th>первая правка</th>
+<th>сборка моделью</th>
+<th><strong>автосборка обвязкой</strong></th>
+<th><strong>увидела результат</strong></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>A</strong> <code>kmp_nudge</code> (Q3, без автосборки)</td>
+<td>08:13 (шаг 29)</td>
+<td>28:33 (шаг 95)</td>
+<td>— (выключена)</td>
+<td>28:45</td>
+</tr>
+<tr>
+<td><strong>B</strong> <code>kmp_auto</code> (Q3, с автосборкой)</td>
+<td>20:57 (шаг 54)</td>
+<td>50:53 (шаг 136)</td>
+<td><strong>не сработала</strong> (дыра в детекторе)</td>
+<td>51:05</td>
+</tr>
+<tr>
+<td><strong><code>anwap_bug</code></strong> (Q3, баг в существующем)</td>
+<td>00:47 (шаг 5)</td>
+<td>00:52 (шаг 6)</td>
+<td><strong>00:17 (шаг 1)</strong></td>
+<td>00:58</td>
+</tr>
+<tr>
+<td><strong><code>kmp_iq4xs2</code></strong> (IQ4_XS, ctx 64k)</td>
+<td>32:23 (шаг 64)</td>
+<td>49:11 (шаг 130)</td>
+<td><strong>34:03 (шаг 71)</strong></td>
+<td>49:24</td>
+</tr>
+</tbody></table>
+<h3>Главное измерение: механизм даёт факт раньше, чем модель доберётся сама</h3>
+<table>
+<thead>
+<tr>
+<th>плечо</th>
+<th>автосборка</th>
+<th>собственная сборка модели</th>
+<th>выигрыш</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>kmp_iq4xs2</code> (IQ4_XS)</td>
+<td><strong>34:03</strong></td>
+<td>49:11</td>
+<td><strong>−15:08</strong></td>
+</tr>
+<tr>
+<td><code>anwap_bug</code> (существующий проект)</td>
+<td><strong>00:17</strong></td>
+<td>00:52</td>
+<td>−00:35</td>
+</tr>
+<tr>
+<td><code>kmp_auto</code> (Q3)</td>
+<td>не сработала</td>
+<td>50:53</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<p>То есть на IQ4_XS обвязка сообщила вердикт о сборке на <strong>15 минут раньше</strong>, чем модель собрала бы сама.
+Вердикт был <code>compile</code> → «молчать» (версии разрешились, код ещё не дописан) — это ожидаемое
+поведение: цель ранней проверки — поймать провал версий, а не догонять недописанный код.</p>
+<h3>Итоги по плечам</h3>
+<ul>
+<li><strong>A (напоминания, Q3):</strong> модель собрала проект сама, но на 28-й минуте и после 4 попыток.
+Первые два напоминания «нет правок» ушли на шагах 24 и 26 — <strong>до</strong> скелета (13-я минута).</li>
+<li><strong>B (автосборка, Q3):</strong> механизм <strong>не сработал</strong>: детектор искал скелет только в корне, а проект
+оказался в подкаталоге <code>TodoApp/</code>. Исправлено и покрыто тестом; перепроверить на Q3 не успели.</li>
+<li><strong><code>anwap_bug</code> (существующий проект):</strong> всё сработало мгновенно — автосборка на <strong>17-й секунде</strong>,
+модель сама прогнала падающий тест (воспроизведение), исправила одну строку. Независимая
+проверка: <code>git diff</code> — верный фикс, <code>./gradlew :app:testDebugUnitTest</code> → <strong>BUILD SUCCESSFUL, 25/25</strong>.</li>
+<li><strong>IQ4_XS (64k, новый проект):</strong> пишет быстрее Q3 (TG 39–47 против 27–39 ток/с), но <strong>долго
+раскачивается</strong>: первая правка на 32-й минуте, до этого 64 шага разведки. Окно 64k упирается
+в компакцию чаще: <strong>3 компакции за час</strong>, контекст стоит у порога (53 093 из 65 536 = 81 %).
+Механизм сработал полностью: <code>phase_change</code> (шаг 65) → автосборка ×2 (шаги 71–72).</li>
+</ul>
+<h2>3. Главные выводы</h2>
+<ol>
+<li><strong>Разброс модели между прогонами огромен.</strong> Одна и та же модель на одном промпте: первая
+правка на 8-й минуте против 21-й; сборка на 28-й против 51-й. <strong>A/B при n=1 сравнивать по
+«когда» нельзя</strong> — сравнивать надо <em>факт срабатывания механизма</em> и его эффект. Для калибровки
+чисел нужно n≥3.</li>
+<li><strong>Механизм работает там, где у него есть триггер.</strong> Существующий проект: автосборка на 17-й
+секунде, потому что сборка есть с первой минуты. Новый проект: триггер — появление скелета,
+а его может не быть за час (плечо B не создало его в корне вовсе).</li>
+<li><strong>Автосборка без правильного классификатора бесполезна.</strong> Три случая: сборка через
+<code>cmd //c &quot;gradlew.bat …&quot;</code> не распознавалась; падающий тест считался «недописанным кодом» и
+замалчивался; плагинный резолв (<code>Error resolving plugin … could not be satisfied</code>) уходил в
+<code>unknown</code> → молчание. Каждый случай найден тестами и фикстурами, а не «на глаз».</li>
+<li><strong>Напоминание-совет доходит до модели</strong> (в размышлениях она пересказывала текст надзирателя
+своими словами), но <strong>бюджет и пауза критичны</strong>: без кулдауна два напоминания ушли на шагах
+24 и 26 — весь бюджет за 96 секунд.</li>
+<li><strong>Фазы проекта — правильная модель.</strong> <code>phase_change</code> (recon → work) сработал в обоих прогонах
+с подкаталогом; без фаз бюджет тратится на разведку и заканчивается к началу работы.</li>
+</ol>
+<h2>4. Что исправлено (с обоснованием каждого)</h2>
+<h3>Детекторы (измерение)</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>что было</th>
+<th>как исправлено</th>
+<th>чем найдено</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1</td>
+<td>сборка не считалась проверкой (<code>nudge_verify</code> не мог сработать)</td>
+<td>распознаются <code>gradlew</code>, <code>gradle &lt;task&gt;</code>, <code>mvn</code>, <code>npm test</code>, <code>pytest</code>, <code>cargo</code>, <code>dotnet</code>, <code>make</code>, <code>tsc</code>…</td>
+<td>замер плеча A: 0 сборок при 1626 строках</td>
+</tr>
+<tr>
+<td>2</td>
+<td>сборка через оболочку <code>cmd //c &quot;gradlew.bat …&quot;</code> не распознавалась</td>
+<td>добавлено правило «gradlew + задача в любом месте строки»</td>
+<td>модель собрала проект на 28:33, детектор этого не видел</td>
+</tr>
+<tr>
+<td>3</td>
+<td><code>chmod +x gradlew</code> и <code>ls gradle</code> считались сборкой</td>
+<td>после имени обязана идти задача или флаг</td>
+<td>тест детектора</td>
+</tr>
+<tr>
+<td>4</td>
+<td>правки считались по <code>2&gt;/dev/null</code> и <code>&gt;</code> внутри sed</td>
+<td>цель редиректа должна выглядеть как имя файла</td>
+<td>«первая правка» показывалась на 1-й минуте при нуле правок</td>
+</tr>
+<tr>
+<td>5</td>
+<td><code>python - &lt;&lt;EOF</code> считался записью файла</td>
+<td>heredoc сам по себе не запись; нужен редирект в файл</td>
+<td>13 «правок» на разведке плеча B</td>
+</tr>
+<tr>
+<td>6</td>
+<td>падающий тест считался «недописанным кодом» → молчание</td>
+<td>новая ветка <code>test_failed</code> — «это воспроизведение», говорим</td>
+<td>фикстура реального вывода теста</td>
+</tr>
+<tr>
+<td>7</td>
+<td><code>Error resolving plugin … could not be satisfied</code> → <code>unknown</code> → молчание</td>
+<td>расширена ветка <code>resolution</code></td>
+<td>реальный прогон IQ4_XS: сборка падала на резолве плагина, надзиратель молчал</td>
+</tr>
+<tr>
+<td>8</td>
+<td>проект искался только в корне сессии</td>
+<td>ищем в подкаталогах и <strong>по записям модели</strong> (ближайший предок записанного файла с признаком проекта)</td>
+<td>плечо B: проект в <code>TodoApp/</code>, автосборка не сработала</td>
+</tr>
+<tr>
+<td>9</td>
+<td>распакованный шаблон мог считаться «проектом»</td>
+<td>приоритет у каталога, куда модель пишет; «где больше исходников» — только запасной путь</td>
+<td>риск ложной автосборки не там</td>
+</tr>
+<tr>
+<td>10</td>
+<td>вердикт автосборки затирал имя события в логе</td>
+<td>поле <code>verdict</code>, а не <code>kind</code></td>
+<td>разбор лога: <code>auto_verify_end</code> выглядел как <code>unknown</code></td>
+</tr>
+</tbody></table>
+<h3>Механика надзирателя</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>что изменилось</th>
+<th>зачем</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>11</td>
+<td><strong>фазы</strong> <code>recon</code> → <code>work</code> со сменой порога (24 → 6) и сбросом бюджета (настраивается)</td>
+<td>в плече A бюджет сгорел до скелета: 2 напоминания на 4-й и 5-й минуте</td>
+</tr>
+<tr>
+<td>12</td>
+<td><strong>кулдаун</strong> между напоминаниями (порог/3)</td>
+<td>два напоминания на шагах 24 и 26 — весь бюджет за 96 секунд</td>
+</tr>
+<tr>
+<td>13</td>
+<td><code>nudge_repeat</code> уважает общий бюджет</td>
+<td>третья инъекция при <code>maxNudges: 2</code></td>
+</tr>
+<tr>
+<td>14</td>
+<td><strong>автосборка через <code>cmd.exe /c</code> на Windows</strong></td>
+<td><code>execFile(&#39;*.bat&#39;)</code> даёт синхронный <code>EINVAL</code> → автосборка молча не работает</td>
+</tr>
+<tr>
+<td>15</td>
+<td>текст <code>nudge_verify</code> стал общим (не про устройство)</td>
+<td>для сборки проект-нейтральная формулировка</td>
+</tr>
+<tr>
+<td>16</td>
+<td>профиль <code>existing-bug</code> требует <strong>воспроизведения</strong> до правки (<code>requireRepro</code>)</td>
+<td>урок стенда OOM: «проверка» модели была ложной</td>
+</tr>
+<tr>
+<td>17</td>
+<td><code>research-first</code> убран; добавлены <code>existing-feature</code>, <code>existing-bug</code></td>
+<td>меньше профилей — меньше поводов ошибиться; различия по осям, а не по числам</td>
+</tr>
+</tbody></table>
+<h3>Инструменты измерения (чтобы не мерить фигню)</h3>
+<table>
+<thead>
+<tr>
+<th>#</th>
+<th>что было</th>
+<th>как исправлено</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>18</td>
+<td>контекст считался по <code>usage.input</code> → «15 %» при реальных 40 %</td>
+<td>считаем по <code>usage.totalTokens</code> (роутер отдаёт в <code>input</code> только некэшированную часть)</td>
+</tr>
+<tr>
+<td>19</td>
+<td>живость прогона определялась по PID из lock → «процесса нет» при живом прогоне</td>
+<td>по свежести трейса и файла сессии</td>
+</tr>
+<tr>
+<td>20</td>
+<td>таймлайн брал времена из stdout-трейса, где у tool-событий нет меток → «правка на 00:01 (шаг 29)»</td>
+<td>таймлайн строится по сессионному файлу pi, где метки есть у всего</td>
+</tr>
+<tr>
+<td>21</td>
+<td>запуск длинной командой с heredoc дал <strong>две сессии</strong> в одном каталоге</td>
+<td>отдельный лаунчер: мьютекс <code>.pi/run.lock</code>, уникальные пути, проверка «ровно одна новая сессия»</td>
+</tr>
+</tbody></table>
+<h2>5. Инструменты (все проверены)</h2>
+<table>
+<thead>
+<tr>
+<th>файл</th>
+<th>что делает</th>
+<th>проверка</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>bench/launch-run.mjs</code></td>
+<td>запуск прогона: мьютекс, свои пути, манифест, проверка после старта</td>
+<td>отказал бы при живом lock; требует ровно одну новую сессию</td>
+</tr>
+<tr>
+<td><code>bench/status-run.mjs</code></td>
+<td>статус: пороги, контекст по <code>totalTokens</code>, живость, счёт числа сессий</td>
+<td>сверено с трейсом</td>
+</tr>
+<tr>
+<td><code>bench/timeline-run.mjs</code></td>
+<td>пороги: первая правка / сборка / автосборка / «увидела результат»</td>
+<td>времена сверены с сессией</td>
+</tr>
+<tr>
+<td><code>bench/test-measure.mjs</code></td>
+<td>тесты измерителей: 11 случаев записи, 9 сборки, 6 вердиктов, 4 скелета, сверка с сессией</td>
+<td>все проходят</td>
+</tr>
+<tr>
+<td><code>bench/test-project-detect.mjs</code></td>
+<td>детектор проекта на реальных каталогах (в т.ч. подкаталог)</td>
+<td>все проходят</td>
+</tr>
+<tr>
+<td><code>bench/extract-fixtures.mjs</code></td>
+<td>вытаскивает реальные выводы Gradle из сессий в фикстуры</td>
+<td>есть 5 фикстур</td>
+</tr>
+<tr>
+<td><code>bench/compare-arms.mjs</code></td>
+<td>сравнение плеч по <code>timeline.json</code></td>
+<td>—</td>
+</tr>
+<tr>
+<td><code>bench/analyze-sessions.mjs</code></td>
+<td>метрики из сессионных файлов + предупреждение о дублях</td>
+<td>—</td>
+</tr>
+</tbody></table>
+<h2>6. Профили: итоговый набор и что уже проверено</h2>
+<table>
+<thead>
+<tr>
+<th>профиль</th>
+<th>для чего</th>
+<th>порог (recon/work)</th>
+<th>автосборка</th>
+<th>проверено?</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><code>build-project</code></td>
+<td>новый проект с нуля</td>
+<td>24 / 6</td>
+<td>2×</td>
+<td><strong>механизм — да</strong> (IQ4_XS: вердикт на 15 мин раньше собственной сборки). A/B на Q3 недействителен: в плече B механизм не сработал из-за дыры в детекторе</td>
+</tr>
+<tr>
+<td><code>existing-bug</code></td>
+<td>баг в существующем проекте</td>
+<td>6 / 6</td>
+<td>3× + <code>requireRepro</code></td>
+<td><strong>да</strong> (полигон anwap: баг исправлен, 25/25; автосборка на 17-й секунде)</td>
+</tr>
+<tr>
+<td><code>existing-feature</code></td>
+<td>фича в существующем проекте</td>
+<td>6 / 6</td>
+<td>3×</td>
+<td>нет (механизмы те же, что у бага, кроме <code>requireRepro</code>)</td>
+</tr>
+<tr>
+<td><code>fix-first</code></td>
+<td>правка по симптому на устройстве</td>
+<td>8 / 6 + гейт</td>
+<td>—</td>
+<td>да ранее (стенд OOM: <code>verify</code> 0 → 31)</td>
+</tr>
+<tr>
+<td><code>search-only</code></td>
+<td>только поиск/анализ</td>
+<td>выкл</td>
+<td>—</td>
+<td>косвенно (экзамены: 0–2 правки)</td>
+</tr>
+<tr>
+<td><code>generate-artifact</code></td>
+<td>генерация артефакта</td>
+<td>выкл</td>
+<td>—</td>
+<td>косвенно (moon_mission)</td>
+</tr>
+</tbody></table>
+<h2>6а. Что дальше (по важности)</h2>
+<ol>
+<li><strong>Второй триггер автосборки</strong> для проекта с нуля: «есть код, прошло N минут, сборки не было».
+Сегодня механизм ждёт именно скелет, а он появился только на 32-й минуте (IQ4_XS).</li>
+<li><strong>Перепрогнать Q3-плечо B</strong> с исправленным детектором — чтобы получить чистый A/B по Q3.</li>
+<li><strong>Каналы против долгой раскачки</strong>: сегодня есть только порог шагов. Нужен механизм «первая
+компакция без единого файла → заставить начать» (в IQ4_XS до первой правки прошло 64 шага
+и одна компакция).</li>
+<li><strong>Тесты для нового кода</strong>: <code>test-measure.mjs</code> и <code>test-project-detect.mjs</code> уже покрывают
+детекторы и классификатор; при правках — прогонять перед каждым экспериментом.</li>
+</ol>
+<h2>7. Открытые вопросы</h2>
+<ol>
+<li><strong>Триггер автосборки для проекта «с нуля».</strong> Скелет может появиться поздно (IQ4_XS: 32-я минута)
+или не в корне. Нужен второй триггер: «прошло N минут, есть .kt-файлы, сборки не было» → собрать самим.
+Сейчас при скелете на 32-й минуте механизм уже не экономит много времени.</li>
+<li><strong>Проект Q3-плеча B надо перепроверить</strong> после правки детектора подкаталогов: там механизм не
+сработал именно из-за дыры, и выигрыш на Q3 остаётся неизмеренным.</li>
+<li><strong><code>requireRepro</code> не проверен</strong>: в полигоне бага модель воспроизвела симптом сама за 17 секунд,
+и напоминание не понадобилось. Проверять надо на баге без готового теста.</li>
+<li><strong>Калибровка чисел</strong> (пороги, кулдаун, <code>workNudgeAfter</code>) — нужны n≥3 на класс задачи;
+разброс модели между прогонами больше, чем эффект любой отдельной правки.</li>
+<li><strong>IQ4_XS раскачивается долго</strong> (64 шага разведки, 32 минуты до первой правки). Для такого
+поведения в <code>build-project</code> нужен отдельный механизм: не только порог шагов, но и жёсткое
+требование «начни файл» после первой компакции.</li>
+</ol>
+<h2>8. Оговорки к замерам (чтобы не повторять ошибок)</h2>
+<ul>
+<li><code>TG</code> за интервал считается по <strong>завершённым</strong> запросам: на одном длинном запросе покажет почти ноль.
+Для мгновенной скорости — две выборки счётчика с паузой.</li>
+<li>Счётчики <code>/metrics</code> <strong>кумулятивные по загруженной модели</strong>: при двух прогонах подряд на одной
+модели интервал нужно считать внутри каталога конкретного прогона (так и сделано в <code>status-run</code>).</li>
+<li>Разница в «первой правке» между плечами на разных моделях — это разброс модели, а не эффект
+обвязки. Сравнивать по ней при n=1 нельзя.</li>
+<li>Перед каждым экспериментом гонять <code>test-measure.mjs</code> и <code>test-project-detect.mjs</code>: три недействительных
+замера были получены из-за непроверенных детекторов.</li>
+</ul>
+<h2>8. Как воспроизвести</h2>
+<pre><code class="language-bash"># запуск (одна сессия, свои пути, проверка после старта)
+node bench/launch-run.mjs --cwd &lt;каталог&gt; --prompt-file &lt;каталог&gt;/PROMPT.txt \
+     --model llama.cpp/qwen-27b-q3 --max-minutes 60 --tag &lt;имя&gt;
+
+# наблюдение
+node bench/status-run.mjs  &lt;каталог&gt;/runs/&lt;имя&gt;
+node bench/timeline-run.mjs &lt;каталог&gt;/runs/&lt;имя&gt;
+
+# проверка самих измерителей (перед экспериментом — обязательно)
+node bench/test-measure.mjs &lt;каталог&gt;/runs/&lt;имя&gt;
+node bench/test-project-detect.mjs
+</code></pre>
+</body></html>

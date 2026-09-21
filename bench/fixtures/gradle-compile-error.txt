@@ -1,0 +1,50 @@
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:136:52 Unresolved reference 'NavBackStackManager'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:139:42 Unresolved reference 'currentRoute'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:141:48 Unresolved reference 'popBackStack'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:142:34 Unresolved reference 'navigate'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:148:52 Unresolved reference 'NavBackStackManager'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:153:51 Unresolved reference 'navigate'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:154:44 Unresolved reference 'navigate'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/App.kt:158:41 Unresolved reference 'popBackStack'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:39:8 Unresolved reference 'coil'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:118:23 Argument type mismatch: actual type is 'List<RemoteTodo>', but 'Int' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:118:43 Unresolved reference 'id'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:120:32 Argument type mismatch: actual type is 'Int', but 'RemoteTodo' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:121:61 Unresolved reference 'id'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:122:61 Argument type mismatch: actual type is 'Int', but 'RemoteTodo' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/remote/RemoteTodosScreen.kt:147:13 Unresolved reference 'AsyncImage'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:136:23 Argument type mismatch: actual type is 'List<Task>', but 'Int' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:136:47 Unresolved reference 'id'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:138:32 Argument type mismatch: actual type is 'Int', but 'Task' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:139:55 Argument type mismatch: actual type is 'Int', but 'Task' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:140:55 Argument type mismatch: actual type is 'Int', but 'Task' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:141:52 Unresolved reference 'id'.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:172:13 None of the following candidates is applicable:
+
+fun Text(text: String, modifier: Modifier = ..., color: Color = ..., autoSize: TextAutoSize? = ..., fontSize: TextUnit = ..., fontStyle: FontStyle? = ..., fontWeight: FontWeight? = ..., fontFamily: FontFamily? = ..., letterSpacing: TextUnit = ..., textDecoration: TextDecoration? = ..., textAlign: TextAlign? = ..., lineHeight: TextUnit = ..., overflow: TextOverflow = ..., softWrap: Boolean = ..., maxLines: Int = ..., minLines: Int = ..., onTextLayout: ((TextLayoutResult) -> Unit)? = ..., style: TextStyle = ...): Unit
+fun Text(text: String, color: ColorProducer, modifier: Modifier = ..., autoSize: TextAutoSize? = ..., fontSize: TextUnit = ..., fontStyle: FontStyle? = ..., fontWeight: FontWeight? = ..., fontFamily: FontFamily? = ..., letterSpacing: TextUnit = ..., textDecoration: TextDecoration? = ..., textAlign: TextAlign? = ..., lineHeight: TextUnit = ..., overflow: TextOverflow = ..., softWrap: Boolean = ..., maxLines: Int = ..., minLines: Int = ..., onTextLayout: ((TextLayoutResult) -> Unit)? = ..., style: TextStyle = ...): Unit:
+  No value passed for parameter 'color'.
+
+fun Text(text: AnnotatedString, modifier: Modifier = ..., color: Color = ..., autoSize: TextAutoSize? = ..., fontSize: TextUnit = ..., fontStyle: FontStyle? = ..., fontWeight: FontWeight? = ..., fontFamily: FontFamily? = ..., letterSpacing: TextUnit = ..., textDecoration: TextDecoration? = ..., textAlign: TextAlign? = ..., lineHeight: TextUnit = ..., overflow: TextOverflow = ..., softWrap: Boolean = ..., maxLines: Int = ..., minLines: Int = ..., inlineContent: Map<String, InlineTextContent> = ..., onTextLayout: (TextLayoutResult) -> Unit = ..., style: TextStyle = ...): Unit:
+  Argument type mismatch: actual type is 'String', but 'AnnotatedString' was expected.
+
+fun Text(text: AnnotatedString, color: ColorProducer, modifier: Modifier = ..., autoSize: TextAutoSize? = ..., fontSize: TextUnit = ..., fontStyle: FontStyle? = ..., fontWeight: FontWeight? = ..., fontFamily: FontFamily? = ..., letterSpacing: TextUnit = ..., textDecoration: TextDecoration? = ..., textAlign: TextAlign? = ..., lineHeight: TextUnit = ..., overflow: TextOverflow = ..., softWrap: Boolean = ..., maxLines: Int = ..., minLines: Int = ..., inlineContent: Map<String, InlineTextContent> = ..., onTextLayout: (TextLayoutResult) -> Unit = ..., style: TextStyle = ...): Unit:
+  No value passed for parameter 'color'.
+  Argument type mismatch: actual type is 'String', but 'AnnotatedString' was expected.
+e: file:///G:/AIModels/LLMBenchmarks/MyTests/kmp_app_run/shared/src/commonMain/kotlin/com/example/todo/ui/tasks/TaskListScreen.kt:175:17 No parameter with name 'decoration' found.
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':shared:compileKotlinJvm' (registered in build file 'shared\build.gradle.kts').
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.btapi.BuildToolsApiCompilationWork
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 58s
+6 actionable tasks: 6 executed

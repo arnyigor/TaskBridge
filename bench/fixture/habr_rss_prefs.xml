@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <string name="custom_feeds">[{&quot;id&quot;:&quot;habr-hub:programming:alltime&quot;,&quot;title&quot;:&quot;programming&quot;,&quot;url&quot;:&quot;https://habr.com/ru/hubs/programming/&quot;}]</string>
+</map>

@@ -1,0 +1,85 @@
+{
+  "id": "tivi-declarations-exam",
+  "project": "tivi",
+  "root": "G:/AIModels/LLMBenchmarks/MyTests/tivi",
+  "scope": "исходники Kotlin",
+  "rel_base": "",
+  "why": [
+    "Проект в 3 раза больше anwap: 629 Kotlin-файлов, 66 модулей, 3469 символов, 14 617 ссылок.",
+    "Вопросы построены на том, где текстовый поиск принципиально слабее: имена, объявленные",
+    "десятки раз. grep считает УПОМИНАНИЯ (импорты, вызовы, строки) и не отличает объявление",
+    "от использования; индекс отвечает точно. Плюс вопрос про expect/actual в KMP.",
+    "Эталон посчитан независимо: разбор объявлений по файлам вручную, не индексом."
+  ],
+  "prompt": "Ты работаешь в проекте tivi (Kotlin Multiplatform). Считай только объявления в исходниках Kotlin (.kt), каталоги build исключай. Отвечь на 4 вопроса.\n\nQ1. Сколько всего объявлений с именем Params (классов/интерфейсов/объектов с этим именем) в проекте?\nQ2. Сколько всего объявлений с именем ClearMessage в проекте?\nQ3. Сколько всего объявлений с именем NavigateUp в проекте?\nQ4. В каких файлах объявлен TiviDateFormatter? Перечисли пути от корня проекта.\n\nФормат итогового ответа — строго так, без пояснений:\nQ1|<число>\nQ2|<число>\nQ3|<число>\nQ4|<путь>[,<путь>]\n",
+  "questions": [
+    {
+      "id": "Q1",
+      "kind": "count_only",
+      "count": 42,
+      "expect": [],
+      "traps": [
+        "Упоминаний Params в тексте — сотни (импорты, параметры, вызовы). Объявлений именно 42.",
+        "Объявления разбросаны по domain/interactors, home, showdetails — не в одном модуле."
+      ],
+      "truth_note": "Разбор ^(modifiers)*class|interface|object Params по всем .kt: 42 сайта."
+    },
+    {
+      "id": "Q2",
+      "kind": "count_only",
+      "count": 8,
+      "expect": [],
+      "traps": [
+        "Часть объявлений — вложенные в sealed interface UiState (отступ), текстовый поиск этого не видит.",
+        "Восемь разных файлов UiState объявляют собственный ClearMessage."
+      ],
+      "truth_note": "8 сайтов: Discover, EpisodeDetails, EpisodeTrack, Library, Search, ShowDetails, ShowSeasons, UpNext."
+    },
+    {
+      "id": "Q3",
+      "kind": "count_only",
+      "count": 10,
+      "expect": [],
+      "traps": [
+        "Это object внутри sealed interface — объявление в одну строку, легко спутать с использованием."
+      ],
+      "truth_note": "10 сайтов object NavigateUp в разных UiState."
+    },
+    {
+      "id": "Q4",
+      "kind": "file_set",
+      "count": 4,
+      "expect": [
+        "common/ui/resources/src/commonMain/kotlin/app/tivi/util/TiviDateFormatter.kt",
+        "common/ui/resources/src/androidMain/kotlin/app/tivi/util/TiviDateFormatter.kt",
+        "common/ui/resources/src/iosMain/kotlin/app/tivi/util/TiviDateFormatter.kt",
+        "common/ui/resources/src/jvmMain/kotlin/app/tivi/util/TiviDateFormatter.kt"
+      ],
+      "traps": [
+        "Это expect/actual: expect в commonMain, три actual в androidMain/iosMain/jvmMain. Имя файла одинаковое — текстовый поиск даёт четыре одинаковых пути и не говорит, какой из них expect.",
+        "Упоминаний TiviDateFormatter в коде в разы больше, чем объявлений."
+      ],
+      "truth_note": "4 файла, по одному объявлению в каждом."
+    }
+  ],
+  "scoring": {
+    "correctness": "Точное сравнение: для Q1–Q3 — число объявлений, для Q4 — множество файлов. Вопрос зачтён только при полном совпадении.",
+    "line_tolerance": 0,
+    "primary_metrics": [
+      "число шагов до итогового ответа",
+      "состав вызовов: grep / bash / read / ast / sg",
+      "токены на вход, время прогона"
+    ],
+    "note": "Здесь впервые есть шанс на разницу: grep по Params выдаёт сотни строк, и модель обязана их фильтровать."
+  },
+  "runs": {
+    "arms": {
+      "A": "обвязка выключена: PI_CODE_SEARCH_OFF=1",
+      "B": "включены инструменты ast/sg",
+      "C": "B + перехват текстового поиска: PI_CODE_SEARCH_INTERCEPT=1"
+    },
+    "repeats": 3,
+    "model": "llama.cpp/qwen-27b-q3",
+    "thinking": "off"
+  }
+}
