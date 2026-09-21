@@ -196,9 +196,22 @@ class TestWebSocket {
   drop() { this.readyState = 3; this.listeners.close?.(); }
 }
 
-async function ui({ coarsePointer = false, cloud = false } = {}) {
+async function ui({ coarsePointer = false, cloud = false, viewportWidth = null } = {}) {
   const { document, window } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
-  window.matchMedia = () => ({ matches: coarsePointer }); // desktop (fine pointer) unless a test opts in
+  // Without viewportWidth every query answers with the pointer flag, as before.
+  // With it, width queries are evaluated for real — the phone layout is chosen
+  // by width, and answering `(max-width: 900px)` from a boolean could not tell
+  // 390px from 1280px (or notice the two drifting apart).
+  window.matchMedia = (query) => {
+    if (viewportWidth === null) return { matches: coarsePointer };
+    const max = query.match(/max-width:\s*(\d+)px/);
+    if (max) return { matches: viewportWidth <= Number(max[1]) };
+    const min = query.match(/min-width:\s*(\d+)px/);
+    if (min) return { matches: viewportWidth >= Number(min[1]) };
+    if (/pointer:\s*coarse|hover:\s*none/.test(query)) return { matches: coarsePointer };
+    if (/pointer:\s*fine|hover:\s*hover/.test(query)) return { matches: !coarsePointer };
+    return { matches: false };
+  };
   const intervals = [];
   const streams = [];
   const copied = [];
@@ -265,7 +278,7 @@ async function ui({ coarsePointer = false, cloud = false } = {}) {
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -1179,6 +1192,230 @@ test('DOM: commands sit above the answer and below the reasoning block', async (
   assert.ok(tool < answer, `commands must precede the answer: ${children}`);
   // The answer stays readable without scrolling past a long tool list.
   assert.match(body.querySelector('.md').textContent, /Первый ответ|Второй ответ/);
+});
+
+test('DOM: a long tool run folds into one collapsed line', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+
+  // One call is not a run: the fixture's single chip stays a line of its own.
+  assert.equal(app.document.querySelector('.toolGroup'), null, 'below the threshold nothing is folded');
+
+  // A build, a fix and a second fix: past two chips a run stops being read
+  // line by line and becomes a wall the answer hides behind.
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    const extra = [
+      ['tool_execution_start', { toolCallId: 'x1', toolName: 'bash', args: { command: './gradlew assembleDebug' } }],
+      ['tool_execution_end', { toolCallId: 'x1', toolName: 'bash', isError: false }],
+      ['tool_execution_start', { toolCallId: 'x2', toolName: 'edit', args: { path: 'Main.kt' } }],
+      ['tool_execution_end', { toolCallId: 'x2', toolName: 'edit', isError: false }],
+      ['tool_execution_start', { toolCallId: 'x3', toolName: 'edit', args: { path: 'App.kt' } }],
+      ['tool_execution_end', { toolCallId: 'x3', toolName: 'edit', isError: false }],
+    ];
+    return { ok: true, json: async () => [...history('a'),
+      ...extra.map(([type, pi], i) => ({ taskId: 'a', seq: 20 + i, type: 'PI_EVENT', data: { pi: { type, ...pi } } }))] };
+  });
+  await app.refreshTask();
+
+  const body = [...app.document.querySelectorAll('.turn .body')].filter(node => node.querySelector('.msg.s-bot')).at(-1);
+  const groups = [...body.children].filter(node => node.classList.contains('toolGroup'));
+  assert.equal(groups.length, 1, 'the chips are folded into a single group');
+  const group = groups[0];
+  assert.equal(group.hasAttribute('open'), false, 'the fold starts closed');
+  // The fixture's own chip is now inside the fold too — 2 bash + 2 edit.
+  assert.equal(group.querySelectorAll('.toolGroupList > .tool').length, 4, 'every chip is inside the fold');
+  assert.equal([...body.children].filter(node => node.classList.contains('tool')).length, 0, 'no chip is left loose');
+  assert.match(group.querySelector('summary').textContent, /^✓ 4 действия · /u);
+  assert.match(group.querySelector('summary').textContent, /2 bash/u);
+  assert.match(group.querySelector('summary').textContent, /2 edit/u);
+  // Still between the reasoning block and the answer, where the chips were.
+  const kinds = [...body.children].map(node => [...node.classList].join(' '));
+  assert.ok(kinds.findIndex(k => k.includes('toolGroup')) < kinds.findIndex(k => k.includes('msg')), `fold must precede the answer: ${kinds}`);
+});
+
+test('DOM: while a folded run is in flight, the line says what is running', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    const frames = [
+      { type: 'agent_start' },
+      { type: 'tool_execution_start', toolCallId: 'y1', toolName: 'bash', args: { command: './gradlew test' } },
+      { type: 'tool_execution_end', toolCallId: 'y1', toolName: 'bash', isError: false },
+      { type: 'tool_execution_start', toolCallId: 'y2', toolName: 'bash', args: { command: './gradlew assembleDebug' } },
+      { type: 'tool_execution_end', toolCallId: 'y2', toolName: 'bash', isError: false },
+      { type: 'tool_execution_start', toolCallId: 'y3', toolName: 'read', args: { path: 'app/build.gradle.kts' } },
+    ];
+    return { ok: true, json: async () => [...history('a'),
+      ...frames.map((pi, i) => ({ taskId: 'a', seq: 30 + i, type: 'PI_EVENT', data: { pi } }))] };
+  });
+  await app.refreshTask();
+
+  // The chip for the call in flight is inside the fold, so a folded run that
+  // said nothing about it would look like a session doing nothing.
+  const group = app.document.querySelector('.toolGroup');
+  assert.ok(group, 'the run is folded');
+  assert.equal(group.hasAttribute('open'), false);
+  assert.match(group.querySelector('summary').textContent, /^⚙ read … · 4 действия/u);
+});
+
+test('DOM: backfilled history folds its tools once, not once per poll', async () => {
+  const app = await ui();
+  // An older page for the "load older" button: one turn with three calls. The
+  // tail's own seq numbers are moved up so the two pages do not overlap.
+  const olderFrames = [
+    { type: 'message_start', message: { role: 'assistant' } },
+    ...[1, 2, 3].flatMap(i => [
+      { type: 'tool_execution_start', toolCallId: `o${i}`, toolName: 'bash', args: { command: `шаг ${i}` } },
+      { type: 'tool_execution_end', toolCallId: `o${i}`, toolName: 'bash', isError: false },
+    ]),
+    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Старый ответ' }] } },
+    { type: 'agent_settled' },
+  ];
+  const older = [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'Старый вопрос', data: { text: 'Старый вопрос' } },
+    ...olderFrames.map((pi, i) => ({ taskId: 'a', seq: 2 + i, type: 'PI_EVENT', data: { pi } })),
+  ];
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    if (searchParams.has('before')) return { ok: true, json: async () => ({ events: older, reachedStart: false }) };
+    if (searchParams.has('tail')) {
+      return { ok: true, json: async () => ({ events: history('a').map(e => ({ ...e, seq: e.seq + 100 })), reachedStart: false }) };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+
+  const button = app.document.getElementById('loadOlderButton');
+  assert.ok(button, 'the older page is offered');
+  button.onclick();
+  for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
+
+  const folds = () => app.document.querySelectorAll('.toolGroup').length;
+  assert.equal(folds(), 1, 'the backfilled turn is folded once');
+  assert.match(app.document.querySelector('.toolGroup > summary').textContent, /^✓ 3 действия · 3 bash$/u);
+  // A backfilled turn is re-laid-out on every render pass (each poll), so a fold
+  // the node cannot find again would be rebuilt and left behind each time.
+  await app.refreshTask();
+  await app.refreshTask();
+  assert.equal(folds(), 1, 'a poll must not add another fold');
+  assert.equal(app.document.querySelectorAll('.toolGroupList > .tool').length, 3, 'and must not lose the chips');
+});
+
+
+
+test('DOM: a tool that fails after the turn settled still shows in the fold', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  // Three calls in flight, then the operator writes again: the turn is settled
+  // while they are still running, and the real end of one of them arrives later.
+  const frames = [
+    { type: 'tool_execution_start', toolCallId: 'p1', toolName: 'bash', args: { command: 'a' } },
+    { type: 'tool_execution_start', toolCallId: 'p2', toolName: 'bash', args: { command: 'b' } },
+    { type: 'tool_execution_start', toolCallId: 'p3', toolName: 'bash', args: { command: 'c' } },
+    { type: 'user', text: 'ещё вопрос' },
+  ];
+  const late = { type: 'tool_execution_end', toolCallId: 'p2', toolName: 'bash', isError: true };
+  let withLate = false;
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    const all = frames.map((frame, i) => frame.type === 'user'
+      ? { taskId: 'a', seq: 40 + i, type: 'USER_MESSAGE', message: frame.text, data: { text: frame.text } }
+      : { taskId: 'a', seq: 40 + i, type: 'PI_EVENT', data: { pi: frame } });
+    if (withLate) all.push({ taskId: 'a', seq: 50, type: 'PI_EVENT', data: { pi: late } });
+    return { ok: true, json: async () => [...history('a'), ...all] };
+  });
+  await app.refreshTask();
+  const fold = app.document.querySelector('.toolGroup');
+  assert.ok(fold, 'the run is folded');
+  // Three calls started and the turn closed without their ends: the fold must
+  // not call that a clean run while the chips inside it still show «…».
+  assert.match(fold.querySelector('summary').textContent, /^■ 4 действия · 3 прервано · 4 bash$/u);
+
+  // The line depends on the tools' states, not only on how many there are: the
+  // count does not move here, so a cache keyed on the count alone would keep
+  // claiming the unfinished calls that this end event has just resolved.
+  withLate = true;
+  await app.refreshTask();
+  assert.match(fold.querySelector('summary').textContent, /^✕ 4 действия · 1 ошибка · 2 прервано · 4 bash$/u);
+});
+
+test('DOM: the model chip keeps its name when the phone drops the label', async () => {
+  // A phone hides "Модель: " so the header fits on one row (web/app.css). That
+  // only works while the label and the name are separate elements — writing the
+  // chip as one string would take the model's name down with the label.
+  const app = await ui();
+  const chip = app.document.getElementById('modelButton');
+  const label = chip.querySelector('.modelChipLabel');
+  const name = chip.querySelector('.modelChipName');
+  assert.ok(label && name, 'the label and the name are their own elements');
+  assert.equal(label.textContent, 'Модель: ');
+
+  app.updateModelChip();
+  assert.ok(name.textContent.trim().length > 0, `the name is filled: ${JSON.stringify(name.textContent)}`);
+  assert.doesNotMatch(name.textContent, /Модель/u, 'the label is not part of the name');
+  assert.match(chip.title, /сменить/u, 'the chip still explains itself on hover');
+});
+
+test('DOM: on a phone the secondary header controls move into the ⋮ menu', async () => {
+  // A phone in portrait: 390px wide, finger input. The header used to spend the
+  // whole width on controls that are not read on every glance.
+  const phone = await ui({ coarsePointer: true, viewportWidth: 390 });
+  const menuBody = phone.document.getElementById('headerMenuBody');
+  const actions = phone.document.querySelector('.headerActions');
+
+  assert.deepEqual([...menuBody.children].map(node => node.id), [
+    'modelButton', 'runtimeControl', 'localModelsButton', 'mcpButton', 'serverRestartButton', 'pairButton',
+    'sessionDetailsButton', 'helpButton', 'uiSettingsButton',
+  ]);
+  // What is left in the header is the status dot: 12px of a live indicator costs
+  // no row, while the model chip (158px of 332 available at 360px) did.
+  assert.deepEqual([...actions.children].map(node => node.id), ['pcState', 'headerMenu']);
+  // Moved, not duplicated: each control exists exactly once, so the handlers
+  // wired to it still work.
+  assert.equal(phone.document.querySelectorAll('#mcpButton').length, 1);
+  const phoneMenu = phone.document.getElementById('headerMenu');
+  assert.equal(phoneMenu.hasAttribute('data-ready'), true, 'the CSS shows the menu only once it is filled');
+
+  // A wide screen gets the header index.html describes, in its own order.
+  const desktop = await ui({ viewportWidth: 1280 });
+  assert.equal(desktop.document.querySelectorAll('#headerMenuBody > *').length, 0);
+  assert.equal(desktop.document.getElementById('headerMenu').hasAttribute('data-ready'), false, 'no empty ⋮ on a wide screen');
+  assert.deepEqual([...desktop.document.querySelector('.headerActions').children].map(node => node.id), [
+    'runtimeControl', 'modelButton', 'localModelsButton', 'mcpButton', 'serverRestartButton', 'pairButton',
+    'pcState', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton', 'headerMenu',
+  ]);
+
+  // The two sides of the breakpoint: 900 is a phone, 901 is not. This is the
+  // boundary the CSS and this query have to agree on (web-css.test.mjs checks
+  // the stylesheet's half of it).
+  const edge = await ui({ viewportWidth: 900 });
+  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 9, '900px is the phone layout');
+  const past = await ui({ viewportWidth: 901 });
+  assert.equal(past.document.querySelectorAll('#headerMenuBody > *').length, 0, '901px is not');
+  assert.equal(past.document.getElementById('headerMenu').hasAttribute('data-ready'), false);
+});
+
+test('DOM: choosing a session closes the phone drawer it was chosen from', async () => {
+  const app = await ui({ coarsePointer: true, viewportWidth: 390 });
+  const spoiler = app.document.getElementById('controlsSpoiler');
+  spoiler.open = true;
+  await app.selectTask('a');
+  assert.equal(spoiler.open, false, 'the list must not stay on top of the session it opened');
+
+  // On a wide screen the list is a block in the page, not an overlay: closing
+  // it there would fold away the list the operator is working in.
+  const wide = await ui({ viewportWidth: 1280 });
+  const wideSpoiler = wide.document.getElementById('controlsSpoiler');
+  wideSpoiler.open = true;
+  await wide.selectTask('a');
+  assert.equal(wideSpoiler.open, true);
 });
 
 test('DOM: a queued prompt is reported as queued, not as an error', async () => {
@@ -2455,6 +2692,72 @@ test('DOM: the restart icon asks first, shows progress and reloads when the serv
   // It waits for the server to disappear and return, then reloads the page.
   for (let i = 0; i < 80 && !app.reloads.length; i++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(app.reloads.length, 1, 'the page reloads itself once the server answers again');
+});
+
+test('DOM: the status panel names the model the session runs on', async () => {
+  // The panel leads with it: the chip in the header carries a short name (and on
+  // a phone it is in the menu), while "which model answers, and is it this machine
+  // or the cloud" is what the dot is opened for.
+  const app = await ui();
+  app.tasks.a.model = { id: 'deepseek-flash', provider: 'deepseek' };
+  await app.selectTask('a');
+  app.updateModelChip();
+  const line = () => app.document.getElementById('pcStateModel').textContent;
+  assert.match(line(), /^Модель Pi: deepseek\/deepseek-flash · облачная/u, line());
+
+  // A model served by the machine's own router is local, even before /api/info
+  // has reported the router's provider id.
+  app.tasks.a.model = { id: 'qwen-27b-q3', provider: 'llama.cpp' };
+  app.updateModelChip();
+  assert.match(line(), /^Модель Pi: llama\.cpp\/qwen-27b-q3 · локальная/u, line());
+
+  // No session and no pending choice: say so instead of inventing a name.
+  app.startNewTask();
+  app.updateModelChip();
+  assert.equal(line(), 'Модель Pi: по умолчанию', line());
+});
+
+test('DOM: the status dot carries the full state on a tap, not only in a tooltip', async () => {
+  // On a phone the dot is the only live indicator left in the header, and a
+  // `title` tooltip cannot be reached by touch: the dot is a disclosure now and
+  // app.js fills its panel with the state, the addresses and the machine load.
+  const app = await ui();
+  const info = {
+    bootId: 'boot-a',
+    build: { version: '0.10.0', commit: 'bbb1bd3' },
+    modelBusy: false,
+    modelReady: true,
+    addresses: [{ url: 'http://192.168.1.212:8787' }, { url: 'http://192.168.56.1:8787' }],
+    engine: { reachable: true, model: 'qwen-27b-q3', contextWindow: 65536, slots: { busy: 0, total: 2 } },
+    system: { ram: { used: 1000, total: 4000, ratio: 0.25 }, cpu: { load: 0.05, cores: 32 }, gpu: [{ name: 'RTX 5070 Ti', utilization: 7, memoryUsedMb: 15000, memoryTotalMb: 16000 }] },
+    warnings: [],
+    local: { enabled: false },
+  };
+  app.setFetchHook(async (url) => (String(url).includes('/api/info') ? { ok: true, json: async () => info } : undefined));
+  await app.checkPcState();
+
+  const el = app.document.getElementById('pcState');
+  const dot = el.querySelector('summary');
+  assert.equal(el.tagName, 'DETAILS', 'the dot opens a panel');
+  assert.equal(dot.className, 'statusDot ok', 'the colour stays on the dot itself');
+  assert.equal(dot.getAttribute('aria-label'), 'Модель онлайн');
+  const panel = app.document.getElementById('pcStateStatus').textContent;
+  assert.match(panel, /^Модель онлайн/u);
+  assert.match(panel, /192\.168\.1\.212:8787/u, 'the addresses are readable without a hover');
+  assert.match(panel, /qwen-27b-q3/u);
+  // One panel for "what is running and how loaded is this box": the machine load
+  // lives here since the separate system chip was removed.
+  const load = app.document.getElementById('pcStateSystem').textContent;
+  assert.match(load, /RTX 5070 Ti/u);
+  assert.match(load, /CPU: 5% \(32 ядер\)/u);
+  assert.match(load, /RAM/u);
+
+  // A machine that stopped answering says so on the dot and in the panel.
+  app.setFetchHook(async () => { throw new Error('offline'); });
+  await app.checkPcState();
+  assert.equal(dot.className, 'statusDot err');
+  assert.equal(dot.getAttribute('aria-label'), 'Нет связи с сервером');
+  assert.equal(app.document.getElementById('pcStateStatus').textContent, 'Нет связи с сервером');
 });
 
 test('DOM: a phone tab reloads itself when the machine is restarted behind it', async () => {

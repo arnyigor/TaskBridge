@@ -39,7 +39,7 @@ test('the legacy cloud UI copy is gone and nothing points at it any more', async
 test('the shell loads the cloud config before the app, and caches only files that exist', async () => {
   const html = await read('web/index.html');
   const config = html.indexOf('/cloud-config.js');
-  const app = html.indexOf('type="module" src="/app.js?v=20260918-33"');
+  const app = html.indexOf('type="module" src="/app.js?v=20260921-41"');
   assert.ok(config > 0 && app > 0, 'both scripts must be in the shell');
   // A classic script runs before a deferred module: app.js picks its transport
   // from the config, so the order is load-bearing, not cosmetic.
@@ -47,7 +47,7 @@ test('the shell loads the cloud config before the app, and caches only files tha
   // No inline <script> anywhere in the shell: the server sends script-src 'self',
   // so an inline block is blocked by the browser and simply never runs.
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)[^>]*>[\s\S]*?<\/script>/, 'inline scripts are blocked by the CSP');
-  assert.match(await read('web/cloud-config.js'), /navigator\.serviceWorker\.register\('\/sw\.js\?v=20260918-33'/, 'the PWA must install the current shell revision from an external script');
+  assert.match(await read('web/cloud-config.js'), /navigator\.serviceWorker\.register\('\/sw\.js\?v=20260921-41'/, 'the PWA must install the current shell revision from an external script');
 
   const shell = (await read('web/sw.js')).match(/const SHELL = \[([^\]]+)\]/s)[1]
     .split(',').map(entry => entry.trim().replace(/^'|'$/g, '')).filter(Boolean);
