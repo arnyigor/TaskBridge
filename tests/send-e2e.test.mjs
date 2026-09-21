@@ -30,6 +30,48 @@ const userTexts = (events) => events.filter(e => e.type === 'USER_MESSAGE').map(
 const answers = (events) => events.filter(e => e.type === 'PI_EVENT' && e.data?.pi?.type === 'message_end' && e.data.pi.message?.role === 'assistant')
   .map(e => (e.data.pi.message.content || []).filter(p => p.type === 'text').map(p => p.text).join(''));
 
+test('HTTP pending actions target IDs and send-now interrupts the active run', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'slow initial' });
+  await waitFor(async () => (await api(`/api/tasks/${created.id}/state`)).state?.isStreaming, 'Pi streaming');
+  for (let i = 0; i < 3; i++) await api(`/api/tasks/${created.id}/message`, { text: 'slow identical', queue: true });
+  const [first, second, third] = (await api(`/api/tasks/${created.id}`)).pendingPrompts;
+  for (let i = 0; i < 2; i++) await api(`/api/tasks/${created.id}/pending?pendingId=${second.id}`, null, 'DELETE');
+  assert.deepEqual((await api(`/api/tasks/${created.id}`)).pendingPrompts.map(p => p.id), [first.id, third.id]);
+  for (let i = 0; i < 2; i++) await api(`/api/tasks/${created.id}/pending/send`, { pendingId: first.id });
+  assert.deepEqual((await api(`/api/tasks/${created.id}`)).pendingPrompts.map(p => p.id), [third.id]);
+  const events = await eventsOf(api, created.id);
+  // «Отправить сейчас» is a deliberate cut-in: the turn in flight is stopped.
+  assert.equal(events.some(e => e.type === 'TASK_CANCELLED'), true, 'the interrupted turn is recorded');
+  const users = events.filter(e => e.type === 'USER_MESSAGE');
+  assert.equal(users.length, 1, 'the delivered prompt is recorded once');
+  await api(`/api/tasks/${created.id}/cancel`, {});
+  assert.equal((await api(`/api/tasks/${created.id}`)).status, 'CANCELLED', 'explicit STOP still cancels');
+});
+
+test('commandId replays answer from the ledger instead of running twice', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  // The client lost the HTTP answer and replays with the same commandId.
+  const commandId = `cmd-${Date.now()}`;
+  const first = await api('/api/tasks', { projectId: 'fixture', prompt: 'первый', commandId, clientId: 'client-a' });
+  const replay = await api('/api/tasks', { projectId: 'fixture', prompt: 'первый', commandId, clientId: 'client-a' });
+  assert.equal(replay.id, first.id, 'повтор с тем же commandId возвращает ту же сессию');
+  const mine = (await api('/api/tasks')).filter(task => task.prompt === 'первый');
+  assert.equal(mine.length, 1, 'и не создаёт вторую');
+  await terminal(api, first.id);
+
+  const messageCommandId = 'msg-cmd-1';
+  await api(`/api/tasks/${first.id}/message`, { text: 'второе', commandId: messageCommandId, clientId: 'client-a' });
+  await api(`/api/tasks/${first.id}/message`, { text: 'второе', commandId: messageCommandId, clientId: 'client-a' });
+  await terminal(api, first.id);
+  const events = await eventsOf(api, first.id);
+  assert.equal(userTexts(events).filter(text => text === 'второе').length, 1, 'повтор сообщения не дублирует его');
+});
+
 test('two follow-ups keep their order and each gets its own answer', { timeout: 30000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());

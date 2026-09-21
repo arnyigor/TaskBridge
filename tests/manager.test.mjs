@@ -31,6 +31,88 @@ async function fixture(t, streaming = false) {
   return { manager, store, task, pi, runtime, sent, root };
 }
 
+test('send-now stops the turn in flight (tool included) and keeps the queue', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  let aborts = 0;
+  let aborted = false;
+  f.pi.abort = async () => { aborts += 1; aborted = true; };
+  f.pi.getState = async () => ({ isStreaming: !aborted });
+  f.manager.toolLogs.set('a:t1', { name: 'tool-t1.log', bytes: 0 });
+  // A prompt already waiting in the queue survives the cut-in.
+  f.task.pendingPrompts = [{ id: 'p1', text: 'потом', mode: 'auto', files: [] }];
+  f.manager.pendingFiles.set('p1', { files: [], uploadToken: null });
+  await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
+  assert.equal(aborts, 1, 'the turn (and the command in it) is stopped');
+  assert.deepEqual(f.sent, ['срочно'], 'the text reaches Pi at once');
+  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(types.includes('TASK_CANCELLED'), `the interrupted turn is honest: ${types.join(',')}`);
+  assert.ok(types.includes('USER_MESSAGE'), types.join(','));
+  assert.equal(f.manager.getTask('a').status, 'RUNNING');
+  const pending = (f.manager.tasks.get('a').pendingPrompts || []).map(p => p.text);
+  assert.deepEqual(pending, ['потом'], 'the queue is not dropped by the cut-in');
+  assert.ok(f.manager.pendingFiles.has('p1'), 'the staged files of the queued prompt stay');
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('the queued «Отправить сейчас» targets one pendingId and interrupts the run', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  let aborts = 0;
+  let aborted = false;
+  f.pi.abort = async () => { aborts += 1; aborted = true; };
+  f.pi.getState = async () => ({ isStreaming: !aborted });
+  await f.manager.message('a', 'второе', 'auto', [], null, { queue: true });
+  const [first] = f.task.pendingPrompts;
+  await f.manager.sendPendingNow('a', first.id);
+  assert.equal(aborts, 1, '«Отправить сейчас» cuts into the running turn');
+  assert.deepEqual(f.sent, ['второе']);
+  assert.deepEqual(f.task.pendingPrompts || [], [], 'the delivered prompt left the queue');
+  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(types.includes('TASK_CANCELLED'), types.join(','));
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('pending IDs select identical messages and stale actions never affect another entry', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  await f.manager.message('a', 'same', 'auto', [], null, { queue: true });
+  await f.manager.message('a', 'same', 'auto', [], null, { queue: true });
+  const [first, second] = f.task.pendingPrompts;
+  await f.manager.dropPending('a', second.id);
+  await f.manager.dropPending('a', second.id);
+  await f.manager.sendPendingNow('a', second.id);
+  assert.deepEqual(f.sent, []);
+  assert.deepEqual(f.task.pendingPrompts.map(p => p.id), [first.id]);
+  await f.manager.sendPendingNow('a', first.id);
+  await f.manager.sendPendingNow('a', first.id);
+  assert.deepEqual(f.sent, ['same']);
+});
+
+test('dropping a follow-up before the workspace exists preserves the initial queued task', async t => {
+  const f = await fixture(t);
+  f.manager.activeTaskId = 'other';
+  f.task.workspacePath = null;
+  f.task.status = 'QUEUED';
+  await f.manager.message('a', 'follow-up', 'auto', [], null, { queue: true });
+  await f.manager.dropPending('a', f.task.pendingPrompts[0].id);
+  assert.equal(f.task.status, 'QUEUED');
+  assert.equal(f.task.prompt, 'original');
+  assert.ok(f.manager.queue.includes('a'));
+});
+
+test('removing the last queued prompt does not finish the active generation', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  await f.manager.message('a', 'remove me', 'auto', [], null, { queue: true });
+  const after = await f.manager.dropPending('a');
+  assert.equal(after.status, 'RUNNING');
+  assert.equal(f.manager.activeTaskId, 'a');
+  assert.deepEqual(after.pendingPrompts, []);
+  const events = await f.store.readEvents('a', 0);
+  assert.equal(events.some(e => e.type === 'TASK_SUCCEEDED' || e.type === 'TASK_CANCELLED'), false);
+});
+
 test('a busy local model queues the prompt instead of refusing it', async t => {
   const f = await fixture(t);
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
@@ -617,10 +699,30 @@ test('commandId dedupes a retry and conflicts on changed content', async t => {
   await f.manager.cancel('a');
 });
 
+test('a rejected commandId replays the same error and delivery flags conflict', async t => {
+  const f = await fixture(t, true); // streaming: now → steer, queue → park
+  f.pi.sendFollowUp = async () => { throw Object.assign(new Error('fixture refused'), { code: 'PI_REJECTED' }); };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(
+      () => f.manager.message('a', 'reject me', 'auto', [], null, { now: true, commandId: 'reject-1' }),
+      error => error.code === 'PI_REJECTED' && /fixture refused/.test(error.message),
+    );
+  }
+  assert.equal(f.manager.commandLedger.get('reject-1')?.status, 'REJECTED');
+
+  // The same commandId with a different delivery intent is a conflict, not a replay.
+  await f.manager.message('a', 'queued', 'auto', [], null, { queue: true, commandId: 'delivery-1' });
+  await assert.rejects(
+    () => f.manager.message('a', 'queued', 'auto', [], null, { now: true, commandId: 'delivery-1' }),
+    { code: 'CONFLICT' },
+  );
+  await f.manager.cancel('a');
+});
+
 test('an in-flight commandId is refused as ACCEPTED, not re-run', async t => {
   const f = await fixture(t);
   // Pre-seed an in-flight entry with the exact payload hash so the guard sees it.
-  const args = ['a', 'ещё', 'auto', [], null];
+  const args = ['a', 'ещё', 'auto', [], null, false, false];
   const { createHash } = await import('node:crypto');
   const digest = createHash('sha256').update(JSON.stringify(args)).digest('hex');
   f.manager.commandLedger.set('inflight-1', { hash: digest, done: false, result: null, at: Date.now() });
@@ -676,7 +778,7 @@ test('an unfinished command after crash is UNKNOWN_AFTER_CRASH, never re-run', a
   t.after(async () => { await fs.rm(root, { recursive: true, force: true }); });
   const store = new TaskStore(root);
   const { createHash } = await import('node:crypto');
-  const hash = createHash('sha256').update(JSON.stringify(['a', 'crash', 'auto', [], null])).digest('hex');
+  const hash = createHash('sha256').update(JSON.stringify(['a', 'crash', 'auto', [], null, false, false])).digest('hex');
   // Simulate: a command was ACCEPTED right before the process died.
   store.upsertCommand('crashed-1', { hash, done: false });
 

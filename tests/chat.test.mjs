@@ -26,6 +26,39 @@ function history(id = 'a') {
   return frames.map((frame, i) => ({ taskId: id, seq: i + 1, type: frame.user ? 'USER_MESSAGE' : 'PI_EVENT', message: frame.user || frame.type, data: frame.user ? { files: [{ name: 'photo.png' }] } : { pi: frame } }));
 }
 
+test('steering preserves the in-flight assistant and tool until Pi completes them', () => {
+  const state = new ChatState(task());
+  let seq = 0;
+  const pi = frame => state.apply({ taskId: 'a', seq: ++seq, type: 'PI_EVENT', data: { pi: frame } });
+  pi({ type: 'message_start', message: { role: 'assistant' } });
+  pi({ type: 'tool_execution_start', toolCallId: 'running', toolName: 'bash', args: { command: 'build' } });
+  const previous = state.current;
+  state.apply({ taskId: 'a', seq: ++seq, type: 'USER_MESSAGE', data: { text: 'уточнение', mode: 'steer' } });
+  assert.equal(previous.active, true);
+  assert.equal(previous.tools[0].state, 'run');
+  assert.equal(Boolean(previous.final), false);
+  pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Первый результат' }], stopReason: 'stop' } });
+  pi({ type: 'tool_execution_end', toolCallId: 'running', toolName: 'bash', isError: false });
+  pi({ type: 'message_start', message: { role: 'assistant' } });
+  pi({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Уточнённый результат' }], stopReason: 'stop' } });
+  pi({ type: 'agent_settled' });
+  assert.equal(previous.text, 'Первый результат');
+  assert.equal(previous.tools[0].state, 'done');
+  assert.equal(previous.status, 'DONE');
+  assert.equal(state.current.text, 'Уточнённый результат');
+  assert.equal(state.current.status, 'DONE');
+});
+
+test('optimistic input does not cancel an answer before the server accepts it', () => {
+  const state = new ChatState(task());
+  state.current.active = true;
+  const previous = state.current;
+  state.addUser('new', [], 'pending-1', null, true);
+  assert.equal(previous.active, true);
+  assert.equal(Boolean(previous.final), false);
+  assert.notEqual(previous.status, 'CANCELLED');
+});
+
 test('multi-turn replay, duplicate delivery and terminal status preserve exact answers', () => {
   const state = new ChatState(task());
   const events = history();
@@ -278,7 +311,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -1561,6 +1594,99 @@ test('the new line appears even when the continuation arrives without message_en
   assert.equal(state.current.text, 'первая часть\n\nвторая часть');
 });
 
+test('DOM: a lost HTTP answer is replayed with the same commandId', async () => {
+  const app = await ui();
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  await app.selectTask('a');
+  const bodies = [];
+  let attempts = 0;
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) {
+      attempts += 1;
+      bodies.push(JSON.parse(options.body));
+      if (attempts === 1) throw new TypeError('Failed to fetch');
+      return { ok: true, json: async () => ({ id: 'a', status: 'RUNNING', pendingPrompts: [] }) };
+    }
+    if (pathname.startsWith('/api/commands/')) return { ok: true, json: async () => null };
+    return null;
+  });
+  const prompt = app.document.getElementById('prompt');
+  prompt.value = 'не потеряй меня';
+  form.requestSubmit();
+  for (let i = 0; i < 20 && attempts < 2; i++) await new Promise(resolve => setImmediate(resolve));
+
+  // One transport failure, one replay — and the replay carries the SAME
+  // commandId, so the server can only answer with its recorded outcome.
+  assert.equal(attempts, 2, 'the send is replayed exactly once');
+  assert.equal(bodies.length, 2);
+  assert.ok(bodies[0].commandId, 'the request is stamped with a commandId');
+  assert.ok(bodies[0].clientId, 'and a client id');
+  assert.equal(bodies[1].commandId, bodies[0].commandId, 'the replay reuses the commandId');
+  assert.equal(bodies[1].clientId, bodies[0].clientId);
+  assert.equal(bodies[1].text, 'не потеряй меня');
+});
+
+test('DOM: a cloud relay drop is retried like any lost answer', async () => {
+  const app = await ui({ cloud: true });
+  for (const code of ['RELAY_OFFLINE', 'REQUEST_TIMEOUT']) {
+    const seen = [];
+    app.transport.request = async (method, path) => {
+      seen.push(path);
+      throw Object.assign(new Error('the link is down'), { code });
+    };
+    await assert.rejects(
+      () => app.commandApi('/api/tasks', { prompt: 'x', projectId: 'p' }),
+      error => error.network === true,
+      'a transport failure is not an HTTP refusal',
+    );
+    assert.equal(seen.filter(path => path === '/api/tasks').length, 2, `${code}: the send is replayed once with the same commandId`);
+  }
+});
+
+test('DOM: an unconfirmed send keeps the optimistic turn and says so', async () => {
+  const app = await ui();
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  await app.selectTask('a');
+  const seen = [];
+  app.setFetchHook(async (url, options = {}) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname.endsWith('/message')) { seen.push(JSON.parse(options.body)); throw new TypeError('Failed to fetch'); }
+    // The ledger says the server may still be working on the command.
+    if (pathname.startsWith('/api/commands/')) return { ok: true, json: async () => ({ status: 'ACCEPTED', done: false }) };
+    return null;
+  });
+  const prompt = app.document.getElementById('prompt');
+  prompt.value = 'неизвестный исход';
+  form.requestSubmit();
+  for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(seen.length, 2, 'the send was replayed once with the same commandId');
+  assert.equal(seen[1].commandId, seen[0].commandId);
+  const chat = app.document.body.textContent;
+  assert.equal(/неизвестный исход/.test(chat), true, 'the optimistic turn is kept on screen');
+  assert.match(app.document.getElementById('createError').textContent, /не подтверждена/i, 'the ambiguity is explained to the operator');
+});
+
+test('DOM: the typed text survives a page reload', async () => {
+  const app = await ui();
+  // A refresh wipes the in-memory draft map; only localStorage can return
+  // what the operator was typing (attachments are the browser's to re-add).
+  app.localStorage.setItem('tbDraft:b', JSON.stringify({ text: 'черновик из прошлой жизни' }));
+  await app.selectTask('b');
+  const prompt = app.document.getElementById('prompt');
+  assert.equal(prompt.value, 'черновик из прошлой жизни', 'localStorage restores the text after a reload');
+
+  // Typing persists, and an empty composer cleans the stored copy up.
+  prompt.value = 'новый текст';
+  app.saveDraft('b');
+  assert.equal(JSON.parse(app.localStorage.getItem('tbDraft:b')).text, 'новый текст');
+  prompt.value = '';
+  app.saveDraft('b');
+  assert.equal(app.localStorage.getItem('tbDraft:b'), null, 'an empty composer leaves no stale draft');
+});
+
 test('DOM: Ctrl+Enter asks for an immediate send, plain Enter accepts the queue', async () => {
   const app = await ui();
   // linkedom has no requestSubmit: make it perform a real submit event.
@@ -1644,7 +1770,8 @@ test('DOM: several queued messages are summarised with their count', async () =>
   await app.selectTask('a');
   const row = app.document.getElementById('queuedPrompt');
   assert.equal(row.classList.contains('hidden'), false);
-  assert.match(row.textContent, /В очереди \(2\): первое/);
+  assert.match(row.textContent, /В очереди \(1\/2\): первое/);
+  assert.match(row.textContent, /В очереди \(2\/2\): второе/);
 });
 
 test('DOM: an ordinary request goes through the transport, not straight to fetch', async () => {
@@ -2412,6 +2539,78 @@ test('DOM: a turn without a recorded time shows no clock', async () => {
   assert.equal(times.length, 0, 'без времени в событиях часы не рисуются');
 });
 
+test('DOM: a silent running tool is not an error, and nothing cancels it', async () => {
+  // A long bash call or a slow model load produces NO text for minutes. The
+  // turn keeps its typing animation and its running tool chip: silence is a
+  // wait state, not a failure — only an explicit STOP (or a server error
+  // event) may end it (1.7).
+  const app = await ui();
+  app.tasks.a.status = 'RUNNING';
+  const events = [
+    { taskId: 'a', seq: 1, at: '2026-09-15T10:00:00.000Z', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос', files: [] } },
+    { taskId: 'a', seq: 2, at: '2026-09-15T10:00:01.000Z', type: 'PI_EVENT', data: { pi: { type: 'agent_start' } } },
+    { taskId: 'a', seq: 3, at: '2026-09-15T10:00:02.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 4, at: '2026-09-15T10:00:03.000Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 't1', toolName: 'bash', args: { command: 'npm test' } } } },
+    { taskId: 'a', seq: 5, at: '2026-09-15T10:05:00.000Z', type: 'STATUS', message: 'STATUS', data: { status: 'RUNNING' } },
+  ];
+  let delivered = 0;
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const list = events.slice(0, delivered).filter(e => e.seq > Number(searchParams.get('after') || 0));
+      return { ok: true, json: async () => searchParams.has('tail') ? { events: list, reachedStart: true } : list };
+    }
+    return null;
+  });
+  await app.selectTask('a');
+  for (delivered = 1; delivered <= events.length; delivered++) await app.refreshTask();
+  const bubble = [...app.document.querySelectorAll('.turn:not(.me) .md')].at(-1);
+  assert.ok(bubble.querySelector('.typing'), 'тишина — это ожидание, а не провал');
+  const chip = [...app.document.querySelectorAll('.tool')].at(-1);
+  assert.match(chip.textContent, /npm test/);
+  assert.match(chip.textContent, /…/u, 'инструмент ещё работает');
+});
+
+test('DOM: loading older history never disturbs the live tool run', async () => {
+  const app = await ui();
+  app.tasks.a.status = 'RUNNING';
+  // The live window: a fresh question with a bash call in flight.
+  const live = [
+    { taskId: 'a', seq: 10, at: '2026-09-21T12:00:00.000Z', type: 'USER_MESSAGE', message: 'новый вопрос', data: { text: 'новый вопрос', files: [] } },
+    { taskId: 'a', seq: 11, at: '2026-09-21T12:00:01.000Z', type: 'PI_EVENT', data: { pi: { type: 'agent_start' } } },
+    { taskId: 'a', seq: 12, at: '2026-09-21T12:00:02.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 13, at: '2026-09-21T12:00:03.000Z', type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 'call-live', toolName: 'bash', args: { command: 'npm test' } } } },
+  ];
+  // An older page: one finished exchange.
+  const older = [
+    { taskId: 'a', seq: 1, at: '2026-09-20T11:00:00.000Z', type: 'USER_MESSAGE', message: 'старый вопрос', data: { text: 'старый вопрос', files: [] } },
+    { taskId: 'a', seq: 2, at: '2026-09-20T11:00:01.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    { taskId: 'a', seq: 3, at: '2026-09-20T11:00:02.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'старый ответ' }] } } } },
+  ];
+  let delivered = 0;
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a/events') {
+      const page = searchParams.has('tail') && !searchParams.has('before')
+        ? live.slice(0, delivered)
+        : older;
+      const list = page.filter(e => e.seq > Number(searchParams.get('after') || 0));
+      const reachedStart = Boolean(searchParams.has('before'));
+      return { ok: true, json: async () => searchParams.has('tail') ? { events: list, reachedStart } : list };
+    }
+    return null;
+  });
+  delivered = live.length;
+  await app.selectTask('a');
+  await app.loadOlderHistory();
+  const chip = [...app.document.querySelectorAll('.tool')].at(-1);
+  assert.match(chip.textContent, /npm test/u);
+  assert.equal(/прервано/.test(chip.textContent), false, 'живой инструмент не помечен прерванным');
+  assert.match(chip.className, /run/u, `чип остаётся работающим: ${chip.className}`);
+  const liveBubble = chip.parentNode?.querySelector('.md');
+  assert.equal(/Запрос прерван|Ответ не был получен/.test(liveBubble?.textContent || ''), false, 'живой ход не отображается прерванным');
+});
+
 test('DOM: an empty settled turn never turns into the typing animation', async () => {
   const app = await ui();
   // A session that is still running (non-terminal status) whose last answer was
@@ -2724,6 +2923,35 @@ test('a structured late aborted end without error text preserves the fresh strea
   assert.equal(fresh.error, null);
   assert.equal(state.messageTurn, fresh);
   assert.equal(state.messageOpen, true);
+});
+
+test('late agent_settled and late TASK_FAILED mark only the turn that ran them', () => {
+  // Two answers: the first is superseded by the next prompt before Pi ever
+  // settles it, and its terminal records arrive while the second streams.
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, at: '2026-09-21T12:00:00.000Z', type: 'USER_MESSAGE', message: 'первый', data: { text: 'первый' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-21T12:00:01.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  const first = state.current;
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-21T12:00:02.000Z', type: 'USER_MESSAGE', message: 'второй', data: { text: 'второй' } });
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-21T12:00:03.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  const fresh = state.current;
+  assert.notEqual(first, fresh);
+
+  // The settle of the FIRST answer, recorded before the second prompt started.
+  state.apply({ taskId: 'a', seq: 5, at: '2026-09-21T12:00:02.500Z', type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  assert.equal(fresh.active, true, 'свежий ответ продолжает стримиться');
+  assert.equal(fresh.status, '', 'его статус не занят чужим settle');
+
+  // A late failure report of the FIRST answer, same window.
+  state.apply({ taskId: 'a', seq: 6, at: '2026-09-21T12:00:02.700Z', type: 'TASK_FAILED', message: 'Context overflow', data: { errorCode: 'MODEL_ERROR' } });
+  assert.equal(fresh.active, true, 'свежий ответ не был отменён чужой ошибкой');
+  assert.ok(!fresh.error, 'ошибка старого хода не переименована в новый');
+  assert.ok(!first.active, 'поздний провал закрыл свой ход');
+
+  // The fresh answer then finishes on its own.
+  state.apply({ taskId: 'a', seq: 7, at: '2026-09-21T12:00:05.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: 'ответ' }] } } } });
+  state.apply({ taskId: 'a', seq: 8, at: '2026-09-21T12:00:06.000Z', type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  assert.equal(fresh.status, 'SUCCEEDED');
 });
 
 test('DOM: the restart icon asks first, shows progress and reloads when the server is back', async () => {

@@ -87,7 +87,7 @@ test('while the model is busy a prompt is queued, not refused, and it is visible
   // machine and leaves the prompt in the queue.
   await assert.rejects(
     fixture.api(`/api/tasks/${created.id}/pending/send`, {}),
-    error => /занят/i.test(error.message) && ['BUSY', 'MODEL_BUSY'].includes(error.code),
+    error => /занят|дождитесь запуска/i.test(error.message) && ['BUSY', 'MODEL_BUSY'].includes(error.code),
     'send now must explain that the model is still held');
   const after = await fixture.api(`/api/tasks/${created.id}`);
   assert.deepEqual(after.pendingPrompts.map(entry => entry.text), ['второе'], 'the prompt is not lost');
