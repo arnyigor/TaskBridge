@@ -665,3 +665,93 @@ test('POST /api/server/restart needs confirmation and works on a busy machine', 
   if (Number.isSafeInteger(pid)) await promisify(execFile)('taskkill', ['/PID', String(pid), '/T', '/F']).catch(() => {});
   assert.equal((await fetch(`${fixture.base}/api/health`)).status, 200, 'сервер пережил перезапуск в тесте');
 });
+
+// The "load older" button pages history BELOW the loaded window, so the read
+// behind ?tail&before must not stop at the newest 500 events: a session with
+// more events than one slice kept a reachable past unreachable, and the walk
+// ended in an empty page that claimed to be the session start.
+test('tail pagination can page below the newest 500-event slice to the very first event', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  // 700 events in ~230 turns (a USER_MESSAGE every 3), seq chosen well above
+  // the fixture's own few events, as a long session would have.
+  const store = new TaskStore(path.join(root, 'data'));
+  for (let i = 0; i < 700; i++) {
+    const seq = 1000 + i;
+    const type = i % 3 === 0 ? 'USER_MESSAGE' : 'PI_EVENT';
+    await store.appendEventAt(id, seq, { taskId: id, seq, type, data: { text: `сообщение ${i}` }, message: `сообщение ${i}` });
+  }
+  store.close();
+
+  // Walk the pages exactly like the browser does: initial tail window, then
+  // each page below the previous one until reachedStart (the page that reports
+  // reachedStart is applied too — the browser prepends it as the last one).
+  const seen = new Set();
+  let oldest = null;
+  let pages = 0;
+  let current = await api(`/api/tasks/${id}/events?tail=20`);
+  while (true) {
+    for (const event of current.events) seen.add(event.seq);
+    if (current.reachedStart || pages >= 50) break;
+    oldest = current.events[0].seq;
+    current = await api(`/api/tasks/${id}/events?tail=20&before=${oldest}`);
+    pages += 1;
+  }
+  const { reachedStart } = current;
+  // The walk must have gone below the newest 500 events (seq 1200) and below
+  // the injected 1000-1699 range, and delivered the fixture's own events.
+  assert.ok(reachedStart, `pagination must reach the session start (stopped after ${pages} pages, oldest seq ${oldest})`);
+  for (const seq of [1000, 1201, 1500]) assert.ok(seen.has(seq), `page walk missed seq ${seq}`);
+  assert.ok([...seen].some(seq => seq < 1000), 'the walk delivered events below the injected range');
+  assert.equal(Math.min(...seen), 1, 'the very first event must be reachable');
+});
+
+// A turn bigger than the history byte budget cannot be shipped whole: the cap
+// keeps its newest events, and that page opens mid-turn. It must still be
+// DELIVERED — the client renders it as a partial turn — and the walk must be
+// able to continue below it to the beginning of the session.
+test('a page cut by size is delivered and the walk still reaches the start', { timeout: 30000 }, async t => {
+  const fixture = await startFixture(undefined, { server: { maxHistoryMb: 0.25 } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  const store = new TaskStore(path.join(root, 'data'));
+  const giant = 'x'.repeat(300 * 1024);
+  await store.appendEventAt(id, 100, { taskId: id, seq: 100, type: 'USER_MESSAGE', message: 'старый вопрос', data: { text: 'старый вопрос' } });
+  await store.appendEventAt(id, 101, { taskId: id, seq: 101, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  await store.appendEventAt(id, 200, { taskId: id, seq: 200, type: 'USER_MESSAGE', message: 'гигантский вопрос', data: { text: 'гигантский вопрос' } });
+  await store.appendEventAt(id, 201, { taskId: id, seq: 201, type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 'g1', toolName: 'bash', args: { command: giant } } } });
+  await store.appendEventAt(id, 202, { taskId: id, seq: 202, type: 'PI_EVENT', data: { pi: { type: 'tool_execution_end', toolCallId: 'g1', toolName: 'bash', isError: false } } });
+  await store.appendEventAt(id, 300, { taskId: id, seq: 300, type: 'USER_MESSAGE', message: 'новый вопрос', data: { text: 'новый вопрос' } });
+  await store.appendEventAt(id, 301, { taskId: id, seq: 301, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  store.close();
+
+  // Walk the pages the way the browser does, all the way down.
+  const seen = new Set();
+  let before = null;
+  let reachedStart = false;
+  let pages = 0;
+  while (!reachedStart && pages < 20) {
+    const page = await api(`/api/tasks/${id}/events?tail=1${before == null ? '' : `&before=${before}`}`);
+    for (const event of page.events) seen.add(event.seq);
+    reachedStart = page.reachedStart;
+    if (!page.events.length) break;
+    before = page.events[0].seq;
+    pages += 1;
+  }
+  assert.ok(reachedStart, 'the walk reaches the session start');
+  assert.equal(Math.min(...seen), 1, 'the very first event is reachable');
+  assert.ok(seen.has(100), 'the older exchange is served');
+  // The giant turn cannot fit: its events arrive as a byte-capped fragment, and
+  // the client is the one that decides how to show it.
+  assert.ok(seen.has(201) || seen.has(202), 'the giant turn is delivered as a fragment, not dropped');
+  assert.ok(!(seen.has(201) && seen.has(302)), 'sanity: nothing above the newest exchange leaks in');
+});

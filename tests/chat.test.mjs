@@ -1307,7 +1307,86 @@ test('DOM: backfilled history folds its tools once, not once per poll', async ()
   assert.equal(app.document.querySelectorAll('.toolGroupList > .tool').length, 3, 'and must not lose the chips');
 });
 
+test('DOM: a page that opens mid-turn shows its content instead of nothing', async () => {
+  const app = await ui();
+  // The initial tail is the newest exchange only, with older history below.
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    if (!searchParams.has('tail')) return null; // refreshTask's catch-up poll
+    if (!searchParams.has('before')) {
+      return { ok: true, json: async () => ({ events: history('a').map(e => ({ ...e, seq: e.seq + 100 })), reachedStart: false }) };
+    }
+    // A byte-capped page of ONE huge turn: no USER_MESSAGE of its own, but real
+    // content — a tool run and the start of an answer.
+    return { ok: true, json: async () => ({ events: [
+      { taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'tool_execution_start', toolCallId: 'g1', toolName: 'bash', args: { command: './gradlew assembleDebug' } } } },
+      { taskId: 'a', seq: 3, type: 'PI_EVENT', data: { pi: { type: 'tool_execution_end', toolCallId: 'g1', toolName: 'bash', isError: false } } },
+      { taskId: 'a', seq: 4, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+      { taskId: 'a', seq: 5, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'начало старого ответа' } } } },
+    ], reachedStart: false }) };
+  });
+  await app.selectTask('a');
 
+  const button = app.document.getElementById('loadOlderButton');
+  assert.ok(button, 'the older history is offered');
+  button.onclick();
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+
+  const inner = app.document.getElementById('msgsInner');
+  assert.match(inner.textContent, /начала старого|начало старого ответа/u, 'the fragment\'s content is shown');
+  assert.match(inner.textContent, /bash/u, 'its tool call is shown');
+  assert.match(inner.textContent, /часть более раннего обмена/u, 'and it is labelled as a partial turn');
+  // The server knows no turn with this id: edit/fork/drop must not be offered.
+  const partial = [...inner.querySelectorAll('.turn')].find(node => node.textContent.includes('часть более раннего обмена'));
+  assert.ok(partial, 'the partial turn is on screen');
+  assert.equal(partial.querySelector('.turnActionBar'), null, 'no actions on a partial turn');
+  assert.equal(partial.querySelector('.typing'), null, 'and no typing animation in an old turn');
+
+  // renderChat walks every turn on every poll: the label and the missing action
+  // bar must survive a pass.
+  await app.refreshTask();
+  const afterPoll = [...inner.querySelectorAll('.turn')].find(node => node.textContent.includes('часть более раннего обмена'));
+  assert.ok(afterPoll, 'the partial turn keeps its label after a poll');
+  assert.equal(afterPoll.querySelector('.turnActionBar'), null, 'and still offers no actions');
+});
+
+test('DOM: a page with nothing to render is paged past in one click', async () => {
+  const app = await ui();
+  let beforeRequests = 0;
+  app.setFetchHook(async (url) => {
+    const { pathname, searchParams } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    if (!searchParams.has('tail')) return null;
+    if (!searchParams.has('before')) {
+      return { ok: true, json: async () => ({ events: history('a').map(e => ({ ...e, seq: e.seq + 100 })), reachedStart: false }) };
+    }
+    beforeRequests += 1;
+    // A page of pure bookkeeping events: nothing a turn can be built from.
+    if (beforeRequests === 1) {
+      return { ok: true, json: async () => ({ events: [
+        { taskId: 'a', seq: 40, type: 'STATUS', data: { status: 'SUCCEEDED' } },
+        { taskId: 'a', seq: 41, type: 'OUTPUT_FILES', data: {} },
+      ], reachedStart: false }) };
+    }
+    return { ok: true, json: async () => ({ events: [
+      { taskId: 'a', seq: 1, type: 'USER_MESSAGE', message: 'Старый вопрос', data: { text: 'Старый вопрос' } },
+      { taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+      { taskId: 'a', seq: 3, type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Старый ответ' }] } } } },
+      { taskId: 'a', seq: 4, type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } },
+    ], reachedStart: true }) };
+  });
+  await app.selectTask('a');
+
+  const button = app.document.getElementById('loadOlderButton');
+  assert.ok(button, 'the older history is offered');
+  button.onclick();
+  for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve));
+
+  assert.match(app.document.getElementById('msgsInner').textContent, /Старый ответ/u, 'one click reaches the renderable page');
+  assert.equal(app.document.getElementById('loadOlderButton'), null, 'history is exhausted');
+  assert.equal(beforeRequests, 2, 'the empty page was not shown to the user');
+});
 
 test('DOM: a tool that fails after the turn settled still shows in the fold', async () => {
   const app = await ui();
