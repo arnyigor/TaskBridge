@@ -1044,10 +1044,13 @@ async function handleRequest(req, res) {
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending\/send$/);
-    if (req.method === 'POST' && match) return json(res, 200, await manager.sendPendingNow(match[1]));
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.sendPendingNow(match[1], body.pendingId || null));
+    }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending$/);
-    if (req.method === 'DELETE' && match) return json(res, 200, await manager.dropPending(match[1]));
+    if (req.method === 'DELETE' && match) return json(res, 200, await manager.dropPending(match[1], url.searchParams.get('pendingId')));
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/model$/);
     if (req.method === 'POST' && match) {

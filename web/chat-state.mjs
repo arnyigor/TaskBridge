@@ -101,9 +101,9 @@ export class ChatState {
     return turns;
   }
 
-  addUser(text, files, id, at = null) {
+  addUser(text, files, id, at = null, preservePrevious = false) {
     // If the previous turn was not marked final, close it cleanly:
-    if (this.current && this.current.role === 'assistant' && !this.current.final) {
+    if (!preservePrevious && this.current && this.current.role === 'assistant' && !this.current.final) {
       this.current.active = false;
       this.current.superseded = true;
       if (!this.current.status) {
@@ -309,6 +309,9 @@ export class ChatState {
     if (Number.isSafeInteger(event.seq)) this.cursor = event.seq;
     const frame = event.data?.pi;
     if (event.type === 'USER_MESSAGE') {
+      // A steer is accepted while Pi still owns the current message/tools.
+      // Receipt of that instruction does not mean the previous work stopped.
+      const preservePrevious = ['steer', 'follow_up'].includes(event.data?.mode);
       // A message that arrives while an answer is still streaming SUPERSEDES it:
       // Pi ends that assistant message and answers the new one. Close the
       // previous turn here, at the moment it was pushed aside — otherwise it
@@ -316,7 +319,7 @@ export class ChatState {
       // which gave it the end time of a whole different answer (a range that
       // looked wrong next to the message that replaced it).
       const superseded = this.current;
-      if (superseded && superseded.role === 'assistant' && superseded.active) {
+      if (!preservePrevious && superseded && !superseded.id.startsWith('assistant-pending-') && superseded.role === 'assistant' && superseded.active) {
         superseded.active = false;
         superseded.final = true;
         // Its own answer was cut off, so it never got a verdict of its own: it
@@ -349,11 +352,11 @@ export class ChatState {
           this.current = optAssistant;
           this.variants.set(key, { ids: [`assistant-${seqId}`], selected: `assistant-${seqId}` });
         } else {
-          this.addUser(event.data?.text ?? event.message, event.data?.files || [], seqId, event.at || null);
+          this.addUser(event.data?.text ?? event.message, event.data?.files || [], seqId, event.at || null, preservePrevious);
           this.current.active = true;
         }
       } else {
-        this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq, event.at || null);
+        this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq, event.at || null, preservePrevious);
         this.current.active = true;
       }
     } else if (event.type === 'TURN_TRUNCATED') {

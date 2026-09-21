@@ -177,6 +177,10 @@ export class TaskManager extends EventEmitter {
     this.closing = true;
     if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null; }
     await this.#drainPump(2000);
+    // A queued #event write that is still pending here would fire after the
+    // caller closes the SQLite handle and crash ("reading 'exec' of null"),
+    // so close() waits for the event chains to drain first.
+    await Promise.allSettled([...this.eventWrites.values()]);
     for (const [taskId, entry] of this.runtimes) {
       try {
         if (entry?.eventChain) await entry.eventChain;
@@ -194,6 +198,9 @@ export class TaskManager extends EventEmitter {
     try {
       if (this.localModels?.enabled) await this.localModels.stop();
     } catch { /* best effort */ }
+    // eventChain drained above may have enqueued more #event writes; a second
+    // pass keeps close() from returning in front of its own background writes.
+    await Promise.allSettled([...this.eventWrites.values()]);
   }
 
   // Waits until an in-flight pump has finished (bounded), so store.write from a
@@ -589,15 +596,20 @@ export class TaskManager extends EventEmitter {
   // Taking a prompt out of the queue must never lose it. `restore` puts it back in
   // front and makes the session wait again, so a failure (the model got busy in a
   // race, an RPC error) costs time, not the operator's text.
-  async #takePending(task) {
-    const [pending, ...rest] = task.pendingPrompts || [];
+  async #takePending(task, pendingId = null) {
+    const items = task.pendingPrompts || [];
+    const index = pendingId ? items.findIndex(p => p.id === pendingId) : 0;
+    const pending = items[index];
+    const rest = items.filter((_, i) => i !== index);
     if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
     task.pendingPrompts = rest;
     await this.store.save(this.#publicTask(task));
     return {
       pending,
       restore: async () => {
-        task.pendingPrompts = [pending, ...(task.pendingPrompts || [])];
+        const restored = [...(task.pendingPrompts || [])];
+        restored.splice(Math.min(index, restored.length), 0, pending);
+        task.pendingPrompts = restored;
         if (!this.queue.includes(task.id)) this.queue.unshift(task.id);
         await this.#markWaiting(task, 'QUEUED');
       }
@@ -1242,6 +1254,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #verifyAndFinalize(task, run = {}) {
+    if (this.closing) return; // a closed store must not receive this run's tail
     if (this.deleted.has(task.id) || task.status === 'CANCELLED') return;
     const runtime = this.runtimes.get(task.id);
     const turn = run.turn ?? null;
@@ -2028,8 +2041,8 @@ export class TaskManager extends EventEmitter {
   async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     // Ctrl+Enter («вклиниться сразу»): the text must reach the model now, not
-    // after the reasoning block in flight ends, so the generation is stopped
-    // first (see #interruptGeneration).
+    // after the reasoning block or the command in flight ends, so the current
+    // generation (and with it any running tool) is stopped first.
     const send = async () => {
       if (opts.now === true) await this.#interruptGeneration(id);
       return this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true });
@@ -2038,7 +2051,7 @@ export class TaskManager extends EventEmitter {
     return this.#withCommand(
       commandId,
       opts && opts.clientId ? String(opts.clientId) : null,
-      () => this.#payloadHash(id, text, mode, files, uploadToken),
+      () => this.#payloadHash(id, text, mode, files, uploadToken, opts.now === true, opts.queue === true),
       () => this.#admit(send),
     );
   }
@@ -2092,7 +2105,9 @@ export class TaskManager extends EventEmitter {
         }
         if (stored.done) {
           const status = stored.status || (stored.result != null ? 'COMPLETED' : 'REJECTED');
-          this.commandLedger.set(commandId, { hash, done: true, result: stored.result, at: stored.at, clientId: stored.clientId, status });
+          const replay = { hash, done: true, result: stored.result, at: stored.at, clientId: stored.clientId, status };
+          this.commandLedger.set(commandId, replay);
+          if (status === 'REJECTED') throw this.#commandError(stored.result);
           return stored.result;
         }
         this.commandLedger.set(commandId, { hash, done: false, result: null, at: stored.at, clientId: stored.clientId, status: 'UNKNOWN_AFTER_CRASH' });
@@ -2102,7 +2117,10 @@ export class TaskManager extends EventEmitter {
       if (entry.hash !== hash) {
         throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
       }
-      if (entry.done) return entry.result;
+      if (entry.done) {
+        if (entry.status === 'REJECTED') throw this.#commandError(entry.result);
+        return entry.result;
+      }
       throw Object.assign(new Error('Команда уже выполняется.'), { code: entry.status === 'UNKNOWN_AFTER_CRASH' ? 'UNKNOWN_AFTER_CRASH' : 'ACCEPTED' });
     }
     // New command: persist ACCEPTED before running, so we cannot lose track of a
@@ -2123,11 +2141,17 @@ export class TaskManager extends EventEmitter {
       try { this.store.upsertCommand(commandId, { hash, done: true, result, clientId, status: 'COMPLETED' }); } catch {}
       return result;
     } catch (error) {
+      const rejected = { error: { code: error?.code || 'INTERNAL_ERROR', message: error?.message || String(error) } };
       const g = this.commandLedger.get(commandId);
-      if (g) { g.done = true; g.result = null; g.status = 'REJECTED'; }
-      try { this.store.upsertCommand(commandId, { hash, done: true, result: null, clientId, status: 'REJECTED' }); } catch {}
+      if (g) { g.done = true; g.result = rejected; g.status = 'REJECTED'; }
+      try { this.store.upsertCommand(commandId, { hash, done: true, result: rejected, clientId, status: 'REJECTED' }); } catch {}
       throw error;
     }
+  }
+
+  #commandError(result) {
+    const saved = result?.error;
+    return Object.assign(new Error(saved?.message || 'Команда была отклонена.'), { code: saved?.code || 'INTERNAL_ERROR' });
   }
 
   // Command-status contract (TZ stage 3): ACCEPTED / DISPATCHING / COMPLETED /
@@ -2182,10 +2206,13 @@ export class TaskManager extends EventEmitter {
   // A prompt the operator decided not to wait for: it is handed to Pi right
   // away (Pi/llama.cpp decide how to fit it into the running turn), bypassing
   // the local queue.
-  async sendPendingNow(id) {
+  async sendPendingNow(id, pendingId = null) {
     return this.#admit(async () => {
       const task = this.tasks.get(id);
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      // Retrying a stale button must not deliver the NEXT queued message.
+      if (pendingId && !(task.pendingPrompts || []).some(p => p.id === pendingId)) return this.#publicTask(task);
+      if (!task.workspacePath) throw Object.assign(new Error('Сначала дождитесь запуска исходной задачи.'), { code: 'BUSY' });
       // Check first: "сейчас" cannot mean a second generation in parallel, and a
       // refusal must leave the prompt where it was. The pump may be delivering
       // another session's queued prompt right now (a delegating delivery claims
@@ -2200,14 +2227,11 @@ export class TaskManager extends EventEmitter {
       if (this.dispatching) {
         throw Object.assign(new Error('Очередь доставляет сообщение прямо сейчас — повторите через мгновение.'), { code: 'BUSY' });
       }
-      // Like Ctrl+Enter, "сейчас" is allowed to try even when the model looks
-      // busy (the flag can be stale): if the attempt fails, `restore` below puts
-      // the prompt back at the front of the queue. A generation in flight is
-      // stopped first, so the message is not queued behind the model's current
-      // reasoning block.
-      // "Сейчас" must not sit behind the model's current reasoning block, so a
-      // generation in flight is stopped before the queue is touched.
-      await this.#interruptGeneration(id).catch(() => false);
+      // «Отправить сейчас» is the explicit "cut in" action: it stops the turn in
+      // flight (tools included) so the queued text is the very next thing Pi
+      // sees, instead of waiting behind a long command. The rest of the queue
+      // survives (#cancel with keepPending).
+      // If delivery fails, restore puts the prompt back at the queue front.
       // The pump may have already taken (or delivered) the only queued prompt by
       // now: «Отправить сейчас» clicked right after Enter. An empty queue here is
       // not an error — the message is already on its way, and the operator must
@@ -2218,7 +2242,7 @@ export class TaskManager extends EventEmitter {
       }
       let pending, restore;
       try {
-        ({ pending, restore } = await this.#takePending(task));
+        ({ pending, restore } = await this.#takePending(task, pendingId));
       } catch (error) {
         if (error.code === 'INPUT_INVALID') {
           // Lost the race with the pump: the prompt was taken and is being
@@ -2229,6 +2253,7 @@ export class TaskManager extends EventEmitter {
         throw error;
       }
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
+      await this.#interruptGeneration(id).catch(() => false);
       try {
         const waiting = (await this.#getPendingFiles(id, pending.id)) || { files: [], uploadToken: null };
         const result = await this.#message(id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
@@ -2243,24 +2268,32 @@ export class TaskManager extends EventEmitter {
 
   // Removing a queued prompt leaves the session as it was: a session that never
   // ran is cancelled, an existing one simply loses the pending message.
-  async dropPending(id) {
+  async dropPending(id, pendingId = null) {
     return this.#admit(async () => {
       const task = this.tasks.get(id);
       if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-      const [dropped, ...rest] = task.pendingPrompts || [];
+      const items = task.pendingPrompts || [];
+      const index = pendingId ? items.findIndex(p => p.id === pendingId) : 0;
+      const dropped = items[index];
+      const rest = items.filter((_, i) => i !== index);
+      if (pendingId && !dropped) return this.#publicTask(task);
       if (!dropped) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
       await this.#releasePendingFiles(id, [dropped]);
       task.pendingPrompts = rest;
       if (rest.length) { await this.store.save(this.#publicTask(task)); return this.#publicTask(task); }
+      if (!task.workspacePath) {
+        // The original task.prompt is still queued; only its follow-up was removed.
+        task.updatedAt = now();
+        await this.#event(task, 'QUEUE_DROPPED', 'Сообщение убрано из очереди');
+        await this.store.save(this.#publicTask(task));
+        return this.#publicTask(task);
+      }
       task.queueReason = null;
       this.queue = this.queue.filter(x => x !== id);
-      if (!task.workspacePath) {
-        task.status = 'CANCELLED';
-        task.current = 'Cancelled';
+      if (this.activeTaskId === id || ['RUNNING', 'PREPARING', 'PREFLIGHT', 'VERIFYING', 'WAITING_USER', 'CANCELLING'].includes(task.status)) {
+        // Removing future input cannot finish the current run or its tools.
         task.updatedAt = now();
-        // Terminal event before terminal status is readable (same ordering rule
-        // as #verifyAndFinalize and #fail).
-        await this.#event(task, 'TASK_CANCELLED', 'Queued prompt removed');
+        await this.#event(task, 'QUEUE_DROPPED', 'Сообщение убрано из очереди');
         await this.store.save(this.#publicTask(task));
       } else {
         task.status = 'SUCCEEDED';
@@ -2521,6 +2554,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #fail(task, error) {
+    if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
     const classified = classifyEngineError(error) || classifyEngineError(task._modelError);
     const explicit = error?.code && !['MODEL_ERROR', 'INTERNAL_ERROR'].includes(error.code) ? error.code : null;

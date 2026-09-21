@@ -1796,3 +1796,7 @@ body.cloud-mode [data-pc-only] { display: none; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+
+/* Each pending message owns its actions on desktop and phone. */
+.queuedRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; min-width: 0; }
+.queuedRow .queuedText { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }

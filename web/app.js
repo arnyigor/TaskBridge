@@ -96,12 +96,51 @@ async function api(path, options = {}) {
     return await transport.request(method, path, body, timeoutMs);
   } catch (error) {
     if (error.code === 'AUTH_REQUIRED') showAuthGate();
-    throw new Error(`${error.code || 'HTTP_ERROR'}: ${error.message}`);
+    const network = !error.code || ['RELAY_OFFLINE', 'REQUEST_TIMEOUT'].includes(error.code);
+    throw Object.assign(new Error(`${error.code || 'HTTP_ERROR'}: ${error.message}`), { code: error.code || 'HTTP_ERROR', network });
   }
 }
 
 function safeParse(text) {
   try { return JSON.parse(text); } catch { return undefined; }
+}
+
+// Every mutating request carries a commandId: a lost HTTP answer (Wi-Fi drop,
+// phone sleep, reload) can then be retried with the SAME id and the server
+// replays its recorded outcome instead of running the action twice.
+function newCommandId() {
+  return (globalThis.crypto && typeof crypto.randomUUID === 'function' && crypto.randomUUID())
+    || `cmd-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+}
+
+function commandClientId() {
+  try {
+    let id = localStorage.getItem('tbClientId');
+    if (!id) { id = newCommandId(); localStorage.setItem('tbClientId', id); }
+    return id;
+  } catch { return 'web-client'; }
+}
+
+// POST with a commandId. A transport-level failure (the answer was lost, not
+// the command) is retried once with the same id; if that also fails, the
+// server's command ledger decides: accepted → the operator is told the send
+// is unconfirmed but may have landed, otherwise the error stands.
+async function commandApi(path, payload) {
+  const commandId = newCommandId();
+  let networkError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await api(path, { method: 'POST', body: JSON.stringify({ ...payload, commandId, clientId: commandClientId() }) });
+    } catch (error) {
+      if (!error.network || attempt) { networkError = error; break; }
+    }
+  }
+  const status = await api(`/api/commands/${encodeURIComponent(commandId)}`).catch(() => null);
+  if (status && (status.status === 'ACCEPTED' || status.status === 'DISPATCHING' || status.status === 'COMPLETED')) {
+    const ambiguous = new Error('Отправка не подтверждена: соединение пропало. Возможно, сервер получил сообщение — проверьте историю.');
+    throw Object.assign(ambiguous, { commandId, ambiguous: true, cause: networkError });
+  }
+  throw Object.assign(networkError, { commandId });
 }
 
 /* ---------------- chat rendering ---------------- */
@@ -1137,7 +1176,7 @@ function setComposerMode(taskId) {
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
   const hint = isTouchDevice()
     ? 'Enter — перенос строки, отправка — кнопкой.'
-    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — вклиниться сразу (прервёт текущий ответ, если инструмент не выполняется), Shift+Enter — перенос строки.';
+    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — прервать текущий ответ и отправить сразу, Shift+Enter — перенос строки.';
   promptEl.placeholder = continuing
     ? `Сообщение продолжит текущую сессию. ${hint}`
     : `Сообщение для Pi. ${hint}`;
@@ -1148,21 +1187,38 @@ $('project').addEventListener('change', () => {
 });
 
 const drafts = new Map(); // taskId | '__new__' -> { text, files: File[] }
+const draftStorageKey = key => `tbDraft:${key}`;
 
 function saveDraft(key) {
   const text = promptEl.value;
   const files = Array.from($('files').files || []);
-  if (!text && !files.length) drafts.delete(key);
-  else drafts.set(key, { text, files });
+  if (!text && !files.length) {
+    drafts.delete(key);
+    try { localStorage.removeItem(draftStorageKey(key)); } catch { /* private mode */ }
+  } else {
+    drafts.set(key, { text, files });
+    // Files cannot survive a reload, the typed text can — a phone that
+    // refreshes mid-thought must not wipe the composer (see 1.6).
+    try { localStorage.setItem(draftStorageKey(key), JSON.stringify({ text })); } catch { /* storage full */ }
+  }
 }
 
 function restoreDraft(key) {
   const draft = drafts.get(key);
-  promptEl.value = draft?.text || '';
+  if (!draft) {
+    // After a reload only the text is recoverable; attachments stay the
+    // operator's to re-add (browsers do not let a page re-read local files).
+    try {
+      const saved = JSON.parse(localStorage.getItem(draftStorageKey(key)) || 'null');
+      if (saved && saved.text) drafts.set(key, { text: saved.text, files: [] });
+    } catch { /* unreadable entry: fall back to an empty composer */ }
+  }
+  const restored = drafts.get(key);
+  promptEl.value = restored?.text || '';
   promptEl.style.height = 'auto';
   promptEl.style.height = `${Math.min(promptEl.scrollHeight, 240)}px`;
   const dt = new DataTransfer();
-  for (const file of draft?.files || []) dt.items.add(file);
+  for (const file of restored?.files || []) dt.items.add(file);
   $('files').files = dt.files;
   renderFileList();
   updateClearButton();
@@ -2191,10 +2247,9 @@ async function refreshTask() {
 
 async function sendContinueMessage(taskId, text, opts = {}) {
   const version = selectionVersion;
-  const result = await api(`/api/tasks/${encodeURIComponent(taskId)}/message`, {
-    method: 'POST', body: JSON.stringify({ text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null,
-      now: opts.now === true, queue: opts.queue === true })
-  });
+  const result = await commandApi(`/api/tasks/${encodeURIComponent(taskId)}/message`,
+    { text, mode: 'auto', files: opts.files || [], uploadToken: opts.uploadToken || null,
+      now: opts.now === true, queue: opts.queue === true });
   if (version === selectionVersion) await refreshTask();
   return result;
 }
@@ -2214,10 +2269,13 @@ function renderQueuedPrompt() {
   // control is disabled and names the session in the way instead of failing with
   // «машина занята» afterwards.
   const busy = lastTasks.find(task => task.status === 'RUNNING' && task.id !== selectedTaskId) || null;
+  for (const [index, pending] of queue.entries()) {
+  const row = document.createElement('div');
+  row.className = 'queuedRow';
   const text = document.createElement('div');
   text.className = 'queuedText';
-  const first = String(queue[0].text || '').split('\n')[0];
-  const head = queue.length > 1 ? `В очереди (${queue.length}): ${first}` : `В очереди: ${first}`;
+  const first = String(pending.text || '').split('\n')[0];
+  const head = queue.length > 1 ? `В очереди (${index + 1}/${queue.length}): ${first}` : `В очереди: ${first}`;
   text.textContent = busy ? `${head} — ждёт «${busy.title || busy.id}»` : head;
   const send = document.createElement('button');
   send.type = 'button';
@@ -2225,26 +2283,28 @@ function renderQueuedPrompt() {
   send.textContent = 'Отправить сейчас';
   send.title = busy
     ? `Сейчас нельзя: идёт сессия «${busy.title || busy.id}».`
-    : 'Прервать текущий ответ и отправить это сообщение сразу';
+    : 'Прервать текущий ответ (и выполняющуюся команду) и отправить это сообщение сразу';
   // Kept pressable on purpose: a dead button explains nothing. Pressing it says
   // why it cannot happen now; the prompt stays queued meanwhile.
   send.onclick = () => {
     if (busy) { showNotice(`Сейчас нельзя: идёт сессия «${busy.title || busy.id}». Сообщение отправится само, когда она завершится.`); return; }
-    actOnPending('send');
+    actOnPending('send', pending.id);
   };
   const drop = document.createElement('button');
   drop.type = 'button';
   drop.className = 'small';
   drop.textContent = 'Убрать';
-  drop.onclick = () => actOnPending('drop');
-  host.append(text, send, drop);
+  drop.onclick = () => actOnPending('drop', pending.id);
+  row.append(text, send, drop);
+  host.append(row);
+  }
 }
 
-async function actOnPending(action) {
+async function actOnPending(action, pendingId = null) {
   if (!selectedTaskId) return;
   try {
-    if (action === 'send') await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending/send`, { method: 'POST', body: '{}' });
-    else await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending`, { method: 'DELETE' });
+    if (action === 'send') await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending/send`, { method: 'POST', body: JSON.stringify({ pendingId }) });
+    else await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/pending${pendingId ? `?pendingId=${encodeURIComponent(pendingId)}` : ''}`, { method: 'DELETE' });
     await refreshTask();
   } catch (error) {
     // A refusal here is not a crash: the prompt stays queued. Show it in the app
@@ -2824,6 +2884,7 @@ $('form').addEventListener('submit', async (e) => {
     const draftKey = taskId || '__new__';
     const clearComposer = () => {
       drafts.delete(draftKey);
+      try { localStorage.removeItem(`tbDraft:${draftKey}`); } catch { /* best effort */ }
       if (promptEl.value.trim() === prompt) {
         promptEl.value = '';
         promptEl.style.height = '';
@@ -2849,7 +2910,7 @@ $('form').addEventListener('submit', async (e) => {
         renderChat();
       };
       if (chatState && prompt) {
-        chatState.addUser(prompt, files, pendingId);
+        chatState.addUser(prompt, files, pendingId, null, true);
         chatState.current.active = true;
         renderChat();
         scrollBottom();
@@ -2859,6 +2920,14 @@ $('form').addEventListener('submit', async (e) => {
       try {
         sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow, queue: !sendNow });
       } catch (error) {
+        // An unconfirmed send is NOT a failed one: the server may have accepted
+        // the message, so the optimistic turn stays on screen and the operator
+        // is told what to do instead of losing text.
+        if (error.ambiguous) {
+          showNotice(error.message);
+          lastPrompt = { id: taskId, text: prompt, failedSend: false };
+          return;
+        }
         // Remove the optimistic turn if the send failed
         dropOptimistic();
         // The machine runs one generation at a time. If it refused only because
@@ -2879,9 +2948,7 @@ $('form').addEventListener('submit', async (e) => {
         ? 'Локальная модель ещё не загружена — сообщение в очереди и отправится, как только она будет готова.'
         : QUEUED_NOTICE);
     } else {
-      const task = await api('/api/tasks', {
-        method: 'POST', body: JSON.stringify({ projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking })
-      });
+      const task = await commandApi('/api/tasks', { projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking });
       // Clear before selectTask() runs resetSelection(), which would
       // otherwise capture this just-sent text as a stale "new task" draft.
       clearComposer();
@@ -2919,7 +2986,7 @@ $('stopButton').onclick = async () => {
   if (!confirm(`Остановить текущую работу Pi в сессии «${target.title || target.id}»?`)) return;
   $('stopButton').disabled = true;
   try {
-    await api(`/api/tasks/${encodeURIComponent(target.id)}/cancel`, { method: 'POST', body: '{}' });
+    await commandApi(`/api/tasks/${encodeURIComponent(target.id)}/cancel`, {});
   } catch (e) { alert(e.message); }
   await loadTasks();
   if (target.id === selectedTaskId) await refreshTask();
@@ -2969,7 +3036,7 @@ $('applyChanges').onclick = async () => {
   if (!confirm('Применить изменения этой сессии к исходному проекту?')) return;
   $('applyChanges').disabled = true;
   try {
-    await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/apply`, { method: 'POST', body: JSON.stringify({}) });
+    await commandApi(`/api/tasks/${encodeURIComponent(selectedTaskId)}/apply`, {});
     await refreshTask();
   } catch (error) {
     alert(error.message);
@@ -4599,13 +4666,26 @@ async function init() {
   if (notifyEnabled()) subscribeToPush().catch(() => {});
   checkPcState();
   setInterval(checkPcState, 2000);
+
+  const sync = () => {
+    checkPcState();
+    if (selectedTaskId) refreshTask();
+    else loadTasks();
+  };
+
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') checkPcState();
+    if (document.visibilityState === 'visible') sync();
   });
+  window.addEventListener('online', sync);
   // In cloud mode the first load waits for the relay handshake instead (see
   // startCloudMode), and the pairing screen belongs to the PC.
   if (!cloudMode && await checkAuth()) await loadAll();
   window.addEventListener('popstate', () => { routeFromLocation(); });
+  // Keep the button as an accessible/manual fallback, but normally fetch the
+  // next page before the operator reaches the top of the real scroll viewport.
+  $('msgs').addEventListener('scroll', () => {
+    if ($('msgs').scrollTop <= 240) loadOlderHistory();
+  });
 }
 
 init();
