@@ -891,7 +891,6 @@ async function handleRequest(req, res) {
       const requested = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 500;
       if (!Number.isSafeInteger(requested) || requested < 0) throw Object.assign(new Error('Invalid event limit'), { code: 'INPUT_INVALID' });
       const limit = requested === 0 ? maxEventsPerRequest : Math.min(requested, maxEventsPerRequest);
-      const events = trimStreamingDeltas(await store.readEvents(match[1], limit, after));
       // tail: turn-aligned windowing for paginated history load (see
       // event-window.mjs). Without it, behaves exactly as before — full or
       // limit-sliced history, always used by refreshTask()'s small
@@ -901,14 +900,27 @@ async function handleRequest(req, res) {
         const before = url.searchParams.has('before') ? Number(url.searchParams.get('before')) : null;
         if (!Number.isSafeInteger(tail) || tail <= 0) throw Object.assign(new Error('Invalid tail count'), { code: 'INPUT_INVALID' });
         if (before != null && (!Number.isSafeInteger(before) || before < 0)) throw Object.assign(new Error('Invalid before cursor'), { code: 'INPUT_INVALID' });
+        // Read one row more than the slice: the extra row proves events older
+        // than the slice exist, so reachedStart can only be true when the read
+        // really reached the session start, not just the edge of the slice.
+        // With `before` this is also what pages BELOW the cursor at all —
+        // reading only the newest `limit` events made everything older
+        // unreachable, and "load older" on a long session returned an empty
+        // page that looked like the whole history.
+        const slice = await store.readEvents(match[1], limit + 1, after, before);
+        const events = trimStreamingDeltas(slice.length > limit ? slice.slice(1) : slice);
+        const hasOlder = slice.length > limit;
         const window = windowByTurns(events, tail, before);
         // Also bound by size: a turn (or the events read for it) can be tens of
         // megabytes, which the browser then cannot parse — that is what froze
-        // the chat when switching to a very long session.
+        // the chat when switching to a very long session. A page cut by size can
+        // open mid-turn (no USER_MESSAGE of its own); the client renders what it
+        // gets as a partial turn instead of dropping it.
         const bounded = capEventsByBytes(window.events, maxHistoryBytes);
         const cut = bounded.length !== window.events.length;
-        return json(res, 200, { events: bounded, reachedStart: window.reachedStart && !cut });
+        return json(res, 200, { events: bounded, reachedStart: window.reachedStart && !hasOlder && !cut });
       }
+      const events = trimStreamingDeltas(await store.readEvents(match[1], limit, after));
       return json(res, 200, events);
     }
 

@@ -53,6 +53,10 @@ export class ChatState {
     this.messageOpen = false;
     this.orphanMessage = null;
     this.executionTurn = null;
+    // The detached placeholder of a mid-turn window (see below), kept so a
+    // history backfill can tell which content belongs to a turn whose
+    // USER_MESSAGE is not in the batch.
+    this.windowStart = null;
     if (seedInitial) this.addUser(task.prompt, task.files || [], 'initial');
     // A window that does not reach the session start (seedInitial:false) can
     // still open mid-turn: the server's size cap cuts at an arbitrary event, so
@@ -63,6 +67,7 @@ export class ChatState {
     // real USER_MESSAGE replaces it, and, being outside `turns`, it is never
     // rendered.
     else this.current = { id: 'assistant-window-start', role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: 0, at: null, endedAt: null, userAt: null };
+    this.windowStart = seedInitial ? null : this.current;
   }
 
   // Replays an older, already-settled batch of events in an isolated scratch
@@ -72,10 +77,28 @@ export class ChatState {
   prependOlder(task, events, reachedStart) {
     const scratch = new ChatState(task, { seedInitial: reachedStart });
     for (const event of events) scratch.apply(event);
-    this.turns.unshift(...scratch.turns);
+    const turns = [...scratch.turns];
+    // A page cut by size opens mid-turn: its events belong to a turn whose
+    // USER_MESSAGE is not in the page, so everything lands on the detached
+    // window-start placeholder and the page rendered as NOTHING — the "load
+    // older" button appeared dead on a session with one huge turn. That content
+    // is real (a tool run, part of an answer) and the neighbouring pages carry
+    // the rest of the same turn, so it becomes a partial turn of its own.
+    const partial = scratch.windowStart;
+    if (partial && !turns.includes(partial) && (partial.text || partial.thinking || partial.tools.length)) {
+      partial.id = `assistant-partial-${events[0].seq}`;
+      partial.partial = true;
+      // A settle that never arrives in this page must not leave a typing
+      // animation or a running chip in a historical turn.
+      partial.active = false;
+      partial.final = true;
+      for (const tool of partial.tools) if (tool.state === 'run') tool.state = 'interrupted';
+      turns.unshift(partial);
+    }
+    this.turns.unshift(...turns);
     for (const [id, tool] of scratch.tools) if (!this.tools.has(id)) this.tools.set(id, tool);
     for (const [key, entry] of scratch.variants) if (!this.variants.has(key)) this.variants.set(key, entry);
-    return scratch.turns;
+    return turns;
   }
 
   addUser(text, files, id, at = null) {

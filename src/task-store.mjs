@@ -433,17 +433,27 @@ export class TaskStore {
     return new Map(rows.map(row => [String(row.task_id), Number(row.n)]));
   }
 
-  async readEvents(id, limit = 500, after = 0) {
+  // `before` bounds the read from above (seq < before): paginated history walks
+  // DOWN from the live tail, so a page must be the newest events BELOW the
+  // cursor — reading "the last `limit` events of the session" like before would
+  // make anything older than the newest slice unreachable, and a long session
+  // could never page back past it.
+  async readEvents(id, limit = 500, after = 0, before = null) {
     this.taskDir(id); // keep the id validation of the previous file store
     if (!Number.isSafeInteger(limit) || limit < 0 || !Number.isSafeInteger(after) || after < 0) {
       throw Object.assign(new Error('Invalid event cursor or limit'), { code: 'INPUT_INVALID' });
     }
+    if (before != null && (!Number.isSafeInteger(before) || before < 0)) {
+      throw Object.assign(new Error('Invalid event cursor'), { code: 'INPUT_INVALID' });
+    }
     // Same contract as before: events after the cursor, then the last `limit`.
     const toEvent = row => ({ ...JSON.parse(row.payload), seq: Number(row.seq) });
+    const params = before == null ? [id, after] : [id, after, before];
+    const upper = before == null ? '' : ' AND seq < ?';
     if (!limit) {
-      return this.db.prepare('SELECT seq, payload FROM events WHERE task_id = ? AND seq > ? ORDER BY seq').all(id, after).map(toEvent);
+      return this.db.prepare(`SELECT seq, payload FROM events WHERE task_id = ? AND seq > ?${upper} ORDER BY seq`).all(...params).map(toEvent);
     }
-    const rows = this.db.prepare('SELECT seq, payload FROM events WHERE task_id = ? AND seq > ? ORDER BY seq DESC LIMIT ?').all(id, after, limit);
+    const rows = this.db.prepare(`SELECT seq, payload FROM events WHERE task_id = ? AND seq > ?${upper} ORDER BY seq DESC LIMIT ?`).all(...params, limit);
     rows.reverse();
     return rows.map(toEvent);
   }
