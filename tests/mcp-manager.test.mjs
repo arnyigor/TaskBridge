@@ -108,3 +108,41 @@ test('per-tool exclusion writes excludeTools and is reflected in status', async 
   assert.equal(JSON.parse(await fs.readFile(mcp.path, 'utf8')).mcpServers.img.excludeTools, undefined);
   await assert.rejects(mcp.setToolExcluded('img', '', true), { code: 'INPUT_INVALID' });
 });
+
+// The adapter prints a ~290-character `console.warn` advisory at 75+ direct
+// tools; that raw stdout line corrupts an interactive Pi TUI and shows up as
+// PI_PROTOCOL_ERROR in `--mode rpc`. TaskBridge owns the file it hands to Pi,
+// so the advisory is pinned off there while Pi's own config stays untouched.
+test('managed config pins settings.warnOnLargeDirectTools off and keeps Pi settings', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-pin-');
+  const agentDir = await temp(t, 'tb-mcp-pin-agent-');
+  await fs.writeFile(path.join(agentDir, 'mcp.json'), JSON.stringify({
+    mcpServers: { chrome: { command: 'npx', directTools: true } },
+    settings: { collapsedResultLines: 3, toolResultRendering: 'compact' }
+  }));
+
+  const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  await mcp.importFromPi({ PI_AGENT_DIR: agentDir });
+
+  const written = JSON.parse(await fs.readFile(mcp.path, 'utf8'));
+  assert.equal(written.settings.warnOnLargeDirectTools, false);
+  assert.equal(written.settings.collapsedResultLines, 3);
+  assert.equal(written.settings.toolResultRendering, 'compact');
+
+  // Later edits (server toggle, tool exclusion, explicit write) must not drop it.
+  await mcp.setDisabled('chrome', true);
+  assert.equal(JSON.parse(await fs.readFile(mcp.path, 'utf8')).settings.warnOnLargeDirectTools, false);
+  await mcp.write({ mcpServers: {}, settings: { warnOnLargeDirectTools: true } });
+  assert.equal(JSON.parse(await fs.readFile(mcp.path, 'utf8')).settings.warnOnLargeDirectTools, false);
+
+  // Pi's own file is only read, never rewritten.
+  const piConfig = JSON.parse(await fs.readFile(path.join(agentDir, 'mcp.json'), 'utf8'));
+  assert.equal(piConfig.settings.warnOnLargeDirectTools, undefined);
+});
+
+test('off mode config stays empty (no direct tools, nothing to silence)', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-off-pin-');
+  const mcp = new McpManager({ mcp: { mode: 'off' } }, dataRoot);
+  await mcp.ensureReady();
+  assert.deepEqual(JSON.parse(await fs.readFile(mcp.offPath, 'utf8')), { mcpServers: {} });
+});

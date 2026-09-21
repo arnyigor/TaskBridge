@@ -503,6 +503,11 @@ function appendInlineImage(relPath) {
   img.src = url;
   img.alt = relPath;
   img.loading = 'lazy';
+  // A refused path (403) or a file that disappeared since the turn ran leaves a
+  // broken-image icon in the conversation. chat-state already filters paths the
+  // server will refuse, but a missing or out-of-workspace file can only be told
+  // apart by trying — so the preview withdraws itself instead of lying.
+  img.onerror = () => link.remove();
   link.append(img);
   liveTurn.body.insertBefore(link, liveTurn.bubble || liveTurn.metaRow);
   scrollBottom();
@@ -1714,6 +1719,9 @@ function renderSettledTurn(turn, before) {
       img.src = url;
       img.alt = tool.imagePath;
       img.loading = 'lazy';
+      // Same reason as appendInlineImage: withdraw the preview rather than show
+      // a broken picture when the server will not serve the file.
+      img.onerror = () => link.remove();
       link.append(img);
       body.insertBefore(link, bubble);
       chip.dataset.imageShown = 'true';
@@ -3454,8 +3462,9 @@ async function waitUntil(predicate, timeoutMs, stepMs = 700) {
   }
 }
 
-function showRestart({ title, detail, retry }) {
-  $('serverRestartButton').classList.add('restarting');
+function showRestart({ title, detail, retry, spinning = true }) {
+  if (spinning) $('serverRestartButton').classList.add('restarting');
+  else $('serverRestartButton').classList.remove('restarting');
   $('restartTitle').textContent = title;
   $('restartDetail').textContent = detail;
   $('restartRetry').classList.toggle('hidden', !retry);
@@ -3467,11 +3476,46 @@ function stopRestartProgress() {
   $('serverRestartButton').classList.remove('restarting');
 }
 
-async function reloadWhenServerIsBack() {
-  const up = await waitUntil(serverIsUp, 120000);
+async function bootIdOfServer() {
+  try {
+    const info = await api('/api/info', { timeoutMs: 3000 });
+    return info?.bootId ? String(info.bootId) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function reloadWhenServerIsBack(initialBootId = null) {
+  // Positive proof: /api/info answering with a different bootId means a new
+  // process has started and is serving requests. Waiting for a downtime gap
+  // fails on fast restarts or through reverse proxies where health polls
+  // never catch the process going down, leaving the progress animation stuck
+  // even while the DOM behind it has already reconnected and rebuilt.
+  const deadline = Date.now() + 120000;
+  let sawDown = false;
+  let up = false;
+
+  while (Date.now() < deadline) {
+    if (initialBootId) {
+      const current = await bootIdOfServer();
+      if (!current) {
+        sawDown = true;
+      } else if (current !== initialBootId || sawDown) {
+        up = true;
+        break;
+      }
+    } else {
+      if (await serverIsUp()) {
+        up = true;
+        break;
+      }
+    }
+    await new Promise(resolve => setTimeout(resolve, 700));
+  }
+
   if (!up) {
     stopRestartProgress();
-    showRestart({ title: 'Сервер не отвечает', detail: 'Проверь окно запуска TaskBridge и попробуй ещё раз.', retry: true });
+    showRestart({ title: 'Сервер не отвечает', detail: 'Проверь окно запуска TaskBridge и попробуй ещё раз.', retry: true, spinning: false });
     return;
   }
   $('restartTitle').textContent = 'Сервер вернулся';
@@ -3485,6 +3529,7 @@ $('serverRestartButton').onclick = async () => {
   if (!confirm('Перезагрузить сервер TaskBridge?\n\nАктивные сессии будут прерваны, страница переподключится автоматически через несколько секунд.')) return;
   restarting = true;
   $('serverRestartButton').classList.add('restarting');
+  const initialBootId = await bootIdOfServer().catch(() => null);
   try {
     await api('/api/server/restart', { method: 'POST', body: { confirm: true } });
   } catch (error) {
@@ -3493,24 +3538,16 @@ $('serverRestartButton').onclick = async () => {
     $('createError').classList.add('error');
     return;
   }
-  showRestart({ title: 'Перезагрузка сервера…', detail: 'Сервер получил команду. Ждём остановки, затем — запуска.', retry: false });
-  // The command is accepted BEFORE the process actually dies, so wait for it to
-  // go away first: otherwise the very first poll would still hit the old server
-  // and the page would reload straight back into it.
-  const wentDown = await waitUntil(async () => !(await serverIsUp()), 30000);
-  if (!wentDown) {
-    stopRestartProgress();
-    showRestart({ title: 'Сервер не перезапустился', detail: 'Процесс не остановился. Смотри окно запуска TaskBridge.', retry: true });
-    return;
-  }
-  $('restartDetail').textContent = 'Сервер остановлен. Ждём запуска…';
-  await reloadWhenServerIsBack();
+  showRestart({ title: 'Перезагрузка сервера…', detail: 'Сервер получил команду. Ждём остановки, затем — запуска.', retry: false, spinning: true });
+  await reloadWhenServerIsBack(initialBootId);
 };
 
 $('restartRetry').onclick = async () => {
   $('restartRetry').classList.add('hidden');
   $('restartDetail').textContent = 'Ждём, пока сервер вернётся…';
-  await reloadWhenServerIsBack();
+  restarting = true;
+  $('serverRestartButton').classList.add('restarting');
+  await reloadWhenServerIsBack(null);
 };
 
 /* ---------------- MCP (pi-mcp-adapter) ---------------- */
@@ -4242,11 +4279,26 @@ function renderSysState(info) {
   }
 }
 
+// The machine was restarted behind this page: a phone tab has no restart flow of
+// its own running, so without this it keeps the old shell until the operator
+// reloads by hand — while the tab that pressed the button refreshes right away.
+// bootId is the running process, not the code: same build restarted still means
+// a fresh start for every page.
+let seenBootId = null;
+
 async function checkPcState() {
   const el = $('pcState');
   loadRuntimeStatus();
   try {
     const info = await api('/api/info');
+    if (info.bootId) {
+      if (seenBootId && info.bootId !== seenBootId) {
+        seenBootId = info.bootId;
+        location.reload();
+        return;
+      }
+      seenBootId = info.bootId;
+    }
     // Visible on purpose (not only in the tooltip): the operator reports bugs
     // against a version, so the running build must be readable on screen.
     const shownCommit = String(info.build?.commit || '').slice(0, 7);

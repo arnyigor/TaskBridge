@@ -52,15 +52,28 @@ export class ModelCatalog {
     if (!refresh) {
       const cached = this.peek();
       if (cached) return cached;
+      // Stale-while-revalidate: an expired catalog still answers the picker
+      // instantly. A fresh Pi probe takes seconds, and with a 60s TTL the
+      // cache was almost always cold for a client (a phone) that opens the
+      // picker rarely — so it paid the full probe on every open. The refresh
+      // runs in the background for the next caller instead.
+      if (this.cache) {
+        if (!this.inFlight) this.#start().catch(() => {});
+        return this.cache.value;
+      }
     }
-    if (!this.inFlight) {
-      this.inFlight = this.#probe()
-        .then(value => {
-          this.cache = { at: Date.now(), value };
-          return value;
-        })
-        .finally(() => { this.inFlight = null; });
-    }
+    if (!this.inFlight) this.#start();
+    return this.inFlight;
+  }
+
+  // One probe at a time: concurrent callers share the same in-flight promise.
+  #start() {
+    this.inFlight = this.#probe()
+      .then(value => {
+        this.cache = { at: Date.now(), value };
+        return value;
+      })
+      .finally(() => { this.inFlight = null; });
     return this.inFlight;
   }
 

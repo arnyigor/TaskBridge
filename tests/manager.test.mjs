@@ -773,14 +773,22 @@ test('send-now stops the reasoning in flight so the message reaches Pi immediate
   for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });
 
-test('send-now never interrupts a running tool call', async t => {
+test('send-now stops a running command together with the turn', async t => {
   const f = await fixture(t, true);
   let aborts = 0;
-  f.pi.abort = async () => { aborts += 1; };
+  let aborted = false;
+  f.pi.abort = async () => { aborts += 1; aborted = true; };
+  f.pi.getState = async () => ({ isStreaming: !aborted });
   f.manager.toolLogs.set('a:t1', { name: 'tool-t1.log', bytes: 0 });
   await f.manager.message('a', 'текст', 'auto', [], null, { now: true });
-  assert.equal(aborts, 0, 'aborting a tool call would leave half-applied side effects');
-  assert.deepEqual(f.sent, ['текст'], 'the message still reaches Pi (as steering)');
+  // «Отправить сейчас» — явное решение оператора, и оно важнее сохранности
+  // наполовину выполненной команды: Pi при abort гасит дерево процессов bash-тула,
+  // поэтому команда умирает вместе с ходом, а сообщение уходит новым prompt'ом.
+  assert.equal(aborts, 1, 'команда в полёте останавливается вместе с ходом');
+  assert.deepEqual(f.sent, ['текст'], 'сообщение доставлено новым ходом, а не steer\'ом');
+  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
+  assert.ok(types.includes('USER_MESSAGE'), types.join(','));
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });
 
 test('a queued prompt survives the send-now interrupt', async t => {

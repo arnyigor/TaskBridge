@@ -3,6 +3,7 @@ import https from 'node:https';
 import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
+import crypto from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -60,6 +61,12 @@ const build = await (async () => {
 })();
 
 const config = await loadConfig(rootDir);
+
+// Identifies this process run, not the code it runs: every page keeps the bootId
+// it first saw and reloads when it changes — that is how a phone tab (which has
+// no restart flow of its own running) learns the machine was restarted behind
+// its back and refreshes like the tab that pressed the button.
+const bootId = crypto.randomUUID();
 
 // Variant B (docs/agent-host-separation.md §12): the app runs *behind* the LAN
 // proxy, and the proxy owns the public face — address, port, TLS. These knobs
@@ -678,9 +685,13 @@ async function handleRequest(req, res) {
       if (body?.confirm !== true) {
         return errorJson(res, 400, Object.assign(new Error('Перезапуск сервера требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' }));
       }
-      if (manager.activeTaskId || manager.admitting || manager.runtimeChanging) {
-        return errorJson(res, 409, Object.assign(new Error('Дождитесь завершения текущей операции перед перезапуском.'), { code: 'MODEL_BUSY' }));
-      }
+      // No busy gate here, deliberately: a restart relaunches the whole tree
+      // (taskkill /T in the helper script), so it cannot rely on anything inside
+      // the dying process — including the very flags that say "busy". Those
+      // flags are exactly what a stuck state leaves behind, and the restart is
+      // the only escape hatch that resets them. The UI confirm dialog already
+      // warns that active sessions will be interrupted; confirm:true is that
+      // warning for API callers.
       const mode = await detectServerMode();
       const script = mode === 'lan' ? 'scripts/restart-lan-now.mjs' : 'scripts/restart-and-verify.mjs';
       const args = mode === 'lan' ? [script, '--delay-ms=1500'] : [script, '--delay-ms=1500', `--port=${port}`];
@@ -781,6 +792,7 @@ async function handleRequest(req, res) {
       return json(res, 200, {
         name: 'TaskBridge MVP',
         build,
+        bootId,
         apiVersion: API_VERSION,
         addresses: [
           ...lanAddresses(publicPort),
