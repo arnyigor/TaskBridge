@@ -1,0 +1,36 @@
+{
+  "app": "com.arny.habrrss.b2",
+  "verdict": "CRASH",
+  "at": "2026-09-18T12:01:48.585Z",
+  "driver": "uiautomator",
+  "goal": null,
+  "steps": [
+    "устройство emulator-5554, приложение com.arny.habrrss.b2, драйвер uiautomator",
+    "фикстура на месте: 156807168 байт",
+    "приложение на переднем плане",
+    "не найдена вкладка /^Хабы$/ в нижней полосе",
+    "скролл 1 — /programming/i пока нет",
+    "скролл 2 — /programming/i пока нет",
+    "скролл 3 — /programming/i пока нет",
+    "не найден текст /programming/i (скроллов: 3)"
+  ],
+  "crash": {
+    "timestamp": "2026-09-18 12:01:41.387",
+    "reason": 4,
+    "reasonText": "APP CRASH(EXCEPTION",
+    "pss": null,
+    "rss": null
+  },
+  "died": false,
+  "evidence": {
+    "oom": "09-18 12:01:40.039  8900  8931 W arny.habrrss.b: Throwing OutOfMemoryError \"Failed to allocate a 13184 byte allocation with 461120 free bytes and 450KB until OOM, target footprint 201326592, growth limit 201326592\" (VmSize 14045464 kB)",
+    "heap": "growth limit 201326592",
+    "size": "updateState items=0 visible=0 hubs=1 tags=0 derivedCached=false destination=Feed elapsed=11ms"
+  },
+  "reasons": [
+    "exit-info: APP CRASH(EXCEPTION (2026-09-18 12:01:41.387)",
+    "logcat: 09-18 12:01:40.039  8900  8931 W arny.habrrss.b: Throwing OutOfMemoryError \"Failed to allocate a 13184 byte allocation with 461120 free bytes and 450KB until OOM, target footprint 201326592, growth li",
+    "heap: growth limit 201326592",
+    "лог приложения: updateState items=0 visible=0 hubs=1 tags=0 derivedCached=false destination=Feed elapsed=11ms"
+  ]
+}

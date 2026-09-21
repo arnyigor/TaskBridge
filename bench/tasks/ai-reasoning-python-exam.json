@@ -1,0 +1,71 @@
+{
+  "id": "ai-reasoning-python-exam",
+  "project": "AI-Reasoning-Lab",
+  "root": "G:/Android/OpenideProjects/AI-Reasoning-Lab",
+  "scope": "baselogic/core",
+  "why": [
+    "Быстрая проверка того, что sg (ast-grep) работает на Python и что модель его вызывает —",
+    "до этого sg мерился только на Kotlin/JS. Проект маленький (190 файлов), поэтому задача",
+    "не различает обвязки — здесь проверяется работа инструмента, а не эффект.",
+    "Эталон посчитан независимо: grep + чтение файлов вручную."
+  ],
+  "prompt": "Ты работаешь в Python-проекте. Отвечь на 2 вопроса про код пакета baselogic/core.\n\nQ1. Какие классы в baselogic/core наследуют интерфейс ProviderClient? Перечисли файл и строку объявления каждого класса-реализации.\nQ2. Сколько классов в файле baselogic/core/enhanced_validator.py имеют метод score? Перечисли имена классов.\n\nФормат итогового ответа — строго так, без пояснений:\nQ1|<число>|<файл>:<строка>[,<файл>:<строка>]\nQ2|<число>|<имя>[,<имя>]\n",
+  "questions": [
+    {
+      "id": "Q1",
+      "kind": "impls_with_lines",
+      "count": 3,
+      "expect": [
+        "GeminiClient.py:50",
+        "ollama_client.py:20",
+        "openai_client.py:12"
+      ],
+      "traps": [
+        "interfaces.py:54 — class ProviderClient(ABC): это сам интерфейс, тоже «наследует» (ABC) — не реализация.",
+        "client_factory.py:16 — тип возврата -> ProviderClient, не реализация.",
+        "llm_client.py:16 — тип параметра, не реализация.",
+        "Всего упоминаний 12, реализаций — 3.",
+        "Класс в openai_client.py называется OpenAICompatibleClient — имя файла не совпадает с именем класса."
+      ],
+      "truth_note": "grep -rn ProviderClient даёт 12 попаданий; фильтр по 'class X(ProviderClient):' даёт 3."
+    },
+    {
+      "id": "Q2",
+      "kind": "name_set",
+      "count": 4,
+      "expect": [
+        "BaseScorer",
+        "SemanticAnalyzer",
+        "LLMJudge",
+        "StatisticalCalibrator"
+      ],
+      "traps": [
+        "def score встречается 4 раза в одном файле с отступами — текстовый поиск не различит, какой класс владеет каким def, без чтения.",
+        "EnsembleScorer и EnhancedValidator метода score не имеют.",
+        "В файле 8 классов: ValidationLevel, ValidationResult, ValidationConfig, BaseScorer, SemanticAnalyzer, LLMJudge, StatisticalCalibrator, EnsembleScorer, EnhancedValidator."
+      ],
+      "truth_note": "grep -n 'class |def score' даёт карту владения: 4 класса имеют score."
+    }
+  ],
+  "scoring": {
+    "correctness": "Для каждого вопроса — точное сравнение множеств. Вопрос зачтён только при полном совпадении.",
+    "line_tolerance": 3,
+    "line_rule": "Для Python строка класса однозначна, поэтому допуск — числовое окно ±3 строки вокруг эталона.",
+    "primary_metrics": [
+      "число шагов до итогового ответа",
+      "состав вызовов: grep / bash / read / ast / sg",
+      "токены на вход, время прогона"
+    ]
+  },
+  "runs": {
+    "arms": {
+      "A": "обвязка выключена: PI_CODE_SEARCH_OFF=1",
+      "B": "включены инструменты ast/sg"
+    },
+    "repeats": 3,
+    "model": "llama.cpp/qwen-27b-q3",
+    "thinking": "off",
+    "note": "Плечо C (перехват) здесь не гоняется: перехват зовёт ast-index, который работает только по Kotlin/Java — на Python он честно молчит."
+  },
+  "rel_base": ""
+}

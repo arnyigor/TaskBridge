@@ -1,0 +1,15 @@
+{
+  "dvKmS": 3.132,
+  "dvMS": 3132,
+  "minMoonCenterKm": 4671,
+  "minMoonSurfaceKm": 2934,
+  "impact": false,
+  "success": true,
+  "phase": 2.17693,
+  "timeToClosestDays": 3.88,
+  "deepestFlyby": {
+    "dvKmS": 3.17,
+    "minMoonCenterKm": 1704
+  },
+  "note": "Эталон посчитан независимо от файлов моделей: та же постановка, своя реализация. Минимизируется Δv, а не расстояние."
+}

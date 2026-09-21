@@ -1,0 +1,34 @@
+openjdk version "17.0.17" 2025-10-21 LTS
+OpenJDK Runtime Environment Microsoft-12574423 (build 17.0.17+10-LTS)
+OpenJDK 64-Bit Server VM Microsoft-12574423 (build 17.0.17+10-LTS, mixed mode, sharing)
+---
+ANDROID_HOME= ANDROID_SDK_ROOT=
+emulator
+platform-tools
+---
+/usr/bin/bash: line 1: gradle: command not found
+---
+akvarium
+bouncing_balls
+container_shape
+index.html
+index_01.html
+index_Q4XS.html
+index_q3.html
+kmp_app
+moon_mission
+moon_mission.html
+moon_mission_3KXL.html
+moon_mission_3d
+moon_mission_GPT.html
+moon_mission_Q4XS_medium.html
+moon_mission_Q4_001.html
+moon_mission_V4_pro.html
+moon_mission_chat_27B.html
+moon_mission_ornith_6.html
+moon_mission_q4_Xs.html
+moon_transfer.html
+styled_container
+traffic
+tree
+tree.html

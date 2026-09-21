@@ -1,0 +1,8 @@
+=== IPv6 only ===
+v6 http=000 ip= t=0.133604
+curl: (6) Could not resolve host: pkg.pr.new
+exit6=6
+=== IPv4 forced, 20s ===
+v4 http=200 ip=172.66.44.216 t=20.007414
+curl: (28) Operation timed out after 20007 milliseconds with 25411 bytes received
+exit4=28

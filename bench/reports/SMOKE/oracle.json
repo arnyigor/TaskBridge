@@ -1,0 +1,19 @@
+{
+  "root": "G:\\AIModels\\LLMBenchmarks\\MyTests\\anwap_bug",
+  "changedFiles": [
+    "M app/src/main/java/com/arny/mobilecinema/presentation/player/PlayerSource.kt",
+    "?? PROMPT_OBS.txt",
+    "?? runs/"
+  ],
+  "touchedTests": [],
+  "touchedBuild": [],
+  "seconds": 66,
+  "tests": {
+    "total": 25,
+    "failed": 0
+  },
+  "failedTests": [],
+  "verdict": "PASS"
+}
+
+ВЕРДИКТ: PASS

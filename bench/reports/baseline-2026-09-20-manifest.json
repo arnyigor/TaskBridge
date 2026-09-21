@@ -1,0 +1,36 @@
+{
+  "benchmarkId": "observational-baseline-v1",
+  "why": "Первый честный observational baseline: три одинаковых прогона одной задачи, ни одного enforcement. Отвечает сразу на три вопроса — застой, write burst, грязный финиш.",
+  "taskId": "kmp-todo-greenfield",
+  "taskSha1": "3c2afdce353c",
+  "supervisorSha1": "0467a3f64904 (R1-R3), 4fa1a0db2f99 (после починки прибора и перевода умолчаний в shadow)",
+  "extensionPath": "~/.pi/agent/extensions/bench-harness/supervisor.ts",
+  "eventSchemaVersion": 1,
+  "model": "llama.cpp/qwen-27b-q3",
+  "quant": "Qwen3.8-27B-UD-Q3_K_XL",
+  "ctx": 102400,
+  "cachePrompt": true,
+  "thinking": "medium",
+  "reasoningBudget": 6144,
+  "temp": 0.6, "topK": 20, "topP": 0.95, "presencePenalty": 0.52,
+  "router": "http://127.0.0.1:8090",
+  "settings": {
+    "stagnationAfter": 24,
+    "editsBeforeVerifyBlock": 4,
+    "shadowWindow": 8,
+    "BENCH_SHADOW": 1,
+    "BENCH_BLOCKING": 1,
+    "BENCH_AUTO_VERIFY": 0,
+    "BENCH_MAX_NUDGES": 0
+  },
+  "enforcement": {
+    "stagnation": "OFF (shadow)",
+    "writeGate": "OFF (shadow)",
+    "finalVerify": "OFF (наблюдение)",
+    "nudgeSteer": "OFF (maxNudges=0)",
+    "autoVerify": "OFF (обвязка не проверяет за модель)"
+  },
+  "runTimeoutMinutes": 25,
+  "runs": ["shadow-base-1", "shadow-base-2", "shadow-base-3"],
+  "rule": "Между прогонами не менять НИЧЕГО. Если найден дефект измерителя — серия отменяется целиком и начинается заново с R1."
+}
