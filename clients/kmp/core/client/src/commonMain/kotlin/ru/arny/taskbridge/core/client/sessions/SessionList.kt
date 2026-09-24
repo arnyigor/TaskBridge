@@ -69,6 +69,13 @@ class SessionList(
     private val _state = MutableStateFlow(SessionListState())
     val state: StateFlow<SessionListState> = _state.asStateFlow()
 
+    /**
+     * Sessions being or just deleted. Deleting takes the server seconds (it
+     * stops Pi first), and a poll started before it ended still lists the
+     * session: without this it came back, and a second delete got 404.
+     * An id leaves the set once a poll no longer lists it.
+     */
+    private val hidden = MutableStateFlow<Set<String>>(emptySet())
     private var job: Job? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private var infoTick = 0
@@ -96,7 +103,9 @@ class SessionList(
 
     private suspend fun load() {
         try {
-            val tasks = api.tasks()
+            val listed = api.tasks()
+            hidden.update { ids -> ids.filterTo(mutableSetOf()) { id -> listed.any { it.id == id } } }
+            val tasks = listed.filterNot { it.id in hidden.value }
             val projects = if (_state.value.projects.isEmpty() || infoTick % 10 == 0) api.projects() else _state.value.projects
             val info = if (_state.value.info == null || infoTick % 5 == 0) api.info() else _state.value.info
             infoTick += 1
@@ -138,9 +147,21 @@ class SessionList(
         task
     }
 
-    suspend fun delete(taskId: String): Result<Unit> = runCatching {
-        api.delete(taskId)
+    /** Drops a session deleted elsewhere (from its chat) from the list, and keeps a stale poll from bringing it back. */
+    fun forget(taskId: String) {
+        hidden.update { it + taskId }
         _state.update { s -> s.copy(tasks = s.tasks.filterNot { it.id == taskId }) }
+    }
+
+    /** Hides the session at once; "not found" means it is already gone, which is success. */
+    suspend fun delete(taskId: String): Result<Unit> {
+        forget(taskId)
+        return runCatching { api.delete(taskId) }
+            .recoverCatching { if ((it as? ApiException)?.error !is ApiError.NotFound) throw it }
+            .onFailure {
+                hidden.update { ids -> ids - taskId }
+                wake.trySend(Unit)
+            }
     }
 
     suspend fun rename(taskId: String, title: String): Result<Unit> = runCatching {

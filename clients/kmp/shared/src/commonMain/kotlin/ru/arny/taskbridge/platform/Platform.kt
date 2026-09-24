@@ -45,6 +45,10 @@ interface PlatformServices {
     fun openUrl(url: String)
 }
 
+/** Status and navigation bar icons follow the app theme, not the system one (Android); no-op on desktop. */
+@Composable
+expect fun SystemBarsAppearance(dark: Boolean)
+
 /** System back (Android); no-op on desktop, where Esc is handled by the screens. */
 @Composable
 expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)

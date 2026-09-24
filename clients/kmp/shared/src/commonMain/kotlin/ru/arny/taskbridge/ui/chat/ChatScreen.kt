@@ -4,7 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -23,21 +24,16 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -50,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -88,13 +85,16 @@ import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.platform.rememberFilePicker
+import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
-import ru.arny.taskbridge.ui.common.StatusPill
+import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.parseIsoMillis
 import ru.arny.taskbridge.ui.common.sourceLabel
 import ru.arny.taskbridge.ui.common.timeRange
+import ru.arny.taskbridge.ui.sessions.FieldLabel
 import ru.arny.taskbridge.ui.sessions.ModelPicker
+import ru.arny.taskbridge.ui.sessions.ThinkingPicker
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -129,6 +129,7 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var dialog by remember { mutableStateOf<ChatDialog?>(null) }
+    var viewing by remember { mutableStateOf<FileTarget?>(null) }
     var files by remember(taskId) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var draft by remember(taskId) { mutableStateOf(TextFieldValue(graph.settings.draft(taskId))) }
     val pickFiles = rememberFilePicker { picked -> files = files + picked }
@@ -149,7 +150,7 @@ fun ChatScreen(
                 is ChatEffect.RestoreComposer -> draft = TextFieldValue(effect.text)
                 is ChatEffect.OpenSession -> onOpenSession(effect.taskId)
                 ChatEffect.Deleted -> {
-                    connection.sessions.refresh()
+                    connection.sessions.forget(taskId)
                     connection.closeChat(taskId)
                     onBack()
                 }
@@ -180,10 +181,7 @@ fun ChatScreen(
                 working = working,
                 showBack = showBack,
                 onBack = onBack,
-                onStop = { if (task?.pendingPrompts?.isNotEmpty() == true) dialog = ChatDialog.ConfirmStop else session.cancel() },
-                stopping = "cancel" in state.busy || task?.status == "CANCELLING",
                 onDialog = { dialog = it },
-                onCompact = { session.compact() },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
@@ -205,34 +203,69 @@ fun ChatScreen(
                         listState = listState,
                         historyLocked = historyLocked,
                         onDialog = { dialog = it },
+                        onViewFile = { viewing = it },
+                        onCopyMessage = { text ->
+                            platform.copyText(text)
+                            snackbar.currentSnackbarData?.dismiss()
+                            scope.launch { snackbar.showSnackbar("Сообщение скопировано") }
+                        },
                     )
                 }
+                // Reading older messages: the list stays put; new output only lights up the jump button.
                 val showJump by remember { derivedStateOf { listState.firstVisibleItemIndex > 1 } }
+                val newest = state.chat.items.lastOrNull()
+                val newestSignature = newest?.let { it.id + ((it as? ChatItem.Assistant)?.let { a -> a.text.length + a.tools.size } ?: 0) }
+                var seenSignature by remember { mutableStateOf(newestSignature) }
+                LaunchedEffect(showJump, newestSignature) { if (!showJump) seenSignature = newestSignature }
+                val hasNew = showJump && newestSignature != seenSignature
                 // Qualified: inside Box-in-Column the ColumnScope overload would win and is illegal here.
-                androidx.compose.animation.AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                androidx.compose.animation.AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)) {
                     SmallFloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem(0) } }) {
-                        Icon(AppIcons.ArrowDown, "К последнему сообщению")
+                        Row(Modifier.padding(horizontal = if (hasNew) 12.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Icon(AppIcons.ArrowDown, "К последнему сообщению", Modifier.size(18.dp))
+                            if (hasNew) {
+                                Spacer(Modifier.width(6.dp))
+                                Text("Новое", style = MaterialTheme.typography.labelLarge)
+                            }
+                        }
                     }
                 }
             }
             for (approval in state.approvals) {
                 ApprovalCard(approval, busy = "approval:${approval.approvalId}" in state.busy, onAnswer = { allow -> session.answerApproval(approval.approvalId, allow) })
             }
-            if (task != null && task.pendingPrompts.isNotEmpty()) {
-                QueuePanel(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
-            }
-            for (message in state.outbox) {
-                OutboxRow(
-                    message,
-                    onRetry = { session.retry(message.commandId) },
-                    onEdit = {
-                        draft = TextFieldValue(message.text)
-                        session.dismiss(message.commandId)
-                    },
-                    onDismiss = { session.dismiss(message.commandId) },
-                )
-            }
             Composer(
+                runStartedAt = parseIsoMillis(task?.statusChangedAt),
+                activity = task?.current,
+                stopping = "cancel" in state.busy || task?.status == "CANCELLING",
+                onStop = { if (task?.pendingPrompts?.isNotEmpty() == true) dialog = ChatDialog.ConfirmStop else session.cancel() },
+                tools = {
+                    if (task != null) ContextButton(
+                        summary = listOfNotNull(
+                            task.model?.label?.takeIf { it != "—" },
+                            (task.thinkingLevelActual ?: task.thinkingLevel)?.let { thinkingLabel(it) },
+                        ).joinToString(" · "),
+                        canCompact = !working,
+                        onModel = { dialog = ChatDialog.ModelSettings },
+                        onCompact = { session.compact() },
+                    )
+                },
+                top = {
+                    if (task != null && task.pendingPrompts.isNotEmpty()) {
+                        QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
+                    }
+                    for (message in state.outbox) {
+                        OutboxRow(
+                            message,
+                            onRetry = { session.retry(message.commandId) },
+                            onEdit = {
+                                draft = TextFieldValue(message.text)
+                                session.dismiss(message.commandId)
+                            },
+                            onDismiss = { session.dismiss(message.commandId) },
+                        )
+                    }
+                },
                 value = draft,
                 onValueChange = { draft = it },
                 files = files,
@@ -248,6 +281,7 @@ fun ChatScreen(
     }
 
     ChatDialogs(dialog, state, session, graph, onClose = { dialog = null })
+    viewing?.let { FileViewer(it, session, platform, onDismiss = { viewing = null }) }
 }
 
 @Composable
@@ -257,10 +291,7 @@ private fun ChatTopBar(
     working: Boolean,
     showBack: Boolean,
     onBack: () -> Unit,
-    onStop: () -> Unit,
-    stopping: Boolean,
     onDialog: (ChatDialog) -> Unit,
-    onCompact: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val task = state.task
@@ -269,37 +300,28 @@ private fun ChatTopBar(
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
         },
         title = {
-            Column {
+            // Title plus one quiet line "● Работает · model"; tapping it opens the session panel.
+            Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = task != null) { onDialog(ChatDialog.ModelSettings) }) {
                 Text(task?.displayTitle ?: "Сессия", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    if (task != null) StatusPill(displayState, text = task.current?.takeIf { working }?.take(40) ?: displayState.label)
-                    task?.model?.label?.takeIf { it != "—" }?.let {
-                        Spacer(Modifier.width(8.dp))
-                        Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (task != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        StatusDot(displayState, size = 7)
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            listOfNotNull(displayState.label, task.model?.label?.takeIf { it != "—" }).joinToString(" · "),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                     }
                 }
             }
         },
         actions = {
-            if (working) {
-                Button(
-                    onClick = onStop,
-                    enabled = !stopping,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError),
-                    contentPadding = PaddingValues(horizontal = 14.dp),
-                    modifier = Modifier.height(36.dp),
-                ) {
-                    if (stopping) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onError)
-                    else Icon(AppIcons.Stop, null, Modifier.size(14.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("STOP")
-                }
-            }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    DropdownMenuItem(text = { Text("Модель и размышления") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { menu = false; onDialog(ChatDialog.ModelSettings) })
-                    DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { menu = false; onCompact() })
                     DropdownMenuItem(text = { Text("Переименовать") }, leadingIcon = { Icon(AppIcons.Edit, null) }, onClick = { menu = false; onDialog(ChatDialog.Rename) })
                     DropdownMenuItem(text = { Text("Очистить чат") }, leadingIcon = { Icon(AppIcons.Eraser, null) }, enabled = !working, onClick = { menu = false; onDialog(ChatDialog.ConfirmClear) })
                     DropdownMenuItem(
@@ -311,6 +333,29 @@ private fun ChatTopBar(
             }
         },
     )
+}
+
+/** Beside the input: the model and context actions, with the current model as the menu's header. */
+@Composable
+private fun ContextButton(summary: String, canCompact: Boolean, onModel: () -> Unit, onCompact: () -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) { Icon(AppIcons.Spark, "Модель и контекст") }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (summary.isNotEmpty()) {
+                Text(
+                    summary,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 280.dp).padding(horizontal = 16.dp, vertical = 8.dp),
+                )
+            }
+            DropdownMenuItem(text = { Text("Модель и размышления") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { open = false; onModel() })
+            DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = canCompact, onClick = { open = false; onCompact() })
+        }
+    }
 }
 
 @Composable
@@ -343,19 +388,24 @@ private fun MessageList(
     listState: androidx.compose.foundation.lazy.LazyListState,
     historyLocked: Boolean,
     onDialog: (ChatDialog) -> Unit,
+    onViewFile: (FileTarget) -> Unit,
+    onCopyMessage: (String) -> Unit,
 ) {
     val platform = graph.platform
     val ownClient = graph.settings.clientId
     val items = state.chat.items
     val reversed = remember(items) { items.asReversed() }
     // Older history loads when the top of the chat comes into view.
-    val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 3 } == true } }
+    val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 10 } == true } }
     LaunchedEffect(nearTop, state.reachedStart) { if (nearTop && !state.reachedStart) session.loadOlder() }
 
     if (items.isEmpty()) {
-        EmptyState(AppIcons.Chat, "Пустой чат", "Напишите агенту, что сделать.")
+        val task = state.task
+        val setup = listOfNotNull(task?.model?.label?.takeIf { it != "—" }, (task?.thinkingLevelActual ?: task?.thinkingLevel)?.let { "размышления: ${thinkingLabel(it)}" }).joinToString(" · ")
+        EmptyState(AppIcons.Chat, "Что сделать агенту?", listOfNotNull(setup.ifEmpty { null }, "Опишите задачу — агент прочитает проект, внесёт правки и запустит команды.").joinToString("\n"))
         return
     }
+    CompositionLocalProvider(LocalChatListState provides listState) {
     LazyColumn(
         state = listState,
         reverseLayout = true,
@@ -374,12 +424,12 @@ private fun MessageList(
                                 time = parseIsoMillis(item.at)?.let { platform.formatClock(it) }.orEmpty(),
                                 source = sourceLabel(item.clientId, ownClient),
                                 actions = MessageActions(
-                                    copy = { platform.copyText(item.text) },
+                                    copy = { onCopyMessage(item.text) },
                                     edit = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.EditMessage(it, item.text)) } },
                                     fork = turnId?.takeIf { !historyLocked }?.let { { session.fork(it) } },
                                     deleteFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.DeleteFrom(it)) } },
                                 ),
-                                onOpenFile = { platform.openUrl(session.fileUrl(it)) },
+                                onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
                             )
                         }
                         is ChatItem.Assistant -> {
@@ -388,7 +438,7 @@ private fun MessageList(
                                 item = item,
                                 time = timeRange(platform, item.at, item.endedAt),
                                 actions = MessageActions(
-                                    copy = { platform.copyText(item.text) },
+                                    copy = { onCopyMessage(item.text) },
                                     edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.id, item.text)) }) else null,
                                     fork = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
                                     regenerate = if (newest) ({ session.regenerate(item.id) }) else null,
@@ -396,7 +446,8 @@ private fun MessageList(
                                 ),
                                 onCopyText = { platform.copyText(it) },
                                 loadToolOutput = { session.toolOutput(it) },
-                                onOpenPath = { platform.openUrl(session.workspaceFileUrl(it)) },
+                                onOpenPath = { onViewFile(FileTarget.Workspace(it)) },
+                                hoverActions = platform.kind == "desktop",
                                 onSelectVariant = { position ->
                                     val variants = item.variants
                                     val variantId = variants?.variantIdAt(position)
@@ -418,6 +469,7 @@ private fun MessageList(
                 }
             }
         }
+    }
     }
 }
 
@@ -473,8 +525,12 @@ private fun argsPreview(args: JsonElement): String {
     return obj.entries.joinToString("\n") { (key, value) -> "$key: ${(value as? kotlinx.serialization.json.JsonPrimitive)?.content ?: value}" }
 }
 
+/**
+ * The queue as one line above the input: one message shows its text and ×,
+ * several show "В очереди: N ›" and unfold into the list with «Сейчас» / ×.
+ */
 @Composable
-private fun QueuePanel(
+private fun QueueLine(
     pending: List<PendingPrompt>,
     working: Boolean,
     busy: Set<String>,
@@ -482,19 +538,36 @@ private fun QueuePanel(
     onDrop: (String) -> Unit,
 ) {
     val colors = LocalStatusColors.current
-    Surface(color = colors.queued.copy(alpha = 0.08f), modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(AppIcons.Queue, null, tint = colors.queued, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    "В очереди: ${pending.size}" + if (working) " · уйдут после текущего ответа" else "",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = colors.queued,
-                )
+    var open by remember { mutableStateOf(false) }
+    val single = pending.singleOrNull()
+    Column(Modifier.fillMaxWidth().padding(bottom = 4.dp).clip(RoundedCornerShape(12.dp)).background(colors.queued.copy(alpha = 0.08f))) {
+        Row(
+            Modifier.fillMaxWidth().clickable(enabled = single == null) { open = !open }.padding(start = 12.dp, end = 4.dp).heightIn(min = 36.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(AppIcons.Queue, null, tint = colors.queued, modifier = Modifier.size(15.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                if (single != null) "В очереди · ${single.text}" else "В очереди: ${pending.size}" + if (working && !open) " · уйдут после ответа" else "",
+                style = MaterialTheme.typography.labelMedium,
+                color = colors.queued,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (single != null) {
+                val busyHere = "pending:${single.id}" in busy
+                TextButton(onClick = { onSendNow(single.id) }, enabled = !busyHere) { Text("Сейчас") }
+                IconButton(onClick = { onDrop(single.id) }, enabled = !busyHere, modifier = Modifier.size(32.dp)) {
+                    Icon(AppIcons.Close, "Убрать из очереди", Modifier.size(16.dp))
+                }
+            } else {
+                Icon(if (open) AppIcons.ChevronDown else AppIcons.ChevronRight, null, Modifier.padding(end = 8.dp).size(16.dp), tint = colors.queued)
             }
+        }
+        if (single == null && open) Column(Modifier.padding(start = 12.dp, end = 4.dp, bottom = 6.dp)) {
             for (prompt in pending) {
-                Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(prompt.text, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     val busyHere = "pending:${prompt.id}" in busy
                     TextButton(onClick = { onSendNow(prompt.id) }, enabled = !busyHere) { Text("Сейчас") }
@@ -614,49 +687,51 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
     var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
     LaunchedEffect(Unit) { connection.sessions.models().onSuccess { catalog = it } }
     val task = state.task
-    ModalBottomSheet(onDismissRequest = onClose) {
-        Column(Modifier.padding(horizontal = 20.dp).padding(bottom = 24.dp).navigationBarsPadding()) {
-            Text("Модель сессии", style = MaterialTheme.typography.titleLarge)
-            Spacer(Modifier.height(12.dp))
-            ModelPicker(catalog, task?.model, onPick = { session.setModel(it) })
-            Text(
-                "Смена модели записывается в историю Pi и переживает перезапуск.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-            val levels = catalog?.thinkingLevels.orEmpty()
-            if (levels.isNotEmpty()) {
-                Spacer(Modifier.height(16.dp))
-                Text("Размышления", style = MaterialTheme.typography.titleSmall)
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    val current = task?.thinkingLevelActual ?: task?.thinkingLevel
-                    for (level in levels) FilterChip(selected = current == level, onClick = { session.setThinking(level) }, label = { Text(thinkingLabel(level)) })
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Автосжатие контекста", style = MaterialTheme.typography.titleSmall)
-                    Text("Pi сам сожмёт историю, когда она перестанет помещаться.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Switch(checked = task?.autoCompactionEnabled != false, onCheckedChange = { session.setAutoCompaction(it) })
-            }
-            Spacer(Modifier.height(12.dp))
-            val usage = task?.lastUsage
-            val stats = listOfNotNull(
-                usage?.totalTokens?.let { "последний ход: $it токенов" },
-                task?.metrics?.tg?.let { "скорость ≈ ${it.toInt()} ток/с" },
-                task?.compaction?.count?.takeIf { it > 0 }?.let { "сжатий: $it" },
-            ).joinToString(" · ")
-            if (stats.isNotEmpty()) Text(stats, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(12.dp))
-            FilledTonalButton(onClick = { session.compact(); onClose() }, enabled = task?.status !in setOf("RUNNING", "PREPARING", "CANCELLING")) {
+    val running = task?.status in setOf("RUNNING", "PREPARING", "CANCELLING")
+    AdaptiveSheet(
+        title = "Сессия",
+        subtitle = task?.workspacePath,
+        onDismiss = onClose,
+        footer = {
+            OutlinedButton(onClick = { session.compact(); onClose() }, enabled = !running) {
                 Icon(AppIcons.Layers, null, Modifier.size(18.dp))
                 Spacer(Modifier.width(8.dp))
-                Text("Сжать контекст сейчас")
+                Text("Сжать контекст")
             }
+            Spacer(Modifier.weight(1f))
+            Button(onClick = onClose) { Text("Готово") }
+        },
+    ) {
+        FieldLabel("Модель")
+        ModelPicker(catalog, task?.model, onPick = { session.setModel(it) })
+        Text(
+            "Смена модели записывается в историю Pi и переживает перезапуск.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        val levels = catalog?.thinkingLevels.orEmpty()
+        if (levels.isNotEmpty() && task?.model?.reasoning != false) {
+            FieldLabel("Размышления", top = 20)
+            ThinkingPicker(levels, task?.thinkingLevelActual ?: task?.thinkingLevel, onPick = { session.setThinking(it) })
         }
+        FieldLabel("Контекст", top = 20)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Автосжатие", style = MaterialTheme.typography.bodyLarge)
+                Text("Pi сам сожмёт историю, когда она перестанет помещаться.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(checked = task?.autoCompactionEnabled != false, onCheckedChange = { session.setAutoCompaction(it) })
+        }
+        val usage = task?.lastUsage
+        val window = task?.model?.contextWindow
+        val stats = listOfNotNull(
+            usage?.totalTokens?.let { tokens -> "последний ход: $tokens" + (window?.let { " из ${it / 1000}K" } ?: "") + " токенов" },
+            task?.metrics?.tg?.let { "скорость ≈ ${it.toInt()} ток/с" },
+            task?.compaction?.count?.takeIf { it > 0 }?.let { "сжатий: $it" },
+        )
+        for (line in stats) Text(line, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
     }
 }
 
@@ -672,19 +747,30 @@ private fun TextEditDialog(
     extra: (@Composable () -> Unit)? = null,
 ) {
     var text by remember { mutableStateOf(initial) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            Column {
-                hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 8.dp)) }
-                OutlinedTextField(text, { text = it }, singleLine = singleLine, minLines = if (singleLine) 1 else 3, maxLines = 12, modifier = Modifier.fillMaxWidth())
-                extra?.invoke()
-            }
+    if (singleLine) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            title = { Text(title) },
+            text = { OutlinedTextField(text, { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
+            confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text(confirm) } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+        )
+        return
+    }
+    // A long message needs room: a wide dialog on desktop, a full sheet on a phone.
+    AdaptiveSheet(
+        title = title,
+        subtitle = hint,
+        onDismiss = onDismiss,
+        maxWidth = 760,
+        footer = {
+            TextButton(onClick = onDismiss) { Text("Отмена") }
+            Button(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text(confirm) }
         },
-        confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text(confirm) } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
-    )
+    ) {
+        OutlinedTextField(text, { text = it }, minLines = 6, maxLines = 20, modifier = Modifier.fillMaxWidth())
+        extra?.invoke()
+    }
 }
 
 @Composable

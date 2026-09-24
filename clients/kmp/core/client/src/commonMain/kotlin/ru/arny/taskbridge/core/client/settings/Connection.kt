@@ -47,6 +47,11 @@ class AppSettings(private val store: KeyValueStore, private val newId: () -> Str
         get() = store.get("lastSessionId")
         set(value) = store.put("lastSessionId", value)
 
+    /** A project folder the user folded or unfolded by hand on the sessions list; null = never touched. */
+    fun folderExpanded(projectId: String): Boolean? = store.get("folder:$projectId")?.toBooleanStrictOrNull()
+
+    fun setFolderExpanded(projectId: String, expanded: Boolean) = store.put("folder:$projectId", expanded.toString())
+
     fun draft(taskId: String): String = store.get("draft:$taskId").orEmpty()
 
     fun saveDraft(taskId: String, text: String) = store.put("draft:$taskId", text.ifEmpty { null })

@@ -85,6 +85,9 @@ class DesktopPlatformServices(
 actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) = Unit
 
 @Composable
+actual fun SystemBarsAppearance(dark: Boolean) = Unit
+
+@Composable
 actual fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit = remember(onPicked) {
     {
         val dialog = FileDialog(null as Frame?, "Выберите файлы", FileDialog.LOAD).apply {
