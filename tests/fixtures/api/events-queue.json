@@ -1,15 +1,15 @@
 [
   {
-    "at": "2026-09-24T10:19:11.844Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.212Z",
+    "taskId": "28ffa5c56e83",
     "type": "TASK_QUEUED",
     "message": "Task queued",
     "data": {},
     "seq": 1
   },
   {
-    "at": "2026-09-24T10:19:11.846Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.214Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Preparing workspace",
     "data": {
@@ -18,16 +18,16 @@
     "seq": 2
   },
   {
-    "at": "2026-09-24T10:19:11.848Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.216Z",
+    "taskId": "28ffa5c56e83",
     "type": "WORKSPACE_READY",
-    "message": "Workspace: /tmp/taskbridge-http-test-VTkkxA",
+    "message": "Workspace: /tmp/taskbridge-http-test-G6bEuT",
     "data": {},
     "seq": 3
   },
   {
-    "at": "2026-09-24T10:19:11.848Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.217Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Checking local model runtime",
     "data": {
@@ -36,16 +36,16 @@
     "seq": 4
   },
   {
-    "at": "2026-09-24T10:19:11.849Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.218Z",
+    "taskId": "28ffa5c56e83",
     "type": "RUNTIME_READY",
     "message": "Local runtime: EXTERNAL_RUNNING",
     "data": {},
     "seq": 5
   },
   {
-    "at": "2026-09-24T10:19:11.916Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.284Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Pi starting",
     "data": {
@@ -54,8 +54,8 @@
     "seq": 6
   },
   {
-    "at": "2026-09-24T10:19:11.918Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.287Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "Pi started processing",
     "data": {
@@ -66,8 +66,8 @@
     "seq": 7
   },
   {
-    "at": "2026-09-24T10:19:11.919Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.288Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -87,8 +87,8 @@
     "seq": 8
   },
   {
-    "at": "2026-09-24T10:19:11.920Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.289Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -108,8 +108,8 @@
     "seq": 9
   },
   {
-    "at": "2026-09-24T10:19:11.921Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.289Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -124,8 +124,8 @@
     "seq": 10
   },
   {
-    "at": "2026-09-24T10:19:11.921Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.290Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "tool: read — example.txt",
     "data": {
@@ -141,8 +141,8 @@
     "seq": 11
   },
   {
-    "at": "2026-09-24T10:19:11.922Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.291Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "tool done: read",
     "data": {
@@ -156,8 +156,8 @@
     "seq": 12
   },
   {
-    "at": "2026-09-24T10:19:12.051Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.421Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -183,8 +183,8 @@
     "seq": 16
   },
   {
-    "at": "2026-09-24T10:19:12.052Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.422Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "agent_end",
     "data": {
@@ -195,8 +195,8 @@
     "seq": 17
   },
   {
-    "at": "2026-09-24T10:19:12.053Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.423Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "Pi settled",
     "data": {
@@ -207,8 +207,8 @@
     "seq": 18
   },
   {
-    "at": "2026-09-24T10:19:12.054Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.424Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Collecting diff and changed files",
     "data": {
@@ -217,16 +217,16 @@
     "seq": 19
   },
   {
-    "at": "2026-09-24T10:19:12.066Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.437Z",
+    "taskId": "28ffa5c56e83",
     "type": "TASK_SUCCEEDED",
     "message": "Done",
     "data": {},
     "seq": 20
   },
   {
-    "at": "2026-09-24T10:19:12.133Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.500Z",
+    "taskId": "28ffa5c56e83",
     "type": "USER_MESSAGE",
     "message": "slow — второй ход",
     "data": {
@@ -239,8 +239,8 @@
     "seq": 21
   },
   {
-    "at": "2026-09-24T10:19:12.134Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.501Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Follow-up sent to Pi",
     "data": {
@@ -249,8 +249,8 @@
     "seq": 22
   },
   {
-    "at": "2026-09-24T10:19:12.135Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.502Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "Pi started processing",
     "data": {
@@ -261,8 +261,8 @@
     "seq": 23
   },
   {
-    "at": "2026-09-24T10:19:12.135Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.502Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -282,8 +282,8 @@
     "seq": 24
   },
   {
-    "at": "2026-09-24T10:19:12.136Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.503Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -303,8 +303,8 @@
     "seq": 25
   },
   {
-    "at": "2026-09-24T10:19:12.136Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.503Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -319,8 +319,8 @@
     "seq": 26
   },
   {
-    "at": "2026-09-24T10:19:12.137Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.504Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "tool: read — example.txt",
     "data": {
@@ -336,8 +336,8 @@
     "seq": 27
   },
   {
-    "at": "2026-09-24T10:19:12.137Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.504Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "tool done: read",
     "data": {
@@ -351,20 +351,20 @@
     "seq": 28
   },
   {
-    "at": "2026-09-24T10:19:12.441Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:41:59.807Z",
+    "taskId": "28ffa5c56e83",
     "type": "PROMPT_QUEUED",
     "message": "Сообщение поставлено в очередь",
     "data": {
-      "pendingId": "26005c92-f8fd-4485-af68-8aaa1bf42684",
+      "pendingId": "e5b5cd27-005e-4023-b1a2-0d7c061b086e",
       "commandId": "fixture-msg-2",
       "clientId": "fixture-desktop"
     },
     "seq": 29
   },
   {
-    "at": "2026-09-24T10:19:22.196Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.562Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -390,8 +390,8 @@
     "seq": 33
   },
   {
-    "at": "2026-09-24T10:19:22.197Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.563Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "agent_end",
     "data": {
@@ -402,8 +402,8 @@
     "seq": 34
   },
   {
-    "at": "2026-09-24T10:19:22.198Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.563Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "Pi settled",
     "data": {
@@ -414,8 +414,8 @@
     "seq": 35
   },
   {
-    "at": "2026-09-24T10:19:22.199Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.564Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Collecting diff and changed files",
     "data": {
@@ -424,16 +424,16 @@
     "seq": 36
   },
   {
-    "at": "2026-09-24T10:19:22.211Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.575Z",
+    "taskId": "28ffa5c56e83",
     "type": "TASK_SUCCEEDED",
     "message": "Done",
     "data": {},
     "seq": 37
   },
   {
-    "at": "2026-09-24T10:19:22.224Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.601Z",
+    "taskId": "28ffa5c56e83",
     "type": "USER_MESSAGE",
     "message": "из очереди",
     "data": {
@@ -442,13 +442,13 @@
       "files": [],
       "commandId": "fixture-msg-2",
       "clientId": "fixture-desktop",
-      "pendingId": "26005c92-f8fd-4485-af68-8aaa1bf42684"
+      "pendingId": "e5b5cd27-005e-4023-b1a2-0d7c061b086e"
     },
     "seq": 38
   },
   {
-    "at": "2026-09-24T10:19:22.225Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.602Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Follow-up sent to Pi",
     "data": {
@@ -457,8 +457,8 @@
     "seq": 39
   },
   {
-    "at": "2026-09-24T10:19:22.226Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.603Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "Pi started processing",
     "data": {
@@ -469,8 +469,8 @@
     "seq": 40
   },
   {
-    "at": "2026-09-24T10:19:22.227Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.604Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -490,8 +490,8 @@
     "seq": 41
   },
   {
-    "at": "2026-09-24T10:19:22.228Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.604Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -511,8 +511,8 @@
     "seq": 42
   },
   {
-    "at": "2026-09-24T10:19:22.228Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.605Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -527,8 +527,8 @@
     "seq": 43
   },
   {
-    "at": "2026-09-24T10:19:22.229Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.606Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "tool: read — example.txt",
     "data": {
@@ -544,8 +544,8 @@
     "seq": 44
   },
   {
-    "at": "2026-09-24T10:19:22.229Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.606Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "tool done: read",
     "data": {
@@ -559,8 +559,8 @@
     "seq": 45
   },
   {
-    "at": "2026-09-24T10:19:22.356Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.734Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -586,8 +586,8 @@
     "seq": 49
   },
   {
-    "at": "2026-09-24T10:19:22.356Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.734Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "agent_end",
     "data": {
@@ -598,8 +598,8 @@
     "seq": 50
   },
   {
-    "at": "2026-09-24T10:19:22.357Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.735Z",
+    "taskId": "28ffa5c56e83",
     "type": "PI_EVENT",
     "message": "Pi settled",
     "data": {
@@ -610,8 +610,8 @@
     "seq": 51
   },
   {
-    "at": "2026-09-24T10:19:22.357Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.735Z",
+    "taskId": "28ffa5c56e83",
     "type": "STATUS",
     "message": "Collecting diff and changed files",
     "data": {
@@ -620,8 +620,8 @@
     "seq": 52
   },
   {
-    "at": "2026-09-24T10:19:22.367Z",
-    "taskId": "96903db4b531",
+    "at": "2026-09-24T10:42:09.744Z",
+    "taskId": "28ffa5c56e83",
     "type": "TASK_SUCCEEDED",
     "message": "Done",
     "data": {},

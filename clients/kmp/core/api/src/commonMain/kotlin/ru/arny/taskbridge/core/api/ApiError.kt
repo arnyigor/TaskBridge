@@ -39,9 +39,15 @@ sealed class ApiError(open val message: String) {
     /** Anything else, kept with its status and code for the log. */
     data class Other(val status: Int, val code: String?, override val message: String) : ApiError(message)
 
-    /** Worth retrying automatically (with backoff) without asking the operator. */
+    /**
+     * Worth retrying automatically (with backoff) without asking the operator:
+     * the network, rate limits, a command still in flight, and gateway errors
+     * (502–504, the LAN proxy while the app restarts). A 500 with TaskBridge's
+     * own error envelope is a final answer (e.g. Pi rejected the prompt), and
+     * repeating the same command would only replay the same refusal.
+     */
     val transient: Boolean
-        get() = this is Unreachable || this is RateLimited || this is CommandInFlight || (this is Other && status >= 500)
+        get() = this is Unreachable || this is RateLimited || this is CommandInFlight || (this is Other && status in 502..504)
 }
 
 class ApiException(val error: ApiError) : Exception(error.message)

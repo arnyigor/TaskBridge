@@ -240,10 +240,14 @@ data class CreateTaskRequest(
     val model: ModelSelection? = null,
     val thinkingLevel: String? = null,
     val uploadToken: String? = null,
-    val files: List<String>? = null,
+    val files: List<UploadedFileId>? = null,
     val commandId: String? = null,
     val clientId: String? = null,
 )
+
+/** A file already sent to /api/uploads, referenced by id (the server never trusts client names or sizes). */
+@Serializable
+data class UploadedFileId(val id: String)
 
 @Serializable
 data class ModelSelection(val provider: String?, val id: String)
@@ -255,7 +259,7 @@ data class MessageRequest(
     val now: Boolean = false,
     val queue: Boolean = false,
     val uploadToken: String? = null,
-    val files: List<String>? = null,
+    val files: List<UploadedFileId>? = null,
     val commandId: String? = null,
     val clientId: String? = null,
 )
