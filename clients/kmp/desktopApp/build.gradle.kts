@@ -22,7 +22,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "TaskBridge"
-            packageVersion = "1.0.0"
+            packageVersion = "1.1.0"
             // A trimmed runtime: what suggestRuntimeModules found, plus TLS (the proxy's https port) and logging for OkHttp.
             modules("java.instrument", "java.management", "java.prefs", "jdk.unsupported", "jdk.crypto.ec", "java.logging")
             windows {

@@ -106,6 +106,7 @@ private sealed interface ChatDialog {
     data class EditAnswer(val turnId: String, val text: String) : ChatDialog
     data class DeleteFrom(val turnId: String) : ChatDialog
     data object ConfirmStop : ChatDialog
+    data object ConfirmInterrupt : ChatDialog
     data object ConfirmClear : ChatDialog
     data object ConfirmDelete : ChatDialog
     data object Rename : ChatDialog
@@ -239,6 +240,7 @@ fun ChatScreen(
                 activity = task?.current,
                 stopping = "cancel" in state.busy || task?.status == "CANCELLING",
                 onStop = { if (task?.pendingPrompts?.isNotEmpty() == true) dialog = ChatDialog.ConfirmStop else session.cancel() },
+                onInterrupt = { dialog = ChatDialog.ConfirmInterrupt },
                 tools = {
                     if (task != null) ContextButton(
                         summary = listOfNotNull(
@@ -280,7 +282,7 @@ fun ChatScreen(
         }
     }
 
-    ChatDialogs(dialog, state, session, graph, onClose = { dialog = null })
+    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onClose = { dialog = null })
     viewing?.let { FileViewer(it, session, platform, onDismiss = { viewing = null }) }
 }
 
@@ -608,7 +610,7 @@ private fun OutboxRow(message: OutgoingMessage, onRetry: () -> Unit, onEdit: () 
 }
 
 @Composable
-private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, onClose: () -> Unit) {
+private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, send: (SendMode) -> Unit, onClose: () -> Unit) {
     when (dialog) {
         null -> Unit
         is ChatDialog.EditMessage -> TextEditDialog(
@@ -650,6 +652,14 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             confirm = "Остановить",
             destructive = true,
             onConfirm = { session.cancel(); onClose() },
+            onDismiss = onClose,
+        )
+        ChatDialog.ConfirmInterrupt -> ConfirmDialog(
+            title = "Прервать запрос?",
+            text = "Прервёт текущий ответ и запущенные команды, затем отправит введённое сообщение. Это нельзя отменить.",
+            confirm = "Прервать",
+            destructive = true,
+            onConfirm = { send(SendMode.NOW); onClose() },
             onDismiss = onClose,
         )
         ChatDialog.ConfirmClear -> ConfirmDialog(
