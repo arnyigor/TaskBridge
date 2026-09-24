@@ -1,0 +1,49 @@
+{
+  "id": "0694ae3e0714",
+  "createdAt": "2026-09-24T10:05:56.052Z",
+  "updatedAt": "2026-09-24T10:05:56.144Z",
+  "status": "FAILED",
+  "queueReason": null,
+  "projectId": "fixture",
+  "prompt": "fault-crash now",
+  "workspacePath": "/tmp/taskbridge-http-test-VfUeSr",
+  "sourcePath": "/tmp/taskbridge-http-test-VfUeSr",
+  "worktree": false,
+  "current": "Failed",
+  "assistantText": "",
+  "thinkingText": "",
+  "error": "Pi process exited unexpectedly: code=3, signal=null",
+  "errorCode": "PI_SESSION_FAILED",
+  "engine": {
+    "profileId": null,
+    "auto": false,
+    "reason": null
+  },
+  "requestedModel": null,
+  "thinkingLevel": null,
+  "mcp": null,
+  "verification": null,
+  "git": null,
+  "compaction": {
+    "count": 0,
+    "last": null
+  },
+  "lastUsage": null,
+  "metrics": null,
+  "model": {
+    "id": "fixture",
+    "provider": null,
+    "contextWindow": 65536,
+    "maxTokens": 1024
+  },
+  "autoCompactionEnabled": true,
+  "files": [],
+  "attachments": [],
+  "outputFiles": [],
+  "statusChangedAt": "2026-09-24T10:05:56.117Z",
+  "baseCommit": null,
+  "thinkingLevelActual": "off",
+  "retryable": null,
+  "retryAfterMs": null,
+  "sessionAvailable": true
+}
