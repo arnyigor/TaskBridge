@@ -140,12 +140,16 @@ export async function collectGitState(workspacePath) {
       await git(['add', '-A', `--pathspec-from-file=${pathspecFile}`, '--pathspec-file-nul'], root, 120000, env);
     }
     const baseArgs = ['diff', '--cached', ...(head ? [head] : []), '--no-ext-diff'];
-    const diff = (await git([...baseArgs, '--binary', '--no-textconv'], root, 120000, env)).stdout;
+    // Written by git straight to a file: a binary diff of a large untracked file
+    // (a zip in the worktree) overflowed execFile's maxBuffer and failed the task.
+    const diffFile = path.join(temporary, 'diff');
+    await git([...baseArgs, '--binary', '--no-textconv', `--output=${diffFile}`], root, 120000, env);
+    const diff = await fs.readFile(diffFile, 'utf8');
     const changedFiles = (await git([...baseArgs, '--name-only', '--no-renames', '-z'], root, 30000, env)).stdout.split('\0').filter(Boolean);
     return { isGit: true, status: statusLines.join(''), diff, changedFiles };
   } finally {
     // Only remove the known files we created; never recursively remove a repo.
-    for (const name of [indexFile, indexFile + '.lock', pathspecFile]) {
+    for (const name of [indexFile, indexFile + '.lock', pathspecFile, path.join(temporary, 'diff')]) {
       await fs.unlink(name).catch(error => { if (error.code !== 'ENOENT') throw error; });
     }
     await fs.rmdir(temporary);

@@ -97,6 +97,14 @@ test('clean and unborn repositories produce accurate snapshots', async t => {
   await assert.rejects(fs.access(path.join(unborn, '.git', 'index')), { code: 'ENOENT' });
 });
 
+test('a diff larger than the exec buffer (big untracked zip) is still collected', async t => {
+  const repo = await repository(t);
+  await fs.writeFile(path.join(repo, 'build.zip'), (await import('node:crypto')).randomBytes(24 * 1024 * 1024));
+  const state = await collectGitState(repo);
+  assert.deepEqual(state.changedFiles, ['build.zip']);
+  assert.ok(state.diff.length > 20 * 1024 * 1024);
+});
+
 test('non-repository result remains empty', async () => {
   assert.deepEqual(await collectGitState(os.tmpdir()), { isGit: false, status: '', diff: '', changedFiles: [] });
 });
