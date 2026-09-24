@@ -25,7 +25,7 @@
 
 ## 1. Подготовка
 
-1. Node.js 22.13+ (`node --version`), Pi 0.85.x (`pi --version`).
+1. Node.js 22.13+ (`node --version`), Pi 0.85–0.87 (`pi --version`).
 2. Сделать снимок рабочей базы перед любыми ручными тестами:
    ```powershell
    npm run backup
@@ -165,7 +165,7 @@ npm run smoke:pi -- "G:\path\to\project"   # реальный Pi: ожидани
 ### M1. Версия Pi (C5)
 
 1. `Invoke-RestMethod "$base/api/info" | select -Expand pi`
-   → `version` = вывод `pi --version`, `supported = True`, `supportedRange = >=0.85.0 <0.86.0`, `error` пусто.
+   → `version` = вывод `pi --version`, `supported = True`, `supportedRange = >=0.85.0 <0.88.0`, `error` пусто.
 2. В `warnings` нет `PI_VERSION_UNSUPPORTED`: `(Invoke-RestMethod "$base/api/info").warnings`.
 3. Неподдерживаемая версия. Остановить TaskBridge; в `config.json` поставить `"pi": { "command": "node G:/path/to/Taskbridge/tests/fake-pi.mjs", "env": { "FAKE_PI_VERSION": "0.99.0" } }`; запустить.
    → `pi.version = 0.99.0`, `supported = False`, в `warnings` есть `PI_VERSION_UNSUPPORTED` с понятным текстом; сервер работает.
@@ -236,14 +236,14 @@ try { Invoke-RestMethod "$base/api/tasks/$t/message" -Method Post -ContentType '
 2. `pgrep -af 'sleep 600'` — есть.
 3. STOP → `pgrep -af 'sleep 600'` пусто. **До исправления здесь процесс оставался.**
 
-### M8. Остановка TaskBridge во время хода (C6, POSIX)
+### M8. Остановка TaskBridge во время хода (C6)
 
 Pi теперь в своей группе процессов и не получает Ctrl+C из терминала напрямую — его останавливает сам TaskBridge.
 
 1. Запустить сервер в терминале (`npm run start:monolith` или `taskbridge start`), начать долгий ход с `sleep 600`.
 2. Ctrl+C в терминале сервера (или `taskbridge stop`).
 3. В течение ~5 секунд: `pgrep -af 'mode rpc'` и `pgrep -af 'sleep 600'` → пусто.
-4. На Windows тот же сценарий — регрессия: `Get-CimInstance Win32_Process | ? CommandLine -match 'mode rpc'` → пусто.
+4. На Windows — `taskbridge stop` в обоих режимах (LAN и `--monolith`): `Get-CimInstance Win32_Process | ? CommandLine -match 'mode rpc'` → пусто, дочерний процесс хода тоже исчез. На Windows нет SIGTERM, поэтому остановка убивает всё дерево (`taskkill /T /F`) без мягкого завершения; до исправления в режиме `--monolith` занятый Pi и его дети переживали сервер (найдено на прогоне b821a52).
 
 **Известное ограничение (не баг ветки):** при аварийном убийстве сервера (`kill -9`, «Снять задачу») Pi и его дети переживают сервер. Это пункт B1 (PID в SQLite и зачистка сирот при старте). Зафиксировать, что осталось, в отчёте для сравнения после B1.
 
@@ -317,7 +317,7 @@ Pi теперь в своей группе процессов и не получ
 
 ```text
 Коммит:            (git log --oneline -1)
-ОС / Node / Pi:    Windows 11 / 22.x / 0.85.x
+ОС / Node / Pi:    Windows 11 / 22.x / 0.87.x
 Модель:            ...
 Дата:
 
