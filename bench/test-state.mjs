@@ -263,7 +263,6 @@ console.log('\n8. failureKindOf (на реальных фикстурах Gradle
   check('  непонятное → unknown (не гадаем)', unk === 'unknown', unk);
 }
 
-console.log(failed ? `\nПРОВАЛЕНО: ${failed}` : '\nядро проверено: блокировки и дельта ошибок работают как задумано');
 
 // ─── 9. Плечо A/B: блокирует ровно один гейт ────────────────────────────────
 // Требование парного эксперимента: отличается ОДИН переключатель. Если включение блокировок
@@ -283,6 +282,36 @@ console.log('\n6. Плечо A/B (enforcedGate)');
   check('  плечо stagnation: свой гейт блокирует', enforced(false, 'stagnation', 'stagnation') === true, '');
   check('  плечо stagnation: чужой гейт НЕ блокирует', enforced(false, 'stagnation', 'verify-delta') === false, '');
   check('  shadow сильнее плеча', enforced(true, 'stagnation', 'stagnation') === false, '');
+}
+
+// ─── 10. Справка и выключатели ──────────────────────────────────────────────
+// Описание команды и её поведение уже расходились: в `description` висела опция, которой
+// не существовало, а `off` обещал выключить напоминания, хотя включал их чаще. Здесь
+// проверяется, что справка перечисляет реальные ветки, а выключатели глушат всё.
+console.log('\n10. Справка /nudge help и выключатели');
+{
+  const cmd = src.slice(src.indexOf("registerCommand('nudge'"));
+  check('  есть ветка help', /arg === 'help'/.test(cmd), '');
+  check('  неизвестный аргумент показывает справку', /не понял[\s\S]{0,60}help\(\)/.test(cmd), '');
+
+  for (const opt of ['off', 'silent', 'on']) {
+    check(`  «${opt}» из справки обрабатывается`, cmd.includes(`arg === '${opt}'`), '');
+  }
+  for (const key of ['edits', 'stagnation', 'after', 'work']) {
+    check(`  «${key}=» из справки обрабатывается`, cmd.includes(`key === '${key}'`), '');
+  }
+
+  // Выключатели обязаны глушить ВСЕ напоминания, а не одну ветку.
+  check('  off ставит maxNudges = 0', /arg === 'off'[\s\S]{0,500}S\.maxNudges = 0/.test(cmd), '');
+  check('  silent дополнительно гасит журнал', /arg === 'silent'[\s\S]{0,500}S\.log = ''/.test(cmd), '');
+  check('  есть глобальный выключатель расширения', /BENCH_SUPERVISOR_OFF === '1'\) return;/.test(src), '');
+
+  // Переменные, названные в справке, должны существовать в коде.
+  for (const env of ['BENCH_SUPERVISOR_OFF', 'BENCH_SHADOW', 'BENCH_ENFORCED_GATE', 'BENCH_MAX_NUDGES', 'BENCH_SUPERVISOR_LOG']) {
+    const inHelp = cmd.includes(env);
+    const inCode = src.includes(`'${env}'`) || src.includes(`env.${env}`);
+    check(`  ${env} — и в справке, и в коде`, inHelp && inCode, `справка ${inHelp}, код ${inCode}`);
+  }
 }
 
 console.log(failed ? `\nПРОВАЛЕНО: ${failed}` : '\nядро проверено: блокировки и дельта ошибок работают как задумано');

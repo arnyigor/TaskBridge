@@ -1118,10 +1118,44 @@ export default function activate(pi: ExtensionAPI) {
   });
 
   pi.registerCommand('nudge', {
-    description: 'Настройки надзирателя: /nudge | off | on | profile=build-project | after=24 | edits=4 | block=off',
+    description: 'Надзиратель: /nudge help — весь список. Кратко: /nudge | off | silent | on | block=off | edits=4 | stagnation=24',
     handler: async (args, ctx) => {
       const arg = String(args ?? '').trim();
       const info = () => `надзиратель:\n  состояние: ${workspaceState} (гейт ${gateStatus}${gateKind ? '/' + gateKind : ''}, сбой ${failureKind})\n  legacy-режим формулировок: ${legacyMode(workspaceState)}\n  профиль: ${S.profile || 'по умолчанию'}\n  блокировки: ${S.blocking ? 'вкл' : 'выкл'}${S.readOnly ? ', только чтение' : ''}\n  правок без проверки до блокировки: ${S.editsBeforeVerifyBlock}\n  шагов без сдвига до блокировки: ${S.stagnationAfter}`;
+      // Справка держится РЯДОМ с обработчиком: описание команды и её поведение уже
+      // расходились (в description осталась несуществующая опция, а `off` обещал выключить
+      // напоминания, но включал их чаще). Одно место — меньше шансов разойтись снова.
+      const help = () => [
+        'НАДЗИРАТЕЛЬ — что умеет команда /nudge',
+        '',
+        '  /nudge                  показать текущее состояние и пороги',
+        '  /nudge help             эта справка',
+        '',
+        'Выключение:',
+        '  /nudge off              не блокировать и не напоминать (журнал пишется)',
+        '  /nudge silent           то же + не писать журнал',
+        '  /nudge on               вернуть настройки из файла/окружения',
+        '',
+        'Пороги (действуют до конца сессии):',
+        '  /nudge block=on|off     блокировки в момент вызова инструмента',
+        '  /nudge edits=4          файлов проекта без проверки до блокировки записи',
+        '  /nudge stagnation=24    шагов без сдвига состояния до блокировки',
+        '  /nudge after=24         шагов до мягкого напоминания (greenfield)',
+        '  /nudge work=8           то же для существующего проекта',
+        `  /nudge profile=<имя>    профиль порогов: ${Object.keys(PROFILES).join(', ')}`,
+        '',
+        'Переменные окружения (задаются при запуске pi):',
+        '  BENCH_SUPERVISOR_OFF=1  расширение не подключается вообще',
+        '  BENCH_SHADOW=0          включить блокировки (по умолчанию только наблюдение)',
+        '  BENCH_ENFORCED_GATE=…   блокирует ровно один гейт: repro | verify-delta | stagnation',
+        '  BENCH_MAX_NUDGES=0      запретить напоминания',
+        '  BENCH_SUPERVISOR_LOG=…  путь журнала (пусто — не писать)',
+        '',
+        `Журнал сейчас: ${S.log || '(не пишется)'}`,
+        'Разбор журнала: node bench/analyze-run.mjs <путь>',
+      ].join('\n');
+
+      if (arg === 'help' || arg === '?') { ctx.ui.notify(help(), 'info'); return; }
       if (!arg) { ctx.ui.notify(info(), 'info'); return; }
       if (arg === 'on') { S = loadSettings(); recomputeWorkspaceState(); ctx.ui.notify(info(), 'info'); return; }
       if (arg === 'off') {
@@ -1139,7 +1173,9 @@ export default function activate(pi: ExtensionAPI) {
         return;
       }
       const m = /^(profile|after|work|edits|stagnation|block)=(.+)$/.exec(arg);
-      if (!m) { ctx.ui.notify('формат: off | on | profile=build-project | after=24 | edits=4 | stagnation=24 | block=on|off', 'warning'); return; }
+      if (!m) { ctx.ui.notify(`не понял «${arg}».
+
+${help()}`, 'warning'); return; }
       const [, key, value] = m;
       if (key === 'profile' && PROFILES[value]) { S = { ...BASE, ...PROFILES[value], log: S.log, profile: value }; recomputeWorkspaceState(); }
       if (key === 'after') S.nudgeAfter = Number(value);

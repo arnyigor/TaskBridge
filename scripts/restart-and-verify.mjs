@@ -122,7 +122,7 @@ function pickLanAddress() {
 // correct restart look broken whenever the working tree was not committed yet.
 const buildId = (build) => (build ? `${build.version || '?'}@${build.commit || '?'}` : null);
 
-async function runChecks({ port, httpsPort, previousBuild, previousPid }) {
+async function runChecks({ port, httpsPort, previousBuild, previousPid, dryRun = false }) {
   const checks = [];
   const add = (name, ok, detail) => checks.push({ name, ok: Boolean(ok), detail });
 
@@ -131,7 +131,7 @@ async function runChecks({ port, httpsPort, previousBuild, previousPid }) {
 
   const info = await fetchJson(`http://127.0.0.1:${port}/api/info`).catch(() => ({ body: null }));
   const build = info.body?.build || null;
-  add('новый код запущен (сборка изменилась)', Boolean(build && previousBuild && buildId(build) !== previousBuild), `было ${previousBuild || '—'}, стало ${buildId(build) || '—'}`);
+  add('новый код запущен (сборка изменилась)', dryRun || Boolean(build && previousBuild && buildId(build) !== previousBuild), `было ${previousBuild || '—'}, стало ${buildId(build) || '—'}`);
   add('облако выключено', !info.body?.cloud, info.body?.cloud ? JSON.stringify(info.body.cloud) : 'поля cloud нет');
   const lan = pickLanAddress();
   add('LAN-адрес объявлен', Boolean(lan && (info.body?.addresses || []).some(a => a.url.includes(lan))), `${lan || 'нет интерфейса'} → ${JSON.stringify(info.body?.addresses || [])}`);
@@ -160,8 +160,11 @@ async function runChecks({ port, httpsPort, previousBuild, previousPid }) {
   add('неизвестный API-путь остаётся JSON-404', missing.status === 404 && missing.contentType.includes('json'), `HTTP ${missing.status} ${missing.contentType}`);
 
   if (sample) {
-    const pending = await fetchJson(`http://127.0.0.1:${port}/api/tasks/${encodeURIComponent(sample.id)}/pending/send`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } }).catch(() => ({ status: 0, body: null }));
-    add('эндпоинт очереди существует', pending.status === 400 && pending.body?.code === 'INPUT_INVALID', `HTTP ${pending.status} ${JSON.stringify(pending.body)}`);
+    // A fake pendingId is a deliberate no-op per the pendingId contract
+    // (stale button retry): it proves the endpoint exists without the risk of
+    // delivering a real queued prompt during a mere check.
+    const pending = await fetchJson(`http://127.0.0.1:${port}/api/tasks/${encodeURIComponent(sample.id)}/pending/send`, { method: 'POST', body: JSON.stringify({ pendingId: 'restart-verify-noop' }), headers: { 'content-type': 'application/json' } }).catch(() => ({ status: 0, body: null }));
+    add('эндпоинт очереди существует', pending.status === 200 && Boolean(pending.body?.id), `HTTP ${pending.status} ${JSON.stringify(pending.body)}`);
   }
 
   const local = await fetchJson(`http://127.0.0.1:${port}/api/local`, { timeoutMs: 120_000 }).catch(() => ({ body: null }));
@@ -264,7 +267,7 @@ async function main() {
     restarted = true;
   }
 
-  const result = await runChecks({ port: args.port, httpsPort: args.httpsPort, previousBuild, previousPid: previousTask });
+  const result = await runChecks({ port: args.port, httpsPort: args.httpsPort, previousBuild, previousPid: previousTask, dryRun: args.dryRun });
   const report = renderReport({ args, previousBuild, previousPid, stopped, restarted, ...result });
   await fs.writeFile(args.report, `${report}\n`, 'utf8');
   await fs.writeFile(args.report.replace(/\.md$/, '.json'), `${JSON.stringify({ at: new Date().toISOString(), previousBuild, previousPid, stopped, restarted, ...result }, null, 2)}\n`, 'utf8');

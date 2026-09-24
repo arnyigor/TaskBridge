@@ -634,6 +634,78 @@ test('/api/info carries a bootId that changes only when the process restarts', {
   assert.notEqual((await fixture.api('/api/info')).bootId, first, 'a new process must be distinguishable');
 });
 
+test('/api/info exposes normalized provider statuses and keeps legacy DeepSeek data', async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+
+  const info = await fixture.api('/api/info');
+  assert.deepEqual(Object.keys(info.providerStatuses).sort(), ['deepseek', 'routerai', 'wormsoft']);
+  assert.equal(info.providerStatuses.deepseek.available, false);
+  assert.equal(info.providerStatuses.wormsoft.available, false);
+  assert.equal(info.providerStatuses.routerai.available, false);
+  assert.equal(info.providerStatuses.deepseek.reason, 'no-key');
+  assert.deepEqual(info.deepseek, info.providerStatuses.deepseek, 'legacy field stays compatible');
+});
+
+test('provider info poll never fetches; click refresh is targeted and cooldown-guarded', async t => {
+  let calls = 0;
+  const provider = http.createServer((req, res) => {
+    calls++;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(req.url === '/api/gpt/subscription-limit'
+      ? { subcriptionType: 'payed', subcriptionLimit: 700 }
+      : { payed: { amount: 3000000, seconds: 14400 } }));
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => provider.close(resolve)));
+  const fixture = await startFixture(undefined, {
+    root: { providerStatus: { wormsoft: { baseUrl: `http://127.0.0.1:${provider.address().port}` } } },
+    env: { WORMSOFT_API_KEY: 'fixture-on-demand' },
+  });
+  t.after(() => fixture.close());
+  for (let n = 0; n < 3; n++) {
+    const info = await fixture.api('/api/info');
+    assert.equal(info.providerStatuses.wormsoft.reason, 'not-fetched');
+  }
+  assert.equal(calls, 0, 'polling /api/info must make no WormSoft requests');
+  await assert.rejects(fixture.api('/api/providers/refresh', {}), { code: 'INPUT_INVALID' });
+  const refreshed = await fixture.api('/api/providers/refresh', { provider: 'wormsoft' });
+  assert.equal(refreshed.wormsoft.subscription.remaining, 700);
+  assert.equal(calls, 2, 'only the selected provider is fetched (account + plan)');
+  assert.equal((await fixture.api('/api/info')).providerStatuses.wormsoft.subscription.remaining, 700);
+  await fixture.api('/api/providers/refresh', { provider: 'wormsoft' });
+  assert.equal(calls, 2, 'repeated clicks within 20s use the cached result');
+});
+
+test('a WormSoft model request samples the balance without a status poll', { timeout: 30000 }, async t => {
+  let calls = 0;
+  const provider = http.createServer((req, res) => {
+    calls++;
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(req.url === '/api/gpt/subscription-limit'
+      ? { subcriptionType: 'payed', subcriptionLimit: 800 }
+      : { payed: { amount: 3000000, seconds: 14400 } }));
+  });
+  await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => provider.close(resolve)));
+  const fixture = await startFixture(undefined, {
+    root: { providerStatus: { wormsoft: { baseUrl: `http://127.0.0.1:${provider.address().port}` } } },
+    env: { WORMSOFT_API_KEY: 'fixture-model-sample' },
+  });
+  t.after(() => fixture.close());
+  await fixture.api('/api/info');
+  assert.equal(calls, 0);
+  const task = await fixture.api('/api/tasks', {
+    projectId: 'fixture', prompt: 'sample', model: { provider: 'wormsoft', id: 'test-model' },
+  });
+  for (let i = 0; i < 80 && calls < 2; i++) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(calls, 2, `model request should sample account and plan: ${fixture.logs()}`);
+  assert.equal((await fixture.api('/api/info')).providerStatuses.wormsoft.subscription.remaining, 800);
+  assert.equal(calls, 2, 'subsequent info polls do not request the provider');
+  assert.ok((await fs.readFile(path.join(fixture.root, 'data', 'wormsoft-usage.json'), 'utf8')).includes('800'));
+  assert.ok(task.id);
+});
+
 test('POST /api/server/restart needs confirmation and works on a busy machine', { timeout: 30000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
