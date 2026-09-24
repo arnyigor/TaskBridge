@@ -1,6 +1,12 @@
 import readline from 'node:readline';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+// `pi --version`, as TaskBridge probes it at startup. Overridable so tests can
+// play an unsupported Pi.
+if (process.argv.includes('--version')) {
+  process.stdout.write(`${process.env.FAKE_PI_VERSION || '0.85.1'}\n`);
+  process.exit(0);
+}
 const sessionArg = process.argv.indexOf('--session');
 const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
 const argValue = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; };

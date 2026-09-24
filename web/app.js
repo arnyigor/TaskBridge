@@ -1782,6 +1782,15 @@ function applyEvents(events) {
 function dropDeliveredFromQueue(event) {
   const queued = currentTask?.pendingPrompts || [];
   if (!queued.length) return false;
+  // The server names the queue entry it delivered; matching by text is only the
+  // fallback for events written before pendingId existed (two identical queued
+  // lines used to drop the wrong one).
+  const pendingId = event.data?.pendingId;
+  if (pendingId) {
+    const before = queued.length;
+    currentTask.pendingPrompts = queued.filter(entry => entry?.id !== pendingId);
+    return currentTask.pendingPrompts.length !== before;
+  }
   const text = String(event.data?.text ?? event.message ?? '');
   if (!text) return false;
   const index = queued.findIndex(entry => String(entry?.text || '') === text || String(entry?.text || '').startsWith(text));

@@ -34,6 +34,7 @@ import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
 import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
+import { PiVersionProbe } from './pi-version.mjs';
 import { API_VERSION } from './api-contract.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -98,6 +99,10 @@ const store = new TaskStore(dataRoot, {
   busyTimeoutMs: config.server?.sqlite?.busyTimeoutMs
 });
 const manager = new TaskManager(config, dataRoot, store);
+// Which Pi we drive, checked once at startup (B0). Reported by /api/info; an
+// unsupported or missing Pi is a warning, never a startup failure.
+const piVersion = new PiVersionProbe({ command: config.pi?.command || 'pi', env: config.pi?.env || null });
+piVersion.refresh().catch(() => {});
 // The Pi approval extension needs a loopback endpoint and its absolute path.
 manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
 manager.approvalExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-approval.js');
@@ -840,11 +845,22 @@ async function handleRequest(req, res) {
           message: 'В настройках Pi включён images.blockImages — Pi заменяет любые картинки на текст «Image reading is disabled.» до отправки модели. Выключите его командой /images или в /settings, иначе никакая vision-модель не увидит вложения.'
         });
       }
+      const pi = piVersion.current();
+      if (pi && !pi.supported) {
+        warnings.push({
+          code: 'PI_VERSION_UNSUPPORTED',
+          message: pi.version
+            ? `Pi ${pi.version} не проверялся с этой версией TaskBridge (поддерживается ${pi.supportedRange}). Сессии могут вести себя неожиданно.`
+            : `Не удалось определить версию Pi: ${pi.error || 'нет ответа'}.`
+        });
+      }
       return json(res, 200, {
         name: 'TaskBridge MVP',
         build,
         bootId,
         apiVersion: API_VERSION,
+        storeId: store.storeId,
+        pi,
         addresses: [
           ...lanAddresses(publicPort),
           ...(httpsConfig.enabled && !tlsDisabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])
@@ -1323,7 +1339,10 @@ async function handleRequest(req, res) {
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
       : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY'].includes(error.code) ? 409
+      // CONFLICT / UNKNOWN_AFTER_CRASH come from the commandId journal. They are
+      // final answers about that command, not server faults: a 5xx would make a
+      // retrying client repeat a request that can never succeed.
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429
