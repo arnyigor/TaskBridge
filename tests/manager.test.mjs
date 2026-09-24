@@ -132,7 +132,7 @@ test('a busy local model queues the prompt instead of refusing it', async t => {
   assert.equal(followUp.queueReason, 'MODEL_BUSY');
   assert.equal(followUp.pendingPrompts[0].text, 'позже');
   const waitingEvents = await f.store.readEvents('a', 0);
-  assert.deepEqual(waitingEvents.map(event => event.type), ['QUEUE_WAITING'], 'only the waiting state is recorded');
+  assert.deepEqual(waitingEvents.map(event => event.type), ['QUEUE_WAITING', 'PROMPT_QUEUED'], 'only the waiting state and the queued entry are recorded');
   assert.equal(waitingEvents.some(event => event.type === 'USER_MESSAGE'), false, 'nothing is sent to Pi while waiting');
   assert.deepEqual(f.manager.queue, [queued.id, 'a']);
 
