@@ -1916,24 +1916,28 @@ export class TaskManager extends EventEmitter {
     if (!variants.some(variant => variant.id === String(turnId || ''))) {
       throw Object.assign(new Error('Продолжить можно только самый новый ответ.'), { code: 'NOT_ALLOWED' });
     }
-    const answer = this.#answerText(events, turnSeq);
-    if (!String(answer).trim()) throw Object.assign(new Error('Продолжать нечего — ответ пуст.'), { code: 'INPUT_INVALID' });
+    if (!this.#answerHasOutput(events, turnSeq)) throw Object.assign(new Error('Продолжать нечего — ответ пуст.'), { code: 'INPUT_INVALID' });
     return this.#message(id, CONTINUE_PROMPT, 'auto', [], null, { immediate: true, announce: false });
   }
 
-  // The newest answer's text of one exchange: the closing message_end carries
-  // the full final content, so the last one wins.
-  #answerText(events, turnSeq) {
+  // Whether the newest answer of an exchange produced anything. An agent answer
+  // is several assistant messages (text → tools → text), and an interrupted one
+  // ends with an empty aborted message — exactly the answer "continue" is for.
+  // So every message of the current variant counts, text or tool call; only the
+  // last one used to count, and a stopped answer was reported as empty.
+  #answerHasOutput(events, turnSeq) {
     const seq = Number(turnSeq) || 0;
-    let text = '';
+    let output = false;
     for (const event of events) {
       if (event.seq <= seq) continue;
+      // A regenerated variant starts over: the previous answer is not this one.
+      if (event.type === 'TURN_VARIANT_START' && Number(event.data?.turnSeq || 0) === seq) { output = false; continue; }
       const frame = event.data?.pi;
       if (event.type === 'PI_EVENT' && frame?.type === 'message_end' && frame.message?.role === 'assistant') {
-        text = (frame.message.content || []).filter(part => part?.type === 'text').map(part => part?.text || '').join('');
+        output ||= (frame.message.content || []).some(part => (part?.type === 'text' && String(part.text || '').trim()) || part?.type === 'toolCall');
       }
     }
-    return text;
+    return output;
   }
 
   // "Fork": a new session in the same project whose conversation is a copy of

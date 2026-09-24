@@ -487,7 +487,7 @@ private fun MessageList(
                                     edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.id, item.text)) }) else null,
                                     fork = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
                                     regenerate = if (newest) ({ session.regenerate(item.id) }) else null,
-                                    continueAnswer = if (newest && item.text.isNotBlank()) ({ session.continueAnswer(item.id) }) else null,
+                                    continueAnswer = if (newest && (item.text.isNotBlank() || item.tools.isNotEmpty())) ({ session.continueAnswer(item.id) }) else null,
                                     deleteFrom = questionOf[item.id]?.takeIf { !historyLocked && !item.active }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
                                 ),
                                 onCopyText = { platform.copyText(it) },

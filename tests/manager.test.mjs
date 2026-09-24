@@ -984,6 +984,28 @@ test('continueTurn appends to the existing answer instead of a new exchange', as
   for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });
 
+test('continueTurn accepts an interrupted answer whose last message is empty', async t => {
+  const f = await fixture(t);
+  const pi = message => ({ at: new Date().toISOString(), taskId: 'a', type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message } } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  await f.store.appendEvent('a', pi({ role: 'assistant', content: [{ type: 'text', text: 'Смотрю код.' }, { type: 'toolCall', name: 'read' }], stopReason: 'toolUse' }));
+  // Stopped mid-answer: the closing message is aborted and has no content.
+  await f.store.appendEvent('a', pi({ role: 'assistant', content: [], stopReason: 'aborted' }));
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'TASK_CANCELLED', message: 'Cancelled', data: {} });
+
+  const task = await f.manager.continueTurn('a', 'assistant-1');
+  assert.equal(task.status, 'RUNNING');
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+});
+
+test('continueTurn refuses an answer that produced nothing', async t => {
+  const f = await fixture(t);
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'PI_EVENT', message: '', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'хм' }], stopReason: 'aborted' } } } });
+  await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'TASK_CANCELLED', message: 'Cancelled', data: {} });
+  await assert.rejects(() => f.manager.continueTurn('a', 'assistant-1'), err => err.code === 'INPUT_INVALID');
+});
+
 test('an answer can be edited in place or branched into another variant', async t => {
   const f = await fixture(t);
   await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
