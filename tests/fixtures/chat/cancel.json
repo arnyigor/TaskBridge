@@ -1,0 +1,272 @@
+{
+  "task": {
+    "id": "c3799e6ac271",
+    "createdAt": "2026-09-24T10:28:16.845Z",
+    "updatedAt": "2026-09-24T10:28:17.160Z",
+    "status": "CANCELLED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "slow — отменят",
+    "workspacePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "sourcePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "worktree": false,
+    "current": "Cancelled",
+    "assistantText": "",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": null,
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": null,
+    "metrics": null,
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "statusChangedAt": "2026-09-24T10:28:17.152Z",
+    "baseCommit": null,
+    "thinkingLevelActual": "off",
+    "pendingPrompts": null,
+    "sessionAvailable": true
+  },
+  "events": [
+    {
+      "at": "2026-09-24T10:28:16.845Z",
+      "taskId": "c3799e6ac271",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-09-24T10:28:16.848Z",
+      "taskId": "c3799e6ac271",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-09-24T10:28:16.849Z",
+      "taskId": "c3799e6ac271",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: /tmp/taskbridge-http-test-vVWgYM",
+      "data": {},
+      "seq": 3
+    },
+    {
+      "at": "2026-09-24T10:28:16.850Z",
+      "taskId": "c3799e6ac271",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-09-24T10:28:16.850Z",
+      "taskId": "c3799e6ac271",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-09-24T10:28:16.934Z",
+      "taskId": "c3799e6ac271",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-09-24T10:28:16.936Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 7
+    },
+    {
+      "at": "2026-09-24T10:28:16.937Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "slow — отменят\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-09-24T10:28:16.938Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "slow — отменят\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-09-24T10:28:16.938Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-09-24T10:28:16.938Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-09-24T10:28:16.939Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-09-24T10:28:17.153Z",
+      "taskId": "c3799e6ac271",
+      "type": "STATUS",
+      "message": "Stopping Pi",
+      "data": {
+        "status": "CANCELLING"
+      },
+      "seq": 13
+    },
+    {
+      "at": "2026-09-24T10:28:17.155Z",
+      "taskId": "c3799e6ac271",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 14
+    },
+    {
+      "at": "2026-09-24T10:28:17.160Z",
+      "taskId": "c3799e6ac271",
+      "type": "TASK_CANCELLED",
+      "message": "Task cancelled",
+      "data": {},
+      "seq": 15
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "slow — отменят",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-initial",
+      "role": "assistant",
+      "text": "",
+      "thinking": "",
+      "status": "FAILED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": [
+        {
+          "id": "call-1",
+          "name": "read",
+          "state": "done"
+        }
+      ]
+    }
+  ]
+}

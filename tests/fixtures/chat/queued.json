@@ -1,0 +1,655 @@
+{
+  "task": {
+    "id": "7bd807ecc8bf",
+    "createdAt": "2026-09-24T10:28:05.242Z",
+    "updatedAt": "2026-09-24T10:28:15.539Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "slow — длинный ход",
+    "workspacePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "sourcePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "worktree": false,
+    "current": "Done",
+    "assistantText": "Ответ 1Ответ 2",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": [],
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": {
+      "input": 1000,
+      "output": 100,
+      "totalTokens": 1100
+    },
+    "metrics": {
+      "tg": 2000,
+      "outputTokens": 100,
+      "ms": 50,
+      "source": "usage"
+    },
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "statusChangedAt": "2026-09-24T10:28:15.530Z",
+    "baseCommit": null,
+    "thinkingLevelActual": "off",
+    "pendingPrompts": [],
+    "verificationStatus": "NOT_CONFIGURED",
+    "retryable": null,
+    "retryAfterMs": null,
+    "sessionAvailable": true
+  },
+  "events": [
+    {
+      "at": "2026-09-24T10:28:05.243Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-09-24T10:28:05.244Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-09-24T10:28:05.244Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: /tmp/taskbridge-http-test-vVWgYM",
+      "data": {},
+      "seq": 3
+    },
+    {
+      "at": "2026-09-24T10:28:05.245Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-09-24T10:28:05.246Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-09-24T10:28:05.310Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-09-24T10:28:05.312Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 7
+    },
+    {
+      "at": "2026-09-24T10:28:05.313Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "slow — длинный ход\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-09-24T10:28:05.314Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "slow — длинный ход\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-09-24T10:28:05.314Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-09-24T10:28:05.315Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-09-24T10:28:05.316Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-09-24T10:28:05.551Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PROMPT_QUEUED",
+      "message": "Сообщение поставлено в очередь",
+      "data": {
+        "pendingId": "f2314620-3aab-4a55-9a6b-9550359fae56",
+        "commandId": "chat-q-1",
+        "clientId": "desktop-test"
+      },
+      "seq": 13
+    },
+    {
+      "at": "2026-09-24T10:28:15.323Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 14
+    },
+    {
+      "at": "2026-09-24T10:28:15.348Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 15
+    },
+    {
+      "at": "2026-09-24T10:28:15.373Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 1"
+          }
+        }
+      },
+      "seq": 16
+    },
+    {
+      "at": "2026-09-24T10:28:15.374Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 1"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 17
+    },
+    {
+      "at": "2026-09-24T10:28:15.375Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 18
+    },
+    {
+      "at": "2026-09-24T10:28:15.376Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 19
+    },
+    {
+      "at": "2026-09-24T10:28:15.376Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 20
+    },
+    {
+      "at": "2026-09-24T10:28:15.386Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 21
+    },
+    {
+      "at": "2026-09-24T10:28:15.395Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "USER_MESSAGE",
+      "message": "в очередь",
+      "data": {
+        "text": "в очередь",
+        "mode": "prompt",
+        "files": [],
+        "commandId": "chat-q-1",
+        "clientId": "desktop-test",
+        "pendingId": "f2314620-3aab-4a55-9a6b-9550359fae56"
+      },
+      "seq": 22
+    },
+    {
+      "at": "2026-09-24T10:28:15.396Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "STATUS",
+      "message": "Follow-up sent to Pi",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 23
+    },
+    {
+      "at": "2026-09-24T10:28:15.397Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 24
+    },
+    {
+      "at": "2026-09-24T10:28:15.398Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "в очередь"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 25
+    },
+    {
+      "at": "2026-09-24T10:28:15.398Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "в очередь"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 26
+    },
+    {
+      "at": "2026-09-24T10:28:15.400Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 27
+    },
+    {
+      "at": "2026-09-24T10:28:15.400Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 28
+    },
+    {
+      "at": "2026-09-24T10:28:15.401Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 29
+    },
+    {
+      "at": "2026-09-24T10:28:15.476Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 30
+    },
+    {
+      "at": "2026-09-24T10:28:15.501Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 31
+    },
+    {
+      "at": "2026-09-24T10:28:15.526Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 2"
+          }
+        }
+      },
+      "seq": 32
+    },
+    {
+      "at": "2026-09-24T10:28:15.528Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 2"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 33
+    },
+    {
+      "at": "2026-09-24T10:28:15.529Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 34
+    },
+    {
+      "at": "2026-09-24T10:28:15.530Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 35
+    },
+    {
+      "at": "2026-09-24T10:28:15.530Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 36
+    },
+    {
+      "at": "2026-09-24T10:28:15.539Z",
+      "taskId": "7bd807ecc8bf",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 37
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "slow — длинный ход",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-initial",
+      "role": "assistant",
+      "text": "Ответ 1",
+      "thinking": "",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": [
+        {
+          "id": "call-1",
+          "name": "read",
+          "state": "done"
+        }
+      ]
+    },
+    {
+      "id": "user-22",
+      "role": "user",
+      "text": "в очередь",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-22",
+      "role": "assistant",
+      "text": "Ответ 2",
+      "thinking": "",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": [
+        {
+          "id": "call-2",
+          "name": "read",
+          "state": "done"
+        }
+      ]
+    }
+  ]
+}

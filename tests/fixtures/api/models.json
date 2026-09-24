@@ -1,0 +1,38 @@
+{
+  "models": [
+    {
+      "provider": "fixture",
+      "id": "fixture",
+      "name": "Fixture",
+      "contextWindow": 65536,
+      "maxTokens": 1024,
+      "reasoning": true,
+      "images": false
+    },
+    {
+      "provider": "other",
+      "id": "other",
+      "name": "Other",
+      "contextWindow": 8000,
+      "maxTokens": 512,
+      "reasoning": false,
+      "images": true
+    }
+  ],
+  "thinkingLevels": [
+    "off",
+    "low",
+    "medium",
+    "high"
+  ],
+  "defaultModel": {
+    "provider": null,
+    "id": "fixture",
+    "name": null,
+    "contextWindow": 65536,
+    "maxTokens": 1024,
+    "reasoning": false,
+    "images": false
+  },
+  "defaultThinkingLevel": "off"
+}

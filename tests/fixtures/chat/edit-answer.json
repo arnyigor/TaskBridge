@@ -1,0 +1,376 @@
+{
+  "task": {
+    "id": "d94dd30c8be4",
+    "createdAt": "2026-09-24T10:28:19.300Z",
+    "updatedAt": "2026-09-24T10:28:19.569Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "вопрос для правки",
+    "workspacePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "sourcePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "worktree": false,
+    "current": "Done",
+    "assistantText": "Ответ 1",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": [],
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": {
+      "input": 1000,
+      "output": 100,
+      "totalTokens": 1100
+    },
+    "metrics": {
+      "tg": 1923.076923076923,
+      "outputTokens": 100,
+      "ms": 52,
+      "source": "usage"
+    },
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "statusChangedAt": "2026-09-24T10:28:19.508Z",
+    "baseCommit": null,
+    "thinkingLevelActual": "off",
+    "verificationStatus": "NOT_CONFIGURED",
+    "retryable": null,
+    "retryAfterMs": null,
+    "sessionAvailable": true
+  },
+  "events": [
+    {
+      "at": "2026-09-24T10:28:19.301Z",
+      "taskId": "d94dd30c8be4",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-09-24T10:28:19.302Z",
+      "taskId": "d94dd30c8be4",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-09-24T10:28:19.304Z",
+      "taskId": "d94dd30c8be4",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: /tmp/taskbridge-http-test-vVWgYM",
+      "data": {},
+      "seq": 3
+    },
+    {
+      "at": "2026-09-24T10:28:19.305Z",
+      "taskId": "d94dd30c8be4",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-09-24T10:28:19.306Z",
+      "taskId": "d94dd30c8be4",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-09-24T10:28:19.371Z",
+      "taskId": "d94dd30c8be4",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-09-24T10:28:19.373Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 7
+    },
+    {
+      "at": "2026-09-24T10:28:19.374Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "вопрос для правки\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-09-24T10:28:19.375Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "вопрос для правки\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-09-24T10:28:19.376Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-09-24T10:28:19.376Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-09-24T10:28:19.377Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-09-24T10:28:19.454Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 13
+    },
+    {
+      "at": "2026-09-24T10:28:19.479Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 14
+    },
+    {
+      "at": "2026-09-24T10:28:19.505Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 1"
+          }
+        }
+      },
+      "seq": 15
+    },
+    {
+      "at": "2026-09-24T10:28:19.506Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 1"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 16
+    },
+    {
+      "at": "2026-09-24T10:28:19.507Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 17
+    },
+    {
+      "at": "2026-09-24T10:28:19.507Z",
+      "taskId": "d94dd30c8be4",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 18
+    },
+    {
+      "at": "2026-09-24T10:28:19.508Z",
+      "taskId": "d94dd30c8be4",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 19
+    },
+    {
+      "at": "2026-09-24T10:28:19.521Z",
+      "taskId": "d94dd30c8be4",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 20
+    },
+    {
+      "at": "2026-09-24T10:28:19.569Z",
+      "taskId": "d94dd30c8be4",
+      "type": "TURN_VARIANT_START",
+      "message": "Ответ отредактирован: создан новый вариант.",
+      "data": {
+        "turnSeq": 0,
+        "variantId": "e500b7f87bff",
+        "editedText": "исправленный ответ"
+      },
+      "seq": 21
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "вопрос для правки",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-e500b7f87bff",
+      "role": "assistant",
+      "text": "исправленный ответ",
+      "thinking": "",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": []
+    }
+  ]
+}

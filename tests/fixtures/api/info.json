@@ -5,9 +5,9 @@
     "commit": null,
     "date": null
   },
-  "bootId": "b59c6e60-c062-4c41-886e-27397cbc3ac2",
+  "bootId": "24e9b7ee-e109-4dfd-8fbf-259847791c63",
   "apiVersion": 1,
-  "storeId": "5d69bf69-1811-4407-a5d2-7af58959ce22",
+  "storeId": "dfd2dbe1-8abe-44ee-b952-e5b9a588c6db",
   "pi": {
     "version": "0.85.1",
     "supported": true,
@@ -18,7 +18,7 @@
     {
       "interface": "eth0",
       "ip": "192.0.2.2",
-      "url": "http://192.0.2.2:43417"
+      "url": "http://192.0.2.2:35835"
     }
   ],
   "modelBusy": null,
@@ -29,15 +29,15 @@
     "state": "EXTERNAL_RUNNING"
   },
   "system": {
-    "sampledAt": "2026-09-24T10:05:56.162Z",
+    "sampledAt": "2026-09-24T10:19:22.528Z",
     "cpu": {
-      "load": 0.02505268087099044,
+      "load": 0.023250352278064823,
       "cores": 4
     },
     "ram": {
-      "used": 619323392,
+      "used": 639315968,
       "total": 16877547520,
-      "ratio": 0.036695105806462576
+      "ratio": 0.037879672223846896
     },
     "gpu": null
   },

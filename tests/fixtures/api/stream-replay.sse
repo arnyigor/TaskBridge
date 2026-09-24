@@ -1,134 +1,134 @@
 retry: 1500
 
 id: 1
-data: {"at":"2026-09-24T10:05:45.479Z","taskId":"d53f916136d9","type":"TASK_QUEUED","message":"Task queued","data":{},"seq":1}
+data: {"at":"2026-09-24T10:19:11.844Z","taskId":"96903db4b531","type":"TASK_QUEUED","message":"Task queued","data":{},"seq":1}
 
 id: 2
-data: {"at":"2026-09-24T10:05:45.482Z","taskId":"d53f916136d9","type":"STATUS","message":"Preparing workspace","data":{"status":"PREPARING"},"seq":2}
+data: {"at":"2026-09-24T10:19:11.846Z","taskId":"96903db4b531","type":"STATUS","message":"Preparing workspace","data":{"status":"PREPARING"},"seq":2}
 
 id: 3
-data: {"at":"2026-09-24T10:05:45.483Z","taskId":"d53f916136d9","type":"WORKSPACE_READY","message":"Workspace: /tmp/taskbridge-http-test-VfUeSr","data":{},"seq":3}
+data: {"at":"2026-09-24T10:19:11.848Z","taskId":"96903db4b531","type":"WORKSPACE_READY","message":"Workspace: /tmp/taskbridge-http-test-VTkkxA","data":{},"seq":3}
 
 id: 4
-data: {"at":"2026-09-24T10:05:45.484Z","taskId":"d53f916136d9","type":"STATUS","message":"Checking local model runtime","data":{"status":"PREFLIGHT"},"seq":4}
+data: {"at":"2026-09-24T10:19:11.848Z","taskId":"96903db4b531","type":"STATUS","message":"Checking local model runtime","data":{"status":"PREFLIGHT"},"seq":4}
 
 id: 5
-data: {"at":"2026-09-24T10:05:45.485Z","taskId":"d53f916136d9","type":"RUNTIME_READY","message":"Local runtime: EXTERNAL_RUNNING","data":{},"seq":5}
+data: {"at":"2026-09-24T10:19:11.849Z","taskId":"96903db4b531","type":"RUNTIME_READY","message":"Local runtime: EXTERNAL_RUNNING","data":{},"seq":5}
 
 id: 6
-data: {"at":"2026-09-24T10:05:45.551Z","taskId":"d53f916136d9","type":"STATUS","message":"Pi starting","data":{"status":"RUNNING"},"seq":6}
+data: {"at":"2026-09-24T10:19:11.916Z","taskId":"96903db4b531","type":"STATUS","message":"Pi starting","data":{"status":"RUNNING"},"seq":6}
 
 id: 7
-data: {"at":"2026-09-24T10:05:45.554Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"Pi started processing","data":{"pi":{"type":"agent_start"}},"seq":7}
+data: {"at":"2026-09-24T10:19:11.918Z","taskId":"96903db4b531","type":"PI_EVENT","message":"Pi started processing","data":{"pi":{"type":"agent_start"}},"seq":7}
 
 id: 8
-data: {"at":"2026-09-24T10:05:45.555Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Прочитай example.txt\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."}]}}},"seq":8}
+data: {"at":"2026-09-24T10:19:11.919Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Прочитай example.txt\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."}]}}},"seq":8}
 
 id: 9
-data: {"at":"2026-09-24T10:05:45.556Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Прочитай example.txt\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."}]}}},"seq":9}
+data: {"at":"2026-09-24T10:19:11.920Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Прочитай example.txt\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."}]}}},"seq":9}
 
 id: 10
-data: {"at":"2026-09-24T10:05:45.557Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"assistant","content":[]}}},"seq":10}
+data: {"at":"2026-09-24T10:19:11.921Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"assistant","content":[]}}},"seq":10}
 
 id: 11
-data: {"at":"2026-09-24T10:05:45.557Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"tool: read — example.txt","data":{"pi":{"type":"tool_execution_start","toolCallId":"call-1","toolName":"read","args":{"path":"example.txt"}}},"seq":11}
+data: {"at":"2026-09-24T10:19:11.921Z","taskId":"96903db4b531","type":"PI_EVENT","message":"tool: read — example.txt","data":{"pi":{"type":"tool_execution_start","toolCallId":"call-1","toolName":"read","args":{"path":"example.txt"}}},"seq":11}
 
 id: 12
-data: {"at":"2026-09-24T10:05:45.558Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"tool done: read","data":{"pi":{"type":"tool_execution_end","toolCallId":"call-1","toolName":"read","isError":false}},"seq":12}
+data: {"at":"2026-09-24T10:19:11.922Z","taskId":"96903db4b531","type":"PI_EVENT","message":"tool done: read","data":{"pi":{"type":"tool_execution_end","toolCallId":"call-1","toolName":"read","isError":false}},"seq":12}
 
 id: 16
-data: {"at":"2026-09-24T10:05:45.687Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Ответ 1"}],"usage":{"input":1000,"output":100,"totalTokens":1100},"stopReason":"stop"}}},"seq":16}
+data: {"at":"2026-09-24T10:19:12.051Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Ответ 1"}],"usage":{"input":1000,"output":100,"totalTokens":1100},"stopReason":"stop"}}},"seq":16}
 
 id: 17
-data: {"at":"2026-09-24T10:05:45.688Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"agent_end","data":{"pi":{"type":"agent_end"}},"seq":17}
+data: {"at":"2026-09-24T10:19:12.052Z","taskId":"96903db4b531","type":"PI_EVENT","message":"agent_end","data":{"pi":{"type":"agent_end"}},"seq":17}
 
 id: 18
-data: {"at":"2026-09-24T10:05:45.689Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"Pi settled","data":{"pi":{"type":"agent_settled"}},"seq":18}
+data: {"at":"2026-09-24T10:19:12.053Z","taskId":"96903db4b531","type":"PI_EVENT","message":"Pi settled","data":{"pi":{"type":"agent_settled"}},"seq":18}
 
 id: 19
-data: {"at":"2026-09-24T10:05:45.690Z","taskId":"d53f916136d9","type":"STATUS","message":"Collecting diff and changed files","data":{"status":"VERIFYING"},"seq":19}
+data: {"at":"2026-09-24T10:19:12.054Z","taskId":"96903db4b531","type":"STATUS","message":"Collecting diff and changed files","data":{"status":"VERIFYING"},"seq":19}
 
 id: 20
-data: {"at":"2026-09-24T10:05:45.704Z","taskId":"d53f916136d9","type":"TASK_SUCCEEDED","message":"Done","data":{},"seq":20}
+data: {"at":"2026-09-24T10:19:12.066Z","taskId":"96903db4b531","type":"TASK_SUCCEEDED","message":"Done","data":{},"seq":20}
 
 id: 21
-data: {"at":"2026-09-24T10:05:45.769Z","taskId":"d53f916136d9","type":"USER_MESSAGE","message":"slow — второй ход","data":{"text":"slow — второй ход","mode":"prompt","files":[],"commandId":"fixture-msg-1","clientId":"fixture-android"},"seq":21}
+data: {"at":"2026-09-24T10:19:12.133Z","taskId":"96903db4b531","type":"USER_MESSAGE","message":"slow — второй ход","data":{"text":"slow — второй ход","mode":"prompt","files":[],"commandId":"fixture-msg-1","clientId":"fixture-android"},"seq":21}
 
 id: 22
-data: {"at":"2026-09-24T10:05:45.770Z","taskId":"d53f916136d9","type":"STATUS","message":"Follow-up sent to Pi","data":{"status":"RUNNING"},"seq":22}
+data: {"at":"2026-09-24T10:19:12.134Z","taskId":"96903db4b531","type":"STATUS","message":"Follow-up sent to Pi","data":{"status":"RUNNING"},"seq":22}
 
 id: 23
-data: {"at":"2026-09-24T10:05:45.771Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"Pi started processing","data":{"pi":{"type":"agent_start"}},"seq":23}
+data: {"at":"2026-09-24T10:19:12.135Z","taskId":"96903db4b531","type":"PI_EVENT","message":"Pi started processing","data":{"pi":{"type":"agent_start"}},"seq":23}
 
 id: 24
-data: {"at":"2026-09-24T10:05:45.772Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"slow — второй ход"}]}}},"seq":24}
+data: {"at":"2026-09-24T10:19:12.135Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"slow — второй ход"}]}}},"seq":24}
 
 id: 25
-data: {"at":"2026-09-24T10:05:45.772Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"slow — второй ход"}]}}},"seq":25}
+data: {"at":"2026-09-24T10:19:12.136Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"slow — второй ход"}]}}},"seq":25}
 
 id: 26
-data: {"at":"2026-09-24T10:05:45.773Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"assistant","content":[]}}},"seq":26}
+data: {"at":"2026-09-24T10:19:12.136Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"assistant","content":[]}}},"seq":26}
 
 id: 27
-data: {"at":"2026-09-24T10:05:45.773Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"tool: read — example.txt","data":{"pi":{"type":"tool_execution_start","toolCallId":"call-2","toolName":"read","args":{"path":"example.txt"}}},"seq":27}
+data: {"at":"2026-09-24T10:19:12.137Z","taskId":"96903db4b531","type":"PI_EVENT","message":"tool: read — example.txt","data":{"pi":{"type":"tool_execution_start","toolCallId":"call-2","toolName":"read","args":{"path":"example.txt"}}},"seq":27}
 
 id: 28
-data: {"at":"2026-09-24T10:05:45.774Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"tool done: read","data":{"pi":{"type":"tool_execution_end","toolCallId":"call-2","toolName":"read","isError":false}},"seq":28}
+data: {"at":"2026-09-24T10:19:12.137Z","taskId":"96903db4b531","type":"PI_EVENT","message":"tool done: read","data":{"pi":{"type":"tool_execution_end","toolCallId":"call-2","toolName":"read","isError":false}},"seq":28}
 
 id: 29
-data: {"at":"2026-09-24T10:05:46.076Z","taskId":"d53f916136d9","type":"PROMPT_QUEUED","message":"Сообщение поставлено в очередь","data":{"pendingId":"2b4587db-2fc0-44bd-8e78-fe4465839b60","commandId":"fixture-msg-2","clientId":"fixture-desktop"},"seq":29}
+data: {"at":"2026-09-24T10:19:12.441Z","taskId":"96903db4b531","type":"PROMPT_QUEUED","message":"Сообщение поставлено в очередь","data":{"pendingId":"26005c92-f8fd-4485-af68-8aaa1bf42684","commandId":"fixture-msg-2","clientId":"fixture-desktop"},"seq":29}
 
 id: 33
-data: {"at":"2026-09-24T10:05:55.832Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Ответ 2"}],"usage":{"input":1000,"output":100,"totalTokens":1100},"stopReason":"stop"}}},"seq":33}
+data: {"at":"2026-09-24T10:19:22.196Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Ответ 2"}],"usage":{"input":1000,"output":100,"totalTokens":1100},"stopReason":"stop"}}},"seq":33}
 
 id: 34
-data: {"at":"2026-09-24T10:05:55.833Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"agent_end","data":{"pi":{"type":"agent_end"}},"seq":34}
+data: {"at":"2026-09-24T10:19:22.197Z","taskId":"96903db4b531","type":"PI_EVENT","message":"agent_end","data":{"pi":{"type":"agent_end"}},"seq":34}
 
 id: 35
-data: {"at":"2026-09-24T10:05:55.834Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"Pi settled","data":{"pi":{"type":"agent_settled"}},"seq":35}
+data: {"at":"2026-09-24T10:19:22.198Z","taskId":"96903db4b531","type":"PI_EVENT","message":"Pi settled","data":{"pi":{"type":"agent_settled"}},"seq":35}
 
 id: 36
-data: {"at":"2026-09-24T10:05:55.834Z","taskId":"d53f916136d9","type":"STATUS","message":"Collecting diff and changed files","data":{"status":"VERIFYING"},"seq":36}
+data: {"at":"2026-09-24T10:19:22.199Z","taskId":"96903db4b531","type":"STATUS","message":"Collecting diff and changed files","data":{"status":"VERIFYING"},"seq":36}
 
 id: 37
-data: {"at":"2026-09-24T10:05:55.846Z","taskId":"d53f916136d9","type":"TASK_SUCCEEDED","message":"Done","data":{},"seq":37}
+data: {"at":"2026-09-24T10:19:22.211Z","taskId":"96903db4b531","type":"TASK_SUCCEEDED","message":"Done","data":{},"seq":37}
 
 id: 38
-data: {"at":"2026-09-24T10:05:55.856Z","taskId":"d53f916136d9","type":"USER_MESSAGE","message":"из очереди","data":{"text":"из очереди","mode":"prompt","files":[],"commandId":"fixture-msg-2","clientId":"fixture-desktop","pendingId":"2b4587db-2fc0-44bd-8e78-fe4465839b60"},"seq":38}
+data: {"at":"2026-09-24T10:19:22.224Z","taskId":"96903db4b531","type":"USER_MESSAGE","message":"из очереди","data":{"text":"из очереди","mode":"prompt","files":[],"commandId":"fixture-msg-2","clientId":"fixture-desktop","pendingId":"26005c92-f8fd-4485-af68-8aaa1bf42684"},"seq":38}
 
 id: 39
-data: {"at":"2026-09-24T10:05:55.857Z","taskId":"d53f916136d9","type":"STATUS","message":"Follow-up sent to Pi","data":{"status":"RUNNING"},"seq":39}
+data: {"at":"2026-09-24T10:19:22.225Z","taskId":"96903db4b531","type":"STATUS","message":"Follow-up sent to Pi","data":{"status":"RUNNING"},"seq":39}
 
 id: 40
-data: {"at":"2026-09-24T10:05:55.858Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"Pi started processing","data":{"pi":{"type":"agent_start"}},"seq":40}
+data: {"at":"2026-09-24T10:19:22.226Z","taskId":"96903db4b531","type":"PI_EVENT","message":"Pi started processing","data":{"pi":{"type":"agent_start"}},"seq":40}
 
 id: 41
-data: {"at":"2026-09-24T10:05:55.859Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"из очереди"}]}}},"seq":41}
+data: {"at":"2026-09-24T10:19:22.227Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"из очереди"}]}}},"seq":41}
 
 id: 42
-data: {"at":"2026-09-24T10:05:55.859Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"из очереди"}]}}},"seq":42}
+data: {"at":"2026-09-24T10:19:22.228Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"из очереди"}]}}},"seq":42}
 
 id: 43
-data: {"at":"2026-09-24T10:05:55.860Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"assistant","content":[]}}},"seq":43}
+data: {"at":"2026-09-24T10:19:22.228Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_start","data":{"pi":{"type":"message_start","message":{"role":"assistant","content":[]}}},"seq":43}
 
 id: 44
-data: {"at":"2026-09-24T10:05:55.861Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"tool: read — example.txt","data":{"pi":{"type":"tool_execution_start","toolCallId":"call-3","toolName":"read","args":{"path":"example.txt"}}},"seq":44}
+data: {"at":"2026-09-24T10:19:22.229Z","taskId":"96903db4b531","type":"PI_EVENT","message":"tool: read — example.txt","data":{"pi":{"type":"tool_execution_start","toolCallId":"call-3","toolName":"read","args":{"path":"example.txt"}}},"seq":44}
 
 id: 45
-data: {"at":"2026-09-24T10:05:55.861Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"tool done: read","data":{"pi":{"type":"tool_execution_end","toolCallId":"call-3","toolName":"read","isError":false}},"seq":45}
+data: {"at":"2026-09-24T10:19:22.229Z","taskId":"96903db4b531","type":"PI_EVENT","message":"tool done: read","data":{"pi":{"type":"tool_execution_end","toolCallId":"call-3","toolName":"read","isError":false}},"seq":45}
 
 id: 49
-data: {"at":"2026-09-24T10:05:55.990Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Ответ 3"}],"usage":{"input":1000,"output":100,"totalTokens":1100},"stopReason":"stop"}}},"seq":49}
+data: {"at":"2026-09-24T10:19:22.356Z","taskId":"96903db4b531","type":"PI_EVENT","message":"message_end","data":{"pi":{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Ответ 3"}],"usage":{"input":1000,"output":100,"totalTokens":1100},"stopReason":"stop"}}},"seq":49}
 
 id: 50
-data: {"at":"2026-09-24T10:05:55.990Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"agent_end","data":{"pi":{"type":"agent_end"}},"seq":50}
+data: {"at":"2026-09-24T10:19:22.356Z","taskId":"96903db4b531","type":"PI_EVENT","message":"agent_end","data":{"pi":{"type":"agent_end"}},"seq":50}
 
 id: 51
-data: {"at":"2026-09-24T10:05:55.991Z","taskId":"d53f916136d9","type":"PI_EVENT","message":"Pi settled","data":{"pi":{"type":"agent_settled"}},"seq":51}
+data: {"at":"2026-09-24T10:19:22.357Z","taskId":"96903db4b531","type":"PI_EVENT","message":"Pi settled","data":{"pi":{"type":"agent_settled"}},"seq":51}
 
 id: 52
-data: {"at":"2026-09-24T10:05:55.992Z","taskId":"d53f916136d9","type":"STATUS","message":"Collecting diff and changed files","data":{"status":"VERIFYING"},"seq":52}
+data: {"at":"2026-09-24T10:19:22.357Z","taskId":"96903db4b531","type":"STATUS","message":"Collecting diff and changed files","data":{"status":"VERIFYING"},"seq":52}
 
 id: 53
-data: {"at":"2026-09-24T10:05:56.004Z","taskId":"d53f916136d9","type":"TASK_SUCCEEDED","message":"Done","data":{},"seq":53}
+data: {"at":"2026-09-24T10:19:22.367Z","taskId":"96903db4b531","type":"TASK_SUCCEEDED","message":"Done","data":{},"seq":53}
 

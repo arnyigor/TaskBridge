@@ -1,0 +1,633 @@
+{
+  "events": [
+    {
+      "at": "2026-09-24T10:19:11.844Z",
+      "taskId": "96903db4b531",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-09-24T10:19:11.846Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-09-24T10:19:11.848Z",
+      "taskId": "96903db4b531",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: /tmp/taskbridge-http-test-VTkkxA",
+      "data": {},
+      "seq": 3
+    },
+    {
+      "at": "2026-09-24T10:19:11.848Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-09-24T10:19:11.849Z",
+      "taskId": "96903db4b531",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-09-24T10:19:11.916Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-09-24T10:19:11.918Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 7
+    },
+    {
+      "at": "2026-09-24T10:19:11.919Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Прочитай example.txt\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-09-24T10:19:11.920Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "Прочитай example.txt\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-09-24T10:19:11.921Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-09-24T10:19:11.921Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-09-24T10:19:11.922Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-09-24T10:19:12.051Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 1"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 16
+    },
+    {
+      "at": "2026-09-24T10:19:12.052Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 17
+    },
+    {
+      "at": "2026-09-24T10:19:12.053Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 18
+    },
+    {
+      "at": "2026-09-24T10:19:12.054Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 19
+    },
+    {
+      "at": "2026-09-24T10:19:12.066Z",
+      "taskId": "96903db4b531",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 20
+    },
+    {
+      "at": "2026-09-24T10:19:12.133Z",
+      "taskId": "96903db4b531",
+      "type": "USER_MESSAGE",
+      "message": "slow — второй ход",
+      "data": {
+        "text": "slow — второй ход",
+        "mode": "prompt",
+        "files": [],
+        "commandId": "fixture-msg-1",
+        "clientId": "fixture-android"
+      },
+      "seq": 21
+    },
+    {
+      "at": "2026-09-24T10:19:12.134Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Follow-up sent to Pi",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 22
+    },
+    {
+      "at": "2026-09-24T10:19:12.135Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 23
+    },
+    {
+      "at": "2026-09-24T10:19:12.135Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "slow — второй ход"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 24
+    },
+    {
+      "at": "2026-09-24T10:19:12.136Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "slow — второй ход"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 25
+    },
+    {
+      "at": "2026-09-24T10:19:12.136Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 26
+    },
+    {
+      "at": "2026-09-24T10:19:12.137Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 27
+    },
+    {
+      "at": "2026-09-24T10:19:12.137Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 28
+    },
+    {
+      "at": "2026-09-24T10:19:12.441Z",
+      "taskId": "96903db4b531",
+      "type": "PROMPT_QUEUED",
+      "message": "Сообщение поставлено в очередь",
+      "data": {
+        "pendingId": "26005c92-f8fd-4485-af68-8aaa1bf42684",
+        "commandId": "fixture-msg-2",
+        "clientId": "fixture-desktop"
+      },
+      "seq": 29
+    },
+    {
+      "at": "2026-09-24T10:19:22.196Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 2"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 33
+    },
+    {
+      "at": "2026-09-24T10:19:22.197Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 34
+    },
+    {
+      "at": "2026-09-24T10:19:22.198Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 35
+    },
+    {
+      "at": "2026-09-24T10:19:22.199Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 36
+    },
+    {
+      "at": "2026-09-24T10:19:22.211Z",
+      "taskId": "96903db4b531",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 37
+    },
+    {
+      "at": "2026-09-24T10:19:22.224Z",
+      "taskId": "96903db4b531",
+      "type": "USER_MESSAGE",
+      "message": "из очереди",
+      "data": {
+        "text": "из очереди",
+        "mode": "prompt",
+        "files": [],
+        "commandId": "fixture-msg-2",
+        "clientId": "fixture-desktop",
+        "pendingId": "26005c92-f8fd-4485-af68-8aaa1bf42684"
+      },
+      "seq": 38
+    },
+    {
+      "at": "2026-09-24T10:19:22.225Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Follow-up sent to Pi",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 39
+    },
+    {
+      "at": "2026-09-24T10:19:22.226Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 40
+    },
+    {
+      "at": "2026-09-24T10:19:22.227Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "из очереди"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 41
+    },
+    {
+      "at": "2026-09-24T10:19:22.228Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "из очереди"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 42
+    },
+    {
+      "at": "2026-09-24T10:19:22.228Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 43
+    },
+    {
+      "at": "2026-09-24T10:19:22.229Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-3",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 44
+    },
+    {
+      "at": "2026-09-24T10:19:22.229Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-3",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 45
+    },
+    {
+      "at": "2026-09-24T10:19:22.356Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 3"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 49
+    },
+    {
+      "at": "2026-09-24T10:19:22.356Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 50
+    },
+    {
+      "at": "2026-09-24T10:19:22.357Z",
+      "taskId": "96903db4b531",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 51
+    },
+    {
+      "at": "2026-09-24T10:19:22.357Z",
+      "taskId": "96903db4b531",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 52
+    },
+    {
+      "at": "2026-09-24T10:19:22.367Z",
+      "taskId": "96903db4b531",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 53
+    }
+  ],
+  "reachedStart": true
+}
