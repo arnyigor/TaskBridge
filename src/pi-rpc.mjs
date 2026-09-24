@@ -61,7 +61,13 @@ export class PiRpcSession extends EventEmitter {
       env: env ? { ...process.env, ...env } : process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
-      shell: process.platform === 'win32'
+      shell: process.platform === 'win32',
+      // On POSIX Pi must lead its own process group: killTree() signals the
+      // group (-pid), and without one that call fails and only Pi itself dies,
+      // leaving the pytest/gradle it started running as orphans. Windows kills
+      // the tree with taskkill /T instead. The process is never unref'd, so it
+      // still lives and dies with this session (stdin EOF, close(), killTree()).
+      detached: process.platform !== 'win32'
     });
     this.proc = proc;
 

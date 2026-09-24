@@ -20,20 +20,20 @@
 |---|---|---|---|
 | Один процесс Pi на сессию | ✅ есть | `TaskManager.runtimes` (`Map taskId → {pi}`), `src/pi-rpc.mjs` | — |
 | Очередь команд на сессию | 🟡 частично | `#admit` (глобальный мьютекс), `pendingPrompts`, `eventChain` | единый актор на сессию вместо глобального мьютекса (B1) |
-| Буферизация stdout, UTF-8 на границе чанков | ✅ есть | `pi-rpc.mjs` (`StringDecoder`, строгий LF-JSONL) | покрыть тестом кириллицу на границе чанка, если его нет |
+| Буферизация stdout, UTF-8 на границе чанков | ✅ есть | `pi-rpc.mjs` (`StringDecoder`, строгий LF-JSONL) | — (тест: `tests/pi-rpc-faults.test.mjs`) |
 | Таймауты RPC-запросов | ✅ есть | `pi-rpc.mjs` (idle-таймер, `tests/rpc-timeout.test.mjs`) | — |
-| Убийство дерева процессов | 🟡 частично | `killTree()` → `taskkill /T /F` | Job Object, сироты по PID+времени старта (B1) |
+| Убийство дерева процессов | 🟡 частично | `killTree()`: Windows `taskkill /T /F`; POSIX — группа процессов (Pi запускается `detached`, исправлено в B0) | Job Object, сироты по PID+времени старта (B1) |
 | SQLite, WAL, миграции | ✅ есть | `task-store.mjs`: `tasks`, `events`, `meta`, `PRAGMA user_version` | таблицы `runtimes`, `ui_requests` (B2) |
 | `seq` монотонный, атомарный | ✅ есть | `task-store.mjs`, `events/event-sequence.mjs` | — |
 | Реплей без дыр при подписке | ✅ есть | `server.mjs`, `/api/tasks/:id/stream`: подписка → чтение БД → буфер → live | тот же алгоритм для списка сессий (B3) |
-| Идемпотентность промптов | ✅ есть | `#withCommand`, `commandId`+`clientId`, журнал в SQLite, `UNKNOWN_AFTER_CRASH` | — (переименовывать в `idempotencyKey` не нужно) |
+| Идемпотентность промптов | ✅ есть | `#withCommand`, `commandId`+`clientId`, журнал в SQLite, `UNKNOWN_AFTER_CRASH` → `409`; `USER_MESSAGE`/`PROMPT_QUEUED` несут `commandId`/`pendingId` | — (переименовывать в `idempotencyKey` не нужно) |
 | Стриминговые дельты не копятся | 🟡 иначе | `event-trim.mjs`: `message_update` пишутся и вычищаются после `message_end` | решить, переходить ли на live-кадры без `seq` (см. B2) |
 | Усечённый вывод инструментов + полный по запросу | ✅ есть | `tool-output.mjs`, `GET /api/tasks/:id/tools/:toolCallId/output` | — |
 | Контракт API + проверка | ✅ есть | `src/api-contract.mjs`, `docs/api-contract.md`, `tests/api-contract.test.mjs` | Bearer-токен, нормализованные события, состояния runtime (B3) |
 | Подтверждения инструментов | ✅ есть | `pi-extension/taskbridge-approval.js`, `APPROVAL_REQUIRED/RESOLVED`, `/approvals` | обобщить до любых UI-запросов расширений (B4) |
 | Общие UI-запросы расширений Pi | ❌ нет | в RPC-клиенте не обрабатываются | B0 (разведка) + B4 |
-| fake-pi | 🟡 частично | `tests/fake-pi.mjs` (turn, модели, approvals, сессии) | режимы отказов: падение, зависание, битый JSON, мусор (B0) |
-| Проверка версии Pi | ❌ нет | — | B0 |
+| fake-pi | ✅ есть | `tests/fake-pi.mjs`: turn, модели, approvals, сессии, `--version`, режимы `fault-crash/garbage/utf8/hang/deaf/child` | воспроизведение записанных транскриптов (B0) |
+| Проверка версии Pi | ✅ есть | `src/pi-version.mjs`, `/api/info` → `pi`, предупреждение `PI_VERSION_UNSUPPORTED` | — |
 | Параллельные сессии | ❌ сознательно нет | `activeTaskId`, capacity=1, [multi-session-queues.md](multi-session-queues.md) | B5 — отдельное решение, см. там |
 | Hibernate по простою | ❌ нет | — | B6 |
 | Восстановление после падения daemon'а | 🟡 частично | `init()`: активные → `FAILED`/`FAILED_RECOVERY`, следующее сообщение поднимает Pi с тем же `--session` | переименовать в честное состояние `RESTORABLE` (B6) |
@@ -93,11 +93,11 @@ Pi JSONL — истина для модели. SQLite — истина для м
 | I3 | Событие сначала пишется в SQLite, потом рассылается | ✅ | есть |
 | I4 | `seq` в сессии строго монотонный и без пропусков | ✅ | есть |
 | I5 | Нет живого процесса без записи и записи `LIVE` без процесса | ❌ (PID не хранится) | B1/B6 |
-| I6 | `stop`/`hibernate` завершают всё дерево процессов | 🟡 Windows `taskkill /T` | B1 |
+| I6 | `stop`/`hibernate` завершают всё дерево процессов | ✅ при живом daemon'е (Windows `taskkill /T`, POSIX — группа процессов); ❌ при аварийном kill daemon'а | `tests/runtime-faults.test.mjs`; Job Object — B1 |
 | I7 | Каждый UI-запрос разрешается ровно один раз | ✅ для approvals | распространить на все UI-запросы (B4) |
 | I8 | Команда с одним `commandId` выполняется не более одного раза, **в том числе после рестарта** | ✅ (`UNKNOWN_AFTER_CRASH`) | есть |
 | I9 | JSONL одной Conversation пишет не больше одного Pi | 🟡 `take-over` требует ручного `confirmedClosed` | B9 |
-| I10 | Клиент может отличить «та же база» от «база пересоздана/восстановлена из бэкапа» | ❌ | `storeId` в `/api/info` (B3) |
+| I10 | Клиент может отличить «та же база» от «база пересоздана/восстановлена из бэкапа» | ✅ `storeId` в `/api/info`, у бэкапа свой | `tests/store-identity.test.mjs` |
 
 I10 новый: после восстановления из `npm run backup` или удаления `data/` `seq` начинается заново, и кэш клиента с `lastSeq = 1284` молча перестанет получать события. Решение — случайный `storeId`, создаваемый вместе с БД и отдаваемый в `/api/info` и в snapshot; клиент при несовпадении сбрасывает кэш.
 
@@ -157,7 +157,7 @@ I10 новый: после восстановления из `npm run backup` и
 
 Цель: зафиксировать реальное поведение Pi до рефакторинга.
 
-- [ ] Зафиксировать поддерживаемый диапазон версий Pi (сейчас 0.85.x). `pi --version` при старте; при несовпадении — `piVersion` + `piVersionSupported: false` в `/api/info` и баннер в UI. Не блокировать работу.
+- [x] Зафиксировать поддерживаемый диапазон версий Pi (сейчас 0.85.x). `pi --version` при старте; при несовпадении — `piVersion` + `piVersionSupported: false` в `/api/info` и баннер в UI. Не блокировать работу.
 - [ ] Записать реальные RPC-транскрипты (stdin и stdout JSONL) как fixtures в `tests/fixtures/pi-rpc/`. Скрипт записи — поверх `scripts/pi-rpc-smoke.mjs`:
   - обычный turn с текстовым ответом;
   - turn с несколькими tool calls;
@@ -168,7 +168,8 @@ I10 новый: после восстановления из `npm run backup` и
   - `steer` и `follow_up` во время стриминга;
   - длинный вывод инструмента.
 - [ ] Документ `docs/pi-rpc-protocol.md`: какие команды и события мы используем, по транскриптам. Сейчас используются `prompt`, `steer`, `follow_up`, `abort`, `clear_queue`, `compact`, `get_state`, `set_model`, `set_thinking_level`, `get_available_models`, `get_available_thinking_levels` — сверить, дописать то, что нашлось.
-- [ ] Расширить `tests/fake-pi.mjs`: воспроизведение fixture-файла + режимы отказа по переменной окружения — упасть на N-м кадре, зависнуть, ответить с задержкой, оборвать строку JSON, записать мусор в stdout, записать кириллицу, разрезанную посреди символа.
+- [x] Режимы отказа в `tests/fake-pi.mjs` (ключевые слова `fault-*` в промпте) и тесты на них: `tests/pi-rpc-faults.test.mjs`, `tests/runtime-faults.test.mjs`. Найдено и исправлено: на POSIX `killTree` не убивал детей Pi (Pi не был лидером группы процессов).
+- [ ] Воспроизведение записанного fixture-файла в `tests/fake-pi.mjs` + режимы отказа по переменной окружения — упасть на N-м кадре, зависнуть, ответить с задержкой, оборвать строку JSON, записать мусор в stdout, записать кириллицу, разрезанную посреди символа.
 - [ ] Характеризационные тесты там, где их нет: браузер продолжает живую сессию после переподключения SSE; restore после рестарта; capacity=1.
 
 **Готово, когда:** сценарий «prompt → tools → settled» проходит на fake-pi в CI за секунды; все fixtures проигрываются; формат UI-запросов расширений задокументирован.
@@ -195,7 +196,7 @@ I10 новый: после восстановления из `npm run backup` и
 
 - [ ] `runtimes(task_id PK, pid, process_started_at, state, activity_json, started_at, exit_code, exit_reason)`.
 - [ ] `ui_requests(id PK, task_id, kind, payload_json, status, resolved_by_client_id, resolved_at, created_at)` — общая таблица для approvals и UI-запросов расширений (сейчас approvals живут отдельно).
-- [ ] `meta.store_id` — случайный id базы (I10).
+- [x] `meta.store_id` — случайный id базы (I10); копия из `backup()` получает свой.
 - [ ] В `tasks.data`: `pinned`, `ownership`, `lastActivityAt`.
 - [ ] Стриминговые дельты. Сейчас `message_update` пишутся в БД и вычищаются после `message_end` (`event-trim.mjs`). Вариант первой редакции — дельты вообще не писать, отдавать live-кадрами без `seq`, а незавершённый текст держать в памяти и отдавать в snapshot. **Рекомендация: перейти на live-кадры**, потому что:
   - KMP-клиенту не нужно фильтровать мёртвые дельты из истории;
@@ -241,7 +242,7 @@ I10 новый: после восстановления из `npm run backup` и
   ```
   Нормализованные виды: `message.user`, `message.assistant`, `thinking`, `tool.started`, `tool.finished`, `ui.request`, `ui.resolved`, `prompt.queued`, `prompt.dispatched`, `prompt.dropped`, `runtime.state`, `turn.started`, `turn.finished`, `history.edited`, `history.truncated`, `model.changed`, `compaction`, `error`.
 - [ ] `source.kind` для пользовательских событий: `web | cli | android | desktop | cloud` (из `clientKind` устройства).
-- [ ] `USER_MESSAGE` и `QUEUE_*` несут `commandId` и `pendingId` исходной команды. Сейчас их там нет, и клиент после `UNKNOWN_AFTER_CRASH` не может проверить по истории, дошло ли сообщение до агента.
+- [x] `USER_MESSAGE` несёт `commandId`/`clientId` (и `pendingId` при доставке из очереди), каждое сообщение в очереди — событие `PROMPT_QUEUED {pendingId, commandId?, clientId?}`. По ним клиент после `UNKNOWN_AFTER_CRASH` проверяет, дошло ли сообщение до агента.
 - [ ] События правки истории (`TURN_EDITED`, `TURN_TRUNCATED`, `TASK_FORKED`) явно описать в контракте как **переписывающие** состояние клиента: `TURN_EDITED` меняет событие с тем же `seq`, `TURN_TRUNCATED {fromSeq}` удаляет всё после `fromSeq`. Клиентский кэш обязан это поддерживать.
 - [ ] JSON Schema для `Task`, `TaskEvent`, `norm.*`, кадров потока — в `docs/schema/`, из неё генерируются или против неё проверяются модели клиентов (KMP K1). Тест в `api-contract.test.mjs` проверяет, что реальные ответы проходят схему.
 
@@ -264,7 +265,7 @@ I10 новый: после восстановления из `npm run backup` и
 
 - [ ] Конверт остаётся `{error, code}`, добавляется необязательный `state` (текущий `displayState`) для `409`.
 - [ ] Коды: `404 NOT_FOUND`, `409 INVALID_STATE` / `MODEL_BUSY` (есть), `423 EXTERNAL_SESSION`, `429 RUNTIME_LIMIT` (`429 RATE_LIMITED` уже занят лимитом авторизации — различаются по `code`), `409 UI_REQUEST_RESOLVED`. Список — в `api-contract.md`, коды — стабильные строки, клиент ветвится по `code`, а не по тексту.
-- [ ] **Баг, чинить сразу, не дожидаясь B3:** `CONFLICT` (повтор `commandId` с другим телом) и `UNKNOWN_AFTER_CRASH` не попадают в таблицу статусов в конце `src/server.mjs` и отдаются как `500`. Клиент с ретраями примет их за временную ошибку сервера и будет повторять. Нужно: `CONFLICT → 409`, `UNKNOWN_AFTER_CRASH → 409` (или `422`), плюс тест.
+- [x] **Баг, чинить сразу, не дожидаясь B3:** `CONFLICT` (повтор `commandId` с другим телом) и `UNKNOWN_AFTER_CRASH` не попадают в таблицу статусов в конце `src/server.mjs` и отдаются как `500`. Клиент с ретраями примет их за временную ошибку сервера и будет повторять. Нужно: `CONFLICT → 409`, `UNKNOWN_AFTER_CRASH → 409` (или `422`), плюс тест.
 
 **Готово, когда:** контрактные тесты на все новые маршруты и схемы; тест «переподключение с `after` во время активного turn» — ни одного пропуска и дубля; тест «live-дельта с неверным `offset` игнорируется, финальное сообщение восстанавливает текст»; `apiVersion` и `capabilities` в `/api/info`. После этого контракт замораживается для KMP.
 
