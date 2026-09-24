@@ -157,13 +157,14 @@ I10 новый: после восстановления из `npm run backup` и
 
 Цель: зафиксировать реальное поведение Pi до рефакторинга.
 
-- [x] Зафиксировать поддерживаемый диапазон версий Pi (сейчас 0.85.x). `pi --version` при старте; при несовпадении — `piVersion` + `piVersionSupported: false` в `/api/info` и баннер в UI. Не блокировать работу.
+- [x] Зафиксировать поддерживаемый диапазон версий Pi (сейчас `>=0.85.0 <0.88.0`; 0.87.1 проверен на рабочей машине). `pi --version` при старте; при несовпадении — `piVersion` + `piVersionSupported: false` в `/api/info` и баннер в UI. Не блокировать работу.
 - [ ] Записать реальные RPC-транскрипты (stdin и stdout JSONL) как fixtures в `tests/fixtures/pi-rpc/`. Скрипт записи — поверх `scripts/pi-rpc-smoke.mjs`:
   - обычный turn с текстовым ответом;
   - turn с несколькими tool calls;
   - `abort` посреди tool call;
   - ошибка модели / недоступный провайдер;
-  - **extension UI-запрос** (confirm/select/input) и ответ на него — формат кадров не известен, это главная цель разведки;
+  - **extension UI-запрос** (confirm/select/input) и ответ на него — главная цель разведки.
+    Первая запись с реального Pi 0.87.1 (smoke через `scripts/pi-rpc-record.mjs`) показала: даже простой prompt даёт ~10 кадров `extension_ui_request` от установленных расширений (MCP, pi-limits-wait, plannotator) — методы `setStatus`, `notify`, `setWidget`; `statusText` содержит ANSI-коды. TaskBridge их сейчас никак не обрабатывает. Для уведомлений это безвредно, но **интерактивный запрос (confirm/select) почти наверняка подвесит ход** — нужна отдельная запись с расширением, которое действительно спрашивает;
   - `compact`, `set_model`, `set_thinking_level`;
   - `steer` и `follow_up` во время стриминга;
   - длинный вывод инструмента.

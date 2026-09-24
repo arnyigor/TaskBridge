@@ -10,7 +10,9 @@
 import { spawn } from 'node:child_process';
 
 // Inclusive lower bound, exclusive upper bound.
-export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '0.86.0' });
+// 0.87.x: checked on the operator's machine (Pi 0.87.1 — smoke, real sessions
+// and the RPC recorder) before the range was widened.
+export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '0.88.0' });
 
 // `pi --version` has printed both "0.85.1" and "pi 0.85.1"; take the first
 // x.y.z anywhere in the output rather than depend on the prefix.
@@ -65,7 +67,16 @@ export function readPiVersion({ command = 'pi', env = null, timeoutMs = 10000 } 
     proc.on('close', (code) => {
       const version = parsePiVersion(out);
       if (version) finish({ version, error: null });
-      else finish({ version: null, error: code === 0 ? 'unrecognised pi --version output' : `pi --version exited with ${code}` });
+      else if (code === 0) finish({ version: null, error: 'unrecognised pi --version output' });
+      // On Windows Pi starts through cmd.exe, so a missing Pi is not ENOENT but
+      // cmd's own "is not recognized" message with exit code 1 (9009 on some
+      // setups). Name that case instead of reporting a bare exit code.
+      else if (/not recognized|not found|не является|не найден/i.test(out) || code === 9009 || code === 127) {
+        finish({ version: null, error: `Pi не найден: ${command}` });
+      } else {
+        const detail = out.trim().split(/\r?\n/)[0];
+        finish({ version: null, error: `pi --version exited with ${code}${detail ? `: ${detail.slice(0, 200)}` : ''}` });
+      }
     });
   });
 }

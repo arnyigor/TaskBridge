@@ -6,33 +6,39 @@ import path from 'node:path';
 import { TaskStore } from '../src/task-store.mjs';
 import { startFixture } from './server-fixture.mjs';
 
-async function tempDir(t) {
+// Stores close before the directory goes: Windows cannot unlink an open database.
+async function tempDir(t, stores) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-store-id-'));
-  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    for (const store of stores) store.close();
+    await fs.rm(dir, { recursive: true, force: true });
+  });
   return dir;
 }
 
 test('a database keeps its storeId across reopening', async t => {
-  const dir = await tempDir(t);
+  const stores = [];
+  const dir = await tempDir(t, stores);
   const first = new TaskStore(dir);
   const id = first.storeId;
   first.close();
   const again = new TaskStore(dir);
-  t.after(() => again.close());
+  stores.push(again);
   assert.match(id, /^[0-9a-f-]{36}$/);
   assert.equal(again.storeId, id);
 });
 
 test('a restored backup has its own storeId, so clients drop their seq cache', async t => {
-  const dir = await tempDir(t);
+  const stores = [];
+  const dir = await tempDir(t, stores);
   const store = new TaskStore(dir);
-  t.after(() => store.close());
+  stores.push(store);
   const file = await store.backup(path.join(dir, 'backups', 'copy.db'));
   const restoredDir = path.join(dir, 'restored');
   await fs.mkdir(restoredDir);
   await fs.copyFile(file, path.join(restoredDir, 'taskbridge.db'));
   const restored = new TaskStore(restoredDir);
-  t.after(() => restored.close());
+  stores.push(restored);
   assert.ok(restored.storeId);
   assert.notEqual(restored.storeId, store.storeId);
 });
@@ -90,4 +96,24 @@ test('a commandId reused with a different body is a 409 CONFLICT, and the sender
   assert.equal(users.length, 1, 'the replay did not reach Pi twice');
   assert.equal(users[0].data.commandId, 'cmd-origin-1');
   assert.equal(users[0].data.clientId, 'phone-1');
+});
+
+test('a repeat of a command still in flight is a 409 ACCEPTED, not a server error', { timeout: 40000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  for (let i = 0; i < 200; i++) {
+    const current = await api(`/api/tasks/${task.id}`);
+    if (['SUCCEEDED', 'FAILED'].includes(current.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const body = { text: 'одновременно', commandId: 'cmd-inflight-1', clientId: 'phone-1' };
+  const results = await Promise.allSettled([1, 2, 3].map(() => api(`/api/tasks/${task.id}/message`, body)));
+  const refused = results.filter(r => r.status === 'rejected').map(r => r.reason);
+  assert.ok(results.some(r => r.status === 'fulfilled'), 'one of them went through');
+  for (const error of refused) assert.deepEqual([error.status, error.code], [409, 'ACCEPTED']);
+
+  const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+  assert.equal(events.filter(event => event.type === 'USER_MESSAGE' && event.data.commandId === 'cmd-inflight-1').length, 1);
 });

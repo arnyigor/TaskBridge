@@ -1339,10 +1339,11 @@ async function handleRequest(req, res) {
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
       : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
-      // CONFLICT / UNKNOWN_AFTER_CRASH come from the commandId journal. They are
-      // final answers about that command, not server faults: a 5xx would make a
-      // retrying client repeat a request that can never succeed.
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH'].includes(error.code) ? 409
+      // CONFLICT / UNKNOWN_AFTER_CRASH / ACCEPTED come from the commandId journal.
+      // They are answers about that command, not server faults: a 5xx would make
+      // a retrying client treat them as an outage. ACCEPTED (still in flight) is
+      // the one worth repeating later — the repeat returns the saved result.
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429
