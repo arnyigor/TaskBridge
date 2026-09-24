@@ -63,4 +63,6 @@ object AppIcons {
     val Shield = lineIcon("shield", "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z")
     val Queue = lineIcon("queue", "M8 6h13", "M8 12h13", "M8 18h13", "M3 6h.01", "M3 12h.01", "M3 18h.01")
     val Eraser = lineIcon("eraser", "M20 20H9l-6-6 10-10 7 7-6 6", "M6 11l7 7")
+    val Sun = lineIcon("sun", "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z", "M12 1v2", "M12 21v2", "M4.22 4.22l1.42 1.42", "M18.36 18.36l1.42 1.42", "M1 12h2", "M21 12h2", "M4.22 19.78l1.42-1.42", "M18.36 5.64l1.42-1.42")
+    val Moon = lineIcon("moon", "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z")
 }

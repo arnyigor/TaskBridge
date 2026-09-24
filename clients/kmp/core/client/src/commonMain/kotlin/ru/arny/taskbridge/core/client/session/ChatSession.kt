@@ -442,7 +442,12 @@ class ChatSession(
     fun rename(title: String) = act("rename") { api.rename(taskId, title.trim()) }
 
     fun delete() = act("delete") {
-        api.delete(taskId)
+        // "Not found": deleted already (another device, an earlier tap) — the outcome asked for.
+        try {
+            api.delete(taskId)
+        } catch (gone: ApiException) {
+            if (gone.error !is ApiError.NotFound) throw gone
+        }
         _effects.tryEmit(ChatEffect.Deleted)
     }
 
@@ -470,6 +475,14 @@ class ChatSession(
     fun fileUrl(fileId: String): String = api.fileUrl(taskId, fileId)
 
     fun workspaceFileUrl(path: String): String = api.workspaceFileUrl(taskId, path)
+
+    suspend fun readWorkspaceFile(path: String): Result<ByteArray> = runCatching { api.download(api.workspaceFileUrl(taskId, path)) }
+
+    suspend fun readFile(fileId: String): Result<ByteArray> = runCatching { api.download(api.fileUrl(taskId, fileId)) }
+
+    suspend fun openWorkspaceFileOnComputer(path: String, reveal: Boolean): Result<Unit> = runCatching { api.openWorkspaceFile(taskId, path, reveal) }
+
+    suspend fun openFileOnComputer(fileId: String, reveal: Boolean): Result<Unit> = runCatching { api.openFile(taskId, fileId, reveal) }
 
     private fun act(key: String, startNotice: String? = null, block: suspend () -> Unit) {
         if (key in _state.value.busy) return

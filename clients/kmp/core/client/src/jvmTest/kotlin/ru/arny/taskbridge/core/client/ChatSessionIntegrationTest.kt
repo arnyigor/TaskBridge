@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import ru.arny.taskbridge.core.api.CreateTaskRequest
@@ -88,6 +89,25 @@ class ChatSessionIntegrationTest {
 
     private fun ChatSessionState.users() = chat.items.filterIsInstance<ChatItem.User>()
     private fun ChatSessionState.answers() = chat.items.filterIsInstance<ChatItem.Assistant>()
+
+    @Test
+    fun deletingAnOpenSessionEndsWithDeletedAndNoError() = runBlocking<Unit> {
+        if (!nodeAvailable) return@runBlocking
+        val api = api()
+        val task = api.createTask(CreateTaskRequest(projectId = "fixture", prompt = "Прочитай example.txt"))
+        val chat = session(task.id)
+        val effects = java.util.concurrent.CopyOnWriteArrayList<ru.arny.taskbridge.core.client.session.ChatEffect>()
+        val collector = scope.launch { chat.effects.collect { effects += it } }
+        chat.start()
+        chat.await("answered") { it.link == LinkState.Live && it.idle() }
+
+        chat.delete()
+        withTimeout(20_000) { while (effects.none { it is ru.arny.taskbridge.core.client.session.ChatEffect.Deleted }) delay(50) }
+        delay(1500)
+        collector.cancel()
+        assertEquals(emptyList(), effects.filterIsInstance<ru.arny.taskbridge.core.client.session.ChatEffect.Notice>().map { it.message })
+        assertTrue(api.tasks().none { it.id == task.id }, "the session is gone on the server")
+    }
 
     @Test
     fun aConversationWithQueueStopAndReconnect() = runBlocking<Unit> {

@@ -18,36 +18,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.platform.SystemBarsAppearance
 
-// A calm, readable palette: the chat is read for hours, so contrast comes from
-// type and spacing rather than saturated color. Status colors are the only
-// loud ones, and each state keeps its hue in both themes.
+// Neutral graphite surfaces with one indigo accent: the chat is read for
+// hours, so contrast comes from type and spacing, not saturated color. Status
+// colors are the only loud ones, and each state keeps its hue in both themes.
+// Dark is layered by lightness (deeper = further back), not by a blue tint.
 
 private val Indigo = Color(0xFF4F5BD5)
-private val IndigoLight = Color(0xFFA9B1FF)
+private val IndigoLight = Color(0xFFA3ACFF)
 
 private val LightColors = lightColorScheme(
     primary = Indigo,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE3E6FF),
+    primaryContainer = Color(0xFFE4E7FF),
     onPrimaryContainer = Color(0xFF151C5C),
-    secondary = Color(0xFF5B5F72),
-    secondaryContainer = Color(0xFFE2E3F0),
-    onSecondaryContainer = Color(0xFF181B2B),
-    tertiary = Color(0xFF7A5362),
-    background = Color(0xFFF8F8FC),
-    onBackground = Color(0xFF1A1B21),
-    surface = Color(0xFFF8F8FC),
-    onSurface = Color(0xFF1A1B21),
-    surfaceVariant = Color(0xFFE4E4EE),
-    onSurfaceVariant = Color(0xFF474856),
+    secondary = Color(0xFF5C5F6B),
+    secondaryContainer = Color(0xFFE6E7EE),
+    onSecondaryContainer = Color(0xFF1A1C24),
+    tertiary = Color(0xFFB0306A),
+    background = Color(0xFFFBFBFC),
+    onBackground = Color(0xFF1B1C20),
+    surface = Color(0xFFFBFBFC),
+    onSurface = Color(0xFF1B1C20),
+    surfaceVariant = Color(0xFFE7E8EC),
+    onSurfaceVariant = Color(0xFF5B5E68),
     surfaceContainerLowest = Color.White,
-    surfaceContainerLow = Color(0xFFF2F2F8),
-    surfaceContainer = Color(0xFFECECF3),
-    surfaceContainerHigh = Color(0xFFE6E6EE),
-    surfaceContainerHighest = Color(0xFFE0E0E9),
-    outline = Color(0xFF777888),
-    outlineVariant = Color(0xFFC8C8D6),
+    surfaceContainerLow = Color(0xFFF5F5F7),
+    surfaceContainer = Color(0xFFEFEFF2),
+    surfaceContainerHigh = Color(0xFFE9E9ED),
+    surfaceContainerHighest = Color(0xFFE3E3E8),
+    outline = Color(0xFF82848E),
+    outlineVariant = Color(0xFFD9DAE0),
     error = Color(0xFFBA1A1A),
     errorContainer = Color(0xFFFFDAD6),
     onErrorContainer = Color(0xFF410002),
@@ -55,28 +57,28 @@ private val LightColors = lightColorScheme(
 
 private val DarkColors = darkColorScheme(
     primary = IndigoLight,
-    onPrimary = Color(0xFF1B247A),
-    primaryContainer = Color(0xFF343F9E),
+    onPrimary = Color(0xFF151C5C),
+    primaryContainer = Color(0xFF2E3677),
     onPrimaryContainer = Color(0xFFE0E3FF),
-    secondary = Color(0xFFC4C5DC),
-    secondaryContainer = Color(0xFF43465A),
-    onSecondaryContainer = Color(0xFFE0E1F8),
-    tertiary = Color(0xFFE9B9CA),
-    background = Color(0xFF121318),
-    onBackground = Color(0xFFE3E2EA),
-    surface = Color(0xFF121318),
-    onSurface = Color(0xFFE3E2EA),
-    surfaceVariant = Color(0xFF45464F),
-    onSurfaceVariant = Color(0xFFC6C5D3),
-    surfaceContainerLowest = Color(0xFF0D0E13),
-    surfaceContainerLow = Color(0xFF1A1B21),
-    surfaceContainer = Color(0xFF1E1F25),
-    surfaceContainerHigh = Color(0xFF292A30),
-    surfaceContainerHighest = Color(0xFF34343B),
-    outline = Color(0xFF90909F),
-    outlineVariant = Color(0xFF45464F),
+    secondary = Color(0xFFC3C5D0),
+    secondaryContainer = Color(0xFF2C2E35),
+    onSecondaryContainer = Color(0xFFE3E4EC),
+    tertiary = Color(0xFFF2A7C8),
+    background = Color(0xFF151619),
+    onBackground = Color(0xFFE6E6EA),
+    surface = Color(0xFF151619),
+    onSurface = Color(0xFFE6E6EA),
+    surfaceVariant = Color(0xFF2C2E34),
+    onSurfaceVariant = Color(0xFFA4A7B1),
+    surfaceContainerLowest = Color(0xFF0F1012),
+    surfaceContainerLow = Color(0xFF1A1B1F),
+    surfaceContainer = Color(0xFF1F2024),
+    surfaceContainerHigh = Color(0xFF26272C),
+    surfaceContainerHighest = Color(0xFF2E3035),
+    outline = Color(0xFF6E717B),
+    outlineVariant = Color(0xFF35373E),
     error = Color(0xFFFFB4AB),
-    errorContainer = Color(0xFF93000A),
+    errorContainer = Color(0xFF5C1512),
     onErrorContainer = Color(0xFFFFDAD6),
 )
 
@@ -112,9 +114,9 @@ private val LightStatus = StatusColors(
     failed = Color(0xFFDC2626),
     done = Color(0xFF16A34A),
     muted = Color(0xFF8A8B99),
-    codeBackground = Color(0xFFF0F0F6),
-    userBubble = Color(0xFFE3E6FF),
-    onUserBubble = Color(0xFF151C5C),
+    codeBackground = Color(0xFFF3F4F6),
+    userBubble = Color(0xFFEDEFF9),
+    onUserBubble = Color(0xFF1B1C20),
 )
 
 private val DarkStatus = StatusColors(
@@ -124,10 +126,10 @@ private val DarkStatus = StatusColors(
     restorable = Color(0xFFFB923C),
     failed = Color(0xFFF87171),
     done = Color(0xFF4ADE80),
-    muted = Color(0xFF8E8FA0),
-    codeBackground = Color(0xFF1B1C22),
-    userBubble = Color(0xFF2C3480),
-    onUserBubble = Color(0xFFE6E8FF),
+    muted = Color(0xFF7E818B),
+    codeBackground = Color(0xFF0F1012),
+    userBubble = Color(0xFF272A38),
+    onUserBubble = Color(0xFFE6E6EA),
 )
 
 val LocalStatusColors = staticCompositionLocalOf { LightStatus }
@@ -161,6 +163,7 @@ fun TaskBridgeTheme(mode: String = "system", content: @Composable () -> Unit) {
     }
     val colors: ColorScheme = if (dark) DarkColors else LightColors
     androidx.compose.runtime.CompositionLocalProvider(LocalStatusColors provides if (dark) DarkStatus else LightStatus) {
+        SystemBarsAppearance(dark)
         MaterialTheme(colorScheme = colors, typography = AppTypography, shapes = AppShapes, content = content)
     }
 }

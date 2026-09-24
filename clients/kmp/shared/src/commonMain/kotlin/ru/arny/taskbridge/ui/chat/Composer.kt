@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
@@ -25,6 +26,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,11 +44,17 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.api.UploadFile
+import kotlinx.coroutines.delay
 import ru.arny.taskbridge.core.client.session.SendMode
+import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.theme.AppIcons
+import ru.arny.taskbridge.ui.theme.LocalStatusColors
+import kotlin.time.Clock
 
 @Composable
 fun Composer(
@@ -60,11 +68,23 @@ fun Composer(
     enabled: Boolean,
     onSend: (SendMode) -> Unit,
     modifier: Modifier = Modifier,
+    /** When the current run started (epoch ms): the status line counts from it. */
+    runStartedAt: Long? = null,
+    /** What the agent is doing now ("Running tests…"), from the server. */
+    activity: String? = null,
+    stopping: Boolean = false,
+    onStop: () -> Unit = {},
+    /** Above the input: the queue line, outbox problems. */
+    top: @Composable () -> Unit = {},
+    /** Next to the attach button: the session's model and context menu. */
+    tools: @Composable () -> Unit = {},
 ) {
     var modeMenu by remember { mutableStateOf(false) }
     val canSend = enabled && (value.text.isNotBlank() || files.isNotEmpty())
     Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            if (working) RunStatus(runStartedAt, activity, stopping, onStop)
+            top()
             if (files.isNotEmpty()) {
                 FlowRow(Modifier.padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     for (file in files) {
@@ -79,6 +99,7 @@ fun Composer(
             }
             Row(verticalAlignment = Alignment.Bottom) {
                 IconButton(onClick = onAttach, enabled = enabled) { Icon(AppIcons.Attach, "Прикрепить файл") }
+                tools()
                 TextField(
                     value = value,
                     onValueChange = onValueChange,
@@ -146,6 +167,37 @@ fun Composer(
                     }
                 }
             }
+        }
+    }
+}
+
+/** "● Работает · 18 с · Running tests…  ■" — the live run and its STOP, right above the input. */
+@Composable
+private fun RunStatus(startedAt: Long?, activity: String?, stopping: Boolean, onStop: () -> Unit) {
+    var now by remember { mutableStateOf(Clock.System.now().toEpochMilliseconds()) }
+    LaunchedEffect(startedAt) {
+        while (true) {
+            now = Clock.System.now().toEpochMilliseconds()
+            delay(1000)
+        }
+    }
+    val seconds = startedAt?.let { ((now - it) / 1000).coerceAtLeast(0) }
+    val elapsed = seconds?.let { if (it < 60) "$it с" else "${it / 60} мин ${it % 60} с" }
+    val color = LocalStatusColors.current.working
+    Row(Modifier.fillMaxWidth().padding(start = 6.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        StatusDot(DisplayState.WORKING, size = 8)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            listOfNotNull(if (stopping) "Останавливается" else "Работает", elapsed, activity?.takeIf { it.isNotBlank() && !stopping }).joinToString(" · "),
+            style = MaterialTheme.typography.labelMedium,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        IconButton(onClick = onStop, enabled = !stopping, modifier = Modifier.size(36.dp)) {
+            if (stopping) CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.error)
+            else Icon(AppIcons.Stop, "Остановить агента", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.error)
         }
     }
 }

@@ -9,6 +9,7 @@ import io.ktor.client.request.request
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
 import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsBytes
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -240,6 +241,32 @@ class TaskBridgeApi(
     fun fileUrl(id: String, fileId: String): String = "$base/api/tasks/${id.path()}/files/${fileId.path()}"
 
     fun workspaceFileUrl(id: String, path: String): String = "$base/api/tasks/${id.path()}/workspace-file?path=${path.encodeURLParameter()}"
+
+    /**
+     * The bytes behind [fileUrl] / [workspaceFileUrl], read with this client's
+     * session: a browser handed the bare URL has no cookie and gets 401.
+     */
+    suspend fun download(url: String): ByteArray {
+        val response = guard { http.request { url(url); authorize() } }
+        if (!response.status.isSuccess()) throw ApiException(apiErrorOf(response.status.value, response.bodyAsText()))
+        return response.bodyAsBytes()
+    }
+
+    /** Opens (or reveals in the file manager) a workspace file with its app on the PC; only a client on the PC itself may. */
+    suspend fun openWorkspaceFile(id: String, path: String, reveal: Boolean) {
+        send(HttpMethod.Post, "/api/tasks/${id.path()}/workspace-file/open?path=${path.encodeURLParameter()}", buildJsonObject {
+            put("confirm", true)
+            put("reveal", reveal)
+        })
+    }
+
+    /** The same for an attachment or an output file. */
+    suspend fun openFile(id: String, fileId: String, reveal: Boolean) {
+        send(HttpMethod.Post, "/api/tasks/${id.path()}/files/${fileId.path()}/open", buildJsonObject {
+            put("confirm", true)
+            put("reveal", reveal)
+        })
+    }
 
     // --- live stream -----------------------------------------------------------
 

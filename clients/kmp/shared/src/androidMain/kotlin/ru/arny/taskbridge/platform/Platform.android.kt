@@ -1,11 +1,13 @@
 package ru.arny.taskbridge.platform
 
+import android.app.Activity
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -14,7 +16,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import ru.arny.taskbridge.core.api.UploadFile
@@ -152,3 +157,15 @@ private fun readUri(context: Context, uri: Uri): UploadFile? = runCatching {
     val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
     UploadFile(name, resolver.getType(uri), bytes)
 }.getOrNull()
+
+@Composable
+actual fun SystemBarsAppearance(dark: Boolean) {
+    val view = LocalView.current
+    SideEffect {
+        val activity = generateSequence(view.context) { (it as? ContextWrapper)?.baseContext }.filterIsInstance<Activity>().firstOrNull() ?: return@SideEffect
+        WindowCompat.getInsetsController(activity.window, view).apply {
+            isAppearanceLightStatusBars = !dark
+            isAppearanceLightNavigationBars = !dark
+        }
+    }
+}
