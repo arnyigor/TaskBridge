@@ -16,6 +16,7 @@ import { ModelCatalog } from './model-catalog.mjs';
 import { LocalModelService, quantFromPath } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
+import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
 import { computeTokensPerSecond, accumulateStreamMs } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
@@ -1163,17 +1164,26 @@ export class TaskManager extends EventEmitter {
       if (frame.toolCallId) this.toolLogs.set(`${task.id}:${frame.toolCallId}`, { name: `tool-${safeFileName(frame.toolCallId)}.log`, bytes: 0 });
     }
     if (frame.type === 'tool_execution_update') {
-      const chunk = frame.output ?? frame.partialResult ?? frame.delta ?? '';
+      // Only a text chunk streams into the log. Pi's partialResult is an object
+      // holding the output so far (not a delta): appending it wrote
+      // "[object Object]", and its text would repeat; the end frame has it all.
+      const chunk = [frame.output, frame.delta, frame.partialResult].find(value => typeof value === 'string') ?? '';
       const log = frame.toolCallId ? this.toolLogs.get(`${task.id}:${frame.toolCallId}`) : null;
       if (log && chunk) {
-        log.bytes += Buffer.byteLength(String(chunk), 'utf8');
-        this.store.appendRaw(task.id, log.name, String(chunk)).catch(() => {});
+        log.bytes += Buffer.byteLength(chunk, 'utf8');
+        this.store.appendRaw(task.id, log.name, chunk).catch(() => {});
       }
     }
     if (frame.type === 'tool_execution_end' && frame.toolCallId) {
       const key = `${task.id}:${frame.toolCallId}`;
-      const log = this.toolLogs.get(key);
-      if (log) this.store.writeArtifact(task.id, `${log.name}.meta.json`, JSON.stringify({ toolCallId: frame.toolCallId, toolName: frame.toolName ?? null, bytes: log.bytes, at: now() })).catch(() => {});
+      const log = this.toolLogs.get(key) ?? { name: `tool-${safeFileName(frame.toolCallId)}.log`, bytes: 0 };
+      // Nothing streamed as text: the log is the final result, in full.
+      const text = log.bytes === 0 ? toolResultText(frame.result) : '';
+      if (text) {
+        log.bytes = Buffer.byteLength(text, 'utf8');
+        this.store.writeArtifact(task.id, log.name, text).catch(() => {});
+      }
+      if (log.bytes > 0) this.store.writeArtifact(task.id, `${log.name}.meta.json`, JSON.stringify({ toolCallId: frame.toolCallId, toolName: frame.toolName ?? null, bytes: log.bytes, at: now() })).catch(() => {});
       this.toolLogs.delete(key);
     }
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result) {
@@ -1370,12 +1380,31 @@ export class TaskManager extends EventEmitter {
       } finally { await handle.close(); }
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
-      throw Object.assign(new Error('Для этого вызова нет сохранённого вывода.'), { code: 'NOT_FOUND' });
+      text = null;
+    }
+    // No log, or one saved as "[object Object]" by older builds: the end event
+    // in the history still holds the result, so the output is rebuilt from it.
+    if (text == null || isBrokenToolLog(text)) {
+      const full = await this.#toolResultFromEvents(id, toolCallId);
+      if (!full) throw Object.assign(new Error('Для этого вызова нет сохранённого вывода.'), { code: 'NOT_FOUND' });
+      const limit = Math.min(Math.max(1, Number(maxBytes) || this.toolOutput.maxFullBytes), this.toolOutput.maxFullBytes);
+      bytes = Buffer.byteLength(full, 'utf8');
+      text = tailBytes(full, limit);
     }
     const truncated = bytes > Buffer.byteLength(text, 'utf8');
     const payload = { toolCallId, text, bytes, truncated, at: now() };
     if (emit) await this.#event(task, 'TOOL_OUTPUT', `tool output: ${toolCallId}`, payload);
     return payload;
+  }
+
+  // The result text of a finished tool call, from its tool_execution_end event.
+  async #toolResultFromEvents(id, toolCallId) {
+    const events = await this.store.readEvents(id, 0);
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const frame = events[i]?.data?.pi;
+      if (frame?.type === 'tool_execution_end' && frame.toolCallId === toolCallId) return toolResultText(frame.result);
+    }
+    return '';
   }
 
   // ------------------------------------------------------------ approvals ---
