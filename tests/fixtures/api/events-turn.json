@@ -1,15 +1,15 @@
 [
   {
-    "at": "2026-09-24T10:05:45.479Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.844Z",
+    "taskId": "96903db4b531",
     "type": "TASK_QUEUED",
     "message": "Task queued",
     "data": {},
     "seq": 1
   },
   {
-    "at": "2026-09-24T10:05:45.482Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.846Z",
+    "taskId": "96903db4b531",
     "type": "STATUS",
     "message": "Preparing workspace",
     "data": {
@@ -18,16 +18,16 @@
     "seq": 2
   },
   {
-    "at": "2026-09-24T10:05:45.483Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.848Z",
+    "taskId": "96903db4b531",
     "type": "WORKSPACE_READY",
-    "message": "Workspace: /tmp/taskbridge-http-test-VfUeSr",
+    "message": "Workspace: /tmp/taskbridge-http-test-VTkkxA",
     "data": {},
     "seq": 3
   },
   {
-    "at": "2026-09-24T10:05:45.484Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.848Z",
+    "taskId": "96903db4b531",
     "type": "STATUS",
     "message": "Checking local model runtime",
     "data": {
@@ -36,16 +36,16 @@
     "seq": 4
   },
   {
-    "at": "2026-09-24T10:05:45.485Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.849Z",
+    "taskId": "96903db4b531",
     "type": "RUNTIME_READY",
     "message": "Local runtime: EXTERNAL_RUNNING",
     "data": {},
     "seq": 5
   },
   {
-    "at": "2026-09-24T10:05:45.551Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.916Z",
+    "taskId": "96903db4b531",
     "type": "STATUS",
     "message": "Pi starting",
     "data": {
@@ -54,8 +54,8 @@
     "seq": 6
   },
   {
-    "at": "2026-09-24T10:05:45.554Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.918Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "Pi started processing",
     "data": {
@@ -66,8 +66,8 @@
     "seq": 7
   },
   {
-    "at": "2026-09-24T10:05:45.555Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.919Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -87,8 +87,8 @@
     "seq": 8
   },
   {
-    "at": "2026-09-24T10:05:45.556Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.920Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -108,8 +108,8 @@
     "seq": 9
   },
   {
-    "at": "2026-09-24T10:05:45.557Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.921Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "message_start",
     "data": {
@@ -124,8 +124,8 @@
     "seq": 10
   },
   {
-    "at": "2026-09-24T10:05:45.557Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.921Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "tool: read — example.txt",
     "data": {
@@ -141,8 +141,8 @@
     "seq": 11
   },
   {
-    "at": "2026-09-24T10:05:45.558Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:11.922Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "tool done: read",
     "data": {
@@ -156,8 +156,8 @@
     "seq": 12
   },
   {
-    "at": "2026-09-24T10:05:45.687Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:12.051Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "message_end",
     "data": {
@@ -183,8 +183,8 @@
     "seq": 16
   },
   {
-    "at": "2026-09-24T10:05:45.688Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:12.052Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "agent_end",
     "data": {
@@ -195,8 +195,8 @@
     "seq": 17
   },
   {
-    "at": "2026-09-24T10:05:45.689Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:12.053Z",
+    "taskId": "96903db4b531",
     "type": "PI_EVENT",
     "message": "Pi settled",
     "data": {
@@ -207,8 +207,8 @@
     "seq": 18
   },
   {
-    "at": "2026-09-24T10:05:45.690Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:12.054Z",
+    "taskId": "96903db4b531",
     "type": "STATUS",
     "message": "Collecting diff and changed files",
     "data": {
@@ -217,8 +217,8 @@
     "seq": 19
   },
   {
-    "at": "2026-09-24T10:05:45.704Z",
-    "taskId": "d53f916136d9",
+    "at": "2026-09-24T10:19:12.066Z",
+    "taskId": "96903db4b531",
     "type": "TASK_SUCCEEDED",
     "message": "Done",
     "data": {},

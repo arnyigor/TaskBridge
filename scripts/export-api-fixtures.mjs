@@ -106,6 +106,18 @@ try {
   await write('tasks.json', await api('/api/tasks'));
   await write('command-status.json', await api('/api/commands/fixture-msg-1'));
 
+  // What the chat screen needs besides the event log.
+  await write('models.json', await api('/api/models'));
+  await write('events-tail.json', await api(`/api/tasks/${created.id}/events?tail=2`));
+  const toolCall = all.find((event) => event.data?.pi?.type === 'tool_execution_start')?.data.pi.toolCallId;
+  if (toolCall) await write('tool-output.json', await raw(base, `/api/tasks/${created.id}/tools/${encodeURIComponent(toolCall)}/output`));
+  const form = new FormData();
+  form.append('files', new Blob(['hello from a phone'], { type: 'text/plain' }), 'заметка.txt');
+  const upload = await fetch(base + '/api/uploads', { method: 'POST', headers: { 'x-taskbridge-upload': '1' }, body: form });
+  await write('upload.json', { status: upload.status, body: await upload.json() });
+  await write('approvals.json', await api(`/api/tasks/${created.id}/approvals`));
+  await write('auth.json', await api('/api/auth'));
+
   // The live stream: a replay from seq 0 of the finished session.
   await write('stream-replay.sse', await sse(base, `/api/tasks/${created.id}/stream?after=0`, 1500));
 } finally {

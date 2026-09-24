@@ -1,13 +1,13 @@
 {
-  "id": "d53f916136d9",
-  "createdAt": "2026-09-24T10:05:45.479Z",
-  "updatedAt": "2026-09-24T10:05:46.076Z",
+  "id": "96903db4b531",
+  "createdAt": "2026-09-24T10:19:11.843Z",
+  "updatedAt": "2026-09-24T10:19:12.440Z",
   "status": "RUNNING",
   "queueReason": null,
   "projectId": "fixture",
   "prompt": "Прочитай example.txt",
-  "workspacePath": "/tmp/taskbridge-http-test-VfUeSr",
-  "sourcePath": "/tmp/taskbridge-http-test-VfUeSr",
+  "workspacePath": "/tmp/taskbridge-http-test-VTkkxA",
+  "sourcePath": "/tmp/taskbridge-http-test-VTkkxA",
   "worktree": false,
   "current": "read: example.txt",
   "assistantText": "Ответ 1",
@@ -38,9 +38,9 @@
     "totalTokens": 1100
   },
   "metrics": {
-    "tg": 2000,
+    "tg": 1960.7843137254904,
     "outputTokens": 100,
-    "ms": 50,
+    "ms": 51,
     "source": "usage"
   },
   "model": {
@@ -53,7 +53,7 @@
   "files": [],
   "attachments": [],
   "outputFiles": [],
-  "statusChangedAt": "2026-09-24T10:05:45.770Z",
+  "statusChangedAt": "2026-09-24T10:19:12.134Z",
   "baseCommit": null,
   "thinkingLevelActual": "off",
   "verificationStatus": "NOT_CONFIGURED",
@@ -61,7 +61,7 @@
   "retryAfterMs": null,
   "pendingPrompts": [
     {
-      "id": "2b4587db-2fc0-44bd-8e78-fe4465839b60",
+      "id": "26005c92-f8fd-4485-af68-8aaa1bf42684",
       "text": "из очереди",
       "mode": "auto",
       "files": [],
