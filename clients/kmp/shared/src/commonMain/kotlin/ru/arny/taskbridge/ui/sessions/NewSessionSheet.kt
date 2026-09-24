@@ -46,6 +46,7 @@ import ru.arny.taskbridge.core.api.SCRATCH_PROJECT_ID
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.platform.rememberFilePicker
+import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.theme.AppIcons
@@ -57,6 +58,8 @@ fun NewSessionSheet(
     projects: List<Project>,
     onDismiss: () -> Unit,
     onCreated: (Task) -> Unit,
+    /** No task typed: open the chat now, the session is created by its first message. */
+    onDraft: (SessionDraft) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var projectId by remember { mutableStateOf(projects.firstOrNull()?.id ?: SCRATCH_PROJECT_ID) }
@@ -91,15 +94,20 @@ fun NewSessionSheet(
             }
             Spacer(Modifier.weight(1f))
             Button(
-                enabled = !busy && (prompt.isNotBlank() || files.isNotEmpty()),
+                enabled = !busy,
                 onClick = {
-                    busy = true
-                    error = null
-                    scope.launch {
-                        connection.sessions.create(projectId, prompt.ifBlank { "Посмотри приложенные файлы" }, model, thinking, title, files, commandId)
-                            .onSuccess { onCreated(it) }
-                            .onFailure { error = messageOf(it) }
-                        busy = false
+                    if (prompt.isBlank() && files.isEmpty()) {
+                        val name = projects.firstOrNull { it.id == projectId }?.displayName ?: "Без проекта"
+                        onDraft(SessionDraft(projectId, name, model, thinking, title.trim().ifEmpty { null }, commandId))
+                    } else {
+                        busy = true
+                        error = null
+                        scope.launch {
+                            connection.sessions.create(projectId, prompt.ifBlank { "Посмотри приложенные файлы" }, model, thinking, title, files, commandId)
+                                .onSuccess { onCreated(it) }
+                                .onFailure { error = messageOf(it) }
+                            busy = false
+                        }
                     }
                 },
             ) {
@@ -138,7 +146,7 @@ fun NewSessionSheet(
             value = prompt,
             onValueChange = { prompt = it; error = null },
             label = { Text("Задача для агента") },
-            placeholder = { Text("Например: найди, почему падает тест X, и исправь") },
+            placeholder = { Text("Можно не заполнять — напишете в чате") },
             minLines = 4,
             modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
         )

@@ -331,11 +331,14 @@ class ChatSession(
             commandId = message.commandId,
         )
         val task = withRetries(message.commandId) { api.message(taskId, request) } ?: return
-        onDelivered(message.commandId, task)
+        onDelivered(message.commandId, message.text, task)
     }
 
-    private suspend fun onDelivered(commandId: String, task: Task) {
-        val queued = task.pendingPrompts.any { it.commandId == commandId }
+    private suspend fun onDelivered(commandId: String, text: String, task: Task) {
+        // A server that does not record commandId on queue entries (older builds)
+        // still parks the message: then the entry is ours by its text.
+        val queued = task.pendingPrompts.any { it.commandId == commandId } ||
+            task.pendingPrompts.any { it.commandId == null && it.text.trim() == text.trim() }
         mutex.withLock {
             val chat = reducer
             // Parked in the server queue: the banner above the composer shows it,

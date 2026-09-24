@@ -19,6 +19,7 @@ import ru.arny.taskbridge.platform.PlatformBackHandler
 import ru.arny.taskbridge.ui.Navigator
 import ru.arny.taskbridge.ui.Screen
 import ru.arny.taskbridge.ui.chat.ChatScreen
+import ru.arny.taskbridge.ui.chat.DraftChatScreen
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.connect.ConnectScreen
 import ru.arny.taskbridge.ui.sessions.SessionsScreen
@@ -63,12 +64,19 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             graph, connection,
             selectedTaskId = null,
             onOpen = { navigator.openChat(it) },
+            onDraft = { navigator.openDraft(it) },
             onSettings = { navigator.push(Screen.Settings) },
         )
         is Screen.Chat -> ChatScreen(
             graph, connection, screen.taskId,
             onBack = { navigator.pop() },
             onOpenSession = { navigator.openChat(it) },
+            showBack = true,
+        )
+        is Screen.Draft -> DraftChatScreen(
+            graph, connection, screen.draft,
+            onBack = { navigator.pop() },
+            onCreated = { navigator.openChat(it) },
             showBack = true,
         )
         Screen.Settings -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) })
@@ -78,7 +86,8 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
 /** Desktop and tablets: the list stays on the left, the chat on the right. */
 @Composable
 private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigator: Navigator) {
-    val chat = navigator.stack.lastOrNull { it is Screen.Chat } as? Screen.Chat
+    val open = navigator.stack.lastOrNull { it is Screen.Chat || it is Screen.Draft }
+    val chat = open as? Screen.Chat
     val settingsOpen = navigator.current == Screen.Settings
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(360.dp).fillMaxHeight()) {
@@ -86,6 +95,7 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
                 graph, connection,
                 selectedTaskId = chat?.taskId,
                 onOpen = { navigator.openChat(it) },
+                onDraft = { navigator.openDraft(it) },
                 onSettings = { navigator.push(Screen.Settings) },
             )
         }
@@ -97,6 +107,12 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
                     graph, connection, chat.taskId,
                     onBack = { navigator.pop() },
                     onOpenSession = { navigator.openChat(it) },
+                    showBack = false,
+                )
+                open is Screen.Draft -> DraftChatScreen(
+                    graph, connection, open.draft,
+                    onBack = { navigator.pop() },
+                    onCreated = { navigator.openChat(it) },
                     showBack = false,
                 )
                 else -> EmptyState(AppIcons.Chat, "Выберите сессию", "Слева — все сессии агента на этом компьютере. Или начните новую.")

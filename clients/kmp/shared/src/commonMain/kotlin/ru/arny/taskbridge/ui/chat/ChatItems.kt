@@ -319,8 +319,9 @@ private fun SecondaryPane(content: @Composable () -> Unit) {
 }
 
 /**
- * The tools of one answer. A long run folds its older calls into one
- * "N действий" row; the last two stay visible so the live one is always seen.
+ * The tools of one answer. A few calls show as they are; more are summed up
+ * by kind — "Изучил код · 6 файлов", "Изменил 2 файла" — each unfolding into
+ * its calls. The group that is working says so, with the file it is on.
  */
 @Composable
 private fun ToolList(
@@ -329,37 +330,60 @@ private fun ToolList(
     onCopy: (String) -> Unit,
     onOpenPath: (String) -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    val pinned = rememberPinned()
-    val folded = if (tools.size > 3 && !expanded) tools.size - 2 else 0
-    Column(Modifier.padding(vertical = 2.dp).then(pinned.modifier)) {
-        if (folded > 0) {
-            val errors = tools.take(folded).count { it.state == ToolState.ERROR }
-            QuietRow(
-                leading = { Icon(AppIcons.Layers, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-                text = "$folded ${actionsWord(folded)}" + if (errors > 0) " · ошибок: $errors" else "",
-                color = if (errors > 0) LocalStatusColors.current.failed else MaterialTheme.colorScheme.onSurfaceVariant,
-                onClick = { pinned.toggle { expanded = true } },
-            )
-        }
-        for (tool in tools.drop(folded)) ToolRow(tool, loadOutput, onCopy, onOpenPath)
-        if (expanded) {
-            QuietRow(
-                leading = { Icon(AppIcons.ChevronUp, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-                text = "Свернуть",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                onClick = { expanded = false },
-            )
+    Column(Modifier.padding(vertical = 2.dp)) {
+        if (tools.size <= 3) {
+            for (tool in tools) ToolRow(tool, loadOutput, onCopy, onOpenPath)
+        } else {
+            for (group in groupTools(tools)) {
+                if (group.tools.size == 1) ToolRow(group.tools.single(), loadOutput, onCopy, onOpenPath)
+                else ToolGroupRow(group, loadOutput, onCopy, onOpenPath)
+            }
         }
     }
 }
 
-internal fun actionsWord(n: Int) = when {
-    n % 100 in 11..14 -> "действий"
-    n % 10 == 1 -> "действие"
-    n % 10 in 2..4 -> "действия"
-    else -> "действий"
+@Composable
+private fun ToolGroupRow(
+    group: ToolGroup,
+    loadOutput: suspend (String) -> Result<ToolOutput>,
+    onCopy: (String) -> Unit,
+    onOpenPath: (String) -> Unit,
+) {
+    val colors = LocalStatusColors.current
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    var open by remember { mutableStateOf(false) }
+    val pinned = rememberPinned()
+    val current = group.tools.lastOrNull { it.state == ToolState.RUNNING }
+    Column(pinned.modifier) {
+        QuietRow(
+            leading = {
+                when {
+                    group.running -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = colors.working)
+                    group.errors > 0 -> Icon(AppIcons.Alert, "Есть ошибки", Modifier.size(14.dp), tint = colors.failed)
+                    else -> Icon(AppIcons.Check, null, Modifier.size(14.dp), tint = muted)
+                }
+            },
+            text = groupSummary(group) + if (group.errors > 0) " · ошибок: ${group.errors}" else "",
+            color = if (group.errors > 0) colors.failed else if (group.running) MaterialTheme.colorScheme.onSurface else muted,
+            target = current?.let { toolTarget(it) }?.let { "$it…" },
+            trailing = if (open) null else "›",
+            onClick = { pinned.toggle { open = !open } },
+        )
+        AnimatedVisibility(open) {
+            Column {
+                SecondaryPane { Column { for (tool in group.tools) ToolRow(tool, loadOutput, onCopy, onOpenPath) } }
+                QuietRow(
+                    leading = { Icon(AppIcons.ChevronUp, null, Modifier.size(14.dp), tint = muted) },
+                    text = "Свернуть",
+                    color = muted,
+                    onClick = { open = false },
+                )
+            }
+        }
+    }
 }
+
+internal fun actionsWord(n: Int) = plural(n, "действие", "действия", "действий")
 
 /** "Прочитал" / "Читает" — what a Pi tool did, in words; unknown tools keep their name. */
 internal fun toolVerb(name: String, running: Boolean): String = when (name.lowercase()) {

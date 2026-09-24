@@ -117,6 +117,28 @@ class SessionList(
         }
     }
 
+    /**
+     * Restarts TaskBridge on the PC and returns once a new process answers,
+     * like the web UI: /api/info with another bootId, or answering again after
+     * it was down. Chats reconnect by themselves.
+     */
+    suspend fun restartServer(timeoutMillis: Long = 120_000, stepMillis: Long = 700): Result<Unit> = runCatching {
+        val before = runCatching { api.info().bootId }.getOrNull()
+        api.restartServer()
+        var sawDown = false
+        val back = withTimeoutOrNull(timeoutMillis) {
+            while (true) {
+                delay(stepMillis)
+                val now = runCatching { api.info().bootId }.getOrNull()
+                if (now == null) sawDown = true
+                else if (sawDown || (before != null && now != before)) break
+            }
+        }
+        if (back == null) throw IllegalStateException("Сервер не вернулся за ${timeoutMillis / 1000} с — проверьте окно запуска TaskBridge на компьютере")
+        infoTick = 0 // a new process: read its info and projects again
+        refresh()
+    }
+
     suspend fun models(refresh: Boolean = false): Result<ModelCatalog> = runCatching { api.models(refresh) }
 
     /** Creates a session; files go up first and travel with the first prompt. */

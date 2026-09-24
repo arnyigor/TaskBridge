@@ -7,7 +7,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import org.jetbrains.skia.Image
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -31,6 +34,10 @@ import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 
 fun main() {
+    // A second launch brings the running window forward instead of starting another process.
+    if (SingleInstance.activateExisting()) return
+    val showRequests = MutableStateFlow(0)
+    SingleInstance.listen { showRequests.value += 1 }
     val platform = DesktopPlatformServices()
     val graph = AppGraph(platform)
     val openTask = MutableStateFlow<String?>(null)
@@ -42,6 +49,8 @@ fun main() {
         val connection = graph.connection
         val listState by (connection?.sessions?.state ?: flowOf(SessionListState())).collectAsState(SessionListState())
         val opened by openTask.collectAsState()
+        val shows by showRequests.collectAsState()
+        LaunchedEffect(shows) { if (shows > 0) visible = true }
 
         // Alerts become tray notifications; clicking the tray opens the window.
         LaunchedEffect(Unit) {
@@ -62,8 +71,10 @@ fun main() {
             if (listState.workingCount > 0) add("работают: ${listState.workingCount}")
         }.joinToString(", ").ifEmpty { "агент свободен" }
 
+        // The brand mark (web/icon.svg, rendered by icons/make-icon.ps1): the old line icon was black on a dark taskbar.
+        val appIcon = remember { BitmapPainter(Image.makeFromEncoded(object {}.javaClass.getResourceAsStream("/icon.png")!!.readBytes()).toComposeImageBitmap()) }
         Tray(
-            icon = rememberVectorPainter(if (listState.waitingCount > 0) AppIcons.Alert else AppIcons.Terminal),
+            icon = if (listState.waitingCount > 0) rememberVectorPainter(AppIcons.Alert) else appIcon,
             state = trayState,
             tooltip = "TaskBridge — $summary",
             onAction = { visible = true },
@@ -90,16 +101,24 @@ fun main() {
         }
 
         Window(
-            // Closing hides to the tray: sessions keep being watched and notified.
-            onCloseRequest = { visible = false },
+            // Closing the window quits: hiding to the tray left processes nobody knew were running.
+            onCloseRequest = ::exitApplication,
             visible = visible,
             state = windowState,
             title = "TaskBridge",
-            icon = rememberVectorPainter(AppIcons.Terminal),
+            icon = appIcon,
             onPreviewKeyEvent = { event ->
                 if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) navigator?.pop() ?: false else false
             },
         ) {
+            // Another launch asked for this window: out of the tray / minimized, to the front.
+            LaunchedEffect(shows) {
+                if (shows > 0) {
+                    window.isMinimized = false
+                    window.toFront()
+                    window.requestFocus()
+                }
+            }
             LaunchedEffect(window) {
                 window.addWindowFocusListener(object : WindowAdapter() {
                     override fun windowGainedFocus(e: WindowEvent?) {

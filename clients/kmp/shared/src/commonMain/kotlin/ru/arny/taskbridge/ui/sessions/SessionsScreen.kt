@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
+import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.Task
@@ -84,6 +85,7 @@ fun SessionsScreen(
     connection: AppGraph.Connected,
     selectedTaskId: String?,
     onOpen: (String) -> Unit,
+    onDraft: (SessionDraft) -> Unit,
     onSettings: () -> Unit,
 ) {
     val state by connection.sessions.state.collectAsState()
@@ -94,6 +96,8 @@ fun SessionsScreen(
     var creating by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<Task?>(null) }
     var deleting by remember { mutableStateOf<Task?>(null) }
+    var confirmRestart by remember { mutableStateOf(false) }
+    var restarting by remember { mutableStateOf(false) }
     // Relative times ("5 мин") move on their own.
     var now by remember { mutableLongStateOf(graph.nowMillis()) }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = graph.nowMillis() } }
@@ -135,6 +139,8 @@ fun SessionsScreen(
                     IconButton(onClick = { graph.changeTheme(if (dark) "light" else "dark") }) {
                         Icon(if (dark) AppIcons.Sun else AppIcons.Moon, if (dark) "Светлая тема" else "Тёмная тема")
                     }
+                    // Restarts the TaskBridge process, as the web header does: the way out of a stuck state.
+                    IconButton(onClick = { confirmRestart = true }, enabled = !restarting) { Icon(AppIcons.Refresh, "Перезапустить сервер") }
                     IconButton(onClick = onSettings) { Icon(AppIcons.Settings, "Настройки") }
                 },
             )
@@ -149,6 +155,13 @@ fun SessionsScreen(
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            if (restarting) {
+                Banner(
+                    text = "Перезапуск сервера… сессии переподключатся сами",
+                    icon = AppIcons.Refresh,
+                    color = LocalStatusColors.current.working,
+                )
+            }
             val error = state.error
             if (error != null) {
                 val since = state.updatedAtMillis?.let { " · данные на ${graph.platform.formatClock(it)}" }.orEmpty()
@@ -198,6 +211,10 @@ fun SessionsScreen(
             connection = connection,
             projects = state.projects,
             onDismiss = { creating = false },
+            onDraft = { draft ->
+                creating = false
+                onDraft(draft)
+            },
             onCreated = { task ->
                 creating = false
                 onOpen(task.id)
@@ -220,6 +237,27 @@ fun SessionsScreen(
                 }) { Text("Сохранить") }
             },
             dismissButton = { TextButton(onClick = { renaming = null }) { Text("Отмена") } },
+        )
+    }
+
+    if (confirmRestart) {
+        AlertDialog(
+            onDismissRequest = { confirmRestart = false },
+            title = { Text("Перезапустить сервер TaskBridge?") },
+            text = { Text("Активные сессии будут прерваны. Приложение переподключится само через несколько секунд.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmRestart = false
+                    restarting = true
+                    scope.launch {
+                        connection.sessions.restartServer()
+                            .onSuccess { snackbar.showSnackbar("Сервер перезапущен") }
+                            .onFailure { snackbar.showSnackbar(messageOf(it)) }
+                        restarting = false
+                    }
+                }) { Text("Перезапустить", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold) }
+            },
+            dismissButton = { TextButton(onClick = { confirmRestart = false }) { Text("Отмена") } },
         )
     }
 
