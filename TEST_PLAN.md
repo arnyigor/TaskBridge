@@ -59,3 +59,7 @@ Prompt:
 На живой длинной session нажать COMPACT.
 
 Ожидание: `compaction_end`, до/после отражены в UI.
+
+---
+
+Подробный план проверки бэкенда (автотесты, приёмка изменений, запись RPC-транскриптов, chaos, soak, форма отчёта) — [docs/TEST_PLAN_BACKEND.md](docs/TEST_PLAN_BACKEND.md).
