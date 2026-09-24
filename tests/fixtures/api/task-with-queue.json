@@ -1,0 +1,73 @@
+{
+  "id": "d53f916136d9",
+  "createdAt": "2026-09-24T10:05:45.479Z",
+  "updatedAt": "2026-09-24T10:05:46.076Z",
+  "status": "RUNNING",
+  "queueReason": null,
+  "projectId": "fixture",
+  "prompt": "Прочитай example.txt",
+  "workspacePath": "/tmp/taskbridge-http-test-VfUeSr",
+  "sourcePath": "/tmp/taskbridge-http-test-VfUeSr",
+  "worktree": false,
+  "current": "read: example.txt",
+  "assistantText": "Ответ 1",
+  "thinkingText": "",
+  "error": null,
+  "errorCode": null,
+  "engine": {
+    "profileId": null,
+    "auto": false,
+    "reason": null
+  },
+  "requestedModel": null,
+  "thinkingLevel": null,
+  "mcp": null,
+  "verification": [],
+  "git": {
+    "isGit": false,
+    "status": "",
+    "changedFiles": []
+  },
+  "compaction": {
+    "count": 0,
+    "last": null
+  },
+  "lastUsage": {
+    "input": 1000,
+    "output": 100,
+    "totalTokens": 1100
+  },
+  "metrics": {
+    "tg": 2000,
+    "outputTokens": 100,
+    "ms": 50,
+    "source": "usage"
+  },
+  "model": {
+    "id": "fixture",
+    "provider": null,
+    "contextWindow": 65536,
+    "maxTokens": 1024
+  },
+  "autoCompactionEnabled": true,
+  "files": [],
+  "attachments": [],
+  "outputFiles": [],
+  "statusChangedAt": "2026-09-24T10:05:45.770Z",
+  "baseCommit": null,
+  "thinkingLevelActual": "off",
+  "verificationStatus": "NOT_CONFIGURED",
+  "retryable": null,
+  "retryAfterMs": null,
+  "pendingPrompts": [
+    {
+      "id": "2b4587db-2fc0-44bd-8e78-fe4465839b60",
+      "text": "из очереди",
+      "mode": "auto",
+      "files": [],
+      "commandId": "fixture-msg-2",
+      "clientId": "fixture-desktop"
+    }
+  ],
+  "sessionAvailable": true
+}

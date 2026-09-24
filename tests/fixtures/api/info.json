@@ -1,0 +1,86 @@
+{
+  "name": "TaskBridge MVP",
+  "build": {
+    "version": null,
+    "commit": null,
+    "date": null
+  },
+  "bootId": "b59c6e60-c062-4c41-886e-27397cbc3ac2",
+  "apiVersion": 1,
+  "storeId": "5d69bf69-1811-4407-a5d2-7af58959ce22",
+  "pi": {
+    "version": "0.85.1",
+    "supported": true,
+    "supportedRange": ">=0.85.0 <0.88.0",
+    "error": null
+  },
+  "addresses": [
+    {
+      "interface": "eth0",
+      "ip": "192.0.2.2",
+      "url": "http://192.0.2.2:43417"
+    }
+  ],
+  "modelBusy": null,
+  "modelReady": true,
+  "engine": {
+    "configured": false,
+    "reachable": false,
+    "state": "EXTERNAL_RUNNING"
+  },
+  "system": {
+    "sampledAt": "2026-09-24T10:05:56.162Z",
+    "cpu": {
+      "load": 0.02505268087099044,
+      "cores": 4
+    },
+    "ram": {
+      "used": 619323392,
+      "total": 16877547520,
+      "ratio": 0.036695105806462576
+    },
+    "gpu": null
+  },
+  "local": {
+    "state": "EXTERNAL_RUNNING",
+    "pid": null,
+    "profileId": null,
+    "error": null,
+    "provider": "llama.cpp"
+  },
+  "providerStatuses": {
+    "deepseek": {
+      "available": false,
+      "reason": "no-key",
+      "provider": "deepseek",
+      "label": "DeepSeek",
+      "kind": "balance"
+    },
+    "wormsoft": {
+      "provider": "wormsoft",
+      "available": false,
+      "reason": "no-key"
+    },
+    "routerai": {
+      "provider": "routerai",
+      "available": false,
+      "reason": "no-key"
+    }
+  },
+  "deepseek": {
+    "available": false,
+    "reason": "no-key",
+    "provider": "deepseek",
+    "label": "DeepSeek",
+    "kind": "balance"
+  },
+  "warnings": [],
+  "fileLimits": {
+    "count": 10,
+    "totalBytes": 16777216,
+    "uploadFileBytes": 67108864,
+    "uploadBytes": 134217728,
+    "outputBytes": 268435456,
+    "outputTotalBytes": 536870912
+  }
+}
