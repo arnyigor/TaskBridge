@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -67,6 +68,8 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import ru.arny.taskbridge.core.client.chat.ToolState
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonElement
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ApiError
@@ -104,7 +107,8 @@ import ru.arny.taskbridge.ui.theme.MonoStyle
 private sealed interface ChatDialog {
     data class EditMessage(val turnId: String, val text: String) : ChatDialog
     data class EditAnswer(val turnId: String, val text: String) : ChatDialog
-    data class DeleteFrom(val turnId: String) : ChatDialog
+    /** [withAnswer]: started from an answer — the log is linear, so its question goes too. */
+    data class DeleteFrom(val turnId: String, val withAnswer: Boolean = false) : ChatDialog
     data object ConfirmStop : ChatDialog
     data object ConfirmInterrupt : ChatDialog
     data object ConfirmClear : ChatDialog
@@ -174,6 +178,24 @@ fun ChatScreen(
         scope.launch { listState.animateScrollToItem(0) }
     }
 
+    var copyingHistory by remember { mutableStateOf(false) }
+    LaunchedEffect(copyingHistory) {
+        if (!copyingHistory) return@LaunchedEffect
+        // The chat is paged: pull every older page first; a page that brings nothing
+        // (a network error) ends the loop, and the loaded part is copied.
+        while (!session.state.value.reachedStart) {
+            val count = session.state.value.chat.items.size
+            session.loadOlder()
+            session.state.first { !it.loadingOlder }
+            if (session.state.value.chat.items.size == count && !session.state.value.reachedStart) break
+        }
+        val current = session.state.value
+        platform.copyText(chatTranscript(current.chat.items, current.task?.displayTitle) { start, end -> timeRange(platform, start, end) })
+        snackbar.currentSnackbarData?.dismiss()
+        snackbar.showSnackbar(if (current.reachedStart) "История чата скопирована" else "Скопирована только загруженная часть истории")
+        copyingHistory = false
+    }
+
     Scaffold(
         topBar = {
             ChatTopBar(
@@ -183,9 +205,12 @@ fun ChatScreen(
                 showBack = showBack,
                 onBack = onBack,
                 onDialog = { dialog = it },
+                onCopyHistory = { copyingHistory = true },
             )
         },
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
+        // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
+        contentWindowInsets = WindowInsets(0),
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
             LinkBanner(state.link, onRetry = { session.reconnectNow() })
@@ -239,18 +264,13 @@ fun ChatScreen(
                 runStartedAt = parseIsoMillis(task?.statusChangedAt),
                 activity = task?.current,
                 stopping = "cancel" in state.busy || task?.status == "CANCELLING",
-                onStop = { if (task?.pendingPrompts?.isNotEmpty() == true) dialog = ChatDialog.ConfirmStop else session.cancel() },
+                onStop = { dialog = ChatDialog.ConfirmStop },
                 onInterrupt = { dialog = ChatDialog.ConfirmInterrupt },
-                tools = {
-                    if (task != null) ContextButton(
-                        summary = listOfNotNull(
-                            task.model?.label?.takeIf { it != "—" },
-                            (task.thinkingLevelActual ?: task.thinkingLevel)?.let { thinkingLabel(it) },
-                        ).joinToString(" · "),
-                        canCompact = !working,
-                        onModel = { dialog = ChatDialog.ModelSettings },
-                        onCompact = { session.compact() },
-                    )
+                moreItems = { close ->
+                    if (task != null) {
+                        DropdownMenuItem(text = { Text("Модель и размышления") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
+                        DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { close(); session.compact() })
+                    }
                 },
                 top = {
                     if (task != null && task.pendingPrompts.isNotEmpty()) {
@@ -277,7 +297,6 @@ fun ChatScreen(
                 enterSends = graph.settings.enterSends && platform.kind == "desktop",
                 enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,
                 onSend = { send(it) },
-                modifier = Modifier.navigationBarsPadding(),
             )
         }
     }
@@ -294,6 +313,7 @@ private fun ChatTopBar(
     showBack: Boolean,
     onBack: () -> Unit,
     onDialog: (ChatDialog) -> Unit,
+    onCopyHistory: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val task = state.task
@@ -324,6 +344,7 @@ private fun ChatTopBar(
             Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Копировать историю") }, leadingIcon = { Icon(AppIcons.Copy, null) }, enabled = state.chat.items.isNotEmpty(), onClick = { menu = false; onCopyHistory() })
                     DropdownMenuItem(text = { Text("Переименовать") }, leadingIcon = { Icon(AppIcons.Edit, null) }, onClick = { menu = false; onDialog(ChatDialog.Rename) })
                     DropdownMenuItem(text = { Text("Очистить чат") }, leadingIcon = { Icon(AppIcons.Eraser, null) }, enabled = !working, onClick = { menu = false; onDialog(ChatDialog.ConfirmClear) })
                     DropdownMenuItem(
@@ -337,28 +358,38 @@ private fun ChatTopBar(
     )
 }
 
-/** Beside the input: the model and context actions, with the current model as the menu's header. */
-@Composable
-private fun ContextButton(summary: String, canCompact: Boolean, onModel: () -> Unit, onCompact: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
-    Box {
-        IconButton(onClick = { open = true }) { Icon(AppIcons.Spark, "Модель и контекст") }
-        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            if (summary.isNotEmpty()) {
-                Text(
-                    summary,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 280.dp).padding(horizontal = 16.dp, vertical = 8.dp),
-                )
+/**
+ * The conversation as plain text: who, when, what. Tools stay one line each
+ * ("Выполнил: npm test") — the outputs are not loaded and would bury the talk.
+ */
+internal fun chatTranscript(items: List<ChatItem>, title: String?, time: (start: String?, end: String?) -> String): String = buildString {
+    if (!title.isNullOrBlank()) append("# ").append(title).append("\n\n")
+    for (item in items) {
+        when (item) {
+            is ChatItem.User -> {
+                val at = time(item.at, null)
+                append("## Вы").append(if (at.isNotEmpty()) " · $at" else "").append("\n")
+                append(item.text.trim()).append("\n")
+                if (item.files.isNotEmpty()) append("Файлы: ").append(item.files.joinToString { it.name ?: "файл" }).append("\n")
             }
-            DropdownMenuItem(text = { Text("Модель и размышления") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { open = false; onModel() })
-            DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = canCompact, onClick = { open = false; onCompact() })
+            is ChatItem.Assistant -> {
+                val at = time(item.at, item.endedAt)
+                append("## Агент").append(if (at.isNotEmpty()) " · $at" else "").append("\n")
+                for (tool in item.tools) {
+                    append("> ").append(toolVerb(tool.name, running = false))
+                    toolTarget(tool)?.let { append(": ").append(it) }
+                    if (tool.state == ToolState.ERROR) append(" — ошибка")
+                    append("\n")
+                }
+                if (item.tools.isNotEmpty() && item.text.isNotBlank()) append("\n")
+                if (item.text.isNotBlank()) append(item.text.trim()).append("\n")
+                item.error?.let { append("Ошибка: ").append(it).append("\n") }
+            }
+            is ChatItem.Note -> append("— ").append(item.text).append(" —\n")
         }
+        append("\n")
     }
-}
+}.trimEnd() + "\n"
 
 @Composable
 private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
@@ -397,6 +428,16 @@ private fun MessageList(
     val ownClient = graph.settings.clientId
     val items = state.chat.items
     val reversed = remember(items) { items.asReversed() }
+    // An answer is deleted from its question: the server drops a message with everything after it.
+    val questionOf = remember(items) {
+        buildMap {
+            var question: String? = null
+            for (item in items) {
+                if (item is ChatItem.User) question = item.turnId
+                if (item is ChatItem.Assistant) question?.let { put(item.id, it) }
+            }
+        }
+    }
     // Older history loads when the top of the chat comes into view.
     val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 10 } == true } }
     LaunchedEffect(nearTop, state.reachedStart) { if (nearTop && !state.reachedStart) session.loadOlder() }
@@ -432,6 +473,8 @@ private fun MessageList(
                                     deleteFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.DeleteFrom(it)) } },
                                 ),
                                 onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
+                                loadFile = { session.readFile(it) },
+                                hoverActions = platform.kind == "desktop",
                             )
                         }
                         is ChatItem.Assistant -> {
@@ -445,10 +488,14 @@ private fun MessageList(
                                     fork = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
                                     regenerate = if (newest) ({ session.regenerate(item.id) }) else null,
                                     continueAnswer = if (newest && item.text.isNotBlank()) ({ session.continueAnswer(item.id) }) else null,
+                                    deleteFrom = questionOf[item.id]?.takeIf { !historyLocked && !item.active }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
                                 ),
                                 onCopyText = { platform.copyText(it) },
                                 loadToolOutput = { session.toolOutput(it) },
                                 onOpenPath = { onViewFile(FileTarget.Workspace(it)) },
+                                onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
+                                loadFile = { session.readFile(it) },
+                                loadWorkspaceFile = { session.readWorkspaceFile(it) },
                                 hoverActions = platform.kind == "desktop",
                                 onSelectVariant = { position ->
                                     val variants = item.variants
@@ -639,8 +686,8 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             )
         }
         is ChatDialog.DeleteFrom -> ConfirmDialog(
-            title = "Удалить сообщение?",
-            text = "Сообщение и всё, что после него, исчезнут из истории сессии. Это нельзя отменить.",
+            title = if (dialog.withAnswer) "Удалить ответ?" else "Удалить сообщение?",
+            text = (if (dialog.withAnswer) "Ответ, вопрос к нему" else "Сообщение") + " и всё, что после, исчезнут из истории сессии. Это нельзя отменить.",
             confirm = "Удалить",
             destructive = true,
             onConfirm = { session.deleteFrom(dialog.turnId); onClose() },
@@ -648,7 +695,8 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
         )
         ChatDialog.ConfirmStop -> ConfirmDialog(
             title = "Остановить агента?",
-            text = "STOP прервёт текущий ответ и запущенные команды, а также уберёт из очереди ${state.task?.pendingPrompts?.size ?: 0} сообщ. Чтобы сохранить очередь, отправьте первое из неё «Сейчас».",
+            text = "STOP прервёт текущий ответ и запущенные команды" + (state.task?.pendingPrompts?.size?.takeIf { it > 0 }
+                ?.let { ", а также уберёт из очереди $it сообщ. Чтобы сохранить очередь, отправьте первое из неё «Сейчас»." } ?: "."),
             confirm = "Остановить",
             destructive = true,
             onConfirm = { session.cancel(); onClose() },

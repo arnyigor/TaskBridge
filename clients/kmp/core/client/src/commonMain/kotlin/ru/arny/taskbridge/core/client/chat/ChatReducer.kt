@@ -329,6 +329,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     current.status = status
                 } else finish(status ?: "DONE")
             }
+            // Files the agent left in the workspace: they belong to the answer that made them.
+            "OUTPUT_FILES" -> if (current.role == Role.ASSISTANT) current.files = current.files + decodeFiles(event)
             "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
                 finish(event.type.removePrefix("TASK_"), if (event.type == "TASK_FAILED") event.message else null, event.at)
         }
@@ -350,7 +352,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             for (tool in superseded.tools) if (tool.state == "run") tool.state = "interrupted"
         }
         val text = event.string("text") ?: event.message.orEmpty()
-        val files = event.data["files"]?.let { runCatching { TaskBridgeJson.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(FileRef.serializer()), it) }.getOrNull() }.orEmpty()
+        val files = decodeFiles(event)
         // Reconcile the optimistic bubble: by commandId when the server says
         // which command this is, else the oldest pending one.
         val commandId = event.string("commandId")
@@ -508,6 +510,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         version++
     }
 
+    private fun decodeFiles(event: TaskEvent): List<FileRef> =
+        event.data["files"]?.let { runCatching { TaskBridgeJson.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(FileRef.serializer()), it) }.getOrNull() }.orEmpty()
+
     fun snapshot(): ChatSnapshot {
         val items = turns.filter { !it.hidden }.map { turn ->
             when (turn.role) {
@@ -527,7 +532,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                         tools = turn.tools.map { ToolCall(it.id, it.name, it.label, ToolState.of(it.state), it.imagePath) },
                         active = turn.active, status = turn.status, error = turn.error, final = turn.final,
                         at = turn.at, endedAt = turn.endedAt, partial = turn.partial, superseded = turn.superseded,
-                        stopReason = turn.stopReason, variants = variantInfo,
+                        stopReason = turn.stopReason, variants = variantInfo, files = turn.files,
                     )
                 }
             }

@@ -49,6 +49,8 @@ sealed interface ChatItem {
         val stopReason: String?,
         /** Set when the exchange has more than one answer (regenerated / edited). */
         val variants: VariantInfo?,
+        /** Files the agent created or changed during this answer (OUTPUT_FILES). */
+        val files: List<FileRef> = emptyList(),
     ) : ChatItem {
         val cutOff: Boolean get() = final && text.isBlank() && (superseded || status == "CANCELLED" || stopReason == "aborted")
     }
