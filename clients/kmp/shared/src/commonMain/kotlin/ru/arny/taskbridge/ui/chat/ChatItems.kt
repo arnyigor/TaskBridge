@@ -68,6 +68,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.ToolOutput
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ToolCall
@@ -95,10 +96,15 @@ fun UserBubble(
     source: String?,
     actions: MessageActions,
     onOpenFile: (fileId: String, name: String) -> Unit,
+    loadFile: suspend (fileId: String) -> Result<ByteArray>,
+    /** Desktop: the action icons appear on hover; the time stays. */
+    hoverActions: Boolean = false,
 ) {
     val colors = LocalStatusColors.current
     val menu = remember { MenuAnchor() }
-    Column(Modifier.fillMaxWidth().padding(start = 48.dp), horizontalAlignment = Alignment.End) {
+    val interaction = remember { MutableInteractionSource() }
+    val hovered by interaction.collectIsHoveredAsState()
+    Column(Modifier.fillMaxWidth().padding(start = 48.dp).hoverable(interaction), horizontalAlignment = Alignment.End) {
         Box {
             Surface(
                 color = colors.userBubble,
@@ -111,18 +117,20 @@ fun UserBubble(
                         Text("вклинилось в ответ", style = MaterialTheme.typography.labelSmall, color = colors.onUserBubble.copy(alpha = 0.7f))
                     }
                     SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyLarge) }
-                    if (item.files.isNotEmpty()) {
-                        FlowRow(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (file in item.files) {
-                                FileChip(file.name ?: "файл", formatBytes(file.size), onClick = file.id?.let { id -> { onOpenFile(id, file.name ?: "файл") } })
-                            }
-                        }
-                    }
+                    if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
                 }
             }
             AnchoredMenu(menu, actions, isUser = true)
         }
-        Row(Modifier.padding(top = 3.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.padding(top = 2.dp).heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
+            // Same order as the web's msgActions: copy, time, then edit / fork / delete.
+            Row(Modifier.alpha(if (!hoverActions || hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
+                SmallAction(AppIcons.Copy, "Копировать", actions.copy)
+                actions.edit?.let { SmallAction(AppIcons.Edit, "Изменить и отправить заново", it) }
+                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка отсюда", it) }
+                actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить отсюда и ниже", it) }
+            }
+            Spacer(Modifier.width(4.dp))
             if (item.pending) {
                 Icon(AppIcons.Clock, "Отправляется", Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(4.dp))
@@ -142,6 +150,9 @@ fun AssistantMessage(
     loadToolOutput: suspend (String) -> Result<ToolOutput>,
     onOpenPath: (String) -> Unit,
     onSelectVariant: (Int) -> Unit,
+    onOpenFile: (fileId: String, name: String) -> Unit,
+    loadFile: suspend (fileId: String) -> Result<ByteArray>,
+    loadWorkspaceFile: suspend (path: String) -> Result<ByteArray>,
     /** Desktop: the action row appears on hover (the newest answer keeps it). */
     hoverActions: Boolean = false,
 ) {
@@ -152,6 +163,12 @@ fun AssistantMessage(
     Column(Modifier.fillMaxWidth().padding(end = 8.dp).hoverable(interaction).animateContentSize()) {
         if (item.thinking.isNotBlank()) ThinkingBlock(item.thinking, streaming = item.active && item.text.isBlank())
         if (item.tools.isNotEmpty()) ToolList(item.tools, loadToolOutput, onCopyText, onOpenPath)
+        // A picture a tool wrote shows at once, while the answer runs; once the run
+        // ends the same file arrives as an output file and is shown from there.
+        val saved = item.files.mapNotNull { it.path }.toSet()
+        for (path in item.tools.mapNotNull { it.path }.distinct().filter { isImageName(it) && it !in saved }) {
+            ChatImage("ws:$path", path, { loadWorkspaceFile(path) }, onClick = { onOpenPath(path) }, Modifier.padding(vertical = 4.dp))
+        }
         Box {
             Column(Modifier.fillMaxWidth().menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = {}, onLongClick = { menu.open = true })) {
                 when {
@@ -164,6 +181,7 @@ fun AssistantMessage(
                     item.final && item.error == null -> Muted("Ответ не был получен.")
                 }
                 if (item.active && item.text.isNotBlank()) TypingIndicator()
+                if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
                 item.error?.let { error ->
                     Surface(
                         color = MaterialTheme.colorScheme.errorContainer,
@@ -174,7 +192,10 @@ fun AssistantMessage(
                         Row(Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
                             Icon(AppIcons.Alert, null, Modifier.size(16.dp).padding(top = 2.dp))
                             Spacer(Modifier.width(8.dp))
-                            SelectionContainer { Text(error, style = MaterialTheme.typography.bodySmall) }
+                            SelectionContainer(Modifier.weight(1f, fill = false)) { Text(error, style = MaterialTheme.typography.bodySmall) }
+                            IconButton(onClick = { onCopyText(error) }, modifier = Modifier.padding(start = 4.dp).size(24.dp)) {
+                                Icon(AppIcons.Copy, "Копировать ошибку", Modifier.size(14.dp))
+                            }
                         }
                     }
                 }
@@ -198,7 +219,10 @@ fun AssistantMessage(
                 Spacer(Modifier.weight(1f))
                 if (item.text.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать", actions.copy)
                 actions.regenerate?.let { SmallAction(AppIcons.Refresh, "Ответить заново", it) }
-                Box {
+                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка отсюда", it) }
+                actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить вопрос с ответом и всё ниже", it) }
+                actions.continueAnswer?.let { SmallAction(AppIcons.Play, "Продолжить ответ", it) }
+                if (actions.edit != null) Box {
                     SmallAction(AppIcons.More, "Ещё") { buttonMenu = true }
                     MessageMenu(buttonMenu, onDismiss = { buttonMenu = false }, actions = actions, isUser = false)
                 }
@@ -256,7 +280,7 @@ private fun MessageMenu(open: Boolean, onDismiss: () -> Unit, actions: MessageAc
         actions.fork?.let { DropdownMenuItem(text = { Text("Новая ветка отсюда") }, leadingIcon = { Icon(AppIcons.Fork, null) }, onClick = { onDismiss(); it() }) }
         actions.deleteFrom?.let {
             DropdownMenuItem(
-                text = { Text("Удалить отсюда и ниже", color = MaterialTheme.colorScheme.error) },
+                text = { Text(if (isUser) "Удалить отсюда и ниже" else "Удалить вопрос с ответом и ниже", color = MaterialTheme.colorScheme.error) },
                 leadingIcon = { Icon(AppIcons.Delete, null, tint = MaterialTheme.colorScheme.error) },
                 onClick = { onDismiss(); it() },
             )
@@ -540,6 +564,29 @@ private fun ToolRow(
                         onClick = { open = false },
                     )
                 }
+            }
+        }
+    }
+}
+
+/** Attachments or results: pictures as previews, everything else as chips; a tap opens the viewer. */
+@Composable
+private fun FileList(
+    files: List<FileRef>,
+    onOpenFile: (fileId: String, name: String) -> Unit,
+    loadFile: suspend (fileId: String) -> Result<ByteArray>,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        for (file in files) {
+            val id = file.id ?: continue
+            val name = file.name ?: "файл"
+            if (isImageName(name)) ChatImage("file:$id", name, { loadFile(id) }, onClick = { onOpenFile(id, name) })
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            for (file in files) {
+                val name = file.name ?: "файл"
+                FileChip(name, formatBytes(file.size), onClick = file.id?.let { id -> { onOpenFile(id, name) } })
             }
         }
     }

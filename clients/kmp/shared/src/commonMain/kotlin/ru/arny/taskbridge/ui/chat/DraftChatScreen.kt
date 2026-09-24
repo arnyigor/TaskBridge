@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -79,7 +80,9 @@ fun DraftChatScreen(
                 },
             )
         },
-        snackbarHost = { SnackbarHost(snackbar) },
+        snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
+        // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
+        contentWindowInsets = WindowInsets(0),
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -95,7 +98,6 @@ fun DraftChatScreen(
                 enterSends = graph.settings.enterSends && graph.platform.kind == "desktop",
                 enabled = !sending,
                 onSend = { send() },
-                modifier = Modifier.navigationBarsPadding(),
             )
         }
     }

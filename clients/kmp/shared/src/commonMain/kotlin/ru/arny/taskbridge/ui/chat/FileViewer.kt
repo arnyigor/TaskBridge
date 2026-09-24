@@ -1,6 +1,9 @@
 package ru.arny.taskbridge.ui.chat
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
@@ -57,6 +60,7 @@ private const val SHOWN_BYTES = 300_000
 private sealed interface Loaded {
     data class Text(val text: String, val bytes: Int, val cut: Boolean) : Loaded
     data class Binary(val bytes: Int) : Loaded
+    data class Picture(val bitmap: ImageBitmap, val bytes: Int) : Loaded
     data class Failed(val message: String) : Loaded
 }
 
@@ -79,7 +83,9 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
         }
         loaded = result.fold(
             onSuccess = { bytes ->
+                val picture = if (isImageName(target.name)) decodeImage(bytes) else null
                 when {
+                    picture != null -> Loaded.Picture(picture, bytes.size)
                     looksBinary(bytes) -> Loaded.Binary(bytes.size)
                     else -> Loaded.Text(bytes.copyOf(minOf(bytes.size, SHOWN_BYTES)).decodeToString(), bytes.size, bytes.size > SHOWN_BYTES)
                 }
@@ -101,6 +107,7 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
     val info = when (val state = loaded) {
         is Loaded.Text -> formatBytes(state.bytes.toLong()) + if (state.cut) " · показано начало" else ""
         is Loaded.Binary -> formatBytes(state.bytes.toLong())
+        is Loaded.Picture -> "${state.bitmap.width}×${state.bitmap.height} · " + formatBytes(state.bytes.toLong())
         else -> null
     }
     AdaptiveSheet(
@@ -127,6 +134,7 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
         when (val state = loaded) {
             null -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
             is Loaded.Failed -> Text(state.message, color = MaterialTheme.colorScheme.error)
+            is Loaded.Picture -> Image(state.bitmap, target.name, Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.FillWidth)
             is Loaded.Binary -> Text(
                 "Это не текстовый файл — показать его здесь нельзя." + if (platform.kind == "desktop") " Откройте его в приложении на компьютере." else "",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

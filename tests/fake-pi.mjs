@@ -24,6 +24,7 @@ function persist(message) {
   }
 }
 const send = frame => process.stdout.write(JSON.stringify(frame) + '\n');
+const FIXTURE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAh0lEQVR42u3bsQ3AIAwAwTjKMIyQSSgYMAWTeKwsEKgiQXHfukEnuyRKy0PjTgSAAAECBAgQIED66pqPs9VVL7ufboOcGCBAgAQIECBAgAABAiRAgAABAgQIECABAgQIECBAgAABQgAIECBAgAABAiRAgP4vfMm0QYAAAQIECBAgAQIECNBuvaKJBhXtF+1iAAAAAElFTkSuQmCC';
 let streaming = false;
 let pending;
 let automatic = true;
@@ -222,6 +223,14 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const readResult = { content: [{ type: 'text', text: 'hello from example.txt' }] };
     send({ type: 'tool_execution_update', toolCallId: `call-${turn}`, toolName: 'read', args: { path: 'example.txt' }, partialResult: readResult });
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false, result: readResult });
+    // `make-files`: the agent leaves an image and a text file in the workspace,
+    // announcing the image through a write tool — the "files from the agent" case.
+    if (command.message.includes('make-files')) {
+      fs.writeFileSync('result.png', Buffer.from(FIXTURE_PNG, 'base64'));
+      fs.writeFileSync('report.txt', 'Отчёт агента\nстрока 2\n');
+      send({ type: 'tool_execution_start', toolCallId: `write-${turn}`, toolName: 'write', args: { path: 'result.png' } });
+      send({ type: 'tool_execution_end', toolCallId: `write-${turn}`, toolName: 'write', isError: false, result: { content: [{ type: 'text', text: 'wrote result.png' }] } });
+    }
     // A provider that answers with a JSON error envelope (as Pi forwards it
     // verbatim) is a separate case from a plain-text failure.
     const modelError = command.message.includes('model-error-json')

@@ -1,5 +1,11 @@
 package ru.arny.taskbridge.ui.chat
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -8,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -15,16 +22,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -33,7 +36,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -78,13 +80,15 @@ fun Composer(
     onInterrupt: () -> Unit = {},
     /** Above the input: the queue line, outbox problems. */
     top: @Composable () -> Unit = {},
-    /** Next to the attach button: the session's model and context menu. */
-    tools: @Composable () -> Unit = {},
+    /** Extra items of the «+» menu (the session's model and context); call `close` on click. */
+    moreItems: @Composable (close: () -> Unit) -> Unit = {},
 ) {
     var modeMenu by remember { mutableStateOf(false) }
+    var plusMenu by remember { mutableStateOf(false) }
     val canSend = enabled && (value.text.isNotBlank() || files.isNotEmpty())
     Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+        // Inside the Surface: its tint runs under the navigation bar instead of a blank strip.
+        Column(Modifier.navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp)) {
             if (working) RunStatus(runStartedAt, activity, stopping, onStop)
             top()
             if (files.isNotEmpty()) {
@@ -99,73 +103,106 @@ fun Composer(
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.Bottom) {
-                IconButton(onClick = onAttach, enabled = enabled) { Icon(AppIcons.Attach, "Прикрепить файл") }
-                tools()
-                TextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    enabled = enabled,
-                    placeholder = { Text(if (working) "Уточнить или поставить в очередь…" else "Сообщение агенту…") },
-                    maxLines = 8,
-                    shape = RoundedCornerShape(22.dp),
-                    colors = TextFieldDefaults.colors(
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        disabledIndicatorColor = Color.Transparent,
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    ),
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp)
-                        .onPreviewKeyEvent { event ->
-                            if (event.type != KeyEventType.KeyDown || (event.key != Key.Enter && event.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
-                            when {
-                                event.isCtrlPressed || event.isMetaPressed -> { if (canSend) onSend(SendMode.NOW); true }
-                                event.isShiftPressed || !enterSends -> {
-                                    // A newline at the cursor.
-                                    val text = value.text.replaceRange(value.selection.min, value.selection.max, "\n")
-                                    onValueChange(TextFieldValue(text, TextRange(value.selection.min + 1)))
-                                    true
-                                }
-                                else -> { if (canSend) onSend(SendMode.QUEUE); true }
-                            }
-                        },
-                )
-                Spacer(Modifier.width(6.dp))
-                Box {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (working) {
-                            IconButton(onClick = { modeMenu = true }, enabled = canSend, modifier = Modifier.size(32.dp)) {
-                                Icon(AppIcons.ChevronUp, "Как отправить", Modifier.size(18.dp))
-                            }
+            // One capsule: «+», the text (all the free width, grows by itself), send.
+            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+                Row(Modifier.heightIn(min = 52.dp).padding(4.dp), verticalAlignment = Alignment.Bottom) {
+                    Box {
+                        IconButton(onClick = { plusMenu = true }, enabled = enabled, modifier = Modifier.size(44.dp)) {
+                            Icon(AppIcons.Add, "Вложения и действия", Modifier.size(22.dp))
                         }
-                        FilledIconButton(
-                            onClick = { onSend(SendMode.QUEUE) },
-                            enabled = canSend,
-                            modifier = Modifier.size(48.dp),
-                            colors = IconButtonDefaults.filledIconButtonColors(),
-                        ) {
-                            Icon(if (working) AppIcons.Queue else AppIcons.Send, if (working) "В очередь" else "Отправить")
+                        DropdownMenu(expanded = plusMenu, onDismissRequest = { plusMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Прикрепить файл") },
+                                leadingIcon = { Icon(AppIcons.Attach, null) },
+                                onClick = { plusMenu = false; onAttach() },
+                            )
+                            moreItems { plusMenu = false }
                         }
                     }
-                    DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
-                        DropdownMenuItem(
-                            text = { ModeText("В очередь", "Уйдёт, когда закончится текущий ответ") },
-                            leadingIcon = { Icon(AppIcons.Queue, null) },
-                            onClick = { modeMenu = false; onSend(SendMode.QUEUE) },
-                        )
-                        DropdownMenuItem(
-                            text = { ModeText("Вклиниться", "Подсказка в текущий ответ, без остановки") },
-                            leadingIcon = { Icon(AppIcons.Spark, null) },
-                            onClick = { modeMenu = false; onSend(SendMode.STEER) },
-                        )
-                        DropdownMenuItem(
-                            text = { ModeText("Прервать и отправить", "Остановит ответ и запущенные команды (Ctrl+Enter)") },
-                            leadingIcon = { Icon(AppIcons.Stop, null) },
-                            onClick = { modeMenu = false; onInterrupt() },
-                        )
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        enabled = enabled,
+                        // Grows line by line up to 6 lines, then scrolls inside.
+                        maxLines = 6,
+                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                        decorationBox = { field ->
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (value.text.isEmpty()) {
+                                    Text(
+                                        if (working) "Добавить инструкцию…" else "Сообщение агенту…",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                field()
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(horizontal = 4.dp, vertical = 12.dp)
+                            .onPreviewKeyEvent { event ->
+                                if (event.type != KeyEventType.KeyDown || (event.key != Key.Enter && event.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
+                                when {
+                                    event.isCtrlPressed || event.isMetaPressed -> { if (canSend) onSend(SendMode.NOW); true }
+                                    event.isShiftPressed || !enterSends -> {
+                                        // A newline at the cursor.
+                                        val text = value.text.replaceRange(value.selection.min, value.selection.max, "\n")
+                                        onValueChange(TextFieldValue(text, TextRange(value.selection.min + 1)))
+                                        true
+                                    }
+                                    else -> { if (canSend) onSend(SendMode.QUEUE); true }
+                                }
+                            },
+                    )
+                    Box {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            // While the agent works: how to send (also a long press on the send button).
+                            if (working) {
+                                IconButton(onClick = { modeMenu = true }, enabled = canSend, modifier = Modifier.size(36.dp)) {
+                                    Icon(AppIcons.ChevronUp, "Как отправить", Modifier.size(22.dp))
+                                }
+                            }
+                            Box(
+                                Modifier
+                                    .size(44.dp)
+                                    .clip(CircleShape)
+                                    .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+                                    .combinedClickable(
+                                        enabled = canSend,
+                                        onLongClick = if (working) ({ modeMenu = true }) else null,
+                                        onClick = { onSend(SendMode.QUEUE) },
+                                    ),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    if (working) AppIcons.Queue else AppIcons.Send,
+                                    if (working) "В очередь" else "Отправить",
+                                    Modifier.size(22.dp),
+                                    tint = if (canSend) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                                )
+                            }
+                        }
+                        DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
+                            DropdownMenuItem(
+                                text = { ModeText("В очередь", "Уйдёт, когда закончится текущий ответ") },
+                                leadingIcon = { Icon(AppIcons.Queue, null) },
+                                onClick = { modeMenu = false; onSend(SendMode.QUEUE) },
+                            )
+                            DropdownMenuItem(
+                                text = { ModeText("Вклиниться", "Подсказка в текущий ответ, без остановки") },
+                                leadingIcon = { Icon(AppIcons.Spark, null) },
+                                onClick = { modeMenu = false; onSend(SendMode.STEER) },
+                            )
+                            DropdownMenuItem(
+                                text = { ModeText("Прервать и отправить", "Остановит ответ и запущенные команды (Ctrl+Enter)") },
+                                leadingIcon = { Icon(AppIcons.Stop, null) },
+                                onClick = { modeMenu = false; onInterrupt() },
+                            )
+                        }
                     }
                 }
             }
