@@ -176,7 +176,18 @@ async function stopServer(timeoutMs = 9000) {
   const holder = runningLock();
   if (!holder) { log('no running server to stop'); return; }
   log(`stopping server PID ${holder.pid}`);
-  try { process.kill(holder.pid, 'SIGTERM'); } catch {}
+  if (process.platform === 'win32') {
+    // Windows has no SIGTERM: process.kill() terminates the server outright, so
+    // it never runs its shutdown and a busy Pi (plus the pytest/gradle it
+    // started) outlives it. Kill the whole tree, as the LAN mode stop does.
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill', ['/PID', String(holder.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      killer.on('close', resolve);
+      killer.on('error', resolve);
+    });
+  } else {
+    try { process.kill(holder.pid, 'SIGTERM'); } catch {}
+  }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && alive(holder.pid)) await new Promise((r) => setTimeout(r, 200));
   if (alive(holder.pid)) { try { process.kill(holder.pid, 'SIGKILL'); } catch {} log('forced (SIGKILL)'); }

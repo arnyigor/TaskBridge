@@ -249,3 +249,32 @@ test('a queued message keeps its attachment, with a name and not a raw path', { 
   const task = await fixture.api(`/api/tasks/${created.id}`);
   assert.equal((task.attachments || []).filter(file => file.name === 'sample.txt').length, 1, JSON.stringify(task.attachments));
 });
+
+test('a queued prompt keeps its pendingId and sender all the way to USER_MESSAGE', { timeout: 40000 }, async t => {
+  const { fixture, router } = await fixtureWithLocalModel(t);
+
+  const created = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'первое', model: LOCAL_MODEL });
+  assert.equal(created.status, 'QUEUED');
+  const queued = await fixture.api(`/api/tasks/${created.id}/message`, { text: 'второе', queue: true, commandId: 'cmd-q-1', clientId: 'android-1' });
+  const entry = queued.pendingPrompts[0];
+  assert.equal(entry.commandId, 'cmd-q-1');
+  assert.equal(entry.clientId, 'android-1');
+
+  // Every queued prompt announces itself, so each client learns the id of
+  // what it sent without matching texts.
+  const early = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+  const announced = early.filter(event => event.type === 'PROMPT_QUEUED');
+  assert.equal(announced.length, 1);
+  assert.deepEqual(announced[0].data, { pendingId: entry.id, commandId: 'cmd-q-1', clientId: 'android-1' });
+
+  router.free();
+  const events = await waitFor(async () => {
+    const list = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
+    return list.some(event => event.type === 'USER_MESSAGE') ? list : null;
+  }, { tries: 300, delay: 100 });
+  const delivered = events.find(event => event.type === 'USER_MESSAGE');
+  assert.equal(delivered.data.text, 'второе');
+  assert.equal(delivered.data.pendingId, entry.id);
+  assert.equal(delivered.data.commandId, 'cmd-q-1');
+  assert.equal(delivered.data.clientId, 'android-1');
+});
