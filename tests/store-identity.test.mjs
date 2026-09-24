@@ -117,3 +117,17 @@ test('a repeat of a command still in flight is a 409 ACCEPTED, not a server erro
   const events = await api(`/api/tasks/${task.id}/events?limit=0`);
   assert.equal(events.filter(event => event.type === 'USER_MESSAGE' && event.data.commandId === 'cmd-inflight-1').length, 1);
 });
+
+test('a history action on an answer that is not the newest is a 409 NOT_ALLOWED', { timeout: 40000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  for (let i = 0; i < 200; i++) {
+    const current = await api(`/api/tasks/${task.id}`);
+    if (['SUCCEEDED', 'FAILED'].includes(current.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  await assert.rejects(api(`/api/tasks/${task.id}/regenerate`, { turnId: 'assistant-not-the-newest' }),
+    error => error.status === 409 && error.code === 'NOT_ALLOWED');
+});
