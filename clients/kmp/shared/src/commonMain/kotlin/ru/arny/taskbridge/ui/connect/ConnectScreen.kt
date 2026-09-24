@@ -56,7 +56,11 @@ import ru.arny.taskbridge.ui.theme.AppIcons
 @Composable
 fun ConnectScreen(graph: AppGraph, onConnected: () -> Unit) {
     val scope = rememberCoroutineScope()
-    var address by remember { mutableStateOf(graph.settings.serverUrl ?: "") }
+    // Desktop: the daemon is on this machine, so the default address is known and prefilled.
+    // Android: the PC's address is not discoverable, the field stays empty (the placeholder is an example).
+    var address by remember {
+        mutableStateOf(graph.settings.serverUrl ?: if (graph.platform.kind == "desktop") "127.0.0.1:8787" else "")
+    }
     var code by remember { mutableStateOf("") }
     var needsCode by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
