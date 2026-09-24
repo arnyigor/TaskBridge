@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  TaskBridge runs on the operator's PC in the LAN and is reached by IP
+  (http://192.168.x.x:8787). Android cannot scope cleartext to IP ranges, only
+  to domain names, so plain HTTP is allowed for the app. HTTPS with the PC's
+  self-signed certificate works too (the address can be https://…:8443) once
+  certificate pinning is added (KMP plan 3.7).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
