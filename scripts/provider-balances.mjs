@@ -2,7 +2,7 @@
 //
 // Здесь только те провайдеры, у которых найден публичный эндпоинт баланса,
 // принимающий API-ключ. Локальный llama.cpp не входит по определению (денег нет).
-// Для остальных (wormsoft, clodex-openai, google, huggingface, github-copilot,
+// Для остальных (clodex-openai, google, huggingface, github-copilot,
 // openai-codex) баланс по ключу недоступен — разбор в docs/provider-balances.md.
 //
 // Запуск: node scripts/provider-balances.mjs [--json]
@@ -27,6 +27,16 @@ const PROVIDERS = [
     // {"data":{"credits":2097.6143708804548}} — валюта в ответе не указана
     format: json => (json?.data && Number.isFinite(json.data.credits))
       ? `${json.data.credits} credits`
+      : null
+  },
+  {
+    id: 'wormsoft',
+    label: 'WormSoft',
+    url: 'https://ai.wormsoft.ru/api/gpt/subscription-limit',
+    keyEnv: 'WORMSOFT_API_KEY',
+    // API сохраняет историческую опечатку subcription*.
+    format: json => (json?.subcriptionType && Number.isFinite(Number(json.subcriptionLimit)))
+      ? `${json.subcriptionLimit} credits (${json.subcriptionType})`
       : null
   }
 ];

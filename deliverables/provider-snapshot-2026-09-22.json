@@ -1,0 +1,76 @@
+{
+  "capturedAt": "2026-09-22T20:27:43+05:00",
+  "sources": {
+    "modelCatalog": "GET http://127.0.0.1:8787/api/models?refresh=1",
+    "balances": "node scripts/provider-balances.mjs --json",
+    "routerAiPrices": "GET https://routerai.ru/api/v1/models",
+    "deepseekInfo": "GET http://127.0.0.1:8787/api/info"
+  },
+  "modelsVisibleInPi": {
+    "total": 624,
+    "byProvider": {
+      "routerai": 497,
+      "huggingface": 76,
+      "google": 22,
+      "wormsoft": 15,
+      "llama.cpp": 6,
+      "openai-codex": 6,
+      "deepseek": 2
+    }
+  },
+  "balances": {
+    "deepseek": {
+      "cny": -1.45,
+      "usd": 21.24,
+      "rubApprox": 1768.0,
+      "note": "Current charges observed against USD wallet; old cost_history.csv ends 2026-09-21 and is CNY-denominated."
+    },
+    "routerai": {
+      "credits": 1471.737261760892,
+      "unit": "approximately RUB based on provider pricing and usage.cost documentation"
+    },
+    "wormsoft": {
+      "plan": "payed",
+      "remainingCredits": 2564798,
+      "planCredits": 3000000,
+      "remainingPercent": 85.49,
+      "windowSeconds": 14400,
+      "monthlyRub": 4000,
+      "rateLimitRequests": 120,
+      "rateLimitSeconds": 60,
+      "concurrentRequests": 5,
+      "observedBurst": {
+        "requests": 50,
+        "spanSeconds": 13804,
+        "credits": 1034791,
+        "peakFourHourCredits": 1034791,
+        "peakOneHourCredits": 542598,
+        "peakRequestsPerMinute": 10,
+        "estimatedCacheReadCreditShare": 0.6736
+      }
+    },
+    "wormsoftDeveloper": {
+      "plan": "wormsoft_developer",
+      "planCredits": 5000000,
+      "windowSeconds": 7200,
+      "monthlyRub": 8000,
+      "rateLimitRequests": 150,
+      "rateLimitSeconds": 60,
+      "concurrentRequests": 10
+    }
+  },
+  "routerAiRubPerMillionTokens": {
+    "z-ai/glm-5.3-flash": { "input": 9.02, "output": 30.06 },
+    "deepseek/deepseek-v4.1-flash": { "input": 16.84, "output": 50.51 },
+    "openai/gpt-5.6-luna": { "input": 21.86, "output": 131.19 },
+    "qwen/qwen3.8-27b": { "input": 10.93, "output": 196.78 },
+    "deepseek/deepseek-v4-pro": { "input": 146.14, "output": 292.29 },
+    "anthropic/claude-haiku-4.5": { "input": 109.32, "output": 546.62 },
+    "google/gemini-3.8-flash": { "input": 81.99, "output": 409.97 },
+    "anthropic/claude-sonnet-5": { "input": 218.65, "output": 1093.24 },
+    "openai/gpt-5.6-sol": { "input": 218.65, "output": 1093.24 },
+    "openai/gpt-5.6-terra": { "input": 218.65, "output": 1311.89 },
+    "anthropic/claude-opus-5": { "input": 546.62, "output": 2733.10 },
+    "openai/gpt-6-astra": { "input": 1093.24, "output": 5466.20 }
+  }
+}

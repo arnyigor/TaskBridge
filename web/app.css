@@ -258,6 +258,9 @@ body {
   border-bottom: 1px solid var(--border);
 }
 .pcStateSystem { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+/* Баланс/подписка активного провайдера: под строкой модели, до состояния.
+   Строка кликабельна — явный refresh баланса вместо автоматического опроса. */
+.pcStateProvider { margin-bottom: 8px; cursor: pointer; }
 
 .statusDot {
   width: 12px;

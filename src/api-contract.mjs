@@ -22,7 +22,8 @@ export const API_VERSION = 1;
 export const API_ROUTES = [
   // --- host / status --------------------------------------------------------
   { method: 'GET', path: '/api/health', summary: 'liveness, no auth' },
-  { method: 'GET', path: '/api/info', summary: 'name, build, apiVersion, addresses, engine, system, limits' },
+  { method: 'GET', path: '/api/info', summary: 'name, build, apiVersion, addresses, engine, system, limits, last known provider balances/subscriptions (no provider requests on the poll)' },
+  { method: 'POST', path: '/api/providers/refresh', summary: 'fresh provider balances/subscriptions now (operator action, cooldown-guarded)' },
   { method: 'GET', path: '/api/metrics', summary: 'counters as JSON, or Prometheus with ?format=prometheus' },
   { method: 'GET', path: '/debug/cloud', summary: 'cloud transport diagnostics' },
 

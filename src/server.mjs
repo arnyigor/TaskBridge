@@ -32,6 +32,8 @@ import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
+import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus } from './provider-status.mjs';
+import { readDeepseekCost } from './deepseek-cost.mjs';
 import { API_VERSION } from './api-contract.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -61,6 +63,7 @@ const build = await (async () => {
 })();
 
 const config = await loadConfig(rootDir);
+const providerRefreshes = new Map();
 
 // Identifies this process run, not the code it runs: every page keeps the bootId
 // it first saw and reloads when it changes — that is how a phone tab (which has
@@ -243,6 +246,21 @@ manager.on('task-event', (event) => {
   for (const client of sseClients.get(event.taskId) || []) {
     if (client.replaying) client.pending.push(event);
     else try { deliver(client, event); } catch {}
+  }
+  // Sample after a completed Pi turn (initial prompt AND follow-ups), so the
+  // remainder includes that request's usage. Fire-and-forget; rapid turns
+  // share the provider cache (at most one read per minute).
+  if (event.type === 'PI_EVENT' && event.data?.pi?.type === 'agent_settled'
+      && manager.getTask?.(event.taskId)?.model?.provider === 'wormsoft') {
+    readWormsoftStatus(config.providerStatus?.wormsoft, {
+      env: process.env,
+      storagePath: path.join(dataRoot, 'wormsoft-usage.json'),
+      // Sampling keeps its own one-minute floor instead of the display cache
+      // TTL: a balance read must include this request's usage even if the
+      // panel was refreshed a moment ago.
+      noCache: true,
+      minRefreshMs: 60_000,
+    }).catch(() => {});
   }
   // Only what an operator waits for (finished, failed, needs a confirmation).
   const notification = notificationFor(event, manager.getTask?.(event.taskId));
@@ -700,6 +718,27 @@ async function handleRequest(req, res) {
       return json(res, 202, { restarting: true, mode, pid: child.pid });
     }
 
+    // Refresh only the selected account; repeated clicks share a request and
+    // never generate more than one provider read per 20 seconds.
+    if (req.method === 'POST' && pathname === '/api/providers/refresh') {
+      const { provider } = await readJson(req);
+      if (!['wormsoft', 'routerai', 'deepseek'].includes(provider)) {
+        throw Object.assign(new Error('Неизвестный провайдер.'), { code: 'INPUT_INVALID' });
+      }
+      const last = providerRefreshes.get(provider);
+      if (last && Date.now() - last.at < 20_000) return json(res, 200, { [provider]: await last.promise });
+      const options = { env: process.env, noCache: true, minRefreshMs: 20_000,
+        storagePath: path.join(dataRoot, 'wormsoft-usage.json') };
+      const promise = (async () => {
+        if (provider === 'wormsoft') return readWormsoftStatus(config.providerStatus?.wormsoft, options);
+        if (provider === 'routerai') return readRouterAiStatus(config.providerStatus?.routerai, options);
+        const status = await readDeepseekCost(config.deepseek, options);
+        return { ...status, provider: 'deepseek', label: 'DeepSeek', kind: 'balance' };
+      })();
+      providerRefreshes.set(provider, { at: Date.now(), promise });
+      return json(res, 200, { [provider]: await promise });
+    }
+
     if (req.method === 'GET' && pathname === '/api/models') {
       const refresh = url.searchParams.get('refresh') === '1';
       return json(res, 200, await manager.listModels({ refresh }));
@@ -778,9 +817,21 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === 'GET' && pathname === '/api/info') {
-      const [busy, modelReady, engine, local, system] = await Promise.all([
-        manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus(), readSystemMetrics()
+      const [busy, modelReady, engine, local, system, providerStatuses] = await Promise.all([
+        manager.local.getBusyStatus(), manager.local.isReady(), manager.local.getEngineInfo(), manager.localStatus(), readSystemMetrics(),
+        readProviderStatuses(config, {
+          env: process.env,
+          // Usage samples must survive restarts; isolated instances keep their own file.
+          storagePath: path.join(dataRoot, 'wormsoft-usage.json'),
+          // The poll serves the last known state without touching providers: an
+          // always-on status endpoint must not get the account blocked. The
+          // operator refreshes explicitly (POST /api/providers/refresh), and
+          // each real model run samples the remainder by itself.
+          cacheOnly: true,
+        }).catch(() => ({}))
       ]);
+      // Keep the original field for clients written before providerStatuses.
+      const deepseek = providerStatuses.deepseek || { available: false, reason: 'error' };
       const settings = await readPiSettings().catch(() => null);
       const warnings = [];
       if (imagesBlocked(settings)) {
@@ -803,6 +854,8 @@ async function handleRequest(req, res) {
         engine,
         system,
         local,
+        providerStatuses,
+        deepseek,
         warnings,
         fileLimits: FILE_LIMITS
       });

@@ -410,6 +410,8 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `workspace.requireCleanSource` | запрещать старт на dirty source repository |
 | `workspace.useGitWorktreeByDefault` | изолировать задачу в worktree |
 | `projectBrowser.roots` | корни, которые видит браузер папок |
+| `deepseek.costHistoryPath` | CSV расходов для прогноза, на сколько дней хватит баланса DeepSeek |
+| `providerStatus.wormsoft` / `routerai` | настройки кэша и переопределения URL для статуса аккаунта; ключи по умолчанию берутся из `WORMSOFT_API_KEY` / `ROUTERAI_API_KEY` |
 | `projects[]` | зарегистрированные проекты |
 
 `config.json` в git не хранится — он содержит локальные пути.
@@ -431,7 +433,7 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `GET` | `/api/auth` | статус авторизации |
 | `POST` | `/api/auth/pair` | вход по pairing-коду |
 | `GET` | `/api/auth/pairing` | текущий код (только с localhost) |
-| `GET` | `/api/info` | имя, build, адреса, готовность модели, engine health, скорости модели (`engine.metrics`), состояние ПК (`system`), лимиты файлов |
+| `GET` | `/api/info` | имя, build, адреса, engine/system, лимиты файлов и `providerStatuses` (баланс/подписка точного provider активной модели) |
 | `POST` | `/api/uploads` | потоковая multipart-загрузка файлов |
 | `GET` | `/api/projects` | список проектов |
 | `DELETE` | `/api/projects/:id` | удалить проект |

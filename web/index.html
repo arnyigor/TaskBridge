@@ -56,6 +56,11 @@
         <summary class="statusDot" title="Состояние модели, адреса и нагрузка" aria-label="Статус модели"></summary>
         <div class="pcStateBody">
           <div id="pcStateModel" class="pcStateModel"></div>
+          <!-- Баланс или лимит подписки активного облачного провайдера.
+               Аккаунт выбирается по точному provider модели, а не по её имени.
+               Заполняет renderProviderStatus (web/app.js); клик по строке —
+               явный refresh баланса (POST /api/providers/refresh). -->
+          <div id="pcStateProvider" class="pcStateProvider hidden" title="Нажмите, чтобы обновить баланс и подписку"></div>
           <div id="pcStateStatus"></div>
           <div id="pcStateSystem" class="pcStateSystem"></div>
         </div>

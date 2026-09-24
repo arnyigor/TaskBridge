@@ -14,7 +14,7 @@
 | --- | --- | --- | --- | --- |
 | DeepSeek | API-ключ `DEEPSEEK_API_KEY` | 4 в каталоге, **1 в конфиге** | **36.78 CNY + 2.00 USD** | `GET api.deepseek.com/user/balance` |
 | RouterAI | API-ключ `ROUTERAI_API_KEY` | 3 в конфиге, **497 в каталоге** | **2097.61 ₽** (credits) | `GET routerai.ru/api/v1/credits` |
-| WormSoft | API-ключ `WORMSOFT_API_KEY` | 10 в конфиге, **39 в API** | нет данных | по ключу баланс не отдаётся (только кабинет) |
+| WormSoft | API-ключ `WORMSOFT_API_KEY` | 10 в конфиге, **39 в API** | **остаток кредитов подписки** | `GET /api/gpt/subscription-limit` + публичные параметры тарифа |
 | Clodex | API-ключ `CLODEX_API_KEY` | 9 | нет данных | `/api/user/self` → 401, нужен access token ЛК |
 | Hugging Face | токен `HF_TOKEN` (fine-grained) | 75 | нет данных | `/api/whoami-v2`: `isPro: false`, баланс только в кабинете |
 | Google (Gemini) | API-ключ `GEMINI_API_KEY` | 22 | нет данных | баланс живёт в Google Cloud Billing, не в API-ключе |
@@ -94,9 +94,14 @@
 | `qwen/qwen3.5-plus`, `qwen/qwen3.6-plus` | 0.04 | 2.5 | 0.02 |
 | `qwen/qwen3.5-35b`, `google/gemma4:26b` | 0.0005 | 0.005 | 0.00005 |
 
-Тарифы (`GET /api/user-connector/subscription-limits`): free — 5000 кредитов,
-10 запросов / 600 с, 0 ₽; promo — 150 000 кредитов за 1000 ₽; simple — 500 000 за 2000 ₽
-(период 30 дней).
+Текущий остаток подписки отдаёт авторизованный
+`GET /api/gpt/subscription-limit` в исторически опечатанных полях
+`subcriptionType` / `subcriptionLimit`. Проверено живым запросом 2026-09-22:
+тариф `payed`, остаток 1 402 275 кредитов. Публичные параметры тарифов берутся из
+`GET /api/user-connector/subscription-limits`: для `payed` базовый объём
+3 000 000 кредитов, окно 14 400 с, 120 запросов / 60 с, 5 параллельных запросов,
+4000 ₽ за 30 дней. API не отдаёт точное время следующего сброса, поэтому TaskBridge
+его не выдумывает.
 
 ⚠ Расхождение: 11 из 18 позиций прайса (`openai/gpt-5.5`, `glm-5.1`, `qwen3.5-plus`…)
 в списке `v1/models` не значатся, и наоборот — большинство рабочих моделей
@@ -291,9 +296,9 @@ routerai (3/3) и clodex-openai (9/9) все id на месте, у deepseek —
   абсурдные суммы). Значит `credits` ≈ рубли. `GET /v1/key` показывает расход этого
   ключа: `usage_monthly` 2.34 и уменьшение `credits` на ~0.009 за шесть пробных
   запросов — те же единицы.
-- WormSoft: перебор `/api/user-connector/*`, `/api/gpt/v1/*`, `/api/money/*` — отвечают только
-  `/api/user-connector/subscription-limits` (публичный каталог тарифов) и публичный
-  `/api/money/token-pricing` (прайс, 18 позиций). Баланса аккаунта по ключу нет — только ЛК (`/lk`).
+- WormSoft: `GET /api/gpt/subscription-limit` с Bearer API-ключом отдаёт тип подписки
+  и оставшиеся кредиты; `GET /api/user-connector/subscription-limits` — публичные
+  параметры тарифов. Точного `resetAt` API не отдаёт.
 - WormSoft, живые вызовы моделей, которых нет в `models.json`: `kimi/kimi-k3`,
   `anthropic/claude-opus-5`, `openai/gpt-5.6-sol` — ответили.
 - Hugging Face, живой вызов роутера: `deepseek-ai/DeepSeek-V4.1-Flash`, `Qwen/Qwen3.8-27B`,
@@ -307,7 +312,7 @@ routerai (3/3) и clodex-openai (9/9) все id на месте, у deepseek —
 
 Не проверено:
 
-- остатки WormSoft / Clodex / Hugging Face / Google — доступны только в веб-кабинетах;
+- остатки Clodex / Hugging Face / Google — доступны только в веб-кабинетах;
 - у Copilot проверены 3 модели из 28 — отказ происходит на refresh'е токена, то есть
   до выбора модели, поэтому остальные 25 отдельно не гонялись;
 - Clodex в этот прогон не входил (ни цены, ни живые вызовы моделей помимо конфига);

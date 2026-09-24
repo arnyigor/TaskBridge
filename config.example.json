@@ -34,7 +34,16 @@
     "router": {
       "enabled": false,
       "command": "C:\\path\\to\\llama-server.exe",
-      "args": ["--host", "127.0.0.1", "--port", "8080", "--models-preset", "C:\\path\\to\\models.ini", "--models-max", "1"],
+      "args": [
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8080",
+        "--models-preset",
+        "C:\\path\\to\\models.ini",
+        "--models-max",
+        "1"
+      ],
       "cwd": "C:\\path\\to\\llamacpp",
       "startTimeoutMs": 120000,
       "loadTimeoutMs": 900000
@@ -51,7 +60,14 @@
         "name": "Текст",
         "enabled": false,
         "command": "C:\\path\\to\\llama-server.exe",
-        "args": ["-m", "C:\\path\\to\\model.gguf", "--host", "127.0.0.1", "--port", "8080"],
+        "args": [
+          "-m",
+          "C:\\path\\to\\model.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "8080"
+        ],
         "cwd": ""
       },
       {
@@ -59,7 +75,16 @@
         "name": "Vision",
         "enabled": false,
         "command": "C:\\path\\to\\llama-server.exe",
-        "args": ["-m", "C:\\path\\to\\model.gguf", "-mm", "C:\\path\\to\\mmproj.gguf", "--host", "127.0.0.1", "--port", "8080"],
+        "args": [
+          "-m",
+          "C:\\path\\to\\model.gguf",
+          "-mm",
+          "C:\\path\\to\\mmproj.gguf",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "8080"
+        ],
         "cwd": ""
       }
     ],
@@ -110,6 +135,19 @@
   },
   "projectBrowser": {
     "roots": []
+  },
+  "deepseek": {
+    "costHistoryPath": "",
+    "cacheMs": 600000
+  },
+  "providerStatus": {
+    "wormsoft": {
+      "cacheMs": 60000,
+      "endsAt": "2026-09-29"
+    },
+    "routerai": {
+      "cacheMs": 600000
+    }
   },
   "projects": [
     {
