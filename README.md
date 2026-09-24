@@ -13,6 +13,16 @@ TaskBridge (v0.10.0) — небольшой локальный HTTP/PWA-серв
 - сжать контекст (`COMPACT`) и посмотреть состояние Pi;
 - открыть историю сессий, вложения и артефакты результата.
 
+## Скачать клиент
+
+Приложение для Android и Windows (кроме веб-интерфейса) — на странице
+[последнего релиза](https://github.com/arnyigor/TaskBridge/releases/latest):
+
+- **Windows** — `TaskBridge-…-windows-portable.zip`: распакуйте и запустите `TaskBridge.exe`, установка и Java не нужны;
+- **Android** — `TaskBridge-…-android-debug.apk`.
+
+Клиенту нужен запущенный на компьютере сервер TaskBridge (ниже — как его поставить). Исходники клиента — [clients/kmp](clients/kmp).
+
 Главная идея:
 
 ```text
