@@ -217,7 +217,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       });
       return;
     }
-    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false });
+    // Shaped like real Pi: the update carries the output so far as an object,
+    // the end carries the whole result (content parts).
+    const readResult = { content: [{ type: 'text', text: 'hello from example.txt' }] };
+    send({ type: 'tool_execution_update', toolCallId: `call-${turn}`, toolName: 'read', args: { path: 'example.txt' }, partialResult: readResult });
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false, result: readResult });
     // A provider that answers with a JSON error envelope (as Pi forwards it
     // verbatim) is a separate case from a plain-text failure.
     const modelError = command.message.includes('model-error-json')

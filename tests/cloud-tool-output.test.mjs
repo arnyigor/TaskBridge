@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ToolOutputWindow, tailBytes } from '../src/tool-output.mjs';
+import { ToolOutputWindow, tailBytes, toolResultText } from '../src/tool-output.mjs';
 import { EventNormalizer } from '../src/events/event-normalizer.mjs';
 import { TaskStore } from '../src/task-store.mjs';
 import { TaskManager } from '../src/task-manager.mjs';
@@ -124,4 +124,31 @@ test('FETCH_TOOL_OUTPUT command is routed and acknowledged', async t => {
 
   const unknown = await dispatcher.handle({ commandId: 'c3', machineId: 'm', taskId: 'nope', seq: 3, type: 'FETCH_TOOL_OUTPUT', payload: { toolCallId: 'x' } });
   assert.equal(unknown.error.code, 'TASK_NOT_FOUND');
+});
+
+test("Pi's tool result object reads as its text, not [object Object]", () => {
+  assert.equal(toolResultText({ content: [{ type: 'text', text: 'a' }, { type: 'image', data: 'x' }, { type: 'text', text: 'b' }], details: {} }), 'a\n[изображение]\nb');
+  assert.equal(toolResultText({ content: [] }), '');
+  assert.equal(toolResultText('plain'), 'plain');
+  assert.equal(toolResultText(null), '');
+});
+
+test('a log saved as [object Object], or never saved, is rebuilt from the end event', async t => {
+  const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-tool-output-'));
+  const store = new TaskStore(dataRoot);
+  t.after(async () => { store.close(); await fs.rm(dataRoot, { recursive: true, force: true }); });
+  const manager = new TaskManager({ projects: [] }, dataRoot, store);
+  const task = { id: 'b', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), status: 'SUCCEEDED', workspacePath: dataRoot, files: [], attachments: [], outputFiles: [], compaction: { count: 0 }, assistantText: '', thinkingText: '' };
+  await store.create(task);
+  manager.tasks.set('b', task);
+  const end = (toolCallId, text) => ({ type: 'PI_EVENT', taskId: 'b', at: new Date().toISOString(), message: 'tool done', data: { pi: { type: 'tool_execution_end', toolCallId, toolName: 'bash', result: { content: [{ type: 'text', text }] } } } });
+
+  await store.appendRaw('b', 'tool-c1.log', '[object Object][object Object]');
+  await store.appendEvent('b', end('c1', 'BUILD SUCCESSFUL'));
+  assert.equal((await manager.fetchToolOutput('b', 'c1')).text, 'BUILD SUCCESSFUL');
+
+  await store.appendEvent('b', end('c2', 'no log file'));
+  assert.equal((await manager.fetchToolOutput('b', 'c2')).text, 'no log file');
+
+  await assert.rejects(manager.fetchToolOutput('b', 'c3'), { code: 'NOT_FOUND' });
 });

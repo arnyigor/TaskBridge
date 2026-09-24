@@ -84,3 +84,21 @@ export class ToolOutputWindow {
 }
 
 export { tailUtf8 as tailBytes };
+
+// Pi reports a tool result as { content: [{ type: 'text', text }, { type: 'image', … }], details };
+// tool_execution_update carries the same shape with the output so far. The log
+// used to get String(result), which is "[object Object]".
+export function toolResultText(result) {
+  if (result == null) return '';
+  if (typeof result === 'string') return result;
+  const parts = Array.isArray(result.content) ? result.content : [];
+  return parts
+    .map(part => part?.type === 'text' ? String(part.text ?? '') : part?.type === 'image' ? '[изображение]' : '')
+    .filter(Boolean)
+    .join('\n');
+}
+
+// A log saved before that fix: nothing but "[object Object]" repeated.
+export function isBrokenToolLog(text) {
+  return /^(?:\[object Object\])+$/.test(String(text ?? '').trim());
+}
