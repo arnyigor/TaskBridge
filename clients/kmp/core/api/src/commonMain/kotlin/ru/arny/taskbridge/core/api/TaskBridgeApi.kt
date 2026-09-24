@@ -81,6 +81,11 @@ class TaskBridgeApi(
 
     suspend fun auth(): AuthStatus = get("/api/auth", AuthStatus.serializer())
 
+    /** Restarts the whole TaskBridge process (202 at once, the relaunch is detached); running sessions are cut. */
+    suspend fun restartServer() {
+        send(HttpMethod.Post, "/api/server/restart", buildJsonObject { put("confirm", true) })
+    }
+
     /**
      * Exchanges the pairing code shown on the PC for a session cookie and keeps
      * it in [connection]. The cookie is signed by the server and valid for up to
