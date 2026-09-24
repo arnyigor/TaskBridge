@@ -1,0 +1,530 @@
+{
+  "task": {
+    "id": "aaefaa9f5eaa",
+    "createdAt": "2026-09-24T10:28:20.815Z",
+    "updatedAt": "2026-09-24T10:28:21.159Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "fault-crash",
+    "workspacePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "sourcePath": "/tmp/taskbridge-http-test-vVWgYM",
+    "worktree": false,
+    "current": "Done",
+    "assistantText": "Ответ 1",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": [],
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": {
+      "input": 1000,
+      "output": 100,
+      "totalTokens": 1100
+    },
+    "metrics": {
+      "tg": 1960.7843137254904,
+      "outputTokens": 100,
+      "ms": 51,
+      "source": "usage"
+    },
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "statusChangedAt": "2026-09-24T10:28:21.133Z",
+    "baseCommit": null,
+    "thinkingLevelActual": "off",
+    "retryable": null,
+    "retryAfterMs": null,
+    "piSessionFile": "/tmp/taskbridge-http-test-vVWgYM/data/pi-sessions/aaefaa9f5eaa/recovered-bfa6fe7b-70e6-40ea-ae77-0b488baf9766.jsonl",
+    "verificationStatus": "NOT_CONFIGURED",
+    "sessionAvailable": true
+  },
+  "events": [
+    {
+      "at": "2026-09-24T10:28:20.816Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-09-24T10:28:20.817Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-09-24T10:28:20.818Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: /tmp/taskbridge-http-test-vVWgYM",
+      "data": {},
+      "seq": 3
+    },
+    {
+      "at": "2026-09-24T10:28:20.819Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-09-24T10:28:20.820Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-09-24T10:28:20.882Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-09-24T10:28:20.883Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_STDERR",
+      "message": "fake-pi: simulated crash during a tool call\n",
+      "data": {
+        "raw": "fake-pi: simulated crash during a tool call\n"
+      },
+      "seq": 7
+    },
+    {
+      "at": "2026-09-24T10:28:20.894Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-09-24T10:28:20.894Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "fault-crash\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-09-24T10:28:20.895Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "fault-crash\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-09-24T10:28:20.895Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-09-24T10:28:20.896Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "tool: bash — pytest",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "bash",
+          "args": {
+            "command": "pytest"
+          }
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-09-24T10:28:20.908Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "TASK_FAILED",
+      "message": "Pi process exited unexpectedly: code=3, signal=null",
+      "data": {
+        "errorCode": "PI_SESSION_FAILED"
+      },
+      "seq": 13
+    },
+    {
+      "at": "2026-09-24T10:28:20.986Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "SESSION_RESTORED",
+      "message": "Сессия Pi восстановлена с сохранённой историей.",
+      "data": {},
+      "seq": 14
+    },
+    {
+      "at": "2026-09-24T10:28:20.998Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "USER_MESSAGE",
+      "message": "продолжай",
+      "data": {
+        "text": "продолжай",
+        "mode": "prompt",
+        "files": []
+      },
+      "seq": 15
+    },
+    {
+      "at": "2026-09-24T10:28:20.999Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "STATUS",
+      "message": "Follow-up sent to Pi",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 16
+    },
+    {
+      "at": "2026-09-24T10:28:21.000Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 17
+    },
+    {
+      "at": "2026-09-24T10:28:21.003Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "продолжай"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 18
+    },
+    {
+      "at": "2026-09-24T10:28:21.005Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "продолжай"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 19
+    },
+    {
+      "at": "2026-09-24T10:28:21.005Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 20
+    },
+    {
+      "at": "2026-09-24T10:28:21.006Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 21
+    },
+    {
+      "at": "2026-09-24T10:28:21.006Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false
+        }
+      },
+      "seq": 22
+    },
+    {
+      "at": "2026-09-24T10:28:21.080Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 23
+    },
+    {
+      "at": "2026-09-24T10:28:21.105Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 24
+    },
+    {
+      "at": "2026-09-24T10:28:21.131Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 1"
+          }
+        }
+      },
+      "seq": 25
+    },
+    {
+      "at": "2026-09-24T10:28:21.132Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 1"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 26
+    },
+    {
+      "at": "2026-09-24T10:28:21.132Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 27
+    },
+    {
+      "at": "2026-09-24T10:28:21.133Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 28
+    },
+    {
+      "at": "2026-09-24T10:28:21.134Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 29
+    },
+    {
+      "at": "2026-09-24T10:28:21.159Z",
+      "taskId": "aaefaa9f5eaa",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 30
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "fault-crash",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-initial",
+      "role": "assistant",
+      "text": "",
+      "thinking": "",
+      "status": "FAILED",
+      "active": false,
+      "final": true,
+      "error": "Pi process exited unexpectedly: code=3, signal=null",
+      "tools": [
+        {
+          "id": "call-1",
+          "name": "bash",
+          "state": "done"
+        }
+      ]
+    },
+    {
+      "id": "user-15",
+      "role": "user",
+      "text": "продолжай",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-15",
+      "role": "assistant",
+      "text": "Ответ 1",
+      "thinking": "",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": []
+    }
+  ]
+}

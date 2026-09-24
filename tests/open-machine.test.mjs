@@ -67,6 +67,11 @@ test('workspace-file open/run read the path from the query, not an empty body', 
   t.after(() => fixture.close());
   const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'workspace open probe' });
   const route = `/api/tasks/${task.id}/workspace-file/open`;
+  // The workspace is prepared asynchronously; until it exists the route answers
+  // 404 for any path, which would hide the check below under load.
+  for (let i = 0; i < 200 && !(await fixture.api(`/api/tasks/${task.id}`)).workspacePath; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
 
   // A path in the query is what gets resolved. A missing file 404s — it must not
   // silently fall back to the workspace folder (which the panel then "opened").

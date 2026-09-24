@@ -1,0 +1,14 @@
+{
+  "status": 201,
+  "body": {
+    "token": "7abea9f0-44e5-4529-bd9b-a6192f647a13",
+    "files": [
+      {
+        "id": "fa0b42eb-453c-4fc5-ae52-bd185614fce0",
+        "name": "заметка.txt",
+        "size": 18,
+        "mimeType": "text/plain"
+      }
+    ]
+  }
+}

@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -86,6 +87,19 @@ export class TaskStore {
     this.#ensureCommandColumns();
     this.#migrateSchema();
     this.#importLegacy();
+    this.storeId = this.#ensureStoreId();
+  }
+
+  // A random id of this database's history (plan invariant I10). `seq` restarts
+  // when the database is recreated or restored from a backup, and a client that
+  // cached `lastSeq = 1284` would then silently wait for events that never come.
+  // Comparing storeId tells it to drop its cache instead.
+  #ensureStoreId() {
+    const existing = this.#meta('store_id');
+    if (existing) return existing;
+    const id = crypto.randomUUID();
+    this.#setMeta('store_id', id);
+    return id;
   }
 
   // user_version 0 is either a fresh database or one created before events had a
@@ -203,6 +217,13 @@ export class TaskStore {
     const file = path.resolve(target);
     await fsp.mkdir(path.dirname(file), { recursive: true });
     this.db.exec(`VACUUM INTO '${file.replaceAll("'", "''")}'`);
+    // A backup is a different history from the moment it is taken: once it is
+    // restored, the live database has moved on and its seq values no longer
+    // match. Give the copy its own storeId so clients notice the restore.
+    const copy = new DatabaseSync(file);
+    try {
+      copy.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('store_id', crypto.randomUUID());
+    } finally { copy.close(); }
     return file;
   }
 

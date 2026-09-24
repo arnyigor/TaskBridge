@@ -1,6 +1,12 @@
 import readline from 'node:readline';
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+// `pi --version`, as TaskBridge probes it at startup. Overridable so tests can
+// play an unsupported Pi.
+if (process.argv.includes('--version')) {
+  process.stdout.write(`${process.env.FAKE_PI_VERSION || '0.85.1'}\n`);
+  process.exit(0);
+}
 const sessionArg = process.argv.indexOf('--session');
 const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
 const argValue = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; };
@@ -65,6 +71,77 @@ function finish(text, fail = false, errorMessage = 'Fixture model error') {
   };
   emit();
 }
+// --- failure modes (backend plan B0) --------------------------------------
+// A prompt containing `fault-<name>` makes this stand-in misbehave the way a
+// real Pi (or the pipe to it) can. Everything else keeps the normal script.
+//   fault-crash   exits with code 3 in the middle of a tool call, after stderr
+//   fault-garbage writes a non-JSON line and a torn JSON line, then answers
+//   fault-utf8    answers with Cyrillic text whose bytes are split across writes
+//   fault-hang    acknowledges the prompt, starts a tool and never finishes
+//   fault-deaf    like fault-hang, and ignores abort too
+//   fault-child   starts a long-lived child process (like pytest), then hangs;
+//                 its pid is reported on stderr as `fake-pi child <pid>`
+let deaf = false;
+function faultOf(message) {
+  const match = String(message || '').match(/fault-(crash|garbage|utf8|hang|deaf|child)/);
+  return match ? match[1] : null;
+}
+function startTurn(message) {
+  streaming = true;
+  turn += 1;
+  send({ type: 'agent_start' });
+  const user = { role: 'user', content: [{ type: 'text', text: message }] };
+  persist(user);
+  send({ type: 'message_start', message: user });
+  send({ type: 'message_end', message: user });
+  send({ type: 'message_start', message: { role: 'assistant', content: [] } });
+  send({ type: 'tool_execution_start', toolCallId: `call-${turn}`, toolName: 'bash', args: { command: 'pytest' } });
+}
+async function runFault(fault, command, respond) {
+  respond();
+  startTurn(command.message);
+  if (fault === 'crash') {
+    process.stderr.write('fake-pi: simulated crash during a tool call\n');
+    setTimeout(() => process.exit(3), 20);
+    return;
+  }
+  if (fault === 'garbage') {
+    process.stdout.write('this is not json at all\n');
+    process.stdout.write('{"type":"message_update","assistantMessageEvent":\n');
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    finish('после мусора');
+    return;
+  }
+  if (fault === 'utf8') {
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    const text = 'Привет, мир — ёжик';
+    const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 10, output: 5, totalTokens: 15 }, stopReason: 'stop' };
+    persist(message);
+    const bytes = Buffer.from(JSON.stringify({ type: 'message_end', message }) + '\n', 'utf8');
+    // Cut inside the first multi-byte character, and again a few bytes later,
+    // flushing between writes so the reader sees separate chunks.
+    const cut = bytes.indexOf(Buffer.from('П', 'utf8')) + 1;
+    const writes = [bytes.subarray(0, cut), bytes.subarray(cut, cut + 3), bytes.subarray(cut + 3)];
+    for (const part of writes) {
+      await new Promise(resolve => process.stdout.write(part, resolve));
+      await new Promise(resolve => setTimeout(resolve, 15));
+    }
+    streaming = false;
+    send({ type: 'agent_end' });
+    send({ type: 'agent_settled' });
+    return;
+  }
+  // deaf and child combine: `fault-deaf fault-child` is a hung tool that
+  // ignores abort and holds a child process.
+  if (command.message.includes('fault-deaf')) deaf = true;
+  if (command.message.includes('fault-child')) {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    process.stderr.write(`fake-pi child ${child.pid}\n`);
+  }
+  // hang / deaf / child: the tool never finishes on its own.
+}
+
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);
   const respond = (data = {}, success = true) => send({ type: 'response', id: command.id, command: command.type, success, data, ...(!success ? { error: 'Fixture rejected prompt' } : {}) });
@@ -84,12 +161,16 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (command.type === 'clear_queue') return respond();
   if (command.type === 'abort') {
+    // fault-deaf: Pi that no longer reacts to abort; only killing it helps.
+    if (deaf) return;
     clearTimeout(pending);
     if (streaming) { streaming = false; send({ type: 'agent_settled' }); }
     return respond();
   }
   if (['prompt', 'steer', 'follow_up'].includes(command.type)) {
     if (command.message.includes('reject')) return respond({}, false);
+    const fault = faultOf(command.message);
+    if (fault) return runFault(fault, command, respond);
     // A model error BEFORE any output: the «Повторить сообщение» case. No text
     // deltas and no tool call, so the turn is genuinely empty.
     if (command.message.includes('model-error-empty')) {

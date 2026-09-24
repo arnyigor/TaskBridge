@@ -1,0 +1,117 @@
+[
+  {
+    "id": "405c7ee857a3",
+    "createdAt": "2026-09-24T10:42:09.793Z",
+    "updatedAt": "2026-09-24T10:42:09.885Z",
+    "status": "FAILED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "fault-crash now",
+    "workspacePath": "/tmp/taskbridge-http-test-G6bEuT",
+    "sourcePath": "/tmp/taskbridge-http-test-G6bEuT",
+    "worktree": false,
+    "current": "Failed",
+    "assistantText": "",
+    "thinkingText": "",
+    "error": "Pi process exited unexpectedly: code=3, signal=null",
+    "errorCode": "PI_SESSION_FAILED",
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": null,
+    "git": null,
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": null,
+    "metrics": null,
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "statusChangedAt": "2026-09-24T10:42:09.858Z",
+    "baseCommit": null,
+    "thinkingLevelActual": "off",
+    "retryable": null,
+    "retryAfterMs": null,
+    "sessionAvailable": true,
+    "events": 13
+  },
+  {
+    "id": "28ffa5c56e83",
+    "createdAt": "2026-09-24T10:41:59.211Z",
+    "updatedAt": "2026-09-24T10:42:09.744Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "Прочитай example.txt",
+    "workspacePath": "/tmp/taskbridge-http-test-G6bEuT",
+    "sourcePath": "/tmp/taskbridge-http-test-G6bEuT",
+    "worktree": false,
+    "current": "Done",
+    "assistantText": "Ответ 1Ответ 2Ответ 3",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": [],
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": {
+      "input": 1000,
+      "output": 100,
+      "totalTokens": 1100
+    },
+    "metrics": {
+      "tg": 1960.7843137254904,
+      "outputTokens": 100,
+      "ms": 51,
+      "source": "usage"
+    },
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "statusChangedAt": "2026-09-24T10:42:09.735Z",
+    "baseCommit": null,
+    "thinkingLevelActual": "off",
+    "verificationStatus": "NOT_CONFIGURED",
+    "retryable": null,
+    "retryAfterMs": null,
+    "pendingPrompts": [],
+    "sessionAvailable": true,
+    "events": 44
+  }
+]

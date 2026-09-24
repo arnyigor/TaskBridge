@@ -22,6 +22,18 @@ import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs'
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
+// The command that produced a prompt, as recorded on its queue entry and its
+// USER_MESSAGE. Absent fields are left out rather than stored as null.
+function originOf(commandId, clientId) {
+  const origin = {};
+  if (commandId) origin.commandId = String(commandId);
+  if (clientId) origin.clientId = String(clientId);
+  return Object.keys(origin).length ? origin : null;
+}
+// #message options for delivering a queue entry: its id and original sender.
+function pendingOrigin(pending) {
+  return { pendingId: pending.id, origin: originOf(pending.commandId, pending.clientId) };
+}
 function safeFileName(name) {
   const base = path.basename(String(name || 'file.bin'));
   return base.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 180) || 'file.bin';
@@ -681,7 +693,7 @@ export class TaskManager extends EventEmitter {
     if ((task.pendingPrompts || []).length && !this.queue.includes(task.id)) this.queue.push(task.id);
     try {
       const waiting = (await this.#getPendingFiles(task.id, pending.id)) || { files: [], uploadToken: null };
-      await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
+      await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
       await this.#deletePendingFiles(task.id, pending.id);
       return true;
     } catch (error) {
@@ -2040,12 +2052,16 @@ export class TaskManager extends EventEmitter {
   // second time; the same id with different content is a CONFLICT.
   async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
+    // Who sent it: carried into the queue entry and the USER_MESSAGE event, so a
+    // client can match its own command in the history (e.g. after
+    // UNKNOWN_AFTER_CRASH) without comparing texts.
+    const origin = originOf(commandId, opts && opts.clientId);
     // Ctrl+Enter («вклиниться сразу»): the text must reach the model now, not
     // after the reasoning block or the command in flight ends, so the current
     // generation (and with it any running tool) is stopped first.
     const send = async () => {
       if (opts.now === true) await this.#interruptGeneration(id);
-      return this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true });
+      return this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
     };
     if (!commandId) return this.#admit(send);
     return this.#withCommand(
@@ -2256,7 +2272,7 @@ export class TaskManager extends EventEmitter {
       await this.#interruptGeneration(id).catch(() => false);
       try {
         const waiting = (await this.#getPendingFiles(id, pending.id)) || { files: [], uploadToken: null };
-        const result = await this.#message(id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [] });
+        const result = await this.#message(id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
         await this.#deletePendingFiles(id, pending.id);
         return result;
       } catch (error) {
@@ -2307,7 +2323,7 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true } = {}) {
+  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -2381,9 +2397,12 @@ export class TaskManager extends EventEmitter {
       // The files are staged already; the delivered turn must carry them too,
       // otherwise the chat shows a raw .taskbridge-input path instead of the
       // file the operator attached.
-      task.pendingPrompts = [...(task.pendingPrompts || []), { id: pendingId, text: userText + note, mode, files: attached.map(metadata) }];
+      task.pendingPrompts = [...(task.pendingPrompts || []), { id: pendingId, text: userText + note, mode, files: attached.map(metadata), ...(origin || {}) }];
       task.updatedAt = now();
       await this.#markWaiting(task, reservedElsewhere ? 'BUSY' : (holdingModel ? 'MODEL_BUSY' : (coldModel ? 'MODEL_LOADING' : 'QUEUED')));
+      // One event per queued prompt (QUEUE_WAITING is per session state and
+      // deduplicated), so every client learns the pendingId of what it sent.
+      await this.#event(task, 'PROMPT_QUEUED', 'Сообщение поставлено в очередь', { pendingId, ...(origin || {}) }, false);
       if (!this.queue.includes(id)) this.queue.push(id);
       // Straight away, so a session that is idle does not wait for the retry tick.
       setImmediate(() => this.#pump());
@@ -2433,7 +2452,12 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
       // announce:false = the message is already in history (regeneration), so a
       // second USER_MESSAGE would show the operator's own line twice.
-      if (announce) await this.#event(task, 'USER_MESSAGE', userText, { text: userText, mode: effectiveMode, files: attached });
+      if (announce) {
+        await this.#event(task, 'USER_MESSAGE', userText, {
+          text: userText, mode: effectiveMode, files: attached,
+          ...(origin || {}), ...(deliveredPendingId ? { pendingId: deliveredPendingId } : {}),
+        });
+      }
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
       else await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
       // Release gate immediately after USER_MESSAGE is safely persisted so the
