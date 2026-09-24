@@ -22,6 +22,7 @@ dependencies {
 android {
     namespace = "ru.arny.taskbridge"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "ru.arny.taskbridge"

@@ -14,6 +14,7 @@ kotlin {
     android {
        namespace = "ru.arny.taskbridge.shared"
        compileSdk = libs.versions.android.compileSdk.get().toInt()
+       buildToolsVersion = "37.0.0"
        minSdk = libs.versions.android.minSdk.get().toInt()
 
        compilerOptions {

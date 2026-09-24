@@ -208,7 +208,8 @@ fun ChatScreen(
                     )
                 }
                 val showJump by remember { derivedStateOf { listState.firstVisibleItemIndex > 1 } }
-                AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
+                // Qualified: inside Box-in-Column the ColumnScope overload would win and is illegal here.
+                androidx.compose.animation.AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp)) {
                     SmallFloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem(0) } }) {
                         Icon(AppIcons.ArrowDown, "К последнему сообщению")
                     }
