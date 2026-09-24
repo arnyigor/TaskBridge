@@ -39,7 +39,7 @@ class AppGraph(val platform: PlatformServices) {
     var theme: String by mutableStateOf(settings.theme)
         private set
 
-    fun setTheme(mode: String) {
+    fun changeTheme(mode: String) {
         settings.theme = mode
         theme = mode
     }

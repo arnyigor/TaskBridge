@@ -88,7 +88,7 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     Text("Тема", style = MaterialTheme.typography.bodyMedium)
                     Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for ((mode, label) in listOf("system" to "Как в системе", "light" to "Светлая", "dark" to "Тёмная")) {
-                            FilterChip(selected = graph.theme == mode, onClick = { graph.setTheme(mode) }, label = { Text(label) })
+                            FilterChip(selected = graph.theme == mode, onClick = { graph.changeTheme(mode) }, label = { Text(label) })
                         }
                     }
                 }
