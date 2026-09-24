@@ -41,6 +41,9 @@ import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
+import ru.arny.taskbridge.core.client.settings.AppSettings
+import ru.arny.taskbridge.ui.theme.LocalStatusColors
+import androidx.compose.material3.IconButton
 import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.SCRATCH_PROJECT_ID
 import ru.arny.taskbridge.core.api.Task
@@ -134,7 +137,7 @@ fun NewSessionSheet(
         }
 
         FieldLabel("Модель", top = 16)
-        ModelPicker(catalog, model, onPick = { model = it })
+        ModelPicker(catalog, model, graph.settings, onPick = { model = it })
         val levels = catalog?.thinkingLevels.orEmpty()
         if (levels.isNotEmpty() && model?.reasoning != false) {
             FieldLabel("Размышления", top = 16)
@@ -197,7 +200,7 @@ private fun ModelRef.details(): String = listOfNotNull(
 
 /** The chosen model as a row; tapping it opens the searchable list of Pi's models. */
 @Composable
-fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, onPick: (ModelRef) -> Unit) {
+fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Surface(
         onClick = { open = true },
@@ -220,12 +223,20 @@ fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, onPick: (ModelRef) 
             else Text("Сменить", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         }
     }
-    if (open && catalog != null) ModelChooser(catalog, selected, onPick = { open = false; onPick(it) }, onDismiss = { open = false })
+    if (open && catalog != null) ModelChooser(catalog, selected, settings, onPick = { open = false; onPick(it) }, onDismiss = { open = false })
 }
 
 @Composable
-private fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit) {
+private fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
+    var favorites by remember { mutableStateOf(settings.favoriteModels) }
+    // The «Избранное» group is fixed when the chooser opens: a star tapped now must
+    // not insert rows above the finger and turn the next tap into a model pick.
+    val pinnedFirst = remember { settings.favoriteModels }
+    fun toggle(key: String) {
+        favorites = if (key in favorites) favorites - key else favorites + key
+        settings.favoriteModels = favorites
+    }
     AdaptiveSheet(
         title = "Модель",
         onDismiss = onDismiss,
@@ -250,7 +261,11 @@ private fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, onPick: (Mo
                 modifier = Modifier.padding(vertical = 24.dp),
             )
         }
-        for ((provider, group) in models.groupBy { it.provider ?: "—" }) {
+        // Starred models first, so the usual ones are one tap away; they stay in their provider too.
+        val starred = models.filter { it.key in pinnedFirst }
+        val groups = (if (starred.isNotEmpty()) listOf("★ Избранное" to starred) else emptyList()) +
+            models.groupBy { it.provider ?: "—" }.toList()
+        for ((provider, group) in groups) {
             FieldLabel(provider, top = 16)
             for (model in group) {
                 val current = model.key == selected?.key
@@ -272,6 +287,15 @@ private fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, onPick: (Mo
                         if (details.isNotEmpty()) Text(details, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                     if (current) Icon(AppIcons.Check, "Выбрана", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                    val favorite = model.key in favorites
+                    IconButton(onClick = { toggle(model.key) }) {
+                        Icon(
+                            if (favorite) AppIcons.StarFilled else AppIcons.Star,
+                            if (favorite) "Убрать из избранного" else "В избранное",
+                            Modifier.size(20.dp),
+                            tint = if (favorite) LocalStatusColors.current.waiting else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
         }

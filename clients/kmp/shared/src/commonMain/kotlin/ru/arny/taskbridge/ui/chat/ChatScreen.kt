@@ -761,7 +761,7 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         },
     ) {
         FieldLabel("Модель")
-        ModelPicker(catalog, task?.model, onPick = { session.setModel(it) })
+        ModelPicker(catalog, task?.model, graph.settings, onPick = { session.setModel(it) })
         Text(
             "Смена модели записывается в историю Pi и переживает перезапуск.",
             style = MaterialTheme.typography.bodySmall,

@@ -43,6 +43,11 @@ class AppSettings(private val store: KeyValueStore, private val newId: () -> Str
         get() = store.get("enterSends") != "false"
         set(value) = store.put("enterSends", value.toString())
 
+    /** Models starred in the model chooser (ModelRef.key), shown first there. Per device. */
+    var favoriteModels: Set<String>
+        get() = store.get("favoriteModels")?.split('\n')?.filter { it.isNotEmpty() }?.toSet().orEmpty()
+        set(value) = store.put("favoriteModels", value.joinToString("\n").ifEmpty { null })
+
     var lastSessionId: String?
         get() = store.get("lastSessionId")
         set(value) = store.put("lastSessionId", value)

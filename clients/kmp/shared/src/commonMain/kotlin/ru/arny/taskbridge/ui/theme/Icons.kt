@@ -49,6 +49,8 @@ object AppIcons {
     val Clock = lineIcon("clock", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2")
     val Alert = lineIcon("alert", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 8v4", "M12 16h.01")
     val Tool = lineIcon("tool", "M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z")
+    val Star = lineIcon("star", "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z")
+    val StarFilled = lineIcon("star-filled", "M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z", filled = true)
     val Terminal = lineIcon("terminal", "M4 17l6-6-6-6", "M12 19h8")
     val Spark = lineIcon("spark", "M13 2L3 14h9l-1 8 10-12h-9l1-8z")
     val Play = lineIcon("play", "M5 3l14 9-14 9V3z")
