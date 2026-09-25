@@ -95,6 +95,21 @@ class ChatReducerGoldenTest {
     }
 
     @Test
+    fun aTailWindowOpeningMidTurnIsShownNotEmpty() {
+        val golden = TaskBridgeJson.decodeFromString(Golden.serializer(), File(dir, "follow-up.json").readText())
+        // The first answer's events without its prompt: what a window cut mid-turn gets.
+        val window = golden.events.takeWhile { it.type != "USER_MESSAGE" }
+        val reducer = ChatReducer(golden.task, seedInitial = false)
+        window.forEach { reducer.apply(it) }
+        reducer.revealWindowStart(window.first().seq)
+        reducer.syncTask(golden.task, initial = true)
+        val snapshot = reducer.snapshot()
+        val partial = snapshot.items.single() as ChatItem.Assistant
+        assertTrue(partial.partial && partial.text.isNotBlank(), "partial turn with the answer text: $partial")
+        assertEquals(null, snapshot.newestAnswerId, "a partial turn is not regenerated or edited")
+    }
+
+    @Test
     fun outputFilesBelongToTheAnswerThatMadeThem() {
         val golden = TaskBridgeJson.decodeFromString(Golden.serializer(), File(dir, "follow-up.json").readText())
         val reducer = ChatReducer(golden.task)

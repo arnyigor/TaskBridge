@@ -157,11 +157,13 @@ class ChatSession(
             mutex.withLock {
                 val chat = ChatReducer(task, seedInitial = window.reachedStart)
                 for (event in window.events) chat.apply(event)
+                window.events.firstOrNull()?.let { chat.revealWindowStart(it.seq) }
                 chat.syncTask(task, initial = true)
                 reducer = chat
                 oldestSeq = window.events.firstOrNull()?.seq
                 _state.update { it.copy(task = task, chat = chat.snapshot(), loading = false, reachedStart = window.reachedStart) }
             }
+            fillEmptyWindow()
             loadApprovals()
             streamJob = scope.launch { streamLoop() }
         } catch (error: ApiException) {
@@ -188,11 +190,18 @@ class ChatSession(
                     oldestSeq = window.events.firstOrNull()?.seq ?: oldestSeq
                     _state.update { it.copy(chat = chat.snapshot(), reachedStart = window.reachedStart || window.events.isEmpty(), loadingOlder = false) }
                 }
+                fillEmptyWindow()
             } catch (error: ApiException) {
                 _state.update { it.copy(loadingOlder = false) }
                 notice(error.error)
             }
         }
+    }
+
+    /** A window with nothing to show (only status events, say) must not look like an empty session: page back. */
+    private fun fillEmptyWindow() {
+        val state = _state.value
+        if (state.chat.items.isEmpty() && !state.reachedStart) loadOlder()
     }
 
     // --- live stream --------------------------------------------------------------

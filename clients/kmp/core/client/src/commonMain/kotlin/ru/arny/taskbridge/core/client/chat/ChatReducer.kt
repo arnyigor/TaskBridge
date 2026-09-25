@@ -149,6 +149,21 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         version++
     }
 
+    /**
+     * The first tail window opened mid-turn (a long turn cut by the server's
+     * event or size cap): that content is the newest there is, so it is shown
+     * as a partial turn instead of an empty chat. It stays [current], so live
+     * events keep landing in it.
+     */
+    fun revealWindowStart(firstSeq: Long) {
+        val partial = windowStart ?: return
+        if (partial in turns || (partial.text.isEmpty() && partial.thinking.isEmpty() && partial.tools.isEmpty())) return
+        partial.id = "assistant-partial-$firstSeq"
+        partial.partial = true
+        turns.add(0, partial)
+        version++
+    }
+
     private fun addUser(text: String, files: List<FileRef>, id: String, at: String? = null, preservePrevious: Boolean = false, origin: TaskEvent? = null) {
         if (!preservePrevious && current.role == Role.ASSISTANT && !current.final && current.id.isNotEmpty()) {
             current.active = false
@@ -538,7 +553,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             }
         }
         // The newest exchange is the one regenerate/continue/edit-answer accept.
-        val newestAnswerId = items.lastOrNull { it is ChatItem.Assistant && !it.id.startsWith("assistant-pending-") }?.id
+        // A partial turn has no id the server knows, so it is never that one.
+        val newestAnswerId = items.lastOrNull { it is ChatItem.Assistant && !it.id.startsWith("assistant-pending-") }?.id?.takeUnless { it.startsWith("assistant-partial-") }
         return ChatSnapshot(items = items, cursor = cursor, version = version, newestAnswerId = newestAnswerId)
     }
 }
