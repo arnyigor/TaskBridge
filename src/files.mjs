@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import { createReadStream, constants as fsConstants } from 'node:fs';
+import { spawn } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -134,6 +135,21 @@ export async function snapshotWorkspace(workspace) {
   return { files, truncated };
 }
 
+// The paths git ignores in this workspace; none when it is not a repository or git is missing.
+function gitIgnored(cwd, names) {
+  if (!names.length) return Promise.resolve(new Set());
+  return new Promise(resolve => {
+    const child = spawn('git', ['check-ignore', '--stdin', '-z'], { cwd, windowsHide: true, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } });
+    const chunks = [];
+    child.stdout.on('data', chunk => chunks.push(chunk));
+    child.on('error', () => resolve(new Set()));
+    // 0: some ignored, 1: none, anything else: not a repository.
+    child.on('close', code => resolve(code === 0 ? new Set(Buffer.concat(chunks).toString('utf8').split('\0').filter(Boolean)) : new Set()));
+    child.stdin.on('error', () => {});
+    child.stdin.end(names.join('\0') + '\0');
+  });
+}
+
 export async function captureOutputs(task, taskDir, baseline) {
   if (!baseline) return { files: [], warnings: [] };
   const after = await snapshotWorkspace(task.workspacePath);
@@ -141,9 +157,15 @@ export async function captureOutputs(task, taskDir, baseline) {
   let totalBytes = 0;
   if (baseline.truncated || after.truncated) warnings.push('Рабочая папка слишком велика: список результатов может быть неполным.');
   await fs.mkdir(path.join(taskDir, 'files'), { recursive: true });
-  for (const [name, stat] of after.files) {
+  const changed = [...after.files].filter(([name, stat]) => {
     const before = baseline.files.get(name);
-    if (before && before.size === stat.size && before.mtimeMs === stat.mtimeMs) continue;
+    return !(before && before.size === stat.size && before.mtimeMs === stat.mtimeMs);
+  });
+  // A build rewrites hundreds of ignored files (build/, dist/): those are not
+  // results of the answer, and they used to fill the list up to its limit.
+  const ignored = await gitIgnored(task.workspacePath, changed.map(([name]) => name));
+  for (const [name, stat] of changed) {
+    if (ignored.has(name)) continue;
     if (files.length >= 100 || stat.size > FILE_LIMITS.outputBytes || totalBytes + stat.size > FILE_LIMITS.outputTotalBytes) {
       warnings.push(`Файл ${name} не сохранён: превышен лимит результатов.`);
       continue;
