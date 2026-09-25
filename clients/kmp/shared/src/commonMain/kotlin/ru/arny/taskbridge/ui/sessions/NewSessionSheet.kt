@@ -59,13 +59,15 @@ fun NewSessionSheet(
     graph: AppGraph,
     connection: AppGraph.Connected,
     projects: List<Project>,
+    /** The folder to start in (the folder menu's "new session here"); the first project otherwise. */
+    initialProjectId: String? = null,
     onDismiss: () -> Unit,
     onCreated: (Task) -> Unit,
     /** No task typed: open the chat now, the session is created by its first message. */
     onDraft: (SessionDraft) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    var projectId by remember { mutableStateOf(projects.firstOrNull()?.id ?: SCRATCH_PROJECT_ID) }
+    var projectId by remember { mutableStateOf(initialProjectId ?: projects.firstOrNull()?.id ?: SCRATCH_PROJECT_ID) }
     var prompt by remember { mutableStateOf("") }
     var title by remember { mutableStateOf("") }
     var catalog by remember { mutableStateOf<ModelCatalog?>(null) }

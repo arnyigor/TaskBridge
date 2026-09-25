@@ -94,6 +94,8 @@ fun SessionsScreen(
     var query by remember { mutableStateOf("") }
     var searching by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var creatingIn by remember { mutableStateOf<String?>(null) }
+    var clearing by remember { mutableStateOf<SessionGroup?>(null) }
     var renaming by remember { mutableStateOf<Task?>(null) }
     var deleting by remember { mutableStateOf<Task?>(null) }
     var confirmRestart by remember { mutableStateOf(false) }
@@ -147,7 +149,7 @@ fun SessionsScreen(
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { creating = true },
+                onClick = { creatingIn = null; creating = true },
                 icon = { Icon(AppIcons.Add, null) },
                 text = { Text("Новая сессия") },
             )
@@ -199,6 +201,8 @@ fun SessionsScreen(
                         onOpen = onOpen,
                         onRename = { renaming = it },
                         onDelete = { deleting = it },
+                        onNewIn = { projectId -> creatingIn = projectId; creating = true },
+                        onClearFinished = { clearing = it },
                     )
                 }
             }
@@ -210,6 +214,7 @@ fun SessionsScreen(
             graph = graph,
             connection = connection,
             projects = state.projects,
+            initialProjectId = creatingIn,
             onDismiss = { creating = false },
             onDraft = { draft ->
                 creating = false
@@ -261,6 +266,27 @@ fun SessionsScreen(
         )
     }
 
+    clearing?.let { group ->
+        val finished = group.sessions.filter { finished(it) }
+        AlertDialog(
+            onDismissRequest = { clearing = null },
+            title = { Text("Удалить завершённые сессии?") },
+            text = { Text("В папке «${group.title}» будут удалены сессии, которые не работают и не ждут ответа (${finished.size}), вместе с историей. Это нельзя отменить.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    clearing = null
+                    scope.launch {
+                        val failed = finished.count { task ->
+                            connection.sessions.delete(task.id).also { connection.closeChat(task.id) }.isFailure
+                        }
+                        snackbar.showSnackbar(if (failed == 0) "Удалено сессий: ${finished.size}" else "Не удалось удалить: $failed из ${finished.size}")
+                    }
+                }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { clearing = null }) { Text("Отмена") } },
+        )
+    }
+
     deleting?.let { task ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -280,6 +306,9 @@ fun SessionsScreen(
     }
 }
 
+/** Not running, not waiting for the operator: safe to clear from a folder. */
+private fun finished(task: Task): Boolean = !displayStateOf(task).active
+
 internal fun messageOf(error: Throwable): String = (error as? ApiException)?.let { describe(it.error) } ?: (error.message ?: "Ошибка")
 
 @Composable
@@ -292,6 +321,8 @@ private fun SessionList(
     onOpen: (String) -> Unit,
     onRename: (Task) -> Unit,
     onDelete: (Task) -> Unit,
+    onNewIn: (String) -> Unit,
+    onClearFinished: (SessionGroup) -> Unit,
 ) {
     // A folder the user never touched opens itself when something in it needs
     // attention (working, waiting, queued) or is open; a hand toggle is remembered.
@@ -303,10 +334,15 @@ private fun SessionList(
         for (group in groups) {
             val open = searching || expanded(group)
             stickyHeader(key = "header:${group.projectId}") {
-                FolderHeader(group, open, onToggle = {
-                    toggled[group.projectId] = !open
-                    graph.settings.setFolderExpanded(group.projectId, !open)
-                })
+                FolderHeader(
+                    group, open,
+                    onToggle = {
+                        toggled[group.projectId] = !open
+                        graph.settings.setFolderExpanded(group.projectId, !open)
+                    },
+                    onNewHere = { onNewIn(group.projectId) },
+                    onClearFinished = { onClearFinished(group) },
+                )
             }
             if (!open) continue
             items(group.sessions, key = { it.id }) { task ->
@@ -326,7 +362,8 @@ private fun SessionList(
 
 /** A project folder: tap to fold; folded, it still shows what inside needs attention. */
 @Composable
-private fun FolderHeader(group: SessionGroup, open: Boolean, onToggle: () -> Unit) {
+private fun FolderHeader(group: SessionGroup, open: Boolean, onToggle: () -> Unit, onNewHere: () -> Unit, onClearFinished: () -> Unit) {
+    var menu by remember { mutableStateOf(false) }
     val colors = LocalStatusColors.current
     val states = group.sessions.map { displayStateOf(it) }
     val waiting = states.count { it == DisplayState.WAITING_USER }
@@ -337,8 +374,8 @@ private fun FolderHeader(group: SessionGroup, open: Boolean, onToggle: () -> Uni
                 .padding(horizontal = 8.dp, vertical = 2.dp)
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
-                .clickable(onClick = onToggle)
-                .padding(start = 8.dp, end = 12.dp, top = 10.dp, bottom = 10.dp),
+                .combinedClickable(onClick = onToggle, onLongClick = { menu = true })
+                .padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(if (open) AppIcons.ChevronDown else AppIcons.ChevronRight, if (open) "Свернуть" else "Развернуть", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -357,6 +394,21 @@ private fun FolderHeader(group: SessionGroup, open: Boolean, onToggle: () -> Uni
             if (working > 0) FolderCount(working, colors.working)
             if (waiting > 0) FolderCount(waiting, colors.waiting)
             Text("${group.sessions.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
+            Box {
+                IconButton(onClick = { menu = true }, modifier = Modifier.size(36.dp)) {
+                    Icon(AppIcons.More, "Действия с папкой", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    DropdownMenuItem(text = { Text("Новая сессия здесь") }, leadingIcon = { Icon(AppIcons.Add, null) }, onClick = { menu = false; onNewHere() })
+                    val finishedCount = group.sessions.count { finished(it) }
+                    DropdownMenuItem(
+                        text = { Text("Удалить завершённые ($finishedCount)", color = if (finishedCount > 0) MaterialTheme.colorScheme.error else Color.Unspecified) },
+                        leadingIcon = { Icon(AppIcons.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                        enabled = finishedCount > 0,
+                        onClick = { menu = false; onClearFinished() },
+                    )
+                }
+            }
         }
     }
 }
