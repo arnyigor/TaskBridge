@@ -49,6 +49,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.platform.rememberClipboardFiles
 import kotlinx.coroutines.delay
 import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.core.client.sessions.DisplayState
@@ -65,6 +66,8 @@ fun Composer(
     files: List<UploadFile>,
     onRemoveFile: (UploadFile) -> Unit,
     onAttach: () -> Unit,
+    /** Pictures or files from the clipboard (Ctrl+V, «Вставить из буфера»); empty from the menu when it holds none. */
+    onPaste: (List<UploadFile>) -> Unit,
     working: Boolean,
     enterSends: Boolean,
     enabled: Boolean,
@@ -83,6 +86,7 @@ fun Composer(
 ) {
     var modeMenu by remember { mutableStateOf(false) }
     var plusMenu by remember { mutableStateOf(false) }
+    val clipboardFiles = rememberClipboardFiles()
     val canSend = enabled && (value.text.isNotBlank() || files.isNotEmpty())
     Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
         // Inside the Surface: its tint runs under the navigation bar instead of a blank strip.
@@ -114,6 +118,11 @@ fun Composer(
                                 leadingIcon = { Icon(AppIcons.Attach, null) },
                                 onClick = { plusMenu = false; onAttach() },
                             )
+                            DropdownMenuItem(
+                                text = { Text("Вставить из буфера") },
+                                leadingIcon = { Icon(AppIcons.Copy, null) },
+                                onClick = { plusMenu = false; onPaste(clipboardFiles()) },
+                            )
                             moreItems { plusMenu = false }
                         }
                     }
@@ -143,6 +152,14 @@ fun Composer(
                             .weight(1f)
                             .padding(horizontal = 4.dp, vertical = 12.dp)
                             .onPreviewKeyEvent { event ->
+                                // Ctrl+V with a picture or files in the clipboard attaches them;
+                                // with text it falls through to the field's own paste.
+                                if (event.type == KeyEventType.KeyDown && event.key == Key.V && (event.isCtrlPressed || event.isMetaPressed)) {
+                                    val pasted = clipboardFiles()
+                                    if (pasted.isEmpty()) return@onPreviewKeyEvent false
+                                    onPaste(pasted)
+                                    return@onPreviewKeyEvent true
+                                }
                                 if (event.type != KeyEventType.KeyDown || (event.key != Key.Enter && event.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
                                 when {
                                     event.isCtrlPressed || event.isMetaPressed -> { if (canSend) onSend(SendMode.NOW); true }

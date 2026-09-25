@@ -11,7 +11,13 @@ import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
+import java.awt.Image
+import java.awt.datatransfer.Clipboard
+import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
+import java.awt.image.BufferedImage
+import java.io.ByteArrayOutputStream
+import javax.imageio.ImageIO
 import java.io.File
 import java.net.URI
 import java.nio.file.Files
@@ -100,3 +106,25 @@ actual fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit 
         if (files.isNotEmpty()) onPicked(files)
     }
 }
+
+@Composable
+actual fun rememberClipboardFiles(): () -> List<UploadFile> = remember { { clipboardFiles(Toolkit.getDefaultToolkit().systemClipboard) } }
+
+/** Files copied in the file manager, or a picture (a screenshot, a copied image) saved as PNG. */
+internal fun clipboardFiles(clipboard: Clipboard): List<UploadFile> = runCatching {
+    val contents = clipboard.getContents(null) ?: return emptyList()
+    when {
+        contents.isDataFlavorSupported(DataFlavor.javaFileListFlavor) ->
+            (contents.getTransferData(DataFlavor.javaFileListFlavor) as List<*>).filterIsInstance<File>().filter(File::isFile).map { file ->
+                UploadFile(file.name, runCatching { Files.probeContentType(file.toPath()) }.getOrNull(), file.readBytes())
+            }
+        contents.isDataFlavorSupported(DataFlavor.imageFlavor) -> {
+            val image = contents.getTransferData(DataFlavor.imageFlavor) as Image
+            val picture = BufferedImage(image.getWidth(null), image.getHeight(null), BufferedImage.TYPE_INT_ARGB)
+            picture.createGraphics().apply { drawImage(image, 0, 0, null); dispose() }
+            val png = ByteArrayOutputStream().also { ImageIO.write(picture, "png", it) }.toByteArray()
+            listOf(UploadFile("picture-${SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(Date())}.png", "image/png", png))
+        }
+        else -> emptyList()
+    }
+}.getOrDefault(emptyList())

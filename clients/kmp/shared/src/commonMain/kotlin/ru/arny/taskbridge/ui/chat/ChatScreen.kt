@@ -291,6 +291,7 @@ fun ChatScreen(
                 files = files,
                 onRemoveFile = { files = files - it },
                 onAttach = pickFiles,
+                onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
                 working = working,
                 enterSends = graph.settings.enterSends && platform.kind == "desktop",
                 enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,

@@ -17,6 +17,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -146,6 +147,19 @@ actual fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit 
         if (files.isNotEmpty()) onPicked(files)
     }
     return { launcher.launch("*/*") }
+}
+
+/** A screenshot or an image copied in another app sits in the clipboard as a content URI. */
+@Composable
+actual fun rememberClipboardFiles(): () -> List<UploadFile> {
+    val context = LocalContext.current
+    return remember(context) {
+        {
+            val clip = (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).primaryClip
+            if (clip == null) emptyList()
+            else (0 until clip.itemCount).mapNotNull { clip.getItemAt(it).uri }.mapNotNull { readUri(context, it) }
+        }
+    }
 }
 
 private fun readUri(context: Context, uri: Uri): UploadFile? = runCatching {

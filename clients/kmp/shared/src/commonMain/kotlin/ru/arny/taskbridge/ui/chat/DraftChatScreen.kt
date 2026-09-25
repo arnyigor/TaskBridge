@@ -94,6 +94,7 @@ fun DraftChatScreen(
                 files = files,
                 onRemoveFile = { files = files - it },
                 onAttach = pickFiles,
+                onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
                 working = false,
                 enterSends = graph.settings.enterSends && graph.platform.kind == "desktop",
                 enabled = !sending,
