@@ -1579,6 +1579,16 @@ body.cloud-mode [data-pc-only] { display: none; }
   color: var(--text);
   cursor: pointer;
   width: 100%;
+  /* A ~1000-item list in the blurred overlay is janky to scroll: skip layout
+     and paint for offscreen rows (placeholder height ≈ one row). */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 52px;
+}
+/* The "show more" sentinel that extends the batched model list. */
+.modelItem.modelMore {
+  text-align: center;
+  color: var(--muted);
+  border-style: dashed;
 }
 .modelItem:hover { border-color: var(--accent); }
 .modelItem.active { border-color: var(--accent); background: rgba(167, 139, 250, 0.12); }
