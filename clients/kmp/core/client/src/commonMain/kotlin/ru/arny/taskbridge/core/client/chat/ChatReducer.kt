@@ -53,6 +53,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var label: String?,
         var state: String = "run",
         val imagePath: String? = null,
+        var progress: String? = null,
     )
 
     internal class Turn(
@@ -447,8 +448,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     val arg = args?.let { it.str("command") ?: it.str("path") ?: it.str("file_path") ?: it.str("filePath") }.orEmpty()
                     val named = args?.let { it.str("path") ?: it.str("file_path") ?: it.str("filePath") }
                     val tool = Tool(id, frame.str("toolName") ?: "tool", arg.ifEmpty { event.message }, imagePath = named?.takeUnless { isPrivateFilePath(it) })
+                    if (tool.name == "subagent") tool.progress = subagentProgress(null, args)
                     turn.tools += tool
                     tools[id] = tool
+                }
+            }
+            "tool_execution_update" -> {
+                val tool = tools[frame.str("toolCallId")]
+                if (tool?.name == "subagent" && tool.state == "run") {
+                    subagentProgress(frame.obj("partialResult"), null)?.let { tool.progress = it }
                 }
             }
             "tool_execution_end" -> {
@@ -460,6 +468,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     tools[tool.id] = tool
                 }
                 tool.state = if (frame.bool("isError") == true) "error" else "done"
+                if (tool.name == "subagent") subagentProgress(frame.obj("result"), null)?.let { tool.progress = it }
             }
             "agent_settled" -> finish("DONE", null, event.at)
             "compaction_end", "auto_compaction_end" -> {
@@ -544,7 +553,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     } else null
                     ChatItem.Assistant(
                         id = turn.id, text = turn.text, thinking = turn.thinking,
-                        tools = turn.tools.map { ToolCall(it.id, it.name, it.label, ToolState.of(it.state), it.imagePath) },
+                        tools = turn.tools.map { ToolCall(it.id, it.name, it.label, ToolState.of(it.state), it.imagePath, it.progress) },
                         active = turn.active, status = turn.status, error = turn.error, final = turn.final,
                         at = turn.at, endedAt = turn.endedAt, partial = turn.partial, superseded = turn.superseded,
                         stopReason = turn.stopReason, variants = variantInfo, files = turn.files,

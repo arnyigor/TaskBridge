@@ -393,6 +393,9 @@ private fun ToolGroupRow(
             trailing = if (open) null else "›",
             onClick = { pinned.toggle { open = !open } },
         )
+        if (!open) current?.progress?.let { progress ->
+            Text(progress, modifier = Modifier.padding(start = 26.dp, bottom = 6.dp), style = MaterialTheme.typography.bodySmall, color = muted)
+        }
         AnimatedVisibility(open) {
             Column {
                 SecondaryPane { Column { for (tool in group.tools) ToolRow(tool, loadOutput, onCopy, onOpenPath) } }
@@ -507,6 +510,11 @@ private fun ToolRow(
                 }
             },
         )
+        tool.progress?.let { progress ->
+            SelectionContainer {
+                Text(progress, modifier = Modifier.padding(start = 26.dp, bottom = 6.dp), style = MaterialTheme.typography.bodySmall, color = muted)
+            }
+        }
         AnimatedVisibility(open) {
             SecondaryPane {
                 Column {

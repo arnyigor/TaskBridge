@@ -1,5 +1,35 @@
 import { humanizeError } from './errors.mjs';
 
+/** Bounded, public activity only: never render system prompts, thinking or tool output. */
+export function subagentProgress(result, args) {
+  const compact = value => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, 180) : '';
+  const results = result?.details?.results;
+  const entries = Array.isArray(results) && results.length ? results
+    : args?.agent ? [args] : Array.isArray(args?.tasks) ? args.tasks : Array.isArray(args?.chain) ? args.chain : [];
+  // What a call is about: «read src/app.js», «bash npm test» — the name alone said nothing.
+  const call = x => {
+    const a = x?.arguments || {};
+    const target = [a.command, a.path, a.file_path, a.pattern, a.query, a.url].find(v => typeof v === 'string' && v.trim());
+    return [compact(x?.name), target ? compact(target).slice(0, 80) : ''].filter(Boolean).join(' ');
+  };
+  return entries.slice(0, 8).map(entry => {
+    const messages = Array.isArray(entry?.messages) ? entry.messages : [];
+    let activity = '';
+    for (let i = messages.length - 1; i >= 0 && !activity; i--) {
+      const message = messages[i];
+      if (message?.role === 'toolResult') activity = `получен результат: ${compact(message.toolName) || 'инструмент'}`;
+      if (message?.role === 'assistant' && Array.isArray(message.content)) {
+        const calls = message.content.filter(x => x?.type === 'toolCall').map(call).filter(Boolean);
+        if (calls.length) activity = `вызов: ${calls.slice(0, 3).join(', ')}`;
+        else activity = compact(message.content.filter(x => x?.type === 'text').map(x => x.text).filter(x => typeof x === 'string').join(' '));
+      }
+    }
+    // How far it got: the number of tool results so far.
+    const steps = messages.filter(m => m?.role === 'toolResult').length;
+    return [compact(entry?.agent) || 'subagent', activity || 'ожидание обновления', steps ? `действий: ${steps}` : '', compact(entry?.task)].filter(Boolean).join(' · ');
+  }).join('\n') || null;
+}
+
 export const ACTIVE_STATUSES = new Set(['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING']);
 
 // The server refuses to hand out files that live under its own private paths
@@ -467,8 +497,16 @@ export class ChatState {
         const arg = frame.args?.command || frame.args?.path || frame.args?.file_path || frame.args?.filePath || '';
         const named = frame.args?.path || frame.args?.file_path || frame.args?.filePath;
         const tool = { id, name: frame.toolName || 'tool', label: arg ? String(arg) : event.message, state: 'run', imagePath: isPrivateFilePath(named) ? undefined : named };
+        if (tool.name === 'subagent') tool.progress = subagentProgress(null, frame.args);
         turn.tools.push(tool);
         this.tools.set(id, tool);
+      }
+    }
+    if (frame.type === 'tool_execution_update') {
+      const tool = this.tools.get(frame.toolCallId);
+      if (tool?.name === 'subagent' && tool.state === 'run') {
+        const progress = subagentProgress(frame.partialResult, null);
+        if (progress) tool.progress = progress;
       }
     }
     if (frame.type === 'tool_execution_end') {
@@ -479,6 +517,7 @@ export class ChatState {
         this.tools.set(tool.id, tool);
       }
       tool.state = frame.isError ? 'error' : 'done';
+      if (tool.name === 'subagent') tool.progress = subagentProgress(frame.result, null) || tool.progress;
     }
     if (frame.type === 'agent_settled') this.finish('DONE', null, event.at);
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type)) {

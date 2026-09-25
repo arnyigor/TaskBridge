@@ -72,6 +72,7 @@ data class ToolCall(
     val state: ToolState,
     /** A workspace file the tool touched that may be shown (never a private path). */
     val path: String?,
+    val progress: String? = null,
 )
 
 enum class ToolState {
