@@ -18,7 +18,11 @@ const fail = (code, message) => Object.assign(new Error(message), { code });
 // mapping can be asserted without launching anything.
 export function openCommand(target, { reveal = false, platform = process.platform } = {}) {
   if (platform === 'win32') {
-    if (reveal) return { command: 'explorer.exe', args: [`/select,${target}`] };
+    // Explorer wants /select,"path" as it is: node's own quoting of a path with
+    // spaces ("/select,C:\a b") makes it open Documents instead. A Windows file
+    // name cannot contain a quote, so wrapping it is safe. `shown`: Explorer is
+    // a window, not a console — windowsHide opened the folder hidden.
+    if (reveal) return { command: 'explorer.exe', args: [`/select,"${target}"`], verbatim: true, shown: true };
     // Start-Process goes through ShellExecute, so the shell picks the program
     // registered for the file's extension (Notepad, Word, the image viewer, …).
     // The path travels through the environment to avoid any quoting/escaping.
@@ -40,7 +44,7 @@ export function openCommand(target, { reveal = false, platform = process.platfor
 export async function openLocalPath(target, { reveal = false, platform = process.platform, run = execute } = {}) {
   const plan = openCommand(target, { reveal, platform });
   try {
-    await run(plan.command, plan.args, { windowsHide: true, timeout: 8000, maxBuffer: 64 * 1024, env: { ...process.env, ...(plan.env || {}) } });
+    await run(plan.command, plan.args, { windowsHide: !plan.shown, windowsVerbatimArguments: plan.verbatim === true, timeout: 8000, maxBuffer: 64 * 1024, env: { ...process.env, ...(plan.env || {}) } });
   } catch (error) {
     // explorer.exe exits with 1 even when it did open the folder; treating that
     // as a failure told the operator «не удалось открыть» over an open window.
