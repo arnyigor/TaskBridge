@@ -442,6 +442,14 @@ private fun MessageList(
     val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 10 } == true } }
     LaunchedEffect(nearTop, state.reachedStart) { if (nearTop && !state.reachedStart) session.loadOlder() }
 
+    if (items.isEmpty() && !state.reachedStart) {
+        // The newest window had nothing to show; the session is paging back for it.
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            if (state.loadingOlder) CircularProgressIndicator()
+            else TextButton(onClick = { session.loadOlder() }) { Text("Показать более раннюю историю") }
+        }
+        return
+    }
     if (items.isEmpty()) {
         val task = state.task
         val setup = listOfNotNull(task?.model?.label?.takeIf { it != "—" }, (task?.thinkingLevelActual ?: task?.thinkingLevel)?.let { "размышления: ${thinkingLabel(it)}" }).joinToString(" · ")
