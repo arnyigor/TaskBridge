@@ -36,6 +36,18 @@ test('openLocalPath runs the planned command and surfaces a launcher failure', a
   );
 });
 
+test('revealing on Windows is not a failure when explorer exits with 1', async () => {
+  // explorer.exe returns 1 even after opening the folder.
+  const exitOne = async () => { throw Object.assign(new Error('Command failed: explorer.exe'), { code: 1 }); };
+  const plan = await openLocalPath('C:\\w\\a.txt', { platform: 'win32', reveal: true, run: exitOne });
+  assert.equal(plan.command, 'explorer.exe');
+  await assert.rejects(
+    () => openLocalPath('C:\\w\\a.txt', { platform: 'win32', run: exitOne }),
+    error => error.code === 'OPEN_FAILED',
+    'a real launcher failure still surfaces'
+  );
+});
+
 test('scriptCommand picks an interpreter by extension and platform', () => {
   assert.equal(scriptCommand('/w/build.bat', { platform: 'win32' }).command, 'cmd.exe');
   assert.deepEqual(scriptCommand('/w/task.ps1', { platform: 'win32' }).args, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', '/w/task.ps1']);

@@ -42,6 +42,9 @@ export async function openLocalPath(target, { reveal = false, platform = process
   try {
     await run(plan.command, plan.args, { windowsHide: true, timeout: 8000, maxBuffer: 64 * 1024, env: { ...process.env, ...(plan.env || {}) } });
   } catch (error) {
+    // explorer.exe exits with 1 even when it did open the folder; treating that
+    // as a failure told the operator «не удалось открыть» over an open window.
+    if (plan.command === 'explorer.exe' && error.code === 1) return plan;
     throw fail('OPEN_FAILED', `Не удалось открыть «${path.basename(target)}» на компьютере: ${error.message}`);
   }
   return plan;
