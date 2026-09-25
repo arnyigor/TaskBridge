@@ -3096,3 +3096,64 @@ test('DOM: an older server without a bootId never triggers a reload loop', async
   assert.equal(app.reloads.length, 0, 'no bootId, nothing to compare, no reload');
   assert.equal(app.document.getElementById('buildInfo').textContent.includes('v0.9.0'), true, 'the rest of the poll still runs');
 });
+
+const subagentUpdate = (toolName = 'read') => ({ details: { results: [{
+  agent: 'scout', task: 'Проверить проект', exitCode: 0,
+  messages: [
+    { role: 'system', content: 'PRIVATE SYSTEM' },
+    { role: 'assistant', content: [{ type: 'thinking', thinking: 'PRIVATE THINKING' }, { type: 'toolCall', name: toolName }] },
+  ],
+}] } });
+
+test('subagent progress replaces snapshots, ignores late updates and excludes private content', () => {
+  const state = new ChatState(task());
+  let seq = 0;
+  const pi = frame => state.apply({ seq: ++seq, type: 'PI_EVENT', data: { pi: frame } });
+  pi({ type: 'tool_execution_start', toolCallId: 'child', toolName: 'subagent', args: { agent: 'scout', task: 'Проверить проект' } });
+  const tool = state.tools.get('child');
+  assert.match(tool.progress, /scout.*ожидание обновления.*Проверить проект/);
+  for (let i = 0; i < 2; i++) pi({ type: 'tool_execution_update', toolCallId: 'child', partialResult: subagentUpdate() });
+  assert.equal(tool.progress, 'scout · вызов: read · Проверить проект');
+  assert.equal(tool.state, 'run', 'exitCode=0 in a snapshot is not completion');
+  pi({ type: 'tool_execution_update', toolCallId: 'child', partialResult: {} });
+  assert.equal(tool.progress, 'scout · вызов: read · Проверить проект');
+  pi({ type: 'tool_execution_update', toolCallId: 'unknown', partialResult: subagentUpdate() });
+  assert.equal(state.tools.size, 1);
+  pi({ type: 'tool_execution_end', toolCallId: 'child', toolName: 'subagent', isError: true });
+  pi({ type: 'tool_execution_update', toolCallId: 'child', partialResult: subagentUpdate('write') });
+  assert.equal(tool.progress, 'scout · вызов: read · Проверить проект');
+  assert.equal(tool.state, 'error');
+  const result = subagentUpdate();
+  result.details.results[0].messages.push({ role: 'toolResult', toolName: 'read', content: [{ type: 'text', text: 'PRIVATE FILE' }] });
+  assert.equal(chatStateModule.subagentProgress(result), 'scout · получен результат: read · действий: 1 · Проверить проект');
+  const withArgs = { details: { results: [{ agent: 'scout', messages: [{ role: 'assistant', content: [{ type: 'toolCall', name: 'bash', arguments: { command: 'npm test' } }] }] }] } };
+  assert.equal(chatStateModule.subagentProgress(withArgs), 'scout · вызов: bash npm test', 'the call says what it is about');
+  assert.equal(chatStateModule.subagentProgress(null, { tasks: [{ agent: 'a', task: 'one' }, { agent: 'b', task: 'two' }] }).split('\n').length, 2);
+  assert.ok(chatStateModule.subagentProgress(null, { chain: Array(100).fill({ agent: 'x', task: 'a'.repeat(10000) }) }).length < 4000);
+});
+
+test('DOM: subagent progress refreshes while still running, including the collapsed group', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const frames = [
+    { type: 'agent_start' },
+    { type: 'tool_execution_start', toolCallId: 'p1', toolName: 'read' },
+    { type: 'tool_execution_end', toolCallId: 'p1', toolName: 'read' },
+    { type: 'tool_execution_start', toolCallId: 'p2', toolName: 'read' },
+    { type: 'tool_execution_end', toolCallId: 'p2', toolName: 'read' },
+    { type: 'tool_execution_start', toolCallId: 'child', toolName: 'subagent', args: { agent: 'scout', task: 'Проверить проект' } },
+    { type: 'tool_execution_update', toolCallId: 'child', partialResult: subagentUpdate() },
+  ];
+  app.setFetchHook(async url => new URL(url, 'http://localhost').pathname.endsWith('/events')
+    ? { ok: true, json: async () => [...history(), ...frames.map((pi, i) => ({ taskId: 'a', seq: 30 + i, type: 'PI_EVENT', data: { pi } }))] } : null);
+  await app.refreshTask();
+  const group = app.document.querySelector('.toolGroup');
+  assert.ok(group);
+  assert.equal(group.hasAttribute('open'), false);
+  assert.match(group.querySelector('summary').textContent, /scout · вызов: read/);
+  frames.push({ type: 'tool_execution_update', toolCallId: 'child', partialResult: subagentUpdate('grep') });
+  await app.refreshTask();
+  assert.match(group.querySelector('summary').textContent, /scout · вызов: grep/);
+  assert.match(group.querySelector('.tool.run > summary').textContent, /scout · вызов: grep/);
+  assert.doesNotMatch(group.textContent, /PRIVATE/);
+});

@@ -573,7 +573,7 @@ function toolGroupSummary(turn) {
     const current = running || turn.tools[total - 1];
     // The name first: the folded line is truncated with an ellipsis on a narrow
     // screen, and what is running now is the part worth the room.
-    return `⚙ ${current.name} ${toolIcon(current.state)} · ${total} ${word}`;
+    return `⚙ ${current.name} ${toolIcon(current.state)}${current.progress ? ` · ${current.progress.split('\n')[0]}` : ""} · ${total} ${word}`;
   }
   const counts = new Map();
   for (const tool of turn.tools) counts.set(tool.name, (counts.get(tool.name) || 0) + 1);
@@ -647,7 +647,7 @@ function groupSignature(turn) {
   }
   const running = [...turn.tools].reverse().find(tool => tool.state === 'run');
   const current = running || turn.tools[turn.tools.length - 1];
-  return `run:${turn.tools.length}:${current.name}:${current.state}`;
+  return `run:${turn.tools.length}:${current.name}:${current.state}:${current.progress || ""}`;
 }
 
 function appendInlineImage(relPath) {
@@ -1372,10 +1372,11 @@ function renderChat() {
       // A settled turn's tools never change again; skipping the write (not
       // just re-computing it) avoids forcing style recalc on every poll once
       // history gets long — the actual source of the reported UI lag.
-      if (chip._state !== tool.state) {
+      if (chip._state !== tool.state || chip._progress !== tool.progress) {
         chip.className = `tool ${tool.state}`;
-        chip._summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
+        chip._summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}${tool.progress ? ` · ${tool.progress.replace(/\n/g, ' | ')}` : ''}`;
         chip._state = tool.state;
+        chip._progress = tool.progress;
       }
       if (tool.state === 'done' && tool.imagePath && IMAGE_EXT_RE.test(tool.imagePath) && !chip.dataset.imageShown) {
         appendInlineImage(tool.imagePath);
@@ -1891,9 +1892,10 @@ function renderSettledTurn(turn, before) {
     toolBody.textContent = tool.label;
     chip.append(summary, toolBody);
     chip.className = `tool ${tool.state}`;
-    summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}`;
+    summary.textContent = `${tool.state === 'interrupted' ? '■' : toolIcon(tool.state)} ${tool.name}${tool.state === 'interrupted' ? ' · прервано' : ''}${tool.progress ? ` · ${tool.progress.replace(/\n/g, ' | ')}` : ''}`;
     chip._summary = summary;
     chip._state = tool.state;
+    chip._progress = tool.progress;
     body.insertBefore(chip, bubble);
     tools.set(tool.id, chip);
     if (tool.state === 'done' && tool.imagePath && IMAGE_EXT_RE.test(tool.imagePath) && selectedTaskId) {
