@@ -76,6 +76,10 @@ kotlin {
         commonTest.dependencies {
             implementation(libs.kotlin.test)
         }
+        // The Skia runtime the desktop app ships: lets a test lay out composables headless.
+        jvmTest.dependencies {
+            implementation(compose.desktop.currentOs)
+        }
     }
 }
 
