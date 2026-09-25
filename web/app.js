@@ -1179,7 +1179,7 @@ function setComposerMode(taskId) {
   if (continuing) badge.textContent = `Продолжение сессии ${taskId}`;
   const hint = isTouchDevice()
     ? 'Enter — перенос строки, отправка — кнопкой.'
-    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — прервать текущий ответ и отправить сразу, Shift+Enter — перенос строки.';
+    : 'Enter — отправить (если Pi занят — сообщение дождётся очереди), Ctrl+Enter — вклиниться в текущий ответ, не останавливая команды, Shift+Enter — перенос строки.';
   promptEl.placeholder = continuing
     ? `Сообщение продолжит текущую сессию. ${hint}`
     : `Сообщение для Pi. ${hint}`;
@@ -2295,7 +2295,7 @@ function renderQueuedPrompt() {
   send.textContent = 'Отправить сейчас';
   send.title = busy
     ? `Сейчас нельзя: идёт сессия «${busy.title || busy.id}».`
-    : 'Прервать текущий ответ (и выполняющуюся команду) и отправить это сообщение сразу';
+    : 'Вклиниться в текущий ответ: команды не остановятся, агент ответит на это сообщение';
   // Kept pressable on purpose: a dead button explains nothing. Pressing it says
   // why it cannot happen now; the prompt stays queued meanwhile.
   send.onclick = () => {

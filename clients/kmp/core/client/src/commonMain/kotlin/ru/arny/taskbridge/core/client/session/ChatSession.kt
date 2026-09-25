@@ -37,7 +37,7 @@ enum class SendMode {
     /** Wait for the current answer to end, then go (Enter in the web UI). */
     QUEUE,
 
-    /** Stop the current answer and send right away (Ctrl+Enter). */
+    /** Skip the queue: while the agent works the text goes into its turn as steering, nothing is stopped (Ctrl+Enter). */
     NOW,
 
     /** Slip the text into the running answer as steering. */

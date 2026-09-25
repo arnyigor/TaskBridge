@@ -76,8 +76,6 @@ fun Composer(
     activity: String? = null,
     stopping: Boolean = false,
     onStop: () -> Unit = {},
-    /** Click on «Прервать и отправить»: the screen shows a confirmation first. */
-    onInterrupt: () -> Unit = {},
     /** Above the input: the queue line, outbox problems. */
     top: @Composable () -> Unit = {},
     /** Extra items of the «+» menu (the session's model and context); call `close` on click. */
@@ -193,14 +191,9 @@ fun Composer(
                                 onClick = { modeMenu = false; onSend(SendMode.QUEUE) },
                             )
                             DropdownMenuItem(
-                                text = { ModeText("Вклиниться", "Подсказка в текущий ответ, без остановки") },
+                                text = { ModeText("Вклиниться", "Команды не остановятся, агент ответит на это сообщение (Ctrl+Enter)") },
                                 leadingIcon = { Icon(AppIcons.Spark, null) },
-                                onClick = { modeMenu = false; onSend(SendMode.STEER) },
-                            )
-                            DropdownMenuItem(
-                                text = { ModeText("Прервать и отправить", "Остановит ответ и запущенные команды (Ctrl+Enter)") },
-                                leadingIcon = { Icon(AppIcons.Stop, null) },
-                                onClick = { modeMenu = false; onInterrupt() },
+                                onClick = { modeMenu = false; onSend(SendMode.NOW) },
                             )
                         }
                     }

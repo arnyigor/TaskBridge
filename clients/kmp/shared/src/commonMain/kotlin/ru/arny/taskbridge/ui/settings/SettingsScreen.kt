@@ -96,7 +96,7 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     Row(Modifier.fillMaxWidth().clickable { enterSends = !enterSends; graph.settings.enterSends = enterSends }.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("Enter отправляет", style = MaterialTheme.typography.bodyMedium)
-                            Text("Shift+Enter — новая строка, Ctrl+Enter — прервать и отправить", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Shift+Enter — новая строка, Ctrl+Enter — вклиниться, не останавливая команды", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(checked = enterSends, onCheckedChange = { enterSends = it; graph.settings.enterSends = it })
                     }
