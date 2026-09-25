@@ -56,3 +56,7 @@ expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)
 /** Returns a function that opens the system file picker; picked files arrive read into memory. */
 @Composable
 expect fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit
+
+/** Returns a function that reads the pictures (or copied files) in the clipboard; empty when it holds none. */
+@Composable
+expect fun rememberClipboardFiles(): () -> List<UploadFile>
