@@ -2089,11 +2089,11 @@ export class TaskManager extends EventEmitter {
     // client can match its own command in the history (e.g. after
     // UNKNOWN_AFTER_CRASH) without comparing texts.
     const origin = originOf(commandId, opts && opts.clientId);
-    // Ctrl+Enter («вклиниться сразу»): the text must reach the model now, not
-    // after the reasoning block or the command in flight ends, so the current
-    // generation (and with it any running tool) is stopped first.
+    // Ctrl+Enter («вклиниться сразу»): the text skips the local queue and, while
+    // the turn streams, goes in as steering — the command in flight keeps
+    // running and the model answers the new text next. Only the model itself or
+    // STOP ends a command.
     const send = async () => {
-      if (opts.now === true) await this.#interruptGeneration(id);
       return this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
     };
     if (!commandId) return this.#admit(send);
@@ -2103,32 +2103,6 @@ export class TaskManager extends EventEmitter {
       () => this.#payloadHash(id, text, mode, files, uploadToken, opts.now === true, opts.queue === true),
       () => this.#admit(send),
     );
-  }
-
-  // "Send now" has to beat a long reasoning block AND a long command: Pi injects
-  // a steer only between messages, so text sent while the turn is in flight
-  // would sit until that turn ends — and with a `bash` tool running that can be
-  // minutes, during which the operator's message is not answered. Stopping the
-  // turn makes the operator's message the very next thing Pi sees.
-  //
-  // A tool call in flight is stopped along with the turn: Pi hands the agent's
-  // abort signal to the bash tool, which kills the whole process tree on abort
-  // (pi-ai dist/core/tools/bash.js), so the command dies with the turn. That is
-  // the deliberate trade of «Отправить сейчас» — an explicit operator decision,
-  // half-applied side effects included — and the reason the queue survives while
-  // the turn does not (see #cancel's keepPending).
-  //
-  // Pi keeps `isStreaming` true for the whole agent run (tools included), so it
-  // alone answers "is there anything to stop".
-  async #interruptGeneration(id) {
-    const live = this.runtimes.get(id);
-    if (!live || live.pi.closed || !this.tasks.get(id)) return false;
-    const state = await live.pi.getState().catch(() => null);
-    if (!state?.isStreaming) return false;
-    // The prompts already queued for this session survive the interrupt: the
-    // operator asked to cut in, not to drop their queue.
-    await this.#cancel(id, { keepPending: true });
-    return true;
   }
 
   // Returns an idempotency guard around `fn`. If `commandId` is new it records
@@ -2276,10 +2250,10 @@ export class TaskManager extends EventEmitter {
       if (this.dispatching) {
         throw Object.assign(new Error('Очередь доставляет сообщение прямо сейчас — повторите через мгновение.'), { code: 'BUSY' });
       }
-      // «Отправить сейчас» is the explicit "cut in" action: it stops the turn in
-      // flight (tools included) so the queued text is the very next thing Pi
-      // sees, instead of waiting behind a long command. The rest of the queue
-      // survives (#cancel with keepPending).
+      // «Отправить сейчас» cuts in without stopping anything: while the turn
+      // streams the text goes in as steering (the command in flight finishes,
+      // then the model answers it); an idle session gets it as a new prompt.
+      // Only the model itself or STOP ends a command.
       // If delivery fails, restore puts the prompt back at the queue front.
       // The pump may have already taken (or delivered) the only queued prompt by
       // now: «Отправить сейчас» clicked right after Enter. An empty queue here is
@@ -2302,10 +2276,10 @@ export class TaskManager extends EventEmitter {
         throw error;
       }
       if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
-      await this.#interruptGeneration(id).catch(() => false);
       try {
         const waiting = (await this.#getPendingFiles(id, pending.id)) || { files: [], uploadToken: null };
-        const result = await this.#message(id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
+        // A follow-up would wait for the end of the turn again: "now" is steering.
+        const result = await this.#message(id, pending.text, pending.mode === 'follow_up' ? 'auto' : (pending.mode || 'auto'), waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
         await this.#deletePendingFiles(id, pending.id);
         return result;
       } catch (error) {

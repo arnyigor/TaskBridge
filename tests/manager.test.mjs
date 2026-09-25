@@ -31,46 +31,52 @@ async function fixture(t, streaming = false) {
   return { manager, store, task, pi, runtime, sent, root };
 }
 
-test('send-now stops the turn in flight (tool included) and keeps the queue', async t => {
+// Cutting in never stops anything: only the model itself or STOP ends a command.
+// While the turn streams the text goes in as steering, so the command in flight
+// finishes and the model answers the new text next.
+function recordSteering(f) {
+  const modes = [];
+  let aborts = 0;
+  f.pi.abort = async () => { aborts += 1; };
+  f.pi.sendFollowUp = async (text, mode) => { f.sent.push(text); modes.push(mode); };
+  return { modes, aborts: () => aborts };
+}
+
+test('send-now cuts in as steering: the turn and its command keep running, the queue stays', async t => {
   const f = await fixture(t, true);
   f.manager.activeTaskId = 'a';
-  let aborts = 0;
-  let aborted = false;
-  f.pi.abort = async () => { aborts += 1; aborted = true; };
-  f.pi.getState = async () => ({ isStreaming: !aborted });
+  const pi = recordSteering(f);
   f.manager.toolLogs.set('a:t1', { name: 'tool-t1.log', bytes: 0 });
-  // A prompt already waiting in the queue survives the cut-in.
   f.task.pendingPrompts = [{ id: 'p1', text: 'потом', mode: 'auto', files: [] }];
   f.manager.pendingFiles.set('p1', { files: [], uploadToken: null });
   await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
-  assert.equal(aborts, 1, 'the turn (and the command in it) is stopped');
-  assert.deepEqual(f.sent, ['срочно'], 'the text reaches Pi at once');
+  assert.equal(pi.aborts(), 0, 'the turn and the command in it are not stopped');
+  assert.deepEqual(f.sent, ['срочно']);
+  assert.deepEqual(pi.modes, ['steer'], 'the text goes into the running turn');
   const types = (await f.store.readEvents('a', 0)).map(event => event.type);
-  assert.ok(types.includes('TASK_CANCELLED'), `the interrupted turn is honest: ${types.join(',')}`);
+  assert.ok(!types.includes('TASK_CANCELLED'), types.join(','));
   assert.ok(types.includes('USER_MESSAGE'), types.join(','));
   assert.equal(f.manager.getTask('a').status, 'RUNNING');
-  const pending = (f.manager.tasks.get('a').pendingPrompts || []).map(p => p.text);
-  assert.deepEqual(pending, ['потом'], 'the queue is not dropped by the cut-in');
+  assert.equal(f.manager.activeTaskId, 'a', 'the running turn still owns the machine');
+  assert.deepEqual((f.task.pendingPrompts || []).map(p => p.text), ['потом'], 'the queue is not touched');
   assert.ok(f.manager.pendingFiles.has('p1'), 'the staged files of the queued prompt stay');
-  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
 });
 
-test('the queued «Отправить сейчас» targets one pendingId and interrupts the run', async t => {
+test('the queued «Отправить сейчас» targets one pendingId and steers into the run', async t => {
   const f = await fixture(t, true);
   f.manager.activeTaskId = 'a';
-  let aborts = 0;
-  let aborted = false;
-  f.pi.abort = async () => { aborts += 1; aborted = true; };
-  f.pi.getState = async () => ({ isStreaming: !aborted });
+  const pi = recordSteering(f);
   await f.manager.message('a', 'второе', 'auto', [], null, { queue: true });
+  // A follow-up would wait for the end of the turn again: "now" steers it in.
+  f.task.pendingPrompts[0].mode = 'follow_up';
   const [first] = f.task.pendingPrompts;
   await f.manager.sendPendingNow('a', first.id);
-  assert.equal(aborts, 1, '«Отправить сейчас» cuts into the running turn');
+  assert.equal(pi.aborts(), 0, '«Отправить сейчас» does not stop the running turn');
   assert.deepEqual(f.sent, ['второе']);
+  assert.deepEqual(pi.modes, ['steer']);
   assert.deepEqual(f.task.pendingPrompts || [], [], 'the delivered prompt left the queue');
   const types = (await f.store.readEvents('a', 0)).map(event => event.type);
-  assert.ok(types.includes('TASK_CANCELLED'), types.join(','));
-  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  assert.ok(!types.includes('TASK_CANCELLED'), types.join(','));
 });
 
 test('pending IDs select identical messages and stale actions never affect another entry', async t => {
@@ -859,45 +865,8 @@ test('a failing project check never fails a completed answer and never holds the
   for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(resolve => setTimeout(resolve, 5));
 });
 
-test('send-now stops the reasoning in flight so the message reaches Pi immediately', async t => {
-  const f = await fixture(t, true); // RUNNING session with Pi streaming
-  let aborts = 0;
-  let aborted = false;
-  f.pi.abort = async () => { aborts += 1; aborted = true; };
-  f.pi.getState = async () => ({ isStreaming: !aborted });
-  await f.manager.message('a', 'срочно', 'auto', [], null, { now: true });
-  assert.equal(aborts, 1, 'the answer in flight was stopped');
-  assert.deepEqual(f.sent, ['срочно'], 'the text was delivered as a fresh message');
-  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
-  assert.ok(types.includes('TASK_CANCELLED'), `the interrupted turn is honest: ${types.join(',')}`);
-  assert.ok(types.includes('USER_MESSAGE'), types.join(','));
-  assert.equal(f.manager.getTask('a').status, 'RUNNING', 'and the new turn is running');
-  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
-});
-
-test('send-now stops a running command together with the turn', async t => {
+test('a queued prompt survives a send-now', async t => {
   const f = await fixture(t, true);
-  let aborts = 0;
-  let aborted = false;
-  f.pi.abort = async () => { aborts += 1; aborted = true; };
-  f.pi.getState = async () => ({ isStreaming: !aborted });
-  f.manager.toolLogs.set('a:t1', { name: 'tool-t1.log', bytes: 0 });
-  await f.manager.message('a', 'текст', 'auto', [], null, { now: true });
-  // «Отправить сейчас» — явное решение оператора, и оно важнее сохранности
-  // наполовину выполненной команды: Pi при abort гасит дерево процессов bash-тула,
-  // поэтому команда умирает вместе с ходом, а сообщение уходит новым prompt'ом.
-  assert.equal(aborts, 1, 'команда в полёте останавливается вместе с ходом');
-  assert.deepEqual(f.sent, ['текст'], 'сообщение доставлено новым ходом, а не steer\'ом');
-  const types = (await f.store.readEvents('a', 0)).map(event => event.type);
-  assert.ok(types.includes('USER_MESSAGE'), types.join(','));
-  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
-});
-
-test('a queued prompt survives the send-now interrupt', async t => {
-  const f = await fixture(t, true);
-  let aborted = false;
-  f.pi.abort = async () => { aborted = true; };
-  f.pi.getState = async () => ({ isStreaming: !aborted });
   const task = f.manager.tasks.get('a');
   task.pendingPrompts = [{ id: 'p1', text: 'потом', mode: 'auto', files: [] }];
   f.manager.pendingFiles.set('p1', { files: [], uploadToken: null });

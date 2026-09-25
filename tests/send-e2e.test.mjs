@@ -30,7 +30,7 @@ const userTexts = (events) => events.filter(e => e.type === 'USER_MESSAGE').map(
 const answers = (events) => events.filter(e => e.type === 'PI_EVENT' && e.data?.pi?.type === 'message_end' && e.data.pi.message?.role === 'assistant')
   .map(e => (e.data.pi.message.content || []).filter(p => p.type === 'text').map(p => p.text).join(''));
 
-test('HTTP pending actions target IDs and send-now interrupts the active run', { timeout: 30000 }, async t => {
+test('HTTP pending actions target IDs and send-now steers into the active run', { timeout: 30000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api } = fixture;
@@ -43,10 +43,11 @@ test('HTTP pending actions target IDs and send-now interrupts the active run', {
   for (let i = 0; i < 2; i++) await api(`/api/tasks/${created.id}/pending/send`, { pendingId: first.id });
   assert.deepEqual((await api(`/api/tasks/${created.id}`)).pendingPrompts.map(p => p.id), [third.id]);
   const events = await eventsOf(api, created.id);
-  // «Отправить сейчас» is a deliberate cut-in: the turn in flight is stopped.
-  assert.equal(events.some(e => e.type === 'TASK_CANCELLED'), true, 'the interrupted turn is recorded');
+  // «Отправить сейчас» cuts in without stopping the turn: the text goes in as steering.
+  assert.equal(events.some(e => e.type === 'TASK_CANCELLED'), false, 'the running turn is not interrupted');
   const users = events.filter(e => e.type === 'USER_MESSAGE');
   assert.equal(users.length, 1, 'the delivered prompt is recorded once');
+  assert.equal(users[0].data.mode, 'steer', 'it went into the running turn');
   await api(`/api/tasks/${created.id}/cancel`, {});
   assert.equal((await api(`/api/tasks/${created.id}`)).status, 'CANCELLED', 'explicit STOP still cancels');
 });

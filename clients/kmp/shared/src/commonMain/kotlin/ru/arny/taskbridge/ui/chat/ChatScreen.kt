@@ -110,7 +110,6 @@ private sealed interface ChatDialog {
     /** [withAnswer]: started from an answer — the log is linear, so its question goes too. */
     data class DeleteFrom(val turnId: String, val withAnswer: Boolean = false) : ChatDialog
     data object ConfirmStop : ChatDialog
-    data object ConfirmInterrupt : ChatDialog
     data object ConfirmClear : ChatDialog
     data object ConfirmDelete : ChatDialog
     data object Rename : ChatDialog
@@ -265,7 +264,6 @@ fun ChatScreen(
                 activity = task?.current,
                 stopping = "cancel" in state.busy || task?.status == "CANCELLING",
                 onStop = { dialog = ChatDialog.ConfirmStop },
-                onInterrupt = { dialog = ChatDialog.ConfirmInterrupt },
                 moreItems = { close ->
                     if (task != null) {
                         DropdownMenuItem(text = { Text("Модель и размышления") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
@@ -708,14 +706,6 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             confirm = "Остановить",
             destructive = true,
             onConfirm = { session.cancel(); onClose() },
-            onDismiss = onClose,
-        )
-        ChatDialog.ConfirmInterrupt -> ConfirmDialog(
-            title = "Прервать запрос?",
-            text = "Прервёт текущий ответ и запущенные команды, затем отправит введённое сообщение. Это нельзя отменить.",
-            confirm = "Прервать",
-            destructive = true,
-            onConfirm = { send(SendMode.NOW); onClose() },
             onDismiss = onClose,
         )
         ChatDialog.ConfirmClear -> ConfirmDialog(
