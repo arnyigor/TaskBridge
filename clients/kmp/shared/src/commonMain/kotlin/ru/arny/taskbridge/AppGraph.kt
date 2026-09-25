@@ -17,6 +17,7 @@ import ru.arny.taskbridge.core.client.sessions.SessionList
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.settings.AppSettings
 import ru.arny.taskbridge.core.client.settings.StoredConnection
+import ru.arny.taskbridge.core.client.settings.savedAddressNeedsPairing
 import ru.arny.taskbridge.platform.PlatformServices
 import kotlin.time.Clock
 import kotlin.uuid.Uuid
@@ -34,6 +35,9 @@ class AppGraph(val platform: PlatformServices) {
 
     var connection: Connected? by mutableStateOf(settings.serverUrl?.let { Connected(it) })
         private set
+
+    /** The connect screen probes the address it is given; the saved one is probed once per launch. */
+    private var savedAddressChecked = false
 
     /** The theme choice, observable so the whole UI follows a change at once. */
     var theme: String by mutableStateOf(settings.theme)
@@ -53,7 +57,29 @@ class AppGraph(val platform: PlatformServices) {
     fun connect(baseUrl: String): Connected {
         connection?.close()
         settings.serverUrl = baseUrl
+        savedAddressChecked = true
         return Connected(baseUrl).also { connection = it }
+    }
+
+    /**
+     * A device that connected while the PC had pairing off keeps its address and no
+     * device token, so it boots straight into the session list — where every write
+     * then fails with «нужно заново подключить устройство», and that screen has no way
+     * to ask for a code. So the saved address is checked once per launch, and only a
+     * server that wants a code sends the app back to the connect screen (the address
+     * stays and is prefilled there). An unreachable daemon keeps the list: offline is
+     * not the same as unpaired.
+     */
+    fun verifySavedConnection() {
+        val current = connection ?: return
+        if (savedAddressChecked) return
+        savedAddressChecked = true
+        scope.launch {
+            if (savedAddressNeedsPairing(current.api)) {
+                current.close()
+                connection = null
+            }
+        }
     }
 
     fun disconnect() {

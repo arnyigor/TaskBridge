@@ -24,6 +24,10 @@ class AppSettings(private val store: KeyValueStore, private val newId: () -> Str
         get() = store.get("sessionCookie")
         set(value) = store.put("sessionCookie", value)
 
+    var authToken: String?
+        get() = store.get("authToken")
+        set(value) = store.put("authToken", value)
+
     /** e.g. android-3f2a9c1e: tells other devices where a message came from. */
     val clientId: String
         get() = store.get("clientId") ?: "$platform-${newId().replace("-", "").take(8)}".also { store.put("clientId", it) }
@@ -64,6 +68,7 @@ class AppSettings(private val store: KeyValueStore, private val newId: () -> Str
     fun forget() {
         serverUrl = null
         sessionCookie = null
+        authToken = null
         storeId = null
     }
 }
@@ -73,6 +78,9 @@ class StoredConnection(private val settings: AppSettings, override val baseUrl: 
     override var sessionCookie: String?
         get() = settings.sessionCookie
         set(value) { settings.sessionCookie = value }
+    override var authToken: String?
+        get() = settings.authToken
+        set(value) { settings.authToken = value }
     override val clientId: String get() = settings.clientId
 }
 
@@ -104,6 +112,21 @@ fun normalizeServerUrl(input: String): String? {
 }
 
 /**
+ * Whether the address saved from the last run must go back to pairing instead of
+ * being used as it is.
+ *
+ * The app trusts the saved address at launch, so a device that connected while the
+ * PC had pairing off boots straight into the session list; once the PC turns pairing
+ * on, every write from that screen fails with AUTH_REQUIRED (the chat shows «нужно
+ * заново подключить устройство»), and the session list has no way to ask for a code.
+ * Only this answer sends the app back to the connect screen, where the address stays
+ * prefilled. An unreachable daemon is not this case: the last known list must still
+ * be shown offline.
+ */
+suspend fun savedAddressNeedsPairing(api: TaskBridgeApi): Boolean =
+    checkConnection(api) is ConnectResult.NeedsPairing
+
+/**
  * Checks the daemon behind [api]: reachable, pairing done, a known API version.
  * /api/auth is open without pairing; /api/info is not, so it is read after.
  */
@@ -111,6 +134,9 @@ suspend fun checkConnection(api: TaskBridgeApi): ConnectResult {
     return try {
         val auth = api.auth()
         if (auth.enabled && !auth.authenticated) return ConnectResult.NeedsPairing(ApiInfo())
+        // A cookie from before device tokens still reads, but the server refuses
+        // it on every write (no Origin): pair once more for a token.
+        if (auth.enabled && !auth.local && auth.deviceTokens && api.connection.authToken == null) return ConnectResult.NeedsPairing(ApiInfo())
         val info = api.info()
         when (val compatibility = compatibilityOf(info)) {
             is Compatibility.UnsupportedApi -> ConnectResult.Unsupported(compatibility.serverVersion)

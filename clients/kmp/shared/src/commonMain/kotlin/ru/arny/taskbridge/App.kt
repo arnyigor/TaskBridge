@@ -39,6 +39,9 @@ fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) 
         val navigator = remember(connection?.baseUrl) {
             Navigator(if (connection == null) Screen.Connect else Screen.Sessions).also(navigatorSink)
         }
+        // A saved address is trusted until the server says it needs a code: without this
+        // the session list looks alive and every write fails with an auth error.
+        LaunchedEffect(graph, connection) { graph.verifySavedConnection() }
         LaunchedEffect(openTaskId, connection) {
             if (connection != null && openTaskId != null) navigator.openChat(openTaskId)
         }
