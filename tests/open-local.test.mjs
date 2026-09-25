@@ -12,7 +12,8 @@ test('openCommand maps open/reveal to the right program on each platform', () =>
 
   const winReveal = openCommand('C:\\work\\out.csv', { platform: 'win32', reveal: true });
   assert.equal(winReveal.command, 'explorer.exe');
-  assert.deepEqual(winReveal.args, ['/select,C:\\work\\out.csv']);
+  assert.deepEqual(winReveal.args, ['/select,"C:\\work\\out.csv"'], 'quoted for Explorer, a path with spaces included');
+  assert.equal(winReveal.verbatim, true, 'passed as is: node\'s own quoting sends Explorer to Documents');
 
   assert.deepEqual(openCommand('/tmp/a.pdf', { platform: 'darwin' }), { command: 'open', args: ['/tmp/a.pdf'] });
   assert.deepEqual(openCommand('/tmp/a.pdf', { platform: 'darwin', reveal: true }), { command: 'open', args: ['-R', '/tmp/a.pdf'] });
@@ -41,6 +42,11 @@ test('revealing on Windows is not a failure when explorer exits with 1', async (
   const exitOne = async () => { throw Object.assign(new Error('Command failed: explorer.exe'), { code: 1 }); };
   const plan = await openLocalPath('C:\\w\\a.txt', { platform: 'win32', reveal: true, run: exitOne });
   assert.equal(plan.command, 'explorer.exe');
+  // windowsHide opened the folder as a hidden window: the operator saw nothing.
+  const calls = [];
+  await openLocalPath('C:\\w\\a b.txt', { platform: 'win32', reveal: true, run: async (command, args, options) => { calls.push(options); } });
+  assert.equal(calls[0].windowsHide, false, 'the Explorer window is shown');
+  assert.equal(calls[0].windowsVerbatimArguments, true);
   await assert.rejects(
     () => openLocalPath('C:\\w\\a.txt', { platform: 'win32', run: exitOne }),
     error => error.code === 'OPEN_FAILED',
