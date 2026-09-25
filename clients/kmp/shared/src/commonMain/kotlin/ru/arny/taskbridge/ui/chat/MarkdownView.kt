@@ -3,6 +3,9 @@ package ru.arny.taskbridge.ui.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -150,6 +153,10 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
             .background(background)
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(10.dp)),
     ) {
+        // The answer sits in a SelectionContainer: selectable text there takes the
+        // press for selection, so only the icon of «Копировать» reacted. The header
+        // is chrome, not content: no selection in it.
+        DisableSelection {
         Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 2.dp).height(34.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 language?.takeIf { it.isNotBlank() } ?: "код",
@@ -159,13 +166,14 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
             )
             if (lines > 1) Text("$lines стр.", style = MaterialTheme.typography.labelSmall, color = muted.copy(alpha = 0.7f))
             Row(
-                Modifier.clip(RoundedCornerShape(8.dp)).clickable { onCopy(code); copied = true }.padding(horizontal = 8.dp, vertical = 6.dp),
+                Modifier.clip(RoundedCornerShape(8.dp)).pointerHoverIcon(PointerIcon.Hand).clickable { onCopy(code); copied = true }.padding(horizontal = 8.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(if (copied) AppIcons.Check else AppIcons.Copy, null, Modifier.size(14.dp), tint = muted)
                 Spacer(Modifier.width(4.dp))
                 Text(if (copied) "Скопировано" else "Копировать", style = MaterialTheme.typography.labelMedium, color = muted)
             }
+        }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         Text(
@@ -174,13 +182,13 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
             softWrap = false,
             modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp),
         )
-        if (lines > FOLDED_LINES + 6) {
+        if (lines > FOLDED_LINES + 6) DisableSelection {
             Text(
                 if (folded) "Показать все $lines строк" else "Свернуть",
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
                 textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(vertical = 8.dp),
+                modifier = Modifier.fillMaxWidth().pointerHoverIcon(PointerIcon.Hand).clickable { expanded = !expanded }.padding(vertical = 8.dp),
             )
         }
     }
