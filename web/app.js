@@ -4141,21 +4141,36 @@ function renderThinkingOptions() {
   select.value = current && values.includes(current) ? current : '';
 }
 
-function renderModelList() {
+// The Pi catalogue easily reaches ~1000 models (openrouter/routerai alone are
+// ~900 of them), and building them all at once makes the picker slow to open
+// and janky to scroll — so the list renders in batches and extends itself
+// when the sentinel scrolls into view. The search input is debounced for the
+// same reason: every keystroke would otherwise rebuild the whole list.
+const MODEL_LIST_BATCH = 200;
+const MODEL_LIST_SEARCH_DEBOUNCE_MS = 150;
+let modelListWindow = { filtered: [], rendered: 0 };
+let modelListSearchTimer = 0;
+const modelListSentinel = document.createElement('button');
+modelListSentinel.type = 'button';
+modelListSentinel.className = 'modelItem modelMore';
+const modelListSentinelObserver = typeof IntersectionObserver === 'function'
+  ? new IntersectionObserver(entries => {
+      if (entries.some(e => e.isIntersecting)) renderModelListBatch();
+    })
+  : null; // DOM-stand (tests) and very old browsers: no auto-extend, list stays batched
+if (modelListSentinelObserver) modelListSentinelObserver.observe(modelListSentinel);
+
+function renderModelListBatch() {
   const list = $('modelList');
-  const models = modelCatalog?.models || [];
-  const query = $('modelSearch').value.trim().toLowerCase();
-  const active = currentModel();
-  const filtered = query
-    ? models.filter(m => `${m.provider}/${m.id} ${m.name || ''}`.toLowerCase().includes(query))
-    : models;
-  list.innerHTML = '';
-  if (!filtered.length) {
-    list.textContent = models.length ? 'Ничего не найдено.' : 'Pi не вернул ни одной доступной модели.';
-    return;
-  }
-  let provider = null;
-  for (const m of filtered) {
+  const { filtered } = modelListWindow;
+  if (modelListWindow.rendered >= filtered.length) return;
+  const from = modelListWindow.rendered;
+  const to = Math.min(filtered.length, from + MODEL_LIST_BATCH);
+  // The provider header must consider the item rendered right before the
+  // batch start, otherwise a boundary between two batches duplicates it.
+  let provider = from > 0 ? filtered[from - 1].provider : null;
+  for (let i = from; i < to; i++) {
+    const m = filtered[i];
     if (m.provider !== provider) {
       provider = m.provider;
       const group = document.createElement('div');
@@ -4166,6 +4181,7 @@ function renderModelList() {
     const item = document.createElement('button');
     item.type = 'button';
     item.className = 'modelItem';
+    const active = currentModel();
     if (active && active.provider === m.provider && active.id === m.id) item.classList.add('active');
     const id = document.createElement('div');
     id.className = 'modelId';
@@ -4182,6 +4198,26 @@ function renderModelList() {
     item.onclick = () => chooseModel(m);
     list.append(item);
   }
+  modelListWindow.rendered = to;
+  modelListSentinel.textContent = `Показать ещё (${to} из ${filtered.length})`;
+  modelListSentinel.hidden = to >= filtered.length;
+  list.append(modelListSentinel);
+}
+
+function renderModelList() {
+  const list = $('modelList');
+  const models = modelCatalog?.models || [];
+  const query = $('modelSearch').value.trim().toLowerCase();
+  const filtered = query
+    ? models.filter(m => `${m.provider}/${m.id} ${m.name || ''}`.toLowerCase().includes(query))
+    : models;
+  modelListWindow = { filtered, rendered: 0 };
+  list.innerHTML = '';
+  if (!filtered.length) {
+    list.textContent = models.length ? 'Ничего не найдено.' : 'Pi не вернул ни одной доступной модели.';
+    return;
+  }
+  renderModelListBatch();
 }
 
 async function openModelPicker(refresh = false) {
@@ -4227,7 +4263,10 @@ $('modelButton').onclick = () => openModelPicker();
 $('changeModelButton').onclick = () => openModelPicker();
 $('modelRefresh').onclick = () => openModelPicker(true);
 $('modelPickerClose').onclick = () => $('modelPickerOverlay').classList.add('hidden');
-$('modelSearch').addEventListener('input', renderModelList);
+$('modelSearch').addEventListener('input', () => {
+  clearTimeout(modelListSearchTimer);
+  modelListSearchTimer = setTimeout(renderModelList, MODEL_LIST_SEARCH_DEBOUNCE_MS);
+});
 $('modelThinking').addEventListener('change', async () => {
   const level = $('modelThinking').value || null;
   if (!level) {
