@@ -28,8 +28,8 @@ android {
         applicationId = "ru.arny.taskbridge"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 6
-        versionName = "1.1.4"
+        versionCode = 7
+        versionName = "1.1.5"
     }
     packaging {
         resources {
