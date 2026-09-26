@@ -51,6 +51,11 @@ class AndroidPlatformServices(
     override val kind: String = "android"
     override val store: KeyValueStore = SharedPreferencesStore(context)
 
+    override val appVersion: String = runCatching {
+        @Suppress("DEPRECATION")
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty()
+    }.getOrDefault("")
+
     @Volatile
     var foreground: Boolean = false
     override val inForeground: Boolean get() = foreground

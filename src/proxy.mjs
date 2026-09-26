@@ -21,6 +21,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig } from './config.mjs';
 import { ensureTlsCert } from './tls.mjs';
+import { lanAllowed, LAN_CLOSED_WARNING } from './auth.mjs';
 
 // Hop-by-hop headers belong to a single connection and must not be forwarded
 // (RFC 9110 §7.6.1). `transfer-encoding` is included on purpose: Node frames the
@@ -144,7 +145,9 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
     console.error('[proxy] LAN_INTERNAL_PORT is required (the port the app listens on)');
     process.exit(1);
   }
-  const host = process.env.LAN_HOST || config.server?.host || '0.0.0.0';
+  const requestedHost = process.env.LAN_HOST || config.server?.host || '0.0.0.0';
+  const host = lanAllowed(requestedHost, config.server?.auth) ? requestedHost : '127.0.0.1';
+  if (host !== requestedHost) console.warn(`[proxy] ${LAN_CLOSED_WARNING}`);
   const port = Number(process.env.LAN_PORT || config.server?.port || 8787);
   const httpsConfig = config.server?.https || {};
 

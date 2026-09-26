@@ -29,14 +29,17 @@ export const API_ROUTES = [
 
   // --- auth -----------------------------------------------------------------
   { method: 'GET', path: '/api/auth', summary: 'whether the caller is authenticated' },
-  { method: 'POST', path: '/api/auth/pair', summary: 'exchange a pairing code for a session cookie' },
-  { method: 'GET', path: '/api/auth/pairing', summary: 'current pairing code (PC only: loopback peer and Host)' },
+  { method: 'POST', path: '/api/auth/pair', summary: 'exchange a pairing code for a device token: HttpOnly cookie for browsers, `token` in the body for clientKind android|desktop|cli' },
+  { method: 'GET', path: '/api/auth/pairing', summary: 'current pairing code and the QR payload (PC only: loopback peer, Host and X-Forwarded-For)' },
+  { method: 'GET', path: '/api/auth/devices', summary: 'paired devices (no tokens), `current` marks the caller' },
+  { method: 'DELETE', path: '/api/auth/devices/:deviceId', summary: 'revoke a device (PC only)' },
 
   // --- projects / files -----------------------------------------------------
   { method: 'GET', path: '/api/projects', summary: 'registered projects' },
   { method: 'DELETE', path: '/api/projects/:id', summary: 'remove a project' },
   { method: 'GET', path: '/api/project-browser', summary: 'folders under projectBrowser.roots' },
   { method: 'POST', path: '/api/project-browser/register', summary: 'register a project from a folder path' },
+  { method: 'POST', path: '/api/projects/local-register', summary: 'register any existing folder on the server machine (localhost only)' },
   { method: 'GET', path: '/api/projects/:id/pi-sessions', summary: 'existing Pi session files of a project' },
   { method: 'POST', path: '/api/uploads', summary: 'streamed multipart upload; returns a token + file ids' },
 

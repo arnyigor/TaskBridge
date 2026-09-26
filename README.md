@@ -202,7 +202,7 @@ Taskbridge/
 │  ├─ runtime-manager.mjs   health-check и запуск llama.cpp
 │  ├─ runtime-control.mjs   профили runtime, start/restart/status
 │  ├─ project-browser.mjs   браузер папок для регистрации проектов
-│  ├─ auth.mjs              pairing-код, cookie, rate limit
+│  ├─ auth.mjs              pairing-код, токены устройств, Bearer/cookie, Origin, rate limit
 │  ├─ tls.mjs               self-signed сертификат для LAN HTTPS
 │  ├─ config.mjs            загрузка/сохранение config.json
 │  ├─ approvals/policy.mjs  политика подтверждений опасных tool-вызовов
@@ -400,7 +400,9 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | `server.maxHistoryMb` | потолок размера окна истории для `?tail` в мегабайтах (по умолчанию 6) |
 | `server.sqlite.synchronous` | `NORMAL` (быстро) или `FULL` (выживает жёсткое отключение) |
 | `server.sqlite.busyTimeoutMs` | сколько ждать занятую БД (по умолчанию 5000) |
-| `server.auth.enabled` | включить pairing-авторизацию |
+| `server.auth.enabled` | включить pairing-авторизацию. **Без неё сервер слушает только `127.0.0.1`**, даже если `host = 0.0.0.0` |
+| `server.auth.allowedOrigins` | дополнительные разрешённые Origin, например `https://pc.<tailnet>.ts.net` для `tailscale serve` |
+| `server.tailscale.ip` / `httpsUrl` | переопределить Tailscale-IP (по умолчанию — адрес интерфейса из `100.64.0.0/10`) и адрес `tailscale serve` для QR |
 | `server.https.enabled` / `port` | self-signed HTTPS для LAN |
 | `pi.command` / `pi.args` | как запускать Pi |
 | `pi.env` | дополнительные env-переменные Pi (TaskBridge сама добавляет `LLAMA_BASE_URL` в router-режиме) |
@@ -441,8 +443,10 @@ pi -p "Прочитай README проекта и ответь одной стр�
 | --- | --- | --- |
 | `GET` | `/api/health` | liveness |
 | `GET` | `/api/auth` | статус авторизации |
-| `POST` | `/api/auth/pair` | вход по pairing-коду |
-| `GET` | `/api/auth/pairing` | текущий код (только с localhost) |
+| `POST` | `/api/auth/pair` | вход по pairing-коду: `{code, deviceName?, clientKind?}` → устройство; браузер получает HttpOnly-cookie, `android`/`desktop`/`cli` — `token` в ответе для `Authorization: Bearer` |
+| `GET` | `/api/auth/pairing` | текущий код и данные QR (только с самого ПК; через прокси и `tailscale serve` — 403) |
+| `GET` | `/api/auth/devices` | подключённые устройства (без токенов) |
+| `DELETE` | `/api/auth/devices/:id` | отозвать устройство (только с ПК) |
 | `GET` | `/api/info` | имя, build, адреса, engine/system, лимиты файлов и `providerStatuses` (баланс/подписка точного provider активной модели) |
 | `POST` | `/api/uploads` | потоковая multipart-загрузка файлов |
 | `GET` | `/api/projects` | список проектов |
@@ -520,7 +524,7 @@ data/
 ├─ worktrees/<task-id>/     изолированный checkout
 ├─ uploads/<token>/         стейджинг потоковых загрузок (удаляется/TTL)
 ├─ pi-sessions/             сессии Pi
-├─ server-auth.json         секрет pairing (если auth включён)
+├─ server-auth.json         секрет pairing и хэши токенов устройств (если auth включён)
 └─ tls/                     self-signed сертификаты
 ```
 
@@ -861,14 +865,31 @@ environment variables, Vercel Root Directory и проверке —
 
 ## Безопасность
 
-В PoC авторизация опциональна (`server.auth.enabled`). Без неё использовать только:
+Без авторизации (`server.auth.enabled = false`) TaskBridge слушает **только `127.0.0.1`** — и приложение, и LAN-турникет — и пишет предупреждение в консоль. Чтобы открыть его телефону, включите `server.auth.enabled: true` и спарьте устройство. Дополнительно:
 
-- в доверенной домашней LAN;
 - Windows Firewall profile = Private;
 - не пробрасывать порт 8787 в интернет;
 - не включать UPnP/port-forwarding для этого порта.
 
-Встроенные меры: CSP и security-заголовки, проверка Origin, pairing-код с rate limit, timing-safe сравнение, защита от traversal при выдаче файлов, запрет symlink/junction при обходе сессий.
+Каждое спаренное устройство получает свой токен (на ПК хранится только его SHA-256 в `data/server-auth.json`). Браузер держит его как HttpOnly-cookie, приложение шлёт `Authorization: Bearer`. Изменяющий запрос с cookie, но без `Origin`, отклоняется: браузер всегда шлёт `Origin`, а нативные клиенты работают через Bearer. Отозвать устройство — в окне «Подключить телефон» на ПК.
+
+Встроенные меры: CSP и security-заголовки, проверка Origin (плюс `allowedOrigins`), pairing-код с rate limit по реальному клиенту (последний `X-Forwarded-For` от своего прокси), timing-safe сравнение, защита от traversal при выдаче файлов, запрет symlink/junction при обходе сессий.
+
+### Доступ из интернета через Tailscale
+
+TaskBridge не нужен публичный адрес: телефон и ПК оказываются в одной приватной сети Tailscale (WireGuard).
+
+1. Установить Tailscale на ПК и телефон, войти одним аккаунтом. На Android включить «Постоянный VPN» (Настройки → Сеть → VPN → Tailscale → Always-on).
+2. В `config.json`: `server.auth.enabled: true`. Перезапустить TaskBridge.
+3. Firewall: входящие на 8787 только из tailnet и домашней подсети (подсеть — своя):
+   ```powershell
+   New-NetFirewallRule -DisplayName "TaskBridge" -Direction Inbound -Protocol TCP `
+     -LocalPort 8787 -RemoteAddress 100.64.0.0/10,192.168.1.0/24 -Action Allow
+   ```
+4. На ПК открыть `http://127.0.0.1:8787` → «Подключить телефон». В окне — 8-значный код и QR с адресами (`lan`, `tailnet` = `http://100.x.y.z:8787`, `tailnet-https`, если задан `server.tailscale.httpsUrl`). Приложение TaskBridge ходит на Tailscale-IP напрямую: трафик уже зашифрован WireGuard, и не нужен DNS `*.ts.net`.
+5. Браузер телефона по HTTPS — через `tailscale serve` на loopback-адрес TaskBridge (синтаксис сверить с `tailscale serve --help` своей версии), например `tailscale serve --bg http://127.0.0.1:8787`. Затем добавить `https://pc.<tailnet>.ts.net` в `server.auth.allowedOrigins` и в `server.tailscale.httpsUrl`. Запросы через `serve` не считаются «локальными»: код pairing по ним не выдаётся, авторизация обязательна.
+
+DNS на телефоне: системный «Частный DNS» с Tailscale совместим (приложение всё равно ходит по IP). DNS-приложения вроде AdGuard/NextDNS занимают VPN-слот Android и одновременно с Tailscale не работают.
 
 **Важно (изменилось):** в UI есть кнопки, которые выполняют команды на машине — `POST /api/tasks/:id/shell`, `…/run` и открытие/показ файлов `…/open`. Открыть/показать файл приложением разрешено **только самой машине**, а **выполнение** (`/shell`, `/run`) — машине **и авторизованному клиенту**. Пока `server.auth.enabled = false` (по умолчанию) авторизованным считается любой, кто дотянулся до API: то есть в LAN команды сможет запускать любое устройство в сети. Если это недопустимо — включи `server.auth.enabled: true` и спарь устройство (`/pair`), тогда выполнять смогут только спаренные; либо держи доверенную LAN, как выше.
 

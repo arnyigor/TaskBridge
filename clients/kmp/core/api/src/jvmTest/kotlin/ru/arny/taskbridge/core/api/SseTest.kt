@@ -29,6 +29,16 @@ class SseTest {
     }
 
     @Test
+    fun heartbeatConfirmsConnectionWithoutChatEvents() = runBlocking<Unit> {
+        val engine = MockEngine { respond(ByteReadChannel(": ping\n\n"), HttpStatusCode.OK) }
+        val http = HttpClient(engine)
+        try {
+            val api = TaskBridgeApi(http, SimpleConnection("http://pc:8787"))
+            assertEquals(listOf(StreamItem.Heartbeat), api.stream("t", 0).toList())
+        } finally { http.close() }
+    }
+
+    @Test
     fun theRecordedReplayParses() {
         val text = Fixtures.text("stream-replay.sse")
         val messages = parseAll(text)

@@ -2,6 +2,7 @@ import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
+import qrcode from './vendor/qrcode.mjs';
 const $ = (id) => document.getElementById(id);
 
 // One interface, two realities (docs/cloud-ui.md): same-origin HTTP + SSE when the
@@ -3363,11 +3364,39 @@ $('pairButton').onclick = async () => {
       $('pairingExpiry').textContent = left ? `Действует ещё ${left} с.` : 'Код истёк, откройте заново.';
     };
     update();
+    const qr = qrcode(0, 'M');
+    qr.addData(JSON.stringify(pairing.qr));
+    qr.make();
+    // The SVG is built by the vendored encoder from our own JSON, not user HTML.
+    $('pairingQr').innerHTML = qr.createSvgTag({ cellSize: 4, margin: 8, scalable: true });
+    await renderPairedDevices();
     const timer = setInterval(update, 1000);
     $('pairingOverlay').classList.remove('hidden');
     $('pairingClose').onclick = () => { clearInterval(timer); $('pairingOverlay').classList.add('hidden'); };
   } catch (err) { alert(err.message); }
 };
+
+async function renderPairedDevices() {
+  const list = $('pairedDevices');
+  const { devices } = await api('/api/auth/devices');
+  list.replaceChildren(...(devices.length ? devices.map(device => {
+    const item = document.createElement('li');
+    const label = document.createElement('span');
+    const seen = device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : '—';
+    label.textContent = `${device.name} · ${device.kind} · ${seen}`;
+    const revoke = document.createElement('button');
+    revoke.type = 'button';
+    revoke.className = 'small';
+    revoke.textContent = 'Отозвать';
+    revoke.onclick = async () => {
+      if (!confirm(`Отозвать доступ «${device.name}»?`)) return;
+      try { await api(`/api/auth/devices/${encodeURIComponent(device.deviceId)}`, { method: 'DELETE' }); await renderPairedDevices(); }
+      catch (err) { alert(err.message); }
+    };
+    item.append(label, revoke);
+    return item;
+  }) : [Object.assign(document.createElement('li'), { className: 'muted small', textContent: 'Пока нет.' })]));
+}
 
 /* ---------------- notifications ---------------- */
 
@@ -4243,14 +4272,17 @@ async function chooseModel(model) {
     $('modelPickerOverlay').classList.add('hidden');
     return;
   }
+  // Switching the model of a running session may need to restore the Pi
+  // session and can take seconds; the picker closes at once so the tap never
+  // feels stuck, and the chip stays disabled until the switch lands.
   const chip = $('modelButton');
   chip.disabled = true;
+  $('modelPickerOverlay').classList.add('hidden');
   try {
     const updated = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/model`, { method: 'POST', body: JSON.stringify(selection) });
     currentTask = updated;
     renderTaskDetails(updated);
     updateModelChip();
-    $('modelPickerOverlay').classList.add('hidden');
     if (localEnabled && model.provider === localProviderId()) {
       loadLocalModel(model.id).catch(() => {});
     }

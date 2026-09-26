@@ -38,7 +38,9 @@ fun main() {
     if (SingleInstance.activateExisting()) return
     val showRequests = MutableStateFlow(0)
     SingleInstance.listen { showRequests.value += 1 }
-    val platform = DesktopPlatformServices()
+    val packagedVersion = object {}.javaClass.getResourceAsStream("/taskbridge-version.txt")
+        ?.bufferedReader()?.use { it.readText().trim() }.orEmpty()
+    val platform = DesktopPlatformServices(appVersion = packagedVersion)
     val graph = AppGraph(platform)
     val openTask = MutableStateFlow<String?>(null)
 

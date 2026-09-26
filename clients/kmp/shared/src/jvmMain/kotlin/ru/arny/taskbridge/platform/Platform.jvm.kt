@@ -26,6 +26,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.prefs.Preferences
+import javax.swing.JFileChooser
 
 /** java.util.prefs: per-user, survives restarts, no files to manage. */
 class PreferencesStore(node: String = "ru/arny/taskbridge") : KeyValueStore {
@@ -43,6 +44,7 @@ class PreferencesStore(node: String = "ru/arny/taskbridge") : KeyValueStore {
  */
 class DesktopPlatformServices(
     override val store: KeyValueStore = PreferencesStore(),
+    override val appVersion: String = "",
 ) : PlatformServices {
     override val kind: String = "desktop"
 
@@ -84,6 +86,15 @@ class DesktopPlatformServices(
         runCatching {
             if (Desktop.isDesktopSupported()) Desktop.getDesktop().browse(URI(url))
         }
+    }
+
+    override fun chooseProjectFolder(): String? {
+        val chooser = JFileChooser().apply {
+            dialogTitle = "Выберите папку проекта"
+            fileSelectionMode = JFileChooser.DIRECTORIES_ONLY
+            isAcceptAllFileFilterUsed = false
+        }
+        return if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile?.absolutePath else null
     }
 }
 

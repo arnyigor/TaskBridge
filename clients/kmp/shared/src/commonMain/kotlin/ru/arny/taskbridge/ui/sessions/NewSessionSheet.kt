@@ -2,6 +2,8 @@ package ru.arny.taskbridge.ui.sessions
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -38,6 +40,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import io.ktor.http.Url
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
@@ -76,8 +79,15 @@ fun NewSessionSheet(
     var files by remember { mutableStateOf<List<UploadFile>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var browsingProjects by remember { mutableStateOf(false) }
+    var addedProject by remember { mutableStateOf<Project?>(null) }
+    var addingFolder by remember { mutableStateOf(false) }
     val commandId = remember { graph.newId() }
     val pick = rememberFilePicker { picked -> files = files + picked }
+    val visibleProjects = projects + listOfNotNull(addedProject).filterNot { added -> projects.any { it.id == added.id } }
+    val localDesktop = graph.platform.kind == "desktop" && runCatching {
+        Url(connection.baseUrl).host.lowercase() in setOf("localhost", "127.0.0.1", "::1", "[::1]")
+    }.getOrDefault(false)
 
     LaunchedEffect(Unit) {
         connection.sessions.models().onSuccess { loaded ->
@@ -102,7 +112,7 @@ fun NewSessionSheet(
                 enabled = !busy,
                 onClick = {
                     if (prompt.isBlank() && files.isEmpty()) {
-                        val name = projects.firstOrNull { it.id == projectId }?.displayName ?: "Без проекта"
+                        val name = visibleProjects.firstOrNull { it.id == projectId }?.displayName ?: "Без проекта"
                         onDraft(SessionDraft(projectId, name, model, thinking, title.trim().ifEmpty { null }, commandId))
                     } else {
                         busy = true
@@ -127,7 +137,7 @@ fun NewSessionSheet(
     ) {
         FieldLabel("Проект")
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (project in projects) {
+            for (project in visibleProjects) {
                 FilterChip(
                     selected = projectId == project.id,
                     onClick = { projectId = project.id },
@@ -136,6 +146,26 @@ fun NewSessionSheet(
                 )
             }
             FilterChip(selected = projectId == SCRATCH_PROJECT_ID, onClick = { projectId = SCRATCH_PROJECT_ID }, label = { Text("Без проекта") })
+            OutlinedButton(onClick = {
+                if (localDesktop) {
+                    val selected = runCatching { graph.platform.chooseProjectFolder() }
+                        .onFailure { error = it.message ?: "Не удалось открыть выбор папки" }.getOrNull()
+                    if (selected != null) {
+                        addingFolder = true
+                        error = null
+                        scope.launch {
+                            connection.sessions.registerLocalProject(selected)
+                                .onSuccess { project -> addedProject = project; projectId = project.id }
+                                .onFailure { error = messageOf(it) }
+                            addingFolder = false
+                        }
+                    }
+                } else browsingProjects = true
+            }, enabled = !addingFolder) {
+                Icon(AppIcons.Add, null, Modifier.size(16.dp))
+                Spacer(Modifier.size(4.dp))
+                Text(if (addingFolder) "Добавляю…" else if (localDesktop) "Выбрать любую папку…" else "Добавить папку")
+            }
         }
 
         FieldLabel("Модель", top = 16)
@@ -180,6 +210,11 @@ fun NewSessionSheet(
             Spacer(Modifier.height(8.dp))
             Text(error.orEmpty(), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
         }
+    }
+    if (browsingProjects) ProjectBrowserSheet(connection.sessions, onDismiss = { browsingProjects = false }) { project ->
+        addedProject = project
+        projectId = project.id
+        browsingProjects = false
     }
 }
 
@@ -229,9 +264,10 @@ fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettin
 }
 
 @Composable
-private fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit) {
+fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit, pendingKey: String? = null) {
     var query by remember { mutableStateOf("") }
     var favorites by remember { mutableStateOf(settings.favoriteModels) }
+    var expanded by remember { mutableStateOf<Set<String>>(emptySet()) }
     // The «Избранное» group is fixed when the chooser opens: a star tapped now must
     // not insert rows above the finger and turn the next tap into a model pick.
     val pinnedFirst = remember { settings.favoriteModels }
@@ -240,67 +276,103 @@ private fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: A
         settings.favoriteModels = favorites
     }
     AdaptiveSheet(
-        title = "Модель",
+        title = "Выбор модели",
         onDismiss = onDismiss,
-        subtitle = "${catalog.models.size} в Pi",
+        subtitle = "Текущая: ${selected?.let { "${it.provider}/${it.id}" } ?: "не выбрана"}",
+        maxWidth = 520,
         pinned = {
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = { Text("Поиск модели или провайдера") },
+                placeholder = { Text("Поиск: провайдер, ID или название") },
                 leadingIcon = { Icon(AppIcons.Search, null, Modifier.size(18.dp)) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
         },
-    ) {
-        val words = query.trim().lowercase().split(' ').filter { it.isNotEmpty() }
-        val models = catalog.models.filter { model -> words.all { it in "${model.label} ${model.id} ${model.provider}".lowercase() } }
-        if (models.isEmpty()) {
-            Text(
-                if (catalog.models.isEmpty()) "Pi не отдал список моделей" else "Ничего не найдено",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(vertical = 24.dp),
-            )
-        }
-        // Starred models first, so the usual ones are one tap away; they stay in their provider too.
-        val starred = models.filter { it.key in pinnedFirst }
-        val groups = (if (starred.isNotEmpty()) listOf("★ Избранное" to starred) else emptyList()) +
-            models.groupBy { it.provider ?: "—" }.toList()
-        for ((provider, group) in groups) {
-            FieldLabel(provider, top = 16)
-            for (model in group) {
-                val current = model.key == selected?.key
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable { onPick(model) }
-                        .padding(horizontal = 8.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(model.label, style = MaterialTheme.typography.bodyLarge, color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                        val details = listOfNotNull(
-                            model.contextWindow?.let { "контекст ${it / 1000}K" },
-                            "думает".takeIf { model.reasoning == true },
-                            "картинки".takeIf { model.images == true },
-                        ).joinToString(" · ")
-                        if (details.isNotEmpty()) Text(details, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        footer = {
+            val shown = catalog.models.count { model ->
+                query.trim().lowercase().split(' ').filter { it.isNotEmpty() }
+                    .all { it in "${model.label} ${model.id} ${model.provider}".lowercase() }
+            }
+            Text("Всего ${catalog.models.size} · показано $shown", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        },
+        // Pi's catalogue easily reaches ~1000 models: a plain Column composes them
+        // all eagerly, which freezes the sheet at open and recomposes every row on
+        // each star tap and search keystroke. The lazyContent slot gives the list
+        // the remaining sheet height and only the visible rows compose.
+        lazyContent = {
+            val words = query.trim().lowercase().split(' ').filter { it.isNotEmpty() }
+            val models = catalog.models.filter { model -> words.all { it in "${model.label} ${model.id} ${model.provider}".lowercase() } }
+            if (models.isEmpty()) {
+                item(key = "empty") {
+                    Text(
+                        if (catalog.models.isEmpty()) "Pi не отдал список моделей" else "Ничего не найдено",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 24.dp),
+                    )
+                }
+            }
+            // Starred models first, so the usual ones are one tap away. A starred
+            // model stays in its provider group in the data, but visually it is
+            // shown only once — its provider-group row is hidden here.
+            val starred = models.filter { it.key in pinnedFirst }
+            val groups = (if (starred.isNotEmpty()) listOf("★ Избранное" to starred) else emptyList()) +
+                models.filterNot { it.key in pinnedFirst }.groupBy { it.provider ?: "—" }.toList().sortedBy { it.first.lowercase() }
+            for ((provider, group) in groups) {
+                val openGroup = words.isNotEmpty() || provider in expanded
+                item(key = "provider:$provider", contentType = "provider") {
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable {
+                            expanded = if (provider in expanded) expanded - provider else expanded + provider
+                        }.padding(horizontal = 8.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(if (openGroup) AppIcons.ChevronDown else AppIcons.ChevronRight, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text(provider, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Text("${group.size} моделей", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    if (current) Icon(AppIcons.Check, "Выбрана", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                    val favorite = model.key in favorites
-                    IconButton(onClick = { toggle(model.key) }) {
-                        Icon(
-                            if (favorite) AppIcons.StarFilled else AppIcons.Star,
-                            if (favorite) "Убрать из избранного" else "В избранное",
-                            Modifier.size(20.dp),
-                            tint = if (favorite) LocalStatusColors.current.waiting else MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                }
+                if (!openGroup) continue
+                // A starred model also appears in its provider group, so the row
+                // keys must include the group or LazyColumn rejects the duplicate.
+                items(group, key = { "model:$provider:${it.key}" }, contentType = { "model" }) { model ->
+                    val current = model.key == selected?.key
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(10.dp))
+                            .clickable(enabled = pendingKey == null) { onPick(model) }
+                            .padding(start = 36.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(model.id ?: model.label, style = MaterialTheme.typography.bodyLarge, color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
+                            val details = listOfNotNull(
+                                model.name?.takeIf { it != model.id },
+                                model.contextWindow?.let { "контекст ${it / 1000}K" },
+                                "думает".takeIf { model.reasoning == true },
+                                "картинки".takeIf { model.images == true },
+                            ).joinToString(" · ")
+                            if (details.isNotEmpty()) Text(details, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (pendingKey == model.key) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        else if (current) Icon(AppIcons.Check, "Выбрана", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
+                        val favorite = model.key in favorites
+                        IconButton(onClick = { toggle(model.key) }) {
+                            Icon(
+                                if (favorite) AppIcons.StarFilled else AppIcons.Star,
+                                if (favorite) "Убрать из избранного" else "В избранное",
+                                Modifier.size(20.dp),
+                                tint = if (favorite) LocalStatusColors.current.waiting else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
                     }
                 }
             }
-        }
+        },
+    ) {
     }
 }
 

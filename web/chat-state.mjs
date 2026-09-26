@@ -267,7 +267,7 @@ export class ChatState {
     return { key: turn.variantKey, index, total: entry.ids.length, ids: [...entry.ids], selectedId };
   }
 
-  #truncateTurns(fromSeq, { dropInitial = false, keepUser = false } = {}) {
+  #truncateTurns(fromSeq, { dropInitial = false, keepUser = false, deleting = false } = {}) {
     if (!Number.isSafeInteger(fromSeq) || fromSeq < 0) return;
     const seqOf = (turn) => {
       const prefix = turn.role === 'user' ? 'user-' : turn.role === 'note' ? 'note-' : 'assistant-';
@@ -301,7 +301,8 @@ export class ChatState {
       while (this.turns.length && this.turns.at(-1).role !== 'user') forget(this.turns.pop());
       const seed = this.turns.length ? (seqOf(this.turns.at(-1)) ?? 'initial') : 'initial';
       this.current = { id: `assistant-${seed}`, role: 'assistant', text: '', thinking: '', tools: [], active: true, status: '', error: null };
-      this.turns.push(this.current);
+      this.current.active = !deleting;
+      if (!deleting) this.turns.push(this.current);
     } else {
       const lastAssistant = [...this.turns].reverse().find(turn => turn.role === 'assistant');
       if (lastAssistant) {
@@ -392,7 +393,8 @@ export class ChatState {
     } else if (event.type === 'TURN_TRUNCATED') {
       this.#truncateTurns(Number(event.data?.fromSeq), {
         dropInitial: event.data?.dropInitial === true,
-        keepUser: event.data?.keepUser === true
+        keepUser: event.data?.keepUser === true,
+        deleting: event.data?.reason === 'delete'
       });
     } else if (event.type === 'TURN_EDITED') {
       // An already settled message was corrected in place: the record is what

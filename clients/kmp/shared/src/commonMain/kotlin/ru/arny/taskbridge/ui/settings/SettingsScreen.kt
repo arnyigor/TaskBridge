@@ -84,6 +84,7 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
                 SectionTitle("Это устройство")
                 InfoRow(label = "Идентификатор", value = graph.settings.clientId)
+                InfoRow(label = "Версия приложения", value = graph.platform.appVersion.ifEmpty { "—" })
                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
                     Text("Тема", style = MaterialTheme.typography.bodyMedium)
                     Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

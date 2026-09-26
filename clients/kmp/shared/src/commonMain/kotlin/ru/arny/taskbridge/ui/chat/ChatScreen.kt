@@ -6,6 +6,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -71,6 +72,7 @@ import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.client.chat.ToolState
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.Json
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.Approval
@@ -87,16 +89,17 @@ import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
+import ru.arny.taskbridge.core.client.sessions.stageLabel
 import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
-import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.parseIsoMillis
 import ru.arny.taskbridge.ui.common.sourceLabel
 import ru.arny.taskbridge.ui.common.timeRange
 import ru.arny.taskbridge.ui.sessions.FieldLabel
 import ru.arny.taskbridge.ui.sessions.ModelPicker
+import ru.arny.taskbridge.ui.sessions.ModelChooser
 import ru.arny.taskbridge.ui.sessions.ThinkingPicker
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
 import ru.arny.taskbridge.ui.theme.AppIcons
@@ -114,6 +117,7 @@ private sealed interface ChatDialog {
     data object ConfirmDelete : ChatDialog
     data object Rename : ChatDialog
     data object ModelSettings : ChatDialog
+    data object ChooseModel : ChatDialog
 }
 
 @OptIn(FlowPreview::class)
@@ -133,10 +137,12 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var dialog by remember { mutableStateOf<ChatDialog?>(null) }
-    var viewing by remember { mutableStateOf<FileTarget?>(null) }
+    var viewing by androidx.compose.runtime.saveable.rememberSaveable(taskId, stateSaver = FileTargetSaver) { mutableStateOf<FileTarget?>(null) }
     var files by remember(taskId) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var draft by remember(taskId) { mutableStateOf(TextFieldValue(graph.settings.draft(taskId))) }
     val pickFiles = rememberFilePicker { picked -> files = files + picked }
+
+    LaunchedEffect(connection) { connection.sessions.models().onFailure { /* chooser can retry */ } }
 
     DisposableEffect(taskId) {
         connection.visibleSession = taskId
@@ -199,7 +205,6 @@ fun ChatScreen(
         topBar = {
             ChatTopBar(
                 state = state,
-                displayState = displayState,
                 working = working,
                 showBack = showBack,
                 onBack = onBack,
@@ -237,7 +242,7 @@ fun ChatScreen(
                     )
                 }
                 // Reading older messages: the list stays put; new output only lights up the jump button.
-                val showJump by remember { derivedStateOf { listState.firstVisibleItemIndex > 1 } }
+                val showJump by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 80 } }
                 val newest = state.chat.items.lastOrNull()
                 val newestSignature = newest?.let { it.id + ((it as? ChatItem.Assistant)?.let { a -> a.text.length + a.tools.size } ?: 0) }
                 var seenSignature by remember { mutableStateOf(newestSignature) }
@@ -260,17 +265,15 @@ fun ChatScreen(
                 ApprovalCard(approval, busy = "approval:${approval.approvalId}" in state.busy, onAnswer = { allow -> session.answerApproval(approval.approvalId, allow) })
             }
             Composer(
-                runStartedAt = parseIsoMillis(task?.statusChangedAt),
-                activity = task?.current,
-                stopping = "cancel" in state.busy || task?.status == "CANCELLING",
-                onStop = { dialog = ChatDialog.ConfirmStop },
                 moreItems = { close ->
                     if (task != null) {
-                        DropdownMenuItem(text = { Text("Модель и размышления") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
+                        DropdownMenuItem(text = { Text("Выбрать модель") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ChooseModel })
+                        DropdownMenuItem(text = { Text("Настройки сессии") }, leadingIcon = { Icon(AppIcons.Layers, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
                         DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { close(); session.compact() })
                     }
                 },
                 top = {
+                    DeliveryDiagnostics(state, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                     if (task != null && task.pendingPrompts.isNotEmpty()) {
                         QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
                     }
@@ -296,18 +299,18 @@ fun ChatScreen(
                 enterSends = graph.settings.enterSends && platform.kind == "desktop",
                 enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,
                 onSend = { send(it) },
+                onStop = if (task?.status in setOf("QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING")) ({ dialog = ChatDialog.ConfirmStop }) else null,
             )
         }
     }
 
-    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onClose = { dialog = null })
+    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onDialog = { dialog = it }, onViewFile = { viewing = it }, onClose = { dialog = null })
     viewing?.let { FileViewer(it, session, platform, onDismiss = { viewing = null }) }
 }
 
 @Composable
 private fun ChatTopBar(
     state: ChatSessionState,
-    displayState: DisplayState,
     working: Boolean,
     showBack: Boolean,
     onBack: () -> Unit,
@@ -321,25 +324,10 @@ private fun ChatTopBar(
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
         },
         title = {
-            // Title plus one quiet line "● Работает · model"; tapping it opens the session panel.
-            Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = task != null) { onDialog(ChatDialog.ModelSettings) }) {
-                Text(task?.displayTitle ?: "Сессия", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                if (task != null) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(displayState, size = 7)
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            listOfNotNull(displayState.label, task.model?.label?.takeIf { it != "—" }).joinToString(" · "),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                }
-            }
+            Text(task?.displayTitle ?: "Сессия", modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = task != null) { onDialog(ChatDialog.ModelSettings) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
         },
         actions = {
+            if (task != null) IconButton(onClick = { onDialog(ChatDialog.ChooseModel) }) { Icon(AppIcons.Spark, "Выбрать модель") }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -427,16 +415,6 @@ private fun MessageList(
     val ownClient = graph.settings.clientId
     val items = state.chat.items
     val reversed = remember(items) { items.asReversed() }
-    // An answer is deleted from its question: the server drops a message with everything after it.
-    val questionOf = remember(items) {
-        buildMap {
-            var question: String? = null
-            for (item in items) {
-                if (item is ChatItem.User) question = item.turnId
-                if (item is ChatItem.Assistant) question?.let { put(item.id, it) }
-            }
-        }
-    }
     // Older history loads when the top of the chat comes into view.
     val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 10 } == true } }
     LaunchedEffect(nearTop, state.reachedStart) { if (nearTop && !state.reachedStart) session.loadOlder() }
@@ -464,7 +442,11 @@ private fun MessageList(
         verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.Bottom),
     ) {
         items(reversed, key = { it.id }, contentType = { it::class.simpleName }) { item ->
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+            val anchor = remember(listState, item.id) { StreamingMessageAnchor(listState) }
+            Box(
+                Modifier.fillMaxWidth().then(if (item is ChatItem.Assistant && item.active) anchor.modifier else Modifier),
+                contentAlignment = Alignment.TopCenter,
+            ) {
                 Box(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
                     when (item) {
                         is ChatItem.User -> {
@@ -495,7 +477,7 @@ private fun MessageList(
                                     fork = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
                                     regenerate = if (newest) ({ session.regenerate(item.id) }) else null,
                                     continueAnswer = if (newest && (item.text.isNotBlank() || item.tools.isNotEmpty())) ({ session.continueAnswer(item.id) }) else null,
-                                    deleteFrom = questionOf[item.id]?.takeIf { !historyLocked && !item.active }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
+                                    deleteFrom = item.id.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
                                 ),
                                 onCopyText = { platform.copyText(it) },
                                 loadToolOutput = { session.toolOutput(it) },
@@ -637,6 +619,55 @@ private fun QueueLine(
 }
 
 @Composable
+private fun DeliveryDiagnostics(state: ChatSessionState, onRefresh: () -> Unit, onCopy: (String) -> Unit) {
+    var open by remember(state.taskId) { mutableStateOf(false) }
+    val answer = state.chat.items.filterIsInstance<ChatItem.Assistant>().lastOrNull()
+    val phase = when {
+        state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
+        state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
+        state.task?.status == "FAILED" -> "Ошибка · подробнее"
+        answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
+        answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
+        answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
+        answer?.active == true -> "Сообщение передано · ожидается ответ агента"
+        state.task?.pendingPrompts?.isNotEmpty() == true -> "Сообщение в очереди"
+        else -> "Диагностика доставки"
+    }
+    val details = listOfNotNull(
+        "Сессия: ${state.taskId}",
+        "Связь: ${if (state.link is LinkState.Live) "поток подключён" else state.link}",
+        "Последний контакт: ${state.lastContactAt ?: "ещё нет"}",
+        "Последнее событие: ${state.lastEventType ?: "ещё нет"} · ${state.lastEventAt ?: "—"}",
+        "Pi: ${state.task?.let { if (displayStateOf(it).active) stageLabel(it.status) else displayStateOf(it).label } ?: "—"}",
+        "Статус сервера: ${state.task?.status ?: "—"} · ${state.task?.runtime?.state ?: "—"}",
+        "Активность: ${state.task?.runtime?.activity ?: "—"} · ${state.task?.current ?: "—"}",
+        "Модель: ${state.task?.model?.key ?: "—"}",
+        "Событие № ${state.chat.cursor} · в очереди ${state.task?.pendingPrompts?.size ?: 0}",
+        state.task?.errorCode?.let { "Код ошибки: $it" },
+        state.task?.error,
+        "Подтверждение агента не означает ответ провайдера. Пока нет событий модели, источник задержки неизвестен."
+            .takeIf { answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty()) },
+    ).joinToString("\n")
+    TextButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
+        Text(phase, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Icon(AppIcons.ChevronRight, "Открыть диагностику", Modifier.size(16.dp))
+    }
+    if (open) {
+        AdaptiveSheet(
+            title = "Диагностика",
+            subtitle = phase,
+            onDismiss = { open = false },
+            footer = {
+                TextButton(onClick = onRefresh) { Text("Проверить связь") }
+                TextButton(onClick = { onCopy(details) }) { Text("Копировать") }
+            },
+        ) {
+            Text(details, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
 private fun OutboxRow(message: OutgoingMessage, onRetry: () -> Unit, onEdit: () -> Unit, onDismiss: () -> Unit) {
     val status = message.status
     val (text, color) = when (status) {
@@ -664,7 +695,7 @@ private fun OutboxRow(message: OutgoingMessage, onRetry: () -> Unit, onEdit: () 
 }
 
 @Composable
-private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, send: (SendMode) -> Unit, onClose: () -> Unit) {
+private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, send: (SendMode) -> Unit, onDialog: (ChatDialog) -> Unit, onViewFile: (FileTarget) -> Unit, onClose: () -> Unit) {
     when (dialog) {
         null -> Unit
         is ChatDialog.EditMessage -> TextEditDialog(
@@ -694,7 +725,7 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
         }
         is ChatDialog.DeleteFrom -> ConfirmDialog(
             title = if (dialog.withAnswer) "Удалить ответ?" else "Удалить сообщение?",
-            text = (if (dialog.withAnswer) "Ответ, вопрос к нему" else "Сообщение") + " и всё, что после, исчезнут из истории сессии. Это нельзя отменить.",
+            text = (if (dialog.withAnswer) "Ответ" else "Сообщение") + " и всё, что после, исчезнут из истории сессии. Это нельзя отменить.",
             confirm = "Удалить",
             destructive = true,
             onConfirm = { session.deleteFrom(dialog.turnId); onClose() },
@@ -734,12 +765,45 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             onConfirm = { session.rename(it); onClose() },
             onDismiss = onClose,
         )
-        ChatDialog.ModelSettings -> ModelSheet(state, session, graph, onClose)
+        ChatDialog.ModelSettings -> ModelSheet(state, session, graph, onDialog = onDialog, onViewFile = onViewFile, onClose = onClose)
+        ChatDialog.ChooseModel -> QuickModelChooser(state, session, graph, onClose)
     }
 }
 
 @Composable
-private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: AppGraph, onClose: () -> Unit) {
+private fun QuickModelChooser(state: ChatSessionState, session: ChatSession, graph: AppGraph, onClose: () -> Unit) {
+    val connection = graph.connection ?: return
+    var catalog by remember(connection) { mutableStateOf(connection.sessions.peekModels()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var pendingKey by remember { mutableStateOf<String?>(null) }
+    var loadAttempt by remember { mutableStateOf(0) }
+    LaunchedEffect(connection, loadAttempt) {
+        connection.sessions.models().onSuccess { catalog = it }.onFailure { loadError = it.message ?: "Не удалось загрузить модели" }
+    }
+    LaunchedEffect(state.busy, state.task?.model?.key, pendingKey) {
+        val requested = pendingKey ?: return@LaunchedEffect
+        if ("model" !in state.busy) {
+            if (state.task?.model?.key == requested) onClose() else pendingKey = null
+        }
+    }
+    if (catalog == null) {
+        AdaptiveSheet(title = "Выбор модели", onDismiss = onClose, subtitle = loadError) {
+            if (loadError == null) CircularProgressIndicator()
+            else OutlinedButton(onClick = { loadError = null; loadAttempt++ }) { Text("Повторить") }
+        }
+    } else {
+        ModelChooser(catalog!!, state.task?.model, graph.settings, onPick = { model ->
+            if (model.key == state.task?.model?.key) onClose()
+            else if (pendingKey == null) {
+                pendingKey = model.key
+                session.setModel(model)
+            }
+        }, onDismiss = onClose, pendingKey = pendingKey ?: if ("model" in state.busy) "" else null)
+    }
+}
+
+@Composable
+private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: AppGraph, onDialog: (ChatDialog) -> Unit, onViewFile: (FileTarget) -> Unit, onClose: () -> Unit) {
     val connection = graph.connection ?: return
     var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
     LaunchedEffect(Unit) { connection.sessions.models().onSuccess { catalog = it } }
@@ -759,7 +823,20 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             Button(onClick = onClose) { Text("Готово") }
         },
     ) {
-        FieldLabel("Модель")
+        // The rows the web's «Детали сессии» dialog shows: name, status, current step.
+        FieldLabel("Название")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(task?.displayTitle ?: "—", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (task != null) IconButton(onClick = { onDialog(ChatDialog.Rename) }) { Icon(AppIcons.Edit, "Переименовать") }
+        }
+        FieldLabel("Статус", top = 16)
+        // displayStateOf labels terminal states the way the web's dialog does
+        // («Готово», «Ошибка», «Остановлена»); stageLabel is for the live run only.
+        Text(task?.let { displayStateOf(it).label } ?: "—", style = MaterialTheme.typography.bodyLarge)
+        task?.current?.takeIf { it.isNotBlank() }?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+        }
+        FieldLabel("Модель", top = 16)
         ModelPicker(catalog, task?.model, graph.settings, onPick = { session.setModel(it) })
         Text(
             "Смена модели записывается в историю Pi и переживает перезапуск.",
@@ -789,6 +866,60 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             task?.compaction?.count?.takeIf { it > 0 }?.let { "сжатий: $it" },
         )
         for (line in stats) Text(line, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
+        // The agent's files and the task artifacts, the way the web's dialog shows them:
+        // data lives on the server, the chat itself no longer displays the chips.
+        val outputFiles = task?.outputFiles.orEmpty()
+        if (outputFiles.isNotEmpty()) {
+            FieldLabel("Файлы агента", top = 20)
+            FileList(outputFiles, onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) }, loadFile = { session.readFile(it) })
+        }
+        var artifacts by remember { mutableStateOf<List<String>?>(null) }
+        LaunchedEffect(task?.id) { artifacts = session.artifacts().getOrNull() }
+        val artifactNames = artifacts.orEmpty()
+        if (artifactNames.isNotEmpty()) {
+            FieldLabel("Artifacts", top = 20)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                for (name in artifactNames) FileChip(name, "") { onViewFile(FileTarget.Artifact(name)) }
+            }
+        }
+        var followup by remember { mutableStateOf("") }
+        FieldLabel("Инструкция во время/после работы", top = 20)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = followup,
+                onValueChange = { followup = it },
+                placeholder = { Text("Например: не меняй публичный API") },
+                singleLine = true,
+                modifier = Modifier.weight(1f),
+            )
+            Button(onClick = { session.send(followup, mode = SendMode.NOW); followup = "" }, enabled = followup.isNotBlank()) { Text("Send") }
+        }
+        OutlinedButton(onClick = { onDialog(ChatDialog.ConfirmClear) }, enabled = !running, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
+            Text("Очистить чат")
+        }
+        // Debug: the raw Pi state, the way the web's collapsible «состояние Pi (JSON)» shows it.
+        var stateOpen by remember { mutableStateOf(false) }
+        var stateJson by remember { mutableStateOf<String?>(null) }
+        LaunchedEffect(stateOpen, task?.id) {
+            if (!stateOpen) return@LaunchedEffect
+            stateJson = session.state().fold(
+                onSuccess = { obj -> Json { prettyPrint = true }.encodeToString(JsonElement.serializer(), obj) },
+                onFailure = { it.message },
+            )
+        }
+        Row(Modifier.fillMaxWidth().clickable { stateOpen = !stateOpen }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (stateOpen) AppIcons.ChevronDown else AppIcons.ChevronRight, null, Modifier.size(14.dp))
+            Spacer(Modifier.width(4.dp))
+            Text("Debug: состояние Pi (JSON)", style = MaterialTheme.typography.bodyMedium)
+        }
+        if (stateOpen) {
+            Text(
+                stateJson ?: "Загрузка…",
+                style = MonoStyle.copy(fontSize = MaterialTheme.typography.bodySmall.fontSize),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
     }
 }
 

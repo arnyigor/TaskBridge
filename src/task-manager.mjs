@@ -20,20 +20,37 @@ import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
 import { computeTokensPerSecond, accumulateStreamMs } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
+import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
+import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
 // The command that produced a prompt, as recorded on its queue entry and its
 // USER_MESSAGE. Absent fields are left out rather than stored as null.
-function originOf(commandId, clientId) {
+function originOf(commandId, clientId, deviceId) {
   const origin = {};
   if (commandId) origin.commandId = String(commandId);
   if (clientId) origin.clientId = String(clientId);
+  // The paired device the server authenticated (R1.2) — unlike clientId, a
+  // client cannot claim someone else's.
+  if (deviceId) origin.deviceId = String(deviceId);
   return Object.keys(origin).length ? origin : null;
+}
+// Pi's extension UI (docs/rpc-extension-ui.md): dialogs block the extension
+// until a client answers; the rest are fire-and-forget.
+const UI_DIALOGS = new Set(['select', 'confirm', 'input', 'editor']);
+const uiText = (value, max = 4000) => (typeof value === 'string' ? value.slice(0, max) : undefined);
+// Kill a whole process tree by pid (an orphan from a previous TaskBridge run).
+async function killTreeByPid(pid) {
+  const { execFile } = await import('node:child_process');
+  await new Promise(resolve => {
+    if (process.platform === 'win32') execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, () => resolve());
+    else { try { process.kill(-pid, 'SIGKILL'); } catch { try { process.kill(pid, 'SIGKILL'); } catch {} } resolve(); }
+  });
 }
 // #message options for delivering a queue entry: its id and original sender.
 function pendingOrigin(pending) {
-  return { pendingId: pending.id, origin: originOf(pending.commandId, pending.clientId) };
+  return { pendingId: pending.id, origin: originOf(pending.commandId, pending.clientId, pending.deviceId) };
 }
 function safeFileName(name) {
   const base = path.basename(String(name || 'file.bin'));
@@ -166,17 +183,48 @@ export class TaskManager extends EventEmitter {
         this.queue.push(task.id);
         await this.#restorePendingFiles(task.id);
       } else if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
+        // R3.6: with the Pi session file intact the conversation is only
+        // interrupted — the next message resumes it (RESTORABLE). Without it
+        // there is nothing to resume from: a real failure.
+        const intact = task.piSessionFile ? await fs.access(task.piSessionFile).then(() => true, () => false) : false;
         task.status = 'FAILED';
-        task.errorCode = 'FAILED_RECOVERY';
-        task.error = 'TaskBridge restarted while this task was active.';
+        task.errorCode = intact ? 'FAILED_RECOVERY' : 'SESSION_LOST';
+        task.error = intact
+          ? 'TaskBridge перезапустился во время ответа. Следующее сообщение продолжит сессию.'
+          : 'TaskBridge перезапустился во время ответа, а файл сессии Pi не сохранился.';
+        if (!intact) task._sessionLost = true;
         task.updatedAt = now();
         await this.store.save(task);
       }
+      // Pi is gone after a restart: a dialog it was waiting on is gone with it.
+      if (task.pendingUiRequest) { task.pendingUiRequest = null; await this.store.save(task).catch(() => {}); }
       this.tasks.set(task.id, task);
+      task._runtimeState = this.#runtimeFacts(task).state;
     }
     if (trimmed) await this.store.vacuum().catch(() => {});
     await this.#sweepOrphans();
+    await this.#killOrphanPis(previous);
     if (this.queue.length) this.#schedulePump();
+  }
+
+  // R3.6: a Pi left running by a previous TaskBridge (crash, taskkill of the
+  // parent only) would keep writing the session file behind our back. Its pid
+  // and start time are in the task; the start time tells it apart from an
+  // unrelated process that got the same pid later.
+  async #killOrphanPis(tasks) {
+    const recorded = tasks.filter(task => Number.isInteger(task.piPid) && task.piStartedAt);
+    if (!recorded.length) return;
+    const list = await listProcesses({ fresh: true });
+    for (const task of recorded) {
+      const alive = await sameProcess(task.piPid, task.piStartedAt, { list });
+      if (alive) {
+        console.warn(`[TaskBridge] killing orphan Pi of task ${task.id}: pid ${task.piPid}`);
+        await killTreeByPid(task.piPid);
+      }
+      task.piPid = null;
+      task.piStartedAt = null;
+      await this.store.save(this.#publicTask(task)).catch(() => {});
+    }
   }
 
   // Graceful shutdown of the agent side: stop taking new work, stop the queue
@@ -504,6 +552,7 @@ export class TaskManager extends EventEmitter {
 
     const task = {
       id: requestedId || shortId(),
+      ...(originOf(null, options.clientId, options.deviceId) ? { source: originOf(null, options.clientId, options.deviceId) } : {}),
       createdAt: now(),
       updatedAt: now(),
       status: 'QUEUED',
@@ -561,10 +610,12 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genLastDeltaAt, ...safe } = task;
+    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genLastDeltaAt,
+      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
+      runtime: this.#runtimeFacts(task),
       assistantText: tailText(safe.assistantText, TEXT_TAIL),
       thinkingText: tailText(safe.thinkingText, THINKING_TAIL),
       sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed))
@@ -852,6 +903,10 @@ export class TaskManager extends EventEmitter {
         await this.#setStatus(task, 'RUNNING', 'Pi starting');
         if (task.status === 'CANCELLED' || this.runtimes.get(task.id)?.cancelRequested) { this.#resolveSettle(task.id); return; }
         await pi.prompt(this.#buildPrompt(task));
+        // The initial prompt has no USER_MESSAGE frame (it is stored on the task).
+        // Publish the RPC acknowledgement so clients can distinguish "created on
+        // the server" from "Pi accepted the prompt".
+        await this.#event(task, 'PROMPT_ACCEPTED', 'Первый запрос принят Pi', { initial: true });
         await settled;
       } catch (error) {
         this.#resolveSettle(task.id);
@@ -868,7 +923,8 @@ export class TaskManager extends EventEmitter {
         await this.#verifyAndFinalize(task, { turn, baseline });
       }
     } catch (error) {
-      await this.#fail(task, error);
+      if (['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) await this.#recoverRpcFailure(task, error);
+      else await this.#fail(task, error);
     } finally {
       delete task._incomingFiles;
     }
@@ -943,9 +999,9 @@ export class TaskManager extends EventEmitter {
     this.runtimes.set(task.id, runtime);
 
     pi.on('event', (frame) => {
-      if (this.deleted.has(task.id)) return;
+      if (this.deleted.has(task.id) || runtime.retired) return;
       runtime.eventChain = runtime.eventChain
-        .then(() => this.#handlePiEvent(task, frame))
+        .then(() => runtime.retired ? undefined : this.#handlePiEvent(task, frame))
         .catch(async (error) => { await this.#fail(task, error); this.#resolveSettle(task.id); });
     });
     pi.on('stderr', (text) => {
@@ -956,10 +1012,19 @@ export class TaskManager extends EventEmitter {
       this.#event(task, 'PI_PROTOCOL_ERROR', data.error, { line: data.line?.slice(0, 2000) }).catch(() => {});
     });
     pi.on('error', error => {
+      if (runtime.retired) return;
       runtime.eventChain = runtime.eventChain.then(() => this.#fail(task, error)).finally(() => this.#resolveSettle(task.id));
       runtime.eventChain.catch(() => {});
     });
     pi.on('close', ({ code, signal }) => {
+      if (runtime.retired) return;
+      task.piPid = null;
+      task.piStartedAt = null;
+      task._lastPiExitAt = Date.now();
+      task._toolsRunning = 0;
+      task._compacting = false;
+      if (task.pendingUiRequest) this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'pi_closed' }).catch(() => {});
+      this.#syncRuntime(task, 'pi_closed');
       if (this.deleted.has(task.id) || runtime.cancelRequested) { this.#resolveSettle(task.id); return; }
       if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) {
         runtime.eventChain = runtime.eventChain.then(() => this.#fail(task, Object.assign(new Error(`Pi process exited unexpectedly: code=${code}, signal=${signal}`), { code: 'PI_SESSION_FAILED' }))).finally(() => this.#resolveSettle(task.id));
@@ -968,6 +1033,9 @@ export class TaskManager extends EventEmitter {
     });
 
     await pi.start();
+    // R3.6: enough to find this process again after a TaskBridge crash.
+    task.piPid = pi.proc?.pid ?? null;
+    task.piStartedAt = task.piPid ? new Date().toISOString() : null;
     return pi;
   }
 
@@ -1058,10 +1126,15 @@ export class TaskManager extends EventEmitter {
 
   // Translates a raw file path or alias into the exact model id Pi lists in its
   // catalog (e.g. G:\...\Qwen3.8-27B-UD-Q3_K_XL.gguf -> qwen-27b-q3).
-  async #resolvePiModelId(provider, modelId) {
+  // probe=false keeps the caller on cached catalog ids only and never spawns a
+  // Pi probe: a fresh probe takes seconds, and with an expired cache (60s TTL)
+  // the model switch would hang on it. The picker always sends an exact
+  // provider/id that exists in the catalog, so anything not in the cache is
+  // passed as-is — Pi itself validates the model at switch time.
+  async #resolvePiModelId(provider, modelId, { probe = true } = {}) {
     if (!modelId) return modelId;
     let known = this.modelCatalog.peek()?.models || [];
-    if (!known.length) {
+    if (!known.length && probe) {
       const catalog = await this.modelCatalog.list().catch(() => null);
       known = catalog?.models || [];
     }
@@ -1092,10 +1165,18 @@ export class TaskManager extends EventEmitter {
     const model = this.#normalizeModelSelection({ provider, id: modelId });
     if (!model) throw Object.assign(new Error('Укажите provider и id модели.'), { code: 'INPUT_INVALID' });
     const runtime = await this.#ensureSession(task);
-    const state = await runtime.pi.getState().catch(() => null);
+    const state = await runtime.pi.getState().catch(async error => {
+      await this.#recoverRpcFailure(task, error);
+      throw error;
+    });
     if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Дождитесь завершения ответа перед сменой модели.'), { code: 'BUSY' });
-    const targetModelId = await this.#resolvePiModelId(model.provider, model.id);
-    const applied = await runtime.pi.setModel(model.provider, targetModelId).catch((error) => {
+    // Cached ids only: the selection must not wait on a catalog probe.
+    const targetModelId = await this.#resolvePiModelId(model.provider, model.id, { probe: false });
+    const applied = await runtime.pi.setModel(model.provider, targetModelId).catch(async (error) => {
+      if (['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) {
+        await this.#recoverRpcFailure(task, error);
+        throw error;
+      }
       throw Object.assign(new Error(`Pi не принял модель ${model.provider}/${targetModelId}: ${error.message}`), { code: 'MODEL_NOT_FOUND' });
     });
     task.requestedModel = { provider: model.provider, id: applied?.id || targetModelId };
@@ -1147,6 +1228,16 @@ export class TaskManager extends EventEmitter {
   async #handlePiEvent(task, frame) {
     if (this.deleted.has(task.id)) return;
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
+    if (frame.type === 'extension_ui_request') return this.#onUiRequest(task, frame);
+    if (frame.type === 'tool_execution_start') task._toolsRunning = (task._toolsRunning || 0) + 1;
+    if (frame.type === 'tool_execution_end') task._toolsRunning = Math.max(0, (task._toolsRunning || 0) - 1);
+    if (frame.type === 'compaction_start' || frame.type === 'auto_compaction_start') task._compacting = true;
+    if (frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') task._compacting = false;
+    if (frame.type === 'agent_settled') {
+      task._toolsRunning = 0;
+      // A dialog cannot outlive its turn.
+      if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'turn_ended' });
+    }
 
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
@@ -1740,10 +1831,16 @@ export class TaskManager extends EventEmitter {
   async deleteTurns(id, turnId) {
     return this.#admit(async () => {
       const task = this.#mutableTask(id);
-      const { fromSeq, dropInitial, mode } = this.#turnSequences(turnId);
+      const answer = /^assistant-(initial|\d+)$/.exec(String(turnId));
+      const { fromSeq, dropInitial, mode } = this.#turnSequences(answer ? `user-${answer[1]}` : turnId);
       const events = await this.store.readEvents(id, 0);
       if (mode === 'seq' && !events.some(event => event.type === 'USER_MESSAGE' && event.seq === fromSeq)) {
         throw Object.assign(new Error('Сообщение не найдено в истории.'), { code: 'NOT_FOUND' });
+      }
+      if (answer) {
+        const answerSeq = mode === 'initial' ? 1 : fromSeq + 1;
+        await this.#truncateFrom(task, answerSeq, { keepUser: true, reason: 'delete' });
+        return { ok: true, fromSeq: answerSeq, dropInitial: false, keepUser: true };
       }
       await this.#truncateFrom(task, fromSeq, { dropInitial, reason: 'delete' });
       return { ok: true, fromSeq, dropInitial };
@@ -2058,12 +2155,22 @@ export class TaskManager extends EventEmitter {
     }
     runtime.cancelRequested = true;
     this.approvals.cancelTask(id);
+    // STOP answers an open dialog with «cancelled» first: the extension is
+    // blocked on it and would otherwise hold the abort up.
+    if (task.pendingUiRequest) {
+      try { runtime.pi.send({ type: 'extension_ui_response', id: task.pendingUiRequest.id, cancelled: true }); } catch {}
+      await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'stopped' });
+    }
     await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
     try {
       await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
     } catch (error) {
       await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`);
-      await runtime.pi.killTree();
+      try {
+        await runtime.pi.killTree();
+      } catch {
+        // The process may already be gone. Ownership still has to be released.
+      }
     }
     await runtime.eventChain.catch(() => {});
     this.#resolveSettle(id);
@@ -2088,14 +2195,12 @@ export class TaskManager extends EventEmitter {
     // Who sent it: carried into the queue entry and the USER_MESSAGE event, so a
     // client can match its own command in the history (e.g. after
     // UNKNOWN_AFTER_CRASH) without comparing texts.
-    const origin = originOf(commandId, opts && opts.clientId);
+    const origin = originOf(commandId, opts && opts.clientId, opts && opts.deviceId);
     // Ctrl+Enter («вклиниться сразу»): the text skips the local queue and, while
     // the turn streams, goes in as steering — the command in flight keeps
     // running and the model answers the new text next. Only the model itself or
     // STOP ends a command.
-    const send = async () => {
-      return this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
-    };
+    const send = async () => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
     if (!commandId) return this.#admit(send);
     return this.#withCommand(
       commandId,
@@ -2330,7 +2435,15 @@ export class TaskManager extends EventEmitter {
     });
   }
 
-  async #message(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
+  async #message(...args) {
+    try { return await this.#deliverMessage(...args); }
+    catch (error) {
+      await this.#recoverRpcFailure(this.tasks.get(args[0]), error);
+      throw error;
+    }
+  }
+
+  async #deliverMessage(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -2353,7 +2466,7 @@ export class TaskManager extends EventEmitter {
     // #ensureSession first would fail with "модель занята" on a busy runtime, and
     // the prompt would never reach the queue.
     const live = this.runtimes.get(id);
-    const liveState = live && !live.pi.closed ? await live.pi.getState().catch(() => null) : null;
+    const liveState = live && !live.pi.closed ? await live.pi.getState() : null;
     if (liveState?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
     const liveStreaming = Boolean(liveState?.isStreaming);
     // Without an explicit queue request, a streaming session still receives the
@@ -2523,8 +2636,14 @@ export class TaskManager extends EventEmitter {
     await fs.access(task.workspacePath);
     if (task.nativeSession && !task._nativeLease) task._nativeLease = await acquireNativeLease(task);
     const sessionFile = await restoreSessionFile(task, this.store, this.dataRoot);
+    await this.#guardSessionFile(task, sessionFile);
     const autoCompaction = task.autoCompactionEnabled;
-    const pi = await this.#createPi(task, sessionFile);
+    task._starting = true;
+    this.#syncRuntime(task, 'starting');
+    let pi;
+    try { pi = await this.#createPi(task, sessionFile); }
+    finally { task._starting = false; }
+    this.#syncRuntime(task, 'started');
     try {
       await pi.getState();
       if (autoCompaction != null) await pi.setAutoCompaction(autoCompaction);
@@ -2584,6 +2703,29 @@ export class TaskManager extends EventEmitter {
     try { return this.store.listRuns(taskId, limit); } catch { return []; }
   }
 
+  // A dead RPC process must not remain the owner of the session/model slot.
+  // Do not retire PI_RPC_SLOW: events prove it is still doing useful work.
+  async #recoverRpcFailure(task, error) {
+    if (!task || !['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) return;
+    const runtime = this.runtimes.get(task.id);
+    if (runtime) {
+      runtime.retired = true;
+      runtime.cancelRequested = true;
+      task._turn = (task._turn || 0) + 1;
+      await runtime.pi.killTree();
+      this.#resolveSettle(task.id);
+      if (this.runtimes.get(task.id) === runtime) this.runtimes.delete(task.id);
+    }
+    task.piPid = null;
+    task.piStartedAt = null;
+    task._toolsRunning = 0;
+    task._compacting = false;
+    if (this.activeTaskId === task.id) this.activeTaskId = null;
+    if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'rpc_failed' });
+    await this.#fail(task, error);
+    this.#schedulePump();
+  }
+
   async #fail(task, error) {
     if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
@@ -2618,6 +2760,12 @@ export class TaskManager extends EventEmitter {
 
   async #recordEvent(task, type, message, data, persistTask, seq = null) {
     if (this.deleted.has(task.id)) return;
+    // Consumers may close their stream at TASK_*: publish the runtime change
+    // first so the terminal event really is the final event of this turn.
+    if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) {
+      const change = this.#runtimeChange(task);
+      if (change) await this.#recordEvent(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason: type }, false);
+    }
     const event = { at: now(), taskId: task.id, type, message, data };
     if (seq === null) await this.store.appendEvent(task.id, event);
     else await this.store.appendEventAt(task.id, seq, event);
@@ -2626,6 +2774,144 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task)).catch(() => {});
     }
     this.emit('task-event', event);
+    // Every status change is followed by an event, so this is the one place the
+    // runtime state is re-derived (R3.1).
+    if (type !== 'RUNTIME_STATE') {
+      const change = this.#runtimeChange(task);
+      if (change) await this.#recordEvent(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason: type }, false);
+    }
     return event;
+  }
+
+  // --- runtime state (R3.1) --------------------------------------------------
+  #runtimeFacts(task) {
+    const runtime = this.runtimes.get(task.id);
+    return deriveRuntimeState({
+      status: task.status,
+      live: Boolean(runtime && !runtime.pi.closed),
+      starting: Boolean(task._starting),
+      sleeping: Boolean(task._sleeping),
+      hasSession: Boolean(task.piSessionFile || task.workspacePath) && !task._sessionLost,
+      compacting: Boolean(task._compacting),
+      toolsRunning: task._toolsRunning || 0,
+    });
+  }
+
+  #runtimeChange(task) {
+    const next = this.#runtimeFacts(task).state;
+    const from = task._runtimeState || null;
+    if (from === next) return null;
+    if (!transitionAllowed(from, next)) console.warn(`[TaskBridge] runtime ${task.id}: unexpected ${from} → ${next} (status ${task.status})`);
+    task._runtimeState = next;
+    return { from, to: next };
+  }
+
+  // For changes no event announces (a Pi starting or exiting).
+  #syncRuntime(task, reason) {
+    if (this.deleted.has(task.id) || this.closing) return;
+    const change = this.#runtimeChange(task);
+    if (change) this.#event(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason }, false).catch(() => {});
+  }
+
+  // --- ownership guard (R3.5) ------------------------------------------------
+  // Two writers on one Pi session file corrupt it. Before our Pi opens a file:
+  // no other process may name it on its command line (a `pi --session <file>` in
+  // a terminal), and a session imported from terminal Pi must have been quiet
+  // for a while (a `pi -c` there does not name the file).
+  async #guardSessionFile(task, sessionFile) {
+    if (!sessionFile) return;
+    const own = new Set();
+    for (const [taskId, runtime] of this.runtimes) {
+      if (taskId !== task.id && runtime?.pi?.proc?.pid) own.add(runtime.pi.proc.pid);
+    }
+    const busy = (detail) => Object.assign(new Error(`Сессию Pi сейчас пишет другой процесс (${detail}). Можно открыть историю только для чтения или сделать копию («Клонировать»).`), { code: 'SESSION_BUSY', detail });
+    for (const [taskId, runtime] of this.runtimes) {
+      if (taskId !== task.id && runtime?.pi && !runtime.pi.closed && this.tasks.get(taskId)?.piSessionFile === sessionFile) throw busy(`сессия ${taskId}`);
+    }
+    const holders = await processesUsingFile(sessionFile, { exclude: own });
+    // Our Pi processes of other tasks never name this file; anything that does
+    // is a foreign writer. (unknown = the OS would not say: go on.)
+    const foreign = holders || [];
+    if (foreign.length) throw busy(`pid ${foreign.map(item => item.pid).join(', ')}`);
+    if (task.nativeSession) {
+      const quietMs = Math.max(0, Number(this.config.pi?.sessionQuietMs ?? 10000));
+      const stat = await fs.stat(sessionFile).catch(() => null);
+      const ownWrite = task._lastPiExitAt ? stat && stat.mtimeMs <= task._lastPiExitAt + 2000 : false;
+      if (stat && !ownWrite && Date.now() - stat.mtimeMs < quietMs) throw busy('файл менялся только что');
+    }
+  }
+
+  // --- extension UI requests (Pi RPC) ------------------------------------------
+  async #onUiRequest(task, frame) {
+    if (frame.method === 'notify') {
+      await this.#event(task, 'UI_NOTIFY', uiText(frame.message, 2000) || '', { notifyType: ['info', 'warning', 'error'].includes(frame.notifyType) ? frame.notifyType : 'info' });
+      return;
+    }
+    // setStatus / setWidget / setTitle / set_editor_text: terminal decoration.
+    if (!UI_DIALOGS.has(frame.method) || typeof frame.id !== 'string') return;
+    const request = {
+      id: frame.id,
+      method: frame.method,
+      title: uiText(frame.title, 500),
+      message: uiText(frame.message),
+      options: frame.method === 'select' && Array.isArray(frame.options) ? frame.options.slice(0, 100).map(option => String(option).slice(0, 500)) : undefined,
+      placeholder: uiText(frame.placeholder, 500),
+      prefill: uiText(frame.prefill, 100000),
+      timeout: Number.isFinite(frame.timeout) && frame.timeout > 0 ? frame.timeout : null,
+      at: now(),
+    };
+    // A second dialog replaces the first: Pi only asks one at a time, so the
+    // first was resolved on its side (its own timeout).
+    if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { timedOut: true, reason: 'superseded' });
+    task.pendingUiRequest = request;
+    await this.#event(task, 'UI_REQUEST', request.title || 'Pi ждёт ответа', request);
+    await this.#setStatus(task, 'WAITING_USER', `Ждёт ответа: ${request.title || request.method}`);
+    // With a timeout Pi resolves the dialog itself; mirror that here.
+    if (request.timeout) {
+      clearTimeout(task._uiTimer);
+      task._uiTimer = setTimeout(() => this.#closeUiRequest(task, request.id, { timedOut: true }).catch(() => {}), request.timeout + 250);
+      task._uiTimer.unref?.();
+    }
+  }
+
+  async #closeUiRequest(task, requestId, outcome, origin = null) {
+    if (task.pendingUiRequest?.id !== requestId) return false;
+    task.pendingUiRequest = null;
+    clearTimeout(task._uiTimer);
+    task._uiTimer = null;
+    await this.#event(task, 'UI_RESOLVED', outcome.cancelled ? 'Запрос закрыт' : outcome.timedOut ? 'Время ответа истекло' : 'Ответ отправлен', { id: requestId, ...outcome, ...(origin || {}) });
+    if (task.status === 'WAITING_USER' && !this.listApprovals(task.id).some(item => item.status === 'PENDING')) {
+      await this.#setStatus(task, 'RUNNING', 'Pi is working');
+    }
+    return true;
+  }
+
+  /**
+   * Answers the dialog Pi is waiting on. The first answer wins: the rest get
+   * NOT_ALLOWED and see the UI_RESOLVED event of the winner.
+   */
+  async respondUi(id, { requestId, value, confirmed, cancelled } = {}, origin = null) {
+    const task = this.tasks.get(id);
+    if (!task || this.deleted.has(id)) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const pending = task.pendingUiRequest;
+    if (!pending || pending.id !== requestId) throw Object.assign(new Error('На этот запрос уже ответили или он закрыт.'), { code: 'NOT_ALLOWED' });
+    let response;
+    if (cancelled === true) response = { cancelled: true };
+    else if (pending.method === 'confirm') {
+      if (typeof confirmed !== 'boolean') throw Object.assign(new Error('Ответ на подтверждение: confirmed true или false.'), { code: 'INPUT_INVALID' });
+      response = { confirmed };
+    } else {
+      if (typeof value !== 'string') throw Object.assign(new Error('Нужен текст ответа (value).'), { code: 'INPUT_INVALID' });
+      if (pending.method === 'select' && !pending.options?.includes(value)) throw Object.assign(new Error('Такого варианта нет.'), { code: 'INPUT_INVALID' });
+      response = { value: value.slice(0, 100000) };
+    }
+    const runtime = this.runtimes.get(id);
+    if (!runtime || runtime.pi.closed) throw Object.assign(new Error('Pi уже не ждёт ответа.'), { code: 'NOT_ALLOWED' });
+    // #closeUiRequest claims the request synchronously, before its first await:
+    // a second answer arriving while this one is written finds it gone.
+    const closing = this.#closeUiRequest(task, requestId, response.cancelled ? { cancelled: true } : { answered: true, ...response }, origin);
+    runtime.pi.send({ type: 'extension_ui_response', id: requestId, ...response });
+    await closing;
+    return this.#publicTask(task);
   }
 }

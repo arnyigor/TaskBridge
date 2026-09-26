@@ -27,6 +27,7 @@ sealed interface ChatItem {
         val mode: String?,
         /** The id the history actions take (`user-12`, `user-initial`); null while pending. */
         val turnId: String?,
+        val delivery: String = "Передано агенту",
     ) : ChatItem
 
     data class Assistant(

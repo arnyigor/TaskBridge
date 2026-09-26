@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { listDirectory, resolveBrowsablePath } from '../src/project-browser.mjs';
+import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath } from '../src/project-browser.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-project-browser-'));
@@ -56,6 +56,14 @@ test('relative paths and missing directories are rejected', async t => {
   const f = await fixture(t);
   await assert.rejects(resolveBrowsablePath(f.config, 'relative/path'), { code: 'INPUT_INVALID' });
   await assert.rejects(resolveBrowsablePath(f.config, path.join(f.allowed, 'missing')), { code: 'NOT_FOUND' });
+});
+
+test('a locally chosen project folder may be outside browser roots', async t => {
+  const f = await fixture(t);
+  assert.equal(await resolveLocalProjectPath(f.outside), await fs.realpath(f.outside));
+  await assert.rejects(resolveLocalProjectPath('relative/path'), { code: 'INPUT_INVALID' });
+  await assert.rejects(resolveLocalProjectPath(path.join(f.root, 'missing')), { code: 'NOT_FOUND' });
+  await assert.rejects(resolveLocalProjectPath(path.join(f.allowed, 'readme.txt')), { code: 'INPUT_INVALID' });
 });
 
 test('a symlink escaping the root is rejected even if it resolves back inside another root', async t => {

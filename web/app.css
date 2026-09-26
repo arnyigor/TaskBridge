@@ -346,6 +346,9 @@ body {
   .restartSpinner, .bareIcon.restarting svg { animation-duration: 2.4s; }
 }
 .authCard.wide { max-width: 520px; }
+.pairingQr svg { display: block; width: 220px; height: 220px; margin: 0 auto; background: #fff; }
+.pairedDevices { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.pairedDevices li { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 .sessionDetailsCard { max-width: 580px; }
 .dialogHeader { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .dialogHeader h2 { margin: 0; font-size: 1rem; font-weight: 600; }

@@ -19,7 +19,14 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { lanAllowed } from '../src/auth.mjs';
 import { loadConfig } from '../src/config.mjs';
+
+// Where the proxy really listens (R1.1): without auth it stays on loopback.
+const proxyHost = config => {
+  const host = process.env.LAN_HOST || config.server?.host || '0.0.0.0';
+  return lanAllowed(host, config.server?.auth) ? host : '127.0.0.1';
+};
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // State: <dataDir>/lan.json, logs: <dataDir>/lan-app.log, lan-proxy.log.
@@ -107,6 +114,7 @@ async function start() {
   // LAN_PORT is how a smoke run stands next to a live server instead of fighting
   // it for the configured port.
   const publicPort = Number(process.env.LAN_PORT || config.server?.port || 8787);
+  const lanHost = proxyHost(config);
   const internalPort = await freePort();
   const appLog = path.join(DATA, 'lan-app.log');
   const proxyLog = path.join(DATA, 'lan-proxy.log');
@@ -157,7 +165,7 @@ async function start() {
   }, null, 2));
 
   console.log(`[lan] app   ${app.pid}  -> 127.0.0.1:${internalPort}  (the only door: loopback)`);
-  console.log(`[lan] proxy ${proxy.pid} -> 0.0.0.0:${publicPort}       (this is what the phone opens)`);
+  console.log(`[lan] proxy ${proxy.pid} -> ${lanHost}:${publicPort}       (${lanHost === '127.0.0.1' ? 'LAN closed: server.auth.enabled is false' : 'this is what the phone opens'})`);
   console.log(`[lan] http://127.0.0.1:${publicPort}`);
   console.log(`[lan] pids in ${DATA}/lan.json, logs ${DATA}/lan-*.log`);
   return 0;
@@ -169,6 +177,7 @@ async function start() {
 async function runForeground() {
   const config = await loadConfig(ROOT);
   const publicPort = Number(process.env.LAN_PORT || config.server?.port || 8787);
+  const lanHost = proxyHost(config);
   const internalPort = await freePort();
   fs.mkdirSync(DATA, { recursive: true });
 
@@ -212,7 +221,7 @@ async function runForeground() {
   }, null, 2));
 
   console.log(`[lan] app ${app.pid} on 127.0.0.1:${internalPort} (loopback only)`);
-  console.log(`[lan] proxy ${proxy.pid} on 0.0.0.0:${publicPort} — this is what the phone opens`);
+  console.log(`[lan] proxy ${proxy.pid} on ${lanHost}:${publicPort} — ${lanHost === '127.0.0.1' ? 'LAN closed: server.auth.enabled is false' : 'this is what the phone opens'}`);
   console.log(`[lan] http://127.0.0.1:${publicPort} · Ctrl+C stops both\n`);
 
   // The app owns the agent: when it is gone, the LAN face must not outlive it.
@@ -233,7 +242,7 @@ async function status() {
   const proxyUp = alive(state.proxyPid);
   const answers = await health(state.publicPort);
   console.log(`[lan] app   ${state.appPid} ${appUp ? 'up' : 'DOWN'} (127.0.0.1:${state.internalPort})`);
-  console.log(`[lan] proxy ${state.proxyPid} ${proxyUp ? 'up' : 'DOWN'} (0.0.0.0:${state.publicPort})`);
+  console.log(`[lan] proxy ${state.proxyPid} ${proxyUp ? 'up' : 'DOWN'} (port ${state.publicPort})`);
   console.log(`[lan] public face ${answers ? 'answers' : 'does NOT answer'}`);
   return appUp && proxyUp && answers ? 0 : 1;
 }

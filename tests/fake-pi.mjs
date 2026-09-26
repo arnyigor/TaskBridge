@@ -57,12 +57,14 @@ async function approvalGate(toolCallId, toolName, args) {
 // response: that is what lets TaskBridge measure TG from usage (output tokens
 // over the time the deltas actually spanned).
 function finish(text, fail = false, errorMessage = 'Fixture model error') {
-  const parts = text.length >= 3 ? [text.slice(0, 1), text.slice(1, 2), text.slice(2)] : [text];
+  // `stream-many` answers are long: one delta per character, so a client can
+  // (re)connect in the middle of a stream.
+  const parts = text.length > 40 ? [...text] : text.length >= 3 ? [text.slice(0, 1), text.slice(1, 2), text.slice(2)] : [text];
   let index = 0;
   const emit = () => {
     send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: parts[index] } });
     index += 1;
-    if (index < parts.length) { setTimeout(emit, 25); return; }
+    if (index < parts.length) { setTimeout(emit, parts.length > 40 ? 8 : 25); return; }
     const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage } : {}) };
     persist(message);
     send({ type: 'message_end', message });
@@ -236,6 +238,6 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const modelError = command.message.includes('model-error-json')
       ? '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}'
       : 'Fixture model error';
-    pending = setTimeout(() => finish(`Ответ ${turn}`, command.message.includes('model-error'), modelError), command.message.includes('slow') ? 10000 : 80);
+    pending = setTimeout(() => finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError), command.message.includes('slow') ? 10000 : 80);
   }
 });

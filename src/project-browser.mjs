@@ -33,6 +33,15 @@ export async function resolveBrowsablePath(config, requested) {
   return resolved;
 }
 
+/** A folder chosen through the Desktop OS picker on the server machine. */
+export async function resolveLocalProjectPath(requested) {
+  if (typeof requested !== 'string' || !path.isAbsolute(requested)) throw fail('Выберите абсолютный путь к папке.');
+  let resolved;
+  try { resolved = await fs.realpath(requested); } catch { throw fail('Папка не найдена.', 'NOT_FOUND'); }
+  if (!(await fs.stat(resolved)).isDirectory()) throw fail('Выбранный путь не является папкой.');
+  return resolved;
+}
+
 export async function listDirectory(config, requested) {
   const roots = await canonicalRoots(config);
   if (!roots.length) throw fail('Просмотр папок не настроен: задайте projectBrowser.roots в config.json.', 'NOT_CONFIGURED');

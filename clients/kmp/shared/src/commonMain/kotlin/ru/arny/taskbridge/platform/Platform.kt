@@ -14,6 +14,9 @@ interface PlatformServices {
     /** "android" or "desktop": the prefix of this device's client id. */
     val kind: String
 
+    /** The installed app version, e.g. "1.1.5"; empty when the platform cannot know it (settings shows "—"). */
+    val appVersion: String
+
     val store: KeyValueStore
 
     /** An HTTP client whose socket reads never time out: SSE streams stay open for hours. */
@@ -43,6 +46,9 @@ interface PlatformServices {
 
     /** Opens a link or a file URL with the system (browser, viewer). */
     fun openUrl(url: String)
+
+    /** Desktop folder dialog; null when cancelled or unavailable on this device. */
+    fun chooseProjectFolder(): String? = null
 }
 
 /** Status and navigation bar icons follow the app theme, not the system one (Android); no-op on desktop. */

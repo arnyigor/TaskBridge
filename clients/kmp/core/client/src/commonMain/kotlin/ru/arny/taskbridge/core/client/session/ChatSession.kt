@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.Approval
@@ -86,6 +87,9 @@ data class ChatSessionState(
     val outbox: List<OutgoingMessage> = emptyList(),
     /** Which actions are running, so buttons can show progress and not double-fire. */
     val busy: Set<String> = emptySet(),
+    val lastEventAt: String? = null,
+    val lastEventType: String? = null,
+    val lastContactAt: String? = null,
 )
 
 /** One-shot things the screen reacts to (a snackbar, text back into the composer, navigation). */
@@ -146,14 +150,15 @@ class ChatSession(
     /** The network came back or the app returned to the foreground: skip the backoff wait. */
     fun reconnectNow() {
         wake.trySend(Unit)
+        refreshRequests.trySend(Unit)
     }
 
     // --- loading ----------------------------------------------------------------
 
     private suspend fun loadInitial() {
         try {
-            val task = api.task(taskId)
             val window = api.eventWindow(taskId, pageTurns)
+            val task = api.task(taskId)
             mutex.withLock {
                 val chat = ChatReducer(task, seedInitial = window.reachedStart)
                 for (event in window.events) chat.apply(event)
@@ -215,9 +220,11 @@ class ChatSession(
             val error: ApiError? = try {
                 val cursor = mutex.withLock { reducer?.cursor ?: 0 }
                 api.stream(taskId, cursor).collect { item ->
+                    _state.update { it.copy(lastContactAt = now()) }
                     when (item) {
                         is StreamItem.Retry -> serverRetry = item.millis
                         is StreamItem.Event -> onEvent(item.event)
+                        StreamItem.Heartbeat -> refreshRequests.trySend(Unit)
                     }
                     if (!gotSomething) {
                         gotSomething = true
@@ -261,7 +268,14 @@ class ChatSession(
             if (event.type == "USER_MESSAGE") {
                 event.string("commandId")?.let { id -> _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == id }) } }
             }
-            _state.update { it.copy(chat = chat.snapshot()) }
+            val kind = event.piFrame?.get("type")?.toString()?.trim('"') ?: event.type
+            val status = when (event.type) {
+                "USER_MESSAGE" -> "RUNNING"
+                "STATUS" -> event.string("status")
+                "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" -> event.type.removePrefix("TASK_")
+                else -> null
+            }
+            _state.update { it.copy(task = if (status != null) it.task?.copy(status = status) else it.task, chat = chat.snapshot(), lastEventAt = event.at ?: now(), lastEventType = kind) }
         }
         if (event.type.startsWith("APPROVAL_")) scope.launch { loadApprovals() }
         val frameType = event.piFrame?.get("type")?.toString()?.trim('"')
@@ -270,9 +284,12 @@ class ChatSession(
 
     private suspend fun refreshTask() {
         try {
+            val cursor = mutex.withLock { reducer?.cursor }
             val task = api.task(taskId)
             mutex.withLock {
                 val chat = reducer
+                // A response started before a new SSE event cannot settle that newer turn.
+                if (chat?.cursor != cursor) return@withLock
                 if (chat != null) chat.syncTask(task)
                 _state.update { it.copy(task = task, chat = chat?.snapshot() ?: it.chat) }
             }
@@ -353,11 +370,12 @@ class ChatSession(
             // Parked in the server queue: the banner above the composer shows it,
             // the bubble appears when it is really delivered.
             if (queued && chat != null) chat.removeOptimistic(commandId)
-            chat?.syncTask(task)
+            if (!queued) chat?.acknowledge(commandId)
             _state.update { s ->
-                s.copy(task = task, chat = chat?.snapshot() ?: s.chat, outbox = s.outbox.filterNot { it.commandId == commandId })
+                s.copy(chat = chat?.snapshot() ?: s.chat, outbox = s.outbox.filterNot { it.commandId == commandId })
             }
         }
+        refreshRequests.trySend(Unit)
     }
 
     /**
@@ -368,6 +386,7 @@ class ChatSession(
      */
     private suspend fun <T> withRetries(commandId: String, block: suspend () -> T): T? {
         var attempt = 0
+        var inFlightChecks = 0
         while (true) {
             try {
                 return block()
@@ -377,9 +396,17 @@ class ChatSession(
                 val error = failure.error
                 when {
                     error is ApiError.CommandInFlight -> {
+                        inFlightChecks += 1
+                        setStatus(commandId, OutgoingMessage.Status.Retrying(inFlightChecks, "Сервер принял команду, ожидается подтверждение агента"))
+                        if (inFlightChecks >= 30) {
+                            setStatus(commandId, OutgoingMessage.Status.Unknown)
+                            dropOptimistic(commandId)
+                            refreshRequests.trySend(Unit)
+                            return null
+                        }
                         delay(1000)
                         val status = runCatching { api.commandStatus(commandId) }.getOrNull()
-                        if (status?.done == true) {
+                        if (status?.done == true && status.status == "COMPLETED") {
                             refreshRequests.trySend(Unit)
                             removeFromOutbox(commandId)
                             return null
@@ -445,7 +472,13 @@ class ChatSession(
 
     fun compact() = act("compact", "Контекст сжимается…") { api.compact(taskId) }
 
-    fun setModel(model: ModelRef) = act("model") { api.setModel(taskId, model) }
+    fun setModel(model: ModelRef) = act("model") {
+        val updated = api.setModel(taskId, model)
+        mutex.withLock {
+            reducer?.syncTask(updated)
+            _state.update { it.copy(task = updated, chat = reducer?.snapshot() ?: it.chat) }
+        }
+    }
 
     fun setThinking(level: String) = act("thinking") { api.setThinking(taskId, level) }
 
@@ -491,6 +524,15 @@ class ChatSession(
     suspend fun readWorkspaceFile(path: String): Result<ByteArray> = runCatching { api.download(api.workspaceFileUrl(taskId, path)) }
 
     suspend fun readFile(fileId: String): Result<ByteArray> = runCatching { api.download(api.fileUrl(taskId, fileId)) }
+
+    suspend fun artifacts(): Result<List<String>> = runCatching { api.artifacts(taskId) }
+
+    suspend fun readArtifact(name: String): Result<ByteArray> = runCatching { api.download(api.artifactUrl(taskId, name)) }
+
+    suspend fun openArtifactOnComputer(name: String, reveal: Boolean): Result<Unit> = runCatching { api.openArtifact(taskId, name, reveal) }
+
+    /** The raw Pi state, as the web's debug «состояние Pi (JSON)» shows it. */
+    suspend fun state(): Result<JsonObject> = runCatching { api.state(taskId) }
 
     suspend fun openWorkspaceFileOnComputer(path: String, reveal: Boolean): Result<Unit> = runCatching { api.openWorkspaceFile(taskId, path, reveal) }
 

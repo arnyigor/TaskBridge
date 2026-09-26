@@ -30,6 +30,7 @@ object AppIcons {
     val Back = lineIcon("back", "M19 12H5", "M12 19l-7-7 7-7")
     val Send = lineIcon("send", "M22 2L11 13", "M22 2l-7 20-4-9-9-4 20-7z")
     val Stop = lineIcon("stop", "M7 7h10v10H7z", filled = true)
+    val StopAction = lineIcon("stopAction", "M4 4h16v16H4z", filled = true)
     val Add = lineIcon("add", "M12 5v14", "M5 12h14")
     val Attach = lineIcon("attach", "M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48")
     val More = lineIcon("more", "M12 5h.01", "M12 12h.01", "M12 19h.01")

@@ -54,8 +54,8 @@ class TaskBridgeApiTest {
     }
 
     @Test
-    fun pairingKeepsTheCookieAndSendsItAfterwards() = runBlocking<Unit> {
-        val connection = SimpleConnection("http://pc:8787")
+    fun pairingWithAnOldServerKeepsTheCookieAndSendsItAfterwards() = runBlocking<Unit> {
+        val connection = SimpleConnection("http://pc:8787", clientId = "android-1a2b3c4d")
         val api = api(connection) { request ->
             if (request.url.encodedPath == "/api/auth/pair") json("""{"ok":true}""", HttpStatusCode.OK,
                 HttpHeaders.SetCookie to listOf("taskbridge_session=123.abc.sig; Path=/; HttpOnly; SameSite=Strict; Max-Age=2678400"))
@@ -63,9 +63,28 @@ class TaskBridgeApiTest {
         }
         api.pair(" 123456 ")
         assertEquals("123.abc.sig", connection.sessionCookie)
+        assertEquals(null, connection.authToken)
         api.tasks()
         assertEquals("taskbridge_session=123.abc.sig", requests.last().headers[HttpHeaders.Cookie])
-        assertEquals("""{"code":"123456"}""", requests.first().bodyText())
+        assertEquals("""{"code":"123456","deviceName":"android-1a2b3c4d","clientKind":"android"}""", requests.first().bodyText())
+    }
+
+    @Test
+    fun pairingKeepsTheDeviceTokenAndSendsItAsBearer() = runBlocking<Unit> {
+        val token = "ab".repeat(32)
+        val connection = SimpleConnection("http://pc:8787", sessionCookie = "old.cookie.sig", clientId = "desktop-99")
+        val api = api(connection) { request ->
+            if (request.url.encodedPath == "/api/auth/pair") json("""{"ok":true,"deviceId":"d_1","token":"$token"}""", HttpStatusCode.OK,
+                HttpHeaders.SetCookie to listOf("taskbridge_session=$token; Path=/; HttpOnly"))
+            else json(Fixtures.text("tasks.json"))
+        }
+        api.pair("12345678")
+        assertEquals(token, connection.authToken)
+        assertEquals(null, connection.sessionCookie, "the token replaces a stale cookie")
+        api.tasks()
+        assertEquals("Bearer $token", requests.last().headers[HttpHeaders.Authorization])
+        assertEquals(null, requests.last().headers[HttpHeaders.Cookie])
+        assertTrue(requests.first().bodyText().contains("\"clientKind\":\"desktop\""))
     }
 
     @Test
@@ -101,6 +120,32 @@ class TaskBridgeApiTest {
         assertEquals("tail=2&before=40", requests.last().url.encodedQuery)
         api.answerApproval("t", "a1", allow = false)
         assertEquals("""{"decision":"DENY"}""", requests.last().bodyText())
+    }
+
+    @Test
+    fun projectBrowserUsesServerPathsAndRegistersTheChosenFolder() = runBlocking<Unit> {
+        val api = api { request ->
+            when (request.url.encodedPath) {
+                "/api/project-browser" -> json("""{"path":"G:\\AIModels","parent":null,"entries":[{"name":"Other","path":"G:\\AIModels\\Other"}]}""")
+                "/api/project-browser/register" -> json("""{"id":"other","name":"Other","path":"G:\\AIModels\\Other"}""", HttpStatusCode.Created)
+                else -> error("Unexpected route: ${request.url}")
+            }
+        }
+        val path = "G:\\AIModels\\Other"
+        val listing = api.projectFolders(path)
+        assertEquals("Other", listing.entries.single().name)
+        assertEquals(path, requests.first().url.parameters["path"])
+        val project = api.registerProject(path, "Other")
+        assertEquals("other", project.id)
+        assertEquals(path, TaskBridgeJson.parseToJsonElement(requests.last().bodyText()).jsonObject["path"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun desktopFolderRegistrationUsesTheLocalOnlyEndpoint() = runBlocking<Unit> {
+        val api = api { json("""{"id":"other","name":"Other","path":"G:\\Elsewhere"}""") }
+        api.registerLocalProject("G:\\Elsewhere")
+        assertEquals("/api/projects/local-register", requests.single().url.encodedPath)
+        assertEquals("G:\\Elsewhere", TaskBridgeJson.parseToJsonElement(requests.single().bodyText()).jsonObject["path"]?.jsonPrimitive?.content)
     }
 
     @Test

@@ -28,7 +28,7 @@ test('undoLastTurn permanently removes the clean failed exchange', async t => {
   const result = await manager.undoLastTurn('a');
   assert.deepEqual(result, { ok: true, text: 'сделай', fromSeq: 1, dropInitial: false });
 
-  const events = await store.readEvents('a', 0);
+  const events = (await store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.equal(events.some(e => e.type === 'USER_MESSAGE'), false, 'the message is gone from history');
   assert.ok(events.some(e => e.type === 'TURN_TRUNCATED'), 'a live marker notifies SSE clients');
   assert.equal(events.at(-1).data.fromSeq, 1);
@@ -82,7 +82,7 @@ test('undoLastTurn can retract the very first prompt of a session', async t => {
   await store.appendEvent('a', { ...at(), type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
   const result = await manager.undoLastTurn('a');
   assert.deepEqual(result, { ok: true, text: 'original', fromSeq: 1, dropInitial: true });
-  const events = await store.readEvents('a', 0);
+  const events = (await store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.equal(events.length, 1, 'only the marker is left');
   assert.equal(events[0].type, 'TURN_TRUNCATED');
   assert.equal(events[0].data.dropInitial, true);
@@ -93,7 +93,7 @@ test('truncateEvents keeps everything before the cursor', async t => {
   const { store } = await fixture(t);
   for (let seq = 1; seq <= 3; seq++) await store.appendEvent('a', { ...at(), type: 'TASK_QUEUED', message: String(seq) });
   await store.truncateEvents('a', 2);
-  const events = await store.readEvents('a', 0);
+  const events = (await store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.deepEqual(events.map(e => e.seq), [1]);
   // The next append continues from the truncated position; the first one is
   // always the TURN_TRUNCATED marker (undoLastTurn), so live SSE cursors
@@ -110,13 +110,13 @@ test('deleteTurns drops the chosen message and everything after it', async t => 
 
   const result = await manager.deleteTurns('a', 'user-1');
   assert.deepEqual(result, { ok: true, fromSeq: 1, dropInitial: false });
-  const events = await store.readEvents('a', 0);
+  const events = (await store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.equal(events.length, 1, 'only the marker is left');
   assert.equal(events[0].type, 'TURN_TRUNCATED');
   assert.equal(events[0].data.reason, 'delete');
 
   await assert.rejects(() => manager.deleteTurns('a', 'user-9'), err => err.code === 'NOT_FOUND');
-  await assert.rejects(() => manager.deleteTurns('a', 'assistant-1'), err => err.code === 'INPUT_INVALID');
+  await assert.rejects(() => manager.deleteTurns('a', 'assistant-1'), err => err.code === 'NOT_FOUND');
 });
 
 test('deleteTurns can drop the whole first exchange', async t => {
@@ -145,7 +145,7 @@ test('a truncation marker keeps the cursor monotonic, so a live client still see
 
   const marker = (await store.readEvents('a', 0)).find(e => e.type === 'TURN_TRUNCATED');
   assert.equal(marker.seq, high + 1, 'the marker lands above every seq the client has seen');
-  assert.deepEqual((await store.readEvents('a', 0, high)).map(e => e.type), ['TURN_TRUNCATED'], 'and `after=<cursor>` returns it');
+  assert.deepEqual((await store.readEvents('a', 0, high)).filter(e => e.type !== 'RUNTIME_STATE').map(e => e.type), ['TURN_TRUNCATED'], 'and `after=<cursor>` returns it');
 });
 
 test('editTurn refuses an unknown turn and an empty text', async t => {
@@ -179,7 +179,7 @@ test('forkTask branches the conversation through the chosen exchange and leaves 
   // The branch stops at the end of the chosen exchange, so it never carries a
   // question nobody has asked yet — and every copied event names the new session.
   const expected = source.filter(e => e.seq < third.seq);
-  const copied = await store.readEvents(forked.id, 0);
+  const copied = (await store.readEvents(forked.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.equal(copied.at(-1).type, 'TASK_FORKED');
   assert.deepEqual(
     copied.slice(0, expected.length).map(e => `${e.type}|${JSON.stringify(e.data)}`),
@@ -211,7 +211,7 @@ test('the operator message frame is not mistaken for the model answer', async t 
   await store.appendEvent('a', { ...at(), type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
   const result = await manager.undoLastTurn('a');
   assert.deepEqual(result, { ok: true, text: 'original', fromSeq: 1, dropInitial: true });
-  assert.equal((await store.readEvents('a', 0)).length, 1, 'the empty exchange is gone');
+  assert.equal((await store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE').length, 1, 'the empty exchange is gone');
 });
 
 test('an assistant message_end with real text still blocks the retry', async t => {
@@ -221,3 +221,27 @@ test('an assistant message_end with real text still blocks the retry', async t =
   await assert.rejects(() => manager.undoLastTurn('a'), err => err.code === 'NOT_ALLOWED');
 });
 
+
+
+test('deleting an assistant preserves its user and removes later history', async t => {
+  const { manager, store } = await fixture(t, 'SUCCEEDED');
+  await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', data: { text: 'keep me' } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
+  await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', data: { text: 'later' } });
+  const result = await manager.deleteTurns('a', 'assistant-1');
+  assert.equal(result.keepUser, true);
+  const events = (await store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.deepEqual(events.filter(e => e.type === 'USER_MESSAGE').map(e => e.data.text), ['keep me']);
+  assert.equal(events.at(-1).data.keepUser, true);
+  assert.equal(events.at(-1).data.fromSeq, 2);
+});
+
+test('deleting the initial answer keeps the initial question', async t => {
+  const { manager, store } = await fixture(t, 'SUCCEEDED');
+  await store.appendEvent('a', { ...at(), type: 'TASK_SUCCEEDED', data: {} });
+  await manager.deleteTurns('a', 'assistant-initial');
+  assert.equal(manager.getTask('a').prompt, 'original');
+  const marker = (await store.readEvents('a', 0)).findLast(e => e.type === 'TURN_TRUNCATED');
+  assert.equal(marker.data.dropInitial, false);
+  assert.equal(marker.data.keepUser, true);
+});

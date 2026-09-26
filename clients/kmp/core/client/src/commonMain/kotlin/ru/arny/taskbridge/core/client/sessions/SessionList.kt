@@ -101,6 +101,24 @@ class SessionList(
         wake.trySend(Unit)
     }
 
+    suspend fun projectFolders(path: String? = null) = runCatching { api.projectFolders(path) }
+
+    suspend fun registerProject(path: String, name: String): Result<ru.arny.taskbridge.core.api.Project> = runCatching {
+        val project = api.registerProject(path, name)
+        _state.update { current -> current.copy(projects = current.projects + project) }
+        infoTick = 0
+        refresh()
+        project
+    }
+
+    suspend fun registerLocalProject(path: String): Result<ru.arny.taskbridge.core.api.Project> = runCatching {
+        val project = api.registerLocalProject(path)
+        _state.update { current -> current.copy(projects = current.projects.filterNot { it.id == project.id } + project) }
+        infoTick = 0
+        refresh()
+        project
+    }
+
     private suspend fun load() {
         try {
             val listed = api.tasks()
@@ -139,7 +157,14 @@ class SessionList(
         refresh()
     }
 
-    suspend fun models(refresh: Boolean = false): Result<ModelCatalog> = runCatching { api.models(refresh) }
+    private var cachedModels: ModelCatalog? = null
+
+    /** Show the last catalogue immediately while the server refreshes it. */
+    fun peekModels(): ModelCatalog? = cachedModels
+
+    suspend fun models(refresh: Boolean = false): Result<ModelCatalog> = runCatching {
+        api.models(refresh).also { cachedModels = it }
+    }
 
     /** Creates a session; files go up first and travel with the first prompt. */
     suspend fun create(

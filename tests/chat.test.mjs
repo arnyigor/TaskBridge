@@ -275,7 +275,8 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     './transport.mjs': transportModule,
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
-    './vendor/purify.mjs': { default: { sanitize: html => html } }
+    './vendor/purify.mjs': { default: { sanitize: html => html } },
+    './vendor/qrcode.mjs': await import('../web/vendor/qrcode.mjs')
   });
   const localStorageStub = {
     store: {},

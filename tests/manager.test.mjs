@@ -138,7 +138,7 @@ test('a busy local model queues the prompt instead of refusing it', async t => {
   assert.equal(followUp.queueReason, 'MODEL_BUSY');
   assert.equal(followUp.pendingPrompts[0].text, 'позже');
   const waitingEvents = await f.store.readEvents('a', 0);
-  assert.deepEqual(waitingEvents.map(event => event.type), ['QUEUE_WAITING', 'PROMPT_QUEUED'], 'only the waiting state and the queued entry are recorded');
+  assert.deepEqual(waitingEvents.filter(event => event.type !== 'RUNTIME_STATE').map(event => event.type), ['QUEUE_WAITING', 'PROMPT_QUEUED'], 'only the waiting state and the queued entry are recorded');
   assert.equal(waitingEvents.some(event => event.type === 'USER_MESSAGE'), false, 'nothing is sent to Pi while waiting');
   assert.deepEqual(f.manager.queue, [queued.id, 'a']);
 
@@ -309,7 +309,7 @@ test('restart restores a queued prompt and fails only what was really running', 
   await f.store.save({ ...f.task, id: 'running', status: 'RUNNING', workspacePath: f.root });
   await f.manager.init();
 
-  assert.equal(f.manager.getTask('running').errorCode, 'FAILED_RECOVERY');
+  assert.equal(f.manager.getTask('running').errorCode, 'SESSION_LOST');
   const restored = f.manager.getTask('queued');
   assert.equal(restored.status, 'QUEUED');
   assert.equal(restored.queueReason, 'RESTORED');
@@ -545,7 +545,7 @@ test('a session created while another one works waits in the queue instead of fa
   assert.equal(created.queueReason, 'BUSY');
   assert.equal(created.current, 'В очереди');
   assert.ok(f.manager.queue.includes(created.id));
-  const events = await f.store.readEvents(created.id, 0);
+  const events = (await f.store.readEvents(created.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.deepEqual(events.map(event => event.type), ['QUEUE_WAITING'], 'the wait is recorded, nothing was lost');
 });
 
@@ -927,7 +927,7 @@ test('selectVariant persists the chosen answer and validates it', async t => {
   await f.store.appendEvent('a', { at: new Date().toISOString(), taskId: 'a', type: 'TURN_VARIANT_START', message: '', data: { turnSeq: 1, variantId: 'v2' } });
   const result = await f.manager.selectVariant('a', { turnSeq: 1, variantId: '1' });
   assert.deepEqual(result, { ok: true, turnSeq: 1, variantId: '1', total: 2 });
-  const events = await f.store.readEvents('a', 0);
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.equal(events.at(-1).type, 'TURN_VARIANT_SELECTED');
   assert.deepEqual(events.at(-1).data, { turnSeq: 1, variantId: '1' });
   await assert.rejects(() => f.manager.selectVariant('a', { turnSeq: 1, variantId: 'нет' }), err => err.code === 'NOT_FOUND');
@@ -1154,4 +1154,44 @@ test('pending prompt files survive TaskBridge restart without being dropped', as
     waiter.resolve();
   }
   await m2.close();
+});
+
+
+test('a hung RPC releases the session and model slot without restarting the server', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  let killed = 0;
+  f.pi.getState = async () => { throw Object.assign(new Error('Pi is silent'), { code: 'PI_RPC_HUNG' }); };
+  f.pi.killTree = async () => { killed++; f.pi.closed = true; };
+  await assert.rejects(() => f.manager.message('a', 'next'), { code: 'PI_RPC_HUNG' });
+  assert.equal(killed, 1);
+  assert.equal(f.manager.runtimes.has('a'), false);
+  assert.equal(f.manager.activeTaskId, null);
+  assert.equal(f.manager.admitting, false);
+  assert.equal(f.manager.getTask('a').status, 'FAILED');
+  assert.equal(f.manager.getTask('a').errorCode, 'PI_RPC_HUNG');
+});
+
+test('a slow but live RPC is not killed on send failure', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  let killed = false;
+  f.pi.getState = async () => { throw Object.assign(new Error('Pi is busy'), { code: 'PI_RPC_SLOW' }); };
+  f.pi.killTree = async () => { killed = true; };
+  await assert.rejects(() => f.manager.message('a', 'next'), { code: 'PI_RPC_SLOW' });
+  assert.equal(killed, false);
+  assert.equal(f.manager.runtimes.get('a'), f.runtime);
+  assert.equal(f.manager.admitting, false);
+});
+
+
+test('changing model also retires an unresponsive session instead of hiding the RPC failure', async t => {
+  const f = await fixture(t);
+  f.pi.getState = async () => { throw Object.assign(new Error('Pi stopped responding'), { code: 'PI_RPC_HUNG' }); };
+  let killed = 0;
+  f.pi.killTree = async () => { killed++; };
+  await assert.rejects(() => f.manager.setModel('a', 'remote', 'model'), { code: 'PI_RPC_HUNG' });
+  assert.equal(killed, 1);
+  assert.equal(f.manager.runtimes.has('a'), false);
+  assert.equal(f.manager.getTask('a').status, 'FAILED');
 });

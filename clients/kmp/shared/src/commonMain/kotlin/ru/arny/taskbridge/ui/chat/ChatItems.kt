@@ -101,6 +101,11 @@ fun UserBubble(
     hoverActions: Boolean = false,
 ) {
     val colors = LocalStatusColors.current
+    val deliveryIcon = when {
+        item.delivery.startsWith("Подтверждение") || item.delivery.startsWith("Ошибка") -> AppIcons.Alert
+        item.pending || item.delivery.startsWith("В очереди") || item.delivery.startsWith("Сервер готовит") || item.delivery.startsWith("Ожидает") -> AppIcons.Clock
+        else -> AppIcons.Check
+    }
     val menu = remember { MenuAnchor() }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -114,7 +119,7 @@ fun UserBubble(
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                     if (item.mode == "steer") {
-                        Text("вклинилось в ответ", style = MaterialTheme.typography.labelSmall, color = colors.onUserBubble.copy(alpha = 0.7f))
+                        Text("инструкция по ходу работы", style = MaterialTheme.typography.labelSmall, color = colors.onUserBubble.copy(alpha = 0.7f))
                     }
                     SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyLarge) }
                     if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
@@ -131,12 +136,10 @@ fun UserBubble(
                 actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить отсюда и ниже", it) }
             }
             Spacer(Modifier.width(4.dp))
-            if (item.pending) {
-                Icon(AppIcons.Clock, "Отправляется", Modifier.size(12.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.width(4.dp))
-            }
-            val meta = listOfNotNull(source, time.ifEmpty { null }).joinToString(" · ")
-            Text(meta, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Icon(deliveryIcon, item.delivery, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(4.dp))
+            val meta = listOfNotNull(source, time.ifEmpty { null }, item.delivery).joinToString(" · ")
+            if (meta.isNotEmpty()) Text(meta, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -160,7 +163,7 @@ fun AssistantMessage(
     var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
-    Column(Modifier.fillMaxWidth().padding(end = 8.dp).hoverable(interaction).animateContentSize()) {
+    Column(Modifier.fillMaxWidth().padding(end = 8.dp).hoverable(interaction).let { if (item.active) it else it.animateContentSize() }) {
         if (item.thinking.isNotBlank()) ThinkingBlock(item.thinking, streaming = item.active && item.text.isBlank())
         if (item.tools.isNotEmpty()) ToolList(item.tools, loadToolOutput, onCopyText, onOpenPath)
         // A picture a tool wrote shows at once, while the answer runs; once the run
@@ -175,13 +178,24 @@ fun AssistantMessage(
                     item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
                         SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
                     }
-                    item.active -> TypingIndicator()
+                    item.active -> Column {
+                        TypingIndicator()
+                        Muted(when {
+                            item.id.startsWith("assistant-pending-") -> "Ожидается подтверждение отправки"
+                            item.tools.any { it.state == ToolState.RUNNING } -> "Агент выполняет команды"
+                            item.thinking.isNotBlank() || item.tools.isNotEmpty() -> "Агент работает · итоговый ответ ещё не получен"
+                            else -> "Агент принял сообщение · ожидается начало работы"
+                        })
+                    }
                     item.cutOff -> Muted("Запрос прерван")
                     item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null) Muted("Без текста")
                     item.final && item.error == null -> Muted("Ответ не был получен.")
                 }
                 if (item.active && item.text.isNotBlank()) TypingIndicator()
-                if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
+                // Turn output files (created and merely viewed by tools) stay in the
+                // data and the web's «Файлы агента» panel, but the chat does not
+                // display them: every file a tool touches otherwise floods the chat
+                // with chips.
                 item.error?.let { error ->
                     Surface(
                         color = MaterialTheme.colorScheme.errorContainer,
@@ -216,11 +230,23 @@ fun AssistantMessage(
                     Spacer(Modifier.width(6.dp))
                 }
                 if (time.isNotEmpty()) Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                val answerStatus = when {
+                    item.partial -> "Часть истории"
+                    item.cutOff -> "Прервано"
+                    item.error != null || item.status == "FAILED" -> "Ошибка"
+                    item.status == "CANCELLED" -> "Остановлено"
+                    item.final && (item.status == "SUCCEEDED" || item.status == "DONE") -> "Готово"
+                    else -> null
+                }
+                if (answerStatus != null) {
+                    if (time.isNotEmpty()) Spacer(Modifier.width(6.dp))
+                    Text("· $answerStatus", style = MaterialTheme.typography.labelSmall, color = if (answerStatus == "Ошибка") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
                 Spacer(Modifier.weight(1f))
                 if (item.text.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать", actions.copy)
                 actions.regenerate?.let { SmallAction(AppIcons.Refresh, "Ответить заново", it) }
                 actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка отсюда", it) }
-                actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить вопрос с ответом и всё ниже", it) }
+                actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить ответ и всё ниже", it) }
                 actions.continueAnswer?.let { SmallAction(AppIcons.Play, "Продолжить ответ", it) }
                 if (actions.edit != null) Box {
                     SmallAction(AppIcons.More, "Ещё") { buttonMenu = true }
@@ -301,12 +327,14 @@ private fun ThinkingBlock(thinking: String, streaming: Boolean) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     Column(Modifier.padding(bottom = 6.dp).then(pinned.modifier)) {
         Row(
-            Modifier.clip(RoundedCornerShape(8.dp)).clickable { pinned.toggle { open = !open } }.padding(vertical = 4.dp, horizontal = 2.dp),
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { pinned.toggle { open = !open } }.padding(vertical = 4.dp, horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(if (open) AppIcons.ChevronDown else AppIcons.ChevronRight, null, Modifier.size(14.dp), tint = muted)
             Spacer(Modifier.width(4.dp))
-            Text(if (streaming) "Думает…" else "Размышления", style = MaterialTheme.typography.labelMedium, color = muted)
+            // The character count shows that the model received the message and is
+            // producing output, the way the web's «Рассуждение · N симв.» does.
+            Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted)
         }
         if (!open && streaming) {
             Text(
@@ -579,7 +607,7 @@ private fun ToolRow(
 
 /** Attachments or results: pictures as previews, everything else as chips; a tap opens the viewer. */
 @Composable
-private fun FileList(
+internal fun FileList(
     files: List<FileRef>,
     onOpenFile: (fileId: String, name: String) -> Unit,
     loadFile: suspend (fileId: String) -> Result<ByteArray>,
@@ -634,6 +662,24 @@ fun NoteRow(item: ChatItem.Note) {
 
 /** The chat list, for blocks that unfold in place (see [rememberPinned]); null outside the chat. */
 val LocalChatListState = staticCompositionLocalOf<LazyListState?> { null }
+
+/** Keep the visible part of a streaming answer still as its height grows. */
+class StreamingMessageAnchor(private val list: LazyListState) {
+    private var top = Float.NaN
+    private var height: Int? = null
+
+    val modifier: Modifier = Modifier.onGloballyPositioned { coordinates ->
+        val y = coordinates.positionInRoot().y
+        val newHeight = coordinates.size.height
+        val shift = y - top
+        if (height != null && newHeight != height && !top.isNaN() && shift != 0f && !list.isScrollInProgress) {
+            list.dispatchRawDelta(-shift)
+        } else {
+            top = y
+        }
+        height = newHeight
+    }
+}
 
 /**
  * Keeps a block's top edge still while it unfolds or folds from its header.

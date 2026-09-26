@@ -31,6 +31,18 @@ fun displayStateOf(task: Task): DisplayState = when (task.status) {
     else -> DisplayState.UNKNOWN
 }
 
+/** The granular live stage of a run for the status line, the way the web's ACTIVITY_LABELS say. */
+fun stageLabel(status: String?): String = when (status) {
+    "QUEUED" -> "В очереди"
+    "PREPARING" -> "Подготовка"
+    "PREFLIGHT" -> "Проверка"
+    "RUNNING" -> "Pi работает"
+    "WAITING_USER" -> "Ждёт подтверждения"
+    "VERIFYING" -> "Собираю результат и проверки"
+    "CANCELLING" -> "Останавливаю…"
+    else -> "Работает"
+}
+
 /** What the session is doing right now, for the second line of a list row. */
 fun activityOf(task: Task): String? {
     val state = displayStateOf(task)

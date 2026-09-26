@@ -28,18 +28,25 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.jsonObject
 
 /** Where the daemon is and how this device authenticates to it. */
 interface Connection {
     /** e.g. http://192.168.1.10:8787, without a trailing slash. */
     val baseUrl: String
 
-    /** The `taskbridge_session` cookie value after pairing, or null. */
+    /** The `taskbridge_session` cookie value after pairing with a server older than device tokens, or null. */
     var sessionCookie: String?
+
+    /** This device's token (server R1.2), sent as `Authorization: Bearer`; wins over [sessionCookie]. */
+    var authToken: String?
 
     /** A stable id of this installation, sent with every command. */
     val clientId: String
@@ -49,6 +56,7 @@ class SimpleConnection(
     override val baseUrl: String,
     override var sessionCookie: String? = null,
     override val clientId: String = "client",
+    override var authToken: String? = null,
 ) : Connection
 
 /** A file picked on the device, read into memory (limits come from /api/info). */
@@ -57,6 +65,7 @@ class UploadFile(val name: String, val mimeType: String?, val bytes: ByteArray)
 /** One item of a live session stream. */
 sealed interface StreamItem {
     data class Event(val event: TaskEvent) : StreamItem
+    data object Heartbeat : StreamItem
 
     /** The server asked for this reconnect delay (`retry:`). */
     data class Retry(val millis: Long) : StreamItem
@@ -87,12 +96,26 @@ class TaskBridgeApi(
     }
 
     /**
-     * Exchanges the pairing code shown on the PC for a session cookie and keeps
-     * it in [connection]. The cookie is signed by the server and valid for up to
-     * 31 days; a 401 later means pairing again.
+     * Exchanges the pairing code shown on the PC for this device's token and
+     * keeps it in [connection]. The token lives until the PC revokes the device;
+     * a 401 later means pairing again. A server older than device tokens answers
+     * with a signed cookie only — kept as before.
      */
     suspend fun pair(code: String) {
-        val response = send(HttpMethod.Post, "/api/auth/pair", buildJsonObject { put("code", code.trim()) })
+        val kind = connection.clientId.substringBefore('-').takeIf { it == "android" || it == "desktop" } ?: "desktop"
+        val response = send(HttpMethod.Post, "/api/auth/pair", buildJsonObject {
+            put("code", code.trim())
+            put("deviceName", connection.clientId)
+            put("clientKind", kind)
+        })
+        val token = runCatching {
+            TaskBridgeJson.parseToJsonElement(response.bodyAsText()).jsonObject["token"]?.jsonPrimitive?.contentOrNull
+        }.getOrNull()
+        if (token != null) {
+            connection.authToken = token
+            connection.sessionCookie = null
+            return
+        }
         val cookie = response.headers.getAll(HttpHeaders.SetCookie).orEmpty()
             .firstNotNullOfOrNull { parseSessionCookie(it) }
         if (cookie != null) connection.sessionCookie = cookie
@@ -101,6 +124,19 @@ class TaskBridgeApi(
     // --- projects and models -------------------------------------------------
 
     suspend fun projects(): List<Project> = get("/api/projects", ListSerializer(Project.serializer()))
+
+    suspend fun projectFolders(path: String? = null): ProjectFolderListing =
+        get("/api/project-browser" + (path?.let { "?path=${it.encodeURLParameter()}" } ?: ""), ProjectFolderListing.serializer())
+
+    suspend fun registerProject(path: String, name: String): Project =
+        call(HttpMethod.Post, "/api/project-browser/register", Project.serializer(), buildJsonObject {
+            put("path", path)
+            put("name", name)
+        })
+
+    /** Registers a folder chosen locally on the Pi server's computer. */
+    suspend fun registerLocalProject(path: String): Project =
+        call(HttpMethod.Post, "/api/projects/local-register", Project.serializer(), buildJsonObject { put("path", path) })
 
     suspend fun models(refresh: Boolean = false): ModelCatalog =
         get("/api/models" + if (refresh) "?refresh=1" else "", ModelCatalog.serializer())
@@ -245,6 +281,8 @@ class TaskBridgeApi(
     /** A URL the platform can download or open (attachments, workspace files). */
     fun fileUrl(id: String, fileId: String): String = "$base/api/tasks/${id.path()}/files/${fileId.path()}"
 
+    fun artifactUrl(id: String, name: String): String = "$base/api/tasks/${id.path()}/artifacts/${name.path()}"
+
     fun workspaceFileUrl(id: String, path: String): String = "$base/api/tasks/${id.path()}/workspace-file?path=${path.encodeURLParameter()}"
 
     /**
@@ -272,6 +310,22 @@ class TaskBridgeApi(
             put("reveal", reveal)
         })
     }
+
+    /** The same for a task artifact. */
+    suspend fun openArtifact(id: String, name: String, reveal: Boolean) {
+        send(HttpMethod.Post, "/api/tasks/${id.path()}/artifacts/${name.path()}/open", buildJsonObject {
+            put("confirm", true)
+            put("reveal", reveal)
+        })
+    }
+
+    /** The task's artifacts (tool output logs, diff patches), in the server's order. */
+    suspend fun artifacts(id: String): List<String> =
+        get("/api/tasks/${id.path()}/artifacts", ListSerializer(String.serializer()))
+
+    /** The raw Pi session state (GET /api/tasks/:id/state → { state: … }), unwrapped. */
+    suspend fun state(id: String): JsonObject =
+        get("/api/tasks/${id.path()}/state", JsonObject.serializer())["state"]?.jsonObject ?: JsonObject(emptyMap())
 
     // --- live stream -----------------------------------------------------------
 
@@ -301,6 +355,7 @@ class TaskBridgeApi(
                     } catch (timeout: TimeoutCancellationException) {
                         throw ApiException(ApiError.Unreachable("Поток молчит дольше ${idleTimeoutMillis / 1000} с"))
                     } ?: break
+                    if (line.startsWith(":")) emit(StreamItem.Heartbeat)
                     val message = parser.feed(line)
                     val retry = parser.retryMillis
                     if (retry != null && retry != announcedRetry) {
@@ -331,12 +386,12 @@ class TaskBridgeApi(
 
     private suspend fun send(method: HttpMethod, path: String, body: kotlinx.serialization.json.JsonElement? = null): HttpResponse {
         val response = guard {
-            http.request {
+            withTimeout(if (method == HttpMethod.Get) 30_000L else 180_000L) { http.request {
                 this.method = method
                 url(base + path)
                 authorize()
                 if (body != null) setBody(TextContent(TaskBridgeJson.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), body), ContentType.Application.Json))
-            }
+            } }
         }
         if (!response.status.isSuccess()) throw ApiException(apiErrorOf(response.status.value, response.bodyAsText()))
         return response
@@ -354,6 +409,8 @@ class TaskBridgeApi(
 
     private suspend fun guard(block: suspend () -> HttpResponse): HttpResponse = try {
         block()
+    } catch (error: TimeoutCancellationException) {
+        throw ApiException(ApiError.Unreachable("Сервер не ответил вовремя. Исход команды уточняется по истории.", error))
     } catch (error: CancellationException) {
         throw error
     } catch (error: ApiException) {
@@ -363,7 +420,9 @@ class TaskBridgeApi(
     }
 
     private fun io.ktor.client.request.HttpRequestBuilder.authorize() {
-        connection.sessionCookie?.let { header(HttpHeaders.Cookie, "$SESSION_COOKIE=$it") }
+        val token = connection.authToken
+        if (token != null) header(HttpHeaders.Authorization, "Bearer $token")
+        else connection.sessionCookie?.let { header(HttpHeaders.Cookie, "$SESSION_COOKIE=$it") }
     }
 
     private fun CreateTaskRequest.withClient() = copy(clientId = clientId ?: connection.clientId)

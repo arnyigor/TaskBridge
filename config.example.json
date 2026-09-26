@@ -11,7 +11,12 @@
       "busyTimeoutMs": 5000
     },
     "auth": {
-      "enabled": false
+      "enabled": false,
+      "allowedOrigins": []
+    },
+    "tailscale": {
+      "ip": null,
+      "httpsUrl": null
     },
     "https": {
       "enabled": false,

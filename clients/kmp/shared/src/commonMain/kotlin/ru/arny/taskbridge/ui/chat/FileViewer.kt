@@ -52,7 +52,30 @@ sealed interface FileTarget {
     }
 
     data class Attachment(val id: String, override val name: String) : FileTarget
+
+    /** A task artifact (a tool output log, diff.patch, …), addressed by name. */
+    data class Artifact(override val name: String) : FileTarget
 }
+
+/** Preserve viewer identity when its chat is restored; image bytes are reloaded from the API. */
+internal val FileTargetSaver = androidx.compose.runtime.saveable.Saver<FileTarget?, List<String>>(
+    save = { target ->
+        when (target) {
+            is FileTarget.Workspace -> listOf("workspace", target.path)
+            is FileTarget.Attachment -> listOf("attachment", target.id, target.name)
+            is FileTarget.Artifact -> listOf("artifact", target.name)
+            null -> emptyList()
+        }
+    },
+    restore = { parts ->
+        when (parts.firstOrNull()) {
+            "workspace" -> FileTarget.Workspace(parts[1])
+            "attachment" -> FileTarget.Attachment(parts[1], parts[2])
+            "artifact" -> FileTarget.Artifact(parts[1])
+            else -> null
+        }
+    },
+)
 
 private const val SHOWN_BYTES = 300_000
 
@@ -60,7 +83,7 @@ private const val SHOWN_BYTES = 300_000
 private sealed interface Loaded {
     data class Text(val text: String, val bytes: Int, val cut: Boolean) : Loaded
     data class Binary(val bytes: Int) : Loaded
-    data class Picture(val bitmap: ImageBitmap, val bytes: Int) : Loaded
+    data class Picture(val bitmap: ImageBitmap, val original: ByteArray) : Loaded
     data class Failed(val message: String) : Loaded
 }
 
@@ -80,12 +103,13 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
         val result = when (target) {
             is FileTarget.Workspace -> session.readWorkspaceFile(target.path)
             is FileTarget.Attachment -> session.readFile(target.id)
+            is FileTarget.Artifact -> session.readArtifact(target.name)
         }
         loaded = result.fold(
             onSuccess = { bytes ->
                 val picture = if (isImageName(target.name)) decodeImage(bytes) else null
                 when {
-                    picture != null -> Loaded.Picture(picture, bytes.size)
+                    picture != null -> Loaded.Picture(picture, bytes)
                     looksBinary(bytes) -> Loaded.Binary(bytes.size)
                     else -> Loaded.Text(bytes.copyOf(minOf(bytes.size, SHOWN_BYTES)).decodeToString(), bytes.size, bytes.size > SHOWN_BYTES)
                 }
@@ -97,6 +121,7 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
         val result = when (target) {
             is FileTarget.Workspace -> session.openWorkspaceFileOnComputer(target.path, reveal)
             is FileTarget.Attachment -> session.openFileOnComputer(target.id, reveal)
+            is FileTarget.Artifact -> session.openArtifactOnComputer(target.name, reveal)
         }
         notice = result.fold(
             onSuccess = { if (reveal) "Показано в папке на компьютере" else "Открыто на компьютере" },
@@ -107,8 +132,12 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
     val info = when (val state = loaded) {
         is Loaded.Text -> formatBytes(state.bytes.toLong()) + if (state.cut) " · показано начало" else ""
         is Loaded.Binary -> formatBytes(state.bytes.toLong())
-        is Loaded.Picture -> "${state.bitmap.width}×${state.bitmap.height} · " + formatBytes(state.bytes.toLong())
+        is Loaded.Picture -> "${state.bitmap.width}×${state.bitmap.height} · " + formatBytes(state.original.size.toLong())
         else -> null
+    }
+    (loaded as? Loaded.Picture)?.takeIf { platform.kind == "android" }?.let { picture ->
+        PictureViewer(picture.bitmap, picture.original, target.name, onDismiss)
+        return
     }
     AdaptiveSheet(
         title = target.name,

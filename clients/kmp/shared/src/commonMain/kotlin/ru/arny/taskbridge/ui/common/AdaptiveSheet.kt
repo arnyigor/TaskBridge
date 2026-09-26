@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -57,6 +59,11 @@ fun AdaptiveSheet(
     footer: (@Composable RowScope.() -> Unit)? = null,
     /** Under the title, outside the scroll: stays put while the content scrolls (a search field). */
     pinned: (@Composable () -> Unit)? = null,
+    /** Like [content], but for lazy lists: the column is not scrollable and the list fills the
+     *  remaining height (weight with fill=true in a bounded, non-scrollable column). A LazyColumn
+     *  nested in the scrollable column with fill=false gets zero height — weight in a scrollable
+     *  column is not sized to the remaining space. */
+    lazyContent: (LazyListScope.() -> Unit)? = null,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val body: @Composable ColumnScope.(Boolean) -> Unit = { wide ->
@@ -70,10 +77,17 @@ fun AdaptiveSheet(
             if (wide) IconButton(onClick = onDismiss) { Icon(AppIcons.Close, "Закрыть") }
         }
         if (pinned != null) Box(Modifier.padding(horizontal = 24.dp).padding(top = 16.dp)) { pinned() }
-        Column(
-            Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(top = 16.dp, bottom = 8.dp),
-            content = content,
-        )
+        if (lazyContent != null) {
+            LazyColumn(
+                Modifier.weight(1f, fill = true).padding(horizontal = 24.dp).padding(top = 16.dp, bottom = 8.dp),
+                content = lazyContent,
+            )
+        } else {
+            Column(
+                Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(top = 16.dp, bottom = 8.dp),
+                content = content,
+            )
+        }
         if (footer != null) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),

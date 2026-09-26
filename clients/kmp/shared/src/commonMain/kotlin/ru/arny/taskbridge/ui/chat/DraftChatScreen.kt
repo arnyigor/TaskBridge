@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -17,6 +18,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,10 +30,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.sessions.messageOf
+import ru.arny.taskbridge.ui.sessions.ModelPicker
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
 import ru.arny.taskbridge.ui.theme.AppIcons
 
@@ -54,14 +59,21 @@ fun DraftChatScreen(
     var text by remember(draft) { mutableStateOf(TextFieldValue("")) }
     var files by remember(draft) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var sending by remember(draft) { mutableStateOf(false) }
+    var model by remember(draft) { mutableStateOf<ModelRef?>(draft.model) }
+    var catalog by remember(draft) { mutableStateOf<ModelCatalog?>(null) }
     val pickFiles = rememberFilePicker { picked -> files = files + picked }
-    val setup = listOfNotNull(draft.projectName, draft.model?.label?.takeIf { it != "—" }, draft.thinking?.let { thinkingLabel(it) }).joinToString(" · ")
+    val setup = listOfNotNull(draft.projectName, model?.label?.takeIf { it != "—" }, draft.thinking?.let { thinkingLabel(it) }).joinToString(" · ")
+
+    LaunchedEffect(draft.commandId) {
+        connection.sessions.models().onSuccess { catalog = it }
+            .onFailure { snackbar.showSnackbar(messageOf(it)) }
+    }
 
     fun send() {
         if (sending || (text.text.isBlank() && files.isEmpty())) return
         sending = true
         scope.launch {
-            connection.sessions.create(draft.projectId, text.text.ifBlank { "Посмотри приложенные файлы" }, draft.model, draft.thinking, draft.title, files, draft.commandId)
+            connection.sessions.create(draft.projectId, text.text.ifBlank { "Посмотри приложенные файлы" }, model, draft.thinking, draft.title, files, draft.commandId)
                 .onSuccess { onCreated(it.id) }
                 .onFailure { snackbar.showSnackbar(messageOf(it)) }
             sending = false
@@ -87,6 +99,9 @@ fun DraftChatScreen(
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 EmptyState(AppIcons.Chat, "Что сделать агенту?", "$setup\nСессия появится на компьютере с первым сообщением.")
+            }
+            Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                ModelPicker(catalog, model, graph.settings, onPick = { model = it })
             }
             Composer(
                 value = text,

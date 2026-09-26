@@ -127,6 +127,10 @@
       <h2>Код для телефона</h2>
       <div id="pairingCode" class="pairingCode">—</div>
       <p class="muted small" id="pairingExpiry"></p>
+      <div id="pairingQr" class="pairingQr" aria-label="QR-код для приложения TaskBridge"></div>
+      <p class="muted small">Приложение TaskBridge: отсканируйте QR. Браузер: введите код.</p>
+      <h3 class="small">Подключённые устройства</h3>
+      <ul id="pairedDevices" class="pairedDevices"></ul>
       <button id="pairingClose" type="button">Закрыть</button>
     </div>
   </div>
@@ -391,8 +395,10 @@
         </div>
         <div id="applyInfo" class="muted small"></div>
 
-        <label class="fieldLabel">Файлы агента</label>
-        <div id="outputFiles" class="fileCards muted">—</div>
+        <div id="agentFilesBlock" class="hidden">
+          <label class="fieldLabel">Файлы агента</label>
+          <div id="outputFiles" class="fileCards muted">—</div>
+        </div>
 
         <label class="fieldLabel">Artifacts</label>
         <div id="artifacts" class="artifacts muted">—</div>
@@ -460,6 +466,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260921-41"></script>
+  <script type="module" src="/app.js?v=20260925-42"></script>
 </body>
 </html>

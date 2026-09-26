@@ -78,6 +78,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var clientId: String? = null,
         var commandId: String? = null,
         var mode: String? = null,
+        var delivery: String = "Передано агенту",
     )
 
     private class Variants(val ids: MutableList<String>, var selected: String?)
@@ -104,6 +105,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var thinkingPrefix = ""
     private var textSeparator = ""
     private var separatorApplied = false
+    private var initialPromptAccepted = false
+    /** Pi may accept several steers before answering any of them. Its user frame
+     * identifies which accepted prompt the following assistant frame belongs to. */
+    private val piUsersSeen = mutableSetOf<String>()
+    private var piUserTurn: Turn? = null
 
     /** Bumped on every change, so the UI can tell snapshots apart cheaply. */
     var version: Long = 0
@@ -116,6 +122,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (seedInitial) {
             current = Turn(id = "", role = Role.ASSISTANT) // replaced by addUser
             addUser(task.prompt.orEmpty(), task.files, "initial")
+            turns.firstOrNull { it.id == "user-initial" }?.delivery = when (task.status) {
+                "QUEUED" -> "В очереди на сервере"
+                "PREPARING", "PREFLIGHT" -> "Сервер готовит сессию"
+                else -> "Ожидает подтверждения Pi"
+            }
             current.at = null
         } else {
             // A window that opens mid-turn: a detached placeholder gives live
@@ -183,6 +194,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         turns += Turn(
             id = "user-$id", role = Role.USER, text = split[0], files = shownFiles, at = at,
             clientId = origin?.string("clientId"), commandId = origin?.string("commandId"), mode = origin?.string("mode"),
+            delivery = if (preservePrevious) "Принято Pi · ждёт применения" else "Принято Pi · ждём ответ модели",
         )
         val key = if (id == "initial") 0L else id.toLong()
         current = Turn(id = "assistant-$id", role = Role.ASSISTANT, variantKey = key, userAt = at)
@@ -212,7 +224,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
         val running = turns.filter { it.role == Role.ASSISTANT && (it.active || it.status.isEmpty()) }
         for (turn in turns) {
-            if (turn.role != Role.ASSISTANT) continue
+            if (turn.role != Role.ASSISTANT || turn.id.startsWith("assistant-pending-")) continue
             // DONE (from agent_settled) is interim: the run's real terminal
             // event (cancelled, failed) replaces it.
             val interim = turn.status.isEmpty() || turn.status == "DONE"
@@ -227,6 +239,18 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (at != null) for (turn in running.ifEmpty { listOf(current) }) {
             if (before(at, turn.at)) continue
             turn.endedAt = turn.endedAt ?: at
+        }
+        for (answer in turns.filter { it.role == Role.ASSISTANT && it.final }) updateUserDelivery(answer)
+    }
+
+    private fun updateUserDelivery(answer: Turn) {
+        val index = turns.indexOf(answer)
+        val user = turns.getOrNull(index - 1)?.takeIf { it.role == Role.USER } ?: return
+        user.delivery = when {
+            answer.text.isNotBlank() -> "Ответ получен"
+            answer.error != null || answer.status == "FAILED" -> "Ошибка ответа"
+            answer.tools.isNotEmpty() -> "Обработано Pi · без текста"
+            else -> user.delivery
         }
     }
 
@@ -243,6 +267,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val index = if (previousId != null) turns.indexOfFirst { it.id == previousId } else -1
         if (index >= 0) turns.add(index + 1, turn) else turns += turn
         current = turn
+        piUserTurn = null
         selectVariant(key, turnId)
     }
 
@@ -256,7 +281,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
     }
 
-    private fun truncateTurns(fromSeq: Long, dropInitial: Boolean, keepUser: Boolean) {
+    private fun truncateTurns(fromSeq: Long, dropInitial: Boolean, keepUser: Boolean, deleting: Boolean = false) {
         if (fromSeq < 0) return
         fun seqOf(turn: Turn): Long? {
             val prefix = when (turn.role) { Role.USER -> "user-"; Role.NOTE -> "note-"; Role.ASSISTANT -> "assistant-" }
@@ -278,8 +303,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (keepUser) {
             while (turns.isNotEmpty() && turns.last().role != Role.USER) forget(turns.removeAt(turns.lastIndex))
             val seed = turns.lastOrNull()?.let { seqOf(it)?.toString() } ?: "initial"
-            current = Turn(id = "assistant-$seed", role = Role.ASSISTANT, active = true)
-            turns += current
+            current = Turn(id = "assistant-$seed", role = Role.ASSISTANT, active = !deleting, variantKey = seed.toLongOrNull() ?: 0L)
+            if (!deleting) turns += current
         } else {
             current = turns.lastOrNull { it.role == Role.ASSISTANT }
                 ?: Turn(id = "assistant-truncated-$fromSeq", role = Role.ASSISTANT)
@@ -298,6 +323,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         messageTurn = null
         messageOpen = false
         orphanMessage = null
+        piUserTurn = null
+        piUsersSeen.retainAll(turns.filter { it.role == Role.USER }.map { it.id }.toSet())
         textSeparator = ""
         separatorApplied = false
     }
@@ -308,7 +335,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
      * servers without commandId on events, with the oldest pending one).
      */
     fun addOptimistic(commandId: String, text: String, files: List<FileRef> = emptyList(), at: String? = null) {
-        turns += Turn(id = "user-pending-$commandId", role = Role.USER, text = text, files = files, at = at, commandId = commandId)
+        turns += Turn(id = "user-pending-$commandId", role = Role.USER, text = text, files = files, at = at, commandId = commandId, delivery = "Отправляется на сервер")
         turns += Turn(id = "assistant-pending-$commandId", role = Role.ASSISTANT, active = true)
         version++
     }
@@ -321,6 +348,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     fun hasOptimistic(commandId: String): Boolean = turns.any { it.id == "user-pending-$commandId" }
 
+    fun acknowledge(commandId: String) {
+        turns.firstOrNull { it.id == "user-pending-$commandId" }?.delivery = "Принято сервером · ожидание события агента"
+        version++
+    }
+
     /** Applies one event; returns false for an event already seen or of another session. */
     fun apply(event: TaskEvent): Boolean {
         if (event.taskId != null && event.taskId != taskId) return false
@@ -330,10 +362,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val data = event.data
         when (event.type) {
             "USER_MESSAGE" -> onUserMessage(event)
+            "PROMPT_ACCEPTED" -> if (data.bool("initial") == true) {
+                initialPromptAccepted = true
+                turns.firstOrNull { it.id == "user-initial" && it.delivery != "Модель начала ответ" }?.delivery = "Принято Pi · ждём ответ модели"
+            }
             "TURN_TRUNCATED" -> truncateTurns(
                 data.long("fromSeq") ?: -1,
                 dropInitial = data.bool("dropInitial") == true,
                 keepUser = data.bool("keepUser") == true,
+                deleting = data.str("reason") == "delete",
             )
             "TURN_EDITED" -> turns.firstOrNull { it.id == data.str("id") }?.text = data.str("text").orEmpty()
             "TURN_VARIANT_START" -> startVariant(data)
@@ -375,6 +412,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val optimistic = commandId?.let { id -> turns.firstOrNull { it.id == "user-pending-$id" } }
             ?: turns.firstOrNull { it.role == Role.USER && it.id.startsWith("user-pending-") && (commandId == null || it.commandId == null) }
         if (optimistic != null) {
+            optimistic.delivery = if (preservePrevious) "Принято Pi · ждёт применения" else "Принято Pi · ждём ответ модели"
             if (event.at != null) optimistic.at = event.at
             val assistant = turns.firstOrNull { it.id == optimistic.id.replace("user-pending-", "assistant-pending-") }
             optimistic.id = "user-${event.seq}"
@@ -405,11 +443,42 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 current.active = true
                 current.status = "RUNNING"
             }
-            "message_start" -> if (frame.obj("message")?.str("role") == "assistant") {
+            "message_start" -> if (frame.obj("message")?.str("role") == "user") {
+                val text = (frame.obj("message")?.get("content") as? JsonArray)
+                    ?.mapNotNull { it as? JsonObject }
+                    ?.filter { it.str("type") == "text" }
+                    ?.joinToString("") { it.str("text").orEmpty() }
+                val candidates = turns.filter { it.role == Role.USER && !it.id.startsWith("user-pending-") && it.id !in piUsersSeen }
+                val variantUser = turns.firstOrNull { it.role == Role.USER &&
+                    current.variantKey == (if (it.id == "user-initial") 0L else it.id.removePrefix("user-").toLongOrNull()) &&
+                    current.id != it.id.replaceFirst("user-", "assistant-") }
+                piUserTurn = variantUser ?: candidates.firstOrNull { text != null && (it.text == text || text.startsWith(it.text + "\n")) } ?: candidates.firstOrNull()
+                piUserTurn?.let { piUsersSeen += it.id }
+            } else if (frame.obj("message")?.str("role") == "assistant") {
+                // USER_MESSAGE says Pi accepted a steer, not that it has reached
+                // it. Restore the answer paired with Pi's most recent user frame.
+                piUserTurn?.let { user ->
+                    val index = turns.indexOf(user)
+                    val answer = turns.getOrNull(index + 1)
+                    if (answer?.role == Role.ASSISTANT && !answer.id.startsWith("assistant-pending-") && current.variantKey != answer.variantKey) current = answer
+                }
+                // Steering preserves running tools until Pi starts answering the new input.
+                // At that boundary the previous bubble must stop animating.
+                val currentIndex = turns.indexOf(current)
+                for (previous in turns.take(currentIndex.coerceAtLeast(0)).filter { it.role == Role.ASSISTANT && it.active && !it.id.startsWith("assistant-pending-") }) {
+                    previous.active = false
+                    previous.final = true
+                    previous.status = if (previous.error != null) "FAILED" else "DONE"
+                    previous.endedAt = previous.endedAt ?: event.at
+                }
                 // An answer left open by an interrupt: its late end must not land on this one.
                 val open = messageTurn
                 if (messageOpen && open != null && open !== current) {
                     orphanMessage = Orphan(open, textPrefix, thinkingPrefix, textSeparator)
+                }
+                turns.getOrNull(currentIndex - 1)?.takeIf { it.role == Role.USER }?.let { user ->
+                    user.delivery = "Модель начала ответ"
+                    if (user.id == "user-initial") initialPromptAccepted = true
                 }
                 if (current.at == null) current.at = event.at
                 messageTurn = current
@@ -440,6 +509,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 }
             }
             "message_end" -> if (frame.obj("message")?.str("role") == "assistant") onMessageEnd(event, frame.obj("message")!!)
+            "turn_end" -> updateUserDelivery(current)
             "tool_execution_start" -> {
                 val id = frame.str("toolCallId") ?: "tool-${event.seq}"
                 if (id !in tools) {
@@ -513,6 +583,12 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             orphanMessage = null
             return
         }
+        if (turn !== current || aborted || stopReason == "error") {
+            turn.active = false
+            turn.final = true
+            turn.status = if (aborted) "CANCELLED" else if (stopReason == "error") "FAILED" else "DONE"
+            turn.endedAt = turn.endedAt ?: event.at
+        }
         textSeparator = ""
         separatorApplied = false
         messageTurn = null
@@ -521,6 +597,18 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     /** Folds the task's own status in (it arrives with the task, not as an event). */
     fun syncTask(task: Task, initial: Boolean = false) {
+        if (!initialPromptAccepted && turns.count { it.role == Role.USER } == 1) {
+            turns.firstOrNull { it.id == "user-initial" }?.let { first ->
+                first.delivery = when (task.status) {
+                    "QUEUED" -> "В очереди на сервере"
+                    "PREPARING", "PREFLIGHT" -> "Сервер готовит сессию"
+                    "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING" -> "Ожидает подтверждения Pi"
+                    "FAILED" -> "Подтверждение Pi не получено"
+                    "SUCCEEDED" -> "Обработано Pi"
+                    else -> first.delivery
+                }
+            }
+        }
         if (initial && turns.none { it.role == Role.ASSISTANT && (it.text.isNotEmpty() || it.thinking.isNotEmpty()) }) {
             // Very early sessions have only session-wide saved text.
             if (turns.count { it.role == Role.ASSISTANT } == 1) {
@@ -544,6 +632,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     id = turn.id, text = turn.text, files = turn.files, at = turn.at,
                     pending = turn.id.startsWith("user-pending-"), clientId = turn.clientId, mode = turn.mode,
                     turnId = turn.id.takeUnless { it.startsWith("user-pending-") },
+                    delivery = turn.delivery,
                 )
                 Role.NOTE -> ChatItem.Note(id = turn.id, text = turn.text)
                 Role.ASSISTANT -> {

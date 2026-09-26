@@ -76,6 +76,24 @@ test('a task can be created from files alone and LAN callers cannot choose its i
   assert.equal(task.attachments.length, 1);
 });
 
+test('local Desktop can register any existing folder, remote callers cannot', { timeout: 20000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const chosen = path.join(fixture.root, 'another-project');
+  await fs.mkdir(chosen);
+  const route = '/api/projects/local-register';
+  const remote = await fetch(fixture.base + route, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': '192.0.2.33' },
+    body: JSON.stringify({ path: chosen })
+  });
+  assert.equal(remote.status, 403);
+  const project = await fixture.api(route, { path: chosen });
+  assert.equal(project.path, await fs.realpath(chosen));
+  assert.equal(project.name, 'another-project');
+  assert.equal((await fixture.api(route, { path: chosen })).id, project.id);
+  assert.equal((await fixture.api('/api/projects')).filter(item => item.path === project.path).length, 1);
+});
+
 test('multipart upload streams files into the task workspace and discards staging', { timeout: 20000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
@@ -242,6 +260,9 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   task = await terminal(api, id);
   assert.equal(task.status, 'SUCCEEDED');
   const events = await api(`/api/tasks/${id}/events?limit=0`);
+  const accepted = events.find(event => event.type === 'PROMPT_ACCEPTED' && event.data?.initial === true);
+  assert.ok(accepted, 'the initial prompt must have a Pi RPC acknowledgement');
+  assert.ok(accepted.seq < events.find(event => event.type === 'TASK_SUCCEEDED').seq);
   const state = new ChatState(task);
   for (const event of events) state.apply(event);
   state.snapshot(task);
@@ -321,16 +342,29 @@ test('/debug/cloud reports a disabled transport and local mode keeps working', {
 // The original way in — a phone or laptop in the same Wi-Fi hitting the PC's
 // LAN address — must keep working regardless of the cloud transport
 // (§2.1 "Сохраняются … LAN", §4 acceptance "LAN работает при выключенном
-// облаке"). The merged cloud work must not have taken this path down.
+// облаке"). Since R1.1 it needs pairing: without auth the server stays on
+// loopback, whatever server.host says.
 test('LAN access keeps working while the cloud is off', { timeout: 30000 }, async t => {
   const lan = Object.values(os.networkInterfaces()).flat()
     .find(iface => iface && iface.family === 'IPv4' && !iface.internal);
   if (!lan) return t.skip('this machine has no LAN interface');
 
-  const fixture = await startFixture(undefined, { server: { host: '0.0.0.0' } });
+  const open = await startFixture(undefined, { server: { host: '0.0.0.0' } });
+  try {
+    await assert.rejects(globalThis.fetch(`http://${lan.address}:${new URL(open.base).port}/api/info`), 'no auth → no LAN listener');
+    assert.deepEqual((await (await globalThis.fetch(`${open.base}/api/info`)).json()).addresses, [], 'no LAN addresses advertised');
+  } finally { await open.close(); }
+
+  const fixture = await startFixture(undefined, { server: { host: '0.0.0.0', auth: { enabled: true } } });
   t.after(() => fixture.close());
   const port = new URL(fixture.base).port;
   const base = `http://${lan.address}:${port}`;
+  const { code } = await (await globalThis.fetch(`${fixture.base}/api/auth/pairing`)).json();
+  const paired = await globalThis.fetch(`${base}/api/auth/pair`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code }) });
+  assert.equal(paired.status, 200);
+  const cookie = paired.headers.get('set-cookie').split(';')[0];
+  // Like a browser: the cookie, and Origin on every request (R1.3).
+  const fetch = (url, init = {}) => globalThis.fetch(url, { ...init, headers: { ...init.headers, cookie, origin: base } });
 
   // The UI itself is served over the LAN address, not just loopback.
   const info = await (await fetch(`${base}/api/info`)).json();
@@ -461,7 +495,7 @@ test('message actions over HTTP: delete drops a message and everything after it'
 
   // Bad input stays an explicit refusal, never a silent no-op.
   await assert.rejects(() => api(`/api/tasks/${id}/turns/nonsense/edit`, { text: 'x' }), err => err.code === 'INPUT_INVALID');
-  await assert.rejects(() => api(`/api/tasks/${id}/turns/assistant-1/delete`, {}), err => err.code === 'INPUT_INVALID');
+  await assert.rejects(() => api(`/api/tasks/${id}/turns/assistant-1/delete`, {}), err => err.code === 'NOT_FOUND');
 });
 
 test('a rewrite reaches a client that already streamed past it', { timeout: 30000 }, async t => {
@@ -604,8 +638,10 @@ test('fork over HTTP copies the conversation and leaves the source alone', { tim
   // The branch replays the source conversation; only its own marker is extra.
   const source = await api(`/api/tasks/${id}/events?limit=0`);
   const copy = await api(`/api/tasks/${forked.id}/events?limit=0`);
-  assert.equal(copy.at(-1).type, 'TASK_FORKED');
-  assert.deepEqual(copy.slice(0, -1).map(e => e.type), source.map(e => e.type));
+  const forkIndex = copy.findIndex(e => e.type === 'TASK_FORKED');
+  assert.ok(forkIndex >= 0);
+  assert.ok(copy.slice(forkIndex + 1).every(e => e.type === 'RUNTIME_STATE'));
+  assert.deepEqual(copy.slice(0, forkIndex).map(e => e.type), source.map(e => e.type));
   assert.deepEqual((await api(`/api/tasks/${id}/events?limit=0`)).map(e => e.seq), source.map(e => e.seq));
 
   // A message that never existed is a 404; an answer is not a branch point.
@@ -615,7 +651,7 @@ test('fork over HTTP copies the conversation and leaves the source alone', { tim
   // copies the very same conversation.
   const fromAnswer = await api(`/api/tasks/${id}/fork`, { turnId: `assistant-${users[0].seq}` });
   const answerCopy = await api(`/api/tasks/${fromAnswer.id}/events?limit=0`);
-  assert.deepEqual(answerCopy.slice(0, -1).map(e => e.type), source.map(e => e.type));
+  assert.deepEqual(answerCopy.slice(0, answerCopy.findIndex(e => e.type === 'TASK_FORKED')).map(e => e.type), source.map(e => e.type));
 });
 
 test('/api/info carries a bootId that changes only when the process restarts', { timeout: 30000 }, async t => {

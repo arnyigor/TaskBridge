@@ -63,6 +63,8 @@ data class AuthStatus(
     val enabled: Boolean = false,
     val local: Boolean = false,
     val machine: Boolean = false,
+    /** The server pairs devices with tokens (R1.2); a cookie-only client should pair again. */
+    val deviceTokens: Boolean = false,
 )
 
 @Serializable
@@ -74,6 +76,17 @@ data class Project(
 ) {
     val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: id
 }
+
+/** Folders exposed by the server inside projectBrowser.roots. */
+@Serializable
+data class ProjectFolder(val name: String, val path: String)
+
+@Serializable
+data class ProjectFolderListing(
+    val path: String? = null,
+    val parent: String? = null,
+    val entries: List<ProjectFolder> = emptyList(),
+)
 
 @Serializable
 data class ModelRef(
@@ -126,6 +139,9 @@ data class GenerationMetrics(val tg: Double? = null, val outputTokens: Long? = n
 data class CompactionInfo(val count: Int = 0)
 
 @Serializable
+data class RuntimeInfo(val state: String? = null, val activity: String? = null)
+
+@Serializable
 data class Task(
     val id: String,
     val title: String? = null,
@@ -155,6 +171,7 @@ data class Task(
     val assistantText: String? = null,
     val thinkingText: String? = null,
     val retryable: Boolean? = null,
+    val runtime: RuntimeInfo? = null,
 ) {
     val taskStatus: TaskStatus get() = TaskStatus.from(status)
 

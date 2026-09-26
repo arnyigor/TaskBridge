@@ -8,10 +8,10 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
-import { listDirectory, resolveBrowsablePath } from './project-browser.mjs';
+import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
-import { AccessControl } from './auth.mjs';
+import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
 import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
 import { tailBytes } from './tool-output.mjs';
@@ -272,13 +272,14 @@ manager.on('task-event', (event) => {
   if (notification) push.notify(notification).catch(() => {});
 });
 
+// R2.5: a client counts the stream dead after 3 silent intervals.
 setInterval(() => {
   for (const clients of sseClients.values()) {
     for (const client of clients) {
       try { client.res.write(': heartbeat\n\n'); } catch {}
     }
   }
-}, 15000).unref();
+}, Math.min(Math.max(Number(config.server?.sse?.heartbeatSec) || 15, 1), 300) * 1000).unref();
 
 // Abandoned uploads are only referenced by a token the client may never use.
 setInterval(() => manager.uploads.cleanup().catch(() => {}), 30 * 60 * 1000).unref();
@@ -350,11 +351,26 @@ function lanAddresses(port, scheme = 'http') {
   for (const [name, list] of Object.entries(os.networkInterfaces())) {
     for (const addr of list || []) {
       if (addr.family === 'IPv4' && !addr.internal) {
-        out.push({ interface: name, ip: addr.address, url: `${scheme}://${addr.address}:${port}` });
+        out.push({ interface: name, ip: addr.address, kind: isTailnetIp(addr.address) ? 'tailnet' : 'lan', url: `${scheme}://${addr.address}:${port}` });
       }
     }
   }
   return out;
+}
+
+// R1.7: what the phone scans. Plain http endpoints only — the phone app talks
+// to the tailnet IP directly (D5); `tailnet-https` is the browser's way in via
+// `tailscale serve`, known only from config.
+function pairingQr(pairing) {
+  const tailscale = config.server?.tailscale || {};
+  const endpoints = lanOpen ? lanAddresses(publicPort).map(({ kind, url }) => ({ kind, url })) : [];
+  if (tailscale.ip && !endpoints.some(item => item.url === `http://${tailscale.ip}:${publicPort}`)) {
+    endpoints.push({ kind: 'tailnet', url: `http://${tailscale.ip}:${publicPort}` });
+  }
+  if (tailscale.httpsUrl) endpoints.push({ kind: 'tailnet-https', url: String(tailscale.httpsUrl).replace(/\/+$/, '') });
+  // Tailnet first: it works both at home and away.
+  endpoints.sort((a, b) => (a.kind === 'lan') - (b.kind === 'lan'));
+  return { v: 1, name: os.hostname(), endpoints, pairingCode: pairing.code, expiresAt: new Date(pairing.expiresAt).toISOString() };
 }
 
 async function serveStatic(urlPath, res) {
@@ -432,15 +448,32 @@ async function handleRequest(req, res) {
     res.setHeader('content-security-policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'");
     const pathname = decodeURIComponent(url.pathname);
     access.checkOrigin(req);
-    if (req.method === 'GET' && pathname === '/api/auth') return json(res, 200, { authenticated: access.authenticated(req), enabled: access.enabled, local: access.local(req), machine: access.machine(req) });
+    if (req.method === 'GET' && pathname === '/api/auth') return json(res, 200, { authenticated: access.authenticated(req), enabled: access.enabled, local: access.local(req), machine: access.machine(req), deviceTokens: true, device: access.device(req) ? { deviceId: access.device(req).deviceId, kind: access.device(req).kind } : null });
     if (req.method === 'POST' && pathname === '/api/auth/pair') {
       const body = await readJson(req);
-      access.pair(req, res, body.code);
-      return json(res, 200, { ok: true });
+      const paired = await access.pair(req, res, body);
+      // A browser keeps the token as an HttpOnly cookie only; a native client
+      // (it says what it is) gets it once, here, for its Authorization header.
+      const native = paired && ['android', 'desktop', 'cli'].includes(body.clientKind);
+      return json(res, 200, { ok: true, ...(paired ? { deviceId: paired.deviceId } : {}), ...(native ? { token: paired.token } : {}) });
     }
     if (req.method === 'GET' && pathname === '/api/auth/pairing') {
       if (!access.enabled || !access.local(req)) return errorJson(res, 403, new Error('Код доступен только на компьютере через localhost.'));
-      return json(res, 200, access.pairing());
+      const pairing = access.pairing();
+      return json(res, 200, { ...pairing, qr: pairingQr(pairing) });
+    }
+    if (req.method === 'GET' && pathname === '/api/auth/devices') {
+      access.require(req);
+      const current = access.device(req)?.deviceId || null;
+      return json(res, 200, { devices: access.listDevices().map(device => ({ ...device, current: device.deviceId === current })) });
+    }
+    {
+      const match = pathname.match(/^\/api\/auth\/devices\/([^/]+)$/);
+      if (match && req.method === 'DELETE') {
+        if (!access.enabled || !access.local(req)) return errorJson(res, 403, Object.assign(new Error('Отзывать устройства можно только с компьютера.'), { code: 'FORBIDDEN' }));
+        await access.removeDevice(decodeURIComponent(match[1]));
+        return json(res, 200, { ok: true });
+      }
     }
     // --- cloud settings screen (§91) -----------------------------------------
     if (req.method === 'GET' && pathname === '/api/cloud/config') {
@@ -861,7 +894,7 @@ async function handleRequest(req, res) {
         apiVersion: API_VERSION,
         storeId: store.storeId,
         pi,
-        addresses: [
+        addresses: !lanOpen ? [] : [
           ...lanAddresses(publicPort),
           ...(httpsConfig.enabled && !tlsDisabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])
         ],
@@ -913,6 +946,19 @@ async function handleRequest(req, res) {
       await saveConfig(rootDir, config);
       return json(res, 201, manager.listProjects().find(p => p.id === id));
     }
+    if (req.method === 'POST' && pathname === '/api/projects/local-register') {
+      if (!access.local(req)) return errorJson(res, 403, Object.assign(new Error('Любую папку можно добавить только на компьютере сервера через localhost.'), { code: 'FORBIDDEN' }));
+      const body = await readJson(req);
+      const resolved = await resolveLocalProjectPath(body.path);
+      const existing = manager.listProjects().find(project => process.platform === 'win32'
+        ? project.path?.toLowerCase() === resolved.toLowerCase() : project.path === resolved);
+      if (existing) return json(res, 200, existing);
+      const name = String(body.name || path.basename(resolved)).trim().slice(0, 120) || path.basename(resolved);
+      const id = uniqueProjectId(manager, name);
+      manager.registerProject({ id, name, path: resolved, useWorktree: false, verification: [] });
+      await saveConfig(rootDir, config);
+      return json(res, 201, manager.listProjects().find(project => project.id === id));
+    }
 
     const sessionsMatch = pathname.match(/^\/api\/projects\/([^/]+)\/pi-sessions$/);
     if (req.method === 'GET' && sessionsMatch) return json(res, 200, await manager.nativeSessions.list(sessionsMatch[1]));
@@ -937,7 +983,7 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && pathname === '/api/tasks') {
       const body = await readJson(req);
       const { commandId, clientId, ...input } = body;
-      const task = await manager.createTask(input, { commandId, clientId });
+      const task = await manager.createTask(input, { commandId, clientId, deviceId: access.device(req)?.deviceId });
       return json(res, 202, task);
     }
 
@@ -1050,7 +1096,7 @@ async function handleRequest(req, res) {
       // now: true is "send immediately, do not wait for the local model" (the
       // Ctrl+Enter path); otherwise a busy model means the prompt is queued.
       return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken,
-        { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId }));
+        { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId, deviceId: access.device(req)?.deviceId }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)$/);
@@ -1353,7 +1399,12 @@ async function handleRequest(req, res) {
   }
 }
 
-const host = bindHostOverride || config.server?.host || '0.0.0.0';
+// In the split launch the app binds loopback and the proxy owns the LAN side, so
+// "is the LAN open" follows the configured host, not the bound one.
+const lanOpen = lanAllowed(config.server?.host || '0.0.0.0', config.server?.auth);
+const requestedHost = bindHostOverride || config.server?.host || '0.0.0.0';
+const host = lanAllowed(requestedHost, config.server?.auth) ? requestedHost : '127.0.0.1';
+if (!lanOpen) console.warn(LAN_CLOSED_WARNING);
 const port = portOverride || Number(config.server?.port || 8787);
 // What the UI prints. Behind the proxy the bound port is the internal one, which
 // no phone can reach — the public port is the proxy's.
@@ -1362,7 +1413,7 @@ const server = http.createServer(handleRequest);
 server.listen(port, host, () => {
   console.log(`\nTaskBridge MVP listening on ${host}:${port}`);
   console.log(`Local: http://127.0.0.1:${port}`);
-  for (const item of lanAddresses(publicPort)) console.log(`LAN (${item.interface}): ${item.url}`);
+  if (lanOpen) for (const item of lanAddresses(publicPort)) console.log(`LAN (${item.interface}): ${item.url}`);
   console.log(access.enabled ? '\nPairing enabled. Open localhost and click «Подключить телефон» for a code.\n' : '\nPairing disabled by configuration.\n');
 });
 
@@ -1372,7 +1423,7 @@ if (httpsConfig.enabled && !tlsDisabled) {
     const { key, cert, certPath } = await ensureTlsCert(dataRoot);
     https.createServer({ key, cert }, handleRequest).listen(httpsPort, host, () => {
       console.log(`HTTPS listening on ${host}:${httpsPort} (self-signed cert: ${certPath})`);
-      for (const item of lanAddresses(httpsPort, 'https')) console.log(`LAN HTTPS (${item.interface}): ${item.url}`);
+      if (lanOpen) for (const item of lanAddresses(httpsPort, 'https')) console.log(`LAN HTTPS (${item.interface}): ${item.url}`);
       console.log('Self-signed certificate: the browser will warn "not secure" once per device until you accept it.\n');
     });
   } catch (error) {
