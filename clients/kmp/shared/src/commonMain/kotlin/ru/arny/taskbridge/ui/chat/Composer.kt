@@ -1,11 +1,8 @@
 package ru.arny.taskbridge.ui.chat
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,13 +10,11 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -29,13 +24,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -53,7 +52,6 @@ import ru.arny.taskbridge.platform.rememberClipboardFiles
 import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.theme.AppIcons
-import ru.arny.taskbridge.ui.theme.LocalStatusColors
 
 @Composable
 fun Composer(
@@ -72,13 +70,14 @@ fun Composer(
     modifier: Modifier = Modifier,
     /** Above the input: the queue line, outbox problems. */
     top: @Composable () -> Unit = {},
-    /** Extra items of the «+» menu (the session's model and context); call `close` on click. */
+    /** Extra items of the actions menu (the session's model and context); call `close` on click. */
     moreItems: @Composable (close: () -> Unit) -> Unit = {},
 ) {
-    var modeMenu by remember { mutableStateOf(false) }
-    var plusMenu by remember { mutableStateOf(false) }
+    var actionsMenu by remember { mutableStateOf(false) }
+    var focused by remember { mutableStateOf(false) }
     val clipboardFiles = rememberClipboardFiles()
     val canSend = enabled && (value.text.isNotBlank() || files.isNotEmpty())
+    val canStop = onStop != null
     Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
         // Inside the Surface: its tint runs under the navigation bar instead of a blank strip.
         Column(Modifier.navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp)) {
@@ -95,27 +94,17 @@ fun Composer(
                     }
                 }
             }
-            // One capsule: «+», the text (all the free width, grows by itself), send.
-            Surface(shape = RoundedCornerShape(24.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Row(Modifier.heightIn(min = 52.dp).padding(4.dp), verticalAlignment = Alignment.Bottom) {
-                    Box {
-                        IconButton(onClick = { plusMenu = true }, enabled = enabled, modifier = Modifier.size(44.dp)) {
-                            Icon(AppIcons.Add, "Вложения и действия", Modifier.size(22.dp))
-                        }
-                        DropdownMenu(expanded = plusMenu, onDismissRequest = { plusMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Прикрепить файл") },
-                                leadingIcon = { Icon(AppIcons.Attach, null) },
-                                onClick = { plusMenu = false; onAttach() },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Вставить из буфера") },
-                                leadingIcon = { Icon(AppIcons.Copy, null) },
-                                onClick = { plusMenu = false; onPaste(clipboardFiles()) },
-                            )
-                            moreItems { plusMenu = false }
-                        }
-                    }
+            // One card: the message on top, the actions under it. The border lights
+            // up while the field has focus, so it is clear where the text goes.
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLowest,
+                border = BorderStroke(
+                    1.dp,
+                    if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                ),
+            ) {
+                Column(Modifier.padding(6.dp)) {
                     BasicTextField(
                         value = value,
                         onValueChange = onValueChange,
@@ -139,8 +128,9 @@ fun Composer(
                             }
                         },
                         modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 4.dp, vertical = 12.dp)
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
+                            .onFocusChanged { focused = it.isFocused }
                             .onPreviewKeyEvent { event ->
                                 // Ctrl+V with a picture or files in the clipboard attaches them;
                                 // with text it falls through to the field's own paste.
@@ -163,51 +153,63 @@ fun Composer(
                                 }
                             },
                     )
-                    Box {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (onStop != null) {
-                                IconButton(onClick = onStop, modifier = Modifier.size(44.dp)) {
-                                    Icon(AppIcons.StopAction, "Остановить агента", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.error)
-                                }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = onAttach, enabled = enabled, modifier = Modifier.size(40.dp)) {
+                            Icon(AppIcons.Attach, "Прикрепить файл", Modifier.size(20.dp))
+                        }
+                        Box {
+                            IconButton(onClick = { actionsMenu = true }, enabled = enabled, modifier = Modifier.size(40.dp)) {
+                                Icon(AppIcons.Tool, "Действия и буфер обмена", Modifier.size(20.dp))
                             }
-                            // While the agent works: how to send (also a long press on the send button).
-                            if (working) {
-                                IconButton(onClick = { modeMenu = true }, enabled = canSend, modifier = Modifier.size(36.dp)) {
-                                    Icon(AppIcons.ChevronUp, "Как отправить", Modifier.size(30.dp))
-                                }
-                            }
-                            Box(
-                                Modifier
-                                    .size(44.dp)
-                                    .clip(CircleShape)
-                                    .background(if (canSend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
-                                    .combinedClickable(
-                                        enabled = canSend,
-                                        onLongClick = if (working) ({ modeMenu = true }) else null,
-                                        onClick = { onSend(SendMode.QUEUE) },
-                                    ),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(
-                                    if (working) AppIcons.Queue else AppIcons.Send,
-                                    if (working) "В очередь" else "Отправить",
-                                    Modifier.size(22.dp),
-                                    tint = if (canSend) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+                            DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Прикрепить файл") },
+                                    leadingIcon = { Icon(AppIcons.Attach, null) },
+                                    onClick = { actionsMenu = false; onAttach() },
                                 )
+                                DropdownMenuItem(
+                                    text = { Text("Вставить из буфера") },
+                                    leadingIcon = { Icon(AppIcons.Copy, null) },
+                                    onClick = { actionsMenu = false; onPaste(clipboardFiles()) },
+                                )
+                                moreItems { actionsMenu = false }
                             }
                         }
-                        DropdownMenu(expanded = modeMenu, onDismissRequest = { modeMenu = false }) {
-                            DropdownMenuItem(
-                                text = { ModeText("В очередь", "Уйдёт, когда закончится текущий ответ") },
-                                leadingIcon = { Icon(AppIcons.Queue, null) },
-                                onClick = { modeMenu = false; onSend(SendMode.QUEUE) },
-                            )
-                            DropdownMenuItem(
-                                text = { ModeText("Вклиниться", "Команды не остановятся, агент ответит на это сообщение (Ctrl+Enter)") },
-                                leadingIcon = { Icon(AppIcons.Spark, null) },
-                                onClick = { modeMenu = false; onSend(SendMode.NOW) },
+                        Spacer(Modifier.weight(1f))
+                        // The lightning cuts into a running turn, so it only has a job while one is
+                        // going: with the agent idle the plane is the whole story.
+                        if (working) {
+                            SquareButton(
+                                icon = AppIcons.Spark,
+                                description = "Вклиниться сейчас",
+                                enabled = canSend,
+                                background = MaterialTheme.colorScheme.primaryContainer,
+                                content = MaterialTheme.colorScheme.onPrimaryContainer,
+                                onClick = { onSend(SendMode.NOW) },
                             )
                         }
+                        SquareButton(
+                            icon = AppIcons.Send,
+                            description = "Отправить в очередь",
+                            enabled = canSend,
+                            background = MaterialTheme.colorScheme.primary,
+                            content = MaterialTheme.colorScheme.onPrimary,
+                            onClick = { onSend(SendMode.QUEUE) },
+                        )
+                        // Stop is always in place: a button that appears and disappears
+                        // confuses more than a disabled one.
+                        SquareButton(
+                            icon = AppIcons.Stop,
+                            description = "Остановить агента",
+                            enabled = canStop,
+                            background = MaterialTheme.colorScheme.errorContainer,
+                            content = MaterialTheme.colorScheme.error,
+                            onClick = { onStop?.invoke() },
+                        )
                     }
                 }
             }
@@ -215,10 +217,29 @@ fun Composer(
     }
 }
 
+/** Send, «вклиниться» and stop: the same rounded square, told apart by colour alone. */
 @Composable
-private fun ModeText(title: String, hint: String) {
-    Column {
-        Text(title)
-        Text(hint, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun SquareButton(
+    icon: ImageVector,
+    description: String,
+    enabled: Boolean,
+    background: Color,
+    content: Color,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(40.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (enabled) background else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            description,
+            Modifier.size(20.dp),
+            tint = if (enabled) content else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+        )
     }
 }

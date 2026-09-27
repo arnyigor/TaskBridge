@@ -92,7 +92,6 @@ fun DraftChatScreen(
                 },
             )
         },
-        snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
@@ -103,6 +102,9 @@ fun DraftChatScreen(
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 ModelPicker(catalog, model, graph.settings, onPick = { model = it })
             }
+            // Above the composer rather than over it: the field and its buttons must stay reachable
+            // while a notice is on screen.
+            SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
             Composer(
                 value = text,
                 onValueChange = { text = it },

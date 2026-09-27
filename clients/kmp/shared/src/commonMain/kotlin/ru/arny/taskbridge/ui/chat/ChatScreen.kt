@@ -212,7 +212,6 @@ fun ChatScreen(
                 onCopyHistory = { copyingHistory = true },
             )
         },
-        snackbarHost = { SnackbarHost(snackbar, Modifier.navigationBarsPadding()) },
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
@@ -261,6 +260,9 @@ fun ChatScreen(
                     }
                 }
             }
+            // Above the composer rather than over it: the field and its buttons must stay reachable
+            // while a notice is on screen.
+            SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
             for (approval in state.approvals) {
                 ApprovalCard(approval, busy = "approval:${approval.approvalId}" in state.busy, onAnswer = { allow -> session.answerApproval(approval.approvalId, allow) })
             }
