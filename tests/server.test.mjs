@@ -681,6 +681,7 @@ test('/api/info exposes normalized provider statuses and keeps legacy DeepSeek d
   assert.equal(info.providerStatuses.routerai.available, false);
   assert.equal(info.providerStatuses.deepseek.reason, 'no-key');
   assert.deepEqual(info.deepseek, info.providerStatuses.deepseek, 'legacy field stays compatible');
+  assert.deepEqual(info.scheduler, { activeTasks: 0, maxConcurrentSessions: 4, queuedTasks: 0 });
 });
 
 test('provider info poll never fetches; click refresh is targeted and cooldown-guarded', async t => {

@@ -326,7 +326,24 @@ private fun ChatTopBar(
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
         },
         title = {
-            Text(task?.displayTitle ?: "Сессия", modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = task != null) { onDialog(ChatDialog.ModelSettings) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+            Column {
+                Text(task?.displayTitle ?: "Сессия", modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = task != null) { onDialog(ChatDialog.ModelSettings) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
+                // The web header answers «which model am I talking to» with a chip
+                // over the input; on the phone only the icon was there. Same label
+                // as the web chip (a short name without the provider), and the tap
+                // opens the picker, exactly like that chip.
+                val model = task?.model
+                if (model != null) {
+                    Text(
+                        "Модель: ${model.label}",
+                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onDialog(ChatDialog.ChooseModel) },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         },
         actions = {
             if (task != null) IconButton(onClick = { onDialog(ChatDialog.ChooseModel) }) { Icon(AppIcons.Spark, "Выбрать модель") }

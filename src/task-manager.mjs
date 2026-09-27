@@ -3,7 +3,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
-import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
+import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile } from './session-history.mjs';
 import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
@@ -94,7 +94,8 @@ export class TaskManager extends EventEmitter {
     this.tasks = new Map();
     this.runtimes = new Map();
     this.queue = [];
-    this.activeTaskId = null;
+    this.activeTaskIds = new Set();
+    this.maxParallelSessions = Math.max(1, Math.min(16, Number(config.queue?.maxConcurrentSessions) || 4));
     // Open run ids per task (stage 2 telemetry): kept out of the task record
     // so they never leak into saved/public task state.
     this.openRuns = new Map();
@@ -114,6 +115,7 @@ export class TaskManager extends EventEmitter {
     // restart is a deliberate follow-up.
     this.commandLedger = new Map();
     this.admitting = false;
+    this.admissionKeys = new Set();
     // Task id whose pending prompt the pump is delivering right now (delegating
     // delivery). Read by sendPendingNow to refuse cutting into it.
     this.dispatching = null;
@@ -153,6 +155,44 @@ export class TaskManager extends EventEmitter {
     this.uploads = new UploadStore(dataRoot, uploadMb > 0
       ? { maxFileBytes: uploadMb * 1048576, maxTotalBytes: uploadMb * 2 * 1048576 }
       : {});
+  }
+
+  // Backwards-compatible singular view used by health/restart code and older
+  // tests. Internally the scheduler owns a set: independent remote sessions can
+  // run together, while one task id still represents at most one generation.
+  get activeTaskId() { return this.activeTaskIds.values().next().value || null; }
+  set activeTaskId(value) {
+    this.activeTaskIds.clear();
+    if (value) this.activeTaskIds.add(value);
+  }
+
+  #claimSlot(id) { this.activeTaskIds.add(id); }
+  #releaseSlot(id) { this.activeTaskIds.delete(id); }
+  #hasActiveLocalSession(exceptId = null) {
+    for (const id of this.activeTaskIds) {
+      if (id !== exceptId && this.#usesLocalRuntime(this.tasks.get(id))) return true;
+    }
+    return false;
+  }
+  #hasWorkspaceConflict(task) {
+    for (const id of this.activeTaskIds) {
+      if (id === task.id) continue;
+      const active = this.tasks.get(id);
+      if (!active) continue;
+      if (task.workspacePath && active.workspacePath && path.resolve(task.workspacePath) === path.resolve(active.workspacePath)) return true;
+      if (!task.workspacePath && !active.workspacePath && task.projectId && task.projectId === active.projectId) {
+        const project = this.projects.get(task.projectId);
+        if (task.projectId !== '__scratch__' && project?.useWorktree === false) return true;
+      }
+    }
+    return false;
+  }
+  #hasCapacityFor(task) {
+    if (this.activeTaskIds.has(task.id)) return false;
+    if (this.activeTaskIds.size >= this.maxParallelSessions) return false;
+    if (this.#usesLocalRuntime(task) && this.#hasActiveLocalSession(task.id)) return false;
+    if (this.#hasWorkspaceConflict(task)) return false;
+    return true;
   }
 
   async init() {
@@ -343,10 +383,15 @@ export class TaskManager extends EventEmitter {
     return task ? this.#publicTask(task) : null;
   }
 
-  async #admit(action) {
-    if (this.admitting) throw Object.assign(new Error('Другой запрос ещё отправляется. Повторите позже.'), { code: 'BUSY' });
+  async #admit(action, key = 'global') {
+    if (this.admissionKeys.has(key)) throw Object.assign(new Error('Другой запрос этой сессии ещё отправляется. Повторите позже.'), { code: 'BUSY' });
+    this.admissionKeys.add(key);
     this.admitting = true;
-    try { return await action(); } finally { this.admitting = false; }
+    try { return await action(); }
+    finally {
+      this.admissionKeys.delete(key);
+      this.admitting = this.admissionKeys.size > 0;
+    }
   }
 
   async createTask(input, options = {}) {
@@ -513,8 +558,9 @@ export class TaskManager extends EventEmitter {
     // The machine runs one generation at a time. A session created while another
     // one holds it waits in the queue instead of being refused: the operator's
     // prompt must never be lost to a timing race (the same rule as messages).
-    const ownerBusy = Boolean(this.activeTaskId);
     let requestedModel = this.#normalizeModelSelection(input.model);
+    const ownerBusy = this.activeTaskIds.size >= this.maxParallelSessions
+      || (this.#selectionUsesLocalRuntime(requestedModel) && this.#hasActiveLocalSession());
     const thinkingLevel = this.#normalizeThinkingLevel(input.thinkingLevel);
     // The model list is a Pi concern; if it is already cached (the picker was
     // just open) reject an unknown selection early. Otherwise trust the client
@@ -640,7 +686,7 @@ export class TaskManager extends EventEmitter {
     // waits for the turn to end, and the status must not claim otherwise (a
     // QUEUED status on the session that owns the slot also made "Отправить
     // сейчас" look like a second generation and refuse).
-    if (this.activeTaskId === task.id && task.status === 'RUNNING') {
+    if (this.activeTaskIds.has(task.id) && task.status === 'RUNNING') {
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
       return;
@@ -769,14 +815,14 @@ export class TaskManager extends EventEmitter {
     // queue is self-healing even if some future path forgets to call #pump.
     if (this.closing) return;
     if (this.pumping) { this.pumpAgain = true; return; }
-    if (this.activeTaskId) { this.#schedulePump(); return; }
     if (this.queue.length === 0) return;
     this.pumping = true;
     try {
       do {
         this.pumpAgain = false;
-        await this.#pumpOnce();
-      } while (this.pumpAgain && !this.activeTaskId && this.queue.length);
+        const started = await this.#pumpOnce();
+        if (started && this.queue.length) this.pumpAgain = true;
+      } while (this.pumpAgain && this.queue.length && this.activeTaskIds.size < this.maxParallelSessions);
     } finally {
       this.pumping = false;
       if (this.queue.length) this.#schedulePump();
@@ -784,7 +830,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #pumpOnce() {
-    if (this.activeTaskId || this.queue.length === 0) return;
+    if (this.queue.length === 0) return false;
     // The first entry that can actually run — not simply the first entry. A
     // session waiting for a busy local model must not hold up one that needs a
     // remote model (or no model at all): that head-of-line block is what made a
@@ -795,6 +841,11 @@ export class TaskManager extends EventEmitter {
       const candidate = this.tasks.get(this.queue[index]);
       if (!candidate || candidate.status === 'CANCELLED' || this.deleted.has(this.queue[index])) {
         this.queue.splice(index, 1);
+        continue;
+      }
+      if (!this.#hasCapacityFor(candidate)) {
+        await this.#markWaiting(candidate, this.#usesLocalRuntime(candidate) && this.#hasActiveLocalSession(candidate.id) ? 'MODEL_BUSY' : 'BUSY');
+        index++;
         continue;
       }
       // capacity 1: never start a request the local runtime would refuse.
@@ -820,7 +871,7 @@ export class TaskManager extends EventEmitter {
       task = candidate;
       break;
     }
-    if (!task) { if (this.queue.length) this.#schedulePump(); return; }
+    if (!task) { if (this.queue.length) this.#schedulePump(); return false; }
 
     const id = this.queue[index];
     this.queue.splice(index, 1);
@@ -828,28 +879,31 @@ export class TaskManager extends EventEmitter {
     // A stored prompt is delivered through #message, which claims the slot
     // itself: the queue must not hold it meanwhile, nor release it afterwards.
     const delegating = Boolean(task.pendingPrompts?.length);
-    this.activeTaskId = delegating ? null : id;
-    let delivered = true;
-    try {
-      if (delegating) {
+    if (delegating) {
+      let delivered = true;
+      try {
         // A delegating delivery claims its slot only inside #message, so this
         // flag is what tells sendPendingNow (see there) that the machine is
         // busy with a delivery activeTaskId cannot represent.
         this.dispatching = id;
         delivered = await this.#deliverPending(task);
-      } else await this.#executeInitial(task);
-    } finally {
-      this.dispatching = null;
-      if (!delegating && this.activeTaskId === id) this.activeTaskId = null;
-      // A delivery that failed put the prompt back: retry on the timer instead
-      // of spinning on it immediately.
-      if (delivered) setImmediate(() => this.#pump());
-      else this.#schedulePump();
+      } finally {
+        this.dispatching = null;
+        if (delivered) setImmediate(() => this.#pump());
+        else this.#schedulePump();
+      }
+    } else {
+      this.#claimSlot(id);
+      this.#executeInitial(task).catch(error => console.error(error)).finally(() => {
+        this.#pump();
+      });
     }
+    return true;
   }
 
   async #executeInitial(task) {
     if (this.closing) return;
+    let ownedTurn = null;
     try {
       await this.#setStatus(task, 'PREPARING', 'Preparing workspace');
       const prepared = await this.#prepareWorkspace(task);
@@ -892,6 +946,7 @@ export class TaskManager extends EventEmitter {
       // Snapshot and turn token belong to this turn only: a follow-up that
       // starts while this turn finalizes must not overwrite them.
       const turn = this.#beginTurn(task);
+      ownedTurn = turn;
       const baseline = await snapshotWorkspace(task.workspacePath);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id) || this.runtimes.get(task.id)?.cancelRequested) {
         await pi.killTree();
@@ -927,6 +982,10 @@ export class TaskManager extends EventEmitter {
       else await this.#fail(task, error);
     } finally {
       delete task._incomingFiles;
+      // A follow-up can start while finalization writes artifacts. It then owns
+      // the same task id with a newer turn token; the older initial run must not
+      // release that slot underneath it.
+      if (ownedTurn == null || task._turn === ownedTurn) this.#releaseSlot(task.id);
     }
   }
 
@@ -1375,14 +1434,20 @@ export class TaskManager extends EventEmitter {
     if (turn != null && task._turn !== turn) return;
     if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }));
     await this.#setStatus(task, 'VERIFYING', 'Collecting diff and changed files');
-    const gitState = await collectGitState(task.workspacePath);
+    const gitState = await collectGitStateForCompletion(task.workspacePath);
+    // STOP can arrive while Git is being inspected. Do not resume finalizing
+    // that turn after cancellation (or after a newer turn takes ownership).
+    if (this.deleted.has(task.id) || task.status === 'CANCELLED' || runtime?.cancelRequested) return;
+    if (turn != null && task._turn !== turn) return;
     task.git = {
       isGit: gitState.isGit,
       status: gitState.status,
-      changedFiles: gitState.changedFiles
+      changedFiles: gitState.changedFiles,
+      ...(gitState.truncated ? { truncated: true } : {}),
+      ...(gitState.warning ? { warning: gitState.warning } : {}),
     };
     await this.store.writeArtifact(task.id, 'diff.patch', gitState.diff || '');
-    await this.store.writeArtifact(task.id, 'git-status.txt', gitState.status || '');
+    await this.store.writeArtifact(task.id, 'git-status.txt', gitState.status || gitState.warning || '');
 
     const output = await captureOutputs(task, this.store.taskDir(task.id), run.baseline);
     task.outputFiles = [...(task.outputFiles || []), ...output.files];
@@ -1608,11 +1673,9 @@ export class TaskManager extends EventEmitter {
     const runtime = this.runtimes.get(task.id);
     if (runtime && (runtime.cancelRequested !== true || (forTurn !== null && task._turn !== forTurn))) return;
     if (runtime && runtime.cancelRequested !== true && task.status === 'RUNNING') return;
-    const gitState = task.workspacePath ? await collectGitState(task.workspacePath).catch(() => null) : null;
-    if (gitState) {
-      task.git = { isGit: gitState.isGit, status: gitState.status, changedFiles: gitState.changedFiles };
-      await this.store.writeArtifact(task.id, 'diff.patch', gitState.diff || '');
-    }
+    // STOP must not wait on a fresh Git snapshot. A large workspace or a
+    // locked disposable index can otherwise keep the session in CANCELLING
+    // even after Pi has stopped. The last completed snapshot remains available.
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
     task.updatedAt = now();
@@ -1637,7 +1700,7 @@ export class TaskManager extends EventEmitter {
       await runtime.eventChain.catch(() => {});
       this.runtimes.delete(id);
     }
-    if (this.activeTaskId === id) this.activeTaskId = null;
+    this.#releaseSlot(id);
     this.queue = this.queue.filter((x) => x !== id);
     this.tasks.delete(id);
     if (task._nativeLease) await task._nativeLease().catch(() => {});
@@ -1734,7 +1797,7 @@ export class TaskManager extends EventEmitter {
   // produced nothing (no text, no tools): otherwise its output would be lost
   // forever and the UI only offers copying the text instead.
   async undoLastTurn(id) {
-    return this.#admit(() => this.#undoLastTurn(id));
+    return this.#admit(() => this.#undoLastTurn(id), id);
   }
 
   async #undoLastTurn(id) {
@@ -1809,7 +1872,7 @@ export class TaskManager extends EventEmitter {
         : reason === 'edit' ? 'Сообщение изменено: отправлено заново.'
         : 'Неудачный ход удалён: сообщение возвращено в поле ввода.';
       await this.#recordEvent(task, 'TURN_TRUNCATED', message, { fromSeq, dropInitial, keepUser, reason, text }, true, markerSeq);
-    });
+    }, id);
     this.eventWrites.set(id, chain.then(() => {}, () => {}));
     await chain;
   }
@@ -1844,7 +1907,7 @@ export class TaskManager extends EventEmitter {
       }
       await this.#truncateFrom(task, fromSeq, { dropInitial, reason: 'delete' });
       return { ok: true, fromSeq, dropInitial };
-    });
+    }, id);
   }
 
   // "Очистить чат": drop every message but keep the session itself (name, project,
@@ -1866,7 +1929,7 @@ export class TaskManager extends EventEmitter {
       task.pendingPrompts = [];
       await this.#truncateFrom(task, 1, { dropInitial: true, reason: 'clear' });
       return { ok: true };
-    });
+    }, id);
   }
 
   // Editing the operator's own message is "fix it and run again": the message
@@ -1875,7 +1938,7 @@ export class TaskManager extends EventEmitter {
   // edited text is put to the model as a fresh prompt. It is not an in-place
   // cosmetic correction: the old answer was produced for the old text.
   async editTurn(id, { turnId, text, branch = false }) {
-    return this.#admit(() => this.#editTurn(id, turnId, text, branch));
+    return this.#admit(() => this.#editTurn(id, turnId, text, branch), id);
   }
 
   async #editTurn(id, turnId, text, branch = false) {
@@ -1930,7 +1993,7 @@ export class TaskManager extends EventEmitter {
   // exchange and the client switches between them (‹ n/m ›). Nothing is deleted
   // here: a bad regeneration must not cost the answer that already existed.
   async regenerateLastTurn(id, turnId) {
-    return this.#admit(() => this.#regenerateLastTurn(id, turnId));
+    return this.#admit(() => this.#regenerateLastTurn(id, turnId), id);
   }
 
   async #regenerateLastTurn(id, turnId) {
@@ -1990,7 +2053,7 @@ export class TaskManager extends EventEmitter {
       const seq = Number(turnSeq) || 0;
       await this.#event(task, 'TURN_VARIANT_SELECTED', 'Показан другой вариант ответа.', { turnSeq: seq, variantId: String(variantId) });
       return { ok: true, turnSeq: seq, variantId: String(variantId), total: variants.length };
-    });
+    }, id);
   }
 
   // "Continue": the existing answer is asked to go on. No new exchange and no
@@ -1999,7 +2062,7 @@ export class TaskManager extends EventEmitter {
   // it belongs to). Pi has no "continue" RPC, so the request is an explicit
   // instruction; unlike regenerate, nothing is dropped and no variant is made.
   async continueTurn(id, turnId) {
-    return this.#admit(() => this.#continueTurn(id, turnId));
+    return this.#admit(() => this.#continueTurn(id, turnId), id);
   }
 
   async #continueTurn(id, turnId) {
@@ -2043,7 +2106,7 @@ export class TaskManager extends EventEmitter {
   // rebuilds Pi's session file from those events (session-history.mjs), so the
   // branch keeps its context. The source is left untouched.
   async forkTask(id, turnId) {
-    return this.#admit(() => this.#forkTask(id, turnId));
+    return this.#admit(() => this.#forkTask(id, turnId), id);
   }
 
   async #forkTask(id, turnId) {
@@ -2175,7 +2238,7 @@ export class TaskManager extends EventEmitter {
     await runtime.eventChain.catch(() => {});
     this.#resolveSettle(id);
     await this.#finalizeCancelled(task);
-    if (this.activeTaskId === id) this.activeTaskId = null;
+    this.#releaseSlot(id);
     this.#pump();
     return this.#publicTask(task);
   }
@@ -2201,12 +2264,12 @@ export class TaskManager extends EventEmitter {
     // running and the model answers the new text next. Only the model itself or
     // STOP ends a command.
     const send = async () => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
-    if (!commandId) return this.#admit(send);
+    if (!commandId) return this.#admit(send, id);
     return this.#withCommand(
       commandId,
       opts && opts.clientId ? String(opts.clientId) : null,
       () => this.#payloadHash(id, text, mode, files, uploadToken, opts.now === true, opts.queue === true),
-      () => this.#admit(send),
+      () => this.#admit(send, id),
     );
   }
 
@@ -2346,10 +2409,11 @@ export class TaskManager extends EventEmitter {
       // another session's queued prompt right now (a delegating delivery claims
       // its slot only inside #message, so activeTaskId alone cannot see it) —
       // "сейчас" must not cut into a delivery in flight either.
-      if (this.activeTaskId && this.activeTaskId !== id) {
-        const owner = this.tasks.get(this.activeTaskId);
+      if (!this.activeTaskIds.has(id) && !this.#hasCapacityFor(task)) {
+        const ownerId = this.activeTaskId;
+        const owner = this.tasks.get(ownerId);
         throw Object.assign(
-          new Error(`Машина занята сессией «${owner?.title || this.activeTaskId}» — сначала остановите её.`),
+          new Error(`Машина занята сессией${owner ? ` «${owner.title || ownerId}»` : ''}: достигнут лимит параллельных запусков.`),
           { code: 'BUSY' });
       }
       if (this.dispatching) {
@@ -2391,7 +2455,7 @@ export class TaskManager extends EventEmitter {
         await restore().catch(() => {});
         throw error;
       }
-    });
+    }, id);
   }
 
   // Removing a queued prompt leaves the session as it was: a session that never
@@ -2418,7 +2482,7 @@ export class TaskManager extends EventEmitter {
       }
       task.queueReason = null;
       this.queue = this.queue.filter(x => x !== id);
-      if (this.activeTaskId === id || ['RUNNING', 'PREPARING', 'PREFLIGHT', 'VERIFYING', 'WAITING_USER', 'CANCELLING'].includes(task.status)) {
+      if (this.activeTaskIds.has(id) || ['RUNNING', 'PREPARING', 'PREFLIGHT', 'VERIFYING', 'WAITING_USER', 'CANCELLING'].includes(task.status)) {
         // Removing future input cannot finish the current run or its tools.
         task.updatedAt = now();
         await this.#event(task, 'QUEUE_DROPPED', 'Сообщение убрано из очереди');
@@ -2432,7 +2496,7 @@ export class TaskManager extends EventEmitter {
         await this.store.save(this.#publicTask(task));
       }
       return this.#publicTask(task);
-    });
+    }, id);
   }
 
   async #message(...args) {
@@ -2456,8 +2520,9 @@ export class TaskManager extends EventEmitter {
     // never loses the text to a "модель занята" refusal. A task that already
     // reached a terminal state may start a new turn even if the queue slot has
     // not been released yet (the finalizer clears it on the next tick).
-    const reservedElsewhere = Boolean(this.activeTaskId)
-      && (this.activeTaskId !== id || (!alreadyFinished && task.status !== 'RUNNING'));
+    const ownsSlot = this.activeTaskIds.has(id);
+    const reservedElsewhere = (!ownsSlot && !this.#hasCapacityFor(task))
+      || (ownsSlot && !alreadyFinished && task.status !== 'RUNNING');
     const incomingFiles = await this.#resolveFiles(files, uploadToken);
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
@@ -2557,7 +2622,7 @@ export class TaskManager extends EventEmitter {
     runtime.cancelRequested = false;
     runtime.cancelFinalizing = null;
     if (!streaming) {
-      this.activeTaskId = id;
+      this.#claimSlot(id);
       turn = this.#beginTurn(task);
       settled = this.#waitForSettle(id, 12 * 60 * 60 * 1000);
       settled.catch(() => {});
@@ -2587,7 +2652,7 @@ export class TaskManager extends EventEmitter {
       if (!accepted && !staged.length) await rollbackFiles(task, this.store.taskDir(id), attached);
       if (!streaming) {
         this.#resolveSettle(id);
-        if (this.activeTaskId === id) this.activeTaskId = null;
+        this.#releaseSlot(id);
       }
       throw error;
     } finally { release(); }
@@ -2603,7 +2668,7 @@ export class TaskManager extends EventEmitter {
           // right away) has called #beginTurn by now. Releasing the slot here
           // would let the queue start another task in parallel with the live
           // generation — the same guard #verifyAndFinalize uses.
-          if (this.activeTaskId === id && task._turn === turn) this.activeTaskId = null;
+          if (this.activeTaskIds.has(id) && task._turn === turn) this.#releaseSlot(id);
           this.#pump();
         }
       })().catch(error => console.error(error));
@@ -2612,14 +2677,14 @@ export class TaskManager extends EventEmitter {
   }
 
   async compact(id, instructions = '') {
-    return this.#admit(() => this.#compact(id, instructions));
+    return this.#admit(() => this.#compact(id, instructions), id);
   }
 
   async #compact(id, instructions) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     const runtime = await this.#ensureSession(task);
-    if (this.activeTaskId || (await runtime.pi.getState())?.isStreaming) throw Object.assign(new Error('Дождитесь завершения ответа перед сжатием контекста.'), { code: 'BUSY' });
+    if (this.activeTaskIds.has(id) || (await runtime.pi.getState())?.isStreaming) throw Object.assign(new Error('Дождитесь завершения ответа перед сжатием контекста.'), { code: 'BUSY' });
     if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом.'), { code: 'MODEL_BUSY' });
     await this.#event(task, 'COMPACT_REQUESTED', 'Manual compaction requested');
     const response = await runtime.pi.compact(String(instructions || ''));
@@ -2720,7 +2785,7 @@ export class TaskManager extends EventEmitter {
     task.piStartedAt = null;
     task._toolsRunning = 0;
     task._compacting = false;
-    if (this.activeTaskId === task.id) this.activeTaskId = null;
+    this.#releaseSlot(task.id);
     if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'rpc_failed' });
     await this.#fail(task, error);
     this.#schedulePump();

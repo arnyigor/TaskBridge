@@ -16,6 +16,7 @@ import ru.arny.taskbridge.core.client.sessions.SessionAlerts
 import ru.arny.taskbridge.core.client.sessions.SessionList
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.settings.AppSettings
+import ru.arny.taskbridge.core.client.settings.SettingsController
 import ru.arny.taskbridge.core.client.settings.StoredConnection
 import ru.arny.taskbridge.core.client.settings.savedAddressNeedsPairing
 import ru.arny.taskbridge.platform.PlatformServices
@@ -95,6 +96,7 @@ class AppGraph(val platform: PlatformServices) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val api = TaskBridgeApi(http, StoredConnection(settings, baseUrl))
         val sessions = SessionList(api, scope, clockMillis = { nowMillis() })
+        val settingsController = SettingsController(api, scope)
         private val chats = mutableMapOf<String, ChatSession>()
         private val alerts = SessionAlerts()
 
@@ -106,6 +108,7 @@ class AppGraph(val platform: PlatformServices) {
             scope.launch {
                 sessions.state.collectLatest { state ->
                     val info = state.info
+                    settingsController.syncProviderStatuses(info?.providerStatuses.orEmpty())
                     // A different database (restored or recreated): nothing cached here is valid.
                     if (info?.storeId != null && info.storeId != settings.storeId) {
                         settings.storeId = info.storeId
@@ -118,6 +121,8 @@ class AppGraph(val platform: PlatformServices) {
                 }
             }
             sessions.start()
+            settingsController.loadMcp()
+            settingsController.loadModels()
         }
 
         /** One ChatSession per open session, kept while the connection lives (switching back is instant). */

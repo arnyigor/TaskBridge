@@ -562,10 +562,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
         val turn = orphan?.turn ?: sink
         val content = message["content"] as? JsonArray
+        val markerText = content?.mapNotNull { it as? JsonObject }
+            ?.filter { it.str("type") == "text" }
+            ?.joinToString("") { it.str("text").orEmpty() }
+            .orEmpty()
         if (content != null) {
-            val blocks = content.mapNotNull { it as? JsonObject }
-            val text = blocks.filter { it.str("type") == "text" }.joinToString("") { it.str("text").orEmpty() }
-            val thinking = blocks.filter { it.str("type") == "thinking" }.joinToString("") { it.str("thinking").orEmpty() }
+            val text = markerText
+            val thinking = content.mapNotNull { it as? JsonObject }.filter { it.str("type") == "thinking" }.joinToString("") { it.str("thinking").orEmpty() }
             val rebuild = orphan != null || messageTurn != null
             val prefix = orphan?.textPrefix ?: textPrefix
             val separator = orphan?.textSeparator ?: textSeparator
@@ -574,7 +577,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             turn.thinking = (if (rebuild) thinkPrefix else turn.thinking) + thinking
         }
         if (stopReason != null) turn.stopReason = stopReason
-        if (errorMessage != null || aborted) turn.error = humanizeError(errorMessage).ifEmpty { "Request was aborted" }
+        if (errorMessage != null || aborted) {
+            // The model answered in this message: an empty abort/error marker that
+            // follows the answer is the run being stopped, not a broken answer — the
+            // answer above it keeps its text and its status. A real aborted answer
+            // carries its own text and keeps its error (ChatDeliveryRegressionTest).
+            if (markerText.isNotEmpty() || turn.text.isBlank()) {
+                turn.error = humanizeError(errorMessage).ifEmpty { "Request was aborted" }
+            }
+        }
         if (orphan != null) {
             turn.status = "FAILED"
             turn.active = false

@@ -149,6 +149,27 @@ class TaskBridgeApiTest {
     }
 
     @Test
+    fun providerAndMcpManagementUseTypedEndpoints() = runBlocking<Unit> {
+        val api = api { request ->
+            when (request.url.encodedPath) {
+                "/api/providers/refresh" -> json("""{"wormsoft":{"provider":"wormsoft","available":true,"kind":"subscription","subscription":{"plan":"paid","remaining":700,"total":1000}}}""")
+                "/api/mcp" -> json("""{"mode":"managed","servers":[{"name":"serena","transport":"stdio","tools":[{"name":"search","description":"Find symbols"}]}]}""")
+                "/api/mcp/tools" -> json("""{"mode":"managed","servers":[{"name":"serena","transport":"stdio","excludeTools":["search"],"tools":[{"name":"search"}]}]}""")
+                else -> error("Unexpected route: ${request.url}")
+            }
+        }
+        val statuses = api.refreshProvider("wormsoft")
+        assertEquals(700.0, statuses.getValue("wormsoft").subscription?.remaining)
+        assertEquals("wormsoft", TaskBridgeJson.parseToJsonElement(requests.first().bodyText()).jsonObject["provider"]?.jsonPrimitive?.content)
+
+        val mcp = api.mcp()
+        assertEquals("search", mcp.servers.single().tools.single().name)
+        val changed = api.setMcpTool("serena", "search", enabled = false)
+        assertEquals(listOf("search"), changed.servers.single().excludeTools)
+        assertEquals("false", TaskBridgeJson.parseToJsonElement(requests.last().bodyText()).jsonObject["enabled"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun theSessionCookieIsReadFromSetCookie() {
         assertEquals("v.1.s", TaskBridgeApi.parseSessionCookie("taskbridge_session=v.1.s; Path=/"))
         assertEquals(null, TaskBridgeApi.parseSessionCookie("other=1"))

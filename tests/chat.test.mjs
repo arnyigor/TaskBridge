@@ -2710,6 +2710,21 @@ test('an interrupted answer keeps its own status when the session finishes later
   assert.equal(interrupted.error, 'Request aborted', 'и его ошибка остаётся видимой');
 });
 
+test('an empty abort marker after an answered message does not fail the answer', () => {
+  const state = new ChatState(task());
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:36:31.000Z', message: 'вопрос', data: { text: 'вопрос' } });
+  state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:36:32.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:36:33.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'готовый ответ' }], stopReason: 'toolUse' } } } });
+  // STOP: the model was starting its next message when the run was killed. The
+  // empty marker follows an answer the model already made — it must not fail it
+  // (real event: task 8709cb9c21ed, seq 8956).
+  state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:36:34.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'aborted', errorMessage: 'Request aborted before processing provider output.' } } } });
+  state.apply({ taskId: 'a', seq: 5, at: '2026-09-15T10:36:35.000Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
+  assert.equal(state.current.error, null, 'ошибка не вешается на ответ, который уже есть');
+  assert.equal(state.current.status, 'CANCELLED');
+  assert.match(state.current.text, /готовый ответ/);
+});
+
 test('a provider JSON error body is shown as one readable line, not raw JSON', () => {
   const envelope = '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}';
   const readable = 'The following parameters are not supported for this model: tools (UNSUPPORTED_OPENAI_PARAMS)';

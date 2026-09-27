@@ -33,7 +33,87 @@ data class ApiInfo(
     val modelReady: Boolean? = null,
     val addresses: List<ApiAddress> = emptyList(),
     val fileLimits: FileLimits? = null,
+    val providerStatuses: Map<String, ProviderStatus> = emptyMap(),
+    val scheduler: SchedulerInfo? = null,
 )
+
+@Serializable
+data class SchedulerInfo(
+    val activeTasks: Int = 0,
+    val maxConcurrentSessions: Int = 1,
+    val queuedTasks: Int = 0,
+)
+
+@Serializable
+data class ProviderStatus(
+    val provider: String? = null,
+    val label: String? = null,
+    val kind: String? = null,
+    val available: Boolean = false,
+    val reason: String? = null,
+    val stale: Boolean = false,
+    val asOf: String? = null,
+    val credits: Double? = null,
+    val endsAt: String? = null,
+    val balance: ProviderBalance? = null,
+    val rub: ProviderRubBalance? = null,
+    val pace: ProviderPace? = null,
+    val runway: ProviderRunway? = null,
+    val subscription: ProviderSubscription? = null,
+    val usage: ProviderUsage? = null,
+)
+
+@Serializable data class ProviderBalance(val cny: Double? = null, val usd: Double? = null)
+@Serializable data class ProviderRubBalance(val cny: Double? = null, val usd: Double? = null, val total: Double? = null)
+@Serializable data class ProviderPace(
+    val recentPerDay: Double? = null,
+    val historyPerDay: Double? = null,
+    val recentPerDayRub: Double? = null,
+    val historyPerDayRub: Double? = null,
+)
+@Serializable data class ProviderRunway(val recentDays: Int? = null, val historyDays: Int? = null)
+@Serializable data class ProviderSubscription(
+    val plan: String? = null,
+    val remaining: Double? = null,
+    val total: Double? = null,
+    val used: Double? = null,
+    val remainingRatio: Double? = null,
+    val windowSeconds: Double? = null,
+    val periodDays: Double? = null,
+    val priceRub: Double? = null,
+    val rateLimitRequests: Double? = null,
+    val rateLimitSeconds: Double? = null,
+    val concurrentRequests: Double? = null,
+)
+@Serializable data class ProviderUsage(
+    val firstSeenAt: String? = null,
+    val windowStartAt: String? = null,
+    val nextResetAt: String? = null,
+    val projectedEmptyAt: String? = null,
+    val perDay: Double? = null,
+)
+
+@Serializable
+data class McpStatus(
+    val mode: String = "inherit",
+    val configPath: String? = null,
+    val activePath: String? = null,
+    val exists: Boolean = false,
+    val servers: List<McpServer> = emptyList(),
+)
+
+@Serializable
+data class McpServer(
+    val name: String,
+    val url: String? = null,
+    val command: String? = null,
+    val transport: String? = null,
+    val disabled: Boolean = false,
+    val excludeTools: List<String> = emptyList(),
+    val tools: List<McpTool> = emptyList(),
+)
+
+@Serializable data class McpTool(val name: String, val description: String = "")
 
 @Serializable
 data class PiInfo(

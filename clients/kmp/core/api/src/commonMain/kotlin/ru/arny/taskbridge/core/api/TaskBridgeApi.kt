@@ -141,6 +141,31 @@ class TaskBridgeApi(
     suspend fun models(refresh: Boolean = false): ModelCatalog =
         get("/api/models" + if (refresh) "?refresh=1" else "", ModelCatalog.serializer())
 
+    suspend fun refreshProvider(provider: String): Map<String, ProviderStatus> =
+        call(HttpMethod.Post, "/api/providers/refresh", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),
+            buildJsonObject { put("provider", provider) })
+
+    suspend fun mcp(): McpStatus = get("/api/mcp", McpStatus.serializer())
+
+    suspend fun setMcpMode(mode: String): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/mode", McpStatus.serializer(), buildJsonObject { put("mode", mode) })
+
+    suspend fun importMcp(): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/import", McpStatus.serializer(), buildJsonObject { })
+
+    suspend fun setMcpServer(name: String, enabled: Boolean): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/servers", McpStatus.serializer(), buildJsonObject {
+            put("name", name)
+            put("enabled", enabled)
+        })
+
+    suspend fun setMcpTool(server: String, tool: String, enabled: Boolean): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/tools", McpStatus.serializer(), buildJsonObject {
+            put("server", server)
+            put("tool", tool)
+            put("enabled", enabled)
+        })
+
     // --- sessions ------------------------------------------------------------
 
     suspend fun tasks(): List<Task> = get("/api/tasks", ListSerializer(Task.serializer()))

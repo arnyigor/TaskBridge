@@ -903,6 +903,11 @@ async function handleRequest(req, res) {
         engine,
         system,
         local,
+        scheduler: {
+          activeTasks: manager.activeTaskIds.size,
+          maxConcurrentSessions: manager.maxParallelSessions,
+          queuedTasks: manager.queue.length,
+        },
         providerStatuses,
         deepseek,
         warnings,

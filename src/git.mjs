@@ -7,6 +7,8 @@ import { isPrivatePath } from './files.mjs';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
+const MAX_SNAPSHOT_PATHS = 256;
+const MAX_STATUS_LINES = 512;
 
 export async function git(args, cwd, timeout = 30000, env = {}) {
   const { stdout, stderr } = await execFileAsync('git', args, {
@@ -111,16 +113,33 @@ export async function collectGitState(workspacePath) {
 
   const publishable = name => !isPrivatePath(name) && !name.split('/').includes('.taskbridge-input');
   const records = (await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], root)).stdout.split('\0');
-  const statusLines = [];
+  const changes = [];
   const displayPath = name => /[\s"\\]/.test(name) ? JSON.stringify(name) : name;
   for (let i = 0; i < records.length && records[i]; i++) {
     const code = records[i].slice(0, 2);
     const name = records[i].slice(3);
     const previous = /[RC]/.test(code) ? records[++i] : null;
     if (publishable(name) && (!previous || publishable(previous))) {
-      statusLines.push(`${code} ${previous ? displayPath(previous) + ' -> ' : ''}${displayPath(name)}\n`);
+      changes.push({ code, name, previous });
     }
   }
+  if (!changes.length) return { isGit: true, status: '', diff: '', changedFiles: [] };
+
+  // An imported project can have tens of thousands of untracked assets. Git
+  // status can describe them cheaply, but adding every file to a disposable
+  // index can run for minutes and leave index.lock behind on Windows. Prefer
+  // tracked edits and bound the snapshot; expose the omitted count explicitly.
+  const ordered = [
+    ...changes.filter(change => change.code !== '??'),
+    ...changes.filter(change => change.code === '??'),
+  ];
+  const selected = ordered.slice(0, MAX_SNAPSHOT_PATHS);
+  const candidates = [...new Set(selected.flatMap(change => [change.name, change.previous].filter(Boolean)))];
+  const omitted = changes.length - selected.length;
+  const status = changes.slice(0, MAX_STATUS_LINES)
+    .map(({ code, name, previous }) => `${code} ${previous ? displayPath(previous) + ' -> ' : ''}${displayPath(name)}\n`)
+    .join('') + (changes.length > MAX_STATUS_LINES ? `… ${changes.length - MAX_STATUS_LINES} more files omitted from status\n` : '')
+    + (omitted ? `… ${omitted} files omitted from diff snapshot\n` : '');
 
   // Build a snapshot of the working files in a disposable index. Neither the
   // user's staged changes nor their index metadata are touched by collection.
@@ -133,11 +152,9 @@ export async function collectGitState(workspacePath) {
     try { head = (await git(['rev-parse', '--verify', 'HEAD'], root)).stdout.trim(); }
     catch { head = null; }
     await git(head ? ['read-tree', head] : ['read-tree', '--empty'], root, 30000, env);
-    const candidates = (await git(['ls-files', '--cached', '--others', '--exclude-standard', '-z'], root, 30000, env)).stdout
-      .split('\0').filter(name => name && publishable(name));
     if (candidates.length) {
       await fs.writeFile(pathspecFile, [...new Set(candidates)].map(name => `:(literal)${name}\0`).join(''));
-      await git(['add', '-A', `--pathspec-from-file=${pathspecFile}`, '--pathspec-file-nul'], root, 120000, env);
+      await git(['add', '-A', `--pathspec-from-file=${pathspecFile}`, '--pathspec-file-nul'], root, 30000, env);
     }
     const baseArgs = ['diff', '--cached', ...(head ? [head] : []), '--no-ext-diff'];
     // Written by git straight to a file: a binary diff of a large untracked file
@@ -146,13 +163,36 @@ export async function collectGitState(workspacePath) {
     await git([...baseArgs, '--binary', '--no-textconv', `--output=${diffFile}`], root, 120000, env);
     const diff = await fs.readFile(diffFile, 'utf8');
     const changedFiles = (await git([...baseArgs, '--name-only', '--no-renames', '-z'], root, 30000, env)).stdout.split('\0').filter(Boolean);
-    return { isGit: true, status: statusLines.join(''), diff, changedFiles };
+    return { isGit: true, status, diff, changedFiles, ...(omitted ? { truncated: true } : {}) };
   } finally {
     // Only remove the known files we created; never recursively remove a repo.
     for (const name of [indexFile, indexFile + '.lock', pathspecFile, path.join(temporary, 'diff')]) {
-      await fs.unlink(name).catch(error => { if (error.code !== 'ENOENT') throw error; });
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try { await fs.unlink(name); break; }
+        catch (error) {
+          if (error.code === 'ENOENT') break;
+          if (attempt === 3 || !['EBUSY', 'EPERM', 'EACCES'].includes(error.code)) {
+            console.warn(`Git snapshot cleanup deferred for ${name}: ${error.message}`);
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
     }
-    await fs.rmdir(temporary);
+    await fs.rmdir(temporary).catch(error => {
+      if (error.code !== 'ENOENT') console.warn(`Git snapshot cleanup deferred for ${temporary}: ${error.message}`);
+    });
+  }
+}
+
+/** An optional diff must never turn a completed model answer into a failed task. */
+export async function collectGitStateForCompletion(workspacePath, collector = collectGitState) {
+  try { return await collector(workspacePath); }
+  catch (error) {
+    return {
+      isGit: false, status: '', diff: '', changedFiles: [],
+      warning: `Git snapshot unavailable: ${error.message}`,
+    };
   }
 }
 

@@ -464,8 +464,9 @@ export class ChatState {
       const turn = orphan?.turn || sink;
       const context = orphan || this;
       const content = frame.message.content;
+      const markerText = Array.isArray(content) ? content.filter(x => x.type === 'text').map(x => x.text || '').join('') : '';
       if (Array.isArray(content)) {
-        const text = content.filter(x => x.type === 'text').map(x => x.text || '').join('');
+        const text = markerText;
         const thinking = content.filter(x => x.type === 'thinking').map(x => x.thinking || '').join('');
         // The message text is rebuilt from the prefix, so the paragraph break
         // must be part of it — whether or not a delta already inserted it for
@@ -476,7 +477,13 @@ export class ChatState {
       if (typeof frame.message.stopReason === 'string') turn.stopReason = frame.message.stopReason;
       // Pi forwards the provider's error body verbatim; a JSON envelope is not a
       // message a human can read, so it is flattened to one line here.
-      if (frame.message.errorMessage || aborted) turn.error = humanizeError(frame.message.errorMessage) || 'Request was aborted';
+      if (frame.message.errorMessage || aborted) {
+        // The model answered in this message: an empty abort/error marker that
+        // follows the answer is the run being stopped, not a broken answer — the
+        // answer above it keeps its text and its status. A real aborted answer
+        // carries its own text and keeps its error (tests/chat.test.mjs).
+        if (markerText || !turn.text) turn.error = humanizeError(frame.message.errorMessage) || 'Request was aborted';
+      }
       if (orphan) {
         // Route the WHOLE late end to its original message. In particular, do
         // not overwrite the fresh answer's deltas or close its streaming sink.

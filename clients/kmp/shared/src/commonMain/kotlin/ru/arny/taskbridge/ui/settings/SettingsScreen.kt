@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -37,6 +39,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.SUPPORTED_API_VERSIONS
+import ru.arny.taskbridge.core.api.McpServer
+import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.ui.common.SectionTitle
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -44,6 +48,7 @@ import ru.arny.taskbridge.ui.theme.LocalStatusColors
 @Composable
 fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit) {
     val state by connection.sessions.state.collectAsState()
+    val agentState by connection.settingsController.state.collectAsState()
     val info = state.info
     var confirmDisconnect by remember { mutableStateOf(false) }
     var enterSends by remember { mutableStateOf(graph.settings.enterSends) }
@@ -76,9 +81,101 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     warning = pi != null && !pi.supported,
                 )
                 InfoRow(label = "Модель занята", value = when (info?.modelBusy) { true -> "да"; false -> "нет"; null -> "нет данных" })
+                info?.scheduler?.let {
+                    InfoRow(label = "Параллельные сессии", value = "${it.activeTasks} из ${it.maxConcurrentSessions}; в очереди ${it.queuedTasks}")
+                }
                 info?.storeId?.let { InfoRow(label = "База", value = it.take(8)) }
                 for (warning in info?.warnings.orEmpty()) {
                     InfoRow(label = "Предупреждение", value = warning.message ?: warning.code.orEmpty(), warning = true)
+                }
+
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                SectionTitle("Модели и лимиты провайдеров")
+                Text(
+                    "Баланс доступен только там, где провайдер предоставляет безопасный API аккаунта. Данные обновляются вручную, чтобы не превысить лимиты кабинета.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+                val catalog = agentState.models
+                InfoRow("Доступно моделей", catalog?.models?.size?.toString() ?: "загрузка…")
+                catalog?.defaultModel?.let { InfoRow("По умолчанию", "${it.provider.orEmpty()}/${it.label}") }
+                catalog?.models
+                    ?.groupingBy { it.provider ?: "другие" }
+                    ?.eachCount()
+                    ?.toList()
+                    ?.sortedByDescending { it.second }
+                    ?.forEach { (provider, count) -> InfoRow(provider, "$count моделей") }
+                OutlinedButton(
+                    onClick = { connection.settingsController.loadModels(refresh = true) },
+                    enabled = !agentState.modelsLoading,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                ) {
+                    if (agentState.modelsLoading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Обновить каталог моделей")
+                }
+                val providers = agentState.providerStatuses.values.sortedBy { it.label ?: it.provider }
+                if (providers.isEmpty()) {
+                    Text("Данные ещё не загружены", modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else {
+                    providers.forEach { provider ->
+                        ProviderRow(
+                            status = provider,
+                            refreshing = provider.provider in agentState.refreshingProviders,
+                            onRefresh = { provider.provider?.let(connection.settingsController::refreshProvider) },
+                        )
+                    }
+                }
+
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                SectionTitle("MCP")
+                Text(
+                    "Режим применяется к новым сессиям. Уже запущенные агенты сохраняют набор инструментов до перезапуска сессии.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+                Row(
+                    Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    for ((mode, label) in listOf("inherit" to "Из Pi", "managed" to "Управляемый", "off" to "Выключен")) {
+                        FilterChip(
+                            selected = agentState.mcp?.mode == mode,
+                            enabled = !agentState.mcpLoading,
+                            onClick = { connection.settingsController.setMcpMode(mode) },
+                            label = { Text(label) },
+                        )
+                    }
+                    if (agentState.mcpLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                }
+                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = connection.settingsController::loadMcp, enabled = !agentState.mcpLoading) {
+                        Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Обновить")
+                    }
+                    OutlinedButton(onClick = connection.settingsController::importMcp, enabled = !agentState.mcpLoading) {
+                        Text("Импортировать из Pi")
+                    }
+                }
+                agentState.mcp?.configPath?.let { InfoRow("Конфигурация", it) }
+                agentState.mcp?.servers.orEmpty().forEach { server ->
+                    McpServerCard(
+                        server = server,
+                        editable = agentState.mcp?.mode == "managed" && !agentState.mcpLoading,
+                        onServerEnabled = { enabled -> connection.settingsController.setServer(server.name, enabled) },
+                        onToolEnabled = { tool, enabled -> connection.settingsController.setTool(server.name, tool, enabled) },
+                    )
+                }
+                agentState.error?.let { error ->
+                    Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
+                        TextButton(onClick = connection.settingsController::clearError) { Text("Скрыть") }
+                    }
                 }
 
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
@@ -135,6 +232,79 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
             },
             dismissButton = { TextButton(onClick = { confirmDisconnect = false }) { Text("Отмена") } },
         )
+    }
+}
+
+@Composable
+private fun ProviderRow(status: ProviderStatus, refreshing: Boolean, onRefresh: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clickable(enabled = !refreshing, onClick = onRefresh).padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(status.label ?: status.provider ?: "Провайдер", style = MaterialTheme.typography.bodyMedium)
+            Text(providerStatusText(status), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+        else Icon(AppIcons.Refresh, "Обновить данные провайдера", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+private fun providerStatusText(status: ProviderStatus): String {
+    if (!status.available) return when (status.reason) {
+        "no-key" -> "Ключ не настроен"
+        "not-fetched" -> "Нажмите, чтобы получить данные"
+        else -> status.reason ?: "Данные недоступны"
+    }
+    val stale = if (status.stale) " · устарело" else ""
+    status.credits?.let { return "${number(it)} кредитов$stale" }
+    status.subscription?.let { subscription ->
+        val total = subscription.total?.let { " из ${number(it)}" }.orEmpty()
+        val percent = subscription.remainingRatio?.let { " · ${(it * 100).toInt()}%" }.orEmpty()
+        val rate = status.usage?.perDay?.let { " · расход ${number(it)}/день" }.orEmpty()
+        return "Осталось ${number(subscription.remaining)}$total$percent$rate$stale"
+    }
+    status.balance?.let { balance ->
+        val parts = listOfNotNull(balance.cny?.let { "¥${number(it)}" }, balance.usd?.let { "\$${number(it)}" })
+        val rub = status.rub?.total?.let { " · ≈ ${number(it)} ₽" }.orEmpty()
+        val runway = status.runway?.historyDays?.let { " · примерно на $it дн." }.orEmpty()
+        return parts.joinToString(" · ") + rub + runway + stale
+    }
+    return "Данные получены$stale"
+}
+
+private fun number(value: Double?): String = value?.let {
+    if (it % 1.0 == 0.0) it.toLong().toString() else ((it * 100).toLong() / 100.0).toString()
+} ?: "—"
+
+@Composable
+private fun McpServerCard(
+    server: McpServer,
+    editable: Boolean,
+    onServerEnabled: (Boolean) -> Unit,
+    onToolEnabled: (String, Boolean) -> Unit,
+) {
+    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(server.name, style = MaterialTheme.typography.titleSmall)
+                Text(server.transport ?: "неизвестный transport", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Switch(checked = !server.disabled, enabled = editable, onCheckedChange = onServerEnabled)
+        }
+        server.tools.forEach { tool ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(tool.name, style = MaterialTheme.typography.bodyMedium)
+                    if (tool.description.isNotBlank()) Text(tool.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = tool.name !in server.excludeTools,
+                    enabled = editable && !server.disabled,
+                    onCheckedChange = { onToolEnabled(tool.name, it) },
+                )
+            }
+        }
     }
 }
 

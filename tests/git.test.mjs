@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { git, collectGitState, prepareProjectWorkspace, applyTaskPatch, removeWorktree } from '../src/git.mjs';
+import { git, collectGitState, collectGitStateForCompletion, prepareProjectWorkspace, applyTaskPatch, removeWorktree } from '../src/git.mjs';
 
 async function repository(t, { unborn = false } = {}) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-git-test-'));
@@ -103,6 +103,27 @@ test('a diff larger than the exec buffer (big untracked zip) is still collected'
   const state = await collectGitState(repo);
   assert.deepEqual(state.changedFiles, ['build.zip']);
   assert.ok(state.diff.length > 20 * 1024 * 1024);
+});
+
+test('a workspace with hundreds of untracked files bounds its disposable index', async t => {
+  const repo = await repository(t);
+  await Promise.all(Array.from({ length: 300 }, (_, i) =>
+    fs.writeFile(path.join(repo, `file-${String(i).padStart(3, '0')}.txt`), `content ${i}\n`)));
+  const state = await collectGitState(repo);
+  assert.equal(state.truncated, true);
+  assert.equal(state.changedFiles.length, 256);
+  assert.match(state.status, /44 files omitted from diff snapshot/);
+  assert.match(state.diff, /file-000\.txt/);
+  assert.doesNotMatch(state.diff, /file-299\.txt/);
+  assert.equal((await git(['ls-files'], repo)).stdout, '');
+});
+
+test('Git snapshot failure is advisory after the model has finished', async () => {
+  const state = await collectGitStateForCompletion('unused', async () => {
+    throw Object.assign(new Error('EBUSY: index.lock'), { code: 'EBUSY' });
+  });
+  assert.deepEqual(state.changedFiles, []);
+  assert.match(state.warning, /EBUSY: index\.lock/);
 });
 
 test('non-repository result remains empty', async () => {

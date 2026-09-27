@@ -33,6 +33,10 @@
       "mode": "inherit"
     }
   },
+  "queue": {
+    "maxConcurrentSessions": 4,
+    "pollMs": 1000
+  },
   "localRuntime": {
     "healthUrl": "http://127.0.0.1:8080/health",
     "provider": "llama.cpp",

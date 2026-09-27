@@ -127,4 +127,20 @@ class ChatDeliveryRegressionTest {
         assertEquals(listOf("assistant-new"), visible.map { it.id })
         assertEquals("New answer", visible.single().text)
     }
+
+    @Test fun anEmptyAbortMarkerAfterAnAnsweredMessageDoesNotFailIt() {
+        val reducer = ChatReducer(task)
+        reducer.apply(event(1, "USER_MESSAGE", """{"text":"вопрос"}"""))
+        reducer.frame(2, """{"type":"message_start","message":{"role":"assistant"}}""")
+        reducer.frame(3, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"готовый ответ"}],"stopReason":"toolUse"}}""")
+        // STOP: the model was starting its next message when the run was killed.
+        // The empty marker follows an answer the model already gave — it must not
+        // fail that answer (real event: task 8709cb9c21ed, seq 8956).
+        reducer.frame(4, """{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"aborted","errorMessage":"Request aborted before processing provider output."}}""")
+        reducer.syncTask(task.copy(status = "CANCELLED"))
+        val answer = reducer.snapshot().items.last() as ChatItem.Assistant
+        assertEquals(null, answer.error)
+        assertEquals("CANCELLED", answer.status)
+        assertEquals("готовый ответ", answer.text)
+    }
 }

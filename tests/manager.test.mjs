@@ -511,6 +511,36 @@ test('a message to another session waits in that session queue instead of being 
   assert.deepEqual(urgent.pendingPrompts.map(entry => entry.text), ['подожду', 'срочно']);
 });
 
+test('independent remote sessions run in parallel while each session keeps one active turn', async t => {
+  const f = await fixture(t);
+  f.task.requestedModel = { provider: 'deepseek', id: 'deepseek-chat' };
+  const otherWorkspace = path.join(f.root, 'other-workspace');
+  await fs.mkdir(otherWorkspace);
+  const other = { ...f.task, id: 'b', status: 'SUCCEEDED', workspacePath: otherWorkspace, prompt: 'другая', requestedModel: { provider: 'routerai', id: 'openai/gpt' } };
+  await f.store.create(other);
+  f.manager.tasks.set('b', other);
+  const otherSent = [];
+  const otherRuntime = {
+    pi: { ...f.pi, getState: async () => ({ isStreaming: false }), prompt: async text => { otherSent.push(text); } },
+    eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false,
+  };
+  f.manager.runtimes.set('b', otherRuntime);
+
+  await f.manager.message('a', 'первая');
+  await f.manager.message('b', 'вторая');
+  assert.deepEqual(f.sent, ['первая']);
+  assert.deepEqual(otherSent, ['вторая']);
+  assert.equal(f.manager.getTask('a').status, 'RUNNING');
+  assert.equal(f.manager.getTask('b').status, 'RUNNING');
+
+  for (const runtime of [f.runtime, otherRuntime]) {
+    for (const waiter of runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  }
+  for (let i = 0; i < 200 && [f.manager.getTask('a'), f.manager.getTask('b')].some(task => task.status === 'RUNNING'); i++) {
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+});
+
 test('send now refuses while another session owns the machine and keeps the prompt', async t => {
   const f = await fixture(t);
   const other = { ...f.task, id: 'b', status: 'RUNNING', workspacePath: f.root, prompt: 'занята' };
@@ -542,8 +572,8 @@ test('a session created while another one works waits in the queue instead of fa
   // the operator's prompt was lost; now it is queued like any other.
   const created = await f.manager.createTask({ projectId: 'p', prompt: 'новая сессия' });
   assert.equal(created.status, 'QUEUED');
-  assert.equal(created.queueReason, 'BUSY');
-  assert.equal(created.current, 'В очереди');
+  assert.equal(created.queueReason, 'MODEL_BUSY');
+  assert.equal(created.current, 'Ждёт освобождения локальной модели');
   assert.ok(f.manager.queue.includes(created.id));
   const events = (await f.store.readEvents(created.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.deepEqual(events.map(event => event.type), ['QUEUE_WAITING'], 'the wait is recorded, nothing was lost');
