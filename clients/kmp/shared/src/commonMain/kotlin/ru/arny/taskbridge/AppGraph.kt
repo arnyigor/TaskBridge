@@ -8,6 +8,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.ChatSession
@@ -31,7 +34,7 @@ import kotlin.uuid.Uuid
  */
 class AppGraph(val platform: PlatformServices) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val settings = AppSettings(platform.store, { newId() }, platform.kind)
+    val settings = AppSettings(platform.store, { newId() }, platform.kind, platform.secrets)
     private val http = platform.httpClient()
 
     var connection: Connected? by mutableStateOf(settings.serverUrl?.let { Connected(it) })
@@ -97,13 +100,22 @@ class AppGraph(val platform: PlatformServices) {
         val api = TaskBridgeApi(http, StoredConnection(settings, baseUrl))
         val sessions = SessionList(api, scope, clockMillis = { nowMillis() })
         val settingsController = SettingsController(api, scope)
+        private val persistence = platform.chatPersistence(baseUrl)
         private val chats = mutableMapOf<String, ChatSession>()
         private val alerts = SessionAlerts()
+        private val _online = MutableStateFlow(true)
+        val online = _online.asStateFlow()
 
         /** The session on screen: its alerts are not notified. */
         var visibleSession: String? = null
 
         init {
+            scope.launch {
+                platform.networkAvailable().distinctUntilChanged().collectLatest { available ->
+                    _online.value = available
+                    if (available) wakeUp()
+                }
+            }
             // Notifications and the background watch follow the list.
             scope.launch {
                 sessions.state.collectLatest { state ->
@@ -127,7 +139,7 @@ class AppGraph(val platform: PlatformServices) {
 
         /** One ChatSession per open session, kept while the connection lives (switching back is instant). */
         fun chat(taskId: String): ChatSession = chats.getOrPut(taskId) {
-            ChatSession(api, taskId, scope, ids = { newId() }, now = { nowIso() }).also { it.start() }
+            ChatSession(api, taskId, scope, ids = { newId() }, now = { nowIso() }, persistence = persistence).also { it.start() }
         }
 
         fun closeChat(taskId: String) {

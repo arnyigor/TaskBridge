@@ -125,6 +125,8 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/mcp/import', summary: 'import the Pi MCP config' },
   { method: 'POST', path: '/api/mcp/servers', summary: 'enable or disable one server' },
   { method: 'POST', path: '/api/mcp/tools', summary: 'enable or disable one tool' },
+  { method: 'POST', path: '/api/mcp/health', summary: 'probe configured MCP servers with bounded timeouts' },
+  { method: 'POST', path: '/api/mcp/definitions', summary: 'create, update, or remove a managed MCP server definition' },
 
   // --- push -----------------------------------------------------------------
   { method: 'GET', path: '/api/push/key', summary: 'VAPID public key (browser push only)' },

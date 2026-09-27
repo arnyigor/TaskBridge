@@ -69,6 +69,7 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import ru.arny.taskbridge.core.client.chat.ToolState
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonElement
@@ -76,6 +77,7 @@ import kotlinx.serialization.json.Json
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.Approval
+import ru.arny.taskbridge.core.api.GenerationMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.PendingPrompt
 import ru.arny.taskbridge.core.api.UploadFile
@@ -94,6 +96,7 @@ import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
+import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.parseIsoMillis
 import ru.arny.taskbridge.ui.common.sourceLabel
 import ru.arny.taskbridge.ui.common.timeRange
@@ -132,6 +135,7 @@ fun ChatScreen(
 ) {
     val session = remember(taskId) { connection.chat(taskId) }
     val state by session.state.collectAsState()
+    val online by connection.online.collectAsState()
     val platform = graph.platform
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -210,12 +214,14 @@ fun ChatScreen(
                 onBack = onBack,
                 onDialog = { dialog = it },
                 onCopyHistory = { copyingHistory = true },
+                onStop = { dialog = ChatDialog.ConfirmStop },
             )
         },
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
+            if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
             LinkBanner(state.link, onRetry = { session.reconnectNow() })
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
@@ -318,35 +324,58 @@ private fun ChatTopBar(
     onBack: () -> Unit,
     onDialog: (ChatDialog) -> Unit,
     onCopyHistory: () -> Unit,
+    onStop: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val task = state.task
+    val display = task?.let(::displayStateOf)
+    val speed = task?.metrics?.let(::generationSpeedLabel)
     TopAppBar(
         navigationIcon = {
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
         },
         title = {
-            Column {
+            Column(Modifier.padding(vertical = 4.dp)) {
                 Text(task?.displayTitle ?: "Сессия", modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = task != null) { onDialog(ChatDialog.ModelSettings) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium)
-                // The web header answers «which model am I talking to» with a chip
-                // over the input; on the phone only the icon was there. Same label
-                // as the web chip (a short name without the provider), and the tap
-                // opens the picker, exactly like that chip.
-                val model = task?.model
-                if (model != null) {
-                    Text(
-                        "Модель: ${model.label}",
-                        modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { onDialog(ChatDialog.ChooseModel) },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (display != null) {
+                        StatusDot(display, size = 7)
+                        Text(
+                            if (display.active) stageLabel(task.status) else display.label,
+                            modifier = Modifier.widthIn(max = 96.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (speed != null) {
+                        Text(
+                            speed,
+                            maxLines = 1,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    task?.model?.let { model ->
+                        Row(
+                            Modifier.weight(1f, fill = false)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                                .clickable { onDialog(ChatDialog.ChooseModel) }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(AppIcons.Spark, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                            Spacer(Modifier.width(4.dp))
+                            Text(model.label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
                 }
             }
         },
         actions = {
-            if (task != null) IconButton(onClick = { onDialog(ChatDialog.ChooseModel) }) { Icon(AppIcons.Spark, "Выбрать модель") }
+            if (working) IconButton(onClick = onStop) { Icon(AppIcons.Stop, "Остановить ответ", tint = MaterialTheme.colorScheme.error) }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -878,10 +907,18 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         }
         val usage = task?.lastUsage
         val window = task?.model?.contextWindow
+        val catalogModel = catalog?.models?.firstOrNull { it.key == task?.model?.key }
+        val estimatedCost = catalogModel?.cost?.let { price ->
+            ((usage?.input ?: 0L) * (price.input ?: 0.0) +
+                (usage?.output ?: 0L) * (price.output ?: 0.0) +
+                (usage?.cacheRead ?: 0L) * (price.cacheRead ?: 0.0) +
+                (usage?.cacheWrite ?: 0L) * (price.cacheWrite ?: 0.0)) / 1_000_000.0
+        }?.takeIf { it > 0.0 }
         val stats = listOfNotNull(
             usage?.totalTokens?.let { tokens -> "последний ход: $tokens" + (window?.let { " из ${it / 1000}K" } ?: "") + " токенов" },
-            task?.metrics?.tg?.let { "скорость ≈ ${it.toInt()} ток/с" },
+            task?.metrics?.let(::generationSpeedLabel)?.let { "скорость: $it ток/с" },
             task?.compaction?.count?.takeIf { it > 0 }?.let { "сжатий: $it" },
+            estimatedCost?.let { "оценка последнего хода: \$${(it * 10_000).roundToInt() / 10_000.0}" },
         )
         for (line in stats) Text(line, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
         // The agent's files and the task artifacts, the way the web's dialog shows them:
@@ -940,6 +977,19 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         }
     }
 }
+
+private fun generationSpeedLabel(metrics: GenerationMetrics): String? {
+    val values = listOfNotNull(
+        metrics.pp?.takeIf { it.isFinite() && it > 0.0 }?.let {
+            "PP ${if (metrics.ppApproximate) "≈" else ""}${formatSpeed(it)}"
+        },
+        metrics.tg?.takeIf { it.isFinite() && it > 0.0 }?.let { "TG ${formatSpeed(it)}" },
+    )
+    return values.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
+private fun formatSpeed(value: Double): String =
+    if (value < 10.0) ((value * 10.0).roundToInt() / 10.0).toString() else value.roundToInt().toString()
 
 @Composable
 private fun TextEditDialog(

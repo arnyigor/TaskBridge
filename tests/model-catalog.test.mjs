@@ -27,7 +27,7 @@ exec node '${fixture}' "$@"
 
 test('normalizeModels projects Pi models to a safe, sorted shape', () => {
   const models = normalizeModels([
-    { provider: 'ollama', id: 'glm-5', name: 'GLM 5', contextWindow: 200000, maxTokens: 8000, reasoning: true, input: ['text'] },
+    { provider: 'ollama', id: 'glm-5', name: 'GLM 5', contextWindow: 200000, maxTokens: 8000, reasoning: true, tools: true, input: ['text'], cost: { input: 0.5, output: 2, cacheRead: 0.1 } },
     { provider: 'llamacpp', id: 'qwen', input: ['text', 'image'] },
     { provider: 'ollama', id: 'aaa' }
   ]);
@@ -38,10 +38,13 @@ test('normalizeModels projects Pi models to a safe, sorted shape', () => {
   assert.equal(glm.maxTokens, 8000);
   assert.equal(glm.reasoning, true);
   assert.equal(glm.images, false);
+  assert.equal(glm.tools, true);
+  assert.deepEqual(glm.cost, { input: 0.5, output: 2, cacheRead: 0.1, cacheWrite: null });
   const qwen = models.find(m => m.id === 'qwen');
   assert.equal(qwen.images, true);
   assert.equal(qwen.reasoning, false);
   assert.equal(qwen.contextWindow, null);
+  assert.deepEqual(qwen.cost, { input: null, output: null, cacheRead: null, cacheWrite: null });
 });
 
 test('normalizeModels tolerates junk and never throws', () => {

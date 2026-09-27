@@ -15,11 +15,11 @@
 | Возможность | Web | KMP после этапа | Следующее действие |
 |---|---:|---:|---|
 | Список/поиск/группировка сессий | Да | Да | — |
-| Живой SSE-чат, восстановление курсора, история | Да | Да | Добавить дисковый cache/offline cold start |
+| Живой SSE-чат, восстановление курсора, история | Да | Да | Дисковый cache и offline cold start реализованы |
 | Очередь, steer, send-now, STOP | Да | Да | Chaos-тесты сети/перезапуска |
-| Модели, thinking, favorites, compact | Да | Да | Показывать capability/cost metadata, когда backend начнёт её отдавать |
+| Модели, thinking, favorites, compact | Да | Да | Capability/cost metadata и оценка последнего хода реализованы |
 | Остатки провайдеров | Да | Да | Новые адаптеры только для провайдеров с официальным account API |
-| MCP mode/server/tool controls | Да | Да | OAuth/health/latency и добавление/редактирование server definitions |
+| MCP mode/server/tool controls | Да | Да | Health/latency/CRUD/scopes/collisions реализованы; OAuth login остаётся внешнему adapter |
 | Tool approvals | Да | Да | Политики «разрешить для сессии», журнал решений |
 | Файлы, картинки, artifacts, полный tool output | Да | Да | Авторизованное открытие файла без системного browser cookie gap |
 | Правка, удаление, regenerate, variants, fork | Да | Да | — |
@@ -29,7 +29,7 @@
 | Apply diff / cleanup worktree | Да | Нет | P1: действия с подтверждением и preview diff |
 | Импорт native Pi sessions | Да | Нет | P2: read-only discovery → explicit import |
 | Cloud relay mode | Да | Нет | P2: transport abstraction вместо прямого LAN API |
-| Durable offline cache/outbox после перезапуска клиента | Частично | Нет | P0: SQLDelight/Room, cursor + command ledger |
+| Durable offline cache/outbox после перезапуска клиента | Частично | Да | Заменить файловый cache на SQLDelight только при росте объёма |
 | QR pairing | Веб показывает код | Только ручной ввод | P1: CameraX/ML Kit scanner |
 
 ## Обязательный минимум production agent harness
@@ -38,15 +38,15 @@
 
 1. **Durable session/run state.** История, незавершённый run, approvals и idempotency key должны переживать перезапуск. OpenAI Agents SDK сохраняет session items и требует продолжать approval interruption тем же `RunState`; TaskBridge уже имеет server-side command ledger, но KMP outbox пока только in-memory.
 2. **Cancellation и bounded execution.** У каждого run нужны STOP/abort, deadline, maximum turns и гарантированное освобождение ресурсов. Backend имеет cancel/kill fallback; следует добавить настраиваемые turn/tool deadlines и отдельный terminal reason.
-3. **Concurrency + backpressure.** Лимит должен быть явным, наблюдаемым и разделённым по ресурсам: remote session slots, local model slots, per-session turn=1, workspace lock. Этот этап реализует базовый scheduler; следующий шаг — fair queue и per-provider limits.
-4. **Idempotent commands и reconnect.** Повтор команды после timeout не должен повторять side effect. Server ledger и KMP `commandId` уже есть; нужна персистентная KMP outbox и UI для `UNKNOWN_AFTER_CRASH`.
+3. **Concurrency + backpressure.** Лимит должен быть явным, наблюдаемым и разделённым по ресурсам: remote session slots, local model slots, per-session turn=1, workspace lock. Scheduler реализует FIFO без head-of-line blocking, per-provider limits, 429 backoff и queue-wait metrics.
+4. **Idempotent commands и reconnect.** Повтор команды после timeout не должен повторять side effect. Server ledger, KMP `commandId`, персистентный outbox и UI для `UNKNOWN_AFTER_CRASH` реализованы.
 5. **Human-in-the-loop.** Опасный tool call ставит run на паузу, решение должно быть адресуемым по call id, durable и разрешимым с другого клиента. TaskBridge это поддерживает; нужны audit trail и scoped allow policies.
 6. **Tool isolation и policy.** Sandbox/worktree, allow/deny policy, ограничения path/network/process, secret redaction и размер output. Worktree и approval gate есть; остаются resource quotas и network policy.
 
 ### P1 — эксплуатация и качество
 
 7. **Tracing/observability.** Иерархия task → agent → turn → model/tool spans, latency, tokens/cost, queue wait, retries, trace/group id и возможность не писать sensitive payload. Сейчас есть events/run ledger; нужен единый trace schema и экспорт.
-8. **Tool/MCP lifecycle.** Capability negotiation, health, cancellation/progress, auth scopes, tool-name collisions, server/tool enable policy. Текущий MCP manager покрывает конфигурацию, но не health/OAuth/scopes.
+8. **Tool/MCP lifecycle.** Capability negotiation, health, cancellation/progress, auth scopes, tool-name collisions, server/tool enable policy. Manager теперь показывает health/scopes/collisions и валидирует definitions; интерактивный OAuth login остаётся ответственностью MCP adapter.
 9. **Context management.** Token budget, compaction checkpoints, input filtering/redaction, summary provenance и предупреждение до исчерпания context window. Manual/auto compact есть, но нет budget dashboard.
 10. **Model routing/fallback.** Capability match (vision/reasoning/context), provider availability, retry classification, cost/balance guardrails и явное подтверждение дорогого fallback. Каталог и balances уже видимы; routing policy ещё не формализована.
 11. **Evaluation.** Golden traces, deterministic fixtures, tool contract tests, replay, chaos и regression scoring. В проекте есть backend/KMP fixtures; добавить nightly replay и fault injection.
@@ -78,12 +78,13 @@
 
 ## Фактическая проверка 2026-09-27
 
-- `npm test`: 644 теста, 639 passed, 5 skipped, 0 failed.
+- `npm test`: 648 тестов, 643 passed, 5 skipped, 0 failed.
 - `npm run check`: синтаксис всех Node entry points и аудит секретов прошли.
 - KMP core `:api:jvmTest :client:jvmTest` и shared `:shared:jvmTest`: успешно.
 - Android `:androidApp:assembleDebug`: успешно.
 - Desktop `:desktopApp:portable`: успешно; portable-каталог содержит 235 файлов.
 - `dist/TaskBridge/TaskBridge.exe`: 461312 байт, SHA-256 `6D40046ED3769D41757AFA3C057B1F860D466A464FF7E4BF5B9ABD598B94E77E`.
+- Обновлённый shared desktop jar: 1756957 байт, SHA-256 `0AD44CAEC2F21CE631B1EE3D6243E3340B52D6BFCFE4B39ECF617EAF3782C303`.
 
 ## Первичные источники
 
@@ -94,3 +95,32 @@
 - MCP official SDK/spec mirror: [Lifecycle, transports, authorization and security](https://go.sdk.modelcontextprotocol.io/protocol/) — cancellation, progress, OAuth и transport security.
 - MCP: [2026-07-28 specification release](https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/) — stateless core, Tasks extension, Apps и authorization hardening.
 - Google ADK: [Development guide](https://google.github.io/agents-cli/guide/development/) — memory, sandboxed execution, approval gates, event-driven runs и evaluation workflow.
+
+## Реализовано дополнительно (2026-09-27)
+
+- Durable KMP outbox: команда записывается на диск до HTTP-вызова и после
+  перезапуска повторяется с тем же `commandId`; вложения требуют повторного
+  выбора, чтобы не отправлять устаревшие байты.
+- Offline cache последних 500 событий и task snapshot с атомарной заменой
+  файлов; при недоступном сервере чат открывается из cache.
+- Android credentials перенесены в AES/GCM key из Android Keystore, Desktop —
+  в Windows DPAPI. Есть одноразовая миграция из старых preferences.
+- Android ConnectivityManager будит SSE и outbox сразу после возврата сети;
+  reconnect использует exponential backoff с jitter до 30 секунд, UI явно
+  показывает offline/cache режим.
+- Scheduler получил общую и per-provider capacity, provider backoff после 429,
+  FIFO без head-of-line blocking и метрики ожидания очереди в `/api/info`.
+- Каталог моделей публикует tools, vision, reasoning, context/output limits и
+  подтверждённые цены; KMP оценивает стоимость последнего хода.
+- Managed MCP получил проверку HTTP/stdio definitions, health/latency/error,
+  CRUD definitions, OAuth/scopes metadata без секретов, обнаружение collision
+  имён tools и append-only audit log.
+- Шапка чата показывает состояние запуска, текущую модель в компактной кнопке
+  и явную остановку активного ответа; длинные названия корректно сокращаются.
+- Выбор модели использует ленивый список со стабильными ключами, один поисковый
+  индекс и мемоизированные фильтрацию/группировку без повторной работы при
+  каждой Compose-recomposition.
+- В шапке чата и статистике модели отображаются `PP` и `TG` в токенах/с.
+  Для managed llama.cpp используются собственные engine counters; для облачных
+  провайдеров `TG` считается по usage и активному потоку, а эффективный `PP` до
+  первого токена явно помечается знаком `≈`.

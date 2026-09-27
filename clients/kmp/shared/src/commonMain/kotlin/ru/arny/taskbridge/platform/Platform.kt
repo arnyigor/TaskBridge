@@ -2,9 +2,12 @@ package ru.arny.taskbridge.platform
 
 import androidx.compose.runtime.Composable
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.flow.Flow
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.core.client.session.ChatPersistence
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
+import ru.arny.taskbridge.core.client.settings.SecretStore
 
 /**
  * What the shared UI needs from the platform. Implemented once per app
@@ -18,9 +21,16 @@ interface PlatformServices {
     val appVersion: String
 
     val store: KeyValueStore
+    val secrets: SecretStore
+
+    /** Durable cache/outbox scoped to one server URL. */
+    fun chatPersistence(serverUrl: String): ChatPersistence
 
     /** An HTTP client whose socket reads never time out: SSE streams stay open for hours. */
     fun httpClient(): HttpClient
+
+    /** Emits connectivity changes so suspended SSE/outbox work can resume immediately. */
+    fun networkAvailable(): Flow<Boolean>
 
     fun copyText(text: String)
 

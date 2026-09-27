@@ -1136,9 +1136,12 @@ function renderContext(t) {
     $('usage').textContent = `${used.toLocaleString('ru-RU')} ток.`;
     bar.classList.add('hidden');
   }
-  // TG is measured from the model's own usage (web/app.js receives task.metrics),
-  // so it is shown for cloud models too — the only speed they expose.
-  if (t.metrics?.tg != null) $('usage').textContent += ` · TG ${fmtMetric(t.metrics.tg)} tok/s`;
+  // Local engines report their own PP/TG counters. For cloud providers PP is
+  // the effective input rate to first token and is marked as approximate.
+  const rates = [];
+  if (t.metrics?.pp != null) rates.push(`PP ${t.metrics.ppApproximate ? '≈' : ''}${fmtMetric(t.metrics.pp)}`);
+  if (t.metrics?.tg != null) rates.push(`TG ${fmtMetric(t.metrics.tg)}`);
+  if (rates.length) $('usage').textContent += ` · ${rates.join(' · ')} tok/s`;
 
   const autoBtn = $('autoCompaction');
   if (t.autoCompactionEnabled == null || t.sessionAvailable === false) {

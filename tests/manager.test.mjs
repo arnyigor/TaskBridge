@@ -541,6 +541,39 @@ test('independent remote sessions run in parallel while each session keeps one a
   }
 });
 
+test('provider concurrency limits one provider without blocking a different provider', async t => {
+  const f = await fixture(t);
+  f.manager.providerConcurrency = { deepseek: 1, routerai: 2 };
+  f.task.requestedModel = { provider: 'deepseek', id: 'deepseek-chat' };
+  f.task.status = 'RUNNING';
+  f.manager.activeTaskId = 'a';
+
+  const makeTask = async (id, provider) => {
+    const workspacePath = path.join(f.root, `workspace-${id}`);
+    await fs.mkdir(workspacePath);
+    const task = { ...f.task, id, status: 'SUCCEEDED', workspacePath, requestedModel: { provider, id: `${provider}-model` } };
+    await f.store.create(task);
+    f.manager.tasks.set(id, task);
+    const sent = [];
+    f.manager.runtimes.set(id, { pi: { ...f.pi, getState: async () => ({ isStreaming: false }), prompt: async text => sent.push(text) }, eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false });
+    return { task, sent };
+  };
+  const same = await makeTask('b', 'deepseek');
+  const other = await makeTask('c', 'routerai');
+
+  await f.manager.message('b', 'wait for provider');
+  await f.manager.message('c', 'can run');
+  assert.deepEqual(same.sent, []);
+  assert.deepEqual(other.sent, ['can run']);
+  assert.equal(f.manager.getTask('b').status, 'QUEUED');
+  assert.equal(f.manager.schedulerInfo().providers.deepseek.active, 1);
+  assert.equal(f.manager.schedulerInfo().providers.deepseek.limit, 1);
+
+  for (const runtime of [f.runtime, f.manager.runtimes.get('c')]) {
+    for (const waiter of runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  }
+});
+
 test('send now refuses while another session owns the machine and keeps the prompt', async t => {
   const f = await fixture(t);
   const other = { ...f.task, id: 'b', status: 'RUNNING', workspacePath: f.root, prompt: 'занята' };

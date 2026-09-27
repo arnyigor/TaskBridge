@@ -166,6 +166,20 @@ class TaskBridgeApi(
             put("enabled", enabled)
         })
 
+    suspend fun probeMcp(server: String? = null): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/health", McpStatus.serializer(), buildJsonObject { server?.let { put("server", it) } })
+
+    suspend fun saveMcpServer(name: String, url: String?, command: String?, args: List<String>): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/definitions", McpStatus.serializer(), buildJsonObject {
+            put("name", name)
+            url?.takeIf { it.isNotBlank() }?.let { put("url", it) }
+            command?.takeIf { it.isNotBlank() }?.let { put("command", it) }
+            put("args", kotlinx.serialization.json.JsonArray(args.map(::JsonPrimitive)))
+        })
+
+    suspend fun removeMcpServer(name: String): McpStatus =
+        call(HttpMethod.Post, "/api/mcp/definitions", McpStatus.serializer(), buildJsonObject { put("name", name); put("remove", true) })
+
     // --- sessions ------------------------------------------------------------
 
     suspend fun tasks(): List<Task> = get("/api/tasks", ListSerializer(Task.serializer()))

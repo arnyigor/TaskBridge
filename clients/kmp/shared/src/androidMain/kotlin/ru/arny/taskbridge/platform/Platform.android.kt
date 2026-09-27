@@ -10,8 +10,13 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Build
 import android.provider.OpenableColumns
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
+import android.util.Base64
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -25,7 +30,26 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.core.client.session.CachedChat
+import ru.arny.taskbridge.core.client.session.ChatPersistence
+import ru.arny.taskbridge.core.client.session.PersistedOutgoing
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
+import ru.arny.taskbridge.core.client.settings.SecretStore
+import ru.arny.taskbridge.core.api.TaskBridgeJson
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.serialization.builtins.ListSerializer
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.KeyStore
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -36,6 +60,72 @@ class SharedPreferencesStore(context: Context) : KeyValueStore {
     override fun get(key: String): String? = prefs.getString(key, null)
     override fun put(key: String, value: String?) {
         prefs.edit().apply { if (value == null) remove(key) else putString(key, value) }.apply()
+    }
+}
+
+class AndroidKeystoreSecretStore(context: Context) : SecretStore {
+    private val prefs = context.getSharedPreferences("taskbridge-secrets", Context.MODE_PRIVATE)
+    private val cache = mutableMapOf<String, String?>()
+
+    override fun get(key: String): String? {
+        synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
+        val value = runCatching {
+        val packed = Base64.decode(prefs.getString(key, null) ?: return null, Base64.NO_WRAP)
+        require(packed.size > 12)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, packed, 0, 12))
+        cipher.doFinal(packed.copyOfRange(12, packed.size)).decodeToString()
+        }.getOrNull()
+        synchronized(cache) { cache[key] = value }
+        return value
+    }
+
+    override fun put(key: String, value: String?) {
+        if (value == null) { prefs.edit().remove(key).apply(); synchronized(cache) { cache[key] = null }; return }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+        val packed = cipher.iv + cipher.doFinal(value.encodeToByteArray())
+        prefs.edit().putString(key, Base64.encodeToString(packed, Base64.NO_WRAP)).commit()
+        synchronized(cache) { cache[key] = value }
+    }
+
+    private fun secretKey(): SecretKey {
+        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        (store.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+        return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").run {
+            init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .build())
+            generateKey()
+        }
+    }
+
+    private companion object { const val KEY_ALIAS = "taskbridge-client-secrets-v1" }
+}
+
+private class AndroidChatPersistence(root: File, serverUrl: String) : ChatPersistence {
+    private val dir = File(root, serverUrl.hashCode().toUInt().toString(16)).apply { mkdirs() }
+    private fun file(taskId: String, suffix: String) = File(dir, taskId.replace(Regex("[^A-Za-z0-9._-]"), "_") + suffix)
+
+    override suspend fun loadChat(taskId: String): CachedChat? = read(file(taskId, ".chat.json"), CachedChat.serializer())
+    override suspend fun saveChat(taskId: String, value: CachedChat) = write(file(taskId, ".chat.json"), TaskBridgeJson.encodeToString(CachedChat.serializer(), value))
+    override suspend fun loadOutbox(taskId: String): List<PersistedOutgoing> = read(file(taskId, ".outbox.json"), ListSerializer(PersistedOutgoing.serializer())).orEmpty()
+    override suspend fun saveOutbox(taskId: String, values: List<PersistedOutgoing>) {
+        val target = file(taskId, ".outbox.json")
+        if (values.isEmpty()) withContext(Dispatchers.IO) { target.delete() }
+        else write(target, TaskBridgeJson.encodeToString(ListSerializer(PersistedOutgoing.serializer()), values))
+    }
+    override suspend fun clear(taskId: String) = withContext(Dispatchers.IO) { file(taskId, ".chat.json").delete(); file(taskId, ".outbox.json").delete(); Unit }
+    private suspend fun <T> read(file: File, serializer: kotlinx.serialization.KSerializer<T>): T? = withContext(Dispatchers.IO) {
+        runCatching { TaskBridgeJson.decodeFromString(serializer, file.readText()) }.getOrNull()
+    }
+    private suspend fun write(file: File, text: String) = withContext(Dispatchers.IO) {
+        file.parentFile?.mkdirs(); val temp = File(file.parentFile, file.name + ".tmp")
+        temp.writeText(text)
+        runCatching { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE) }
+            .getOrElse { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+        Unit
     }
 }
 
@@ -50,6 +140,8 @@ class AndroidPlatformServices(
 ) : PlatformServices {
     override val kind: String = "android"
     override val store: KeyValueStore = SharedPreferencesStore(context)
+    override val secrets: SecretStore = AndroidKeystoreSecretStore(context)
+    override fun chatPersistence(serverUrl: String): ChatPersistence = AndroidChatPersistence(File(context.filesDir, "chat-cache"), serverUrl)
 
     override val appVersion: String = runCatching {
         @Suppress("DEPRECATION")
@@ -70,6 +162,19 @@ class AndroidPlatformServices(
                 retryOnConnectionFailure(true)
             }
         }
+    }
+
+    override fun networkAvailable(): Flow<Boolean> = callbackFlow {
+        val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        fun current() = connectivity.activeNetwork != null
+        trySend(current())
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { trySend(true) }
+            override fun onLost(network: Network) { trySend(current()) }
+            override fun onUnavailable() { trySend(false) }
+        }
+        connectivity.registerDefaultNetworkCallback(callback)
+        awaitClose { runCatching { connectivity.unregisterNetworkCallback(callback) } }
     }
 
     override fun copyText(text: String) {

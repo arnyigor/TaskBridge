@@ -35,6 +35,9 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
     fun importMcp() = mutateMcp { api.importMcp() }
     fun setServer(name: String, enabled: Boolean) = mutateMcp { api.setMcpServer(name, enabled) }
     fun setTool(server: String, tool: String, enabled: Boolean) = mutateMcp { api.setMcpTool(server, tool, enabled) }
+    fun probeMcp(server: String? = null) = mutateMcp { api.probeMcp(server) }
+    fun saveServer(name: String, url: String?, command: String?, args: List<String>) = mutateMcp { api.saveMcpServer(name, url, command, args) }
+    fun removeServer(name: String) = mutateMcp { api.removeMcpServer(name) }
 
     fun refreshProvider(provider: String) {
         if (provider in _state.value.refreshingProviders) return

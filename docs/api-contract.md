@@ -190,6 +190,11 @@ Cookie старого формата `<expires>.<nonce>.<sig>` принимаю�
 переписывание истории, approvals, артефакты), локальный runtime, администрирование
 сервера, MCP, push, облако.
 
+MCP дополнительно поддерживает безопасную диагностику (`POST /api/mcp/health`)
+и CRUD управляемых server definitions (`POST /api/mcp/definitions`). Статус
+возвращает latency/последнюю ошибку, OAuth scopes без секретов и конфликты имён
+инструментов. Изменения пишутся в `data/mcp-audit.jsonl`.
+
 `POST /api/server/restart` перезапускает **сам процесс** TaskBridge (не профиль
 модели) и требует тела `{ "confirm": true }` — без флага отвечает `400
 INPUT_INVALID`, при занятой машине — `409 MODEL_BUSY`. Ответ `202` приходит

@@ -12,9 +12,43 @@ async function temp(t, prefix) {
 }
 
 test('normalizeServer classifies stdio/http and disabled', () => {
-  assert.deepEqual(normalizeServer('s', { command: 'python', args: ['x'] }), { name: 's', url: null, command: 'python', transport: 'stdio', disabled: false, excludeTools: [] });
-  assert.deepEqual(normalizeServer('h', { url: 'https://x/mcp', disabled: true }), { name: 'h', url: 'https://x/mcp', command: null, transport: 'http', disabled: true, excludeTools: [] });
+  assert.deepEqual(normalizeServer('s', { command: 'python', args: ['x'] }), { name: 's', url: null, command: 'python', args: ['x'], transport: 'stdio', disabled: false, excludeTools: [], auth: 'none', scopes: [] });
+  assert.deepEqual(normalizeServer('h', { url: 'https://x/mcp', disabled: true }), { name: 'h', url: 'https://x/mcp', command: null, args: [], transport: 'http', disabled: true, excludeTools: [], auth: 'none', scopes: [] });
   assert.equal(normalizeServer('e', null).transport, null);
+});
+
+test('managed definitions are validated, editable, removable and audited', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-crud-');
+  const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  await assert.rejects(mcp.upsertServer('bad name', { command: 'node' }), { code: 'INPUT_INVALID' });
+  await assert.rejects(mcp.upsertServer('both', { command: 'node', url: 'https://example.test/mcp' }), { code: 'INPUT_INVALID' });
+  await mcp.upsertServer('docs', { url: 'https://example.test/mcp' });
+  assert.equal((await mcp.servers())[0].url, 'https://example.test/mcp');
+  await mcp.upsertServer('docs', { command: 'node', args: ['server.mjs'] });
+  assert.equal((await mcp.servers())[0].command, 'node');
+  await mcp.removeServer('docs');
+  assert.deepEqual(await mcp.servers(), []);
+  const audit = await fs.readFile(path.join(dataRoot, 'mcp-audit.jsonl'), 'utf8');
+  assert.match(audit, /server\.create/);
+  assert.match(audit, /server\.update/);
+  assert.match(audit, /server\.remove/);
+});
+
+test('status reports cached tool collisions and health without exposing headers', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-health-');
+  const agentDir = await temp(t, 'tb-mcp-health-agent-');
+  await fs.writeFile(path.join(agentDir, 'mcp-cache.json'), JSON.stringify({ servers: {
+    one: { tools: [{ name: 'search' }] }, two: { tools: [{ name: 'search' }] }
+  } }));
+  const missing = path.join(dataRoot, 'missing-command.exe');
+  const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  await mcp.write({ mcpServers: { one: { command: missing, headers: { Authorization: 'secret' } }, two: { command: 'node' } } });
+  await mcp.probe('one');
+  const status = await mcp.status({ PI_AGENT_DIR: agentDir });
+  assert.deepEqual(status.collisions, [{ tool: 'search', servers: ['one', 'two'] }]);
+  assert.equal(status.servers.find(server => server.name === 'one').health.state, 'error');
+  assert.equal(status.servers.find(server => server.name === 'one').auth, 'configured');
+  assert.equal(JSON.stringify(status).includes('secret'), false);
 });
 
 test('inherit mode leaves Pi MCP untouched', async t => {

@@ -43,9 +43,12 @@ export function normalizeServer(name, entry) {
     name,
     url,
     command,
+    args: Array.isArray(value.args) ? value.args.filter(arg => typeof arg === 'string') : [],
     transport: url ? 'http' : command ? 'stdio' : null,
     disabled: value.disabled === true,
-    excludeTools: Array.isArray(value.excludeTools) ? value.excludeTools.filter(t => typeof t === 'string') : []
+    excludeTools: Array.isArray(value.excludeTools) ? value.excludeTools.filter(t => typeof t === 'string') : [],
+    auth: value.oauth ? 'oauth' : value.headers?.Authorization || value.headers?.authorization ? 'configured' : 'none',
+    scopes: Array.isArray(value.oauth?.scopes) ? value.oauth.scopes.filter(scope => typeof scope === 'string') : []
   };
 }
 
@@ -76,6 +79,7 @@ export class McpManager {
   constructor(piConfig = {}, dataRoot) {
     this.piConfig = piConfig || {};
     this.dataRoot = dataRoot;
+    this.health = new Map();
   }
 
   get settings() {
@@ -100,15 +104,21 @@ export class McpManager {
   async read() {
     try {
       const parsed = JSON.parse(await fs.readFile(this.path, 'utf8'));
-      return isMcpConfig(parsed) ? parsed : { ...EMPTY_CONFIG };
+      return isMcpConfig(parsed) ? parsed : { mcpServers: {} };
     } catch {
-      return { ...EMPTY_CONFIG };
+      return { mcpServers: {} };
     }
   }
 
   async write(config) {
     await fs.mkdir(path.dirname(this.path), { recursive: true });
     await fs.writeFile(this.path, `${JSON.stringify(withPinnedSettings(config), null, 2)}\n`, 'utf8');
+  }
+
+  async #audit(action, target, details = {}) {
+    const entry = JSON.stringify({ at: new Date().toISOString(), action, target, ...details });
+    await fs.mkdir(this.dataRoot, { recursive: true });
+    await fs.appendFile(path.join(this.dataRoot, 'mcp-audit.jsonl'), `${entry}\n`, 'utf8').catch(() => {});
   }
 
   async servers() {
@@ -137,6 +147,7 @@ export class McpManager {
     else delete entry.disabled;
     config.mcpServers = map;
     await this.write(config);
+    await this.#audit('server.toggle', name, { enabled: !disabled });
     return normalizeServer(name, entry);
   }
 
@@ -154,7 +165,71 @@ export class McpManager {
     else delete entry.excludeTools;
     config.mcpServers = map;
     await this.write(config);
+    await this.#audit('tool.toggle', `${name}/${tool}`, { enabled: !excluded });
     return normalizeServer(name, entry);
+  }
+
+  async upsertServer(name, definition) {
+    if (typeof name !== 'string' || !name.trim() || !/^[A-Za-z0-9._-]+$/.test(name)) {
+      throw Object.assign(new Error('Имя MCP-сервера может содержать буквы, цифры, точку, дефис и подчёркивание.'), { code: 'INPUT_INVALID' });
+    }
+    const url = typeof definition?.url === 'string' ? definition.url.trim() : '';
+    const command = typeof definition?.command === 'string' ? definition.command.trim() : '';
+    if (Boolean(url) === Boolean(command)) throw Object.assign(new Error('Укажите ровно один transport: URL или command.'), { code: 'INPUT_INVALID' });
+    if (url) {
+      let parsed;
+      try { parsed = new URL(url); } catch { throw Object.assign(new Error('Некорректный URL MCP-сервера.'), { code: 'INPUT_INVALID' }); }
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw Object.assign(new Error('MCP URL должен использовать HTTP или HTTPS.'), { code: 'INPUT_INVALID' });
+    }
+    const config = await this.read();
+    const map = isMcpConfig(config.mcpServers) ? config.mcpServers : {};
+    const previous = isMcpConfig(map[name]) ? map[name] : {};
+    map[name] = {
+      ...previous,
+      ...(url ? { url } : { command, args: Array.isArray(definition.args) ? definition.args.filter(arg => typeof arg === 'string') : [] })
+    };
+    if (url) { delete map[name].command; delete map[name].args; }
+    else delete map[name].url;
+    config.mcpServers = map;
+    await this.write(config);
+    await this.#audit(previous.url || previous.command ? 'server.update' : 'server.create', name, { transport: url ? 'http' : 'stdio' });
+    return normalizeServer(name, map[name]);
+  }
+
+  async removeServer(name) {
+    const config = await this.read();
+    const map = isMcpConfig(config.mcpServers) ? config.mcpServers : {};
+    if (!isMcpConfig(map[name])) throw Object.assign(new Error(`MCP-сервер не найден: ${name}`), { code: 'NOT_FOUND' });
+    delete map[name];
+    config.mcpServers = map;
+    await this.write(config);
+    this.health.delete(name);
+    await this.#audit('server.remove', name);
+  }
+
+  async probe(name = null, { timeoutMs = 5000 } = {}) {
+    const servers = (this.mode === 'inherit' ? await this.piServers() : await this.servers()).filter(server => !name || server.name === name);
+    if (name && servers.length === 0) throw Object.assign(new Error(`MCP-сервер не найден: ${name}`), { code: 'NOT_FOUND' });
+    await Promise.all(servers.map(async server => {
+      const started = Date.now();
+      let result;
+      if (server.disabled) result = { state: 'disabled', latencyMs: null, checkedAt: new Date().toISOString() };
+      else if (server.url) {
+        try {
+          const response = await fetch(server.url, { method: 'GET', signal: AbortSignal.timeout(timeoutMs) });
+          result = { state: response.status < 500 ? 'reachable' : 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), statusCode: response.status, error: response.status < 500 ? null : `HTTP ${response.status}` };
+        } catch (error) {
+          result = { state: 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), error: error.message };
+        }
+      } else if (server.command && path.isAbsolute(server.command)) {
+        result = await fs.access(server.command).then(
+          () => ({ state: 'configured', latencyMs: Date.now() - started, checkedAt: new Date().toISOString() }),
+          () => ({ state: 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), error: 'Команда не найдена' })
+        );
+      } else result = { state: 'configured', latencyMs: null, checkedAt: new Date().toISOString() };
+      this.health.set(server.name, result);
+    }));
+    return this.status();
   }
 
   // Copies Pi's global MCP config into the TaskBridge-owned file.
@@ -169,6 +244,7 @@ export class McpManager {
     const config = { mcpServers: isMcpConfig(parsed.mcpServers) ? parsed.mcpServers : {} };
     if (isMcpConfig(parsed.settings)) config.settings = parsed.settings;
     await this.write(config);
+    await this.#audit('config.import', 'pi', { servers: Object.keys(config.mcpServers).length });
     return this.servers();
   }
 
@@ -183,7 +259,7 @@ export class McpManager {
     }
     if (this.mode === 'managed') {
       try { await fs.access(this.path); }
-      catch { await this.importFromPi(env).catch(() => this.write({ ...EMPTY_CONFIG })); }
+      catch { await this.importFromPi(env).catch(() => this.write({ mcpServers: {} })); }
     }
   }
 
@@ -197,8 +273,11 @@ export class McpManager {
   async status(env = process.env) {
     const mode = this.mode;
     const tools = await readToolCache(env);
-    const servers = (mode === 'inherit' ? await this.piServers(env) : await this.servers())
-      .map(server => ({ ...server, tools: tools[server.name] || [] }));
+    const rawServers = mode === 'inherit' ? await this.piServers(env) : await this.servers();
+    const owners = new Map();
+    for (const server of rawServers) for (const tool of tools[server.name] || []) owners.set(tool.name, [...(owners.get(tool.name) || []), server.name]);
+    const collisions = [...owners.entries()].filter(([, names]) => names.length > 1).map(([tool, servers]) => ({ tool, servers }));
+    const servers = rawServers.map(server => ({ ...server, tools: tools[server.name] || [], health: this.health.get(server.name) || null }));
     let exists = false;
     try { await fs.access(mode === 'off' ? this.offPath : this.path); exists = true; } catch { /* not created yet */ }
     return {
@@ -207,7 +286,8 @@ export class McpManager {
       offPath: this.offPath,
       activePath: mode === 'off' ? this.offPath : mode === 'managed' ? this.path : null,
       exists,
-      servers
+      servers,
+      collisions
     };
   }
 }

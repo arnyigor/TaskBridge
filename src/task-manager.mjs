@@ -96,6 +96,11 @@ export class TaskManager extends EventEmitter {
     this.queue = [];
     this.activeTaskIds = new Set();
     this.maxParallelSessions = Math.max(1, Math.min(16, Number(config.queue?.maxConcurrentSessions) || 4));
+    this.providerConcurrency = Object.fromEntries(Object.entries(config.queue?.providerConcurrency || {})
+      .map(([provider, limit]) => [provider, Math.max(1, Math.min(16, Number(limit) || 1))]));
+    this.providerCooldownUntil = new Map();
+    this.queueSince = new Map();
+    this.queueWaitSamples = [];
     // Open run ids per task (stage 2 telemetry): kept out of the task record
     // so they never leak into saved/public task state.
     this.openRuns = new Map();
@@ -168,6 +173,29 @@ export class TaskManager extends EventEmitter {
 
   #claimSlot(id) { this.activeTaskIds.add(id); }
   #releaseSlot(id) { this.activeTaskIds.delete(id); }
+  #enqueue(id) {
+    if (this.queue.includes(id)) return;
+    this.queue.push(id);
+    if (!this.queueSince.has(id)) this.queueSince.set(id, Date.now());
+  }
+  #removeQueued(id) {
+    this.queue = this.queue.filter(entry => entry !== id);
+    this.queueSince.delete(id);
+  }
+  #providerForTask(task) { return task?.requestedModel?.provider || task?.model?.provider || this.#providerFor(task?.requestedModel); }
+  #activeProviderCount(provider) {
+    let count = 0;
+    for (const id of this.activeTaskIds) if (this.#providerForTask(this.tasks.get(id)) === provider) count++;
+    return count;
+  }
+  #providerHasCapacity(task) {
+    const provider = this.#providerForTask(task);
+    const cooldown = this.providerCooldownUntil.get(provider) || 0;
+    if (cooldown > Date.now()) return false;
+    if (cooldown) this.providerCooldownUntil.delete(provider);
+    const limit = this.providerConcurrency[provider];
+    return !limit || this.#activeProviderCount(provider) < limit;
+  }
   #hasActiveLocalSession(exceptId = null) {
     for (const id of this.activeTaskIds) {
       if (id !== exceptId && this.#usesLocalRuntime(this.tasks.get(id))) return true;
@@ -190,9 +218,33 @@ export class TaskManager extends EventEmitter {
   #hasCapacityFor(task) {
     if (this.activeTaskIds.has(task.id)) return false;
     if (this.activeTaskIds.size >= this.maxParallelSessions) return false;
+    if (!this.#providerHasCapacity(task)) return false;
     if (this.#usesLocalRuntime(task) && this.#hasActiveLocalSession(task.id)) return false;
     if (this.#hasWorkspaceConflict(task)) return false;
     return true;
+  }
+
+  schedulerInfo() {
+    const providers = {};
+    const names = new Set([...Object.keys(this.providerConcurrency), ...this.providerCooldownUntil.keys(), ...[...this.activeTaskIds].map(id => this.#providerForTask(this.tasks.get(id))).filter(Boolean)]);
+    for (const provider of names) providers[provider] = {
+      active: this.#activeProviderCount(provider),
+      limit: this.providerConcurrency[provider] ?? this.maxParallelSessions,
+      cooldownUntil: (this.providerCooldownUntil.get(provider) || 0) > Date.now() ? new Date(this.providerCooldownUntil.get(provider)).toISOString() : null
+    };
+    const waiting = [...this.queueSince.values()].map(at => Math.max(0, Date.now() - at));
+    const samples = [...this.queueWaitSamples, ...waiting];
+    return {
+      activeTasks: this.activeTaskIds.size,
+      maxConcurrentSessions: this.maxParallelSessions,
+      queuedTasks: this.queue.length,
+      providers,
+      queueWaitMs: {
+        currentMax: waiting.length ? Math.max(...waiting) : 0,
+        average: samples.length ? Math.round(samples.reduce((a, b) => a + b, 0) / samples.length) : 0,
+        samples: this.queueWaitSamples.length
+      }
+    };
   }
 
   async init() {
@@ -220,7 +272,7 @@ export class TaskManager extends EventEmitter {
         task.current = 'В очереди после перезапуска TaskBridge';
         task.updatedAt = now();
         await this.store.save(task);
-        this.queue.push(task.id);
+        this.#enqueue(task.id);
         await this.#restorePendingFiles(task.id);
       } else if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
         // R3.6: with the Pi session file intact the conversation is only
@@ -633,7 +685,7 @@ export class TaskManager extends EventEmitter {
     this.tasks.set(task.id, task);
     task._incomingFiles = incomingFiles;
     task._uploadToken = input.uploadToken;
-    this.queue.push(task.id);
+    this.#enqueue(task.id);
     await this.#event(task, waitingReason ? 'QUEUE_WAITING' : 'TASK_QUEUED',
       waitingReason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : (waitingReason ? 'В очереди' : 'Task queued'),
       waitingReason ? { reason: waitingReason } : {});
@@ -657,6 +709,7 @@ export class TaskManager extends EventEmitter {
 
   #publicTask(task) {
     const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genLastDeltaAt,
+      _promptStartedAt, _promptMs, _firstTokenAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
@@ -788,7 +841,7 @@ export class TaskManager extends EventEmitter {
   async #deliverPending(task) {
     const { pending, restore } = await this.#takePending(task);
     // The next prompt waits for this turn to end, which is what capacity 1 means.
-    if ((task.pendingPrompts || []).length && !this.queue.includes(task.id)) this.queue.push(task.id);
+    if ((task.pendingPrompts || []).length) this.#enqueue(task.id);
     try {
       const waiting = (await this.#getPendingFiles(task.id, pending.id)) || { files: [], uploadToken: null };
       await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
@@ -840,7 +893,8 @@ export class TaskManager extends EventEmitter {
     while (index < this.queue.length) {
       const candidate = this.tasks.get(this.queue[index]);
       if (!candidate || candidate.status === 'CANCELLED' || this.deleted.has(this.queue[index])) {
-        this.queue.splice(index, 1);
+        const [removed] = this.queue.splice(index, 1);
+        this.queueSince.delete(removed);
         continue;
       }
       if (!this.#hasCapacityFor(candidate)) {
@@ -875,6 +929,12 @@ export class TaskManager extends EventEmitter {
 
     const id = this.queue[index];
     this.queue.splice(index, 1);
+    const queuedAt = this.queueSince.get(id);
+    this.queueSince.delete(id);
+    if (queuedAt) {
+      this.queueWaitSamples.push(Math.max(0, Date.now() - queuedAt));
+      if (this.queueWaitSamples.length > 100) this.queueWaitSamples.shift();
+    }
     task.queueReason = null;
     // A stored prompt is delivered through #message, which claims the slot
     // itself: the queue must not hold it meanwhile, nor release it afterwards.
@@ -1155,6 +1215,20 @@ export class TaskManager extends EventEmitter {
     return this.mcp.status();
   }
 
+  async probeMcp(server = null) {
+    return this.mcp.probe(server);
+  }
+
+  async upsertMcpServer(name, definition) {
+    await this.mcp.upsertServer(name, definition);
+    return this.mcp.status();
+  }
+
+  async removeMcpServer(name) {
+    await this.mcp.removeServer(name);
+    return this.mcp.status();
+  }
+
   async importMcp() {
     await this.mcp.importFromPi();
     return this.mcp.status();
@@ -1289,7 +1363,15 @@ export class TaskManager extends EventEmitter {
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
     if (frame.type === 'extension_ui_request') return this.#onUiRequest(task, frame);
     if (frame.type === 'tool_execution_start') task._toolsRunning = (task._toolsRunning || 0) + 1;
-    if (frame.type === 'tool_execution_end') task._toolsRunning = Math.max(0, (task._toolsRunning || 0) - 1);
+    if (frame.type === 'tool_execution_end') {
+      task._toolsRunning = Math.max(0, (task._toolsRunning || 0) - 1);
+      // The next model call starts after the tool result becomes available.
+      // Measuring from here to the first delta gives remote providers a useful
+      // effective PP value even though their APIs do not expose prompt timings.
+      task._promptStartedAt = Date.now();
+      task._promptMs = 0;
+      task._firstTokenAt = 0;
+    }
     if (frame.type === 'compaction_start' || frame.type === 'auto_compaction_start') task._compacting = true;
     if (frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') task._compacting = false;
     if (frame.type === 'agent_settled') {
@@ -1348,13 +1430,18 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'agent_start') {
       task.status = 'RUNNING';
       task.current = 'Pi is working';
+      task._promptStartedAt = Date.now();
+      task._promptMs = 0;
+      task._firstTokenAt = 0;
+      task._genStreamMs = 0;
+      task._genLastDeltaAt = 0;
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       if (frame.message.usage?.totalTokens > 0) task.lastUsage = frame.message.usage;
       if (frame.message.stopReason === 'error') task._modelError = frame.message.errorMessage || 'Модель завершила ответ с ошибкой.';
-      this.#recordGenerationSpeed(task);
+      await this.#recordGenerationSpeed(task);
     }
     if (frame.type === 'message_end' || frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
       task.updatedAt = now();
@@ -1376,21 +1463,55 @@ export class TaskManager extends EventEmitter {
   // drag the reported TG down.
   #trackStreamTime(task) {
     const at = Date.now();
+    if (!task._firstTokenAt && task._promptStartedAt) {
+      task._firstTokenAt = at;
+      task._promptMs = Math.max(0, at - task._promptStartedAt);
+    }
     task._genStreamMs = accumulateStreamMs(task._genLastDeltaAt, at, task._genStreamMs);
     task._genLastDeltaAt = at;
   }
 
-  // TG from the model's own usage: output tokens over the time it actually
-  // streamed them. Works for a cloud provider (the only speed it exposes) and
-  // is a fallback for a local llama.cpp without --metrics. PP is not knowable
-  // from a streaming response and is left to the llama.cpp /metrics source.
-  #recordGenerationSpeed(task) {
+  // Prefer the local engine's own counters — the same source used by modern
+  // llama.cpp/LM Studio-style dashboards. Remote APIs normally expose token
+  // usage but no prompt duration, so their PP is an explicitly approximate
+  // input-tokens / time-to-first-token value; TG remains output-tokens / active
+  // streaming time and excludes long tool pauses.
+  async #recordGenerationSpeed(task) {
     task._genLastDeltaAt = 0;
     const ms = task._genStreamMs || 0;
     task._genStreamMs = 0;
-    const tg = computeTokensPerSecond(task.lastUsage?.output, ms);
-    if (tg == null) return;
-    task.metrics = { tg, outputTokens: Number(task.lastUsage.output), ms, source: 'usage' };
+    const promptMs = task._promptMs || 0;
+    task._promptMs = 0;
+    task._promptStartedAt = 0;
+    task._firstTokenAt = 0;
+
+    const inputTokens = Number(task.lastUsage?.input || 0) + Number(task.lastUsage?.cacheRead || 0);
+    const outputTokens = Number(task.lastUsage?.output || 0);
+    const estimatedPp = computeTokensPerSecond(inputTokens, promptMs);
+    const usageTg = computeTokensPerSecond(outputTokens, ms);
+    let engine = null;
+    if (this.localModels?.enabled && this.#usesLocalRuntime(task)) {
+      engine = await this.localModels.getMetrics().catch(() => null);
+    }
+    const enginePp = Number(engine?.pp);
+    const engineTg = Number(engine?.tg);
+    const pp = Number.isFinite(enginePp) && enginePp > 0 ? enginePp : estimatedPp;
+    const tg = Number.isFinite(engineTg) && engineTg > 0 ? engineTg : usageTg;
+    if (pp == null && tg == null) return;
+    const ppSource = pp === enginePp ? (engine.source || 'engine') : 'ttft-estimate';
+    const tgSource = tg === engineTg ? (engine.source || 'engine') : 'usage';
+    task.metrics = {
+      pp,
+      tg,
+      inputTokens: inputTokens || null,
+      outputTokens: outputTokens || null,
+      promptMs: promptMs || null,
+      ms: ms || null,
+      source: ppSource === tgSource ? ppSource : 'mixed',
+      ppSource,
+      tgSource,
+      ppApproximate: ppSource === 'ttft-estimate'
+    };
   }
 
   #waitForSettle(taskId, timeoutMs) {
@@ -1701,7 +1822,7 @@ export class TaskManager extends EventEmitter {
       this.runtimes.delete(id);
     }
     this.#releaseSlot(id);
-    this.queue = this.queue.filter((x) => x !== id);
+    this.#removeQueued(id);
     this.tasks.delete(id);
     if (task._nativeLease) await task._nativeLease().catch(() => {});
     if (task.worktree && task.workspacePath && task.sourcePath) {
@@ -2202,12 +2323,12 @@ export class TaskManager extends EventEmitter {
     // the cancel is only interrupting a generation (Ctrl+Enter / «Отправить
     // сейчас»), where the operator's queue must survive.
     if (keepPending) {
-      if ((task.pendingPrompts || []).length && !this.queue.includes(id)) this.queue.push(id);
+      if ((task.pendingPrompts || []).length) this.#enqueue(id);
     } else {
       await this.#releasePendingFiles(id, task.pendingPrompts);
       task.pendingPrompts = null;
       task.queueReason = null;
-      this.queue = this.queue.filter(x => x !== id);
+      this.#removeQueued(id);
     }
     if (!runtime) {
       task.status = 'CANCELLED';
@@ -2429,7 +2550,7 @@ export class TaskManager extends EventEmitter {
       // not an error — the message is already on its way, and the operator must
       // not see «Нет сообщения в очереди» for a text that was sent.
       if (!(task.pendingPrompts || []).length) {
-        this.queue = this.queue.filter(x => x !== id);
+        this.#removeQueued(id);
         return this.#publicTask(task);
       }
       let pending, restore;
@@ -2439,12 +2560,12 @@ export class TaskManager extends EventEmitter {
         if (error.code === 'INPUT_INVALID') {
           // Lost the race with the pump: the prompt was taken and is being
           // delivered right now.
-          this.queue = this.queue.filter(x => x !== id);
+          this.#removeQueued(id);
           return this.#publicTask(task);
         }
         throw error;
       }
-      if (!(task.pendingPrompts || []).length) this.queue = this.queue.filter(x => x !== id);
+      if (!(task.pendingPrompts || []).length) this.#removeQueued(id);
       try {
         const waiting = (await this.#getPendingFiles(id, pending.id)) || { files: [], uploadToken: null };
         // A follow-up would wait for the end of the turn again: "now" is steering.
@@ -2481,7 +2602,7 @@ export class TaskManager extends EventEmitter {
         return this.#publicTask(task);
       }
       task.queueReason = null;
-      this.queue = this.queue.filter(x => x !== id);
+      this.#removeQueued(id);
       if (this.activeTaskIds.has(id) || ['RUNNING', 'PREPARING', 'PREFLIGHT', 'VERIFYING', 'WAITING_USER', 'CANCELLING'].includes(task.status)) {
         // Removing future input cannot finish the current run or its tools.
         task.updatedAt = now();
@@ -2588,7 +2709,7 @@ export class TaskManager extends EventEmitter {
       // One event per queued prompt (QUEUE_WAITING is per session state and
       // deduplicated), so every client learns the pendingId of what it sent.
       await this.#event(task, 'PROMPT_QUEUED', 'Сообщение поставлено в очередь', { pendingId, ...(origin || {}) }, false);
-      if (!this.queue.includes(id)) this.queue.push(id);
+      this.#enqueue(id);
       // Straight away, so a session that is idle does not wait for the retry tick.
       setImmediate(() => this.#pump());
       return this.#publicTask(task);
@@ -2800,6 +2921,10 @@ export class TaskManager extends EventEmitter {
     task.errorCode = explicit || classified?.code || error?.code || 'INTERNAL_ERROR';
     task.retryable = classified ? classified.retryable : null;
     task.retryAfterMs = classified?.retryAfterMs ?? null;
+    if (task.errorCode === 'RATE_LIMITED') {
+      const provider = this.#providerForTask(task);
+      if (provider) this.providerCooldownUntil.set(provider, Date.now() + Math.max(1000, task.retryAfterMs || Number(this.config.queue?.rateLimitBackoffMs) || 30000));
+    }
     // Store a readable line, not the provider's raw JSON body: this text goes to
     // the UI, result.md and push notifications. Classification above still ran
     // against the untouched error.

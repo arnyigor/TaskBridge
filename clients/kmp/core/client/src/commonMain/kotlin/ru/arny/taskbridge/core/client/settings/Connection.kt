@@ -14,19 +14,35 @@ interface KeyValueStore {
     fun put(key: String, value: String?)
 }
 
+/** Platform-protected storage (Android Keystore / Windows DPAPI). */
+interface SecretStore {
+    fun get(key: String): String?
+    fun put(key: String, value: String?)
+}
+
+private class KeyValueSecretStore(private val store: KeyValueStore) : SecretStore {
+    override fun get(key: String): String? = store.get(key)
+    override fun put(key: String, value: String?) = store.put(key, value)
+}
+
 /** What the app remembers between launches. */
-class AppSettings(private val store: KeyValueStore, private val newId: () -> String, private val platform: String) {
+class AppSettings(
+    private val store: KeyValueStore,
+    private val newId: () -> String,
+    private val platform: String,
+    private val secrets: SecretStore = KeyValueSecretStore(store),
+) {
     var serverUrl: String?
         get() = store.get("serverUrl")
         set(value) = store.put("serverUrl", value)
 
     var sessionCookie: String?
-        get() = store.get("sessionCookie")
-        set(value) = store.put("sessionCookie", value)
+        get() = secret("sessionCookie")
+        set(value) = secrets.put("sessionCookie", value)
 
     var authToken: String?
-        get() = store.get("authToken")
-        set(value) = store.put("authToken", value)
+        get() = secret("authToken")
+        set(value) = secrets.put("authToken", value)
 
     /** e.g. android-3f2a9c1e: tells other devices where a message came from. */
     val clientId: String
@@ -64,6 +80,15 @@ class AppSettings(private val store: KeyValueStore, private val newId: () -> Str
     fun draft(taskId: String): String = store.get("draft:$taskId").orEmpty()
 
     fun saveDraft(taskId: String, text: String) = store.put("draft:$taskId", text.ifEmpty { null })
+
+    /** One-time migration from releases that kept credentials in ordinary preferences. */
+    private fun secret(key: String): String? {
+        secrets.get(key)?.let { return it }
+        val legacy = store.get(key) ?: return null
+        secrets.put(key, legacy)
+        store.put(key, null)
+        return legacy
+    }
 
     fun forget() {
         serverUrl = null

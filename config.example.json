@@ -35,6 +35,11 @@
   },
   "queue": {
     "maxConcurrentSessions": 4,
+    "providerConcurrency": {
+      "deepseek": 2,
+      "openai": 4
+    },
+    "rateLimitBackoffMs": 30000,
     "pollMs": 1000
   },
   "localRuntime": {

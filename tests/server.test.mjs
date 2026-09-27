@@ -156,7 +156,7 @@ test('Pi models can be listed and switched for a session', { timeout: 30000 }, a
   const catalog = await api('/api/models');
   assert.deepEqual(catalog.models.map(m => `${m.provider}/${m.id}`), ['fixture/fixture', 'other/other']);
   assert.ok(catalog.thinkingLevels.includes('high'));
-  assert.deepEqual(catalog.models.find(m => m.id === 'other'), { provider: 'other', id: 'other', name: 'Other', contextWindow: 8000, maxTokens: 512, reasoning: false, images: true });
+  assert.deepEqual(catalog.models.find(m => m.id === 'other'), { provider: 'other', id: 'other', name: 'Other', contextWindow: 8000, maxTokens: 512, reasoning: false, images: true, tools: false, cost: { input: null, output: null, cacheRead: null, cacheWrite: null } });
 
   // A model chosen for a new task is passed to Pi as --provider/--model, and the
   // thinking level as --thinking; the captured state reflects the selection.
@@ -251,10 +251,15 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   assert.equal(task.status, 'SUCCEEDED', fixture.logs());
   assert.deepEqual(task.engine, { profileId: null, auto: false, reason: null });
   assert.equal(task.lastUsage.totalTokens, 1100);
-  // TG for cloud/any provider comes from the model's own usage: output tokens
-  // over the time the deltas spanned (see fake-pi's streamed finish).
-  assert.equal(task.metrics.source, 'usage');
+  // Cloud providers expose usage but not prompt timings: TG uses active stream
+  // time, while PP is the explicitly approximate input rate to first token.
+  assert.equal(task.metrics.source, 'mixed');
+  assert.equal(task.metrics.inputTokens, 1000);
   assert.equal(task.metrics.outputTokens, 100);
+  assert.equal(task.metrics.ppSource, 'ttft-estimate');
+  assert.equal(task.metrics.tgSource, 'usage');
+  assert.equal(task.metrics.ppApproximate, true);
+  assert.ok(task.metrics.pp > 0, `pp=${task.metrics.pp}`);
   assert.ok(task.metrics.tg > 0, `tg=${task.metrics.tg}`);
   await api(`/api/tasks/${id}/message`, { text: 'continue', files: [{ name: 'sample.txt', size: 1, base64: 'eA==' }] });
   task = await terminal(api, id);
@@ -681,7 +686,10 @@ test('/api/info exposes normalized provider statuses and keeps legacy DeepSeek d
   assert.equal(info.providerStatuses.routerai.available, false);
   assert.equal(info.providerStatuses.deepseek.reason, 'no-key');
   assert.deepEqual(info.deepseek, info.providerStatuses.deepseek, 'legacy field stays compatible');
-  assert.deepEqual(info.scheduler, { activeTasks: 0, maxConcurrentSessions: 4, queuedTasks: 0 });
+  assert.equal(info.scheduler.activeTasks, 0);
+  assert.equal(info.scheduler.maxConcurrentSessions, 4);
+  assert.equal(info.scheduler.queuedTasks, 0);
+  assert.deepEqual(info.scheduler.queueWaitMs, { currentMax: 0, average: 0, samples: 0 });
 });
 
 test('provider info poll never fetches; click refresh is targeted and cooldown-guarded', async t => {

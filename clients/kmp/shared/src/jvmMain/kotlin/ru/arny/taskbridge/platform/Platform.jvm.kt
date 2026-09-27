@@ -6,7 +6,17 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.core.client.session.CachedChat
+import ru.arny.taskbridge.core.client.session.ChatPersistence
+import ru.arny.taskbridge.core.client.session.PersistedOutgoing
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
+import ru.arny.taskbridge.core.client.settings.SecretStore
+import ru.arny.taskbridge.core.api.TaskBridgeJson
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.serialization.builtins.ListSerializer
 import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
@@ -21,11 +31,13 @@ import javax.imageio.ImageIO
 import java.io.File
 import java.net.URI
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.prefs.Preferences
+import java.util.Base64
 import javax.swing.JFileChooser
 
 /** java.util.prefs: per-user, survives restarts, no files to manage. */
@@ -38,6 +50,56 @@ class PreferencesStore(node: String = "ru/arny/taskbridge") : KeyValueStore {
     }
 }
 
+/** Protects credentials with the current Windows user's DPAPI key; plaintext only crosses stdin. */
+class DpapiSecretStore(private val prefs: Preferences = Preferences.userRoot().node("ru/arny/taskbridge/secrets")) : SecretStore {
+    private val cache = mutableMapOf<String, String?>()
+    override fun get(key: String): String? {
+        synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
+        val encrypted = prefs.get(key, null) ?: return null
+        val value = transform(encrypted, protect = false)?.let { String(Base64.getDecoder().decode(it), Charsets.UTF_8) }
+        synchronized(cache) { cache[key] = value }
+        return value
+    }
+    override fun put(key: String, value: String?) {
+        if (value == null) { prefs.remove(key); prefs.flush(); synchronized(cache) { cache[key] = null }; return }
+        check(System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) { "DPAPI доступен только в Windows" }
+        val input = Base64.getEncoder().encodeToString(value.toByteArray(Charsets.UTF_8))
+        val encrypted = checkNotNull(transform(input, protect = true)) { "Не удалось защитить credential через DPAPI" }
+        prefs.put(key, encrypted); prefs.flush(); synchronized(cache) { cache[key] = value }
+    }
+    private fun transform(input: String, protect: Boolean): String? = runCatching {
+        if (!System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) return null
+        val operation = if (protect) "Protect" else "Unprotect"
+        val script = "Add-Type -AssemblyName System.Security;${'$'}v=[Console]::In.ReadToEnd().Trim();${'$'}b=[Convert]::FromBase64String(${'$'}v);${'$'}o=[Security.Cryptography.ProtectedData]::$operation(${'$'}b,${'$'}null,[Security.Cryptography.DataProtectionScope]::CurrentUser);[Console]::Out.Write([Convert]::ToBase64String(${'$'}o))"
+        val encoded = Base64.getEncoder().encodeToString(script.toByteArray(Charsets.UTF_16LE))
+        val process = ProcessBuilder("powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded).redirectErrorStream(false).start()
+        process.outputStream.bufferedWriter().use { it.write(input) }
+        check(process.waitFor(10, TimeUnit.SECONDS) && process.exitValue() == 0)
+        process.inputStream.bufferedReader().readText().trim().takeIf { it.isNotEmpty() }
+    }.getOrNull()
+}
+
+private class DesktopChatPersistence(root: File, serverUrl: String) : ChatPersistence {
+    private val dir = File(root, serverUrl.hashCode().toUInt().toString(16)).apply { mkdirs() }
+    private fun file(taskId: String, suffix: String) = File(dir, taskId.replace(Regex("[^A-Za-z0-9._-]"), "_") + suffix)
+    override suspend fun loadChat(taskId: String): CachedChat? = read(file(taskId, ".chat.json"), CachedChat.serializer())
+    override suspend fun saveChat(taskId: String, value: CachedChat) = write(file(taskId, ".chat.json"), TaskBridgeJson.encodeToString(CachedChat.serializer(), value))
+    override suspend fun loadOutbox(taskId: String): List<PersistedOutgoing> = read(file(taskId, ".outbox.json"), ListSerializer(PersistedOutgoing.serializer())).orEmpty()
+    override suspend fun saveOutbox(taskId: String, values: List<PersistedOutgoing>) {
+        val target = file(taskId, ".outbox.json")
+        if (values.isEmpty()) withContext(Dispatchers.IO) { target.delete() }
+        else write(target, TaskBridgeJson.encodeToString(ListSerializer(PersistedOutgoing.serializer()), values))
+    }
+    override suspend fun clear(taskId: String) = withContext(Dispatchers.IO) { file(taskId, ".chat.json").delete(); file(taskId, ".outbox.json").delete(); Unit }
+    private suspend fun <T> read(file: File, serializer: kotlinx.serialization.KSerializer<T>): T? = withContext(Dispatchers.IO) { runCatching { TaskBridgeJson.decodeFromString(serializer, file.readText()) }.getOrNull() }
+    private suspend fun write(file: File, text: String) = withContext(Dispatchers.IO) {
+        file.parentFile?.mkdirs(); val temp = File(file.parentFile, file.name + ".tmp"); temp.writeText(text)
+        runCatching { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE) }
+            .getOrElse { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+        Unit
+    }
+}
+
 /**
  * Desktop services. Notifications go through [notifier] (the tray, wired by
  * the desktop app); [foreground] is updated from the window focus.
@@ -47,6 +109,10 @@ class DesktopPlatformServices(
     override val appVersion: String = "",
 ) : PlatformServices {
     override val kind: String = "desktop"
+    override val secrets: SecretStore = DpapiSecretStore()
+    override fun chatPersistence(serverUrl: String): ChatPersistence = DesktopChatPersistence(
+        File(System.getProperty("user.home"), ".taskbridge-kmp/chat-cache"), serverUrl,
+    )
 
     @Volatile
     var foreground: Boolean = true
@@ -65,6 +131,8 @@ class DesktopPlatformServices(
             }
         }
     }
+
+    override fun networkAvailable(): Flow<Boolean> = flowOf(true)
 
     override fun copyText(text: String) {
         runCatching { Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null) }

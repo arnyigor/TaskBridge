@@ -114,6 +114,7 @@ class ChatSession(
     private val now: () -> String,
     private val pageTurns: Int = 8,
     private val random: Random = Random.Default,
+    private val persistence: ChatPersistence = NoopChatPersistence,
 ) {
     private val _state = MutableStateFlow(ChatSessionState(taskId))
     val state: StateFlow<ChatSessionState> = _state.asStateFlow()
@@ -122,6 +123,9 @@ class ChatSession(
     val effects: SharedFlow<ChatEffect> = _effects.asSharedFlow()
 
     private val mutex = Mutex()
+    private val persistenceMutex = Mutex()
+    private val deliveryMutex = Mutex()
+    private val delivering = mutableSetOf<String>()
     private var reducer: ChatReducer? = null
     private var oldestSeq: Long? = null
     private var streamJob: Job? = null
@@ -129,11 +133,16 @@ class ChatSession(
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
     private var started = false
+    private val cachedEvents = mutableListOf<TaskEvent>()
 
     fun start() {
         if (started) return
         started = true
-        scope.launch { loadInitial() }
+        scope.launch {
+            val pending = restoreOutbox()
+            loadInitial()
+            resumeOutbox(pending)
+        }
         refreshJob = scope.launch {
             for (request in refreshRequests) {
                 delay(250) // coalesce a burst of status events into one GET
@@ -151,6 +160,7 @@ class ChatSession(
     fun reconnectNow() {
         wake.trySend(Unit)
         refreshRequests.trySend(Unit)
+        scope.launch { resumeOutbox(_state.value.outbox) }
     }
 
     // --- loading ----------------------------------------------------------------
@@ -167,15 +177,19 @@ class ChatSession(
                 reducer = chat
                 oldestSeq = window.events.firstOrNull()?.seq
                 _state.update { it.copy(task = task, chat = chat.snapshot(), loading = false, reachedStart = window.reachedStart) }
+                cachedEvents.clear()
+                cachedEvents.addAll(window.events)
             }
+            persistCache()
             fillEmptyWindow()
             loadApprovals()
             streamJob = scope.launch { streamLoop() }
         } catch (error: ApiException) {
+            val restored = if (reducer == null) hydrateCache() else false
             _state.update { it.copy(loading = false, link = if (error.error.transient) LinkState.Reconnecting(1, 2000, error.message.orEmpty()) else LinkState.Failed(error.error)) }
             if (error.error.transient) {
-                delay(2000)
-                loadInitial()
+                if (restored) streamJob = scope.launch { streamLoop() }
+                else { delay(2000); loadInitial() }
             }
         }
     }
@@ -192,9 +206,14 @@ class ChatSession(
                     val chat = reducer ?: return@withLock
                     val task = _state.value.task ?: return@withLock
                     if (window.events.isNotEmpty() || window.reachedStart) chat.prependOlder(task, window.events, window.reachedStart)
+                    if (window.events.isNotEmpty()) {
+                        cachedEvents.addAll(0, window.events)
+                        trimCachedEvents()
+                    }
                     oldestSeq = window.events.firstOrNull()?.seq ?: oldestSeq
                     _state.update { it.copy(chat = chat.snapshot(), reachedStart = window.reachedStart || window.events.isEmpty(), loadingOlder = false) }
                 }
+                persistCache()
                 fillEmptyWindow()
             } catch (error: ApiException) {
                 _state.update { it.copy(loadingOlder = false) }
@@ -268,6 +287,10 @@ class ChatSession(
             if (event.type == "USER_MESSAGE") {
                 event.string("commandId")?.let { id -> _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == id }) } }
             }
+            if (cachedEvents.none { it.seq == event.seq }) {
+                cachedEvents += event
+                trimCachedEvents()
+            }
             val kind = event.piFrame?.get("type")?.toString()?.trim('"') ?: event.type
             val status = when (event.type) {
                 "USER_MESSAGE" -> "RUNNING"
@@ -277,6 +300,8 @@ class ChatSession(
             }
             _state.update { it.copy(task = if (status != null) it.task?.copy(status = status) else it.task, chat = chat.snapshot(), lastEventAt = event.at ?: now(), lastEventType = kind) }
         }
+        persistCache()
+        persistOutbox()
         if (event.type.startsWith("APPROVAL_")) scope.launch { loadApprovals() }
         val frameType = event.piFrame?.get("type")?.toString()?.trim('"')
         if (event.type != "PI_EVENT" || frameType == "agent_settled" || frameType == "compaction_end") refreshRequests.trySend(Unit)
@@ -316,13 +341,15 @@ class ChatSession(
         val message = OutgoingMessage(commandId, clean, files.map { it.name }, mode, if (files.isEmpty()) OutgoingMessage.Status.Sending else OutgoingMessage.Status.Uploading)
         _state.update { it.copy(outbox = it.outbox + message) }
         scope.launch {
+            // Durable before network: a process death cannot lose an accepted tap.
+            saveOutbox()
             mutex.withLock {
                 reducer?.let { chat ->
                     chat.addOptimistic(commandId, clean.ifEmpty { "Прикреплённые файлы" }, files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) }, now())
                     _state.update { s -> s.copy(chat = chat.snapshot()) }
                 }
             }
-            deliver(message, files)
+            deliverIfIdle(message, files)
         }
     }
 
@@ -335,7 +362,7 @@ class ChatSession(
 
     fun dismiss(commandId: String) {
         _state.update { it.copy(outbox = it.outbox.filterNot { m -> m.commandId == commandId }) }
-        scope.launch { dropOptimistic(commandId) }
+        scope.launch { saveOutbox(); dropOptimistic(commandId) }
     }
 
     private suspend fun deliver(message: OutgoingMessage, files: List<UploadFile>) {
@@ -360,6 +387,16 @@ class ChatSession(
         onDelivered(message.commandId, message.text, task)
     }
 
+    private suspend fun deliverIfIdle(message: OutgoingMessage, files: List<UploadFile>) {
+        val claimed = deliveryMutex.withLock { delivering.add(message.commandId) }
+        if (!claimed) return
+        try {
+            deliver(message, files)
+        } finally {
+            deliveryMutex.withLock { delivering.remove(message.commandId) }
+        }
+    }
+
     private suspend fun onDelivered(commandId: String, text: String, task: Task) {
         // A server that does not record commandId on queue entries (older builds)
         // still parks the message: then the entry is ours by its text.
@@ -375,6 +412,7 @@ class ChatSession(
                 s.copy(chat = chat?.snapshot() ?: s.chat, outbox = s.outbox.filterNot { it.commandId == commandId })
             }
         }
+        saveOutbox()
         refreshRequests.trySend(Unit)
     }
 
@@ -439,6 +477,64 @@ class ChatSession(
 
     private fun removeFromOutbox(commandId: String) {
         _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == commandId }) }
+        persistOutbox()
+    }
+
+    private suspend fun restoreOutbox(): List<OutgoingMessage> {
+        val restored = persistence.loadOutbox(taskId).mapNotNull { saved ->
+            val mode = runCatching { SendMode.valueOf(saved.mode) }.getOrNull() ?: return@mapNotNull null
+            OutgoingMessage(saved.commandId, saved.text, saved.fileNames, mode,
+                if (saved.fileNames.isEmpty()) OutgoingMessage.Status.Retrying(0, "Восстановлено после перезапуска")
+                else OutgoingMessage.Status.Failed("Повторно выберите файлы перед отправкой"))
+        }
+        if (restored.isNotEmpty()) _state.update { it.copy(outbox = restored) }
+        return restored
+    }
+
+    private suspend fun resumeOutbox(messages: List<OutgoingMessage>) {
+        for (message in messages) {
+            if (message.fileNames.isNotEmpty()) continue
+            deliverIfIdle(message, emptyList())
+        }
+    }
+
+    private fun persistedOutbox(): List<PersistedOutgoing> = _state.value.outbox.map {
+        PersistedOutgoing(it.commandId, it.text, it.fileNames, it.mode.name)
+    }
+
+    private fun persistOutbox() {
+        scope.launch { saveOutbox() }
+    }
+
+    private suspend fun saveOutbox() = persistenceMutex.withLock {
+        persistence.saveOutbox(taskId, persistedOutbox())
+    }
+
+    private suspend fun hydrateCache(): Boolean {
+        val cached = persistence.loadChat(taskId) ?: return false
+        mutex.withLock {
+            val chat = ChatReducer(cached.task, seedInitial = cached.reachedStart)
+            cached.events.forEach(chat::apply)
+            cached.events.firstOrNull()?.let { chat.revealWindowStart(it.seq) }
+            chat.syncTask(cached.task, initial = true)
+            reducer = chat
+            oldestSeq = cached.events.firstOrNull()?.seq
+            cachedEvents.clear(); cachedEvents.addAll(cached.events)
+            _state.update { it.copy(task = cached.task, chat = chat.snapshot(), loading = false, reachedStart = cached.reachedStart) }
+        }
+        return true
+    }
+
+    private suspend fun persistCache() {
+        val snapshot = mutex.withLock {
+            val task = _state.value.task ?: return
+            CachedChat(task, cachedEvents.toList(), _state.value.reachedStart)
+        }
+        persistence.saveChat(taskId, snapshot)
+    }
+
+    private fun trimCachedEvents() {
+        if (cachedEvents.size > 500) cachedEvents.subList(0, cachedEvents.size - 500).clear()
     }
 
     private suspend fun dropOptimistic(commandId: String) {
@@ -493,6 +589,7 @@ class ChatSession(
         } catch (gone: ApiException) {
             if (gone.error !is ApiError.NotFound) throw gone
         }
+        persistence.clear(taskId)
         _effects.tryEmit(ChatEffect.Deleted)
     }
 

@@ -12,6 +12,8 @@ import { PiRpcSession } from './pi-rpc.mjs';
 function publicModel(model) {
   if (!model || typeof model !== 'object' || !model.id) return null;
   const input = Array.isArray(model.input) ? model.input : [];
+  const cost = model.cost && typeof model.cost === 'object' ? model.cost : {};
+  const price = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
   return {
     provider: model.provider || null,
     id: model.id,
@@ -19,7 +21,14 @@ function publicModel(model) {
     contextWindow: Number.isFinite(model.contextWindow) ? model.contextWindow : null,
     maxTokens: Number.isFinite(model.maxTokens) ? model.maxTokens : null,
     reasoning: model.reasoning === true,
-    images: input.includes('image')
+    images: input.includes('image'),
+    tools: model.tools === true || model.capabilities?.tools === true,
+    cost: {
+      input: price(cost.input),
+      output: price(cost.output),
+      cacheRead: price(cost.cacheRead),
+      cacheWrite: price(cost.cacheWrite)
+    }
   };
 }
 

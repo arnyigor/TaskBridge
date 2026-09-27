@@ -231,8 +231,13 @@ fun FieldLabel(text: String, top: Int = 0) {
 private fun ModelRef.details(): String = listOfNotNull(
     provider,
     contextWindow?.let { "контекст ${it / 1000}K" },
+    maxTokens?.let { "ответ до ${it / 1000}K" },
     "думает".takeIf { reasoning == true },
     "картинки".takeIf { images == true },
+    "tools".takeIf { tools == true },
+    cost?.let { price ->
+        listOfNotNull(price.input?.let { "in \$$it" }, price.output?.let { "out \$$it" }).takeIf { it.isNotEmpty() }?.joinToString("/")
+    },
 ).joinToString(" · ")
 
 /** The chosen model as a row; tapping it opens the searchable list of Pi's models. */
@@ -271,6 +276,18 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
     // The «Избранное» group is fixed when the chooser opens: a star tapped now must
     // not insert rows above the finger and turn the next tap into a model pick.
     val pinnedFirst = remember { settings.favoriteModels }
+    val searchIndex = remember(catalog.models) {
+        catalog.models.map { model -> model to "${model.label} ${model.id.orEmpty()} ${model.provider.orEmpty()}".lowercase() }
+    }
+    val words = remember(query) { query.trim().lowercase().split(' ').filter(String::isNotEmpty) }
+    val filteredModels = remember(searchIndex, words) {
+        if (words.isEmpty()) catalog.models else searchIndex.filter { (_, text) -> words.all(text::contains) }.map { it.first }
+    }
+    val groups = remember(filteredModels, pinnedFirst) {
+        val starred = filteredModels.filter { it.key in pinnedFirst }
+        (if (starred.isNotEmpty()) listOf("★ Избранное" to starred) else emptyList()) +
+            filteredModels.filterNot { it.key in pinnedFirst }.groupBy { it.provider ?: "—" }.toList().sortedBy { it.first.lowercase() }
+    }
     fun toggle(key: String) {
         favorites = if (key in favorites) favorites - key else favorites + key
         settings.favoriteModels = favorites
@@ -291,20 +308,14 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
             )
         },
         footer = {
-            val shown = catalog.models.count { model ->
-                query.trim().lowercase().split(' ').filter { it.isNotEmpty() }
-                    .all { it in "${model.label} ${model.id} ${model.provider}".lowercase() }
-            }
-            Text("Всего ${catalog.models.size} · показано $shown", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Всего ${catalog.models.size} · показано ${filteredModels.size}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         },
         // Pi's catalogue easily reaches ~1000 models: a plain Column composes them
         // all eagerly, which freezes the sheet at open and recomposes every row on
         // each star tap and search keystroke. The lazyContent slot gives the list
         // the remaining sheet height and only the visible rows compose.
         lazyContent = {
-            val words = query.trim().lowercase().split(' ').filter { it.isNotEmpty() }
-            val models = catalog.models.filter { model -> words.all { it in "${model.label} ${model.id} ${model.provider}".lowercase() } }
-            if (models.isEmpty()) {
+            if (filteredModels.isEmpty()) {
                 item(key = "empty") {
                     Text(
                         if (catalog.models.isEmpty()) "Pi не отдал список моделей" else "Ничего не найдено",
@@ -316,9 +327,6 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
             // Starred models first, so the usual ones are one tap away. A starred
             // model stays in its provider group in the data, but visually it is
             // shown only once — its provider-group row is hidden here.
-            val starred = models.filter { it.key in pinnedFirst }
-            val groups = (if (starred.isNotEmpty()) listOf("★ Избранное" to starred) else emptyList()) +
-                models.filterNot { it.key in pinnedFirst }.groupBy { it.provider ?: "—" }.toList().sortedBy { it.first.lowercase() }
             for ((provider, group) in groups) {
                 val openGroup = words.isNotEmpty() || provider in expanded
                 item(key = "provider:$provider", contentType = "provider") {

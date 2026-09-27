@@ -170,6 +170,19 @@ class TaskBridgeApiTest {
     }
 
     @Test
+    fun taskDecodesPromptAndGenerationSpeeds() {
+        val task = TaskBridgeJson.decodeFromString(
+            Task.serializer(),
+            """{"id":"speed","metrics":{"pp":321.5,"tg":47.25,"inputTokens":1200,"outputTokens":96,"promptMs":3733,"ms":2032,"source":"mixed","ppSource":"ttft-estimate","tgSource":"usage","ppApproximate":true}}""",
+        )
+        assertEquals(321.5, task.metrics?.pp)
+        assertEquals(47.25, task.metrics?.tg)
+        assertEquals(1200, task.metrics?.inputTokens)
+        assertEquals("ttft-estimate", task.metrics?.ppSource)
+        assertEquals(true, task.metrics?.ppApproximate)
+    }
+
+    @Test
     fun theSessionCookieIsReadFromSetCookie() {
         assertEquals("v.1.s", TaskBridgeApi.parseSessionCookie("taskbridge_session=v.1.s; Path=/"))
         assertEquals(null, TaskBridgeApi.parseSessionCookie("other=1"))

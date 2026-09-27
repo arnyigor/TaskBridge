@@ -23,6 +23,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -49,9 +50,12 @@ import ru.arny.taskbridge.ui.theme.LocalStatusColors
 fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit) {
     val state by connection.sessions.state.collectAsState()
     val agentState by connection.settingsController.state.collectAsState()
+    val online by connection.online.collectAsState()
     val info = state.info
     var confirmDisconnect by remember { mutableStateOf(false) }
     var enterSends by remember { mutableStateOf(graph.settings.enterSends) }
+    var editMcpServer by remember { mutableStateOf<McpServer?>(null) }
+    var addMcpServer by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -67,6 +71,7 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
             Column(Modifier.widthIn(max = 720.dp)) {
                 SectionTitle("Компьютер")
                 InfoRow(label = "Адрес", value = connection.baseUrl, icon = AppIcons.Computer)
+                InfoRow(label = "Сеть устройства", value = if (online) "доступна" else "offline", warning = !online)
                 InfoRow(label = "TaskBridge", value = info?.name ?: "—")
                 InfoRow(label = "Версия API", value = info?.let { "${it.apiVersion} (приложение знает: ${SUPPORTED_API_VERSIONS.joinToString()})" } ?: "—")
                 val pi = info?.pi
@@ -83,6 +88,13 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                 InfoRow(label = "Модель занята", value = when (info?.modelBusy) { true -> "да"; false -> "нет"; null -> "нет данных" })
                 info?.scheduler?.let {
                     InfoRow(label = "Параллельные сессии", value = "${it.activeTasks} из ${it.maxConcurrentSessions}; в очереди ${it.queuedTasks}")
+                    if (it.providers.isNotEmpty()) InfoRow(
+                        label = "Слоты провайдеров",
+                        value = it.providers.entries.sortedBy { entry -> entry.key }.joinToString(" · ") { entry -> "${entry.key} ${entry.value.active}/${entry.value.limit}${if (entry.value.cooldownUntil != null) " (backoff)" else ""}" },
+                    )
+                    it.queueWaitMs?.let { wait ->
+                        if (wait.currentMax > 0 || wait.samples > 0) InfoRow(label = "Ожидание очереди", value = "сейчас до ${wait.currentMax / 1000} с · среднее ${wait.average / 1000} с")
+                    }
                 }
                 info?.storeId?.let { InfoRow(label = "База", value = it.take(8)) }
                 for (warning in info?.warnings.orEmpty()) {
@@ -161,14 +173,25 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     OutlinedButton(onClick = connection.settingsController::importMcp, enabled = !agentState.mcpLoading) {
                         Text("Импортировать из Pi")
                     }
+                    OutlinedButton(onClick = { connection.settingsController.probeMcp() }, enabled = !agentState.mcpLoading) {
+                        Text("Проверить")
+                    }
+                }
+                if (agentState.mcp?.mode == "managed") {
+                    TextButton(onClick = { addMcpServer = true }, enabled = !agentState.mcpLoading, modifier = Modifier.padding(horizontal = 16.dp)) { Text("Добавить MCP-сервер") }
                 }
                 agentState.mcp?.configPath?.let { InfoRow("Конфигурация", it) }
+                agentState.mcp?.collisions.orEmpty().forEach { collision ->
+                    InfoRow("Конфликт tool", "${collision.tool}: ${collision.servers.joinToString()}", warning = true)
+                }
                 agentState.mcp?.servers.orEmpty().forEach { server ->
                     McpServerCard(
                         server = server,
                         editable = agentState.mcp?.mode == "managed" && !agentState.mcpLoading,
                         onServerEnabled = { enabled -> connection.settingsController.setServer(server.name, enabled) },
                         onToolEnabled = { tool, enabled -> connection.settingsController.setTool(server.name, tool, enabled) },
+                        onEdit = { editMcpServer = server },
+                        onProbe = { connection.settingsController.probeMcp(server.name) },
                     )
                 }
                 agentState.error?.let { error ->
@@ -233,6 +256,19 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
             dismissButton = { TextButton(onClick = { confirmDisconnect = false }) { Text("Отмена") } },
         )
     }
+    if (addMcpServer || editMcpServer != null) {
+        McpServerDialog(
+            server = editMcpServer,
+            onDismiss = { addMcpServer = false; editMcpServer = null },
+            onSave = { name, url, command, args ->
+                connection.settingsController.saveServer(name, url, command, args)
+                addMcpServer = false; editMcpServer = null
+            },
+            onRemove = editMcpServer?.let { server ->
+                { connection.settingsController.removeServer(server.name); editMcpServer = null }
+            },
+        )
+    }
 }
 
 @Composable
@@ -283,6 +319,8 @@ private fun McpServerCard(
     editable: Boolean,
     onServerEnabled: (Boolean) -> Unit,
     onToolEnabled: (String, Boolean) -> Unit,
+    onEdit: () -> Unit,
+    onProbe: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -292,6 +330,15 @@ private fun McpServerCard(
             }
             Switch(checked = !server.disabled, enabled = editable, onCheckedChange = onServerEnabled)
         }
+        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = onProbe) { Text("Диагностика") }
+            if (editable) TextButton(onClick = onEdit) { Text("Изменить") }
+        }
+        server.health?.let { health ->
+            val suffix = listOfNotNull(health.latencyMs?.let { "${it} мс" }, health.statusCode?.let { "HTTP $it" }, health.error).joinToString(" · ")
+            Text("${health.state}${suffix.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}", style = MaterialTheme.typography.bodySmall, color = if (health.state == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
+        }
+        if (server.auth != null && server.auth != "none") Text("Auth: ${server.auth}${server.scopes.takeIf { it.isNotEmpty() }?.joinToString(prefix = " · scopes: ").orEmpty()}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
         server.tools.forEach { tool ->
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
@@ -306,6 +353,39 @@ private fun McpServerCard(
             }
         }
     }
+}
+
+@Composable
+private fun McpServerDialog(
+    server: McpServer?,
+    onDismiss: () -> Unit,
+    onSave: (String, String?, String?, List<String>) -> Unit,
+    onRemove: (() -> Unit)?,
+) {
+    var name by remember(server) { mutableStateOf(server?.name.orEmpty()) }
+    var endpoint by remember(server) { mutableStateOf(server?.url ?: server?.command.orEmpty()) }
+    var useUrl by remember(server) { mutableStateOf(server?.url != null || server == null) }
+    var args by remember(server) { mutableStateOf(server?.args?.joinToString("\n").orEmpty()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (server == null) "Новый MCP-сервер" else "MCP ${server.name}") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(name, { name = it }, label = { Text("Имя") }, enabled = server == null, singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(useUrl, { useUrl = true }, label = { Text("HTTP(S)") })
+                    FilterChip(!useUrl, { useUrl = false }, label = { Text("stdio") })
+                }
+                OutlinedTextField(endpoint, { endpoint = it }, label = { Text(if (useUrl) "URL" else "Command") }, singleLine = true)
+                if (!useUrl) OutlinedTextField(args, { args = it }, label = { Text("Аргументы, по одному в строке") })
+                if (onRemove != null) TextButton(onClick = onRemove) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(name.trim(), endpoint.trim().takeIf { useUrl }, endpoint.trim().takeIf { !useUrl }, args.lines().map(String::trim).filter(String::isNotEmpty)) }, enabled = name.isNotBlank() && endpoint.isNotBlank()) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
 }
 
 @Composable

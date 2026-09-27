@@ -42,7 +42,15 @@ data class SchedulerInfo(
     val activeTasks: Int = 0,
     val maxConcurrentSessions: Int = 1,
     val queuedTasks: Int = 0,
+    val providers: Map<String, ProviderSlots> = emptyMap(),
+    val queueWaitMs: QueueWaitMetrics? = null,
 )
+
+@Serializable
+data class ProviderSlots(val active: Int = 0, val limit: Int = 1, val cooldownUntil: String? = null)
+
+@Serializable
+data class QueueWaitMetrics(val currentMax: Long = 0, val average: Long = 0, val samples: Int = 0)
 
 @Serializable
 data class ProviderStatus(
@@ -100,17 +108,25 @@ data class McpStatus(
     val activePath: String? = null,
     val exists: Boolean = false,
     val servers: List<McpServer> = emptyList(),
+    val collisions: List<McpCollision> = emptyList(),
 )
+
+@Serializable data class McpCollision(val tool: String, val servers: List<String> = emptyList())
+@Serializable data class McpHealth(val state: String, val latencyMs: Long? = null, val checkedAt: String? = null, val statusCode: Int? = null, val error: String? = null)
 
 @Serializable
 data class McpServer(
     val name: String,
     val url: String? = null,
     val command: String? = null,
+    val args: List<String> = emptyList(),
     val transport: String? = null,
     val disabled: Boolean = false,
     val excludeTools: List<String> = emptyList(),
     val tools: List<McpTool> = emptyList(),
+    val auth: String? = null,
+    val scopes: List<String> = emptyList(),
+    val health: McpHealth? = null,
 )
 
 @Serializable data class McpTool(val name: String, val description: String = "")
@@ -169,6 +185,14 @@ data class ProjectFolderListing(
 )
 
 @Serializable
+data class ModelCost(
+    val input: Double? = null,
+    val output: Double? = null,
+    val cacheRead: Double? = null,
+    val cacheWrite: Double? = null,
+)
+
+@Serializable
 data class ModelRef(
     val provider: String? = null,
     val id: String? = null,
@@ -177,6 +201,8 @@ data class ModelRef(
     val maxTokens: Long? = null,
     val reasoning: Boolean? = null,
     val images: Boolean? = null,
+    val tools: Boolean? = null,
+    val cost: ModelCost? = null,
 ) {
     val label: String get() = name?.takeIf { it.isNotBlank() } ?: id ?: "—"
     val key: String get() = "${provider.orEmpty()}/${id.orEmpty()}"
@@ -210,10 +236,27 @@ data class PendingPrompt(
 )
 
 @Serializable
-data class Usage(val input: Long? = null, val output: Long? = null, val totalTokens: Long? = null)
+data class Usage(
+    val input: Long? = null,
+    val output: Long? = null,
+    val cacheRead: Long? = null,
+    val cacheWrite: Long? = null,
+    val totalTokens: Long? = null,
+)
 
 @Serializable
-data class GenerationMetrics(val tg: Double? = null, val outputTokens: Long? = null, val ms: Long? = null)
+data class GenerationMetrics(
+    val pp: Double? = null,
+    val tg: Double? = null,
+    val inputTokens: Long? = null,
+    val outputTokens: Long? = null,
+    val promptMs: Long? = null,
+    val ms: Long? = null,
+    val source: String? = null,
+    val ppSource: String? = null,
+    val tgSource: String? = null,
+    val ppApproximate: Boolean = false,
+)
 
 @Serializable
 data class CompactionInfo(val count: Int = 0)

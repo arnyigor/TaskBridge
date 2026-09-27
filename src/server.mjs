@@ -853,6 +853,17 @@ async function handleRequest(req, res) {
       if (typeof body.server !== 'string' || !body.server.trim()) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
       return json(res, 200, await manager.setMcpTool(body.server.trim(), body.tool, body.enabled !== false));
     }
+    if (req.method === 'POST' && pathname === '/api/mcp/health') {
+      const body = await readJson(req);
+      return json(res, 200, await manager.probeMcp(typeof body.server === 'string' && body.server.trim() ? body.server.trim() : null));
+    }
+    if (req.method === 'POST' && pathname === '/api/mcp/definitions') {
+      const body = await readJson(req);
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name) throw Object.assign(new Error('Не указан MCP-сервер.'), { code: 'INPUT_INVALID' });
+      if (body.remove === true) return json(res, 200, await manager.removeMcpServer(name));
+      return json(res, 200, await manager.upsertMcpServer(name, { url: body.url, command: body.command, args: body.args }));
+    }
 
     if (req.method === 'GET' && pathname === '/api/info') {
       const [busy, modelReady, engine, local, system, providerStatuses] = await Promise.all([
@@ -903,11 +914,7 @@ async function handleRequest(req, res) {
         engine,
         system,
         local,
-        scheduler: {
-          activeTasks: manager.activeTaskIds.size,
-          maxConcurrentSessions: manager.maxParallelSessions,
-          queuedTasks: manager.queue.length,
-        },
+        scheduler: manager.schedulerInfo(),
         providerStatuses,
         deepseek,
         warnings,
