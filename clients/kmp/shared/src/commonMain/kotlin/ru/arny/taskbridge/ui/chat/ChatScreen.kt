@@ -443,12 +443,11 @@ private fun MessageList(
         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.Bottom),
     ) {
+        // Stable keys and reverseLayout own the streaming position. Do not compensate
+        // growing answers with dispatchRawDelta here: nested with an expanded block's
+        // Pinned scroll it re-enters LazyListState and crashes Android.
         items(reversed, key = { it.id }, contentType = { it::class.simpleName }) { item ->
-            val anchor = remember(listState, item.id) { StreamingMessageAnchor(listState) }
-            Box(
-                Modifier.fillMaxWidth().then(if (item is ChatItem.Assistant && item.active) anchor.modifier else Modifier),
-                contentAlignment = Alignment.TopCenter,
-            ) {
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 Box(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
                     when (item) {
                         is ChatItem.User -> {

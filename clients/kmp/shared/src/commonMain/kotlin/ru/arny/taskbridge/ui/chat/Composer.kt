@@ -105,54 +105,70 @@ fun Composer(
                 ),
             ) {
                 Column(Modifier.padding(6.dp)) {
-                    BasicTextField(
-                        value = value,
-                        onValueChange = onValueChange,
-                        enabled = enabled,
-                        // Grows line by line up to 6 lines, then scrolls inside.
-                        maxLines = 6,
-                        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                        decorationBox = { field ->
-                            Box(contentAlignment = Alignment.CenterStart) {
-                                if (value.text.isEmpty()) {
-                                    Text(
-                                        if (working) "Добавить инструкцию…" else "Сообщение агенту…",
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                                field()
-                            }
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp)
-                            .onFocusChanged { focused = it.isFocused }
-                            .onPreviewKeyEvent { event ->
-                                // Ctrl+V with a picture or files in the clipboard attaches them;
-                                // with text it falls through to the field's own paste.
-                                if (event.type == KeyEventType.KeyDown && event.key == Key.V && (event.isCtrlPressed || event.isMetaPressed)) {
-                                    val pasted = clipboardFiles()
-                                    if (pasted.isEmpty()) return@onPreviewKeyEvent false
-                                    onPaste(pasted)
-                                    return@onPreviewKeyEvent true
-                                }
-                                if (event.type != KeyEventType.KeyDown || (event.key != Key.Enter && event.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
-                                when {
-                                    event.isCtrlPressed || event.isMetaPressed -> { if (canSend) onSend(SendMode.NOW); true }
-                                    event.isShiftPressed || !enterSends -> {
-                                        // A newline at the cursor.
-                                        val text = value.text.replaceRange(value.selection.min, value.selection.max, "\n")
-                                        onValueChange(TextFieldValue(text, TextRange(value.selection.min + 1)))
-                                        true
+                    Box(Modifier.fillMaxWidth()) {
+                        BasicTextField(
+                            value = value,
+                            onValueChange = onValueChange,
+                            enabled = enabled,
+                            // Grows line by line up to 6 lines, then scrolls inside.
+                            maxLines = 6,
+                            textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            decorationBox = { field ->
+                                Box(contentAlignment = Alignment.CenterStart) {
+                                    if (value.text.isEmpty()) {
+                                        Text(
+                                            if (working) "Добавить инструкцию…" else "Сообщение агенту…",
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
                                     }
-                                    else -> { if (canSend) onSend(SendMode.QUEUE); true }
+                                    field()
                                 }
                             },
-                    )
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(
+                                    start = 12.dp,
+                                    end = if (value.text.isNotEmpty()) 48.dp else 12.dp,
+                                    top = 8.dp,
+                                    bottom = 8.dp,
+                                )
+                                .onFocusChanged { focused = it.isFocused }
+                                .onPreviewKeyEvent { event ->
+                                    // Ctrl+V with a picture or files in the clipboard attaches them;
+                                    // with text it falls through to the field's own paste.
+                                    if (event.type == KeyEventType.KeyDown && event.key == Key.V && (event.isCtrlPressed || event.isMetaPressed)) {
+                                        val pasted = clipboardFiles()
+                                        if (pasted.isEmpty()) return@onPreviewKeyEvent false
+                                        onPaste(pasted)
+                                        return@onPreviewKeyEvent true
+                                    }
+                                    if (event.type != KeyEventType.KeyDown || (event.key != Key.Enter && event.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
+                                    when {
+                                        event.isCtrlPressed || event.isMetaPressed -> { if (canSend) onSend(SendMode.NOW); true }
+                                        event.isShiftPressed || !enterSends -> {
+                                            // A newline at the cursor.
+                                            val text = value.text.replaceRange(value.selection.min, value.selection.max, "\n")
+                                            onValueChange(TextFieldValue(text, TextRange(value.selection.min + 1)))
+                                            true
+                                        }
+                                        else -> { if (canSend) onSend(SendMode.QUEUE); true }
+                                    }
+                                },
+                        )
+                        if (value.text.isNotEmpty()) {
+                            IconButton(
+                                onClick = { onValueChange(TextFieldValue("")) },
+                                enabled = enabled,
+                                modifier = Modifier.align(Alignment.TopEnd).size(40.dp),
+                            ) {
+                                Icon(AppIcons.Close, "Очистить текст", Modifier.size(18.dp))
+                            }
+                        }
+                    }
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),

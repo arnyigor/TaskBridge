@@ -663,24 +663,6 @@ fun NoteRow(item: ChatItem.Note) {
 /** The chat list, for blocks that unfold in place (see [rememberPinned]); null outside the chat. */
 val LocalChatListState = staticCompositionLocalOf<LazyListState?> { null }
 
-/** Keep the visible part of a streaming answer still as its height grows. */
-class StreamingMessageAnchor(private val list: LazyListState) {
-    private var top = Float.NaN
-    private var height: Int? = null
-
-    val modifier: Modifier = Modifier.onGloballyPositioned { coordinates ->
-        val y = coordinates.positionInRoot().y
-        val newHeight = coordinates.size.height
-        val shift = y - top
-        if (height != null && newHeight != height && !top.isNaN() && shift != 0f && !list.isScrollInProgress) {
-            list.dispatchRawDelta(-shift)
-        } else {
-            top = y
-        }
-        height = newHeight
-    }
-}
-
 /**
  * Keeps a block's top edge still while it unfolds or folds from its header.
  * The chat is anchored at the bottom (reverse layout), so a growing block
