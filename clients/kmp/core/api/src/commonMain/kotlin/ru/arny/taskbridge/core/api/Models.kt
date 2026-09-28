@@ -241,6 +241,14 @@ data class ProjectFolderListing(
     val entries: List<ProjectFolder> = emptyList(),
 )
 
+/** A file or folder inside the task workspace, addressed by a relative posix path —
+ *  the same path an @-reference in the prompt resolves against. */
+@Serializable
+data class WorkspaceFileEntry(val name: String, val path: String, val isFile: Boolean = false)
+
+@Serializable
+data class WorkspaceFileListing(val path: String? = null, val entries: List<WorkspaceFileEntry> = emptyList())
+
 @Serializable
 data class ModelCost(
     val input: Double? = null,

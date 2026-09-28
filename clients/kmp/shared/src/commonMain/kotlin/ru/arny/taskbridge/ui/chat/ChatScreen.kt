@@ -330,6 +330,7 @@ fun ChatScreen(
                 files = files,
                 quickActions = quickActions,
                 onQuickAction = { action -> draft = draft.withSlashCommand(action.insertText) },
+                fileCompletions = { session.workspaceFiles().getOrNull()?.entries ?: emptyList() },
                 onRemoveFile = { files = files - it },
                 onAttach = pickFiles,
                 onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },

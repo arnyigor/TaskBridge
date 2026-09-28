@@ -191,6 +191,10 @@ class TaskBridgeApi(
 
     suspend fun task(id: String): Task = get("/api/tasks/${id.path()}", Task.serializer())
 
+    /** Files and folders of the task workspace, relative paths — the source of @-completions. */
+    suspend fun workspaceFiles(id: String): WorkspaceFileListing =
+        get("/api/tasks/${id.path()}/workspace-files", WorkspaceFileListing.serializer())
+
     suspend fun createTask(request: CreateTaskRequest): Task =
         call(HttpMethod.Post, "/api/tasks", Task.serializer(), TaskBridgeJson.encodeToJsonElement(CreateTaskRequest.serializer(), request.withClient()))
 

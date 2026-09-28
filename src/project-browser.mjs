@@ -42,6 +42,40 @@ export async function resolveLocalProjectPath(requested) {
   return resolved;
 }
 
+/**
+ * Files and folders inside a task workspace, as relative posix paths — the same
+ * paths an @-reference in a prompt resolves against (the task workspace is pi's cwd).
+ * Bounded walk: SKIP dirs, hidden entries and symlinks are not followed; the list
+ * is capped so a huge tree cannot blow up the response.
+ */
+const WORKSPACE_FILE_CAP = 2000;
+const WORKSPACE_DEPTH_CAP = 12;
+
+export async function listWorkspaceFiles(root) {
+  let base;
+  try { base = await fs.realpath(root); } catch { throw fail('Рабочая папка не найдена.', 'NOT_FOUND'); }
+  if (!(await fs.lstat(base)).isDirectory()) throw fail('Рабочая папка не найдена.', 'NOT_FOUND');
+  const entries = [];
+  const walk = async (dir, relBase, depth) => {
+    if (depth > WORKSPACE_DEPTH_CAP || entries.length >= WORKSPACE_FILE_CAP) return;
+    for (const entry of await fs.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      if (entries.length >= WORKSPACE_FILE_CAP) return;
+      if (entry.name.startsWith('.') || SKIP.has(entry.name)) continue;
+      const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        entries.push({ name: entry.name, path: rel, isFile: false });
+        await walk(path.join(dir, entry.name), rel, depth + 1);
+      } else if (entry.isFile()) {
+        entries.push({ name: entry.name, path: rel, isFile: true });
+      }
+    }
+  };
+  await walk(base, '', 0);
+  // Code-unit comparison, not localeCompare: paths with '/' must sort deterministically.
+  entries.sort((a, b) => (a.isFile === b.isFile ? (a.path < b.path ? -1 : a.path > b.path ? 1 : 0) : a.isFile ? 1 : -1));
+  return { path: '', entries };
+}
+
 export async function listDirectory(config, requested) {
   const roots = await canonicalRoots(config);
   if (!roots.length) throw fail('Просмотр папок не настроен: задайте projectBrowser.roots в config.json.', 'NOT_CONFIGURED');

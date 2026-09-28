@@ -11,8 +11,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
@@ -50,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 import ru.arny.taskbridge.platform.rememberClipboardFiles
 import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.ui.common.formatBytes
@@ -62,6 +67,8 @@ fun Composer(
     files: List<UploadFile>,
     quickActions: List<QuickAction> = emptyList(),
     onQuickAction: (QuickAction) -> Unit = {},
+    /** Files of the task workspace for @-completions; the chat without a project/workspace passes none. */
+    fileCompletions: suspend () -> List<WorkspaceFileEntry> = { emptyList() },
     onRemoveFile: (UploadFile) -> Unit,
     onAttach: () -> Unit,
     /** Pictures or files from the clipboard (Ctrl+V, «Вставить из буфера»); empty from the menu when it holds none. */
@@ -82,23 +89,58 @@ fun Composer(
     var selectedQuickAction by remember { mutableStateOf(0) }
     val clipboardFiles = rememberClipboardFiles()
     val slashMatches = slashQuickMatches(value.text, quickActions)
-    LaunchedEffect(value.text, slashMatches.size) { selectedQuickAction = 0 }
-    val selectedQuickActionIndex = selectedQuickAction.coerceIn(0, (slashMatches.size - 1).coerceAtLeast(0))
+    // @-completions over the files of the workspace, loaded once per popup session.
+    var workspaceFiles by remember { mutableStateOf(emptyList<WorkspaceFileEntry>()) }
+    var filesLoaded by remember { mutableStateOf(false) }
+    val atFile = atFileQuery(value.text, value.selection.min)
+    val atOpen = slashMatches.isEmpty() && atFile != null
+    LaunchedEffect(atOpen) {
+        if (atOpen && !filesLoaded) {
+            filesLoaded = true
+            workspaceFiles = fileCompletions()
+        } else if (!atOpen) {
+            filesLoaded = false
+        }
+    }
+    val atMatches = if (atOpen) filterWorkspaceFiles(workspaceFiles, atFile.query) else emptyList()
+    LaunchedEffect(value.text, slashMatches.size, atMatches.size, atOpen) { selectedQuickAction = 0 }
+    val slashIndex = selectedQuickAction.coerceIn(0, (slashMatches.size - 1).coerceAtLeast(0))
+    val atIndex = selectedQuickAction.coerceIn(0, (atMatches.size - 1).coerceAtLeast(0))
     val canSend = enabled && (value.text.isNotBlank() || files.isNotEmpty())
     val canStop = onStop != null
     fun handleQuickActionKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
-        if (event.type != KeyEventType.KeyDown || slashMatches.isEmpty()) return false
+        if (event.type != KeyEventType.KeyDown) return false
+        if (slashMatches.isNotEmpty()) {
+            return when (event.key) {
+                Key.DirectionDown -> {
+                    selectedQuickAction = (slashIndex + 1) % slashMatches.size
+                    true
+                }
+                Key.DirectionUp -> {
+                    selectedQuickAction = (slashIndex + slashMatches.size - 1) % slashMatches.size
+                    true
+                }
+                Key.Tab -> {
+                    onQuickAction(slashMatches[slashIndex])
+                    true
+                }
+                else -> false
+            }
+        }
+        if (atMatches.isEmpty()) return false
         return when (event.key) {
             Key.DirectionDown -> {
-                selectedQuickAction = (selectedQuickActionIndex + 1) % slashMatches.size
+                selectedQuickAction = (atIndex + 1) % atMatches.size
                 true
             }
             Key.DirectionUp -> {
-                selectedQuickAction = (selectedQuickActionIndex + slashMatches.size - 1) % slashMatches.size
+                selectedQuickAction = (atIndex + atMatches.size - 1) % atMatches.size
                 true
             }
-            Key.Tab -> {
-                onQuickAction(slashMatches[selectedQuickActionIndex])
+            Key.Tab, Key.Enter, Key.NumPadEnter -> {
+                // @-completions commit with Tab or Enter, as in the Pi console.
+                val af = atFile ?: return false
+                onValueChange(value.withAtFileCompletion(atMatches[atIndex].path, af.atStart))
                 true
             }
             else -> false
@@ -108,7 +150,13 @@ fun Composer(
         // Inside the Surface: its tint runs under the navigation bar instead of a blank strip.
         Column(Modifier.navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp)) {
             top()
-            SlashQuickActions(slashMatches, selectedQuickActionIndex, onQuickAction)
+            SlashQuickActions(slashMatches, slashIndex, onQuickAction)
+            if (slashMatches.isEmpty()) {
+                AtFileSuggestions(atMatches, atIndex) { entry ->
+                    val af = atFile
+                    if (af != null) onValueChange(value.withAtFileCompletion(entry.path, af.atStart))
+                }
+            }
             if (files.isNotEmpty()) {
                 FlowRow(Modifier.padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     for (file in files) {
@@ -296,6 +344,84 @@ internal fun slashQuickMatches(text: String, actions: List<QuickAction>): List<Q
         .take(12)
 }
 
+/** The @-token under the cursor: `@query`, opened by `@` after whitespace or at the start of the text —
+ *  an address like `a@b.com` does not open it. */
+internal data class AtFileQuery(val atStart: Int, val query: String)
+
+internal fun atFileQuery(text: String, cursor: Int): AtFileQuery? {
+    if (cursor <= 0 || cursor > text.length) return null
+    val at = text.lastIndexOf('@', cursor - 1)
+    if (at < 0) return null
+    if (at > 0 && !text[at - 1].isWhitespace()) return null
+    val query = text.substring(at + 1, cursor)
+    if (query.any { it.isWhitespace() }) return null
+    return AtFileQuery(at, query)
+}
+
+internal fun filterWorkspaceFiles(entries: List<WorkspaceFileEntry>, query: String): List<WorkspaceFileEntry> {
+    if (query.isEmpty()) return entries.take(12)
+    val q = query.lowercase()
+    return entries
+        .filter { entry -> entry.name.lowercase().contains(q) || entry.path.lowercase().contains(q) }
+        .sortedWith(
+            compareBy(
+                { entry -> !entry.name.lowercase().startsWith(q) },
+                { entry -> entry.path.count { it == '/' } },
+                { entry -> entry.path.length },
+            ),
+        )
+        .take(12)
+}
+
+/** Replaces the `@query` region with the chosen file: `@путь` + a space, caret after the insert. */
+internal fun TextFieldValue.withAtFileCompletion(path: String, atStart: Int): TextFieldValue {
+    val insert = "@$path "
+    val end = selection.max.coerceAtMost(text.length)
+    val full = text.substring(0, atStart) + insert + text.substring(end)
+    return TextFieldValue(full, TextRange(atStart + insert.length))
+}
+
+/** Files of the workspace under an `@` in the text: the same card as the slash actions. */
+@Composable
+private fun AtFileSuggestions(
+    matches: List<WorkspaceFileEntry>,
+    selectedIndex: Int,
+    onClick: (WorkspaceFileEntry) -> Unit,
+) {
+    if (matches.isEmpty()) return
+    Surface(
+        Modifier.fillMaxWidth().padding(bottom = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 2.dp,
+    ) {
+        QuickList(matches, selectedIndex) { entry, selected ->
+            Column(
+                Modifier.fillMaxWidth()
+                    .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f) else Color.Transparent)
+                    .clickable { onClick(entry) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(entry.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                    if (selected) {
+                        Text("↑↓ Tab/Enter", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+                if (entry.path != entry.name) {
+                    Text(
+                        entry.path,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun SlashQuickActions(
     matches: List<QuickAction>,
@@ -309,33 +435,52 @@ private fun SlashQuickActions(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 2.dp,
     ) {
-        Column(Modifier.padding(vertical = 4.dp)) {
-            for ((index, action) in matches.withIndex()) {
-                val selected = index == selectedIndex
-                Column(
-                    Modifier
-                        .fillMaxWidth()
-                        .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f) else Color.Transparent)
-                        .clickable { onClick(action) }
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(action.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
-                        if (selected) {
-                            Text("↑↓ Tab", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
-                        }
-                    }
-                    if (action.description.isNotBlank()) {
-                        Text(
-                            action.description,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+        QuickList(matches, selectedIndex) { action, selected ->
+            Column(
+                Modifier.fillMaxWidth()
+                    .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f) else Color.Transparent)
+                    .clickable { onClick(action) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(action.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                    if (selected) {
+                        Text("↑↓ Tab", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                 }
+                if (action.description.isNotBlank()) {
+                    Text(
+                        action.description,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
+        }
+    }
+}
+
+/** A scrollable, height-bounded suggestion list (a phone keyboard leaves little
+ *  room, so a fixed-height card that cannot scroll made the last rows
+ *  unreachable). The selected row follows the ↑/↓ keys into view. */
+@Composable
+private fun <T> QuickList(
+    matches: List<T>,
+    selectedIndex: Int,
+    row: @Composable (item: T, selected: Boolean) -> Unit,
+) {
+    val listState = rememberLazyListState()
+    LaunchedEffect(selectedIndex) {
+        if (selectedIndex in matches.indices) listState.animateScrollToItem(selectedIndex)
+    }
+    LazyColumn(
+        Modifier.fillMaxWidth().heightIn(max = 220.dp),
+        state = listState,
+    ) {
+        itemsIndexed(matches) { index, item ->
+            Box(Modifier.padding(vertical = 0.dp)) { row(item, index == selectedIndex) }
         }
     }
 }

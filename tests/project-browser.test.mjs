@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath } from '../src/project-browser.mjs';
+import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from '../src/project-browser.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-project-browser-'));
@@ -77,4 +77,25 @@ test('a symlink escaping the root is rejected even if it resolves back inside an
   await assert.rejects(resolveBrowsablePath(f.config, link), { code: 'FILE_FORBIDDEN' });
   const result = await listDirectory(f.config, f.allowed);
   assert.ok(!result.entries.some(e => e.name === 'escape'));
+});
+
+test('workspace listing reports files and folders as relative posix paths, hides noise', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-workspace-files-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.mkdir(path.join(root, 'src', 'deep'), { recursive: true });
+  await fs.mkdir(path.join(root, '.git'));
+  await fs.mkdir(path.join(root, 'node_modules'));
+  await fs.writeFile(path.join(root, 'README.md'), 'x');
+  await fs.writeFile(path.join(root, 'src', 'main.kt'), 'x');
+  await fs.writeFile(path.join(root, 'src', 'deep', 'nested.txt'), 'x');
+  const result = await listWorkspaceFiles(root);
+  assert.equal(result.path, '');
+  assert.deepEqual(result.entries.map(e => e.path), ['src', 'src/deep', 'README.md', 'src/deep/nested.txt', 'src/main.kt']);
+  assert.deepEqual(result.entries.map(e => e.isFile), [false, false, true, true, true]);
+  const files = result.entries.filter(e => e.isFile);
+  assert.deepEqual(files.map(e => e.name), ['README.md', 'nested.txt', 'main.kt']);
+});
+
+test('workspace listing rejects a missing workspace', async () => {
+  await assert.rejects(listWorkspaceFiles('C:/definitely/not/a/real/dir-taskbridge'), { code: 'NOT_FOUND' });
 });

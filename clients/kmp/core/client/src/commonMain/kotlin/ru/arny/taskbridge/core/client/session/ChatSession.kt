@@ -31,6 +31,7 @@ import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.api.ToolOutput
 import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.api.WorkspaceFileListing
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ChatSnapshot
 import kotlin.random.Random
@@ -615,6 +616,9 @@ class ChatSession(
     }
 
     suspend fun toolOutput(toolCallId: String): Result<ToolOutput> = runCatching { api.toolOutput(taskId, toolCallId) }
+
+    /** Files and folders of the workspace, for @-completions in the composer. */
+    suspend fun workspaceFiles(): Result<WorkspaceFileListing> = runCatching { api.workspaceFiles(taskId) }
 
     fun fileUrl(fileId: String): String = api.fileUrl(taskId, fileId)
 

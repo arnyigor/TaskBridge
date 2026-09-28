@@ -8,7 +8,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
-import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath } from './project-browser.mjs';
+import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
@@ -1277,6 +1277,14 @@ async function handleRequest(req, res) {
       const target = await containedFile(task.workspacePath, String(url.searchParams.get('path') || ''));
       await serveFile(req, res, target, path.basename(target), url.searchParams.get('download') === '1');
       return;
+    }
+
+    // --- list the task workspace (relative paths for @-references in a prompt) ---
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace-files$/);
+    if (['GET', 'HEAD'].includes(req.method) && match) {
+      const task = manager.getTask(match[1]);
+      if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
+      return json(res, 200, await listWorkspaceFiles(task.workspacePath));
     }
 
     // --- open on the machine (browser cannot start an app; the machine can) ---

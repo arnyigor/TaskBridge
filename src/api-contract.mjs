@@ -92,6 +92,7 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/tasks/:id/artifacts/:name', summary: 'download one artifact', binary: true },
   { method: 'GET', path: '/api/tasks/:id/files/:fileId', summary: 'download an upload', binary: true },
   { method: 'GET', path: '/api/tasks/:id/workspace-file', summary: 'read a file from the task workspace (?path=)', binary: true },
+  { method: 'GET', path: '/api/tasks/:id/workspace-files', summary: 'list files in the task workspace (relative paths for @-references)' },
   // Opening on the machine: localhost only, body {confirm:true, reveal?}. These
   // launch an OS application, so the contract probe must never be able to run
   // them — the confirm flag is what keeps it harmless.
