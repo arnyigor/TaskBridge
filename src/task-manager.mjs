@@ -5,7 +5,7 @@ import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
-import { restoreSessionFile } from './session-history.mjs';
+import { restoreSessionFile, sessionContainsUserMessage } from './session-history.mjs';
 import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
 import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease, sweepOrphanLocks } from './native-sessions.mjs';
@@ -353,18 +353,51 @@ export class TaskManager extends EventEmitter {
         this.#enqueue(task.id);
         await this.#restorePendingFiles(task.id);
       } else if (['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'].includes(task.status)) {
-        // R3.6: with the Pi session file intact the conversation is only
-        // interrupted — the next message resumes it (RESTORABLE). Without it
-        // there is nothing to resume from: a real failure.
         const intact = task.piSessionFile ? await fs.access(task.piSessionFile).then(() => true, () => false) : false;
-        task.status = 'FAILED';
-        task.errorCode = intact ? 'FAILED_RECOVERY' : 'SESSION_LOST';
-        task.error = intact
-          ? 'TaskBridge перезапустился во время ответа. Следующее сообщение продолжит сессию.'
-          : 'TaskBridge перезапустился во время ответа, а файл сессии Pi не сохранился.';
-        if (!intact) task._sessionLost = true;
-        task.updatedAt = now();
-        await this.store.save(task);
+        // The in-flight marker: a prompt was sent to Pi and its turn did not
+        // complete before the restart. With the session file intact the restart
+        // finishes the command instead of reporting a failure. Pi records the
+        // user message as the prompt is accepted, so the session file tells the
+        // two cases apart: the text is already there → a short continuation
+        // nudge (re-sending it would duplicate the user turn); nothing there →
+        // the prompt is re-sent as-is. The delivery announces nothing either
+        // way (announce: false): the text is already in the chat history.
+        if (intact && task.inFlightPrompt?.text) {
+          const recorded = await sessionContainsUserMessage(task.piSessionFile, task.inFlightPrompt.text);
+          const resume = {
+            id: `resume-${now()}`,
+            text: recorded ? CONTINUE_PROMPT : task.inFlightPrompt.text,
+            mode: 'auto',
+            files: (task.files || []).map(metadata),
+            announce: false,
+          };
+          // The resume goes to the queue front; prompts queued before the
+          // restart follow it. The marker is spent: the restart delivers it
+          // exactly once, so no restart produces a duplicate.
+          task.pendingPrompts = [resume, ...(task.pendingPrompts || [])];
+          task.inFlightPrompt = null;
+          // The task was RUNNING when the restart hit it: the pump delivers the
+          // resume through #deliverPending, which claims the slot itself.
+          task.status = 'QUEUED';
+          task.queueReason = 'RESTORED_RESUME';
+          task.current = 'TaskBridge перезапустился во время ответа — запрос будет отправлен повторно';
+          task.updatedAt = now();
+          await this.store.save(task);
+          this.#enqueue(task.id);
+          await this.#restorePendingFiles(task.id);
+        } else {
+          // R3.6: with the Pi session file intact the conversation is only
+          // interrupted — the next message resumes it (RESTORABLE). Without it
+          // there is nothing to resume from: a real failure.
+          task.status = 'FAILED';
+          task.errorCode = intact ? 'FAILED_RECOVERY' : 'SESSION_LOST';
+          task.error = intact
+            ? 'TaskBridge перезапустился во время ответа. Следующее сообщение продолжит сессию.'
+            : 'TaskBridge перезапустился во время ответа, а файл сессии Pi не сохранился.';
+          if (!intact) task._sessionLost = true;
+          task.updatedAt = now();
+          await this.store.save(task);
+        }
       }
       // Pi is gone after a restart: a dialog it was waiting on is gone with it.
       if (task.pendingUiRequest) { task.pendingUiRequest = null; await this.store.save(task).catch(() => {}); }
@@ -978,7 +1011,7 @@ export class TaskManager extends EventEmitter {
     if ((task.pendingPrompts || []).length) this.#enqueue(task.id);
     try {
       const waiting = (await this.#getPendingFiles(task.id, pending.id)) || { files: [], uploadToken: null };
-      await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
+      await this.#message(task.id, pending.text, pending.mode || 'auto', waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], announce: pending.announce, ...pendingOrigin(pending) });
       await this.#deletePendingFiles(task.id, pending.id);
       return true;
     } catch (error) {
@@ -1151,6 +1184,11 @@ export class TaskManager extends EventEmitter {
       try {
         await this.#setStatus(task, 'RUNNING', 'Pi starting');
         if (task.status === 'CANCELLED' || this.runtimes.get(task.id)?.cancelRequested) { this.#resolveSettle(task.id); return; }
+        // The in-flight marker (see #deliverMessage): persisted before the RPC so
+        // a restart between here and the turn's end finishes the command instead
+        // of reporting a failure. Cleared when the turn reaches a terminal state.
+        task.inFlightPrompt = { text: this.#buildPrompt(task), initial: true, at: now() };
+        await this.store.save(this.#publicTask(task)).catch(() => {});
         await pi.prompt(this.#buildPrompt(task));
         // The initial prompt has no USER_MESSAGE frame (it is stored on the task).
         // Publish the RPC acknowledgement so clients can distinguish "created on
@@ -1729,6 +1767,8 @@ export class TaskManager extends EventEmitter {
     // A newer turn already owns the session: this turn must not touch its state.
     if (turn != null && task._turn !== turn) return;
     if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }));
+    // The turn completed: the in-flight marker is spent (see #deliverMessage).
+    if (task.inFlightPrompt) { task.inFlightPrompt = null; await this.store.save(this.#publicTask(task)).catch(() => {}); }
     await this.#setStatus(task, 'VERIFYING', 'Collecting diff and changed files');
     const gitState = await collectGitStateForCompletion(task.workspacePath);
     // STOP can arrive while Git is being inspected. Do not resume finalizing
@@ -1972,6 +2012,8 @@ export class TaskManager extends EventEmitter {
     // STOP must not wait on a fresh Git snapshot. A large workspace or a
     // locked disposable index can otherwise keep the session in CANCELLING
     // even after Pi has stopped. The last completed snapshot remains available.
+    // The turn ends cancelled: the in-flight marker is spent (see #deliverMessage).
+    task.inFlightPrompt = null;
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
     task.updatedAt = now();
@@ -2752,7 +2794,7 @@ export class TaskManager extends EventEmitter {
       try {
         const waiting = (await this.#getPendingFiles(id, pending.id)) || { files: [], uploadToken: null };
         // A follow-up would wait for the end of the turn again: "now" is steering.
-        const result = await this.#message(id, pending.text, pending.mode === 'follow_up' ? 'auto' : (pending.mode || 'auto'), waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], ...pendingOrigin(pending) });
+        const result = await this.#message(id, pending.text, pending.mode === 'follow_up' ? 'auto' : (pending.mode || 'auto'), waiting.files, waiting.uploadToken, { immediate: true, fromQueue: true, staged: pending.files || [], announce: pending.announce, ...pendingOrigin(pending) });
         await this.#deletePendingFiles(id, pending.id);
         return result;
       } catch (error) {
@@ -2931,6 +2973,12 @@ export class TaskManager extends EventEmitter {
       settled = this.#waitForSettle(id, 12 * 60 * 60 * 1000);
       settled.catch(() => {});
     }
+    // The in-flight marker (see #executeInitial): every new command overwrites
+    // it, so the latest sent text is the one a restart recovers. Persisted
+    // before the RPC: a restart between the RPC and the acknowledgement must
+    // not lose the command either.
+    task.inFlightPrompt = { text: message, at: now() };
+    await this.store.save(this.#publicTask(task)).catch(() => {});
     try {
       if (effectiveMode === 'prompt') await runtime.pi.prompt(message);
       else await runtime.pi.sendFollowUp(message, effectiveMode);
@@ -3098,6 +3146,8 @@ export class TaskManager extends EventEmitter {
   async #fail(task, error) {
     if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
+    // The turn reached a terminal state: the in-flight command is spent.
+    if (task.inFlightPrompt) task.inFlightPrompt = null;
     const classified = classifyEngineError(error) || classifyEngineError(task._modelError);
     const explicit = error?.code && !['MODEL_ERROR', 'INTERNAL_ERROR'].includes(error.code) ? error.code : null;
     task.status = 'FAILED';

@@ -3,6 +3,37 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { readPiSession } from './pi-session-index.mjs';
 
+// Whether Pi already recorded the exact user text in its v3 session file. The
+// in-flight marker needs this after a restart: Pi writes the user message as
+// the prompt is accepted, so the interrupted turn may be recorded without an
+// answer — re-sending the same text would create a duplicate user turn, and a
+// short continuation nudge finishes it instead. Full read, the same pattern
+// restoreSessionFile uses; only interrupted tasks with a marker pay for it,
+// once each at startup.
+export async function sessionContainsUserMessage(sessionFile, text) {
+  if (!sessionFile) return false;
+  const wanted = String(text || '').trim();
+  if (!wanted) return false;
+  let lines;
+  try { lines = (await fs.readFile(sessionFile, 'utf8')).split(/\r?\n/); }
+  catch { return false; }
+  for (const line of lines) {
+    if (!line) continue;
+    let entry;
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry?.type !== 'message' || entry.message?.role !== 'user') continue;
+    const content = entry.message.content;
+    const body = typeof content === 'string'
+      ? content
+      : Array.isArray(content) ? content.filter(x => x?.type === 'text').map(x => x.text || '').join('\n') : '';
+    // Exact first, then whitespace-normalized: text split into several Pi text
+    // blocks must still match the text that was sent.
+    if (body.trim() === wanted) return true;
+    if (body.replace(/\s+/g, ' ').trim() === wanted.replace(/\s+/g, ' ')) return true;
+  }
+  return false;
+}
+
 // Pi's persisted v3 session keeps message roles, tool results and compaction
 // boundaries intact. Use it directly whenever it is available.
 export async function restoreSessionFile(task, store, dataRoot) {

@@ -316,6 +316,62 @@ test('restart restores a queued prompt and fails only what was really running', 
   assert.deepEqual(f.manager.queue, ['queued']);
 });
 
+// The in-flight marker: the prompt was sent to Pi and its turn did not complete
+// before the restart. With the session file intact the restart finishes the
+// command instead of reporting a failure.
+test('restart auto-resumes a command in flight: the marker re-sends it when Pi never recorded it', async t => {
+  const f = await fixture(t);
+  const sessionFile = path.join(f.root, 'session-lost.jsonl');
+  await fs.writeFile(sessionFile, `${JSON.stringify({ type: 'session', version: 3, id: 's1', timestamp: new Date().toISOString(), cwd: f.root })}\n`);
+  await f.store.save({ ...f.task, id: 'running', status: 'RUNNING', workspacePath: f.root, piSessionFile: sessionFile, inFlightPrompt: { text: 'начатый запрос', initial: true, at: new Date().toISOString() } });
+  await f.manager.init();
+
+  const restored = f.manager.getTask('running');
+  assert.equal(restored.status, 'QUEUED');
+  assert.equal(restored.queueReason, 'RESTORED_RESUME');
+  assert.equal(restored.pendingPrompts.length, 1);
+  assert.equal(restored.pendingPrompts[0].text, 'начатый запрос');
+  assert.equal(restored.pendingPrompts[0].announce, false);
+  assert.equal(restored.inFlightPrompt, null);
+  assert.deepEqual(f.manager.queue, ['running']);
+});
+
+// Pi records the user message as the prompt is accepted, so the interrupted
+// turn may already be in the session file — re-sending the same text would
+// duplicate the user turn, and the continuation nudge finishes it instead.
+test('restart auto-resumes with a continuation nudge when Pi already recorded the prompt', async t => {
+  const f = await fixture(t);
+  const prompt = 'начатый запрос';
+  const sessionFile = path.join(f.root, 'session-recorded.jsonl');
+  await fs.writeFile(sessionFile, [
+    JSON.stringify({ type: 'session', version: 3, id: 's2', timestamp: new Date().toISOString(), cwd: f.root }),
+    JSON.stringify({ type: 'message', id: 'm1', parentId: null, timestamp: new Date().toISOString(), message: { role: 'user', content: [{ type: 'text', text: prompt }] } }),
+  ].join('\n') + '\n');
+  await f.store.save({ ...f.task, id: 'running', status: 'RUNNING', workspacePath: f.root, piSessionFile: sessionFile, inFlightPrompt: { text: prompt, initial: true, at: new Date().toISOString() } });
+  await f.manager.init();
+
+  const restored = f.manager.getTask('running');
+  assert.equal(restored.status, 'QUEUED');
+  assert.equal(restored.queueReason, 'RESTORED_RESUME');
+  assert.notEqual(restored.pendingPrompts[0].text, prompt);
+  assert.ok(restored.pendingPrompts[0].text.startsWith('Продолжи'));
+  assert.equal(restored.inFlightPrompt, null);
+});
+
+// Without the marker there is nothing to re-send: the pre-marker behaviour
+// (FAILED_RECOVERY, the next message resumes) stays.
+test('restart without an in-flight marker still reports FAILED_RECOVERY', async t => {
+  const f = await fixture(t);
+  const sessionFile = path.join(f.root, 'session-intact.jsonl');
+  await fs.writeFile(sessionFile, `${JSON.stringify({ type: 'session', version: 3, id: 's3', timestamp: new Date().toISOString(), cwd: f.root })}\n`);
+  await f.store.save({ ...f.task, id: 'running', status: 'RUNNING', workspacePath: f.root, piSessionFile: sessionFile });
+  await f.manager.init();
+
+  const restored = f.manager.getTask('running');
+  assert.equal(restored.status, 'FAILED');
+  assert.equal(restored.errorCode, 'FAILED_RECOVERY');
+});
+
 test('applyTask applies the result patch to a clean source, then cleanup removes the worktree', async t => {
   const dataRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-apply-data-'));
   const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-apply-repo-'));
