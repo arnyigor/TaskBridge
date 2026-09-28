@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -65,6 +66,7 @@ import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
+import ru.arny.taskbridge.core.api.PiInfo
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
@@ -75,6 +77,8 @@ import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.StatusPill
+import ru.arny.taskbridge.ui.common.formatBytes
+import ru.arny.taskbridge.ui.common.parseIsoMillis
 import ru.arny.taskbridge.ui.common.relativeTime
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -98,22 +102,34 @@ fun SessionsScreen(
     var clearing by remember { mutableStateOf<SessionGroup?>(null) }
     var renaming by remember { mutableStateOf<Task?>(null) }
     var deleting by remember { mutableStateOf<Task?>(null) }
+    var selecting by remember { mutableStateOf(false) }
+    var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var deletingSelected by remember { mutableStateOf<Set<String>?>(null) }
+    var selectingOlder by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     var restarting by remember { mutableStateOf(false) }
     // Relative times ("5 мин") move on their own.
     var now by remember { mutableLongStateOf(graph.nowMillis()) }
+    val groups = state.groups(query)
+    val visibleTasks = groups.flatMap { it.sessions }
+    val visibleIds = visibleTasks.mapTo(mutableSetOf()) { it.id }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = graph.nowMillis() } }
     DisposableEffect(connection) {
         connection.sessions.start()
         onDispose { }
+    }
+    LaunchedEffect(visibleIds) {
+        selectedIds = selectedIds.filterTo(mutableSetOf()) { it in visibleIds }
+        if (selecting && selectedIds.isEmpty()) selecting = false
     }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    if (searching) {
-                        TextField(
+                    when {
+                        selecting -> Text("Выбрано: ${selectedIds.size}")
+                        searching -> TextField(
                             value = query,
                             onValueChange = { query = it },
                             placeholder = { Text("Поиск по сессиям") },
@@ -121,8 +137,7 @@ fun SessionsScreen(
                             colors = TextFieldDefaults.colors(focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent),
                             modifier = Modifier.fillMaxWidth(),
                         )
-                    } else {
-                        Column {
+                        else -> Column {
                             Text("Сессии")
                             val summary = buildList {
                                 if (state.waitingCount > 0) add("ждут: ${state.waitingCount}")
@@ -133,26 +148,46 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { searching = !searching; if (!searching) query = "" }) {
-                        Icon(if (searching) AppIcons.Close else AppIcons.Search, "Поиск")
+                    if (selecting) {
+                        IconButton(onClick = { selectedIds = visibleIds; if (selectedIds.isNotEmpty()) selecting = true }, enabled = visibleIds.isNotEmpty()) {
+                            Icon(AppIcons.Check, "Выбрать все видимые")
+                        }
+                        IconButton(onClick = { selectingOlder = true }, enabled = visibleTasks.isNotEmpty()) {
+                            Icon(AppIcons.Clock, "Выбрать старые")
+                        }
+                        IconButton(onClick = { deletingSelected = selectedIds }, enabled = selectedIds.isNotEmpty()) {
+                            Icon(AppIcons.Delete, "Удалить выбранные", tint = if (selectedIds.isNotEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        IconButton(onClick = { selecting = false; selectedIds = emptySet() }) {
+                            Icon(AppIcons.Close, "Выйти из выбора")
+                        }
+                    } else {
+                        IconButton(onClick = { searching = !searching; if (!searching) query = "" }) {
+                            Icon(if (searching) AppIcons.Close else AppIcons.Search, "Поиск")
+                        }
+                        IconButton(onClick = { selecting = true }) {
+                            Icon(AppIcons.Check, "Выбрать сессии")
+                        }
+                        // One tap flips what is on screen now; "как в системе" stays in Settings.
+                        val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+                        IconButton(onClick = { graph.changeTheme(if (dark) "light" else "dark") }) {
+                            Icon(if (dark) AppIcons.Sun else AppIcons.Moon, if (dark) "Светлая тема" else "Тёмная тема")
+                        }
+                        // Restarts the TaskBridge process, as the web header does: the way out of a stuck state.
+                        IconButton(onClick = { confirmRestart = true }, enabled = !restarting) { Icon(AppIcons.Refresh, "Перезапустить сервер") }
+                        IconButton(onClick = onSettings) { Icon(AppIcons.Settings, "Настройки") }
                     }
-                    // One tap flips what is on screen now; "как в системе" stays in Settings.
-                    val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-                    IconButton(onClick = { graph.changeTheme(if (dark) "light" else "dark") }) {
-                        Icon(if (dark) AppIcons.Sun else AppIcons.Moon, if (dark) "Светлая тема" else "Тёмная тема")
-                    }
-                    // Restarts the TaskBridge process, as the web header does: the way out of a stuck state.
-                    IconButton(onClick = { confirmRestart = true }, enabled = !restarting) { Icon(AppIcons.Refresh, "Перезапустить сервер") }
-                    IconButton(onClick = onSettings) { Icon(AppIcons.Settings, "Настройки") }
                 },
             )
         },
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { creatingIn = null; creating = true },
-                icon = { Icon(AppIcons.Add, null) },
-                text = { Text("Новая сессия") },
-            )
+            if (!selecting) {
+                ExtendedFloatingActionButton(
+                    onClick = { creatingIn = null; creating = true },
+                    icon = { Icon(AppIcons.Add, null) },
+                    text = { Text("Новая сессия") },
+                )
+            }
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { padding ->
@@ -175,15 +210,14 @@ fun SessionsScreen(
                     onAction = { connection.sessions.refresh() },
                 )
             }
-            state.info?.pi?.takeIf { !it.supported }?.let { pi ->
+            piVersionBanner(state.info?.pi)?.let { text ->
                 Banner(
-                    text = "Pi ${pi.version ?: "не найден"}: версия не проверялась с TaskBridge (${pi.supportedRange.orEmpty()})",
+                    text = text,
                     icon = AppIcons.Alert,
                     color = LocalStatusColors.current.waiting,
                 )
             }
             RefreshContainer(pull = graph.platform.kind != "desktop", refreshing = state.refreshing, onRefresh = { connection.sessions.refresh() }) {
-                val groups = state.groups(query)
                 when {
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                     groups.isEmpty() && query.isNotBlank() -> EmptyState(AppIcons.Search, "Ничего не найдено", "Попробуйте другое слово.")
@@ -199,10 +233,18 @@ fun SessionsScreen(
                         now = now,
                         graph = graph,
                         onOpen = onOpen,
+                        selecting = selecting,
+                        selectedIds = selectedIds,
+                        onToggleSelected = { task ->
+                            selecting = true
+                            selectedIds = if (task.id in selectedIds) selectedIds - task.id else selectedIds + task.id
+                        },
                         onRename = { renaming = it },
                         onDelete = { deleting = it },
                         onNewIn = { projectId -> creatingIn = projectId; creating = true },
                         onClearFinished = { clearing = it },
+                        onSelectGroup = { group -> selecting = true; selectedIds = group.sessions.mapTo(mutableSetOf()) { it.id } },
+                        onSelectFinished = { group -> selecting = true; selectedIds = group.sessions.filter(::finished).mapTo(mutableSetOf()) { it.id } },
                     )
                 }
             }
@@ -287,6 +329,56 @@ fun SessionsScreen(
         )
     }
 
+    if (selectingOlder) {
+        var daysText by remember { mutableStateOf("30") }
+        val days = daysText.toLongOrNull()?.takeIf { it > 0 }
+        AlertDialog(
+            onDismissRequest = { selectingOlder = false },
+            title = { Text("Выбрать старые сессии") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Будут отмечены видимые сессии, обновлённые раньше указанного числа дней назад.")
+                    OutlinedTextField(daysText, { daysText = it.filter(Char::isDigit).take(4) }, label = { Text("Старше, дней") }, singleLine = true)
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = days != null,
+                    onClick = {
+                        val picked = visibleTasks.filter { days != null && olderThanDays(it, days, now) }.mapTo(mutableSetOf()) { it.id }
+                        selectedIds = picked
+                        selecting = picked.isNotEmpty()
+                        selectingOlder = false
+                        scope.launch { snackbar.showSnackbar(if (picked.isEmpty()) "Старых сессий не найдено" else "Выбрано сессий: ${picked.size}") }
+                    },
+                ) { Text("Выбрать") }
+            },
+            dismissButton = { TextButton(onClick = { selectingOlder = false }) { Text("Отмена") } },
+        )
+    }
+
+    deletingSelected?.let { ids ->
+        AlertDialog(
+            onDismissRequest = { deletingSelected = null },
+            title = { Text("Удалить выбранные сессии?") },
+            text = { Text("Будут удалены выбранные сессии (${ids.size}) вместе с историей. Это нельзя отменить.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    deletingSelected = null
+                    selecting = false
+                    selectedIds = emptySet()
+                    scope.launch {
+                        val failed = ids.count { id ->
+                            connection.sessions.delete(id).also { connection.closeChat(id) }.isFailure
+                        }
+                        snackbar.showSnackbar(if (failed == 0) "Удалено сессий: ${ids.size}" else "Не удалось удалить: $failed из ${ids.size}")
+                    }
+                }) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deletingSelected = null }) { Text("Отмена") } },
+        )
+    }
+
     deleting?.let { task ->
         AlertDialog(
             onDismissRequest = { deleting = null },
@@ -309,7 +401,26 @@ fun SessionsScreen(
 /** Not running, not waiting for the operator: safe to clear from a folder. */
 private fun finished(task: Task): Boolean = !displayStateOf(task).active
 
+private fun olderThanDays(task: Task, days: Long, nowMillis: Long): Boolean {
+    val millis = parseIsoMillis(task.updatedAt ?: task.createdAt) ?: return false
+    return nowMillis - millis >= days * 24L * 60L * 60L * 1000L
+}
+
 internal fun messageOf(error: Throwable): String = (error as? ApiException)?.let { describe(it.error) } ?: (error.message ?: "Ошибка")
+
+/**
+ * Текст предупреждения о версии Pi, или null если предупреждать не о чем.
+ *
+ * Неизвестная версия — не ошибка версии: "/api/info" не смог получить
+ * `pi --version` (например, проба совпала с загруженной сборкой). Раньше строка
+ * `pi.version ?: "не найден"` рисовала баннер «Pi не найден: версия не
+ * проверялась», то есть выдуманную проблему вместо отсутствия данных.
+ */
+internal fun piVersionBanner(pi: PiInfo?): String? {
+    val version = pi?.version ?: return null
+    if (pi.supported) return null
+    return "Pi $version: версия не проверялась с TaskBridge (${pi.supportedRange.orEmpty()})"
+}
 
 @Composable
 private fun SessionList(
@@ -319,10 +430,15 @@ private fun SessionList(
     now: Long,
     graph: AppGraph,
     onOpen: (String) -> Unit,
+    selecting: Boolean,
+    selectedIds: Set<String>,
+    onToggleSelected: (Task) -> Unit,
     onRename: (Task) -> Unit,
     onDelete: (Task) -> Unit,
     onNewIn: (String) -> Unit,
     onClearFinished: (SessionGroup) -> Unit,
+    onSelectGroup: (SessionGroup) -> Unit,
+    onSelectFinished: (SessionGroup) -> Unit,
 ) {
     // A folder the user never touched opens itself when something in it needs
     // attention (working, waiting, queued) or is open; a hand toggle is remembered.
@@ -342,6 +458,8 @@ private fun SessionList(
                     },
                     onNewHere = { onNewIn(group.projectId) },
                     onClearFinished = { onClearFinished(group) },
+                    onSelectGroup = { onSelectGroup(group) },
+                    onSelectFinished = { onSelectFinished(group) },
                 )
             }
             if (!open) continue
@@ -349,9 +467,12 @@ private fun SessionList(
                 SessionRow(
                     task = task,
                     selected = task.id == selectedTaskId,
+                    checked = task.id in selectedIds,
+                    selecting = selecting,
                     now = now,
                     graph = graph,
-                    onClick = { onOpen(task.id) },
+                    onClick = { if (selecting) onToggleSelected(task) else onOpen(task.id) },
+                    onLongClick = { onToggleSelected(task) },
                     onRename = { onRename(task) },
                     onDelete = { onDelete(task) },
                 )
@@ -362,12 +483,22 @@ private fun SessionList(
 
 /** A project folder: tap to fold; folded, it still shows what inside needs attention. */
 @Composable
-private fun FolderHeader(group: SessionGroup, open: Boolean, onToggle: () -> Unit, onNewHere: () -> Unit, onClearFinished: () -> Unit) {
+private fun FolderHeader(
+    group: SessionGroup,
+    open: Boolean,
+    onToggle: () -> Unit,
+    onNewHere: () -> Unit,
+    onClearFinished: () -> Unit,
+    onSelectGroup: () -> Unit,
+    onSelectFinished: () -> Unit,
+) {
     var menu by remember { mutableStateOf(false) }
     val colors = LocalStatusColors.current
     val states = group.sessions.map { displayStateOf(it) }
     val waiting = states.count { it == DisplayState.WAITING_USER }
     val working = states.count { it == DisplayState.WORKING }
+    // Total on-disk footprint of the folder: the same number the sessions screen shows per row.
+    val totalBytes = group.sessions.sumOf { it.sizeBytes ?: 0L }
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth()) {
         Row(
             Modifier
@@ -394,13 +525,18 @@ private fun FolderHeader(group: SessionGroup, open: Boolean, onToggle: () -> Uni
             if (working > 0) FolderCount(working, colors.working)
             if (waiting > 0) FolderCount(waiting, colors.waiting)
             Text("${group.sessions.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
+            if (totalBytes > 0) {
+                Text(formatBytes(totalBytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
+            }
             Box {
                 IconButton(onClick = { menu = true }, modifier = Modifier.size(36.dp)) {
                     Icon(AppIcons.More, "Действия с папкой", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Новая сессия здесь") }, leadingIcon = { Icon(AppIcons.Add, null) }, onClick = { menu = false; onNewHere() })
+                    DropdownMenuItem(text = { Text("Выбрать все в папке (${group.sessions.size})") }, leadingIcon = { Icon(AppIcons.Check, null) }, onClick = { menu = false; onSelectGroup() })
                     val finishedCount = group.sessions.count { finished(it) }
+                    DropdownMenuItem(text = { Text("Выбрать завершённые ($finishedCount)") }, leadingIcon = { Icon(AppIcons.Check, null) }, enabled = finishedCount > 0, onClick = { menu = false; onSelectFinished() })
                     DropdownMenuItem(
                         text = { Text("Удалить завершённые ($finishedCount)", color = if (finishedCount > 0) MaterialTheme.colorScheme.error else Color.Unspecified) },
                         leadingIcon = { Icon(AppIcons.Delete, null, tint = MaterialTheme.colorScheme.error) },
@@ -429,9 +565,12 @@ private fun FolderCount(count: Int, color: Color) {
 private fun SessionRow(
     task: Task,
     selected: Boolean,
+    checked: Boolean,
+    selecting: Boolean,
     now: Long,
     graph: AppGraph,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -439,6 +578,7 @@ private fun SessionRow(
     var menu by remember { mutableStateOf(false) }
     val accent = MaterialTheme.colorScheme.primary
     val background = when {
+        checked -> MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
         selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
         state == DisplayState.WAITING_USER -> LocalStatusColors.current.waiting.copy(alpha = 0.08f)
         else -> Color.Transparent
@@ -452,10 +592,14 @@ private fun SessionRow(
                 .background(background)
                 // The open session: an accent bar on the left edge, readable in both themes.
                 .drawBehind { if (selected) drawRect(accent, size = Size(3.dp.toPx(), size.height)) }
-                .combinedClickable(onClick = onClick, onLongClick = { menu = true })
+                .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.Top,
         ) {
+            if (selecting) {
+                Checkbox(checked = checked, onCheckedChange = { onClick() }, modifier = Modifier.size(24.dp))
+                Spacer(Modifier.width(8.dp))
+            }
             StatusDot(state, Modifier.padding(top = 6.dp))
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
@@ -493,13 +637,18 @@ private fun SessionRow(
                     task.model?.label?.takeIf { it != "—" }?.let { model ->
                         Text(model, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
+                    task.sizeBytes?.takeIf { it > 0 }?.let { bytes ->
+                        Text(formatBytes(bytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                     if (task.pendingPrompts.isNotEmpty()) {
                         Text("· в очереди ${task.pendingPrompts.size}", style = MaterialTheme.typography.labelSmall, color = LocalStatusColors.current.queued)
                     }
                 }
             }
-            IconButton(onClick = { menu = true }, modifier = Modifier.size(32.dp)) {
-                Icon(AppIcons.More, "Действия", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+            if (!selecting) {
+                IconButton(onClick = { menu = true }, modifier = Modifier.size(32.dp)) {
+                    Icon(AppIcons.More, "Действия", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                }
             }
         }
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {

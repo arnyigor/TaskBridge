@@ -93,6 +93,21 @@ Cookie старого формата `<expires>.<nonce>.<sig>` принимаю�
 Отсутствующий ключ даёт `available: false`; старое поле `deepseek` временно
 сохранено для совместимости.
 
+### `GET /api/quick-actions`
+
+Возвращает список slash-команд для нативных клиентов: skills из Pi, prompts из
+Pi/project folders и встроенные команды. Элемент: `{ id, type, title, description, insertText }`.
+Клиент показывает список при вводе `/` и вставляет `insertText` в composer.
+
+### `GET /api/models`
+
+`{ models, thinkingLevels, defaultModel, defaultThinkingLevel, latency }` — каталог Pi
+плюс накопленная задержка ответа. `latency` — объект по ключу `provider/id` (тот же
+ключ, что у клиента): `{ count, avgMs, p50Ms, lastMs, samples: [{ ttftMs, at }] }`.
+Это TTFT (отправка промпта → первый токен), по одному замеру на ответ ассистента,
+для локальных и облачных моделей одинаково — у облачных API других таймингов нет.
+Ключа может не быть: замеров по модели ещё нет.
+
 ### `Task`
 
 `id`, `title`, `prompt`, `projectId`, `status`, `createdAt`, `updatedAt`,
@@ -102,6 +117,26 @@ Cookie старого формата `<expires>.<nonce>.<sig>` принимаю�
 
 Полный набор полей — в ответе `GET /api/tasks/:id`; сервер вправе добавлять поля,
 поэтому клиент должен игнорировать незнакомые, а не падать.
+
+`queueReason` объясняет, чего ждёт сессия в статусе `QUEUED` (в `data.reason` события
+`QUEUE_WAITING` — тот же код): `MODEL_BUSY` — локальная модель занята другой сессией,
+`MODEL_LOADING` — модель ещё загружается, `WORKSPACE_BUSY` — рабочая папка занята другой
+сессией (только при `queue.maxSessionsPerDirectory` > 0: проект без worktree отдаёт всем
+сессиям свою папку), `BUSY` — занят общий лимит или слот провайдера, `RESTORED` —
+восстановлено после перезапуска. Клиент показывает подпись, а не код; тексты — в
+`WAIT_TEXT` (`src/task-manager.mjs`) и `DisplayState.activityOf` (KMP).
+
+### Лимиты параллельности (`GET /api/info` → `scheduler`)
+
+- `maxConcurrentSessions` (`queue.maxConcurrentSessions`, 1…16, по умолчанию 4) — сколько
+  сессий работают одновременно на всём компьютере;
+- `maxSessionsPerDirectory` (`queue.maxSessionsPerDirectory`, 0…16, по умолчанию 0) — сколько
+  сессий одной рабочей папки допустимо одновременно. `0` — своих ограничений нет: проект
+  без worktree (общая папка) работает как остальные, и число сессий решает только
+  `maxConcurrentSessions`; `1` — строгая очередь «один писатель на папку», вторая сессия
+  ждёт с `WORKSPACE_BUSY`. Worktree сессии и разные проекты этим лимитом не задеваются;
+- `providerConcurrency[provider]` — свой лимит на провайдера (по умолчанию равён
+  `maxConcurrentSessions`), `providers` в ответе показывает `active`/`limit`/`cooldownUntil`.
 
 ### Статусы
 

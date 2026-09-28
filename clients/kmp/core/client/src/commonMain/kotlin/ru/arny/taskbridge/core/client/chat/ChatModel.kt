@@ -74,6 +74,8 @@ data class ToolCall(
     /** A workspace file the tool touched that may be shown (never a private path). */
     val path: String?,
     val progress: String? = null,
+    /** A compact diff-like preview for edit/write tools, built from the tool arguments. */
+    val changePreview: String? = null,
 )
 
 enum class ToolState {

@@ -35,12 +35,60 @@ data class ApiInfo(
     val fileLimits: FileLimits? = null,
     val providerStatuses: Map<String, ProviderStatus> = emptyMap(),
     val scheduler: SchedulerInfo? = null,
+    val engine: LocalEngineInfo? = null,
+    val local: LocalRuntimeInfo? = null,
+)
+
+@Serializable
+data class LocalEngineInfo(
+    val configured: Boolean = false,
+    val reachable: Boolean = false,
+    val state: String? = null,
+    val model: String? = null,
+    val name: String? = null,
+    val contextWindow: Long? = null,
+    val loaded: List<String> = emptyList(),
+    val baseUrl: String? = null,
+    val autoDetected: Boolean = false,
+    val metrics: LocalModelMetrics? = null,
+)
+
+@Serializable
+data class LocalRuntimeInfo(
+    val enabled: Boolean = false,
+    val mode: String? = null,
+    val state: String? = null,
+    val pid: Long? = null,
+    val baseUrl: String? = null,
+    val provider: String? = null,
+    val reachable: Boolean = false,
+    val loaded: List<String> = emptyList(),
+    val loading: List<String> = emptyList(),
+    val error: String? = null,
+)
+
+@Serializable
+data class LocalModelMetrics(
+    val available: Boolean = false,
+    val reason: String? = null,
+    val source: String? = null,
+    val model: String? = null,
+    val name: String? = null,
+    val pp: Double? = null,
+    val tg: Double? = null,
+    val requestsProcessing: Double? = null,
+    val requestsDeferred: Double? = null,
+    val kvRatio: Double? = null,
+    val contextWindow: Long? = null,
+    val nTokensMax: Double? = null,
 )
 
 @Serializable
 data class SchedulerInfo(
     val activeTasks: Int = 0,
     val maxConcurrentSessions: Int = 1,
+    /** 0 — своих ограничений нет: сколько сессий одной рабочей папки идёт сразу, решает выбранный лимит. */
+    val maxSessionsPerDirectory: Int = 0,
     val queuedTasks: Int = 0,
     val providers: Map<String, ProviderSlots> = emptyMap(),
     val queueWaitMs: QueueWaitMetrics? = null,
@@ -164,6 +212,15 @@ data class AuthStatus(
 )
 
 @Serializable
+data class QuickAction(
+    val id: String,
+    val type: String,
+    val title: String,
+    val description: String = "",
+    val insertText: String,
+)
+
+@Serializable
 data class Project(
     val id: String,
     val name: String? = null,
@@ -214,6 +271,23 @@ data class ModelCatalog(
     val thinkingLevels: List<String> = emptyList(),
     val defaultModel: ModelRef? = null,
     val defaultThinkingLevel: String? = null,
+    // Rolling TTFT history keyed by ModelRef.key ("provider/id"), local and cloud models alike.
+    val latency: Map<String, ModelLatency> = emptyMap(),
+)
+
+@Serializable
+data class ModelLatencySample(
+    val ttftMs: Long? = null,
+    val at: String? = null,
+)
+
+@Serializable
+data class ModelLatency(
+    val count: Int = 0,
+    val avgMs: Long? = null,
+    val p50Ms: Long? = null,
+    val lastMs: Long? = null,
+    val samples: List<ModelLatencySample> = emptyList(),
 )
 
 @Serializable
@@ -259,7 +333,19 @@ data class GenerationMetrics(
 )
 
 @Serializable
-data class CompactionInfo(val count: Int = 0)
+data class CompactionInfo(
+    val count: Int = 0,
+    val last: CompactionLast? = null,
+)
+
+@Serializable
+data class CompactionLast(
+    val reason: String? = null,
+    val tokensBefore: Long? = null,
+    val estimatedTokensAfter: Long? = null,
+    val summary: String? = null,
+    val at: String? = null,
+)
 
 @Serializable
 data class RuntimeInfo(val state: String? = null, val activity: String? = null)
@@ -295,6 +381,8 @@ data class Task(
     val thinkingText: String? = null,
     val retryable: Boolean? = null,
     val runtime: RuntimeInfo? = null,
+    /** On-disk footprint of the session (task folder + Pi session + workspace), absent when the server did not compute it. */
+    val sizeBytes: Long? = null,
 ) {
     val taskStatus: TaskStatus get() = TaskStatus.from(status)
 

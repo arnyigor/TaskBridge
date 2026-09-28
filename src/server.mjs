@@ -31,6 +31,7 @@ import { createRelayConnector } from './cloud/relay-connector.mjs';
 import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
+import { listQuickActions } from './pi-quick-actions.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
 import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
@@ -890,12 +891,10 @@ async function handleRequest(req, res) {
         });
       }
       const pi = piVersion.current();
-      if (pi && !pi.supported) {
+      if (pi?.version && !pi.supported) {
         warnings.push({
           code: 'PI_VERSION_UNSUPPORTED',
-          message: pi.version
-            ? `Pi ${pi.version} не проверялся с этой версией TaskBridge (поддерживается ${pi.supportedRange}). Сессии могут вести себя неожиданно.`
-            : `Не удалось определить версию Pi: ${pi.error || 'нет ответа'}.`
+          message: `Pi ${pi.version} не проверялся с этой версией TaskBridge (поддерживается ${pi.supportedRange}). Сессии могут вести себя неожиданно.`
         });
       }
       return json(res, 200, {
@@ -924,6 +923,13 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/projects') {
       return json(res, 200, manager.listProjects());
+    }
+
+    if (req.method === 'GET' && pathname === '/api/quick-actions') {
+      const taskId = url.searchParams.get('taskId');
+      const runtime = taskId ? manager.runtimes.get(taskId) : null;
+      const liveCommands = runtime && !runtime.pi.closed ? await runtime.pi.getCommands().catch(() => []) : [];
+      return json(res, 200, await listQuickActions({ rootDir, liveCommands }));
     }
 
     if (req.method === 'GET' && pathname.startsWith('/api/commands/')) {

@@ -40,10 +40,21 @@ compose.desktop {
         }
     }
 }
-// Portable build: TaskBridge.exe with app/ and runtime/ beside it, in clients/kmp/dist/TaskBridge.
+// Portable build: TaskBridge.exe with app/ and runtime/ beside it.
+// Written into a staging directory so the build never touches the running
+// install — Windows locks TaskBridge.exe, icudtl.dat and the bundled runtime
+// while the app is open, which used to fail this task.
 // ./gradlew :desktopApp:portable
 tasks.register<Sync>("portable") {
     dependsOn("createDistributable")
     from(layout.buildDirectory.dir("compose/binaries/main/app/TaskBridge"))
+    into(rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge"))
+}
+
+// Moves the staged build over dist/TaskBridge. Run with TaskBridge closed, or
+// let the app apply it and restart itself (tray → «Установить обновление»).
+tasks.register<Sync>("installPortable") {
+    dependsOn("portable")
+    from(rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge"))
     into(rootProject.layout.projectDirectory.dir("dist/TaskBridge"))
 }

@@ -5,14 +5,16 @@
 // that looks like a model error. The supported range below is the one the RPC
 // fixtures were recorded against. Outside it TaskBridge keeps working — the
 // operator may well be on a compatible build — but /api/info says so, and the
-// UI shows a warning instead of the failure showing up mid-turn.
+// UI shows a warning instead of the failure showing up mid-turn. If the version
+// probe itself fails, keep the error in /api/info but do not raise the version
+// warning: a transient `pi --version` timeout is not proof of incompatibility.
 
 import { spawn } from 'node:child_process';
 
 // Inclusive lower bound, exclusive upper bound.
-// 0.87.x: checked on the operator's machine (Pi 0.87.1 — smoke, real sessions
+// 0.87.x and 0.88.x: checked on the operator's machine (smoke, real sessions
 // and the RPC recorder) before the range was widened.
-export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '0.88.0' });
+export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '0.89.0' });
 
 // `pi --version` has printed both "0.85.1" and "pi 0.85.1"; take the first
 // x.y.z anywhere in the output rather than depend on the prefix.
@@ -84,22 +86,40 @@ export function readPiVersion({ command = 'pi', env = null, timeoutMs = 10000 } 
 // The /api/info view. Cached: Pi does not change under a running server often
 // enough to spawn a process on every poll, and `refresh()` covers the case
 // where it does (the operator updated Pi and restarted nothing).
+
+// A probe that produced no version is retried after this delay. The reason is
+// real: the one probe at server startup can time out while the machine is busy
+// (a Gradle build alongside), and the old code then cached "unknown" forever —
+// /api/info reported the version as unknown for the whole life of the process.
+export const PI_PROBE_RETRY_MS = 60_000;
+
 export class PiVersionProbe {
   constructor(options = {}, read = readPiVersion) {
     this.options = options;
     this.read = read;
     this.pending = null;
     this.result = null;
+    this.retryTimer = null;
   }
 
   refresh() {
     this.pending = this.read(this.options).then((raw) => {
       this.result = {
         version: raw.version,
-        supported: isSupportedPiVersion(raw.version),
+        supported: raw.version ? isSupportedPiVersion(raw.version) : true,
         supportedRange: `>=${SUPPORTED_PI.min} <${SUPPORTED_PI.below}`,
         error: raw.error || null,
       };
+      // Unknown is not a final answer: retry until the version is read, so a
+      // busy startup cannot disable the version check for the whole session.
+      if (!this.result.version && !this.retryTimer) {
+        this.retryTimer = setTimeout(() => {
+          this.retryTimer = null;
+          this.refresh().catch(() => {});
+        }, PI_PROBE_RETRY_MS);
+        // The timer must not hold the process open on shutdown.
+        if (typeof this.retryTimer.unref === 'function') this.retryTimer.unref();
+      }
       return this.result;
     });
     return this.pending;

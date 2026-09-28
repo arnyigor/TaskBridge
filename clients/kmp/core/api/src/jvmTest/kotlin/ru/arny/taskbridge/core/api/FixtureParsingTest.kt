@@ -81,6 +81,35 @@ class FixtureParsingTest {
         assertTrue(parse("approvals.json", ListSerializer(Approval.serializer())).isEmpty())
     }
 
+    // The per-model latency block of /api/models is declared inline rather than read
+    // from models.json: that fixture is recorded from a live server by
+    // scripts/export-api-fixtures.mjs, and a hand-written block there would be lost on
+    // the next re-record.
+    @Test
+    fun perModelLatencyParses() {
+        val catalog = TaskBridgeJson.decodeFromString(
+            ModelCatalog.serializer(),
+            """
+            {"models":[{"provider":"fixture","id":"fixture"}],"latency":{"fixture/fixture":{
+              "count":2,"avgMs":3000,"p50Ms":3000,"lastMs":3100,
+              "samples":[{"ttftMs":2900,"at":"2026-09-28T10:00:00.000Z"},{"ttftMs":3100,"at":null}]}}}
+            """.trimIndent(),
+        )
+        assertEquals("fixture/fixture", catalog.models.single().key)
+        val latency = catalog.latency.getValue("fixture/fixture")
+        assertEquals(2, latency.count)
+        assertEquals(3000, latency.avgMs)
+        assertEquals(3100, latency.lastMs)
+        assertEquals(2900, latency.samples.first().ttftMs)
+        assertEquals(null, latency.samples.last().at)
+    }
+
+    @Test
+    fun aCatalogWithoutLatencyParsesAsEmpty() {
+        val catalog = TaskBridgeJson.decodeFromString(ModelCatalog.serializer(), """{"models":[]}""")
+        assertEquals(emptyMap(), catalog.latency)
+    }
+
     @Test
     fun unknownFieldsAndEventTypesAreCarriedNotRejected() {
         val event = TaskBridgeJson.decodeFromString(

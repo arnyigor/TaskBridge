@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseNvidiaSmi, cpuLoadFromSamples, readRam, computeTokensPerSecond, accumulateStreamMs } from '../src/system-metrics.mjs';
+import { parseNvidiaSmi, cpuLoadFromSamples, readRam, computeTokensPerSecond, accumulateStreamMs, effectiveGenerationMs } from '../src/system-metrics.mjs';
 
 // The UI must never show an invented GPU/CPU number. Every reader is exercised
 // on both the "data present" and the "data absent" path.
@@ -56,6 +56,12 @@ test('accumulateStreamMs counts generation gaps but not tool-execution pauses', 
   assert.equal(accumulateStreamMs(1000, 4000, 250), 250);
   // A clock that appears to go backwards adds nothing instead of going negative.
   assert.equal(accumulateStreamMs(2000, 1500, 300), 300);
+});
+
+test('effectiveGenerationMs prefers answer text time over reasoning time', () => {
+  assert.equal(effectiveGenerationMs(700, 5000), 700);
+  assert.equal(effectiveGenerationMs(0, 5000), 5000);
+  assert.equal(effectiveGenerationMs(null, 0), 0);
 });
 
 test('computeTokensPerSecond guards against missing or nonsensical input', () => {

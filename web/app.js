@@ -1117,16 +1117,24 @@ function appendSystemNote(text, before = null) {
   return note;
 }
 
+function contextUsagePercent(t) {
+  const used = t.lastUsage?.totalTokens;
+  const windowSize = t.model?.contextWindow;
+  if (used == null || !windowSize) return null;
+  return Math.min(100, Math.round((used / windowSize) * 100));
+}
+
 function renderContext(t) {
   const used = t.lastUsage?.totalTokens;
   const windowSize = t.model?.contextWindow;
+  const pct = contextUsagePercent(t);
   const bar = $('contextBar');
   const fill = $('contextBarFill');
+  const state = $('contextState');
   if (used == null) {
     $('usage').textContent = '—';
     bar.classList.add('hidden');
   } else if (windowSize) {
-    const pct = Math.min(100, Math.round((used / windowSize) * 100));
     $('usage').textContent = `${used.toLocaleString('ru-RU')} / ${windowSize.toLocaleString('ru-RU')} (${pct}%)`;
     bar.classList.remove('hidden');
     fill.style.width = `${pct}%`;
@@ -1136,6 +1144,16 @@ function renderContext(t) {
     $('usage').textContent = `${used.toLocaleString('ru-RU')} ток.`;
     bar.classList.add('hidden');
   }
+  const compacting = t.runtime?.activity === 'compacting';
+  state.textContent = compacting
+    ? 'Сейчас сжимается контекст…'
+    : pct == null ? 'Нет данных о размере'
+      : pct >= 85 ? 'Почти заполнен — скоро нужно сжатие'
+        : pct >= 60 ? 'Заполнен больше половины'
+          : 'Запас контекста нормальный';
+  state.classList.toggle('compacting', compacting);
+  state.classList.toggle('danger', !compacting && pct != null && pct >= 85);
+  state.classList.toggle('warn', !compacting && pct != null && pct >= 60 && pct < 85);
   // Local engines report their own PP/TG counters. For cloud providers PP is
   // the effective input rate to first token and is marked as approximate.
   const rates = [];
@@ -1258,7 +1276,7 @@ function resetSelection(id) {
   $('sessionDetailsButton').classList.toggle('hidden', !id);
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
-  for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
+  for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'contextState', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
   $('worktreeActions').classList.add('hidden');
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
@@ -2079,10 +2097,11 @@ function renderActivity(task = currentTask) {
   const since = Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt || '') || null;
   const paint = () => {
     const seconds = since === null ? null : Math.max(0, Math.round((Date.now() - since) / 1000));
-    const wait = status === 'QUEUED' ? (task.queueReason === 'MODEL_BUSY' ? ' — ждёт модель' : ' — ждёт очередь') : '';
+    const wait = status === 'QUEUED' ? ` — ${queueText(task.queueReason)}` : '';
+    const runtime = task.runtime?.activity === 'compacting' ? ' — сжимается контекст' : '';
     const elapsed = seconds === null ? '' : ` · ${seconds} с`;
     const model = task.model?.id ? ` · ${task.model.id}` : '';
-    host.textContent = `${label}${wait}${elapsed}${model}`;
+    host.textContent = `${label}${wait}${runtime}${elapsed}${model}`;
   };
   paint();
   // Elapsed time keeps ticking while a session works or waits.
@@ -2338,6 +2357,21 @@ function showNotice(text) {
 }
 
 const QUEUED_NOTICE = 'Модель занята — сообщение в очереди и отправится автоматически, как только она освободится.';
+const WORKSPACE_NOTICE = 'Другая сессия работает в этой же папке — сообщение в очереди и отправится, как только она её освободит.';
+const MODEL_LOADING_NOTICE = 'Локальная модель ещё не загружена — сообщение в очереди и отправится, как только она будет готова.';
+
+// Why a parked session waits. The reason strings are the backend's queueReason
+// values (src/task-manager.mjs, WAIT_TEXT) — one vocabulary for server and UI.
+const QUEUE_TEXT = {
+  MODEL_BUSY: 'ждёт модель',
+  MODEL_LOADING: 'ждёт загрузку модели',
+  WORKSPACE_BUSY: 'ждёт рабочую папку',
+  BUSY: 'ждёт очередь',
+  RESTORED: 'в очереди после перезапуска'
+};
+const queueText = (reason) => QUEUE_TEXT[reason] || 'ждёт очередь';
+const queueNotice = (reason) => reason === 'MODEL_LOADING' ? MODEL_LOADING_NOTICE
+  : reason === 'WORKSPACE_BUSY' ? WORKSPACE_NOTICE : QUEUED_NOTICE;
 
 /* ---------------- panel ---------------- */
 
@@ -2425,7 +2459,8 @@ function taskRow(t) {
         <span class="pill ${pillClass(t.status)}">${escapeHtml(t.status)}</span>
         <span class="t-project">${escapeHtml(projectName(t.projectId))}</span>
         ${modelLabel ? `<span class="t-model">${escapeHtml(modelLabel)}</span>` : ''}
-        ${t.queueReason ? '<span class="t-queue">ждёт модель</span>' : ''}
+        ${t.queueReason ? `<span class="t-queue">${escapeHtml(queueText(t.queueReason))}</span>` : ''}
+        ${Number.isFinite(t.sizeBytes) && t.sizeBytes > 0 ? `<span class="t-size" title="Размер сессии на диске">${formatBytes(t.sizeBytes)}</span>` : ''}
         ${Number.isFinite(t.events) ? `<span class="t-count" title="Событий в истории">${compactCount(t.events)}</span>` : ''}
         <span class="t-time">${escapeHtml(relativeTime(t.updatedAt || t.createdAt))}</span>
       </div>
@@ -2451,9 +2486,12 @@ function renderTaskList() {
     .sort(taskSort === 'size'
       ? (a, b) => (Number(b.events) || 0) - (Number(a.events) || 0)
       : (a, b) => Date.parse(b.updatedAt || b.createdAt) - Date.parse(a.updatedAt || a.createdAt));
-  const group = (title, items) => items.length
-    ? `<div class="taskGroup">${title} · ${items.length}</div>${items.map(taskRow).join('')}`
-    : '';
+  const group = (title, items) => {
+    if (!items.length) return '';
+    const totalBytes = items.reduce((sum, t) => sum + (Number(t.sizeBytes) || 0), 0);
+    const sizeTag = totalBytes > 0 ? ` · ${formatBytes(totalBytes)}` : '';
+    return `<div class="taskGroup">${title} · ${items.length}${sizeTag}</div>${items.map(taskRow).join('')}`;
+  };
   $('tasks').innerHTML = group('Активные', active) + group('Недавние', recent);
 
   document.querySelectorAll('.taskRow').forEach((row) => {
@@ -2962,16 +3000,14 @@ $('form').addEventListener('submit', async (e) => {
       if (parked) dropOptimistic();
       lastPrompt = { id: taskId, text: prompt, failedSend: false };
       renderQueuedPrompt();
-      if (sent?.queueReason) showNotice(sent.queueReason === 'MODEL_LOADING'
-        ? 'Локальная модель ещё не загружена — сообщение в очереди и отправится, как только она будет готова.'
-        : QUEUED_NOTICE);
+      if (sent?.queueReason) showNotice(queueNotice(sent.queueReason));
     } else {
       const task = await commandApi('/api/tasks', { projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking });
       // Clear before selectTask() runs resetSelection(), which would
       // otherwise capture this just-sent text as a stale "new task" draft.
       clearComposer();
       lastPrompt = { id: task.id, text: prompt, failedSend: false };
-      if (task.queueReason) showNotice(QUEUED_NOTICE);
+      if (task.queueReason) showNotice(queueNotice(task.queueReason));
       if (version === selectionVersion) {
         await loadTasks();
         await selectTask(task.id);

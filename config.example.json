@@ -35,6 +35,7 @@
   },
   "queue": {
     "maxConcurrentSessions": 4,
+    "maxSessionsPerDirectory": 0,
     "providerConcurrency": {
       "deepseek": 2,
       "openai": 4

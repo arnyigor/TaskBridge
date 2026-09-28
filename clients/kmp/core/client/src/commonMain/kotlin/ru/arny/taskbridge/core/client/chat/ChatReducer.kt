@@ -54,6 +54,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var state: String = "run",
         val imagePath: String? = null,
         var progress: String? = null,
+        val changePreview: String? = null,
     )
 
     internal class Turn(
@@ -94,6 +95,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var turns = mutableListOf<Turn>()
     private val tools = mutableMapOf<String, Tool>()
     private val notes = mutableSetOf<Long>()
+    private val noteTexts = mutableSetOf<String>()
     private val variants = mutableMapOf<Long, Variants>()
     private var current: Turn
     private var messageTurn: Turn? = null
@@ -155,7 +157,16 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             for (tool in partial.tools) if (tool.state == "run") tool.state = "interrupted"
             older.add(0, partial)
         }
-        turns.addAll(0, older)
+        fun noteSeq(turn: Turn): Long? = turn.id.takeIf { it.startsWith("note-") }?.removePrefix("note-")?.toLongOrNull()
+        val visibleOlder = older.filter { turn ->
+            if (turn.role != Role.NOTE) return@filter true
+            val seq = noteSeq(turn)
+            if ((seq != null && seq in notes) || turn.text in noteTexts) return@filter false
+            if (seq != null) notes += seq
+            noteTexts += turn.text
+            true
+        }
+        turns.addAll(0, visibleOlder)
         for ((id, tool) in scratch.tools) tools.getOrPut(id) { tool }
         for ((key, entry) in scratch.variants) variants.getOrPut(key) { entry }
         version++
@@ -309,6 +320,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             current = turns.lastOrNull { it.role == Role.ASSISTANT }
                 ?: Turn(id = "assistant-truncated-$fromSeq", role = Role.ASSISTANT)
         }
+        notes.clear()
+        notes += turns.filter { it.role == Role.NOTE }.mapNotNull { seqOf(it) }
+        noteTexts.clear()
+        noteTexts += turns.filter { it.role == Role.NOTE }.map { it.text }
         val alive = turns.map { it.id }.toSet()
         if (keepUser) {
             val key = current.variantKey ?: 0L
@@ -386,6 +401,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             "OUTPUT_FILES" -> if (current.role == Role.ASSISTANT) current.files = current.files + decodeFiles(event)
             "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
                 finish(event.type.removePrefix("TASK_"), if (event.type == "TASK_FAILED") event.message else null, event.at)
+            // Output of a slash extension command (/nudge status, ...): Pi runs it
+            // locally and delivers the answer as a notify UI request — shown as a
+            // note row, otherwise the command would execute silently.
+            "UI_NOTIFY" -> addNote(event, event.message.orEmpty())
         }
         val frame = event.piFrame ?: return true
         applyFrame(event, frame)
@@ -437,12 +456,19 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
     }
 
+    private fun markAnswerRunning(turn: Turn, at: String?) {
+        turn.active = true
+        turn.final = false
+        turn.error = null
+        turn.status = "RUNNING"
+        turn.stopReason = null
+        turn.endedAt = null
+        if (turn.at == null) turn.at = at
+    }
+
     private fun applyFrame(event: TaskEvent, frame: JsonObject) {
         when (frame.str("type")) {
-            "agent_start" -> {
-                current.active = true
-                current.status = "RUNNING"
-            }
+            "agent_start" -> markAnswerRunning(current, event.at)
             "message_start" -> if (frame.obj("message")?.str("role") == "user") {
                 val text = (frame.obj("message")?.get("content") as? JsonArray)
                     ?.mapNotNull { it as? JsonObject }
@@ -480,19 +506,19 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     user.delivery = "Модель начала ответ"
                     if (user.id == "user-initial") initialPromptAccepted = true
                 }
-                if (current.at == null) current.at = event.at
+                markAnswerRunning(current, event.at)
                 messageTurn = current
                 executionTurn = current
                 textPrefix = current.text
                 thinkingPrefix = current.thinking
                 textSeparator = paragraphSeparator(current.text)
                 separatorApplied = false
-                current.active = true
                 messageOpen = true
             }
             "message_update" -> {
                 if (!messageOpen) {
                     // Deltas without message_start continue the current message (steering).
+                    markAnswerRunning(current, event.at)
                     messageTurn = current
                     textPrefix = current.text
                     thinkingPrefix = current.thinking
@@ -517,7 +543,14 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     val args = frame.obj("args")
                     val arg = args?.let { it.str("command") ?: it.str("path") ?: it.str("file_path") ?: it.str("filePath") }.orEmpty()
                     val named = args?.let { it.str("path") ?: it.str("file_path") ?: it.str("filePath") }
-                    val tool = Tool(id, frame.str("toolName") ?: "tool", arg.ifEmpty { event.message }, imagePath = named?.takeUnless { isPrivateFilePath(it) })
+                    val toolName = frame.str("toolName") ?: "tool"
+                    val tool = Tool(
+                        id,
+                        toolName,
+                        arg.ifEmpty { event.message },
+                        imagePath = named?.takeUnless { isPrivateFilePath(it) },
+                        changePreview = args?.let { changePreview(toolName, it) },
+                    )
                     if (tool.name == "subagent") tool.progress = subagentProgress(null, args)
                     turn.tools += tool
                     tools[id] = tool
@@ -541,12 +574,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 if (tool.name == "subagent") subagentProgress(frame.obj("result"), null)?.let { tool.progress = it }
             }
             "agent_settled" -> finish("DONE", null, event.at)
-            "compaction_end", "auto_compaction_end" -> {
-                val note = frame.str("errorMessage")?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }
-                    ?: if (frame["result"] != null && frame["result"] !is kotlinx.serialization.json.JsonNull) "Контекст сжат." else null
-                if (note != null && notes.add(event.seq)) turns += Turn(id = "note-${event.seq}", role = Role.NOTE, text = note)
-            }
+            "compaction_end", "auto_compaction_end" -> compactionNote(frame)?.let { addNote(event, it) }
         }
+    }
+
+    private fun addNote(event: TaskEvent, text: String) {
+        if (!notes.add(event.seq)) return
+        if (text in noteTexts || turns.any { it.role == Role.NOTE && it.text == text }) return
+        noteTexts += text
+        turns += Turn(id = "note-${event.seq}", role = Role.NOTE, text = text)
     }
 
     private fun onMessageEnd(event: TaskEvent, message: JsonObject) {
@@ -653,7 +689,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     } else null
                     ChatItem.Assistant(
                         id = turn.id, text = turn.text, thinking = turn.thinking,
-                        tools = turn.tools.map { ToolCall(it.id, it.name, it.label, ToolState.of(it.state), it.imagePath, it.progress) },
+                        tools = turn.tools.map { ToolCall(it.id, it.name, it.label, ToolState.of(it.state), it.imagePath, it.progress, it.changePreview) },
                         active = turn.active, status = turn.status, error = turn.error, final = turn.final,
                         at = turn.at, endedAt = turn.endedAt, partial = turn.partial, superseded = turn.superseded,
                         stopReason = turn.stopReason, variants = variantInfo, files = turn.files,
@@ -666,6 +702,42 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val newestAnswerId = items.lastOrNull { it is ChatItem.Assistant && !it.id.startsWith("assistant-pending-") }?.id?.takeUnless { it.startsWith("assistant-partial-") }
         return ChatSnapshot(items = items, cursor = cursor, version = version, newestAnswerId = newestAnswerId)
     }
+}
+
+private const val CHANGE_PREVIEW_LIMIT = 20_000
+
+private fun changePreview(toolName: String, args: JsonObject): String? = when (toolName.lowercase()) {
+    "edit" -> editChangePreview(args)
+    "write" -> args.str("path")?.let { path ->
+        val content = args.str("content").orEmpty()
+        "@@ $path @@\n+ ${content.lineSequence().joinToString("\n+ ")}".take(CHANGE_PREVIEW_LIMIT)
+    }
+    else -> null
+}
+
+private fun editChangePreview(args: JsonObject): String? {
+    val path = args.str("path") ?: args.str("file_path") ?: args.str("filePath") ?: "file"
+    val edits = args["edits"] as? JsonArray ?: return null
+    val blocks = edits.mapNotNull { it as? JsonObject }.mapIndexed { index, edit ->
+        val oldText = edit.str("oldText") ?: return@mapIndexed null
+        val newText = edit.str("newText") ?: return@mapIndexed null
+        buildString {
+            append("@@ $path")
+            if (edits.size > 1) append(" · block ${index + 1}")
+            append(" @@\n")
+            append(oldText.lineSequence().joinToString("\n") { "- $it" })
+            append('\n')
+            append(newText.lineSequence().joinToString("\n") { "+ $it" })
+        }
+    }
+    return blocks.takeIf { it.isNotEmpty() }?.joinToString("\n\n")?.take(CHANGE_PREVIEW_LIMIT)
+}
+
+private fun compactionNote(frame: JsonObject): String? {
+    frame.str("errorMessage")?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }?.let { return it }
+    val result = frame.obj("result") ?: return null
+    val summary = result.str("summary")?.trim().orEmpty()
+    return if (summary.isNotEmpty()) "Контекст сжат:\n$summary" else "Контекст сжат."
 }
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull

@@ -36,6 +36,7 @@ export const API_ROUTES = [
 
   // --- projects / files -----------------------------------------------------
   { method: 'GET', path: '/api/projects', summary: 'registered projects' },
+  { method: 'GET', path: '/api/quick-actions', summary: 'Pi slash quick actions for clients (skills, prompts and built-ins)' },
   { method: 'DELETE', path: '/api/projects/:id', summary: 'remove a project' },
   { method: 'GET', path: '/api/project-browser', summary: 'folders under projectBrowser.roots' },
   { method: 'POST', path: '/api/project-browser/register', summary: 'register a project from a folder path' },

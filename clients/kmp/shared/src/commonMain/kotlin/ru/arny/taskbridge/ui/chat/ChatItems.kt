@@ -40,10 +40,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.positionInRoot
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.TimeSource
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,6 +59,8 @@ import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.round
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -416,7 +414,7 @@ private fun ToolGroupRow(
                 }
             },
             text = groupSummary(group) + if (group.errors > 0) " · ошибок: ${group.errors}" else "",
-            color = if (group.errors > 0) colors.failed else if (group.running) MaterialTheme.colorScheme.onSurface else muted,
+            color = if (group.running) MaterialTheme.colorScheme.onSurface else muted,
             target = current?.let { toolTarget(it) }?.let { "$it…" },
             trailing = if (open) null else "›",
             onClick = { pinned.toggle { open = !open } },
@@ -549,6 +547,26 @@ private fun ToolRow(
                     if (!tool.label.isNullOrBlank()) {
                         SelectionContainer { Text(tool.label.orEmpty(), style = MonoStyle, color = MaterialTheme.colorScheme.onSurface) }
                     }
+                    tool.changePreview?.let { preview ->
+                        Text(
+                            "Правки",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = muted,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 3.dp),
+                        )
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 260.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(colors.codeBackground)
+                                .verticalScroll(rememberScrollState())
+                                .horizontalScroll(rememberScrollState())
+                                .padding(10.dp),
+                        ) {
+                            SelectionContainer { Text(changePreviewText(preview), style = MonoStyle, softWrap = false) }
+                        }
+                    }
                     tool.path?.let { path ->
                         Text(
                             "Открыть файл",
@@ -605,6 +623,25 @@ private fun ToolRow(
     }
 }
 
+@Composable
+private fun changePreviewText(text: String) = buildAnnotatedString {
+    val removed = MaterialTheme.colorScheme.error
+    val added = Color(0xFF2E7D32)
+    val header = MaterialTheme.colorScheme.primary
+    for (line in text.lineSequence()) {
+        val color = when {
+            line.startsWith("- ") -> removed
+            line.startsWith("+ ") -> added
+            line.startsWith("@@") -> header
+            else -> MaterialTheme.colorScheme.onSurface
+        }
+        pushStyle(SpanStyle(color = color))
+        append(line)
+        pop()
+        append('\n')
+    }
+}
+
 /** Attachments or results: pictures as previews, everything else as chips; a tap opens the viewer. */
 @Composable
 internal fun FileList(
@@ -649,14 +686,56 @@ fun FileChip(name: String, size: String, onClick: (() -> Unit)?) {
 }
 
 @Composable
-fun NoteRow(item: ChatItem.Note) {
+fun NoteRow(item: ChatItem.Note, onCopy: () -> Unit) {
+    val multiline = item.text.contains('\n')
+    var expanded by remember(item.id) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
-        Text(
-            item.text,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 12.dp, vertical = 4.dp),
-        )
+        if (!multiline) {
+            Text(
+                item.text,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 12.dp, vertical = 4.dp),
+            )
+        } else {
+            Column(
+                Modifier
+                    .fillMaxWidth(0.92f)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                    .clickable { expanded = !expanded }
+                    .padding(start = 12.dp, top = 8.dp, end = 6.dp, bottom = 8.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        item.text.lineSequence().firstOrNull().orEmpty(),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    IconButton(onClick = onCopy, modifier = Modifier.size(32.dp)) {
+                        Icon(AppIcons.Copy, "Копировать сводку", Modifier.size(16.dp))
+                    }
+                }
+                if (expanded) {
+                    SelectionContainer {
+                        Text(
+                            item.text.lineSequence().drop(1).joinToString("\n").trimStart(),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(top = 6.dp, end = 6.dp),
+                        )
+                    }
+                } else {
+                    Text(
+                        "Нажмите, чтобы раскрыть сводку",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                        modifier = Modifier.padding(top = 2.dp, end = 6.dp),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -664,31 +743,21 @@ fun NoteRow(item: ChatItem.Note) {
 val LocalChatListState = staticCompositionLocalOf<LazyListState?> { null }
 
 /**
- * Keeps a block's top edge still while it unfolds or folds from its header.
- * The chat is anchored at the bottom (reverse layout), so a growing block
- * would push its own header up and the chat would seem to scroll; for a short
- * while after [toggle] every shift of the edge is scrolled back. A fold from
- * the bottom calls the action directly: there the bottom edge stays, as it should.
+ * Wrapper for expandable chat blocks. It used to compensate the block growth by
+ * calling LazyListState.dispatchRawDelta() from onGloballyPositioned(), but on
+ * desktop that can leave LazyList with a pending scroll and the next drag aborts
+ * the app ("entered drag with non-zero pending scroll"). Keep the API so rows
+ * still toggle uniformly, but do not inject raw scroll deltas from layout.
  */
-class Pinned(private val list: LazyListState?) {
-    private var top = Float.NaN
-    private var until: TimeSource.Monotonic.ValueTimeMark? = null
+class Pinned {
+    val modifier: Modifier = Modifier
 
-    val modifier: Modifier = Modifier.onGloballyPositioned { coordinates ->
-        val y = coordinates.positionInRoot().y
-        val shift = y - top
-        if (list != null && !top.isNaN() && until?.hasPassedNow() == false && shift != 0f) list.dispatchRawDelta(-shift)
-        else top = y
-    }
-
-    fun toggle(action: () -> Unit) {
-        until = TimeSource.Monotonic.markNow() + 800.milliseconds
-        action()
-    }
+    fun toggle(action: () -> Unit) = action()
 }
 
 @Composable
 fun rememberPinned(): Pinned {
-    val list = LocalChatListState.current
-    return remember(list) { Pinned(list) }
+    // Read the local so callers recompose consistently when the chat list scope changes.
+    LocalChatListState.current
+    return remember { Pinned() }
 }

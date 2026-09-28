@@ -530,7 +530,8 @@ export class ChatState {
     }
     if (frame.type === 'agent_settled') this.finish('DONE', null, event.at);
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type)) {
-      const note = humanizeError(frame.errorMessage) || (frame.result ? 'Контекст сжат.' : null);
+      const summary = typeof frame.result?.summary === 'string' ? frame.result.summary.trim() : '';
+      const note = humanizeError(frame.errorMessage) || (summary ? `Контекст сжат:\n${summary}` : (frame.result ? 'Контекст сжат.' : null));
       if (note && !this.notes.has(event.seq)) {
         this.notes.add(event.seq);
         this.turns.push({ id: `note-${event.seq}`, role: 'note', text: note });

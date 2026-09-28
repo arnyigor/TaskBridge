@@ -142,35 +142,23 @@ await fs.writeFile(STATE, JSON.stringify({ appPid: app.pid, proxyPid: proxy.pid,
 const build = await fetch(`http://127.0.0.1:${publicPort}/api/info`, { signal: AbortSignal.timeout(10000) }).then(r => r.json()).catch(() => null);
 const tasks = await fetch(`http://127.0.0.1:${publicPort}/api/tasks`, { signal: AbortSignal.timeout(10000) }).then(r => r.json()).catch(() => []);
 
-// Live delivery check: a scratch session whose message must reach the model
-// (a USER_MESSAGE event) without a TASK_FAILED — exactly what the operator
-// tests by hand after a restart.
+// Delivery check must not start a model run or create a visible scratch chat:
+// the restart button is an infrastructure action, not a request to spend tokens.
+// A fake pendingId is a deliberate no-op per the pending-message contract; it
+// proves the command endpoint is alive without choosing any model.
 let delivery = null;
 try {
-  const created = await fetch(`http://127.0.0.1:${publicPort}/api/tasks`, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(15000),
-    body: JSON.stringify({ projectId: '__scratch__', prompt: 'Проверка доставки после рестарта' })
-  }).then(r => r.json());
-  const tid = created.id;
-  for (let i = 0; i < 30; i++) {
-    await sleep(1000);
-    const ev = await fetch(`http://127.0.0.1:${publicPort}/api/tasks/${tid}/events?limit=0`, { signal: AbortSignal.timeout(10000) }).then(r => r.json()).catch(() => []);
-    if (ev.some(e => e.type === 'USER_MESSAGE')) { delivery = { ok: true, at: i + 1 }; break; }
-    const task = await fetch(`http://127.0.0.1:${publicPort}/api/tasks/${tid}`, { signal: AbortSignal.timeout(10000) }).then(r => r.json()).catch(() => null);
-    if (task?.status === 'FAILED') { delivery = { ok: false, error: task.error, code: task.errorCode }; break; }
-    if (task?.status === 'QUEUED' || (task?.pendingPrompts || []).length) {
-      // Waiting for a busy machine is a healthy outcome, not a hang.
-      delivery = { ok: true, queued: true, reason: task.queueReason || 'QUEUED', at: i + 1 };
-      break;
-    }
-    if (task?.status === 'RUNNING' || task?.status === 'VERIFYING' || task?.status === 'SUCCEEDED') {
-      // A brand-new session's first prompt has no USER_MESSAGE event of its own,
-      // so the run starting IS the delivery signal.
-      delivery = { ok: true, at: i + 1 };
-      break;
-    }
+  const sample = Array.isArray(tasks) ? tasks[0] : null;
+  if (sample?.id) {
+    const res = await fetch(`http://127.0.0.1:${publicPort}/api/tasks/${encodeURIComponent(sample.id)}/pending/send`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, signal: AbortSignal.timeout(15000),
+      body: JSON.stringify({ pendingId: 'restart-check-noop' })
+    });
+    const body = await res.json().catch(() => null);
+    delivery = { ok: res.ok && Boolean(body?.id), status: res.status };
+  } else {
+    delivery = { ok: true, skipped: true, reason: 'нет сессий для no-op проверки' };
   }
-  await fetch(`http://127.0.0.1:${publicPort}/api/tasks/${tid}`, { method: 'DELETE', signal: AbortSignal.timeout(10000) }).catch(() => {});
 } catch (error) { delivery = { ok: false, error: error.message }; }
 
 const lan = Object.values(os.networkInterfaces()).flat().find(iface => iface && iface.family === 'IPv4' && !iface.internal)?.address || null;
@@ -186,7 +174,7 @@ const report = [
   `| внутренний сервер отвечает (${internalPort}) | ${internalUp ? '✅' : '❌'} |`,
   `| прокси отвечает (${publicPort}) | ${proxyUp ? '✅' : '❌'} |`,
   `| сессии на месте | ${Array.isArray(tasks) ? `${tasks.length} задач` : '❌'} |`,
-  `| доставка сообщения | ${delivery ? (delivery.ok ? (delivery.queued ? `✅ в очереди (${delivery.reason}, ${delivery.at} с) — машина занята` : `✅ доставлено (${delivery.at} с)`) : `❌ ${delivery.error || ''} ${delivery.code || ''}`) : '⏳ не проверено'} |`,
+  `| endpoint очереди сообщений | ${delivery ? (delivery.ok ? (delivery.skipped ? `✅ пропущено (${delivery.reason})` : `✅ доступен (HTTP ${delivery.status})`) : `❌ ${delivery.error || `HTTP ${delivery.status || 0}`}`) : '⏳ не проверено'} |`,
   `| маршруты undo-last-turn / variant / continue / fork | ✅ (см. HTTP-тесты) |`,
   `| LAN: ${lan || '—'} | |`, '',
 ].join('\n');

@@ -1,5 +1,6 @@
 package ru.arny.taskbridge
 
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -23,6 +24,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberTrayState
 import androidx.compose.ui.window.rememberWindowState
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
@@ -34,8 +36,11 @@ import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 
 fun main() {
-    // A second launch brings the running window forward instead of starting another process.
-    if (SingleInstance.activateExisting()) return
+    // A second launch brings the running window forward instead of starting another tray instance.
+    if (!SingleInstance.claimPrimary()) {
+        SingleInstance.activateExisting()
+        return
+    }
     val showRequests = MutableStateFlow(0)
     SingleInstance.listen { showRequests.value += 1 }
     val packagedVersion = object {}.javaClass.getResourceAsStream("/taskbridge-version.txt")
@@ -48,22 +53,30 @@ fun main() {
         var visible by remember { mutableStateOf(true) }
         var navigator by remember { mutableStateOf<Navigator?>(null) }
         val trayState = rememberTrayState()
+        val alerts = remember { Channel<SessionAlert>(Channel.BUFFERED) }
         val connection = graph.connection
         val listState by (connection?.sessions?.state ?: flowOf(SessionListState())).collectAsState(SessionListState())
         val opened by openTask.collectAsState()
         val shows by showRequests.collectAsState()
         LaunchedEffect(shows) { if (shows > 0) visible = true }
 
-        // Alerts become tray notifications; clicking the tray opens the window.
-        LaunchedEffect(Unit) {
-            platform.notifier = { alert: SessionAlert ->
-                trayState.sendNotification(
-                    Notification(
-                        alertTitle(alert),
-                        alert.text,
-                        if (alert.kind == SessionAlert.Kind.WAITING_USER) Notification.Type.Warning else Notification.Type.Info,
-                    ),
-                )
+        // Alerts may come from background client coroutines. Hop through the Compose coroutine
+        // before touching TrayState/AWT; otherwise desktop notifications can crash the app.
+        DisposableEffect(alerts) {
+            platform.notifier = { alert: SessionAlert -> alerts.trySend(alert) }
+            onDispose { platform.notifier = null }
+        }
+        LaunchedEffect(alerts) {
+            for (alert in alerts) {
+                runCatching {
+                    trayState.sendNotification(
+                        Notification(
+                            alertTitle(alert),
+                            alert.text,
+                            if (alert.kind == SessionAlert.Kind.WAITING_USER) Notification.Type.Warning else Notification.Type.Info,
+                        ),
+                    )
+                }
                 openTask.value = alert.taskId
             }
         }
@@ -83,6 +96,14 @@ fun main() {
             menu = {
                 Item("Открыть TaskBridge", onClick = { visible = true })
                 Item(summary, enabled = false, onClick = {})
+                val installDir = DesktopUpdater.installDir()
+                val staged = installDir?.let { DesktopUpdater.stagedUpdate(it) }
+                if (installDir != null && staged != null) {
+                    Separator()
+                    Item("Установить обновление и перезапустить", onClick = {
+                        if (DesktopUpdater.applyAndRestart(installDir, staged)) exitApplication()
+                    })
+                }
                 Separator()
                 Item("Выход", onClick = ::exitApplication)
             },

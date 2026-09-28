@@ -40,9 +40,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import io.ktor.http.Url
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelLatency
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.client.settings.AppSettings
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -228,7 +230,7 @@ fun FieldLabel(text: String, top: Int = 0) {
     )
 }
 
-private fun ModelRef.details(): String = listOfNotNull(
+private fun ModelRef.details(latency: ModelLatency? = null): String = listOfNotNull(
     provider,
     contextWindow?.let { "контекст ${it / 1000}K" },
     maxTokens?.let { "ответ до ${it / 1000}K" },
@@ -238,7 +240,36 @@ private fun ModelRef.details(): String = listOfNotNull(
     cost?.let { price ->
         listOfNotNull(price.input?.let { "in \$$it" }, price.output?.let { "out \$$it" }).takeIf { it.isNotEmpty() }?.joinToString("/")
     },
+    modelLatencyLabel(latency),
 ).joinToString(" · ")
+
+// «первый токен ≈ 2.1 с · 5 зап.» — measured TTFT for the model (catalog.latency,
+// keyed by ModelRef.key). Cloud models are the main reason to look at it: they
+// can stay silent long after the prompt is sent, and this number says how long
+// is normal for them.
+fun modelLatencyLabel(latency: ModelLatency?): String? {
+    val ms = latency?.let { it.p50Ms ?: it.avgMs } ?: return null
+    val count = latency?.count ?: 0
+    return "первый токен ≈ ${formatLatencyMs(ms)}${if (count > 0) " · $count зап." else ""}"
+}
+
+// The session's model as Pi reported it does not always carry a provider, and for
+// the local router Pi's provider id can differ from the one in models.json (see
+// resolveLocalProviderId), so the recorded key can be `provider/id`, `/id` or an
+// id under another provider. An exact key wins; otherwise any key with the same
+// model id is taken (with several providers offering one id, the first wins).
+fun ModelCatalog.latencyFor(model: ModelRef?): ModelLatency? {
+    val id = model?.id ?: return null
+    return latency["${model.provider.orEmpty()}/$id"]
+        ?: latency.filterKeys { it.substringAfterLast('/') == id }.values.firstOrNull()
+}
+
+fun formatLatencyMs(ms: Long): String =
+    if (ms < 1000) "$ms мс"
+    else {
+        val s = ms / 1000.0
+        if (s < 10) "${(s * 10).roundToInt() / 10.0} с" else "${s.roundToInt()} с"
+    }
 
 /** The chosen model as a row; tapping it opens the searchable list of Pi's models. */
 @Composable
@@ -257,7 +288,7 @@ fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettin
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(selected?.label ?: if (catalog == null) "Загружаю модели…" else "По умолчанию", style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                selected?.details()?.takeIf { it.isNotEmpty() }?.let {
+                selected?.details(catalog?.latencyFor(selected))?.takeIf { it.isNotEmpty() }?.let {
                     Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -362,6 +393,7 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
                                 model.contextWindow?.let { "контекст ${it / 1000}K" },
                                 "думает".takeIf { model.reasoning == true },
                                 "картинки".takeIf { model.images == true },
+                                modelLatencyLabel(catalog.latencyFor(model)),
                             ).joinToString(" · ")
                             if (details.isNotEmpty()) Text(details, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }

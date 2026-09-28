@@ -8,16 +8,17 @@ import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile } from './session-history.mjs';
 import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
 import { UploadStore } from './uploads.mjs';
-import { NativeSessionService, acquireNativeLease } from './native-sessions.mjs';
+import { NativeSessionService, acquireNativeLease, sweepOrphanLocks } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
 import { humanizeError } from '../web/errors.mjs';
 import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
+import { ModelLatency } from './model-latency.mjs';
 import { LocalModelService, quantFromPath } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
-import { computeTokensPerSecond, accumulateStreamMs } from './system-metrics.mjs';
+import { computeTokensPerSecond, accumulateStreamMs, effectiveGenerationMs } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
@@ -84,6 +85,35 @@ const RUN_TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 // the answer it continues — the operator sees the same message grow.
 const CONTINUE_PROMPT = 'Продолжи свой предыдущий ответ ровно с того места, где он оборвался. Не повторяй уже написанное и не добавляй вступлений — продолжай текст сразу.';
 
+// How a waiting session describes itself (task.current and the QUEUE_WAITING
+// message). One place, so the queueReason the clients branch on and the text the
+// operator reads cannot drift apart; KMP maps the same reasons in
+// DisplayState.activityOf.
+const WAIT_TEXT = {
+  MODEL_BUSY: 'Ждёт освобождения локальной модели',
+  MODEL_LOADING: 'Ждёт загрузки локальной модели',
+  WORKSPACE_BUSY: 'Ждёт освобождения рабочей папки'
+};
+const waitText = (reason) => WAIT_TEXT[reason] || (reason ? 'В очереди' : null);
+
+// Recursive byte size of a directory. Tolerant of missing folders (a scratch
+// session has no pi-sessions/workspaces entry at all) and of files that vanish
+// mid-scan (a concurrent delete). Used to report a session's on-disk footprint.
+async function dirBytes(dir) {
+  let entries;
+  try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+  catch { return 0; }
+  let total = 0;
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += await dirBytes(full);
+    else if (entry.isFile()) {
+      try { total += (await fs.stat(full)).size; } catch { /* deleted mid-scan */ }
+    }
+  }
+  return total;
+}
+
 export class TaskManager extends EventEmitter {
   constructor(config, dataRoot, store) {
     super();
@@ -96,6 +126,13 @@ export class TaskManager extends EventEmitter {
     this.queue = [];
     this.activeTaskIds = new Set();
     this.maxParallelSessions = Math.max(1, Math.min(16, Number(config.queue?.maxConcurrentSessions) || 4));
+    // How many sessions of ONE working directory may run at once. 0 (the default)
+    // adds no limit of its own: a project without worktrees hands the same folder
+    // to every session and the operator decides whether to serialize there (1) or
+    // to accept two agents editing one tree. Worktrees and other projects are
+    // never affected. Set 1 for the strict "one writer per folder" rule of
+    // docs/TASKBRIDGE_PARALLEL_SESSIONS_PLAN.md.
+    this.maxSessionsPerDirectory = Math.max(0, Math.min(16, Number(config.queue?.maxSessionsPerDirectory) || 0));
     this.providerConcurrency = Object.fromEntries(Object.entries(config.queue?.providerConcurrency || {})
       .map(([provider, limit]) => [provider, Math.max(1, Math.min(16, Number(limit) || 1))]));
     this.providerCooldownUntil = new Map();
@@ -126,6 +163,12 @@ export class TaskManager extends EventEmitter {
     this.dispatching = null;
     this.deleted = new Set();
     this.eventWrites = new Map();
+    // On-disk footprint per session (task folder + pi-sessions + workspaces).
+    // Recomputed lazily from listTasks(); the map is what the API reads so a
+    // list request never blocks on the filesystem.
+    this.sessionSizes = new Map();
+    this.sessionSizesAt = 0;
+    this.sessionSizesScanning = false;
     this.runtimeManager = new RuntimeManager(config.localRuntime || {}, dataRoot);
     // Router mode: one always-on llama.cpp server that loads presets on demand
     // (see docs). When configured it replaces the single-model RuntimeManager
@@ -135,6 +178,9 @@ export class TaskManager extends EventEmitter {
     this.local = this.localModels.enabled ? this.localModels : this.runtimeManager;
     this.mcp = new McpManager(config.pi || {}, dataRoot);
     this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#llamaEnv() });
+    // Per-model TTFT history (local + cloud): the UI shows "this model usually
+    // answers in ~N s" before the prompt is even sent.
+    this.modelLatency = new ModelLatency(dataRoot);
     this.nativeSessions = new NativeSessionService(this);
     this.runtimeChanging = false;
     // Tool output bounding (§38): the full log stays in the task artifacts; only
@@ -202,18 +248,49 @@ export class TaskManager extends EventEmitter {
     }
     return false;
   }
-  #hasWorkspaceConflict(task) {
+  // The directory a session writes into, known even before its workspace exists.
+  // A project without worktrees hands its own folder to every session; this path
+  // is what `queue.maxSessionsPerDirectory` limits, from admission on — checking
+  // only `workspacePath` saw nothing for a fresh session (its workspace is
+  // prepared later) and saw a permanent conflict for a session that had already
+  // prepared the folder. A worktree project or a scratch session gets a directory
+  // of its own and is never limited here.
+  #workspaceDir(task) {
+    if (!task) return null;
+    if (task.workspacePath) return path.resolve(task.workspacePath);
+    if (!task.projectId || task.projectId === '__scratch__') return null;
+    const project = this.projects.get(task.projectId);
+    if (!project?.path) return null;
+    const useWorktree = project.useWorktree ?? this.config.workspace?.useGitWorktreeByDefault ?? true;
+    return useWorktree ? null : path.resolve(project.path);
+  }
+  // Two sessions in one directory share the same files and the same git state.
+  // Whether that is allowed is the operator's call: `queue.maxSessionsPerDirectory`
+  // (0 = no extra limit, N = at most N sessions of that directory at once). The
+  // check is by the directory the session WILL use, computed before the workspace
+  // exists — looking only at `workspacePath` let a fresh session slip into a
+  // folder another one was already writing in, while a session that had already
+  // prepared the folder waited on a conflict with those very sessions forever.
+  #workspaceOwner(task) {
+    if (!this.maxSessionsPerDirectory) return null;
+    const mine = this.#workspaceDir(task);
+    if (!mine) return null;
+    let taken = 0;
     for (const id of this.activeTaskIds) {
       if (id === task.id) continue;
-      const active = this.tasks.get(id);
-      if (!active) continue;
-      if (task.workspacePath && active.workspacePath && path.resolve(task.workspacePath) === path.resolve(active.workspacePath)) return true;
-      if (!task.workspacePath && !active.workspacePath && task.projectId && task.projectId === active.projectId) {
-        const project = this.projects.get(task.projectId);
-        if (task.projectId !== '__scratch__' && project?.useWorktree === false) return true;
-      }
+      if (this.#workspaceDir(this.tasks.get(id)) !== mine) continue;
+      if (++taken >= this.maxSessionsPerDirectory) return id;
     }
-    return false;
+    return null;
+  }
+  #hasWorkspaceConflict(task) { return this.#workspaceOwner(task) !== null; }
+  // Why a task with no free slot must wait, in the clients' vocabulary: «модель
+  // занята» and «папка занята» need different actions from the operator, and a
+  // bare BUSY explains neither.
+  #waitReason(task) {
+    if (this.#usesLocalRuntime(task) && this.#hasActiveLocalSession(task.id)) return 'MODEL_BUSY';
+    if (this.#hasWorkspaceConflict(task)) return 'WORKSPACE_BUSY';
+    return 'BUSY';
   }
   #hasCapacityFor(task) {
     if (this.activeTaskIds.has(task.id)) return false;
@@ -237,6 +314,7 @@ export class TaskManager extends EventEmitter {
     return {
       activeTasks: this.activeTaskIds.size,
       maxConcurrentSessions: this.maxParallelSessions,
+      maxSessionsPerDirectory: this.maxSessionsPerDirectory,
       queuedTasks: this.queue.length,
       providers,
       queueWaitMs: {
@@ -294,6 +372,7 @@ export class TaskManager extends EventEmitter {
       task._runtimeState = this.#runtimeFacts(task).state;
     }
     if (trimmed) await this.store.vacuum().catch(() => {});
+    else await this.#maybeVacuum();
     await this.#sweepOrphans();
     await this.#killOrphanPis(previous);
     if (this.queue.length) this.#schedulePump();
@@ -389,6 +468,26 @@ export class TaskManager extends EventEmitter {
         await fs.rm(path.join(root, entry.name), { recursive: true, force: true }).catch(() => {});
       }
     }
+    // Lock sidecars live next to the *native* Pi sessions in the operator's home,
+    // not under dataRoot, so the loop above never sees them. A crash leaves one
+    // behind and no other code path removes it (acquireNativeLease recovers only
+    // when the same pid is reused), permanently blocking that session.
+    await sweepOrphanLocks(this.nativeSessions.allRoots()).catch(() => 0);
+  }
+
+  // VACUUM rewrites the entire database and needs exclusive access, so it is
+  // only worth doing when nothing is running. The size check is what keeps an
+  // ordinary delete cheap: without it every removal would pay for a full
+  // rewrite of a multi-gigabyte file. Threshold is configurable; 512 MiB matches
+  // the observed steady state where a stale 2 GiB file still weighs more than
+  // the sessions it holds.
+  async #maybeVacuum() {
+    const thresholdMb = Number(this.config.storage?.vacuumThresholdMb) || 512;
+    if (this.runtimes.size || this.queue.length || this.admitting) return;
+    let stat;
+    try { stat = await fs.stat(this.store.dbPath); } catch { return; }
+    if (stat.size < thresholdMb * 1024 * 1024) return;
+    await this.store.vacuum().catch(() => {});
   }
 
   // Never recurse outside the given root, even if a task carries a bogus path.
@@ -423,11 +522,43 @@ export class TaskManager extends EventEmitter {
 
   listTasks() {
     // `events` lets the sessions screen show and sort by size; one grouped count
-    // keeps it cheap even with hundreds of sessions.
+    // keeps it cheap even with hundreds of sessions. `sizeBytes` is the on-disk
+    // footprint of the session (tasks + pi-sessions + workspaces folders); it is
+    // read from the cache and refreshed in the background so this call stays
+    // synchronous and cheap, even with hundreds of sessions.
+    this.#refreshSessionSizes().catch(() => {});
     const counts = this.store.eventCounts();
+    const sizes = this.sessionSizes;
     return Array.from(this.tasks.values())
-      .map(t => ({ ...this.#publicTask(t), events: counts.get(t.id) || 0 }))
+      .map(t => ({ ...this.#publicTask(t), events: counts.get(t.id) || 0, sizeBytes: sizes.get(t.id) ?? null }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // On-disk footprint per session, recomputed at most every 30 seconds. Only
+  // known task ids are inspected, so the scan is bounded; the list endpoint
+  // keeps returning the previous numbers while a fresh scan runs in the
+  // background (the client polls often, so it picks them up on the next tick).
+  async #refreshSessionSizes() {
+    if (this.sessionSizesScanning) return;
+    if (Date.now() - this.sessionSizesAt < 30_000) return;
+    this.sessionSizesScanning = true;
+    try {
+      const bases = [
+        path.join(this.dataRoot, 'tasks'),
+        path.join(this.dataRoot, 'pi-sessions'),
+        path.join(this.dataRoot, 'workspaces'),
+      ];
+      const map = new Map();
+      for (const id of this.tasks.keys()) {
+        let total = 0;
+        for (const base of bases) total += await dirBytes(path.join(base, id));
+        map.set(id, total);
+      }
+      this.sessionSizes = map;
+      this.sessionSizesAt = Date.now();
+    } finally {
+      this.sessionSizesScanning = false;
+    }
   }
 
   getTask(id) {
@@ -647,6 +778,10 @@ export class TaskManager extends EventEmitter {
     if (projectId !== '__scratch__' && !this.projects.has(projectId)) {
       throw Object.assign(new Error(`Unknown project: ${projectId}`), { code: 'PROJECT_NOT_FOUND' });
     }
+    // The project's own folder may already be taken by a running session: say so
+    // now, instead of starting the session and parking it a moment later with a
+    // reason the operator cannot act on.
+    if (!waitingReason && this.#hasWorkspaceConflict({ id: requestedId, projectId })) waitingReason = 'WORKSPACE_BUSY';
 
     const task = {
       id: requestedId || shortId(),
@@ -660,7 +795,7 @@ export class TaskManager extends EventEmitter {
       workspacePath: null,
       sourcePath: null,
       worktree: false,
-      current: waitingReason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : (waitingReason ? 'В очереди' : 'Queued'),
+      current: waitText(waitingReason) || 'Queued',
       assistantText: '',
       thinkingText: '',
       error: null,
@@ -687,7 +822,7 @@ export class TaskManager extends EventEmitter {
     task._uploadToken = input.uploadToken;
     this.#enqueue(task.id);
     await this.#event(task, waitingReason ? 'QUEUE_WAITING' : 'TASK_QUEUED',
-      waitingReason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели' : (waitingReason ? 'В очереди' : 'Task queued'),
+      waitText(waitingReason) || 'Task queued',
       waitingReason ? { reason: waitingReason } : {});
     this.#pump();
     return this.#publicTask(task);
@@ -708,8 +843,8 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genLastDeltaAt,
-      _promptStartedAt, _promptMs, _firstTokenAt,
+    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genTextStreamMs,
+      _genLastDeltaAt, _genLastTextDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
@@ -748,8 +883,7 @@ export class TaskManager extends EventEmitter {
     if (task.status !== 'QUEUED') task.statusChangedAt = now();
     task.status = 'QUEUED';
     task.queueReason = reason;
-    task.current = reason === 'MODEL_BUSY' ? 'Ждёт освобождения локальной модели'
-      : reason === 'MODEL_LOADING' ? 'Ждёт загрузки локальной модели' : 'В очереди';
+    task.current = waitText(reason) || 'В очереди';
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
     await this.#event(task, 'QUEUE_WAITING', task.current, { reason });
@@ -898,7 +1032,7 @@ export class TaskManager extends EventEmitter {
         continue;
       }
       if (!this.#hasCapacityFor(candidate)) {
-        await this.#markWaiting(candidate, this.#usesLocalRuntime(candidate) && this.#hasActiveLocalSession(candidate.id) ? 'MODEL_BUSY' : 'BUSY');
+        await this.#markWaiting(candidate, this.#waitReason(candidate));
         index++;
         continue;
       }
@@ -1155,6 +1289,13 @@ export class TaskManager extends EventEmitter {
     // R3.6: enough to find this process again after a TaskBridge crash.
     task.piPid = pi.proc?.pid ?? null;
     task.piStartedAt = task.piPid ? new Date().toISOString() : null;
+    // A cold Pi loads its extensions/MCP adapter for >15s before its RPC loop
+    // serves the first command (measured ~17-19s on 2026-09-28). A get_state
+    // sent earlier times out with zero output and the operator's message is
+    // reported as hung although the process is merely booting. Probe readiness
+    // before returning; a failure falls through so the callers' own error
+    // handling stays unchanged.
+    await pi.request({ type: 'get_state' }, 60000).catch(() => {});
     return pi;
   }
 
@@ -1172,9 +1313,13 @@ export class TaskManager extends EventEmitter {
   }
 
   // Lists the models Pi currently considers usable (all providers, not just the
-  // local llama.cpp profiles). Refresh forces a fresh Pi probe.
+  // local llama.cpp profiles). Refresh forces a fresh Pi probe. The rolling
+  // per-model TTFT history is merged in so the picker can show real response
+  // latency for every model, cloud ones included.
   async listModels({ refresh = false } = {}) {
-    return this.modelCatalog.list({ refresh });
+    const catalog = await this.modelCatalog.list({ refresh });
+    await this.modelLatency.load();
+    return { ...catalog, latency: this.modelLatency.stats() };
   }
 
   // ---- local llama.cpp router (router mode) ----
@@ -1382,7 +1527,7 @@ export class TaskManager extends EventEmitter {
 
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
-      if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task);
+      if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task, delta.type);
       if (delta?.type === 'text_delta') task.assistantText = appendTail(task.assistantText, delta.delta, TEXT_TAIL);
       if (delta?.type === 'thinking_delta') {
         task.thinkingText = appendTail(task.thinkingText, delta.delta, THINKING_TAIL);
@@ -1420,12 +1565,17 @@ export class TaskManager extends EventEmitter {
     }
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result) {
       task.compaction.count += 1;
+      const estimatedTokensAfter = frame.result.estimatedTokensAfter ?? null;
       task.compaction.last = {
         reason: frame.reason,
         tokensBefore: frame.result.tokensBefore ?? null,
-        estimatedTokensAfter: frame.result.estimatedTokensAfter ?? null,
+        estimatedTokensAfter,
+        summary: typeof frame.result.summary === 'string' ? frame.result.summary : null,
         at: now()
       };
+      if (Number.isFinite(estimatedTokensAfter) && estimatedTokensAfter > 0) {
+        task.lastUsage = { ...(task.lastUsage || {}), totalTokens: estimatedTokensAfter };
+      }
     }
     if (frame.type === 'agent_start') {
       task.status = 'RUNNING';
@@ -1434,7 +1584,9 @@ export class TaskManager extends EventEmitter {
       task._promptMs = 0;
       task._firstTokenAt = 0;
       task._genStreamMs = 0;
+      task._genTextStreamMs = 0;
       task._genLastDeltaAt = 0;
+      task._genLastTextDeltaAt = 0;
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
     }
@@ -1461,7 +1613,7 @@ export class TaskManager extends EventEmitter {
   // between deltas as long pauses, so only short gaps are added: a 30 s `npm
   // test` in the middle of a turn must not be counted as generation time and
   // drag the reported TG down.
-  #trackStreamTime(task) {
+  #trackStreamTime(task, deltaType) {
     const at = Date.now();
     if (!task._firstTokenAt && task._promptStartedAt) {
       task._firstTokenAt = at;
@@ -1469,6 +1621,10 @@ export class TaskManager extends EventEmitter {
     }
     task._genStreamMs = accumulateStreamMs(task._genLastDeltaAt, at, task._genStreamMs);
     task._genLastDeltaAt = at;
+    if (deltaType === 'text_delta') {
+      task._genTextStreamMs = accumulateStreamMs(task._genLastTextDeltaAt, at, task._genTextStreamMs);
+      task._genLastTextDeltaAt = at;
+    }
   }
 
   // Prefer the local engine's own counters — the same source used by modern
@@ -1478,12 +1634,31 @@ export class TaskManager extends EventEmitter {
   // streaming time and excludes long tool pauses.
   async #recordGenerationSpeed(task) {
     task._genLastDeltaAt = 0;
-    const ms = task._genStreamMs || 0;
+    task._genLastTextDeltaAt = 0;
+    const totalMs = task._genStreamMs || 0;
+    const textMs = task._genTextStreamMs || 0;
+    const ms = effectiveGenerationMs(textMs, totalMs);
     task._genStreamMs = 0;
+    task._genTextStreamMs = 0;
     const promptMs = task._promptMs || 0;
     task._promptMs = 0;
     task._promptStartedAt = 0;
     task._firstTokenAt = 0;
+
+    // One TTFT sample per assistant message, for every model (local and cloud).
+    // Pi does not always name the provider (the default model, and local router
+    // ids that drift between Pi and models.json), so it is taken from the task's
+    // own selection, then from the catalog: the key has to be the provider/id the
+    // clients look up.
+    const ranModel = task.model || task.requestedModel;
+    if (ranModel?.id) {
+      const requested = task.requestedModel?.id === ranModel.id ? task.requestedModel : null;
+      const provider = ranModel.provider
+        || requested?.provider
+        || this.modelCatalog.peek()?.models?.find(model => model.id === ranModel.id)?.provider
+        || '';
+      await this.modelLatency.record({ provider, id: ranModel.id }, promptMs);
+    }
 
     const inputTokens = Number(task.lastUsage?.input || 0) + Number(task.lastUsage?.cacheRead || 0);
     const outputTokens = Number(task.lastUsage?.output || 0);
@@ -1834,6 +2009,11 @@ export class TaskManager extends EventEmitter {
     await this.#removeInside(path.join(this.dataRoot, 'pi-sessions'), path.join(this.dataRoot, 'pi-sessions', task.id));
     await this.#removeInside(path.join(this.dataRoot, 'workspaces'), path.join(this.dataRoot, 'workspaces', task.id));
     await this.store.remove(id);
+    // The rows are gone, but the file on disk keeps its old size until VACUUM.
+    // Truncating the WAL here is cheap; a full rewrite only happens when the
+    // server is idle and the file is over the configured threshold.
+    await this.store.checkpoint().catch(() => {});
+    await this.#maybeVacuum();
     this.#pump();
   }
 
@@ -2531,10 +2711,13 @@ export class TaskManager extends EventEmitter {
       // its slot only inside #message, so activeTaskId alone cannot see it) —
       // "сейчас" must not cut into a delivery in flight either.
       if (!this.activeTaskIds.has(id) && !this.#hasCapacityFor(task)) {
-        const ownerId = this.activeTaskId;
+        const reason = this.#waitReason(task);
+        const ownerId = reason === 'WORKSPACE_BUSY' ? this.#workspaceOwner(task) : this.activeTaskId;
         const owner = this.tasks.get(ownerId);
         throw Object.assign(
-          new Error(`Машина занята сессией${owner ? ` «${owner.title || ownerId}»` : ''}: достигнут лимит параллельных запусков.`),
+          new Error(reason === 'WORKSPACE_BUSY'
+            ? `Рабочая папка занята сессией${owner ? ` «${owner.title || ownerId}»` : ''}: сообщение отправится, когда она её освободит.`
+            : `Машина занята сессией${owner ? ` «${owner.title || ownerId}»` : ''}: достигнут лимит параллельных запусков.`),
           { code: 'BUSY' });
       }
       if (this.dispatching) {
@@ -2705,7 +2888,7 @@ export class TaskManager extends EventEmitter {
       // file the operator attached.
       task.pendingPrompts = [...(task.pendingPrompts || []), { id: pendingId, text: userText + note, mode, files: attached.map(metadata), ...(origin || {}) }];
       task.updatedAt = now();
-      await this.#markWaiting(task, reservedElsewhere ? 'BUSY' : (holdingModel ? 'MODEL_BUSY' : (coldModel ? 'MODEL_LOADING' : 'QUEUED')));
+      await this.#markWaiting(task, reservedElsewhere ? this.#waitReason(task) : (holdingModel ? 'MODEL_BUSY' : (coldModel ? 'MODEL_LOADING' : 'QUEUED')));
       // One event per queued prompt (QUEUE_WAITING is per session state and
       // deduplicated), so every client learns the pendingId of what it sent.
       await this.#event(task, 'PROMPT_QUEUED', 'Сообщение поставлено в очередь', { pendingId, ...(origin || {}) }, false);

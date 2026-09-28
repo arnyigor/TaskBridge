@@ -31,6 +31,17 @@ export class NativeSessionService {
     return [path.join(os.homedir(), '.pi', 'agent', 'sessions'), path.join(this.manager.dataRoot, 'pi-sessions')];
   }
 
+  // Every distinct root that may hold a TaskBridge-owned lock sidecar. Used by
+  // the startup sweep: the same roots list() consults, but flattened and
+  // deduplicated so stale locks can be cleaned without knowing a project id.
+  allRoots() {
+    const roots = new Set();
+    for (const project of this.manager.projects.values()) {
+      for (const root of this.roots(project)) roots.add(root);
+    }
+    return [...roots];
+  }
+
   async existing(candidate) {
     for (const task of this.manager.tasks.values()) {
       if (task.nativeSourceKey === candidate.key) return task.id;
@@ -278,4 +289,39 @@ export async function acquireNativeLease(task) {
     released = true;
     await removeOwned(lock, token);
   };
+}
+
+/**
+ * Removes stale `<session>.jsonl.taskbridge.lock` (and `.recovery`) sidecars
+ * whose owning process is gone. A crash leaves them behind and no code path
+ * would ever clean them up: `acquireNativeLease` only recovers when the SAME
+ * pid is reused, and terminal Pi does not honor these files at all. They live
+ * next to the native Pi session in the operator's home, so #sweepOrphans in
+ * task-manager (which only scans dataRoot areas) cannot reach them.
+ *
+ * Safe by construction: the sidecar is only a TaskBridge writer hint and its
+ * payload carries the owning pid, so a lock whose pid is dead protects nobody.
+ * Unparseable/oversized sidecars are also dropped — they block `create()` with
+ * SESSION_BUSY forever otherwise.
+ */
+export async function sweepOrphanLocks(roots) {
+  let removed = 0;
+  for (const root of roots || []) {
+    if (typeof root !== 'string' || !path.isAbsolute(root)) continue;
+    let entries;
+    try { entries = await fs.readdir(root, { withFileTypes: true, recursive: true }); }
+    catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      if (!entry.name.endsWith('.taskbridge.lock') && !entry.name.endsWith('.taskbridge.lock.recovery')) continue;
+      const file = path.join(entry.parentPath || root, entry.name);
+      const record = await lockRecord(file).catch(() => null);
+      // A lock we cannot parse is not ours to trust, but it is stuck in our
+      // namespace: leaving it would make the same session permanently BUSY.
+      if (record && processAlive(record.pid)) continue;
+      await fs.unlink(file).catch(() => {});
+      removed++;
+    }
+  }
+  return removed;
 }

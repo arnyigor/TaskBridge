@@ -124,6 +124,15 @@ export function accumulateStreamMs(previousAt, at, accumulated, maxGapMs = 2000)
   return total + (at - previousAt);
 }
 
+// Prefer answer-text streaming time for TG: reasoning/thinking deltas can take a
+// long time but are not counted in `usage.output` by every provider. If a turn
+// has no text deltas (reasoning-only/error), fall back to all model deltas.
+export function effectiveGenerationMs(textMs, totalMs) {
+  const text = Number(textMs) || 0;
+  const total = Number(totalMs) || 0;
+  return text > 0 ? text : (total > 0 ? total : 0);
+}
+
 // Output tokens over the time the model actually spent streaming them.
 export function computeTokensPerSecond(outputTokens, ms) {
   const tokens = Number(outputTokens);

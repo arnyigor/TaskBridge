@@ -22,6 +22,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -89,13 +90,25 @@ private sealed interface Loaded {
 
 internal fun looksBinary(bytes: ByteArray): Boolean = bytes.take(8000).any { it == 0.toByte() }
 
+private val MARKDOWN_NAME = Regex("\\.(?:md|markdown|mdx)$", RegexOption.IGNORE_CASE)
+
+/** A file the viewer renders as Markdown instead of showing as source (the web's `MARKDOWN_EXT_RE`). */
+internal fun isMarkdownName(name: String?): Boolean = name != null && MARKDOWN_NAME.containsMatchIn(name)
+
 /**
  * Reads the file through the API with this client's session (a browser given
  * the bare URL has no cookie) and shows it highlighted. On the PC itself the
  * server can also open it with its app or reveal it in the file manager.
  */
 @Composable
-fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServices, onDismiss: () -> Unit) {
+fun FileViewer(
+    target: FileTarget,
+    session: ChatSession,
+    platform: PlatformServices,
+    onDismiss: () -> Unit,
+    /** Opens a workspace path a rendered Markdown link points at; null keeps such links inert. */
+    onOpenPath: ((String) -> Unit)? = null,
+) {
     val scope = rememberCoroutineScope()
     var loaded by remember(target) { mutableStateOf<Loaded?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
@@ -168,7 +181,14 @@ fun FileViewer(target: FileTarget, session: ChatSession, platform: PlatformServi
                 "Это не текстовый файл — показать его здесь нельзя." + if (platform.kind == "desktop") " Откройте его в приложении на компьютере." else "",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            is Loaded.Text -> {
+            is Loaded.Text -> if (isMarkdownName(target.name)) {
+                // A Markdown file is shown the way it is meant to be read — headings,
+                // lists, quotes, tables, code — like the same file in the web viewer.
+                // «Копировать» in the footer still takes the source text.
+                CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
+                    SelectionContainer { MarkdownView(state.text, onCopy = { platform.copyText(it) }) }
+                }
+            } else {
                 val palette = codePalette()
                 val language = remember(target) { languageOfFile(target.name) }
                 val highlighted = remember(state.text, language, palette) { highlight(state.text, language, palette) }

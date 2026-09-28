@@ -191,6 +191,74 @@ test('a prompt queued for another session goes out when the busy session finishe
   assert.ok(events.some(event => event.type === 'USER_MESSAGE' || event.type === 'STATUS'), 'b actually ran');
 });
 
+// One project without worktrees is one working directory for all of its sessions.
+// By default TaskBridge adds no limit of its own there — the operator's
+// `queue.maxConcurrentSessions` decides — so several sessions of one project run
+// together ("раньше работало 3").
+test('three sessions of one project without worktrees run in parallel by default', { timeout: 60000 }, async t => {
+  const fixture = await startFixture(0, { root: { queue: { maxConcurrentSessions: 4, pollMs: 50 } } });
+  t.after(() => fixture.close());
+  const model = { provider: 'deepseek', id: 'deepseek-chat' };
+
+  const ids = [];
+  for (const prompt of ['slow один', 'slow два', 'slow три']) {
+    const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt, model });
+    ids.push(task.id);
+    await waitFor(async () => {
+      const current = await fixture.api(`/api/tasks/${task.id}`);
+      return current.status === 'RUNNING' ? current : null;
+    });
+  }
+
+  const tasks = await Promise.all(ids.map(id => fixture.api(`/api/tasks/${id}`)));
+  assert.deepEqual(tasks.map(task => task.status), ['RUNNING', 'RUNNING', 'RUNNING'], 'all three work at once');
+  assert.deepEqual([...new Set(tasks.map(task => task.workspacePath))], [tasks[0].workspacePath], 'and they share the project folder');
+  const scheduler = (await fixture.api('/api/info')).scheduler;
+  assert.equal(scheduler.activeTasks, 3);
+  assert.equal(scheduler.maxSessionsPerDirectory, 0, 'no per-directory limit is added by default');
+
+  for (const id of ids) await fixture.api(`/api/tasks/${id}/cancel`, {}).catch(() => {});
+});
+
+// The same setup with queue.maxSessionsPerDirectory = 1 serializes that folder:
+// the second session waits with WORKSPACE_BUSY — an explainable wait the operator
+// can act on (another project, worktrees, or removing the limit) — and runs by
+// itself once the first releases the folder.
+test('with maxSessionsPerDirectory = 1 two sessions of one project run one after the other', { timeout: 60000 }, async t => {
+  const fixture = await startFixture(0, { root: { queue: { maxConcurrentSessions: 4, maxSessionsPerDirectory: 1, pollMs: 50 } } });
+  t.after(() => fixture.close());
+  const model = { provider: 'deepseek', id: 'deepseek-chat' };
+
+  const a = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'slow первая', model });
+  await waitFor(async () => {
+    const task = await fixture.api(`/api/tasks/${a.id}`);
+    return task.status === 'RUNNING' ? task : null;
+  });
+
+  const b = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'slow вторая', model });
+  assert.equal(b.status, 'QUEUED', JSON.stringify(b).slice(0, 200));
+  assert.equal(b.queueReason, 'WORKSPACE_BUSY');
+  assert.equal(b.current, 'Ждёт освобождения рабочей папки');
+  assert.equal(b.workspacePath, null, 'the waiting session does not prepare the folder either');
+  // The global limit is not the reason: the scheduler still has free slots, which
+  // is exactly why «в очереди» looked like a broken setting.
+  const scheduler = (await fixture.api('/api/info')).scheduler;
+  assert.equal(scheduler.maxConcurrentSessions, 4);
+  assert.equal(scheduler.activeTasks, 1);
+  assert.equal(scheduler.queuedTasks, 1);
+  const events = await fixture.api(`/api/tasks/${b.id}/events?limit=0`);
+  assert.equal(events.some(event => event.type === 'USER_MESSAGE'), false, 'b was not sent to Pi');
+  assert.equal((await fixture.api(`/api/tasks/${b.id}`)).queueReason, 'WORKSPACE_BUSY');
+
+  // The first session frees the folder: the second starts on its own.
+  await fixture.api(`/api/tasks/${a.id}/cancel`, {});
+  const ran = await waitFor(async () => {
+    const task = await fixture.api(`/api/tasks/${b.id}`);
+    return ['SUCCEEDED', 'FAILED'].includes(task.status) ? task : null;
+  }, { tries: 400, delay: 100 });
+  assert.equal(ran.status, 'SUCCEEDED', ran.error || '');
+});
+
 test('«Отправить сейчас» delivers the queued prompt into the running turn', { timeout: 60000 }, async t => {
   const { fixture, router } = await fixtureWithLocalModel(t);
   router.free();

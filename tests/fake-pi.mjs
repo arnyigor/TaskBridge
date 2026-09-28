@@ -158,7 +158,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   }
   if (command.type === 'set_auto_compaction') { automatic = command.enabled; return respond(); }
   if (command.type === 'compact') {
-    const result = { tokensBefore: 1100, estimatedTokensAfter: 500 };
+    const result = { tokensBefore: 1100, estimatedTokensAfter: 500, summary: 'Сжатая сводка предыдущего контекста' };
     send({ type: 'compaction_end', reason: 'manual', result });
     return respond(result);
   }

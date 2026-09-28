@@ -20,22 +20,45 @@ test('only the recorded range is supported, compared as numbers', () => {
   assert.equal(isSupportedPiVersion(null), false);
 });
 
-test('the probe reports a missing Pi as a status and caches the answer', async () => {
+test('the probe reports a missing Pi as an error but not as an unsupported version', async () => {
   let calls = 0;
   const probe = new PiVersionProbe({}, async () => { calls++; return { version: null, error: 'spawn pi ENOENT' }; });
   assert.equal(probe.current(), null, 'nothing known before the first probe finishes');
   const result = await probe.pending;
-  assert.deepEqual(result, { version: null, supported: false, supportedRange: `>=${SUPPORTED_PI.min} <${SUPPORTED_PI.below}`, error: 'spawn pi ENOENT' });
+  assert.deepEqual(result, { version: null, supported: true, supportedRange: `>=${SUPPORTED_PI.min} <${SUPPORTED_PI.below}`, error: 'spawn pi ENOENT' });
   probe.current();
   probe.current();
   assert.equal(calls, 1, 'current() does not spawn Pi on every poll');
+});
+
+test('a failed probe is retried instead of cached as unknown forever', async () => {
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+  let calls = 0;
+  // The first probe fails the way a busy startup does, the second succeeds.
+  const probe = new PiVersionProbe({}, async () => {
+    calls++;
+    return calls === 1 ? { version: null, error: 'pi --version did not answer in 10000 ms' } : { version: '0.87.1', error: null };
+  });
+  await probe.refresh();
+  assert.equal(probe.result.version, null);
+  assert.equal(probe.result.supported, true);
+  assert.ok(probe.retryTimer, 'a retry is scheduled after an unknown version');
+  clearTimeout(probe.retryTimer);
+  probe.retryTimer = null;
+  // The retry path itself: calling refresh again replaces the unknown answer.
+  await probe.refresh();
+  assert.equal(calls, 2);
+  assert.equal(probe.result.version, '0.87.1');
+  assert.equal(probe.result.supported, true);
+  assert.equal(probe.retryTimer, null, 'no further retry once the version is known');
+  await wait(0);
 });
 
 test('a real process that is not Pi is reported, not thrown', async () => {
   const probe = new PiVersionProbe({ command: 'definitely-not-a-pi-binary-xyz', timeoutMs: 5000 });
   const result = await probe.refresh();
   assert.equal(result.version, null);
-  assert.equal(result.supported, false);
+  assert.equal(result.supported, true);
   assert.ok(result.error);
 });
 

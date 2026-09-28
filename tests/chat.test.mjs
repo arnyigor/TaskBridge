@@ -332,6 +332,14 @@ test('DOM: saved answers survive repeated polls, context loads immediately, reco
   assert.match(app.streams[0].url, /after=12$/);
 });
 
+test('DOM: context panel shows current compaction explicitly', async () => {
+  const app = await ui();
+  app.renderTaskDetails({ ...task(), status: 'RUNNING', runtime: { state: 'WORKING', activity: 'compacting' } });
+  assert.equal(app.document.getElementById('contextState').textContent, 'Сейчас сжимается контекст…');
+  assert.equal(app.document.getElementById('contextState').classList.contains('compacting'), true);
+  assert.match(app.document.getElementById('activity').textContent, /сжимается контекст/);
+});
+
 test('DOM: a loader is shown while a session loads, and hidden when it is ready', async () => {
   const app = await ui();
   let release;

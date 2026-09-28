@@ -5,9 +5,11 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -62,11 +64,13 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -76,10 +80,13 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.Json
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ApiError
+import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.Approval
 import ru.arny.taskbridge.core.api.GenerationMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.PendingPrompt
+import ru.arny.taskbridge.core.api.QuickAction
+import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.session.ChatEffect
@@ -102,6 +109,9 @@ import ru.arny.taskbridge.ui.common.sourceLabel
 import ru.arny.taskbridge.ui.common.timeRange
 import ru.arny.taskbridge.ui.sessions.FieldLabel
 import ru.arny.taskbridge.ui.sessions.ModelPicker
+import ru.arny.taskbridge.ui.sessions.formatLatencyMs
+import ru.arny.taskbridge.ui.sessions.latencyFor
+import ru.arny.taskbridge.ui.sessions.modelLatencyLabel
 import ru.arny.taskbridge.ui.sessions.ModelChooser
 import ru.arny.taskbridge.ui.sessions.ThinkingPicker
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
@@ -135,6 +145,7 @@ fun ChatScreen(
 ) {
     val session = remember(taskId) { connection.chat(taskId) }
     val state by session.state.collectAsState()
+    val sessionListState by connection.sessions.state.collectAsState()
     val online by connection.online.collectAsState()
     val platform = graph.platform
     val snackbar = remember { SnackbarHostState() }
@@ -144,9 +155,15 @@ fun ChatScreen(
     var viewing by androidx.compose.runtime.saveable.rememberSaveable(taskId, stateSaver = FileTargetSaver) { mutableStateOf<FileTarget?>(null) }
     var files by remember(taskId) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var draft by remember(taskId) { mutableStateOf(TextFieldValue(graph.settings.draft(taskId))) }
+    // The picker keeps its own copy; this one feeds the status bar's TTFT.
+    var screenCatalog by remember { mutableStateOf<ModelCatalog?>(null) }
+    var quickActions by remember(connection, taskId) { mutableStateOf(fallbackQuickActions()) }
     val pickFiles = rememberFilePicker { picked -> files = files + picked }
 
-    LaunchedEffect(connection) { connection.sessions.models().onFailure { /* chooser can retry */ } }
+    LaunchedEffect(connection) { connection.sessions.models().onSuccess { screenCatalog = it }.onFailure { /* chooser can retry */ } }
+    LaunchedEffect(connection, taskId, state.task?.runtime?.state) {
+        quickActions = runCatching { connection.api.quickActions(taskId) }.getOrDefault(fallbackQuickActions()).ifEmpty { fallbackQuickActions() }
+    }
 
     DisposableEffect(taskId) {
         connection.visibleSession = taskId
@@ -214,7 +231,6 @@ fun ChatScreen(
                 onBack = onBack,
                 onDialog = { dialog = it },
                 onCopyHistory = { copyingHistory = true },
-                onStop = { dialog = ChatDialog.ConfirmStop },
             )
         },
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
@@ -281,7 +297,7 @@ fun ChatScreen(
                     }
                 },
                 top = {
-                    DeliveryDiagnostics(state, onRefresh = session::reconnectNow, onCopy = platform::copyText)
+                    DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                     if (task != null && task.pendingPrompts.isNotEmpty()) {
                         QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
                     }
@@ -298,8 +314,22 @@ fun ChatScreen(
                     }
                 },
                 value = draft,
-                onValueChange = { draft = it },
+                onValueChange = { next ->
+                    val attachment = largeTextAttachmentFromDraftChange(draft.text, next.text)
+                    if (attachment == null) {
+                        draft = next
+                    } else {
+                        files = files + UploadFile(pastedTextFileName(graph.nowIso()), "text/plain", attachment.text.encodeToByteArray())
+                        draft = TextFieldValue(
+                            attachment.remainingText,
+                            TextRange(attachment.caret.coerceIn(0, attachment.remainingText.length)),
+                        )
+                        scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
+                    }
+                },
                 files = files,
+                quickActions = quickActions,
+                onQuickAction = { action -> draft = draft.withSlashCommand(action.insertText) },
                 onRemoveFile = { files = files - it },
                 onAttach = pickFiles,
                 onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
@@ -313,7 +343,16 @@ fun ChatScreen(
     }
 
     ChatDialogs(dialog, state, session, graph, send = { send(it) }, onDialog = { dialog = it }, onViewFile = { viewing = it }, onClose = { dialog = null })
-    viewing?.let { FileViewer(it, session, platform, onDismiss = { viewing = null }) }
+    viewing?.let {
+        FileViewer(
+            it,
+            session,
+            platform,
+            onDismiss = { viewing = null },
+            // A link inside a rendered Markdown file opens the file it points at.
+            onOpenPath = { path -> viewing = FileTarget.Workspace(path) },
+        )
+    }
 }
 
 @Composable
@@ -324,12 +363,11 @@ private fun ChatTopBar(
     onBack: () -> Unit,
     onDialog: (ChatDialog) -> Unit,
     onCopyHistory: () -> Unit,
-    onStop: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val task = state.task
     val display = task?.let(::displayStateOf)
-    val speed = task?.metrics?.let(::generationSpeedLabel)
+    val headerModel = task?.model ?: task?.requestedModel
     TopAppBar(
         navigationIcon = {
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
@@ -349,15 +387,8 @@ private fun ChatTopBar(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    if (speed != null) {
-                        Text(
-                            speed,
-                            maxLines = 1,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    task?.model?.let { model ->
+                    headerModel?.let { model ->
+                        val modelTitle = modelFullLabel(model)
                         Row(
                             Modifier.weight(1f, fill = false)
                                 .clip(RoundedCornerShape(8.dp))
@@ -368,14 +399,13 @@ private fun ChatTopBar(
                         ) {
                             Icon(AppIcons.Spark, null, Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
                             Spacer(Modifier.width(4.dp))
-                            Text(model.label, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
+                            Text(modelTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
             }
         },
         actions = {
-            if (working) IconButton(onClick = onStop) { Icon(AppIcons.Stop, "Остановить ответ", tint = MaterialTheme.colorScheme.error) }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -540,7 +570,7 @@ private fun MessageList(
                                 },
                             )
                         }
-                        is ChatItem.Note -> NoteRow(item)
+                        is ChatItem.Note -> NoteRow(item, onCopy = { onCopyMessage(item.text) })
                     }
                 }
             }
@@ -666,14 +696,28 @@ private fun QueueLine(
 }
 
 @Composable
-private fun DeliveryDiagnostics(state: ChatSessionState, onRefresh: () -> Unit, onCopy: (String) -> Unit) {
+private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog: ModelCatalog?, nowMillis: () -> Long, onRefresh: () -> Unit, onCopy: (String) -> Unit) {
     var open by remember(state.taskId) { mutableStateOf(false) }
     val answer = state.chat.items.filterIsInstance<ChatItem.Assistant>().lastOrNull()
+    // Live engine PP (llama.cpp reports it in /api/info before the first token)
+    // makes «Модель читает промпт» work for a local session even on its first
+    // turn, where task.metrics is still empty. Gated to the local provider: the
+    // local engine's numbers say nothing about a cloud provider.
+    val localProvider = info?.local?.provider
+    val sessionProvider = state.task?.model?.provider ?: state.task?.requestedModel?.provider
+    val livePp = if (localProvider != null && sessionProvider == localProvider) info?.engine?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 } else null
+    // Live engine TG too: llama.cpp reports both while it streams, so PP and TG
+    // tick with the /api/info poll (1s while a turn is active) instead of
+    // freezing on the last turn's values. A cloud provider has no live source:
+    // Pi reports usage only at message_end, so its PP/TG are per-turn.
+    val liveTg = if (localProvider != null && sessionProvider == localProvider) info?.engine?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 } else null
+    val readingPp = livePp ?: state.task?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
     val phase = when {
         state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
         state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
         state.task?.status == "FAILED" -> "Ошибка · подробнее"
         answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
+        readingPp != null && answer?.text.isNullOrBlank() == true -> "Модель читает промпт"
         answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
         answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
         answer?.active == true -> "Сообщение передано · ожидается ответ агента"
@@ -688,16 +732,78 @@ private fun DeliveryDiagnostics(state: ChatSessionState, onRefresh: () -> Unit, 
         "Pi: ${state.task?.let { if (displayStateOf(it).active) stageLabel(it.status) else displayStateOf(it).label } ?: "—"}",
         "Статус сервера: ${state.task?.status ?: "—"} · ${state.task?.runtime?.state ?: "—"}",
         "Активность: ${state.task?.runtime?.activity ?: "—"} · ${state.task?.current ?: "—"}",
-        "Модель: ${state.task?.model?.key ?: "—"}",
+        "Модель сессии: ${state.task?.let(::sessionModelLabel) ?: "—"}",
+        *sessionDiagnosticsLines(state.task, info).toTypedArray(),
         "Событие № ${state.chat.cursor} · в очереди ${state.task?.pendingPrompts?.size ?: 0}",
         state.task?.errorCode?.let { "Код ошибки: $it" },
         state.task?.error,
         "Подтверждение агента не означает ответ провайдера. Пока нет событий модели, источник задержки неизвестен."
             .takeIf { answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty()) },
     ).joinToString("\n")
-    TextButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth()) {
-        Text(phase, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-        Icon(AppIcons.ChevronRight, "Открыть диагностику", Modifier.size(16.dp))
+    // Elapsed since the turn started, ticking every second. Seeded from the last
+    // user message's server timestamp (the client and the server clocks may drift
+    // by seconds on a LAN, which is fine for a rough «0:34»), so a session opened
+    // mid-turn shows it too.
+    var startedAt by remember(state.taskId) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(state.taskId) {
+        snapshotFlow { state.task?.status }.collect { status ->
+            when (status) {
+                "RUNNING", "PREPARING", "PREFLIGHT", "WAITING_USER", "VERIFYING" ->
+                    if (startedAt == null) startedAt = state.chat.items.filterIsInstance<ChatItem.User>().lastOrNull()?.let { parseIsoMillis(it.at) }
+                null -> {}
+                else -> startedAt = null
+            }
+        }
+    }
+    var tick by remember(state.taskId) { mutableStateOf(nowMillis()) }
+    LaunchedEffect(state.taskId, startedAt) {
+        if (startedAt != null) while (true) { delay(1000); tick = nowMillis() }
+    }
+    val elapsed = startedAt?.let { (tick - it).coerceAtLeast(0) }
+    // Line 1 segments: elapsed · TTFT · PP · TG.
+    val stats = listOfNotNull(
+        elapsed?.let { elapsedClock(it) },
+        catalog?.latencyFor(state.task?.model ?: state.task?.requestedModel)?.let { l -> (l.p50Ms ?: l.avgMs)?.let { "TTFT ${formatLatencyMs(it)}" } },
+        readingPp?.let { "PP ${formatSpeed(it)}" },
+        (liveTg ?: state.task?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 })?.let { "TG ${formatSpeed(it)} ток/с" },
+    )
+    // Line 2: model · context usage · queued count.
+    val used = state.task?.compaction?.last?.estimatedTokensAfter ?: state.task?.lastUsage?.totalTokens
+    val window = state.task?.model?.contextWindow ?: state.task?.requestedModel?.contextWindow
+    val display = state.task?.let(::displayStateOf)
+    val dotColor = when {
+        state.task?.status == "FAILED" -> LocalStatusColors.current.failed
+        display?.active == true -> LocalStatusColors.current.working
+        state.task?.status == "QUEUED" -> LocalStatusColors.current.queued
+        else -> LocalStatusColors.current.muted
+    }
+    Column(Modifier.fillMaxWidth().clickable { open = true }) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(dotColor))
+            Spacer(Modifier.width(6.dp))
+            Text(phase, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            if (stats.isNotEmpty()) {
+                Spacer(Modifier.width(8.dp))
+                Text(stats.joinToString("  ·  "), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            }
+            Spacer(Modifier.width(4.dp))
+            Icon(AppIcons.ChevronRight, "Открыть диагностику", Modifier.size(16.dp))
+        }
+        state.task?.let { task ->
+            Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (window != null && window > 0 && used != null) {
+                    Spacer(Modifier.width(8.dp))
+                    // A plain box bar: no LinearProgressIndicator overload surprises across platforms.
+                    Box(Modifier.weight(1f).height(4.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                        Box(Modifier.fillMaxHeight().fillMaxWidth(((used * 1.0 / window).coerceIn(0.0, 1.0)).toFloat()).background(MaterialTheme.colorScheme.primary))
+                    }
+                    Spacer(Modifier.width(6.dp))
+                    Text("${(used * 100.0 / window).roundToInt()}% (${formatTokensK(used)}/${formatTokensK(window)})", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Spacer(Modifier.width(8.dp))
+                Text("оч. ${task.pendingPrompts.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
     if (open) {
         AdaptiveSheet(
@@ -917,6 +1023,10 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         val stats = listOfNotNull(
             usage?.totalTokens?.let { tokens -> "последний ход: $tokens" + (window?.let { " из ${it / 1000}K" } ?: "") + " токенов" },
             task?.metrics?.let(::generationSpeedLabel)?.let { "скорость: $it ток/с" },
+            // Measured response latency of the session's model (catalog.latency):
+            // how long the first token usually takes — the number to compare a
+            // slow cloud answer against.
+            task?.model?.let { model -> catalog?.latencyFor(model) }?.let { modelLatencyLabel(it) },
             task?.compaction?.count?.takeIf { it > 0 }?.let { "сжатий: $it" },
             estimatedCost?.let { "оценка последнего хода: \$${(it * 10_000).roundToInt() / 10_000.0}" },
         )
@@ -978,6 +1088,57 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
     }
 }
 
+private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
+    val metrics = task?.metrics
+    val speed = metrics?.let(::generationSpeedLabel)?.let { "Скорость сессии: $it ток/с" }
+    // How long the last turn waited for the first token — the direct answer to
+    // «промпт отправлен, а облако молчит».
+    val firstToken = metrics?.promptMs?.takeIf { it > 0 }?.let { "Первый токен: ${formatLatencyMs(it)}" }
+    val usage = task?.lastUsage
+    val window = task?.model?.contextWindow ?: task?.requestedModel?.contextWindow
+    val compactedTokens = task?.compaction?.last?.estimatedTokensAfter
+    val contextTokens = compactedTokens ?: usage?.totalTokens
+    val sessionContext = contextTokens?.let { tokens ->
+        val percent = window?.takeIf { it > 0 }?.let { " · ${(tokens * 100.0 / it).roundToInt()}%" }.orEmpty()
+        val label = if (compactedTokens != null) "Контекст после сжатия" else "Контекст сессии"
+        "$label: $tokens${window?.let { " из ${it / 1000}K" }.orEmpty()} ток.$percent"
+    }
+    val localProvider = info?.local?.provider
+    val sessionProvider = task?.model?.provider ?: task?.requestedModel?.provider
+    val isLocalSession = localProvider != null && sessionProvider == localProvider
+    val localLines = if (isLocalSession) localDiagnosticsLines(info, suppressKvRatio = compactedTokens != null) else emptyList()
+    return listOfNotNull(speed, firstToken, sessionContext) + localLines
+}
+
+private fun localDiagnosticsLines(info: ApiInfo?, suppressKvRatio: Boolean): List<String> {
+    val metrics = info?.engine?.metrics
+    val context = when {
+        metrics?.kvRatio != null && !suppressKvRatio -> {
+            val tokens = metrics.nTokensMax?.takeIf { it.isFinite() && it > 0.0 }?.let { "${it.toLong()} ток." }.orEmpty()
+            val window = metrics.contextWindow ?: info?.engine?.contextWindow
+            val windowText = window?.let { " из ${it / 1000}K" }.orEmpty()
+            "KV llama.cpp: ${(metrics.kvRatio * 100).roundToInt()}%$windowText${tokens.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty()}"
+        }
+        metrics?.nTokensMax?.takeIf { it.isFinite() && it > 0.0 } != null && !suppressKvRatio -> "KV llama.cpp: ${metrics.nTokensMax.toLong()} ток."
+        else -> null
+    }
+    return listOfNotNull(
+        "Локальная модель: ${info?.engine?.model ?: info?.local?.loaded?.firstOrNull() ?: "—"}",
+        context,
+        metrics?.requestsProcessing?.takeIf { it > 0.0 }?.let { "Запросов обрабатывается: ${it.toInt()}" },
+        metrics?.requestsDeferred?.takeIf { it > 0.0 }?.let { "Запросов ждёт: ${it.toInt()}" },
+        metrics?.available?.takeIf { !it }?.let { "Метрики llama.cpp: ${metrics.reason ?: "недоступны"}" },
+    )
+}
+
+private fun sessionModelLabel(task: Task): String =
+    (task.model ?: task.requestedModel)?.let(::modelFullLabel) ?: "—"
+
+private fun modelFullLabel(model: ru.arny.taskbridge.core.api.ModelRef): String =
+    model.provider?.takeIf { it.isNotBlank() }?.let { provider -> "$provider/${model.id ?: "—"}" }
+        ?: model.id?.takeIf { it.isNotBlank() }
+        ?: model.label
+
 private fun generationSpeedLabel(metrics: GenerationMetrics): String? {
     val values = listOfNotNull(
         metrics.pp?.takeIf { it.isFinite() && it > 0.0 }?.let {
@@ -990,6 +1151,19 @@ private fun generationSpeedLabel(metrics: GenerationMetrics): String? {
 
 private fun formatSpeed(value: Double): String =
     if (value < 10.0) ((value * 10.0).roundToInt() / 10.0).toString() else value.roundToInt().toString()
+
+/** «0:34», «1:02:05» — elapsed of the running turn. */
+private fun elapsedClock(ms: Long): String {
+    val s = ms / 1000
+    val h = s / 3600
+    val m = (s % 3600) / 60
+    val sec = s % 60
+    return if (h > 0) "$h:${m.toString().padStart(2, '0')}:${sec.toString().padStart(2, '0')}" else "$m:${sec.toString().padStart(2, '0')}"
+}
+
+/** «40.2K», «999» — compact token counts for the status bar. */
+private fun formatTokensK(tokens: Long): String =
+    if (tokens >= 1000) "${(tokens / 100.0).roundToInt() / 10.0}K" else "$tokens"
 
 @Composable
 private fun TextEditDialog(

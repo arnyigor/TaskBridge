@@ -501,7 +501,9 @@ test('a message to another session waits in that session queue instead of being 
   f.manager.queuePollMs = 5;
 
   const queued = await f.manager.message('b', 'подожду', 'auto', [], null, { queue: false });
-  assert.equal(queued.queueReason, 'BUSY');
+  // The reason names the actual holder (both fixture tasks are model-less, so
+  // they run on the local model) instead of a bare BUSY.
+  assert.equal(queued.queueReason, 'MODEL_BUSY');
   assert.equal(queued.pendingPrompts[0].text, 'подожду');
   assert.deepEqual(f.manager.queue, ['b'], 'the session waits its turn');
   assert.equal(f.manager.getTask('b').status, 'QUEUED');
@@ -583,7 +585,7 @@ test('send now refuses while another session owns the machine and keeps the prom
   f.manager.runtimeManager.getBusyStatus = async () => ({ busy: true });
 
   const queued = await f.manager.message('a', 'хочу сейчас');
-  assert.equal(queued.queueReason, 'BUSY', 'the machine is owned by another session');
+  assert.equal(queued.queueReason, 'MODEL_BUSY', 'the machine is owned by another session');
 
   // "Сейчас" cannot mean a second parallel generation: the refusal names the
   // owner, and the prompt stays in the queue instead of vanishing.
@@ -610,6 +612,89 @@ test('a session created while another one works waits in the queue instead of fa
   assert.ok(f.manager.queue.includes(created.id));
   const events = (await f.store.readEvents(created.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.deepEqual(events.map(event => event.type), ['QUEUE_WAITING'], 'the wait is recorded, nothing was lost');
+});
+
+// A project without worktrees hands its *own* folder to every session, so that
+// directory is the shared resource that has to be reserved — and from admission,
+// because a fresh session has no `workspacePath` yet. Checking only that field
+// let a new session slip into a folder another one was already writing in, while
+// a session that had already prepared the folder was parked with a bare BUSY.
+// (docs/TASKBRIDGE_PARALLEL_SESSIONS_PLAN.md: сериализация + объяснимый
+// WORKSPACE_BUSY; docs/TASKBRIDGE_ROADMAP.md R4.4.)
+test('a new session of a project without worktrees waits while its folder is taken', async t => {
+  const f = await fixture(t);
+  // A remote model on purpose: the local-model gate has its own test above, and
+  // it would otherwise win the reason and hide the directory one.
+  const model = { provider: 'deepseek', id: 'deepseek-chat' };
+  f.task.requestedModel = model;
+  f.task.status = 'RUNNING';
+  f.manager.activeTaskId = 'a';
+  f.manager.queuePollMs = 5;
+  f.manager.maxSessionsPerDirectory = 1; // opt-in serialization for one folder
+
+  const created = await f.manager.createTask({ projectId: 'p', prompt: 'вторая', model });
+  assert.equal(created.status, 'QUEUED');
+  assert.equal(created.queueReason, 'WORKSPACE_BUSY', 'the folder, not the model, is why it waits');
+  assert.equal(created.current, 'Ждёт освобождения рабочей папки');
+  assert.equal(created.workspacePath, null, 'nothing is prepared while the folder is taken');
+  assert.ok(f.manager.queue.includes(created.id));
+  const events = (await f.store.readEvents(created.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.deepEqual(events.map(event => event.type), ['QUEUE_WAITING'], 'the wait is recorded');
+});
+
+// The same reason has to reach a session that already prepared the folder (it ran
+// once, was stopped, then got a new message), and «Сейчас» must refuse with it
+// instead of promising a second generation in that directory.
+test('a session whose folder is taken says so, and «сейчас» refuses for the same reason', async t => {
+  const f = await fixture(t);
+  const model = { provider: 'deepseek', id: 'deepseek-chat' };
+  f.task.requestedModel = model;
+  f.task.status = 'RUNNING';
+  f.manager.activeTaskId = 'a';
+  f.manager.queuePollMs = 5;
+  f.manager.maxSessionsPerDirectory = 1;
+  const other = { ...f.task, id: 'b', status: 'SUCCEEDED', workspacePath: f.root, requestedModel: model };
+  await f.store.create(other);
+  f.manager.tasks.set('b', other);
+
+  const queued = await f.manager.message('b', 'подожду', 'auto');
+  assert.equal(queued.queueReason, 'WORKSPACE_BUSY');
+  assert.equal(queued.current, 'Ждёт освобождения рабочей папки');
+
+  await assert.rejects(f.manager.sendPendingNow('b'),
+    error => error.code === 'BUSY' && /Рабочая папка занята сессией/.test(error.message));
+  assert.deepEqual(f.manager.getTask('b').pendingPrompts.map(entry => entry.text), ['подожду'], 'the prompt is not lost');
+});
+
+// By default the directory adds no limit of its own: a project without worktrees
+// shares one folder, and the operator may run several sessions of it at once —
+// this is what "раньше работало 3" was. `queue.maxSessionsPerDirectory` (1…16)
+// is the opt-in serialization; worktrees and other projects never wait at all.
+test('several sessions of one project run in parallel unless the directory limit is set', async t => {
+  const f = await fixture(t);
+  const model = { provider: 'deepseek', id: 'deepseek-chat' };
+  f.task.requestedModel = model;
+  f.task.status = 'RUNNING';
+  f.manager.activeTaskId = 'a';
+  f.manager.queuePollMs = 5;
+  const other = { ...f.task, id: 'b', status: 'SUCCEEDED', workspacePath: f.root, requestedModel: model };
+  await f.store.create(other);
+  f.manager.tasks.set('b', other);
+  const otherSent = [];
+  const otherRuntime = {
+    pi: { ...f.pi, getState: async () => ({ isStreaming: false }), prompt: async text => { otherSent.push(text); } },
+    eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false,
+  };
+  f.manager.runtimes.set('b', otherRuntime);
+
+  const queued = await f.manager.message('b', 'параллельно', 'auto');
+  assert.ok(!queued.queueReason, 'the shared folder is not a reason to wait by default');
+  assert.deepEqual(otherSent, ['параллельно'], 'the second session went out immediately');
+  assert.equal(f.manager.getTask('b').status, 'RUNNING');
+
+  for (const runtime of [f.runtime, otherRuntime]) {
+    for (const waiter of runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  }
 });
 
 // The queue must be self-healing: whatever waits in it gets another chance on

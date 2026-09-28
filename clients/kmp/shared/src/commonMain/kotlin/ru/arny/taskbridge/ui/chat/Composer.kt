@@ -24,6 +24,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.platform.rememberClipboardFiles
 import ru.arny.taskbridge.core.client.session.SendMode
@@ -58,6 +60,8 @@ fun Composer(
     value: TextFieldValue,
     onValueChange: (TextFieldValue) -> Unit,
     files: List<UploadFile>,
+    quickActions: List<QuickAction> = emptyList(),
+    onQuickAction: (QuickAction) -> Unit = {},
     onRemoveFile: (UploadFile) -> Unit,
     onAttach: () -> Unit,
     /** Pictures or files from the clipboard (Ctrl+V, «Вставить из буфера»); empty from the menu when it holds none. */
@@ -75,13 +79,36 @@ fun Composer(
 ) {
     var actionsMenu by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
+    var selectedQuickAction by remember { mutableStateOf(0) }
     val clipboardFiles = rememberClipboardFiles()
+    val slashMatches = slashQuickMatches(value.text, quickActions)
+    LaunchedEffect(value.text, slashMatches.size) { selectedQuickAction = 0 }
+    val selectedQuickActionIndex = selectedQuickAction.coerceIn(0, (slashMatches.size - 1).coerceAtLeast(0))
     val canSend = enabled && (value.text.isNotBlank() || files.isNotEmpty())
     val canStop = onStop != null
+    fun handleQuickActionKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
+        if (event.type != KeyEventType.KeyDown || slashMatches.isEmpty()) return false
+        return when (event.key) {
+            Key.DirectionDown -> {
+                selectedQuickAction = (selectedQuickActionIndex + 1) % slashMatches.size
+                true
+            }
+            Key.DirectionUp -> {
+                selectedQuickAction = (selectedQuickActionIndex + slashMatches.size - 1) % slashMatches.size
+                true
+            }
+            Key.Tab -> {
+                onQuickAction(slashMatches[selectedQuickActionIndex])
+                true
+            }
+            else -> false
+        }
+    }
     Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
         // Inside the Surface: its tint runs under the navigation bar instead of a blank strip.
         Column(Modifier.navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp)) {
             top()
+            SlashQuickActions(slashMatches, selectedQuickActionIndex, onQuickAction)
             if (files.isNotEmpty()) {
                 FlowRow(Modifier.padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     for (file in files) {
@@ -104,7 +131,7 @@ fun Composer(
                     if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
                 ),
             ) {
-                Column(Modifier.padding(6.dp)) {
+                Column(Modifier.padding(6.dp).onPreviewKeyEvent(::handleQuickActionKey)) {
                     Box(Modifier.fillMaxWidth()) {
                         BasicTextField(
                             value = value,
@@ -146,6 +173,7 @@ fun Composer(
                                         onPaste(pasted)
                                         return@onPreviewKeyEvent true
                                     }
+                                    if (handleQuickActionKey(event)) return@onPreviewKeyEvent true
                                     if (event.type != KeyEventType.KeyDown || (event.key != Key.Enter && event.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
                                     when {
                                         event.isCtrlPressed || event.isMetaPressed -> { if (canSend) onSend(SendMode.NOW); true }
@@ -231,6 +259,91 @@ fun Composer(
             }
         }
     }
+}
+
+internal fun fallbackQuickActions(): List<QuickAction> = listOf(
+    QuickAction("skill:android-compose-ui", "skill", "/skill:android-compose-ui", "Compose UI patterns, previews, accessibility, performance.", "/skill:android-compose-ui"),
+    QuickAction("skill:android-data-layer", "skill", "/skill:android-data-layer", "Repositories, DTOs, Room, Ktor, mappers, offline-first.", "/skill:android-data-layer"),
+    QuickAction("skill:android-di-koin", "skill", "/skill:android-di-koin", "Koin modules, ViewModel injection and app wiring.", "/skill:android-di-koin"),
+    QuickAction("skill:android-error-handling", "skill", "/skill:android-error-handling", "Typed Result wrappers and app error handling.", "/skill:android-error-handling"),
+    QuickAction("skill:android-module-structure", "skill", "/skill:android-module-structure", "Android/KMP modules and Gradle convention structure.", "/skill:android-module-structure"),
+    QuickAction("skill:android-navigation", "skill", "/skill:android-navigation", "Type-safe Compose Navigation and feature graphs.", "/skill:android-navigation"),
+    QuickAction("skill:android-presentation-mvi", "skill", "/skill:android-presentation-mvi", "MVI State/Action/Event, ViewModel and screen split.", "/skill:android-presentation-mvi"),
+    QuickAction("skill:android-testing", "skill", "/skill:android-testing", "JUnit5, Turbine, fakes, ViewModel and Compose tests.", "/skill:android-testing"),
+    QuickAction("skill:clipboard-artifacts", "skill", "/skill:clipboard-artifacts", "Apply complete files/code from clipboard safely.", "/skill:clipboard-artifacts"),
+    QuickAction("skill:deepseek-to-files", "skill", "/skill:deepseek-to-files", "Safely turn external LLM code into project files.", "/skill:deepseek-to-files"),
+    QuickAction("prompt:context", "prompt", "/prompt:context", "Pi prompt: context.md", "/prompt:context"),
+    QuickAction("prompt:handoff", "prompt", "/prompt:handoff", "Pi prompt: handoff.md", "/prompt:handoff"),
+    QuickAction("prompt:hybrid", "prompt", "/prompt:hybrid", "Pi prompt: hybrid.md", "/prompt:hybrid"),
+    QuickAction("command:help", "command", "/help", "Показать справку Pi по slash-командам.", "/help"),
+    QuickAction("command:clear", "command", "/clear", "Очистить/сбросить текущий контекст Pi.", "/clear"),
+    QuickAction("command:mcp", "command", "/mcp", "Настройки MCP в Pi, если команда поддерживается текущей версией.", "/mcp"),
+    QuickAction("command:nudge", "command", "/nudge", "Надзиратель bench-harness: статус, пороги и настройки.", "/nudge"),
+    QuickAction("command:model", "command", "/model", "Выбор/показ модели в Pi, если команда поддерживается текущей версией.", "/model"),
+    QuickAction("command:settings", "command", "/settings", "Открыть настройки Pi, если команда поддерживается текущей версией.", "/settings"),
+    QuickAction("command:reload", "command", "/reload", "Перезагрузить расширения Pi.", "/reload"),
+    QuickAction("command:skill-template", "command", "/skill:<name>", "Запустить skill Pi по имени.", "/skill:"),
+    QuickAction("command:prompt-template", "command", "/prompt:<name>", "Запустить сохранённый prompt Pi по имени.", "/prompt:"),
+)
+
+internal fun slashQuickMatches(text: String, actions: List<QuickAction>): List<QuickAction> {
+    if (!text.startsWith("/")) return emptyList()
+    val query = text.drop(1).trim().lowercase()
+    return actions
+        .filter { action ->
+            query.isEmpty() || action.title.lowercase().contains(query) || action.description.lowercase().contains(query)
+        }
+        .take(12)
+}
+
+@Composable
+private fun SlashQuickActions(
+    matches: List<QuickAction>,
+    selectedIndex: Int,
+    onClick: (QuickAction) -> Unit,
+) {
+    if (matches.isEmpty()) return
+    Surface(
+        Modifier.fillMaxWidth().padding(bottom = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 2.dp,
+    ) {
+        Column(Modifier.padding(vertical = 4.dp)) {
+            for ((index, action) in matches.withIndex()) {
+                val selected = index == selectedIndex
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.10f) else Color.Transparent)
+                        .clickable { onClick(action) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(action.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+                        if (selected) {
+                            Text("↑↓ Tab", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                    if (action.description.isNotBlank()) {
+                        Text(
+                            action.description,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+internal fun TextFieldValue.withSlashCommand(command: String): TextFieldValue {
+    val suffix = if (command.endsWith(":")) "" else " "
+    val text = command + suffix
+    return TextFieldValue(text, TextRange(text.length))
 }
 
 /** Send, «вклиниться» and stop: the same rounded square, told apart by colour alone. */

@@ -304,7 +304,7 @@ class ChatSession(
         persistOutbox()
         if (event.type.startsWith("APPROVAL_")) scope.launch { loadApprovals() }
         val frameType = event.piFrame?.get("type")?.toString()?.trim('"')
-        if (event.type != "PI_EVENT" || frameType == "agent_settled" || frameType == "compaction_end") refreshRequests.trySend(Unit)
+        if (event.type != "PI_EVENT" || frameType == "agent_settled" || frameType == "compaction_end" || frameType == "auto_compaction_end") refreshRequests.trySend(Unit)
     }
 
     private suspend fun refreshTask() {

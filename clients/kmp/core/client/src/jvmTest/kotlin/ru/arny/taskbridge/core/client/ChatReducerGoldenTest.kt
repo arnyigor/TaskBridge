@@ -2,6 +2,8 @@ package ru.arny.taskbridge.core.client
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
@@ -107,6 +109,101 @@ class ChatReducerGoldenTest {
         val partial = snapshot.items.single() as ChatItem.Assistant
         assertTrue(partial.partial && partial.text.isNotBlank(), "partial turn with the answer text: $partial")
         assertEquals(null, snapshot.newestAnswerId, "a partial turn is not regenerated or edited")
+    }
+
+    @Test
+    fun editToolCarriesChangePreview() {
+        val task = Task(id = "edit", status = "RUNNING", assistantText = "Работаю")
+        val reducer = ChatReducer(task)
+        val frame = buildJsonObject {
+            put("type", "tool_execution_start")
+            put("toolCallId", "tool-1")
+            put("toolName", "edit")
+            put("args", buildJsonObject {
+                put("path", "src/Main.kt")
+                put("edits", kotlinx.serialization.json.JsonArray(listOf(buildJsonObject {
+                    put("oldText", "val a = 1")
+                    put("newText", "val a = 2")
+                })))
+            })
+        }
+
+        reducer.apply(TaskEvent(taskId = task.id, seq = 1, type = "PI_EVENT", data = buildJsonObject { put("pi", frame) }))
+
+        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last()
+        assertEquals("@@ src/Main.kt @@\n- val a = 1\n+ val a = 2", answer.tools.single().changePreview)
+    }
+
+    @Test
+    fun compactionNoteShowsSummaryText() {
+        val task = Task(id = "compact", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        val frame = buildJsonObject {
+            put("type", "compaction_end")
+            put("reason", "manual")
+            put("result", buildJsonObject {
+                put("tokensBefore", 12000)
+                put("estimatedTokensAfter", 3000)
+                put("summary", "Краткая сводка прошлого контекста")
+            })
+        }
+
+        reducer.apply(TaskEvent(taskId = task.id, seq = 1, type = "PI_EVENT", data = buildJsonObject { put("pi", frame) }))
+
+        val note = reducer.snapshot().items.single() as ChatItem.Note
+        assertEquals("Контекст сжат:\nКраткая сводка прошлого контекста", note.text)
+    }
+
+    @Test
+    fun assistantThinkingClearsPreviousTurnError() {
+        val task = Task(id = "retry", status = "RUNNING", prompt = "Сделай")
+        val reducer = ChatReducer(task)
+        reducer.apply(TaskEvent(taskId = task.id, seq = 1, type = "TASK_FAILED", message = "old failure"))
+        reducer.apply(TaskEvent(taskId = task.id, seq = 2, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_start")
+                put("message", buildJsonObject { put("role", "assistant") })
+            })
+        }))
+        reducer.apply(TaskEvent(taskId = task.id, seq = 3, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_update")
+                put("assistantMessageEvent", buildJsonObject {
+                    put("type", "thinking_delta")
+                    put("delta", "думаю")
+                })
+            })
+        }))
+
+        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().single()
+        assertEquals(null, answer.error)
+        assertEquals("RUNNING", answer.status)
+        assertEquals(false, answer.final)
+        assertTrue(answer.active)
+        assertEquals("думаю", answer.thinking)
+    }
+
+    @Test
+    fun compactionNoteFromOlderHistoryIsNotDuplicatedByLiveReplay() {
+        val task = Task(id = "compact", status = "RUNNING")
+        fun compaction(seq: Long) = TaskEvent(
+            taskId = task.id,
+            seq = seq,
+            type = "PI_EVENT",
+            data = buildJsonObject {
+                put("pi", buildJsonObject {
+                    put("type", "compaction_end")
+                    put("result", buildJsonObject { put("summary", "Краткая сводка прошлого контекста") })
+                })
+            },
+        )
+        val reducer = ChatReducer(task, seedInitial = false)
+
+        reducer.prependOlder(task, listOf(compaction(10)), reachedStart = false)
+        reducer.apply(compaction(20))
+
+        val notes = reducer.snapshot().items.filterIsInstance<ChatItem.Note>()
+        assertEquals(listOf("Контекст сжат:\nКраткая сводка прошлого контекста"), notes.map { it.text })
     }
 
     @Test

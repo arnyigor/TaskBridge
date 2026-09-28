@@ -63,7 +63,7 @@ class SessionList(
     private val api: TaskBridgeApi,
     private val scope: CoroutineScope,
     private val clockMillis: () -> Long,
-    private val activeIntervalMillis: Long = 3_000,
+    private val activeIntervalMillis: Long = 1_000,
     private val idleIntervalMillis: Long = 10_000,
 ) {
     private val _state = MutableStateFlow(SessionListState())
@@ -97,6 +97,7 @@ class SessionList(
     }
 
     fun refresh() {
+        infoTick = 0
         _state.update { it.copy(refreshing = true) }
         wake.trySend(Unit)
     }
@@ -125,7 +126,8 @@ class SessionList(
             hidden.update { ids -> ids.filterTo(mutableSetOf()) { id -> listed.any { it.id == id } } }
             val tasks = listed.filterNot { it.id in hidden.value }
             val projects = if (_state.value.projects.isEmpty() || infoTick % 10 == 0) api.projects() else _state.value.projects
-            val info = if (_state.value.info == null || infoTick % 5 == 0) api.info() else _state.value.info
+            val active = tasks.any { displayStateOf(it).active }
+            val info = if (_state.value.info == null || active || infoTick % 5 == 0) api.info() else _state.value.info
             infoTick += 1
             _state.update { it.copy(loading = false, refreshing = false, tasks = tasks, projects = projects, info = info, error = null, updatedAtMillis = clockMillis()) }
         } catch (cancel: CancellationException) {

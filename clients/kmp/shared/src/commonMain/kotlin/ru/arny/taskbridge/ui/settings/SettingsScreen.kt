@@ -1,9 +1,12 @@
 package ru.arny.taskbridge.ui.settings
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -30,21 +34,29 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.SUPPORTED_API_VERSIONS
 import ru.arny.taskbridge.core.api.McpServer
+import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ProviderStatus
+import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.ui.common.SectionTitle
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
+import kotlinx.coroutines.delay
 
 @Composable
 fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit) {
@@ -56,6 +68,13 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
     var enterSends by remember { mutableStateOf(graph.settings.enterSends) }
     var editMcpServer by remember { mutableStateOf<McpServer?>(null) }
     var addMcpServer by remember { mutableStateOf(false) }
+
+    LaunchedEffect(connection) {
+        while (true) {
+            connection.sessions.refresh()
+            delay(1_000)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -83,11 +102,53 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                         pi.supported -> "${pi.version} — поддерживается"
                         else -> "${pi.version} — не проверялся (${pi.supportedRange.orEmpty()})"
                     },
-                    warning = pi != null && !pi.supported,
+                    warning = pi?.version != null && !pi.supported,
                 )
                 InfoRow(label = "Модель занята", value = when (info?.modelBusy) { true -> "да"; false -> "нет"; null -> "нет данных" })
+                val engine = info?.engine
+                val metrics = engine?.metrics
+                if (engine != null || info?.local != null) {
+                    InfoRow(label = "Локальная модель", value = engine?.model ?: info?.local?.loaded?.firstOrNull() ?: "—")
+                    val speed = listOfNotNull(
+                        metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }?.let { "PP ${number(it)} ток/с" },
+                        metrics?.tg?.takeIf { it.isFinite() && it > 0.0 }?.let { "TG ${number(it)} ток/с" },
+                    ).joinToString(" · ")
+                    InfoRow(label = "Скорость сейчас", value = speed.ifBlank { metrics?.reason ?: "нет данных" })
+                    val context = when {
+                        metrics?.kvRatio != null -> "${(metrics.kvRatio * 100).toInt()}%" + (metrics.contextWindow ?: engine?.contextWindow)?.let { " из ${it / 1000}K" }.orEmpty() + metrics.nTokensMax?.takeIf { it > 0.0 }?.let { " · ${it.toLong()} ток." }.orEmpty()
+                        metrics?.nTokensMax?.takeIf { it > 0.0 } != null -> "${metrics.nTokensMax.toLong()} ток."
+                        else -> "нет данных"
+                    }
+                    InfoRow(label = "Контекст", value = context)
+                    val queue = listOfNotNull(
+                        metrics?.requestsProcessing?.takeIf { it > 0.0 }?.let { "читает/генерирует: ${it.toInt()}" },
+                        metrics?.requestsDeferred?.takeIf { it > 0.0 }?.let { "ждёт: ${it.toInt()}" },
+                    ).joinToString(" · ")
+                    if (queue.isNotBlank()) InfoRow(label = "Очередь llama.cpp", value = queue)
+                }
                 info?.scheduler?.let {
-                    InfoRow(label = "Параллельные сессии", value = "${it.activeTasks} из ${it.maxConcurrentSessions}; в очереди ${it.queuedTasks}")
+                    // «2 из 4» was read as "максимум 2": name every number instead
+                    // of leaving the operator to guess which one is the limit.
+                    InfoRow(label = "Параллельные сессии", value = "работают ${it.activeTasks} · максимум ${it.maxConcurrentSessions} · в очереди ${it.queuedTasks}")
+                    // A project without worktrees is one folder for all of its sessions;
+                    // the operator decides whether that folder is limited (queue.
+                    // maxSessionsPerDirectory). 0 means "no limit of its own".
+                    if (it.maxSessionsPerDirectory > 0) InfoRow(
+                        label = "Сессий на папку",
+                        value = "до ${it.maxSessionsPerDirectory}",
+                        warning = it.maxSessionsPerDirectory == 1,
+                    )
+                    // Why the queue does not drain is decided by the model and by the
+                    // working directory (one project without worktrees is one folder,
+                    // and only one session may write there): name both, so a wait
+                    // never looks like a stuck server. Counted from the list this
+                    // screen already polls.
+                    val waiting = state.tasks.filter { displayStateOf(it) == DisplayState.QUEUED }.mapNotNull { task -> task.queueReason }
+                    if (waiting.isNotEmpty()) InfoRow(label = "Причина ожидания", value = listOfNotNull(
+                        waiting.count { it == "WORKSPACE_BUSY" }.takeIf { it > 0 }?.let { "папка занята: $it" },
+                        waiting.count { it == "MODEL_BUSY" || it == "MODEL_LOADING" }.takeIf { it > 0 }?.let { "модель занята: $it" },
+                        waiting.count { it != "WORKSPACE_BUSY" && it != "MODEL_BUSY" && it != "MODEL_LOADING" }.takeIf { it > 0 }?.let { "лимит или очередь: $it" },
+                    ).joinToString(" · "))
                     if (it.providers.isNotEmpty()) InfoRow(
                         label = "Слоты провайдеров",
                         value = it.providers.entries.sortedBy { entry -> entry.key }.joinToString(" · ") { entry -> "${entry.key} ${entry.value.active}/${entry.value.limit}${if (entry.value.cooldownUntil != null) " (backoff)" else ""}" },
@@ -142,58 +203,18 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                 }
 
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                SectionTitle("MCP")
-                Text(
-                    "Режим применяется к новым сессиям. Уже запущенные агенты сохраняют набор инструментов до перезапуска сессии.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 16.dp),
+                McpSection(
+                    mcp = agentState.mcp,
+                    loading = agentState.mcpLoading,
+                    onMode = connection.settingsController::setMcpMode,
+                    onReload = connection.settingsController::loadMcp,
+                    onImport = connection.settingsController::importMcp,
+                    onProbe = { connection.settingsController.probeMcp() },
+                    onAdd = { addMcpServer = true },
+                    onEdit = { editMcpServer = it },
+                    onServerEnabled = { name, enabled -> connection.settingsController.setServer(name, enabled) },
+                    onToolEnabled = { name, tool, enabled -> connection.settingsController.setTool(name, tool, enabled) },
                 )
-                Row(
-                    Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    for ((mode, label) in listOf("inherit" to "Из Pi", "managed" to "Управляемый", "off" to "Выключен")) {
-                        FilterChip(
-                            selected = agentState.mcp?.mode == mode,
-                            enabled = !agentState.mcpLoading,
-                            onClick = { connection.settingsController.setMcpMode(mode) },
-                            label = { Text(label) },
-                        )
-                    }
-                    if (agentState.mcpLoading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                }
-                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = connection.settingsController::loadMcp, enabled = !agentState.mcpLoading) {
-                        Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Обновить")
-                    }
-                    OutlinedButton(onClick = connection.settingsController::importMcp, enabled = !agentState.mcpLoading) {
-                        Text("Импортировать из Pi")
-                    }
-                    OutlinedButton(onClick = { connection.settingsController.probeMcp() }, enabled = !agentState.mcpLoading) {
-                        Text("Проверить")
-                    }
-                }
-                if (agentState.mcp?.mode == "managed") {
-                    TextButton(onClick = { addMcpServer = true }, enabled = !agentState.mcpLoading, modifier = Modifier.padding(horizontal = 16.dp)) { Text("Добавить MCP-сервер") }
-                }
-                agentState.mcp?.configPath?.let { InfoRow("Конфигурация", it) }
-                agentState.mcp?.collisions.orEmpty().forEach { collision ->
-                    InfoRow("Конфликт tool", "${collision.tool}: ${collision.servers.joinToString()}", warning = true)
-                }
-                agentState.mcp?.servers.orEmpty().forEach { server ->
-                    McpServerCard(
-                        server = server,
-                        editable = agentState.mcp?.mode == "managed" && !agentState.mcpLoading,
-                        onServerEnabled = { enabled -> connection.settingsController.setServer(server.name, enabled) },
-                        onToolEnabled = { tool, enabled -> connection.settingsController.setTool(server.name, tool, enabled) },
-                        onEdit = { editMcpServer = server },
-                        onProbe = { connection.settingsController.probeMcp(server.name) },
-                    )
-                }
                 agentState.error?.let { error ->
                     Row(Modifier.fillMaxWidth().padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Text(error, color = MaterialTheme.colorScheme.error, modifier = Modifier.weight(1f))
@@ -314,6 +335,77 @@ private fun number(value: Double?): String = value?.let {
 } ?: "—"
 
 @Composable
+internal fun McpSection(
+    mcp: McpStatus?,
+    loading: Boolean,
+    onMode: (String) -> Unit,
+    onReload: () -> Unit,
+    onImport: () -> Unit,
+    onProbe: () -> Unit,
+    onAdd: () -> Unit,
+    onEdit: (McpServer) -> Unit,
+    onServerEnabled: (String, Boolean) -> Unit,
+    onToolEnabled: (String, String, Boolean) -> Unit,
+) {
+    SectionTitle("MCP")
+    Text(
+        "Режим применяется к новым сессиям. Уже запущенные агенты сохраняют набор инструментов до перезапуска сессии.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    )
+    // Three buttons never fit one phone-width row: a plain Row squeezes the last
+    // one to zero width, its label wraps per character and the row grows by ~160dp.
+    FlowRow(
+        Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        for ((mode, label) in listOf("inherit" to "Из Pi", "managed" to "Управляемый", "off" to "Выключен")) {
+            FilterChip(
+                selected = mcp?.mode == mode,
+                enabled = !loading,
+                onClick = { onMode(mode) },
+                label = { Text(label) },
+            )
+        }
+        if (loading) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+    }
+    FlowRow(
+        Modifier.padding(horizontal = 16.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedButton(onClick = onReload, enabled = !loading) {
+            Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Обновить")
+        }
+        OutlinedButton(onClick = onImport, enabled = !loading) { Text("Импортировать из Pi") }
+        OutlinedButton(onClick = onProbe, enabled = !loading) { Text("Проверить") }
+    }
+    if (mcp?.mode == "managed") {
+        // 4dp + the button's own 12dp content padding keeps the label on the 16dp grid.
+        TextButton(onClick = onAdd, enabled = !loading, modifier = Modifier.padding(horizontal = 4.dp)) { Text("Добавить MCP-сервер") }
+    }
+    mcp?.configPath?.let { InfoRow("Конфигурация", it) }
+    mcp?.collisions.orEmpty().forEach { collision ->
+        InfoRow("Конфликт tool", "${collision.tool}: ${collision.servers.joinToString()}", warning = true)
+    }
+    mcp?.servers.orEmpty().forEach { server ->
+        McpServerCard(
+            server = server,
+            editable = mcp?.mode == "managed" && !loading,
+            onServerEnabled = { enabled -> onServerEnabled(server.name, enabled) },
+            onToolEnabled = { tool, enabled -> onToolEnabled(server.name, tool, enabled) },
+            onEdit = { onEdit(server) },
+            onProbe = { onProbe() },
+        )
+    }
+}
+
+@Composable
 private fun McpServerCard(
     server: McpServer,
     editable: Boolean,
@@ -322,37 +414,68 @@ private fun McpServerCard(
     onEdit: () -> Unit,
     onProbe: () -> Unit,
 ) {
+    // Compose-owned UI state: per-card reveal, like LazyListState. Erroring servers stay expanded.
+    val startExpanded = !server.disabled && server.health?.state == "error"
+    var expanded by rememberSaveable(server.name) { mutableStateOf(startExpanded) }
+    val toolsOff = server.tools.count { it.name in server.excludeTools } +
+        if (server.disabled) server.tools.size else 0
+    val summary = listOfNotNull(server.transport, "${server.tools.size} инстр.", toolsOff.takeIf { it > 0 }?.let { "$it выкл" }).joinToString(" · ")
     Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(server.name, style = MaterialTheme.typography.titleSmall)
-                Text(server.transport ?: "неизвестный transport", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // Collapsed by default: a thumb hits the header row, details reveal on tap.
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(8.dp).background(healthColor(server), CircleShape))
+            Spacer(Modifier.width(10.dp))
+            Column(
+                Modifier.weight(1f).clickable { expanded = !expanded },
+            ) {
+                Text(server.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            IconButton(onClick = { expanded = !expanded }) {
+                Icon(if (expanded) AppIcons.ChevronUp else AppIcons.ChevronDown, if (expanded) "Свернуть" else "Развернуть")
             }
             Switch(checked = !server.disabled, enabled = editable, onCheckedChange = onServerEnabled)
         }
-        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onProbe) { Text("Диагностика") }
-            if (editable) TextButton(onClick = onEdit) { Text("Изменить") }
-        }
-        server.health?.let { health ->
-            val suffix = listOfNotNull(health.latencyMs?.let { "${it} мс" }, health.statusCode?.let { "HTTP $it" }, health.error).joinToString(" · ")
-            Text("${health.state}${suffix.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}", style = MaterialTheme.typography.bodySmall, color = if (health.state == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-        }
-        if (server.auth != null && server.auth != "none") Text("Auth: ${server.auth}${server.scopes.takeIf { it.isNotEmpty() }?.joinToString(prefix = " · scopes: ").orEmpty()}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))
-        server.tools.forEach { tool ->
-            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(tool.name, style = MaterialTheme.typography.bodyMedium)
-                    if (tool.description.isNotBlank()) Text(tool.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (expanded) {
+            server.health?.let { health ->
+                val suffix = listOfNotNull(health.latencyMs?.let { "${it} мс" }, health.statusCode?.let { "HTTP $it" }, health.error).joinToString(" · ")
+                Text("${health.state}${suffix.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}", style = MaterialTheme.typography.bodySmall, color = if (health.state == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+            }
+            (server.url ?: server.command)?.let { endpoint ->
+                Text(endpoint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+            }
+            if (server.auth != null && server.auth != "none") Text("Auth: ${server.auth}${server.scopes.takeIf { it.isNotEmpty() }?.joinToString(prefix = " · scopes: ").orEmpty()}", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+            Row(Modifier.padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+                TextButton(onClick = onProbe) { Text("Диагностика") }
+                if (editable) TextButton(onClick = onEdit) { Text("Изменить") }
+            }
+            HorizontalDivider(Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+            server.tools.forEach { tool ->
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(tool.name, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        if (tool.description.isNotBlank()) Text(tool.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Switch(
+                        checked = tool.name !in server.excludeTools,
+                        enabled = editable && !server.disabled,
+                        onCheckedChange = { onToolEnabled(tool.name, it) },
+                    )
                 }
-                Switch(
-                    checked = tool.name !in server.excludeTools,
-                    enabled = editable && !server.disabled,
-                    onCheckedChange = { onToolEnabled(tool.name, it) },
-                )
             }
         }
     }
+}
+
+@Composable
+private fun healthColor(server: McpServer): Color = when {
+    server.disabled -> LocalStatusColors.current.muted
+    server.health?.state == "error" -> LocalStatusColors.current.failed
+    server.health != null -> LocalStatusColors.current.done
+    else -> LocalStatusColors.current.muted
 }
 
 @Composable

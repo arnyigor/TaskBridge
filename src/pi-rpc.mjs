@@ -291,6 +291,11 @@ export class PiRpcSession extends EventEmitter {
     return response.data?.levels || [];
   }
 
+  async getCommands() {
+    const response = await this.request({ type: 'get_commands' }, 30000);
+    return response.data?.commands || [];
+  }
+
   async abort(timeoutMs = 10000) {
     await this.request({ type: 'clear_queue' }, 5000).catch(() => null);
     return this.request({ type: 'abort' }, timeoutMs);

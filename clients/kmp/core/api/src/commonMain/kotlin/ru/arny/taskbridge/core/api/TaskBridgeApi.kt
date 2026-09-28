@@ -125,6 +125,9 @@ class TaskBridgeApi(
 
     suspend fun projects(): List<Project> = get("/api/projects", ListSerializer(Project.serializer()))
 
+    suspend fun quickActions(taskId: String? = null): List<QuickAction> =
+        get("/api/quick-actions" + (taskId?.let { "?taskId=${it.encodeURLParameter()}" } ?: ""), ListSerializer(QuickAction.serializer()))
+
     suspend fun projectFolders(path: String? = null): ProjectFolderListing =
         get("/api/project-browser" + (path?.let { "?path=${it.encodeURLParameter()}" } ?: ""), ProjectFolderListing.serializer())
 

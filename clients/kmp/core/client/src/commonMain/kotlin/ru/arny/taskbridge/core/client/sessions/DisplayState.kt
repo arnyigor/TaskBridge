@@ -50,6 +50,7 @@ fun activityOf(task: Task): String? {
         state == DisplayState.QUEUED -> when (task.queueReason) {
             "MODEL_BUSY" -> "Ждёт освобождения модели"
             "MODEL_LOADING" -> "Ждёт загрузки модели"
+            "WORKSPACE_BUSY" -> "Ждёт освобождения рабочей папки"
             "BUSY" -> "Ждёт, пока закончится другая сессия"
             "RESTORED" -> "В очереди после перезапуска"
             else -> task.current ?: "В очереди"
