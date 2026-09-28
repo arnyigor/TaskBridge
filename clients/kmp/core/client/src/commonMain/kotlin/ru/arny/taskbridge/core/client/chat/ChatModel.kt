@@ -7,6 +7,8 @@ data class ChatSnapshot(
     val items: List<ChatItem> = emptyList(),
     val cursor: Long = 0,
     val version: Long = 0,
+    /** Session-level MCP notice moved out of the message timeline. */
+    val mcpNotice: String? = null,
     /** The id of the newest answer: only it may be regenerated, continued or edited. */
     val newestAnswerId: String? = null,
 )

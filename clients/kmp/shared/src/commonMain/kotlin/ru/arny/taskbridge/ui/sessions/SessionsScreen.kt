@@ -111,6 +111,7 @@ fun SessionsScreen(
     // Relative times ("5 мин") move on their own.
     var now by remember { mutableLongStateOf(graph.nowMillis()) }
     val groups = state.groups(query)
+    val activeTasks = state.sorted.filter { displayStateOf(it).active }
     val visibleTasks = groups.flatMap { it.sessions }
     val visibleIds = visibleTasks.mapTo(mutableSetOf()) { it.id }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = graph.nowMillis() } }
@@ -228,6 +229,7 @@ fun SessionsScreen(
                     )
                     else -> SessionList(
                         groups = groups,
+                        activeTasks = activeTasks,
                         searching = query.isNotBlank(),
                         selectedTaskId = selectedTaskId,
                         now = now,
@@ -425,6 +427,7 @@ internal fun piVersionBanner(pi: PiInfo?): String? {
 @Composable
 private fun SessionList(
     groups: List<SessionGroup>,
+    activeTasks: List<Task>,
     searching: Boolean,
     selectedTaskId: String?,
     now: Long,
@@ -447,6 +450,19 @@ private fun SessionList(
         toggled[group.projectId] ?: graph.settings.folderExpanded(group.projectId)
             ?: (groups.size == 1 || group.sessions.any { it.id == selectedTaskId || displayStateOf(it).active })
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
+        if (!selecting && activeTasks.isNotEmpty()) {
+            item(key = "active-sessions-header") {
+                ActiveSessionsHeader(activeTasks.size)
+            }
+            items(activeTasks, key = { "active:${it.id}" }) { task ->
+                ActiveSessionRow(
+                    task = task,
+                    selected = task.id == selectedTaskId,
+                    onClick = { onOpen(task.id) },
+                )
+            }
+            item(key = "active-sessions-gap") { Spacer(Modifier.height(6.dp)) }
+        }
         for (group in groups) {
             val open = searching || expanded(group)
             stickyHeader(key = "header:${group.projectId}") {
@@ -478,6 +494,56 @@ private fun SessionList(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ActiveSessionsHeader(count: Int) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(AppIcons.Spark, null, modifier = Modifier.size(16.dp), tint = LocalStatusColors.current.working)
+        Spacer(Modifier.width(8.dp))
+        Text("Активные сессии", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.weight(1f))
+        Text("$count", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+@Composable
+private fun ActiveSessionRow(task: Task, selected: Boolean, onClick: () -> Unit) {
+    val state = displayStateOf(task)
+    val accent = MaterialTheme.colorScheme.primary
+    val background = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 2.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(background)
+            .drawBehind { if (selected) drawRect(accent, size = Size(3.dp.toPx(), size.height)) }
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        StatusDot(state)
+        Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(
+                task.displayTitle,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = if (selected) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            activityOf(task)?.takeIf { it.isNotBlank() }?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+        Spacer(Modifier.width(8.dp))
+        StatusPill(state)
     }
 }
 

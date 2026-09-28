@@ -30,6 +30,7 @@ private val PRIVATE_PART = Regex("^(?:\\.git|\\.pi|\\.ssh|\\.aws|\\.codex|node_m
 private val SECRET_PART = Regex("^(?:\\.env(?:\\..*)?|secret(?:s)?(?:\\..*)?|credentials(?:\\..*)?|config\\.json|server-auth\\.json|auth\\.json)$", RegexOption.IGNORE_CASE)
 private val SECRET_EXT = Regex("\\.(?:pem|key|p12|pfx|jks|keystore)$", RegexOption.IGNORE_CASE)
 private val ABORT = Regex("abort", RegexOption.IGNORE_CASE)
+private val MCP_SERVERS_CONNECTED_NOTICE = Regex("^MCP:\\s*servers connected\\b", RegexOption.IGNORE_CASE)
 
 /** Mirrors isPrivatePath in src/files.mjs: such paths are never offered as viewable files. */
 fun isPrivateFilePath(value: String?): Boolean =
@@ -112,6 +113,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
      * identifies which accepted prompt the following assistant frame belongs to. */
     private val piUsersSeen = mutableSetOf<String>()
     private var piUserTurn: Turn? = null
+    private var mcpNotice: String? = null
 
     /** Bumped on every change, so the UI can tell snapshots apart cheaply. */
     var version: Long = 0
@@ -167,6 +169,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             true
         }
         turns.addAll(0, visibleOlder)
+        if (mcpNotice == null) mcpNotice = scratch.mcpNotice
         for ((id, tool) in scratch.tools) tools.getOrPut(id) { tool }
         for ((key, entry) in scratch.variants) variants.getOrPut(key) { entry }
         version++
@@ -404,7 +407,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             // Output of a slash extension command (/nudge status, ...): Pi runs it
             // locally and delivers the answer as a notify UI request — shown as a
             // note row, otherwise the command would execute silently.
-            "UI_NOTIFY" -> addNote(event, event.message.orEmpty())
+            "UI_NOTIFY" -> onUiNotify(event)
         }
         val frame = event.piFrame ?: return true
         applyFrame(event, frame)
@@ -578,6 +581,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
     }
 
+    private fun onUiNotify(event: TaskEvent) {
+        val text = event.message.orEmpty()
+        if (MCP_SERVERS_CONNECTED_NOTICE.containsMatchIn(text)) {
+            mcpNotice = text
+            return
+        }
+        addNote(event, text)
+    }
+
     private fun addNote(event: TaskEvent, text: String) {
         if (!notes.add(event.seq)) return
         if (text in noteTexts || turns.any { it.role == Role.NOTE && it.text == text }) return
@@ -700,7 +712,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         // The newest exchange is the one regenerate/continue/edit-answer accept.
         // A partial turn has no id the server knows, so it is never that one.
         val newestAnswerId = items.lastOrNull { it is ChatItem.Assistant && !it.id.startsWith("assistant-pending-") }?.id?.takeUnless { it.startsWith("assistant-partial-") }
-        return ChatSnapshot(items = items, cursor = cursor, version = version, newestAnswerId = newestAnswerId)
+        return ChatSnapshot(items = items, cursor = cursor, version = version, mcpNotice = mcpNotice, newestAnswerId = newestAnswerId)
     }
 }
 

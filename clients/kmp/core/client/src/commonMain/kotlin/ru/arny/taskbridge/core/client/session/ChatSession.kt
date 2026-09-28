@@ -17,6 +17,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.Approval
@@ -178,7 +180,7 @@ class ChatSession(
                 oldestSeq = window.events.firstOrNull()?.seq
                 _state.update { it.copy(task = task, chat = chat.snapshot(), loading = false, reachedStart = window.reachedStart) }
                 cachedEvents.clear()
-                cachedEvents.addAll(window.events)
+                cachedEvents.addAll(window.events.map(::lightenEvent))
             }
             persistCache()
             fillEmptyWindow()
@@ -207,7 +209,7 @@ class ChatSession(
                     val task = _state.value.task ?: return@withLock
                     if (window.events.isNotEmpty() || window.reachedStart) chat.prependOlder(task, window.events, window.reachedStart)
                     if (window.events.isNotEmpty()) {
-                        cachedEvents.addAll(0, window.events)
+                        cachedEvents.addAll(0, window.events.map(::lightenEvent))
                         trimCachedEvents()
                     }
                     oldestSeq = window.events.firstOrNull()?.seq ?: oldestSeq
@@ -288,7 +290,7 @@ class ChatSession(
                 event.string("commandId")?.let { id -> _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == id }) } }
             }
             if (cachedEvents.none { it.seq == event.seq }) {
-                cachedEvents += event
+                cachedEvents += lightenEvent(event)
                 trimCachedEvents()
             }
             val kind = event.piFrame?.get("type")?.toString()?.trim('"') ?: event.type
@@ -665,3 +667,42 @@ fun describe(error: ApiError): String = when (error) {
     is ApiError.AuthRequired -> "Нужно заново подключить устройство (код с компьютера)."
     else -> error.message
 }
+
+/**
+ * A saved event a client actually reads is a fraction of what Pi sends. A frame
+ * carries tool arguments and results — file contents, whole command output,
+ * base64 image data — that no client code needs: the reducer builds the
+ * transcript from text deltas, the final assistant message and tool
+ * names/arguments, and it never looks at the four payloads dropped here. Keeping
+ * them filled the phone's heap until adding a file ended with OutOfMemoryError
+ * and Android force-finishing the activity (2026-09-28, 253 MB of 256 MB).
+ */
+internal fun lightenEvent(event: TaskEvent): TaskEvent {
+    val frame = event.piFrame ?: return event
+    val type = frame.str("type") ?: return event
+    val tool = frame.str("toolName")
+    val light: JsonObject = when (type) {
+        // The whole turn again, message by message: the reducer ignores agent_end.
+        "agent_end" -> JsonObject(frame - "messages")
+        // Only a trigger to close the previous answer's delivery line.
+        "turn_end" -> JsonObject(frame - "message")
+        // A tool result is echoed as a message of its own, content and all.
+        "message_start", "message_end" ->
+            if (frame.obj("message")?.str("role") == "toolResult") JsonObject(frame - "message") else return event
+        // Read only for the subagent progress line; other results are megabytes.
+        "tool_execution_end" -> if (tool == "subagent") return event else JsonObject(frame - "result")
+        "tool_execution_update" -> if (tool == "subagent") return event else JsonObject(frame - "partialResult")
+        // `write` puts the whole file into args.content; only the label is used.
+        "tool_execution_start" -> {
+            val args = frame.obj("args") ?: return event
+            if ("content" !in args) return event
+            JsonObject(frame + ("args" to JsonObject(args - "content")))
+        }
+        else -> return event
+    }
+    return event.copy(data = JsonObject(event.data + ("pi" to light)))
+}
+
+private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+
+private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject

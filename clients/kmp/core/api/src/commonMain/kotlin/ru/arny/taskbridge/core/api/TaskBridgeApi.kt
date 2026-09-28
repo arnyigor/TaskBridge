@@ -20,7 +20,9 @@ import io.ktor.http.content.TextContent
 import io.ktor.http.encodeURLParameter
 import io.ktor.http.encodeURLPathPart
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.readUTF8Line
+import kotlinx.io.readByteArray
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -441,12 +443,27 @@ class TaskBridgeApi(
 
     private suspend fun <T> decode(response: HttpResponse, serializer: KSerializer<T>): T {
         if (!response.status.isSuccess()) throw ApiException(apiErrorOf(response.status.value, response.bodyAsText()))
-        val text = response.bodyAsText()
+        val text = readTextBody(response)
         return try {
             TaskBridgeJson.decodeFromString(serializer, text)
         } catch (error: Exception) {
             throw ApiException(ApiError.Other(response.status.value, "DECODE", "Неожиданный ответ сервера: ${error.message}"))
         }
+    }
+
+    /**
+     * The body of every JSON answer is materialised as one String, so an unexpectedly
+     * large one is a crash, not an error: on the phone a chat window full of image data
+     * ended with OutOfMemoryError and Android force-finishing the activity (2026-09-28).
+     * The limit is far above anything the server sends on purpose (tool output is capped
+     * at 4 MB there) and only rejects what would otherwise take the process down.
+     */
+    private suspend fun readTextBody(response: HttpResponse): String {
+        val bytes = response.bodyAsChannel().readRemaining(MAX_BODY_BYTES + 1).readByteArray()
+        if (bytes.size > MAX_BODY_BYTES) {
+            throw ApiException(ApiError.Other(response.status.value, "RESPONSE_TOO_LARGE", "Ответ сервера слишком большой (${bytes.size / 1_048_576} МБ) — откройте сессию заново."))
+        }
+        return bytes.decodeToString()
     }
 
     private suspend fun guard(block: suspend () -> HttpResponse): HttpResponse = try {
@@ -473,6 +490,9 @@ class TaskBridgeApi(
 
     companion object {
         const val SESSION_COOKIE = "taskbridge_session"
+
+        /** Ceiling for a JSON body read into one String (see [readTextBody]). */
+        const val MAX_BODY_BYTES = 16L * 1024L * 1024L
 
         /** The value of `taskbridge_session` from one Set-Cookie header, or null. */
         fun parseSessionCookie(setCookie: String): String? {

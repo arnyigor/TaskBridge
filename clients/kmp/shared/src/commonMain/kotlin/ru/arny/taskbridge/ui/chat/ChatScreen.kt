@@ -989,6 +989,10 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         task?.current?.takeIf { it.isNotBlank() }?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
         }
+        state.chat.mcpNotice?.takeIf { it.isNotBlank() }?.let { notice ->
+            FieldLabel("MCP", top = 16)
+            Text(notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         FieldLabel("Модель", top = 16)
         ModelPicker(catalog, task?.model, graph.settings, onPick = { session.setModel(it) })
         Text(

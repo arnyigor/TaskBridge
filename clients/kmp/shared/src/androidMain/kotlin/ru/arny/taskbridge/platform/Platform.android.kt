@@ -53,6 +53,7 @@ import javax.crypto.spec.GCMParameterSpec
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 class SharedPreferencesStore(context: Context) : KeyValueStore {
@@ -121,10 +122,19 @@ private class AndroidChatPersistence(root: File, serverUrl: String) : ChatPersis
         runCatching { TaskBridgeJson.decodeFromString(serializer, file.readText()) }.getOrNull()
     }
     private suspend fun write(file: File, text: String) = withContext(Dispatchers.IO) {
-        file.parentFile?.mkdirs(); val temp = File(file.parentFile, file.name + ".tmp")
+        file.parentFile?.mkdirs()
+        // One temp name per write: a shared ".tmp" was moved away by the first of
+        // two concurrent writers (the chat cache is persisted from several
+        // coroutines), and the loser's ATOMIC_MOVE threw NoSuchFileException out
+        // of a supervisor-launched coroutine — the process died (seen on the
+        // phone: chat-cache/e986173276e4.chat.json.tmp, 2026-09-28 14:14).
+        val temp = File(file.parentFile, file.name + "." + UUID.randomUUID() + ".tmp")
         temp.writeText(text)
         runCatching { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE) }
-            .getOrElse { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+            .getOrElse {
+                runCatching { Files.move(temp.toPath(), file.toPath(), StandardCopyOption.REPLACE_EXISTING) }
+                    .onFailure { temp.delete() }
+            }
         Unit
     }
 }
