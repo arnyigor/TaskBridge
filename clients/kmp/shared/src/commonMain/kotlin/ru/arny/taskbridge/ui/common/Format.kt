@@ -39,7 +39,10 @@ fun formatBytes(bytes: Long?): String = when {
     bytes == null -> ""
     bytes < 1024 -> "$bytes Б"
     bytes < 1024 * 1024 -> "${bytes / 1024} КБ"
-    else -> "${(bytes * 10 / (1024 * 1024)) / 10.0} МБ"
+    // ГБ нужен для RAM машины (/api/info.system.ram — байты): без него 64 ГБ
+    // печатались как «64 000.0 МБ».
+    bytes < 1024L * 1024 * 1024 -> "${(bytes * 10 / (1024 * 1024)) / 10.0} МБ"
+    else -> "${(bytes * 10 / (1024L * 1024 * 1024)) / 10.0} ГБ"
 }
 
 /** Where a message came from, from its client id: android-…, desktop-…, the web UI, the CLI. */

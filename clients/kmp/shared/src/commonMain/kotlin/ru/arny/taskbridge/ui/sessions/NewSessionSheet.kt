@@ -94,8 +94,11 @@ fun NewSessionSheet(
     LaunchedEffect(Unit) {
         connection.sessions.models().onSuccess { loaded ->
             catalog = loaded
-            model = loaded.defaultModel?.let { default -> loaded.models.firstOrNull { it.id == default.id && (default.provider == null || it.provider == default.provider) } ?: default }
-            thinking = loaded.defaultThinkingLevel
+            val chosen = loaded.defaultModel?.let { default -> loaded.models.firstOrNull { it.id == default.id && (default.provider == null || it.provider == default.provider) } ?: default }
+            model = chosen
+            // Уровень по умолчанию мог быть сохранён для другой модели, а карта у
+            // каждой своя (Strata не принимает «minimal»/«max»).
+            thinking = clampThinkingLevel(loaded.defaultThinkingLevel, thinkingChoices(chosen, loaded.thinkingLevels))
         }
     }
 
@@ -171,11 +174,13 @@ fun NewSessionSheet(
         }
 
         FieldLabel("Модель", top = 16)
-        ModelPicker(catalog, model, graph.settings, onPick = { model = it })
-        val levels = catalog?.thinkingLevels.orEmpty()
+        ModelPicker(catalog, model, graph.settings, onPick = { model = it; thinking = clampThinkingLevel(thinking, thinkingChoices(it, catalog?.thinkingLevels.orEmpty())) })
+        // Уровни — из карты выбранной модели: у локальных (Strata) набор другой,
+        // чем у модели Pi по умолчанию, и «Глубоко» там означает xhigh.
+        val levels = thinkingChoices(model, catalog?.thinkingLevels.orEmpty())
         if (levels.isNotEmpty() && model?.reasoning != false) {
             FieldLabel("Размышления", top = 16)
-            ThinkingPicker(levels, thinking, onPick = { thinking = it })
+            ThinkingPicker(levels, thinking, model = model, onPick = { thinking = it })
         }
 
         Spacer(Modifier.height(16.dp))
@@ -299,6 +304,27 @@ fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettin
     if (open && catalog != null) ModelChooser(catalog, selected, settings, onPick = { open = false; onPick(it) }, onDismiss = { open = false })
 }
 
+/** Заголовок общей группы локальных моделей в пикере: пресеты llama.cpp-роутера и
+ * настроенные внешние серверы (Strata) — одна машина, хотя Pi-провайдеры у них разные. */
+private const val LOCAL_MODELS_GROUP = "Локальные модели"
+private const val FAVORITES_GROUP = "★ Избранное"
+
+/**
+ * Группы пикера моделей: избранное → локальные модели одной группой (по флагу
+ * `local`, а не по имени провайдера: llama.cpp-роутер и внешние серверы вроде
+ * Strata имеют разные Pi-провайдеры) → остальные провайдеры по алфавиту.
+ * Избранное фиксируется на момент открытия списка ([pinnedFirst]), чтобы новая
+ * звезда не вставляла строки под пальцем.
+ */
+internal fun modelGroups(models: List<ModelRef>, pinnedFirst: Set<String>): List<Pair<String, List<ModelRef>>> {
+    val starred = models.filter { it.key in pinnedFirst }
+    val rest = models.filterNot { it.key in pinnedFirst }
+        .groupBy { if (it.local) LOCAL_MODELS_GROUP else it.provider ?: "—" }
+        .toList()
+        .sortedWith(compareBy({ it.first != LOCAL_MODELS_GROUP }, { it.first.lowercase() }))
+    return (if (starred.isNotEmpty()) listOf(FAVORITES_GROUP to starred) else emptyList()) + rest
+}
+
 @Composable
 fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit, pendingKey: String? = null) {
     var query by remember { mutableStateOf("") }
@@ -314,11 +340,7 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
     val filteredModels = remember(searchIndex, words) {
         if (words.isEmpty()) catalog.models else searchIndex.filter { (_, text) -> words.all(text::contains) }.map { it.first }
     }
-    val groups = remember(filteredModels, pinnedFirst) {
-        val starred = filteredModels.filter { it.key in pinnedFirst }
-        (if (starred.isNotEmpty()) listOf("★ Избранное" to starred) else emptyList()) +
-            filteredModels.filterNot { it.key in pinnedFirst }.groupBy { it.provider ?: "—" }.toList().sortedBy { it.first.lowercase() }
-    }
+    val groups = remember(filteredModels, pinnedFirst) { modelGroups(filteredModels, pinnedFirst) }
     fun toggle(key: String) {
         favorites = if (key in favorites) favorites - key else favorites + key
         settings.favoriteModels = favorites
@@ -389,6 +411,9 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
                         Column(Modifier.weight(1f)) {
                             Text(model.id ?: model.label, style = MaterialTheme.typography.bodyLarge, color = if (current) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                             val details = listOfNotNull(
+                                // В общей локальной группе заголовок больше не называет
+                                // движок, поэтому провайдер виден в самой строке.
+                                model.provider?.takeIf { model.local && it.isNotBlank() },
                                 model.name?.takeIf { it != model.id },
                                 model.contextWindow?.let { "контекст ${it / 1000}K" },
                                 "думает".takeIf { model.reasoning == true },
@@ -418,10 +443,50 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
 
 /** Pi's thinking levels as chips that wrap, so none hides behind a scroll on a wide window. */
 @Composable
-fun ThinkingPicker(levels: List<String>, current: String?, onPick: (String) -> Unit) {
+fun ThinkingPicker(levels: List<String>, current: String?, model: ModelRef? = null, onPick: (String) -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        for (level in levels) FilterChip(selected = current == level, onClick = { onPick(level) }, label = { Text(thinkingLabel(level)) })
+        for (level in levels) {
+            FilterChip(selected = current == level, onClick = { onPick(level) }, label = { Text(thinkingOptionLabel(model, level)) })
+        }
     }
+}
+
+/**
+ * Уровни для пикера: карта выбранной модели, а не общий список каталога (тот
+ * относится к текущей модели Pi по умолчанию и для локальных моделей неверен).
+ * Пустая карта (модель ещё не выбрана, или её нет в каталоге) — откат на общий
+ * список, чтобы пикер не остался пустым.
+ */
+internal fun thinkingChoices(model: ModelRef?, catalogLevels: List<String>): List<String> {
+    val own = model?.thinkingLevels.orEmpty()
+    return if (own.isNotEmpty()) own else catalogLevels
+}
+
+/**
+ * Подпись уровня вместе с его значением у провайдера: «Глубоко → xhigh». Значение
+ * показывается только там, где оно отличается от самого уровня и не является его
+ * отсутствием (off → none читалось бы как лишний шум).
+ */
+internal fun thinkingOptionLabel(model: ModelRef?, level: String): String {
+    val label = thinkingLabel(level)
+    val mapped = model?.thinkingMap?.get(level)
+    if (mapped.isNullOrBlank() || mapped == level || level == "off") return label
+    return "$label → $mapped"
+}
+
+/**
+ * Ближайший уровень, который примет модель, — по правилу самого Pi
+ * (clampThinkingLevel): вверх от запрошенного, потом вниз. Нужен при смене
+ * модели в форме новой сессии: выбранный ранее «Минимум» у Strata невалиден.
+ */
+internal fun clampThinkingLevel(level: String?, levels: List<String>): String? {
+    if (level == null || levels.isEmpty() || level in levels) return level
+    val order = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+    val requested = order.indexOf(level)
+    if (requested < 0) return levels.first()
+    for (index in requested until order.size) if (order[index] in levels) return order[index]
+    for (index in requested - 1 downTo 0) if (order[index] in levels) return order[index]
+    return levels.first()
 }
 
 fun thinkingLabel(level: String): String = when (level) {
@@ -431,5 +496,6 @@ fun thinkingLabel(level: String): String = when (level) {
     "medium" -> "Средне"
     "high" -> "Глубоко"
     "xhigh" -> "Максимум"
+    "max" -> "Предел"
     else -> level
 }

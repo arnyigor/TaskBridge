@@ -23,6 +23,12 @@ class FixtureParsingTest {
         assertEquals(true, info.pi?.supported)
         assertIs<Compatibility.Ok>(compatibilityOf(info))
         assertTrue(info.fileLimits!!.uploadFileBytes > 0)
+        // Машинная нагрузка: RAM приходит в байтах (os.totalmem), GPU — в МБ и
+        // может быть null (нет nvidia-smi). Раньше эти поля игнорировались.
+        val system = assertNotNull(info.system)
+        assertEquals(4, system.cpu?.cores)
+        assertTrue(system.ram!!.total!! > 0)
+        assertEquals(null, system.gpu, "в фикстуре нет GPU — поле обязано быть nullable")
     }
 
     @Test
@@ -102,6 +108,23 @@ class FixtureParsingTest {
         assertEquals(3100, latency.lastMs)
         assertEquals(2900, latency.samples.first().ttftMs)
         assertEquals(null, latency.samples.last().at)
+    }
+
+    // `local` is the server's grouping fact (llama.cpp presets and configured
+    // external servers are one machine): the picker puts such models under one
+    // heading, so the client must read the flag and not guess it from a name.
+    @Test
+    fun localModelFlagParses() {
+        val catalog = TaskBridgeJson.decodeFromString(
+            ModelCatalog.serializer(),
+            """
+            {"models":[{"provider":"llama.cpp","id":"qwen","local":true},
+              {"provider":"strata-iq3","id":"iq3","local":true},
+              {"provider":"openrouter","id":"glm"}]}
+            """.trimIndent(),
+        )
+        assertEquals(listOf(true, true, false), catalog.models.map { it.local })
+        assertEquals("strata-iq3/iq3", catalog.models[1].key)
     }
 
     @Test

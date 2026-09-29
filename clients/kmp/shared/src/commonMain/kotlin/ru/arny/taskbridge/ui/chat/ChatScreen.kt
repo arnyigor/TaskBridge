@@ -114,6 +114,7 @@ import ru.arny.taskbridge.ui.sessions.latencyFor
 import ru.arny.taskbridge.ui.sessions.modelLatencyLabel
 import ru.arny.taskbridge.ui.sessions.ModelChooser
 import ru.arny.taskbridge.ui.sessions.ThinkingPicker
+import ru.arny.taskbridge.ui.sessions.thinkingChoices
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -1002,10 +1003,10 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 6.dp),
         )
-        val levels = catalog?.thinkingLevels.orEmpty()
+        val levels = thinkingChoices(task?.model, catalog?.thinkingLevels.orEmpty())
         if (levels.isNotEmpty() && task?.model?.reasoning != false) {
             FieldLabel("Размышления", top = 20)
-            ThinkingPicker(levels, task?.thinkingLevelActual ?: task?.thinkingLevel, onPick = { session.setThinking(it) })
+            ThinkingPicker(levels, task?.thinkingLevelActual ?: task?.thinkingLevel, model = task?.model, onPick = { session.setThinking(it) })
         }
         FieldLabel("Контекст", top = 20)
         Row(verticalAlignment = Alignment.CenterVertically) {

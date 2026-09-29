@@ -30,7 +30,11 @@ private val PRIVATE_PART = Regex("^(?:\\.git|\\.pi|\\.ssh|\\.aws|\\.codex|node_m
 private val SECRET_PART = Regex("^(?:\\.env(?:\\..*)?|secret(?:s)?(?:\\..*)?|credentials(?:\\..*)?|config\\.json|server-auth\\.json|auth\\.json)$", RegexOption.IGNORE_CASE)
 private val SECRET_EXT = Regex("\\.(?:pem|key|p12|pfx|jks|keystore)$", RegexOption.IGNORE_CASE)
 private val ABORT = Regex("abort", RegexOption.IGNORE_CASE)
-private val MCP_SERVERS_CONNECTED_NOTICE = Regex("^MCP:\\s*servers connected\\b", RegexOption.IGNORE_CASE)
+// Pi announces a connected MCP surface as "MCP: 4 servers connected (48 tools)", and
+// "MCP: 2/4 servers connected (35 tools)" when a startup server failed; the count is part
+// of the wording, so it is matched here and the notice is shown in the session sheet
+// instead of the timeline. Other "MCP:" notifications (auth, failures) stay in the chat.
+private val MCP_SERVERS_CONNECTED_NOTICE = Regex("^MCP:\\s*(?:\\d+(?:/\\d+)?\\s+)?servers connected\\b", RegexOption.IGNORE_CASE)
 
 /** Mirrors isPrivatePath in src/files.mjs: such paths are never offered as viewable files. */
 fun isPrivateFilePath(value: String?): Boolean =

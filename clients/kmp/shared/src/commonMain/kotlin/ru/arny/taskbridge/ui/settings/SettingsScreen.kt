@@ -39,6 +39,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,17 +47,24 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.SUPPORTED_API_VERSIONS
+import ru.arny.taskbridge.core.api.LocalModelEntry
+import ru.arny.taskbridge.core.api.SystemCpu
+import ru.arny.taskbridge.core.api.SystemGpu
+import ru.arny.taskbridge.core.api.SystemRam
 import ru.arny.taskbridge.core.api.McpServer
 import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.ui.common.SectionTitle
+import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit) {
@@ -68,6 +76,13 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
     var enterSends by remember { mutableStateOf(graph.settings.enterSends) }
     var editMcpServer by remember { mutableStateOf<McpServer?>(null) }
     var addMcpServer by remember { mutableStateOf(false) }
+    // Локальные модели (роутер llama.cpp + внешние серверы вроде Strata):
+    // выбранная кнопкой модель загружается/выгружается через /api/local/*.
+    // Загрузка внешнего сервера — это запуск его процесса на минуты, поэтому
+    // строка до конца ждёт ответа и показывает «…».
+    var localBusyId by remember { mutableStateOf<String?>(null) }
+    var localError by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(connection) {
         while (true) {
@@ -104,11 +119,23 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     },
                     warning = pi?.version != null && !pi.supported,
                 )
-                InfoRow(label = "Модель занята", value = when (info?.modelBusy) { true -> "да"; false -> "нет"; null -> "нет данных" })
+                // «занята» — это про роутер llama.cpp (там же очередь и KV), а не
+                // про внешние серверы вроде Strata: рядом со строкой «iq2-xs ·
+                // загружена» она читалась как «никакая модель не занята».
+                InfoRow(label = "Роутер занят", value = when (info?.modelBusy) { true -> "да"; false -> "нет"; null -> "нет данных" })
+                // Загрузка машины: по RAM видно, как модель читается в память,
+                // по VRAM — почему Strata упирается (создатели экспертов на GPU).
+                info?.system?.let { sys ->
+                    sys.ram?.let { InfoRow(label = "RAM", value = ramLabel(it)) }
+                    sys.cpu?.let { InfoRow(label = "CPU", value = cpuLabel(it)) }
+                    sys.gpu.orEmpty().forEach { InfoRow(label = "GPU", value = gpuLabel(it)) }
+                    if (sys.ram == null && sys.cpu == null && sys.gpu.isNullOrEmpty()) {
+                        InfoRow(label = "Нагрузка машины", value = "нет данных")
+                    }
+                }
                 val engine = info?.engine
                 val metrics = engine?.metrics
                 if (engine != null || info?.local != null) {
-                    InfoRow(label = "Локальная модель", value = engine?.model ?: info?.local?.loaded?.firstOrNull() ?: "—")
                     val speed = listOfNotNull(
                         metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }?.let { "PP ${number(it)} ток/с" },
                         metrics?.tg?.takeIf { it.isFinite() && it > 0.0 }?.let { "TG ${number(it)} ток/с" },
@@ -126,6 +153,31 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     ).joinToString(" · ")
                     if (queue.isNotBlank()) InfoRow(label = "Очередь llama.cpp", value = queue)
                 }
+                LocalModelsSection(
+                    models = info?.local?.models.orEmpty(),
+                    routerProvider = info?.local?.provider,
+                    engineModel = engine?.model,
+                    onLoad = { id ->
+                        localBusyId = id
+                        scope.launch {
+                            runCatching { connection.api.loadLocalModel(id) }
+                                .onFailure { localError = it.message ?: "Не удалось загрузить $id" }
+                            localBusyId = null
+                            connection.sessions.refresh()
+                        }
+                    },
+                    onUnload = { id ->
+                        localBusyId = id
+                        scope.launch {
+                            runCatching { connection.api.unloadLocalModel(id) }
+                                .onFailure { localError = it.message ?: "Не удалось выгрузить $id" }
+                            localBusyId = null
+                            connection.sessions.refresh()
+                        }
+                    },
+                    busyId = localBusyId,
+                    error = localError,
+                )
                 info?.scheduler?.let {
                     // «2 из 4» was read as "максимум 2": name every number instead
                     // of leaving the operator to guess which one is the limit.
@@ -330,6 +382,37 @@ private fun providerStatusText(status: ProviderStatus): String {
     return "Данные получены$stale"
 }
 
+private fun ramLabel(ram: SystemRam): String {
+    val used = ram.used
+    val total = ram.total
+    if (used == null || total == null) return "нет данных"
+    val percent = ram.ratio?.let { " (${(it * 100).roundToInt()}%)" }.orEmpty()
+    return "${formatBytes(used)} / ${formatBytes(total)}$percent"
+}
+
+private fun cpuLabel(cpu: SystemCpu): String {
+    val load = cpu.load?.let { "${(it * 100).roundToInt()}%" } ?: "—"
+    return cpu.cores?.let { "$load ($it ядер)" } ?: load
+}
+
+private fun gpuLabel(gpu: SystemGpu): String {
+    val mem = if (gpu.memoryUsedMb != null && gpu.memoryTotalMb != null) {
+        "${(gpu.memoryUsedMb * 10 / 1024) / 10.0} / ${(gpu.memoryTotalMb * 10 / 1024) / 10.0} ГБ"
+    } else {
+        null
+    }
+    val power = gpu.powerDrawW?.let { "${number(it)} Вт" + (gpu.powerLimitW?.let { limit -> " / ${number(limit)} Вт" }.orEmpty()) }
+    val parts = listOfNotNull(
+        mem,
+        gpu.utilization?.let { "${number(it)}%" },
+        power,
+        gpu.temperatureC?.let { "${number(it)} °C" },
+    )
+    return listOfNotNull(gpu.name?.takeIf { it.isNotBlank() }?.let { "$it: " }.orEmpty().takeIf { it.isNotEmpty() }, parts.joinToString(" · ").takeIf { it.isNotEmpty() })
+        .joinToString("")
+        .ifBlank { "нет данных" }
+}
+
 private fun number(value: Double?): String = value?.let {
     if (it % 1.0 == 0.0) it.toLong().toString() else ((it * 100).toLong() / 100.0).toString()
 } ?: "—"
@@ -509,6 +592,63 @@ private fun McpServerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
+}
+
+/**
+ * Все локальные модели одним блоком — пресеты роутера llama.cpp и настроенные
+ * внешние серверы (Strata), ровно как в веб-панели «Локальные модели».
+ *
+ * Состояние берётся из [LocalModelEntry.status]: «загружена» = роутер отдаёт
+ * модель или внешний сервер отвечает /health. Кнопка шлёт /api/local/load или
+ * /api/local/unload: для Strata это запуск и остановка всего процесса, поэтому
+ * загрузка занимает минуты и кнопка всё это время показывает «…».
+ */
+@Composable
+private fun LocalModelsSection(
+    models: List<LocalModelEntry>,
+    routerProvider: String?,
+    engineModel: String?,
+    onLoad: (String) -> Unit,
+    onUnload: (String) -> Unit,
+    busyId: String?,
+    error: String?,
+) {
+    if (models.isEmpty()) {
+        InfoRow(label = "Локальные модели", value = engineModel ?: "нет данных")
+        return
+    }
+    val isUp: (LocalModelEntry) -> Boolean = { it.status == "loaded" || it.status == "sleeping" }
+    val loaded = models.count(isUp)
+    InfoRow(label = "Локальные модели", value = "загружено $loaded из ${models.size}")
+    models.forEach { model ->
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(model.id, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                val state = when {
+                    isUp(model) -> "загружена"
+                    model.status == "loading" -> "грузится"
+                    model.status == "failed" -> "ошибка"
+                    else -> "не загружена"
+                }
+                val group = model.provider ?: routerProvider ?: "llama.cpp"
+                Text(
+                    "$group · $state",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            OutlinedButton(
+                onClick = { if (isUp(model)) onUnload(model.id) else onLoad(model.id) },
+                enabled = busyId == null,
+            ) {
+                Text(if (busyId == model.id) "…" else if (isUp(model)) "Выгрузить" else "Загрузить")
+            }
+        }
+    }
+    if (error != null) InfoRow(label = "Ошибка модели", value = error, warning = true)
 }
 
 @Composable

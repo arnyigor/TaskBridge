@@ -146,6 +146,22 @@ class TaskBridgeApi(
     suspend fun models(refresh: Boolean = false): ModelCatalog =
         get("/api/models" + if (refresh) "?refresh=1" else "", ModelCatalog.serializer())
 
+    // --- локальные модели (роутер llama.cpp + внешние серверы вроде Strata) ---
+
+    suspend fun local(): LocalRuntimeInfo = get("/api/local", LocalRuntimeInfo.serializer())
+
+    /**
+     * «Загрузить»: для внешнего сервера (Strata) это запуск его процесса, а не
+     * /models/load роутера — решает сервер TaskBridge. Ждёт готовности (до
+     * loadTimeoutMs, для Strata это минуты), поэтому в UI кнопка висит в «…».
+     */
+    suspend fun loadLocalModel(id: String): LocalRuntimeInfo =
+        call(HttpMethod.Post, "/api/local/load", LocalRuntimeInfo.serializer(), buildJsonObject { put("model", id) })
+
+    /** «Выгрузить»: для Strata — остановка процесса сервера. */
+    suspend fun unloadLocalModel(id: String): LocalRuntimeInfo =
+        call(HttpMethod.Post, "/api/local/unload", LocalRuntimeInfo.serializer(), buildJsonObject { put("model", id) })
+
     suspend fun refreshProvider(provider: String): Map<String, ProviderStatus> =
         call(HttpMethod.Post, "/api/providers/refresh", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),
             buildJsonObject { put("provider", provider) })

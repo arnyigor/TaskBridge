@@ -34,6 +34,26 @@ class ChatReducerNoticeAndAttachmentTest {
     }
 
     @Test
+    fun mcpServerNoticeWithToolCountMovesOutOfTimeline() {
+        val reducer = ChatReducer(task, seedInitial = false)
+        // The wording pi-mcp-adapter actually emits on startup, with and without a failed server.
+        reducer.apply(TaskEvent(taskId = "t", seq = 1, type = "UI_NOTIFY", message = "MCP: 4 servers connected (48 tools)"))
+        reducer.apply(TaskEvent(taskId = "t", seq = 2, type = "UI_NOTIFY", message = "MCP: 2/4 servers connected (35 tools)"))
+
+        assertEquals("MCP: 2/4 servers connected (35 tools)", reducer.snapshot().mcpNotice)
+        assertTrue(reducer.snapshot().items.none { it is ChatItem.Note && it.text.startsWith("MCP:") })
+    }
+
+    @Test
+    fun mcpWarningsStayInTimeline() {
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(TaskEvent(taskId = "t", seq = 1, type = "UI_NOTIFY", message = "MCP: artemis requires OAuth. Run /mcp-auth artemis first."))
+
+        assertEquals(null, reducer.snapshot().mcpNotice)
+        assertEquals("MCP: artemis requires OAuth. Run /mcp-auth artemis first.", reducer.snapshot().items.filterIsInstance<ChatItem.Note>().single().text)
+    }
+
+    @Test
     fun phoneAttachmentMarkerIsNotShownAsMessageText() {
         val reducer = ChatReducer(task, seedInitial = false)
         reducer.apply(event(1, "USER_MESSAGE", """{"text":"смотри\n\nAdditional files from the phone are in .taskbridge-input/:\n- .taskbridge-input/f7fd6aef2797/67d0e2c2-ff96-4f54-8b36-c5fb57f7b84c/Screenshot_20260928-200642.jpg"}"""))

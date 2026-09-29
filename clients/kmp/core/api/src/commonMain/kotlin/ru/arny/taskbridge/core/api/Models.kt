@@ -37,6 +37,8 @@ data class ApiInfo(
     val scheduler: SchedulerInfo? = null,
     val engine: LocalEngineInfo? = null,
     val local: LocalRuntimeInfo? = null,
+    /** RAM/CPU/GPU машины — то, по чему видно, что модель читается в память. */
+    val system: SystemMetrics? = null,
 )
 
 @Serializable
@@ -65,6 +67,53 @@ data class LocalRuntimeInfo(
     val loaded: List<String> = emptyList(),
     val loading: List<String> = emptyList(),
     val error: String? = null,
+    /**
+     * Все локальные модели одним списком: пресеты llama.cpp (роутер) и
+     * настроенные внешние серверы вроде Strata ([LocalModelEntry.external]).
+     * Состояние берётся отсюда, `loaded` знает только про роутер.
+     */
+    val models: List<LocalModelEntry> = emptyList(),
+)
+
+@Serializable
+data class LocalModelEntry(
+    val id: String,
+    val name: String? = null,
+    /** Провайдер Pi для внешних серверов (у роутера — null, там общий provider). */
+    val provider: String? = null,
+    val status: String? = null,
+    val external: Boolean = false,
+    val contextWindow: Long? = null,
+)
+
+/**
+ * Машинная нагрузка из /api/info: ответ на «почему модель медленная и что
+ * происходит с памятью». Единицы — как их отдаёт сервер, без догадок:
+ * [SystemRam.used]/[SystemRam.total] в БАЙТАХ, GPU — в МБ.
+ */
+@Serializable
+data class SystemMetrics(
+    val sampledAt: String? = null,
+    val cpu: SystemCpu? = null,
+    val ram: SystemRam? = null,
+    val gpu: List<SystemGpu>? = null,
+)
+
+@Serializable
+data class SystemCpu(val load: Double? = null, val cores: Int? = null)
+
+@Serializable
+data class SystemRam(val used: Long? = null, val total: Long? = null, val ratio: Double? = null)
+
+@Serializable
+data class SystemGpu(
+    val name: String? = null,
+    val memoryUsedMb: Long? = null,
+    val memoryTotalMb: Long? = null,
+    val utilization: Double? = null,
+    val powerDrawW: Double? = null,
+    val powerLimitW: Double? = null,
+    val temperatureC: Double? = null,
 )
 
 @Serializable
@@ -268,6 +317,26 @@ data class ModelRef(
     val images: Boolean? = null,
     val tools: Boolean? = null,
     val cost: ModelCost? = null,
+    /**
+     * Модель обслуживается этим компьютером: пресеты llama.cpp-роутера и
+     * настроенные внешние серверы (Strata). Сервер вычисляет это по `localRuntime`
+     * (провайдер роутера + externalServers), потому что у них разные Pi-провайдеры,
+     * а машина одна: пикер показывает их одной группой.
+     */
+    val local: Boolean = false,
+    /**
+     * Уровни размышлений, которые принимает ИМЕННО эта модель — по её карте в
+     * Pi (thinkingLevelMap). Общий список каталога относится к текущей модели
+     * по умолчанию, поэтому для локальных моделей он неверен: Strata принимает
+     * off/low/medium/high/xhigh, а «minimal» и «max» в её карте равны null.
+     */
+    val thinkingLevels: List<String> = emptyList(),
+    /**
+     * Уровень → значение, которое получит провайдер, только там, где они
+     * различаются: у Strata «high» уходит в движок как «xhigh», «off» → «none».
+     * Показывается в подписи, чтобы «Глубоко» не читалось как уровень высокий.
+     */
+    val thinkingMap: Map<String, String> = emptyMap(),
 ) {
     val label: String get() = name?.takeIf { it.isNotBlank() } ?: id ?: "—"
     val key: String get() = "${provider.orEmpty()}/${id.orEmpty()}"
