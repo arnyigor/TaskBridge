@@ -25,6 +25,7 @@ docs/status-review-*.md
 zen_page.html
 tmp-*/
 tmp-*.xml
+.pytest_cache/
 
 # Agent memory snapshots. These carry notes about other projects — business
 # context, credentials in paths — and must never be committed.
