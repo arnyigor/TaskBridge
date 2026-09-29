@@ -62,6 +62,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.TextRange
@@ -84,6 +85,7 @@ import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.Approval
 import ru.arny.taskbridge.core.api.GenerationMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
 import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.Task
@@ -113,9 +115,9 @@ import ru.arny.taskbridge.ui.sessions.formatLatencyMs
 import ru.arny.taskbridge.ui.sessions.latencyFor
 import ru.arny.taskbridge.ui.sessions.modelLatencyLabel
 import ru.arny.taskbridge.ui.sessions.ModelChooser
-import ru.arny.taskbridge.ui.sessions.ThinkingPicker
 import ru.arny.taskbridge.ui.sessions.thinkingChoices
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
+import ru.arny.taskbridge.ui.sessions.thinkingOptionLabel
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import ru.arny.taskbridge.ui.theme.MonoStyle
@@ -290,6 +292,20 @@ fun ChatScreen(
                 ApprovalCard(approval, busy = "approval:${approval.approvalId}" in state.busy, onAnswer = { allow -> session.answerApproval(approval.approvalId, allow) })
             }
             Composer(
+                thinking = {
+                    // Уровень размышлений меняется одним тапом из чата, поэтому
+                    // ряд иконок живёт прямо под полем ввода: это единственное
+                    // место, где он переключается во время сессии.
+                    val levels = thinkingChoices(task?.model, screenCatalog?.thinkingLevels.orEmpty())
+                    if (task != null && task.model?.reasoning != false && levels.isNotEmpty()) {
+                        ThinkingRow(
+                            levels = levels,
+                            current = task.thinkingLevelActual ?: task.thinkingLevel,
+                            model = task.model,
+                            onPick = { session.setThinking(it) },
+                        )
+                    }
+                },
                 moreItems = { close ->
                     if (task != null) {
                         DropdownMenuItem(text = { Text("Выбрать модель") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ChooseModel })
@@ -707,19 +723,40 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
     // local engine's numbers say nothing about a cloud provider.
     val localProvider = info?.local?.provider
     val sessionProvider = state.task?.model?.provider ?: state.task?.requestedModel?.provider
-    val livePp = if (localProvider != null && sessionProvider == localProvider) info?.engine?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 } else null
+    // Внешний локальный сервер (Strata) — та же машина, что и роутер, но другой
+    // провайдер Pi. Его строка в info.local.models несёт живую телеметрию
+    // (фаза, прогресс чтения промпта, скорости): без неё сессия на Strata не
+    // показывала чтение промпта вообще — условие ниже требовало равенства с
+    // провайдером роутера.
+    val externalRow = info?.local?.models?.firstOrNull { it.provider != null && it.provider == sessionProvider }
+    val externalMetrics = externalRow?.metrics
+    val livePp = when {
+        localProvider != null && sessionProvider == localProvider -> info.engine?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
+        else -> externalMetrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
+    }
     // Live engine TG too: llama.cpp reports both while it streams, so PP and TG
     // tick with the /api/info poll (1s while a turn is active) instead of
     // freezing on the last turn's values. A cloud provider has no live source:
     // Pi reports usage only at message_end, so its PP/TG are per-turn.
-    val liveTg = if (localProvider != null && sessionProvider == localProvider) info?.engine?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 } else null
+    val liveTg = when {
+        localProvider != null && sessionProvider == localProvider -> info.engine?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 }
+        else -> externalMetrics?.tg?.takeIf { it.isFinite() && it > 0.0 }
+    }
     val readingPp = livePp ?: state.task?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
+    // Процент чтения промпта у внешнего сервера (Strata отдаёт prompt_read /
+    // prompt_total): «читает промпт · 64%» вместо просто факта.
+    val readingPercent = externalMetrics?.progress
+        ?.takeIf { it in 0.0..1.0 }
+        ?.let { " · ${(it * 100).toInt()}%" }
+        .orEmpty()
+    val readingPrompt = externalMetrics?.phase?.contains("read", ignoreCase = true) == true
     val phase = when {
         state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
         state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
         state.task?.status == "FAILED" -> "Ошибка · подробнее"
         answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
-        readingPp != null && answer?.text.isNullOrBlank() == true -> "Модель читает промпт"
+        readingPp != null && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingPercent"
+        readingPrompt && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingPercent"
         answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
         answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
         answer?.active == true -> "Сообщение передано · ожидается ответ агента"
@@ -1003,11 +1040,9 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 6.dp),
         )
-        val levels = thinkingChoices(task?.model, catalog?.thinkingLevels.orEmpty())
-        if (levels.isNotEmpty() && task?.model?.reasoning != false) {
-            FieldLabel("Размышления", top = 20)
-            ThinkingPicker(levels, task?.thinkingLevelActual ?: task?.thinkingLevel, model = task?.model, onPick = { session.setThinking(it) })
-        }
+        // Размышления намеренно НЕ дублируются в этом шите: уровнем управляет ряд
+        // иконок под полем ввода в чате (см. ThinkingRow), и он виден всегда,
+        // пока сессия открыта. Здесь остаётся только контекст и автосжатие.
         FieldLabel("Контекст", top = 20)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -1139,6 +1174,58 @@ private fun localDiagnosticsLines(info: ApiInfo?, suppressKvRatio: Boolean): Lis
 
 private fun sessionModelLabel(task: Task): String =
     (task.model ?: task.requestedModel)?.let(::modelFullLabel) ?: "—"
+
+/**
+ * Ряд переключателей уровня размышлений под полем ввода: одна иконка на уровень,
+ * текущий подсвечен. Иконка — шкала интенсивности (см. AppIcons.Thinking*):
+ * отдельного глифа на каждый уровень в наборе нет, а подписи в ряд не помещаются.
+ * Текущий уровень продублирован подписью справа — по «палкам» одному его не
+ * прочитать.
+ */
+@Composable
+private fun ThinkingRow(levels: List<String>, current: String?, model: ModelRef?, onPick: (String) -> Unit) {
+    val glyphs = listOf(
+        AppIcons.ThinkingOff,
+        AppIcons.Thinking1,
+        AppIcons.Thinking2,
+        AppIcons.Thinking3,
+        AppIcons.Thinking4,
+        AppIcons.Thinking5,
+    )
+    Row(
+        Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        levels.forEachIndexed { index, level ->
+            val selected = level == current
+            IconButton(
+                onClick = { if (!selected) onPick(level) },
+                modifier = Modifier
+                    .size(34.dp)
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                        CircleShape,
+                    ),
+            ) {
+                Icon(
+                    imageVector = glyphs.getOrElse(index) { AppIcons.Thinking5 },
+                    contentDescription = "Размышления: ${thinkingOptionLabel(model, level)}",
+                    modifier = Modifier.size(18.dp),
+                    tint = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        Text(
+            thinkingLabel(current ?: "off"),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
 
 private fun modelFullLabel(model: ru.arny.taskbridge.core.api.ModelRef): String =
     model.provider?.takeIf { it.isNotBlank() }?.let { provider -> "$provider/${model.id ?: "—"}" }

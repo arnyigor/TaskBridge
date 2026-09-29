@@ -83,6 +83,12 @@ fun Composer(
     top: @Composable () -> Unit = {},
     /** Extra items of the actions menu (the session's model and context); call `close` on click. */
     moreItems: @Composable (close: () -> Unit) -> Unit = {},
+    /**
+     * Под полем ввода: быстрые переключатели уровня размышлений (ряд иконок).
+     * Слот, а не параметры: композер — чистый UI, а уровни и их карта берутся из
+     * модели сессии в ChatScreen.
+     */
+    thinking: @Composable () -> Unit = {},
 ) {
     var actionsMenu by remember { mutableStateOf(false) }
     var focused by remember { mutableStateOf(false) }
@@ -245,6 +251,7 @@ fun Composer(
                             }
                         }
                     }
+                    thinking()
                     Row(
                         Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -258,11 +265,8 @@ fun Composer(
                                 Icon(AppIcons.Tool, "Действия и буфер обмена", Modifier.size(20.dp))
                             }
                             DropdownMenu(expanded = actionsMenu, onDismissRequest = { actionsMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Прикрепить файл") },
-                                    leadingIcon = { Icon(AppIcons.Attach, null) },
-                                    onClick = { actionsMenu = false; onAttach() },
-                                )
+                                // «Прикрепить файл» живёт на видимой иконке рядом
+                                // (один тап вместо двух), в меню не дублируется.
                                 DropdownMenuItem(
                                     text = { Text("Вставить из буфера") },
                                     leadingIcon = { Icon(AppIcons.Copy, null) },

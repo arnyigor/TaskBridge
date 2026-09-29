@@ -84,6 +84,11 @@ data class LocalModelEntry(
     val status: String? = null,
     val external: Boolean = false,
     val contextWindow: Long? = null,
+    /** Живая телеметрия внешнего сервера (Strata /metrics): фаза, скорости, прогресс. */
+    val metrics: LocalModelMetrics? = null,
+    val phase: String? = null,
+    val promptRead: Long? = null,
+    val promptTotal: Long? = null,
 )
 
 /**
@@ -130,6 +135,17 @@ data class LocalModelMetrics(
     val kvRatio: Double? = null,
     val contextWindow: Long? = null,
     val nTokensMax: Double? = null,
+    /** Strata: что модель делает сейчас (idle/generating/…). */
+    val state: String? = null,
+    val busy: Boolean = false,
+    /** Strata: например «reading the prompt» — по этому видно чтение промпта. */
+    val phase: String? = null,
+    /** Strata: прогресс чтения промпта — promptRead из promptTotal (0..1 в progress). */
+    val promptRead: Long? = null,
+    val promptTotal: Long? = null,
+    val progress: Double? = null,
+    val elapsedS: Double? = null,
+    val generated: Long? = null,
 )
 
 @Serializable

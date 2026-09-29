@@ -128,7 +128,14 @@
         "cwd": "C:\\path\\to\\Strata",
         "loadTimeoutMs": 600000
       }
-    ]
+    ],
+    "externalDiscovery": {
+      "dir": "C:\\path\to\\strata",
+      "engine": "strata",
+      "configGlob": "strata-*.json",
+      "python": ".venv\\Scripts\\python.exe",
+      "server": "serve\\server.py"
+    }
   },
   "approvals": {
     "enabled": false,

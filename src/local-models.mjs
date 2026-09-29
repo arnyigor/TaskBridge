@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listProcesses, processesUsingFile } from './process-info.mjs';
+import { discoverExternalServers } from './external-discovery.mjs';
 
 const ORPHAN_LAUNCHER = fileURLToPath(new URL('./orphan-launcher.mjs', import.meta.url));
 
@@ -256,6 +257,64 @@ export function parsePrometheusMetrics(text, modelKey = '', samples = new Map())
     // carried through as the fallback — see contextUsage().
     kvCacheRatio: pick('llamacpp:kv_cache_usage_ratio'),
     nTokensMax: pick('llamacpp:n_tokens_max')
+  };
+}
+
+/**
+ * Телеметрия внешнего сервера Strata. В отличие от llama.cpp это JSON
+ * (`GET /metrics`), а не prometheus-текст: там есть фаза работы, прогресс
+ * чтения промпта и скорость последнего запроса. Функция чистая — тестируется
+ * без сети.
+ *
+ * Что отдаём:
+ *  - phase/busy — что модель делает прямо сейчас (в т.ч. «reading the prompt»);
+ *  - promptRead/promptTotal/progress — процент чтения промпта на длинном вводе;
+ *  - pp — скорость ЧТЕНИЯ (новые токены за prompt_ms), а не всего промпта:
+ *    доля `reused` приходит из кеша беседа и читается почти мгновенно;
+ *  - tg — скорость генерации (живая или из последнего запроса).
+ */
+export function parseStrataMetrics(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const engine = payload.engine || null;
+  const live = payload.live || null;
+  if (!engine && !live) return null;
+
+  const num = value => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  const read = num(live && live.prompt_read);
+  const total = num(live && live.prompt_total);
+  const progress = read !== null && total !== null && total > 0 ? Math.min(1, read / total) : null;
+
+  const last = Array.isArray(payload.requests) && payload.requests.length ? payload.requests[0] : null;
+  let pp = null;
+  if (last) {
+    const tokens = num(last.prompt_tokens);
+    const reused = num(last.reused) ?? 0;
+    const ms = num(last.prompt_ms);
+    const fresh = tokens !== null ? tokens - reused : null;
+    if (fresh !== null && fresh > 0 && ms !== null && ms > 0) pp = fresh / ms * 1000;
+  }
+
+  const liveRate = num(live && live.tok_s);
+  const lastRate = last ? num(last.decode_tok_s) : null;
+
+  return {
+    available: true,
+    source: 'strata',
+    model: engine ? engine.model ?? null : null,
+    state: live ? live.state ?? null : null,
+    busy: Boolean(live && live.state && live.state !== 'idle'),
+    phase: live ? live.phase ?? null : null,
+    promptRead: read,
+    promptTotal: total,
+    progress,
+    generated: live ? num(live.generated) : null,
+    elapsedS: live ? num(live.elapsed_s) : null,
+    pp,
+    tg: liveRate ?? lastRate,
+    requestsProcessing: live ? num(live.queued) : null,
+    kvRatio: null,
+    nTokensMax: null,
+    contextWindow: engine ? num(engine.context) ?? num(engine.max_context) : null
   };
 }
 
@@ -735,8 +794,10 @@ export class LocalModelService extends EventEmitter {
 // /health says nothing about which model is behind it, and the model id Pi serves
 // is a Pi catalog fact, not a probing guess.
 export class ExternalLocalServers {
-  constructor(config = {}) {
+  constructor(config = {}, { agentDir = null } = {}) {
     this.config = config || {};
+    // Каталог Pi (~/.pi/agent): оттуда читается models.json для автообнаружения.
+    this.agentDir = agentDir;
     // Started by this process («Загрузить» in the dialog): a tracked detached
     // process that stop() kills directly, without matching command lines.
     this.procs = new Map();       // provider -> { proc, server }
@@ -745,8 +806,28 @@ export class ExternalLocalServers {
     this.cacheAt = 0;
   }
 
+  // Записи конфига плюс найденные автоматически (провайдер с локальным baseUrl
+  // в Pi models.json + каталог установки из localRuntime.externalDiscovery).
+  // Ручная запись сильнее обнаружения: провайдер из конфига в объединение не
+  // попадает второй раз (см. discoverExternalServers).
   get servers() {
-    return Array.isArray(this.config.externalServers) ? this.config.externalServers : [];
+    const configured = Array.isArray(this.config.externalServers) ? this.config.externalServers : [];
+    let discovered = [];
+    try {
+      discovered = discoverExternalServers({
+        agentDir: this.agentDir,
+        discovery: { ...(this.config.externalDiscovery || {}), healthUrl: this.config.healthUrl },
+        configured,
+        // Провайдеры самого локального рантайма обнаруживать не нужно: они уже
+        // обслуживаются роутером и его health/busy-гейтом.
+        exclude: [this.config.provider, 'llama.cpp', 'llamacpp']
+      });
+    } catch {
+      // Обнаружение вспомогательное: его сбой не должен ломать статус и запуск
+      // уже настроенных серверов.
+      discovered = [];
+    }
+    return [...discovered, ...configured];
   }
 
   get configured() {
@@ -797,6 +878,23 @@ export class ExternalLocalServers {
   }
 
   /**
+   * Телеметрия внешнего сервера (Strata): /metrics как JSON. Недоступность,
+   * таймаут или чужой формат — просто null: статус не должен ломаться из-за
+   * отсутствия метрик.
+   */
+  async metrics(server, timeoutMs = 1500) {
+    const base = normalizeBaseUrl(server.baseUrl);
+    if (!base) return null;
+    try {
+      const response = await fetch(`${base}/metrics`, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) return null;
+      return parseStrataMetrics(await response.json());
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * The polled status (/api/info calls it every couple of seconds). Cached for
    * a few seconds; a start in progress always reads fresh, so the dialog never
    * pins «не загружена» while the model is being loaded.
@@ -807,6 +905,24 @@ export class ExternalLocalServers {
     const promise = Promise.all(this.servers.map(async server => {
       const reachable = await this.alive(server);
       const starting = this.starting.has(server.provider) && !reachable;
+      // Телеметрия — только у живого сервера: у выгруженного и спрашивать нечего.
+      const metrics = reachable ? await this.metrics(server).catch(() => null) : null;
+      const model = {
+        // Listed even when the server is down: otherwise there would be
+        // nothing to «Загрузить».
+        id: server.model || server.provider,
+        name: server.name || server.model || server.provider,
+        provider: server.provider,
+        status: reachable ? 'loaded' : starting ? 'loading' : 'unloaded',
+        external: true,
+        contextWindow: server.contextWindow ?? null
+      };
+      if (metrics) {
+        model.metrics = metrics;
+        model.phase = metrics.phase;
+        model.promptRead = metrics.promptRead;
+        model.promptTotal = metrics.promptTotal;
+      }
       return {
         provider: server.provider,
         baseUrl: normalizeBaseUrl(server.baseUrl),
@@ -815,16 +931,8 @@ export class ExternalLocalServers {
         // dialog's badge needs the load state of the model itself.
         state: reachable ? 'EXTERNAL_RUNNING' : 'STOPPED',
         loading: starting,
-        models: [{
-          // Listed even when the server is down: otherwise there would be
-          // nothing to «Загрузить».
-          id: server.model || server.provider,
-          name: server.name || server.model || server.provider,
-          provider: server.provider,
-          status: reachable ? 'loaded' : starting ? 'loading' : 'unloaded',
-          external: true,
-          contextWindow: server.contextWindow ?? null
-        }]
+        metrics,
+        models: [model]
       };
     })).then(servers => {
       const value = {

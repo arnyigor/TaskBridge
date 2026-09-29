@@ -23,6 +23,7 @@ import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
+import { piAgentDir } from './pi-settings.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -184,7 +185,7 @@ export class TaskManager extends EventEmitter {
     // for every health/busy/ensure check; the old object stays for the legacy
     // profile restart endpoints.
     this.localModels = new LocalModelService(config.localRuntime || {}, dataRoot);
-    this.localServers = new ExternalLocalServers(config.localRuntime || {});
+    this.localServers = new ExternalLocalServers(config.localRuntime || {}, { agentDir: piAgentDir(process.env) });
     this.local = this.localModels.enabled ? this.localModels : this.runtimeManager;
     this.mcp = new McpManager(config.pi || {}, dataRoot);
     this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#llamaEnv() });
