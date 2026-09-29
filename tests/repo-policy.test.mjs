@@ -119,5 +119,92 @@ test('a file added and then deleted in outgoing commits is still refused', async
 test('this repository passes the policy with a clean index', async t => {
   const result = await policy(REPO_ROOT, ['--staged']);
   assert.equal(result.code, 0, result.output);
-  assert.match(result.output, /every path has a right to be here/);
+  assert.match(result.output, /every path and every added line has a right to be here/);
+});
+
+// Built at runtime: this file must not itself contain a secret-shaped literal.
+const FAKE_OPENAI = 'sk-' + 'a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0u1v2';
+
+test('the index is scanned, not the working file that replaced it', async t => {
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'src/config.mjs', `export const key = '${FAKE_OPENAI}';\n`);
+  await git(root, ['add', 'src/config.mjs']);
+
+  // The secret is gone from disk but still staged — exactly the commit that ships it.
+  await write(root, 'src/config.mjs', 'export const key = process.env.OPENAI_KEY;\n');
+
+  const result = await policy(root, ['--staged']);
+  assert.equal(result.code, 1);
+  assert.match(result.output, /secret-shaped literal \(staged content, openai-style key\)/);
+  assert.ok(!result.output.includes(FAKE_OPENAI), 'the audit must not print the secret');
+});
+
+test('an allowed file that carried a secret into outgoing commits is refused', async t => {
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'src/keep.mjs');
+  await git(root, ['add', '-A']);
+  await commit(root, 'first');
+
+  // docs/ is allowed by the allowlist, so only the content scan can catch this.
+  await write(root, 'docs/research.md', `provider key: ${FAKE_OPENAI}\n`);
+  await git(root, ['add', '-A']);
+  await commit(root, 'add research notes');
+  await git(root, ['rm', '-q', 'docs/research.md']);
+  await commit(root, 'remove them again');
+
+  const { stdout: tip } = await git(root, ['rev-parse', 'HEAD']);
+  const pushing = `refs/heads/master ${tip.trim()} refs/heads/master ${ZERO}`;
+
+  const result = await policy(root, ['--push-refs', pushing]);
+  assert.equal(result.code, 1);
+  assert.match(result.output, /carried a secret-shaped literal/);
+  assert.match(result.output, /docs\/research\.md/);
+  assert.ok(!result.output.includes(FAKE_OPENAI), 'the audit must not print the secret');
+});
+
+test('a policy change may not carry other new files in the same commit', async t => {
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'scripts/repo-policy.mjs', '// baseline\n');
+  await git(root, ['add', '-A']);
+  await commit(root, 'baseline');
+
+  await write(root, 'scripts/repo-policy.mjs', '// widened the allowlist\n');
+  await write(root, 'docs/leak.md', 'whatever the agent wanted to carry along\n');
+  await git(root, ['add', '-A']);
+
+  const result = await policy(root, ['--staged']);
+  assert.equal(result.code, 1);
+  assert.match(result.output, /changes the security policy and also adds docs\/leak\.md/);
+});
+
+test('a hand-written placeholder is not treated as a secret', async t => {
+  // Documents an intentional exemption: fixtures in this repository used to be
+  // written as long literals of sequential characters, and the history scan has
+  // to keep passing over them. Do not "fix" this by removing the list.
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'tests/fixture.mjs', "const fake = 'tb_machine_LEAKED_VALUE_1234567890ABCDEFGH';\n");
+  await git(root, ['add', '-A']);
+
+  const result = await policy(root, ['--staged']);
+  assert.equal(result.code, 0, result.output);
+});
+
+test('a policy change together with its own test is fine', async t => {
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'scripts/repo-policy.mjs', '// baseline\n');
+  await write(root, 'tests/repo-policy.test.mjs', '// baseline\n');
+  await git(root, ['add', '-A']);
+  await commit(root, 'baseline');
+
+  await write(root, 'scripts/repo-policy.mjs', '// new rule\n');
+  await write(root, 'tests/repo-policy.test.mjs', '// covers the new rule\n');
+  await git(root, ['add', '-A']);
+
+  const result = await policy(root, ['--staged']);
+  assert.equal(result.code, 0, result.output);
 });

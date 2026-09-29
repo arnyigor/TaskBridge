@@ -154,7 +154,8 @@ test('check-secrets fails on a fixture where a secret is committed and uploadabl
   assert.match(output, /vercel upload would include config\.json/);
   assert.match(output, /vercel upload would include data\/tasks\.db/);
   assert.match(output, /vercel upload would include deploy\/id_rsa/);
-  assert.match(output, /tracked file contains a machine secret/);
+  // Two sources now: the working tree and the index. Either one is a finding.
+  assert.match(output, /(working tree|staged content) contains a machine secret/);
   assert.match(output, /\.gitignore/);
   // The audit must never print the secret itself.
   assert.ok(!output.includes(FAKE_SECRET), 'the audit must not echo the secret');

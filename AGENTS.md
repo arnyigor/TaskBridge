@@ -9,11 +9,24 @@ in that file — reviewed in the diff, on purpose.
 
 | Gate | When | What it checks |
 |---|---|---|
-| `.githooks/pre-commit` | every commit | `scripts/repo-policy.mjs --staged`: allowlist, risky names, locally forbidden terms |
-| `.githooks/pre-push` | every push | `--outgoing` over `--branches --tags --not --remotes`, plus `check-secrets` |
+| `.githooks/pre-commit` | every commit | `repo-policy --staged`: allowlist, risky names, index blobs for secrets and corporate terms, plus the policy self-defence |
+| `.githooks/pre-push` | every push | `repo-policy --push-refs`: the exact outgoing ranges — paths **and** added lines inside those commits — plus `check-secrets` |
 
 Enable both hooks in a clone: `git config core.hooksPath .githooks`.
 Manual runs: `npm run check:policy` and `npm run check:secrets`.
+
+Content is read from the **index** (`git show :path`), not from the working tree: after
+`git add secret.mjs` an edit on disk leaves the secret in the commit while the file looks
+clean. Pushes read the commits being sent, so a file added in one commit and deleted in the
+next is still caught.
+
+A change to a policy file (`POLICY_FILES` in `scripts/repo-paths.mjs`) must not add other
+new files in the same commit — widening the allowlist can never carry a payload with it.
+Tests under `tests/` are the single allowed companion.
+
+`pre-push` exports `TASKBRIDGE_REQUIRE_LOCAL_POLICY=1`, so a missing `security.local.json`
+is fatal on push (fail-closed). A clone that does not carry the local corporate list has to
+unset it deliberately — knowing that corporate terms are then not checked at all.
 
 `security.local.json` (git-ignored; format in `security.local.example.json`) holds the
 local list of corporate terms that must never be committed. It is deliberately not in the

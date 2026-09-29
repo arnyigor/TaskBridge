@@ -8,7 +8,14 @@ import { promisify } from 'node:util';
 
 import { auditUploadSet, formatAudit, parseIgnoreFile, SENSITIVE_LOCAL_FILES } from '../cloud/lib/upload-set.mjs';
 import { matchesIgnore } from '../cloud/lib/deploy.mjs';
-import { RISKY_ALLOWED, RISKY_PATHS, riskyRule } from './repo-paths.mjs';
+import { createSecretScanner, RISKY_ALLOWED, RISKY_PATHS, riskyRule, SECRET_SHAPES } from './repo-paths.mjs';
+
+// Two sources, because they differ exactly when it matters: the working tree is
+// what you see, the index is what the next commit records.
+const GIT_SOURCES = [
+  ['working tree', []],
+  ['staged content', ['--cached']]
+];
 
 // Audits that no secret can leave this machine — neither through a `vercel
 // deploy` (which ignores .gitignore) nor through a `git push`.
@@ -70,7 +77,9 @@ for (const { path: relative, probe } of SENSITIVE_LOCAL_FILES) {
   notes.push(`local sensitive path present: ${relative}${ignored ? ' (ignored)' : ''}`);
 }
 
-// 3. Do tracked files contain the actual secret values? -----------------------
+// 3. Do the working tree and the index contain the actual config values? ------
+// Both, because they are different things: `git add config.mjs`, then edit the
+// secret out of the file on disk, and the commit still carries the old content.
 const configText = await fs.readFile(path.join(ROOT, 'config.json'), 'utf8').catch(() => null);
 if (configText && inGitRepo) {
   let config = null;
@@ -82,33 +91,31 @@ if (configText && inGitRepo) {
   };
   collect(config, '');
   for (const { value, keyPath } of secrets) {
-    const found = await git(['grep', '-F', '--', value]);
-    if (found.ok && found.stdout.trim()) problems.push(`config.json ${keyPath} value appears in a tracked file`);
+    for (const [source, args] of GIT_SOURCES) {
+      const found = await git(['grep', ...args, '-F', '--', value]);
+      if (found.ok && found.stdout.trim()) problems.push(`config.json ${keyPath} value appears in the ${source}`);
+    }
   }
-  if (secrets.length) notes.push(`checked ${secrets.length} secret value(s) from config.json against tracked files`);
+  if (secrets.length) notes.push(`checked ${secrets.length} secret value(s) from config.json against the working tree and the index`);
   if (config?.cloud?.enabled) notes.push(`cloud is enabled locally (url: ${config.cloud.url ?? 'unset'})`);
 }
 
-// 4. Any secret-shaped literal in tracked files? ------------------------------
+// 4. Any secret-shaped literal in the working tree or the index? ---------------
+// The rules live in repo-paths.mjs so this file, repo-policy --staged and
+// repo-policy --history cannot drift apart.
 if (inGitRepo) {
-  const patterns = [
-    { name: 'user token', pattern: 'tb_user_[A-Za-z0-9_-]{16,}' },
-    { name: 'machine secret', pattern: 'tb_machine_[A-Za-z0-9_-]{16,}' },
-    { name: 'postgres URL with credentials', pattern: 'postgres(ql)?://[^:/[:space:]]+:[^@[:space:]]+@' }
-  ];
-  const allowed = [/tb_user_\.\.\./, /tb_machine_\.\.\./, /tb_machine_…/, /postgres:\/\/…/, /postgres:\/\/user:pass@/];
-  for (const { name, pattern } of patterns) {
-    const found = await git(['grep', '-nE', '--', pattern]);
-    if (!found.ok) continue;
-    for (const line of found.stdout.split(/\r?\n/).filter(Boolean)) {
-      if (allowed.some(rule => rule.test(line))) continue;
-      // Documentation and tests show the shape of a secret; a real one is long
-      // and random (this project generates 11 + 43 = 54 characters).
-      const literal = line.match(new RegExp(pattern))?.[0] ?? '';
-      if (literal.length >= 32) problems.push(`tracked file contains a ${name}: ${line.split(':').slice(0, 2).join(':')}`);
+  const scanSecret = createSecretScanner();
+  for (const { pattern } of SECRET_SHAPES) {
+    for (const [source, args] of GIT_SOURCES) {
+      const found = await git(['grep', ...args, '-nE', '--', pattern]);
+      if (!found.ok) continue;
+      for (const line of found.stdout.split(/\r?\n/).filter(Boolean)) {
+        const shape = scanSecret(line);
+        if (shape) problems.push(`${source} contains a ${shape}: ${line.split(':').slice(0, 2).join(':')}`);
+      }
     }
   }
-  notes.push('scanned tracked files for tb_user_/tb_machine_/postgres:// literals');
+  notes.push(`scanned the working tree and the index for ${SECRET_SHAPES.length} secret shapes`);
 }
 
 // 5. Risky path names (backups, memory snapshots, dumps, archives) ------------

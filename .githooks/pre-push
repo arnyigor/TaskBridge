@@ -5,10 +5,14 @@
 # pre-commit guards the commit being made; this guards the whole outgoing range.
 # A file added in commit A and deleted in commit B is still inside A, and A
 # travels to GitHub whatever the working tree looks like right now.
+#
+# TASKBRIDGE_REQUIRE_LOCAL_POLICY makes a missing security.local.json fatal here
+# (fail-closed). On a clone that does not have the local corporate list yet,
+# unset the variable to push — but then that list is not checked at all.
 set -e
 cd "$(git rev-parse --show-toplevel)" || exit 0
 
 # git feeds one line per ref on stdin; repo-policy turns it into exactly the
 # ranges this push sends, instead of guessing from local-only branches.
-node scripts/repo-policy.mjs --push-refs "$(cat)"
+TASKBRIDGE_REQUIRE_LOCAL_POLICY=1 node scripts/repo-policy.mjs --push-refs "$(cat)"
 node scripts/check-secrets.mjs
