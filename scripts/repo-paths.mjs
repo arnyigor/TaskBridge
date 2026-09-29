@@ -122,7 +122,8 @@ export const SAFE_SECRET_LINE = [
 // The values are fake and already present in this repository's history, so
 // storing them in plain text is not a leak — and it keeps the file readable.
 export const KNOWN_FAKE_SECRETS = [
-  'tb_machine_leaked_value_1234567890abcdefgh'
+  'tb_machine_leaked_value_1234567890abcdefgh',
+  'tb_machine_fixture_value_1234567890'
 ].map(value => value.toLowerCase());
 
 // Blobs the repository is allowed to carry. Anything else that is binary has to
