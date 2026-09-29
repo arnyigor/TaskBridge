@@ -1,0 +1,52 @@
+# Server-side copy of the local gate.
+#
+# The hooks are the first two lines of defence, but they can be bypassed with
+# `--no-verify` and they do not exist at all in a fresh clone. This job runs on
+# GitHub's side, where a developer's machine cannot switch it off.
+#
+# UNVERIFIED: written without a runner to execute it on. Before trusting it:
+#   1. push it and read the run;
+#   2. pin the actions to commit SHAs instead of major tags — majors are fine for
+#      a private repository, a supply-chain risk for a public one;
+#   3. to check corporate terms server-side, add a repository secret
+#      CORPORATE_TERMS holding the same JSON body as security.local.json.
+#      Without it the job still checks paths, secret shapes and the allowlist,
+#      but not the private term list (that list must not live in the repository).
+#
+# This job does NOT make itself required. Branch protection / rulesets are not
+# available on private repositories without a paid plan, so while TaskBridge is
+# private this is a visible check, not a blocking one.
+name: security-policy
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install the local corporate blocklist, if the secret is set
+        env:
+          TERMS: ${{ secrets.CORPORATE_TERMS }}
+        run: |
+          if [ -n "$TERMS" ]; then printf '%s' "$TERMS" > security.local.json; fi
+
+      - name: Repo policy over the whole history
+        run: node scripts/repo-policy.mjs --history
+
+      - name: Secret audit
+        run: node scripts/check-secrets.mjs
+
+      - name: Policy unit tests
+        run: node --test tests/repo-policy.test.mjs tests/cloud-upload-set.test.mjs
