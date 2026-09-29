@@ -179,5 +179,7 @@ Not logged in · Please run /login
 
 ## Файлы
 
-- [tmp-debug/acp-claude-test.mjs](../tmp-debug/acp-claude-test.mjs) — полный сценарий (оба адаптера)
-- [tmp-debug/acp-codex-sessions.mjs](../tmp-debug/acp-codex-sessions.mjs) — session/list + session/load
+Spike-скрипты лежали в рабочем каталоге `tmp-debug/`, в проект не входили и удалены:
+
+- `acp-claude-test.mjs` — полный сценарий (оба адаптера)
+- `acp-codex-sessions.mjs` — session/list + session/load
