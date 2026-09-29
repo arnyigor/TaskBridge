@@ -159,8 +159,7 @@ test('an allowed file that carried a secret into outgoing commits is refused', a
 
   const result = await policy(root, ['--push-refs', pushing]);
   assert.equal(result.code, 1);
-  assert.match(result.output, /carried a secret-shaped literal/);
-  assert.match(result.output, /docs\/research\.md/);
+  assert.match(result.output, /docs\/research\.md contains a secret-shaped literal \(committed blob/);
   assert.ok(!result.output.includes(FAKE_OPENAI), 'the audit must not print the secret');
 });
 
@@ -180,16 +179,71 @@ test('a policy change may not carry other new files in the same commit', async t
   assert.match(result.output, /changes the security policy and also adds docs\/leak\.md/);
 });
 
-test('a hand-written placeholder is not treated as a secret', async t => {
-  // Documents an intentional exemption: fixtures in this repository used to be
-  // written as long literals of sequential characters, and the history scan has
-  // to keep passing over them. Do not "fix" this by removing the list.
+// Built at runtime so this file does not itself contain a secret-shaped literal
+// — the repository's own scanner would otherwise flag the test that tests it.
+const KNOWN_FAKE = 'tb_machine_' + 'LEAKED_VALUE_1234567890ABCDEFGH';
+const UNKNOWN_FAKE = 'tb_machine_' + 'LEAKED_VALUE_1234567890ABCDEFGX';
+
+test('an exact known fixture is not a secret, and nothing else is exempt', async t => {
   const root = await tempDir(t);
   await git(root, ['init', '-q']);
-  await write(root, 'tests/fixture.mjs', "const fake = 'tb_machine_LEAKED_VALUE_1234567890ABCDEFGH';\n");
+  await write(root, 'tests/fixture.mjs', `const fake = '${KNOWN_FAKE}';\n`);
   await git(root, ['add', '-A']);
 
-  const result = await policy(root, ['--staged']);
+  const known = await policy(root, ['--staged']);
+  assert.equal(known.code, 0, known.output);
+
+  // Same shape, same sequential tail, one character different. It is no longer
+  // a named fixture, so it must be refused: this is the difference between
+  // naming a fake and exempting a whole class of strings.
+  await write(root, 'tests/other.mjs', `const fake = '${UNKNOWN_FAKE}';\n`);
+  await git(root, ['add', 'tests/other.mjs']);
+
+  const unknown = await policy(root, ['--staged']);
+  assert.equal(unknown.code, 1, unknown.output);
+  assert.match(unknown.output, /secret-shaped literal/);
+});
+
+test('a new binary blob is refused although no patch shows its content', async t => {
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'src/keep.mjs');
+  await git(root, ['add', '-A']);
+  await commit(root, 'first');
+
+  // docs/ is an allowed path and `git log -p` reports only "Binary files
+  // differ", so a patch-based scan sees nothing here at all.
+  const binary = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(128, 0)]);
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs/data.bin'), binary);
+  await git(root, ['add', 'docs/data.bin']);
+  await commit(root, 'add a binary file');
+
+  const { stdout: tip } = await git(root, ['rev-parse', 'HEAD']);
+  const pushing = `refs/heads/master ${tip.trim()} refs/heads/master ${ZERO}`;
+
+  const result = await policy(root, ['--push-refs', pushing]);
+  assert.equal(result.code, 1);
+  assert.match(result.output, /docs\/data\.bin is a binary blob of an unrecognised type \(\.bin\)/);
+});
+
+test('a binary blob of an allowed type passes', async t => {
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'src/keep.mjs');
+  await git(root, ['add', '-A']);
+  await commit(root, 'first');
+
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(128, 0)]);
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs/logo.png'), png);
+  await git(root, ['add', 'docs/logo.png']);
+  await commit(root, 'add an icon');
+
+  const { stdout: tip } = await git(root, ['rev-parse', 'HEAD']);
+  const pushing = `refs/heads/master ${tip.trim()} refs/heads/master ${ZERO}`;
+
+  const result = await policy(root, ['--push-refs', pushing]);
   assert.equal(result.code, 0, result.output);
 });
 

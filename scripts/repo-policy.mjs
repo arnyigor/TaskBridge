@@ -22,14 +22,14 @@
 //
 // `--root` exists so tests can run this against a fixture repository.
 
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { createSecretScanner, describeAllowlist, findSecretShape, isAllowedPath, normalizePath, POLICY_FILES, riskyRule } from './repo-paths.mjs';
+import { ALLOWED_BINARY_EXTENSIONS, createSecretScanner, describeAllowlist, extensionOf, isAllowedPath, LARGE_BLOB_BYTES, normalizePath, POLICY_FILES, riskyRule } from './repo-paths.mjs';
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -132,9 +132,12 @@ function scanContent(relative, text, where) {
     block(`${relative} contains a locally forbidden term (${where}, term #${term} of ${terms.length})`, 'see security.local.json; that list is intentionally not in the repository');
     return;
   }
-  const shape = findSecretShape(text);
-  if (shape) {
-    block(`${relative} contains a secret-shaped literal (${where}, ${shape})`, 'the index is what actually lands in the commit, whatever the working tree shows now');
+  for (const line of text.split(/\r?\n/)) {
+    const shape = scanSecret(line);
+    if (shape) {
+      block(`${relative} contains a secret-shaped literal (${where}, ${shape})`, 'the index is what actually lands in the commit, whatever the working tree shows now');
+      return;
+    }
   }
 }
 
@@ -153,7 +156,34 @@ async function readStagedBlob(relative) {
   return ok && stdout.length <= MAX_SCANNED_BYTES ? stdout : null;
 }
 
-// Outgoing scope -----------------------------------------------------------------
+// Reads real blob contents. A patch is not enough: for a binary file `git log -p`
+// says only "Binary files differ", so anything that is not text would pass a
+// patch-based scan unseen. Here every object introduced in the scope is read
+// whole, and the type comes from git rather than from the file name.
+function readObjects(oids) {
+  const objects = new Map();
+  if (!oids.length) return objects;
+  const result = spawnSync('git', ['cat-file', '--batch'], {
+    cwd: ROOT,
+    input: `${oids.join('\n')}\n`,
+    maxBuffer: 512 * 1024 * 1024
+  });
+  if (result.status !== 0 || !result.stdout) return objects;
+  const out = result.stdout;
+  let offset = 0;
+  while (offset < out.length) {
+    const newline = out.indexOf(10, offset);
+    if (newline === -1) break;
+    const [oid, type, sizeText] = out.subarray(offset, newline).toString('utf8').split(' ');
+    offset = newline + 1;
+    if (!oid || type === 'missing' || type === undefined) continue;
+    const size = Number(sizeText);
+    if (type !== 'blob' || !Number.isFinite(size)) continue;
+    objects.set(oid, out.subarray(offset, offset + size));
+    offset += size + 1;
+  }
+  return objects;
+}
 // Each group is an argument list for `git log`: keeping them apart avoids the
 // `--not` toggle problem when one push mixes new and existing refs.
 function outgoingGroups() {
@@ -181,36 +211,50 @@ function outgoingGroups() {
   return groups;
 }
 
-// Content of the commits being pushed, not of the working tree. A secret that
-// arrived in commit A and was removed in commit B still reaches GitHub in A, and
-// the patch is also the only place a deleted file's content survives.
-async function scanOutgoingContent(groups) {
-  let scanned = 0;
+// Content of the commits in scope, read as blobs rather than as a patch. A
+// secret that arrived in commit A and was removed in commit B still reaches
+// GitHub in A; a PNG or a SQLite file never appears in a patch at all.
+//
+// Known gap, deliberate: commit messages are not scanned. The previous
+// patch-based version discarded them too (--format=), so this is not a
+// regression — it is an unclosed channel, recorded here rather than forgotten.
+async function scanScopeContent(groups) {
+  const paths = new Map(); // oid -> first path seen
   for (const revs of groups) {
-    const { ok, stdout } = await git(['log', ...revs, '-p', '--no-renames', '-U0', '--format=']);
+    const { ok, stdout } = await git(['rev-list', '--objects', ...revs]);
     if (!ok) continue;
-    let file = '(unknown)';
     for (const line of stdout.split(/\r?\n/)) {
-      if (line.startsWith('+++ ')) {
-        file = normalizePath(line.slice(4).replace(/^b\//, ''));
-        continue;
-      }
-      if (!line.startsWith('+') || line.startsWith('+++')) continue;
-      const body = line.slice(1);
-      scanned += 1;
-      const term = termIn(body);
-      if (term !== null) {
-        block(`${file} carried a locally forbidden term into an outgoing commit (term #${term} of ${terms.length})`, 'see security.local.json');
-        return;
-      }
-      const shape = scanSecret(body);
-      if (shape) {
-        block(`${file} carried a secret-shaped literal (${shape}) into an outgoing commit`, 'the file may already be gone from the working tree; the commit still travels');
-        return;
-      }
+      const space = line.indexOf(' ');
+      if (space === -1) continue; // a commit has no path
+      const oid = line.slice(0, space);
+      const relative = normalizePath(line.slice(space + 1));
+      if (oid.length !== 40 || !relative || paths.has(oid)) continue;
+      paths.set(oid, relative);
     }
   }
-  notes.push(`scanned ${scanned} added line(s) in outgoing commits`);
+  notes.push(`objects introduced in scope: ${paths.size}`);
+
+  const contents = readObjects([...paths.keys()]);
+  let text = 0;
+  let binary = 0;
+  for (const [oid, relative] of paths) {
+    const buffer = contents.get(oid);
+    if (!buffer) continue;
+    if (buffer.length > LARGE_BLOB_BYTES) {
+      warnings.push(`${relative} is ${(buffer.length / 1048576).toFixed(1)} MB — large enough to review by hand`);
+    }
+    if (buffer.includes(0)) {
+      binary += 1;
+      const extension = extensionOf(relative);
+      if (!ALLOWED_BINARY_EXTENSIONS.includes(extension)) {
+        block(`${relative} is a binary blob of an unrecognised type (${extension || 'no extension'})`, `if it belongs here, add the extension to ALLOWED_BINARY_EXTENSIONS in scripts/repo-paths.mjs in the same reviewed commit`);
+      }
+      continue; // a scanner cannot read inside it; the type policy is the check
+    }
+    text += 1;
+    scanContent(relative, buffer.toString('utf8'), 'committed blob');
+  }
+  notes.push(`scanned ${text} text blob(s) and ${binary} binary blob(s)`);
 }
 
 // ---------------------------------------------------------------------------------
@@ -266,6 +310,18 @@ if (MODE === 'paths') {
   const inHistory = MODE === 'history';
   for (const relative of added) checkNames(relative, inHistory ? 'history' : 'outgoing history', { allowlist: !inHistory });
   if (inHistory) {
+    // `--all` is deliberately wider than branches and tags: anything in the object
+    // store can be published by a plain `git push --mirror`, which bypasses the
+    // hooks. Name the extra refs so a finding here is actionable rather than
+    // mysterious — in this repository they are codex working-tree snapshots.
+    const { ok: refsOk, stdout: refsOut } = await git(['for-each-ref', '--format=%(refname)']);
+    if (refsOk) {
+      const extra = refsOut.split(/\r?\n/).filter(ref => ref && !/^refs\/(heads|tags|remotes)\//.test(ref));
+      if (extra.length) {
+        notes.push(`${extra.length} ref(s) outside refs/heads, refs/tags and refs/remotes are in scope — nothing publishes them by default, but \`git push --mirror\` would:`);
+        for (const ref of extra) notes.push(`    ${ref}`);
+      }
+    }
     // The allowlist still guards what is published right now, not what was.
     const { ok, stdout } = await git(['ls-tree', '-r', '--name-only', '-z', 'HEAD']);
     if (ok) {
@@ -274,7 +330,7 @@ if (MODE === 'paths') {
       for (const relative of present) checkNames(relative, 'checked-out tree');
     }
   }
-  await scanOutgoingContent(groups);
+  await scanScopeContent(groups);
 }
 
 console.log('TaskBridge repo policy\n──────────────────────');

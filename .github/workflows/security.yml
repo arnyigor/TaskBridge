@@ -4,19 +4,18 @@
 # `--no-verify` and they do not exist at all in a fresh clone. This job runs on
 # GitHub's side, where a developer's machine cannot switch it off.
 #
-# Verified by running it: run 36536611902 on 2026-09-29 passed on master with all
-# three steps executing (`✔ every path…`, `✔ no secret…`, `# pass 23`). That run
-# also produced a deprecation annotation for v4 of the actions, which is why they
-# now point at v7 — the current major, checked against the GitHub API rather than
-# remembered. Re-read the run after any change here.
+# Verified by running it: runs 36536611902 and 36536717780 passed on master with
+# every step executing (`✔ every path…`, `✔ no secret…`, `# pass 23`). Re-read the
+# run after any change here; this file is not self-testing.
 #
-# Still worth doing before trusting this as a real boundary:
-#   1. pin the actions to commit SHAs instead of major tags — majors are fine for
-#      a private repository, a supply-chain risk for a public one;
-#   2. to check corporate terms server-side, add a repository secret
-#      CORPORATE_TERMS holding the same JSON body as security.local.json.
-#      Without it the job still checks paths, secret shapes and the allowlist,
-#      but not the private term list (that list must not live in the repository).
+# The actions are pinned to full commit SHAs, so a moved tag cannot change what
+# runs. The comment names the version each SHA corresponds to; refresh both
+# together and read the run afterwards.
+#
+# The corporate term list is deliberately NOT passed to CI. This job executes
+# scripts from the repository it is checking, so a secret handed to it is a
+# secret a modified scanner could print or send away — the check would become the
+# leak channel. That list stays local, where `pre-push` fails closed without it.
 #
 # This job does NOT make itself required. Branch protection / rulesets are not
 # available on private repositories without a paid plan, so while TaskBridge is
@@ -34,18 +33,19 @@ jobs:
   policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      # actions/checkout v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          # --history walks the whole reachable history, so a shallow clone would
+          # make the check quietly weaker.
           fetch-depth: 0
-      - uses: actions/setup-node@v7
+          # Nothing here pushes, and the token should not sit in .git/config.
+          persist-credentials: false
+
+      # actions/setup-node v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '22'
-
-      - name: Install the local corporate blocklist, if the secret is set
-        env:
-          TERMS: ${{ secrets.CORPORATE_TERMS }}
-        run: |
-          if [ -n "$TERMS" ]; then printf '%s' "$TERMS" > security.local.json; fi
 
       - name: Repo policy over the whole history
         run: node scripts/repo-policy.mjs --history

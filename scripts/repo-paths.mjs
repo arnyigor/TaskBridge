@@ -114,16 +114,26 @@ export const SAFE_SECRET_LINE = [
   /postgres:\/\/user:pass@/
 ];
 
-// A real secret is random; a hand-written example is not. Runs like these are
-// what fixtures look like — `tb_machine_LEAKED_VALUE_1234567890ABCDEFGH` is a
-// test value, and blocking it would make `--history` unusable on this repo.
-// The chance of a random 32-character secret containing one of them is about
-// 25 x 64^-8, so this is not a hole worth worrying about.
-const PLACEHOLDER_RUNS = ['1234567890', '0123456789', 'abcdefgh', 'ABCDEFGH', 'qwerty', 'QWERTY', 'asdfgh'];
+// Exact values that are known test fixtures — and nothing else. An earlier
+// version of this file exempted anything containing a sequential run such as
+// `1234567890`; that exempted a whole class of possible real credentials to
+// silence one string. This list names the strings instead.
+//
+// The values are fake and already present in this repository's history, so
+// storing them in plain text is not a leak — and it keeps the file readable.
+export const KNOWN_FAKE_SECRETS = [
+  'tb_machine_leaked_value_1234567890abcdefgh'
+].map(value => value.toLowerCase());
 
-export function looksLikePlaceholder(literal) {
-  return PLACEHOLDER_RUNS.some(run => literal.includes(run));
-}
+// Blobs the repository is allowed to carry. Anything else that is binary has to
+// be a deliberate decision: add the extension here, in the same reviewed commit
+// as the file. Checked before the content scan, because a scanner cannot read a
+// PNG but a commit can still ship one.
+export const ALLOWED_BINARY_EXTENSIONS = ['.png', '.ico', '.jar'];
+
+// A blob larger than this is reported but not refused: size is a judgement call,
+// an unknown binary type is a category error.
+export const LARGE_BLOB_BYTES = 10 * 1024 * 1024;
 
 // `git` always speaks forward slashes; Windows callers may not.
 export function normalizePath(value) {
@@ -145,6 +155,12 @@ export function describeAllowlist() {
   return `${ALLOWED_ROOTS.join(', ')} (and ${ALLOWED_ROOT_FILES.size} named root files)`;
 }
 
+export function extensionOf(relative) {
+  const base = String(relative ?? '').split('/').pop() ?? '';
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(dot).toLowerCase() : '';
+}
+
 // Compiles the shapes once. `scan(line)` returns the name of the first secret
 // shape on the line, or null. Line-based on purpose: it lets the safe-shape
 // rules above look at the whole line, and it is what the git-grep paths use too.
@@ -155,18 +171,8 @@ export function createSecretScanner() {
     if (SAFE_SECRET_LINE.some(rule => rule.test(line))) return null;
     for (const { name, re, min } of compiled) {
       const literal = line.match(re)?.[0] ?? '';
-      if (literal.length > min && !looksLikePlaceholder(literal)) return name;
+      if (literal.length > min && !KNOWN_FAKE_SECRETS.includes(literal.toLowerCase())) return name;
     }
     return null;
   };
-}
-
-// Convenience wrapper for whole texts (a staged blob, a file).
-export function findSecretShape(text) {
-  const scan = createSecretScanner();
-  for (const line of String(text ?? '').split(/\r?\n/)) {
-    const hit = scan(line);
-    if (hit) return hit;
-  }
-  return null;
 }
