@@ -23,3 +23,24 @@ downloads-sort/
 docs/project-dump/
 docs/status-review-*.md
 zen_page.html
+tmp-*/
+tmp-*.xml
+
+# Agent memory snapshots. These carry notes about other projects — business
+# context, credentials in paths — and must never be committed.
+.memory-backup*/
+.memory_backup*/
+
+# Backups of config.json — the file itself is ignored, its backup copies are
+# not, and they contain the same machine secret.
+config.json.bak*
+config.json.backup*
+config.json.old
+*.bak
+*.orig
+
+# Local source dumps, archives and agent state
+project-md/
+.claude/
+*.zip
+.pi/security-audit*

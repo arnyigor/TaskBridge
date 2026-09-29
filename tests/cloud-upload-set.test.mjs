@@ -173,3 +173,43 @@ test('check-secrets passes a fixture where everything is excluded', async t => {
   const { stdout } = await execFileAsync(process.execPath, [SCRIPT, '--root', root]);
   assert.match(stdout, /no secret would leave this machine/);
 });
+
+// A memory snapshot reached origin exactly this way: `git add -A`
+// picked up an agent memory snapshot that nothing ignored.
+test('check-secrets fails on a committed memory snapshot', async t => {
+  const root = await tempDir(t);
+  await write(root, '.gitignore', 'config.json\ndata/\ncloud/data/\n');
+  await write(root, '.vercelignore', 'config.json\ndata/\ncloud/data/\n');
+  await write(root, 'src/server.mjs');
+  await write(root, 'config.json', JSON.stringify({ cloud: { machineSecret: FAKE_SECRET } }));
+  await write(root, '.memory-backup-2026-01-01/other-project.md', 'notes about another project');
+
+  await git(root, ['init', '-q']);
+  await git(root, ['add', '-A', '-f']);
+  await git(root, ['add', '-f', 'config.json']);
+  await git(root, ['-c', 'user.email=t@example.com', '-c', 'user.name=t', 'commit', '-qm', 'snapshot']);
+
+  const failure = await execFileAsync(process.execPath, [SCRIPT, '--root', root]).then(
+    () => null,
+    error => error
+  );
+  assert.ok(failure, 'the audit must fail on a committed memory snapshot');
+  assert.equal(failure.code, 1);
+  assert.match(`${failure.stdout}${failure.stderr}`, /\.memory-backup-2026-01-01\/other-project\.md/);
+  assert.match(`${failure.stdout}${failure.stderr}`, /git filter-branch/);
+});
+
+test('check-secrets tolerates a memory snapshot that is ignored and never committed', async t => {
+  const root = await tempDir(t);
+  await write(root, '.gitignore', 'config.json\ndata/\ncloud/data/\n.memory-backup*/\n');
+  await write(root, '.vercelignore', 'config.json\ndata/\ncloud/data/\n.memory-backup*/\n');
+  await write(root, 'src/server.mjs');
+  await write(root, 'config.json', JSON.stringify({ cloud: { machineSecret: FAKE_SECRET } }));
+  await write(root, 'data/tasks.db');
+  await write(root, '.memory-backup-2026-01-01/other-project.md', 'notes about another project');
+
+  await git(root, ['init', '-q']);
+
+  const { stdout } = await execFileAsync(process.execPath, [SCRIPT, '--root', root]);
+  assert.match(stdout, /no secret would leave this machine/);
+});

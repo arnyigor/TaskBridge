@@ -1,5 +1,18 @@
 # TaskBridge project notes
 
+## Repository hygiene — no local scratch, backups or memory snapshots in git
+
+`.gitignore` covers the known offenders: `.memory-backup*/`, `config.json.bak*`,
+`project-md/`, `.claude/`, `tmp-*`, `*.zip` and the `.pi/security-audit*` reports.
+
+`npm run check:secrets` is the gate. It audits the Vercel upload set, tracked files,
+the secret literals from `config.json`, risky path names and the whole git history.
+It runs before every push once the clone has `git config core.hooksPath .githooks`.
+
+Why this exists: a memory-snapshot directory reached `origin` in the past. It was
+deleted and the history rewritten on 2026-09-29; every branch and tag was force-pushed,
+so an existing clone must be re-fetched, not pulled.
+
 ## Desktop portable update procedure
 
 When the user asks to update the Windows `TaskBridge.exe`:

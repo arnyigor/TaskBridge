@@ -110,6 +110,52 @@ if (inGitRepo) {
   notes.push('scanned tracked files for tb_user_/tb_machine_/postgres:// literals');
 }
 
+// 5. Risky path names (backups, memory snapshots, dumps, archives) ------------
+// The value-based checks above cannot see a leak whose value is prose: a memory
+// snapshot of another project, a config backup, a source dump. Those are caught
+// by name instead. A tracked file with such a name is a leak waiting for a
+// push; an untracked one that .gitignore does not cover is one `git add -A`
+// away from the same thing. This is how a memory snapshot once got in.
+const RISKY_PATHS = [
+  { name: 'agent memory snapshot', pattern: /(^|\/)\.memory[-_]backup/ },
+  { name: 'config.json backup', pattern: /(^|\/)config\.json\.(bak|backup|old)/ },
+  { name: 'backup file', pattern: /\.(bak|orig|old)$/ },
+  { name: 'source dump', pattern: /(^|\/)project-md\// },
+  { name: 'archive', pattern: /\.(zip|7z|rar|tgz|tar|tar\.gz)$/ },
+  { name: 'agent state', pattern: /^\.claude\// },
+  { name: 'security audit output', pattern: /^\.pi\/security-audit/ }
+];
+// Paths allowed to keep a risky name on purpose. Empty today.
+const RISKY_ALLOWED = [];
+
+const riskyRule = relative => RISKY_PATHS.find(({ pattern }) => pattern.test(relative));
+
+if (inGitRepo) {
+  const listings = [
+    ['tracked', 'tracked by git — remove it from the repo', await git(['ls-files', '-z'])],
+    ['untracked and not ignored', 'one `git add -A` away from being committed', await git(['ls-files', '--others', '--exclude-standard', '-z'])]
+  ];
+  for (const [, hint, listing] of listings) {
+    for (const relative of String(listing.stdout ?? '').split(String.fromCharCode(0)).filter(Boolean)) {
+      if (RISKY_ALLOWED.includes(relative)) continue;
+      const rule = riskyRule(relative);
+      if (rule) problems.push(`${relative} is a risky path (${rule.name}) — ${hint}`);
+    }
+  }
+  notes.push(`checked ${RISKY_PATHS.length} risky path shapes against tracked and unignored files`);
+}
+
+// 6. Is a risky path already in history? .gitignore cannot undo a push ---------
+if (inGitRepo) {
+  const added = await git(['log', '--all', '--diff-filter=A', '--name-only', '--pretty=format:']);
+  for (const relative of new Set(String(added.stdout ?? '').split(/\r?\n/).filter(Boolean))) {
+    if (RISKY_ALLOWED.includes(relative)) continue;
+    const rule = riskyRule(relative);
+    if (rule) problems.push(`history contains a risky path (${rule.name}): ${relative} — rewrite it with git filter-branch`);
+  }
+  notes.push('scanned every commit for risky path names');
+}
+
 // Report ---------------------------------------------------------------------
 console.log('TaskBridge secret audit\n───────────────────────');
 for (const note of notes) console.log(`• ${note}`);
