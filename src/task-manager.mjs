@@ -11,14 +11,14 @@ import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease, sweepOrphanLocks } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
 import { humanizeError } from '../web/errors.mjs';
-import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId } from './dispatcher.mjs';
+import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId, localProviderIds } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
 import { ModelLatency } from './model-latency.mjs';
-import { LocalModelService, quantFromPath } from './local-models.mjs';
+import { ExternalLocalServers, LocalModelService, quantFromPath } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
-import { computeTokensPerSecond, accumulateStreamMs, effectiveGenerationMs } from './system-metrics.mjs';
+import { generationWindowMs, generationMetrics } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
@@ -41,6 +41,15 @@ function originOf(commandId, clientId, deviceId) {
 // until a client answers; the rest are fire-and-forget.
 const UI_DIALOGS = new Set(['select', 'confirm', 'input', 'editor']);
 const uiText = (value, max = 4000) => (typeof value === 'string' ? value.slice(0, max) : undefined);
+// A retry the agent announces while it is still alive is PROGRESS, not a result:
+// «… retrying after error in 0m 05s. Error: Connection error.», «⏳ pi-limits-wait:
+// … still alive, waiting 0m 05s before the next retry», «… error for 0m 30s;
+// waiting, then retrying». Shown verbatim in the chat they read as a failure the
+// agent does not have — the operator sees «Агент работает» and a wall of “Error:”
+// at the same time (observed 2026-09-29 with a restarting local model). The chat
+// note is dropped; the raw frame stays in pi-events.jsonl, and a real failure
+// still arrives as the message's own error / TASK_FAILED.
+const RETRY_IN_PROGRESS_NOTICE = /retrying after error|before the next retry|then retrying/iu;
 // Kill a whole process tree by pid (an orphan from a previous TaskBridge run).
 async function killTreeByPid(pid) {
   const { execFile } = await import('node:child_process');
@@ -175,6 +184,7 @@ export class TaskManager extends EventEmitter {
     // for every health/busy/ensure check; the old object stays for the legacy
     // profile restart endpoints.
     this.localModels = new LocalModelService(config.localRuntime || {}, dataRoot);
+    this.localServers = new ExternalLocalServers(config.localRuntime || {});
     this.local = this.localModels.enabled ? this.localModels : this.runtimeManager;
     this.mcp = new McpManager(config.pi || {}, dataRoot);
     this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#llamaEnv() });
@@ -876,8 +886,8 @@ export class TaskManager extends EventEmitter {
   }
 
   #publicTask(task) {
-    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken, _genStreamMs, _genTextStreamMs,
-      _genLastDeltaAt, _genLastTextDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt,
+    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken,
+      _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
@@ -1292,7 +1302,7 @@ export class TaskManager extends EventEmitter {
     pi.on('event', (frame) => {
       if (this.deleted.has(task.id) || runtime.retired) return;
       runtime.eventChain = runtime.eventChain
-        .then(() => runtime.retired ? undefined : this.#handlePiEvent(task, frame))
+        .then(() => runtime.retired ? undefined : this.#handlePiEvent(task, frame, runtime))
         .catch(async (error) => { await this.#fail(task, error); this.#resolveSettle(task.id); });
     });
     pi.on('stderr', (text) => {
@@ -1333,17 +1343,15 @@ export class TaskManager extends EventEmitter {
     // reported as hung although the process is merely booting. Probe readiness
     // before returning; a failure falls through so the callers' own error
     // handling stays unchanged.
-    await pi.request({ type: 'get_state' }, 60000).catch(() => {});
+    await pi.request({ type: 'get_state' }, PiRpcSession.PROBE_TIMEOUT_MS).catch(() => {});
     return pi;
   }
 
   async #captureModelInfo(task, pi) {
     try {
-      const state = await pi.getState();
+      const state = await pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
       if (state?.sessionFile) task.piSessionFile = state.sessionFile;
-      task.model = state?.model
-        ? { id: state.model.id, provider: state.model.provider, contextWindow: state.model.contextWindow ?? null, maxTokens: state.model.maxTokens ?? null }
-        : null;
+      task.model = this.#taskModel(state?.model);
       task.autoCompactionEnabled = state?.autoCompactionEnabled ?? null;
       task.thinkingLevelActual = state?.thinkingLevel ?? null;
       await this.store.save(this.#publicTask(task));
@@ -1357,7 +1365,14 @@ export class TaskManager extends EventEmitter {
   async listModels({ refresh = false } = {}) {
     const catalog = await this.modelCatalog.list({ refresh });
     await this.modelLatency.load();
-    return { ...catalog, latency: this.modelLatency.stats() };
+    // `local` is a grouping fact for the pickers: llama.cpp presets and the
+    // configured external servers (Strata) carry different Pi provider ids but
+    // are the same machine, so the client shows them as one group. The real
+    // provider stays untouched — it is what Pi has to be given to select a model.
+    const local = localProviderIds(this.config.localRuntime || {}, this.localServers.servers);
+    const models = (catalog.models || []).map(model =>
+      model && local.has(model.provider) ? { ...model, local: true } : model);
+    return { ...catalog, models, latency: this.modelLatency.stats() };
   }
 
   // ---- local llama.cpp router (router mode) ----
@@ -1371,7 +1386,17 @@ export class TaskManager extends EventEmitter {
     // renamed (e.g. "llamacpp") the configured one may no longer exist, and
     // selecting a model under a dead id makes Pi answer
     // "Provider is not configured".
-    return { ...(await this.local.getStatus()), provider: this.#localProviderId() };
+    // Configured external servers (Strata и др.) merge into the same dialog:
+    // their rows carry their own provider, and load/unload routes to the
+    // server's start/stop instead of the llama.cpp router API.
+    const [status, external] = await Promise.all([
+      this.local.getStatus(),
+      this.localServers.status()
+    ]);
+    const merged = external.configured
+      ? { ...status, models: [...(status.models || []), ...external.models] }
+      : status;
+    return { ...merged, provider: this.#localProviderId() };
   }
 
   // The local provider id Pi actually exposes (see resolveLocalProviderId).
@@ -1418,6 +1443,13 @@ export class TaskManager extends EventEmitter {
   }
 
   async loadLocalModel(id) {
+    // Configured external servers (Strata): the model IS the server, so loading
+    // is starting its process — the router path below cannot do that.
+    const external = this.localServers.find(id);
+    if (external) {
+      await this.localServers.start(external);
+      return this.localStatus();
+    }
     if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
     await this.localModels.ensureRunning(() => {}, id);
     return this.localModels.getStatus();
@@ -1430,6 +1462,11 @@ export class TaskManager extends EventEmitter {
   }
 
   async unloadLocalModel(id) {
+    const external = this.localServers.find(id);
+    if (external) {
+      await this.localServers.stop(external);
+      return this.localStatus();
+    }
     if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
     await this.localModels.unloadModel(id);
     return this.localModels.getStatus();
@@ -1496,9 +1533,9 @@ export class TaskManager extends EventEmitter {
       throw Object.assign(new Error(`Pi не принял модель ${model.provider}/${targetModelId}: ${error.message}`), { code: 'MODEL_NOT_FOUND' });
     });
     task.requestedModel = { provider: model.provider, id: applied?.id || targetModelId };
-    task.model = applied
+    task.model = this.#taskModel(applied
       ? { id: applied.id, provider: applied.provider, contextWindow: applied.contextWindow ?? null, maxTokens: applied.maxTokens ?? null }
-      : { id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null };
+      : { id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null });
     const nextState = await runtime.pi.getState().catch(() => null);
     task.thinkingLevelActual = nextState?.thinkingLevel ?? task.thinkingLevelActual ?? null;
     task.updatedAt = now();
@@ -1512,20 +1549,64 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     const value = this.#normalizeThinkingLevel(level);
     if (!value) throw Object.assign(new Error('Укажите thinking level.'), { code: 'INPUT_INVALID' });
-    const levels = this.modelCatalog.peek()?.thinkingLevels;
-    if (Array.isArray(levels) && levels.length && !levels.includes(value)) {
-      throw Object.assign(new Error(`Модель не поддерживает thinking level «${value}».`), { code: 'INPUT_INVALID' });
+    // The levels of THIS model, not the catalogue-wide list: the latter belongs
+    // to Pi's current default model, and a local Strata model takes a different
+    // set (no «minimal», no «max»). Rejecting an unsupported level is honest —
+    // Pi itself would silently clamp it to a neighbour.
+    const model = task.model || task.requestedModel;
+    const levels = this.#thinkingLevelsFor(model);
+    if (levels.length && !levels.includes(value)) {
+      const name = model?.id ? `${model.provider ? `${model.provider}/` : ''}${model.id}` : 'модель сессии';
+      throw Object.assign(new Error(`Модель ${name} не поддерживает уровень размышлений «${value}». Доступно: ${levels.join(', ')}.`), { code: 'INPUT_INVALID' });
     }
     task.thinkingLevel = value;
     const runtime = this.runtimes.get(id);
     if (runtime && !runtime.pi.closed) {
       await runtime.pi.setThinkingLevel(value);
-      task.thinkingLevelActual = value;
+      // Read back what Pi really applied: it clamps a level the model cannot
+      // take, and the UI must show the effective value, not the request.
+      const nextState = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(() => null);
+      task.thinkingLevelActual = nextState?.thinkingLevel ?? value;
     }
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
-    await this.#event(task, 'THINKING_LEVEL', `Thinking level: ${value}`, { level: value });
+    await this.#event(task, 'THINKING_LEVEL', `Thinking level: ${value}`, { level: value, actual: task.thinkingLevelActual ?? null });
     return this.#publicTask(task);
+  }
+
+  // The session's model as the clients need it. Pi's own state carries only the
+  // id/provider/window of what is running, while the per-model facts live in the
+  // catalogue — above all the thinking map: without it the UI offered the
+  // catalogue-wide levels to every model, so a local Strata model got «minimal»
+  // (null in its map) and «Глубоко» without the note that the engine receives
+  // «xhigh». Cached ids only, this runs on hot paths.
+  #taskModel(model) {
+    if (!model?.id) return null;
+    const entry = this.modelCatalog.peek()?.models?.find(candidate =>
+      candidate.id === model.id && (!model.provider || candidate.provider === model.provider));
+    if (entry) {
+      return {
+        ...entry,
+        contextWindow: model.contextWindow ?? entry.contextWindow ?? null,
+        maxTokens: model.maxTokens ?? entry.maxTokens ?? null
+      };
+    }
+    return { id: model.id, provider: model.provider ?? null, contextWindow: model.contextWindow ?? null, maxTokens: model.maxTokens ?? null };
+  }
+
+  // Levels the model accepts, from the catalogue entry for it. Empty when the
+  // catalogue is not loaded (or the model is missing from it) — callers then
+  // leave the request alone and let Pi clamp.
+  #thinkingLevelsFor(model) {
+    // A task restored from the store may carry the leaner model shape of an
+    // older payload, so the catalogue lookup stays as the fallback.
+    if (Array.isArray(model?.thinkingLevels) && model.thinkingLevels.length) return model.thinkingLevels;
+    const catalog = this.modelCatalog.peek();
+    const entry = model?.id
+      ? catalog?.models?.find(candidate => candidate.id === model.id && (!model.provider || candidate.provider === model.provider))
+      : null;
+    if (Array.isArray(entry?.thinkingLevels) && entry.thinkingLevels.length) return entry.thinkingLevels;
+    return Array.isArray(catalog?.thinkingLevels) ? catalog.thinkingLevels : [];
   }
 
   async setAutoCompaction(id, enabled) {
@@ -1541,9 +1622,21 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  async #handlePiEvent(task, frame) {
+  async #handlePiEvent(task, frame, runtime = null) {
     if (this.deleted.has(task.id)) return;
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
+    // STOP must stick. Pi keeps sending the frames it had already queued when the
+    // abort arrived — the tail of the half-finished message, or an `agent_start`
+    // for a turn it was about to begin — and handled like any other they revived
+    // the just-cancelled task (`agent_start` below sets RUNNING again) while the
+    // chat kept receiving reasoning after the operator pressed STOP. The next
+    // user turn clears cancelRequested (#deliverMessage), so only the stopped
+    // turn's tail is dropped; the raw frame is still on disk (line above).
+    const stopped = runtime ?? this.runtimes.get(task.id);
+    if (stopped?.cancelRequested === true) {
+      if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
+      return;
+    }
     if (frame.type === 'extension_ui_request') return this.#onUiRequest(task, frame);
     if (frame.type === 'tool_execution_start') task._toolsRunning = (task._toolsRunning || 0) + 1;
     if (frame.type === 'tool_execution_end') {
@@ -1565,7 +1658,7 @@ export class TaskManager extends EventEmitter {
 
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
-      if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task, delta.type);
+      if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task);
       if (delta?.type === 'text_delta') task.assistantText = appendTail(task.assistantText, delta.delta, TEXT_TAIL);
       if (delta?.type === 'thinking_delta') {
         task.thinkingText = appendTail(task.thinkingText, delta.delta, THINKING_TAIL);
@@ -1621,17 +1714,22 @@ export class TaskManager extends EventEmitter {
       task._promptStartedAt = Date.now();
       task._promptMs = 0;
       task._firstTokenAt = 0;
-      task._genStreamMs = 0;
-      task._genTextStreamMs = 0;
-      task._genLastDeltaAt = 0;
-      task._genLastTextDeltaAt = 0;
+      task._firstDeltaAt = 0;
+      task._lastDeltaAt = 0;
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       if (frame.message.usage?.totalTokens > 0) task.lastUsage = frame.message.usage;
       if (frame.message.stopReason === 'error') task._modelError = frame.message.errorMessage || 'Модель завершила ответ с ошибкой.';
-      await this.#recordGenerationSpeed(task);
+      // A message that produced no token at all is a failed attempt (connection
+      // error, the wait before a retry): its time-to-first-token is the WAIT, not
+      // the model's latency, and one such sample poisons the p50 the picker
+      // shows. An answer cut short by an error keeps its sample — tokens were
+      // really generated and their rate is real.
+      if (frame.message.stopReason !== 'error' || Number(frame.message.usage?.output || 0) > 0) {
+        await this.#recordGenerationSpeed(task);
+      }
     }
     if (frame.type === 'message_end' || frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
       task.updatedAt = now();
@@ -1647,37 +1745,29 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
   }
 
-  // Wall-clock time the model spent emitting deltas. Tool execution happens
-  // between deltas as long pauses, so only short gaps are added: a 30 s `npm
-  // test` in the middle of a turn must not be counted as generation time and
-  // drag the reported TG down.
-  #trackStreamTime(task, deltaType) {
+  // Wall-clock window the model spent on one assistant message: its first delta
+  // to its message_end. Tool execution happens between messages, so nothing has
+  // to be guessed away here; only the time to the FIRST token (TTFT) is not part
+  // of it, because that is prefill and is reported as its own number.
+  #trackStreamTime(task) {
     const at = Date.now();
     if (!task._firstTokenAt && task._promptStartedAt) {
       task._firstTokenAt = at;
       task._promptMs = Math.max(0, at - task._promptStartedAt);
     }
-    task._genStreamMs = accumulateStreamMs(task._genLastDeltaAt, at, task._genStreamMs);
-    task._genLastDeltaAt = at;
-    if (deltaType === 'text_delta') {
-      task._genTextStreamMs = accumulateStreamMs(task._genLastTextDeltaAt, at, task._genTextStreamMs);
-      task._genLastTextDeltaAt = at;
-    }
+    if (!task._firstDeltaAt) task._firstDeltaAt = at;
+    task._lastDeltaAt = at;
   }
 
   // Prefer the local engine's own counters — the same source used by modern
-  // llama.cpp/LM Studio-style dashboards. Remote APIs normally expose token
-  // usage but no prompt duration, so their PP is an explicitly approximate
-  // input-tokens / time-to-first-token value; TG remains output-tokens / active
-  // streaming time and excludes long tool pauses.
+  // llama.cpp/LM Studio-style dashboards. A provider that only exposes token
+  // usage gets PP from the tokens it actually had to prefill (cache hits are
+  // excluded: they cost no prefill work), and a local engine without counters
+  // gets no PP at all — see generationMetrics.
   async #recordGenerationSpeed(task) {
-    task._genLastDeltaAt = 0;
-    task._genLastTextDeltaAt = 0;
-    const totalMs = task._genStreamMs || 0;
-    const textMs = task._genTextStreamMs || 0;
-    const ms = effectiveGenerationMs(textMs, totalMs);
-    task._genStreamMs = 0;
-    task._genTextStreamMs = 0;
+    const windowMs = generationWindowMs(task._firstDeltaAt, Date.now());
+    task._firstDeltaAt = 0;
+    task._lastDeltaAt = 0;
     const promptMs = task._promptMs || 0;
     task._promptMs = 0;
     task._promptStartedAt = 0;
@@ -1700,31 +1790,20 @@ export class TaskManager extends EventEmitter {
 
     const inputTokens = Number(task.lastUsage?.input || 0) + Number(task.lastUsage?.cacheRead || 0);
     const outputTokens = Number(task.lastUsage?.output || 0);
-    const estimatedPp = computeTokensPerSecond(inputTokens, promptMs);
-    const usageTg = computeTokensPerSecond(outputTokens, ms);
-    let engine = null;
-    if (this.localModels?.enabled && this.#usesLocalRuntime(task)) {
-      engine = await this.localModels.getMetrics().catch(() => null);
-    }
-    const enginePp = Number(engine?.pp);
-    const engineTg = Number(engine?.tg);
-    const pp = Number.isFinite(enginePp) && enginePp > 0 ? enginePp : estimatedPp;
-    const tg = Number.isFinite(engineTg) && engineTg > 0 ? engineTg : usageTg;
-    if (pp == null && tg == null) return;
-    const ppSource = pp === enginePp ? (engine.source || 'engine') : 'ttft-estimate';
-    const tgSource = tg === engineTg ? (engine.source || 'engine') : 'usage';
-    task.metrics = {
-      pp,
-      tg,
-      inputTokens: inputTokens || null,
-      outputTokens: outputTokens || null,
-      promptMs: promptMs || null,
-      ms: ms || null,
-      source: ppSource === tgSource ? ppSource : 'mixed',
-      ppSource,
-      tgSource,
-      ppApproximate: ppSource === 'ttft-estimate'
-    };
+    // The router's /metrics describe the llama.cpp engine only: a configured
+    // external server (Strata) is a different process with its own cache, so its
+    // numbers must never be read as this session's.
+    const routerEngine = this.localModels?.enabled && this.#usesLocalRuntime(task);
+    const engine = routerEngine ? await this.localModels.getMetrics().catch(() => null) : null;
+    const metrics = generationMetrics({
+      usage: task.lastUsage,
+      promptMs,
+      windowMs,
+      engine,
+      local: routerEngine || Boolean(this.localServers?.find(task.model?.provider || task.requestedModel?.provider))
+    });
+    if (!metrics) return;
+    task.metrics = metrics;
   }
 
   #waitForSettle(taskId, timeoutMs) {
@@ -2877,7 +2956,17 @@ export class TaskManager extends EventEmitter {
     // #ensureSession first would fail with "модель занята" on a busy runtime, and
     // the prompt would never reach the queue.
     const live = this.runtimes.get(id);
-    const liveState = live && !live.pi.closed ? await live.pi.getState() : null;
+    // A probe, not a command. A session whose Pi pipe is already gone has no live
+    // state to read — and failing the probe here is what made every message from
+    // the phone answer "Pi RPC session is not writable" instead of the prompt
+    // restarting the session (see #ensureSession). Other failures keep
+    // propagating: a hung Pi is a different diagnosis and must stay visible.
+    const liveState = live && !live.pi.closed && live.pi.canSend?.() !== false
+      ? await live.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(error => {
+        if (error?.code === 'PI_RPC_NOT_WRITABLE') return null;
+        throw error;
+      })
+      : null;
     if (liveState?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
     const liveStreaming = Boolean(liveState?.isStreaming);
     // Without an explicit queue request, a streaming session still receives the
@@ -2942,7 +3031,7 @@ export class TaskManager extends EventEmitter {
     // Nothing is queued: start (or reuse) the session and deliver the prompt.
     if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
     const runtime = await this.#ensureSession(task);
-    const state = await runtime.pi.getState();
+    const state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
     // Fresh state, taken right before delivering: this decides steer vs prompt.
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
@@ -3045,7 +3134,21 @@ export class TaskManager extends EventEmitter {
 
   async #ensureSession(task) {
     const current = this.runtimes.get(task.id);
-    if (current && !current.pi.closed) return current;
+    // `closed` alone is not enough: Pi that exited leaves stdin closed while the
+    // close event may still be unprocessed, and the runtime is then reused as if
+    // it were alive — every command against it fails with "Pi RPC session is not
+    // writable" instead of the session being started again. `canSend` is checked
+    // defensively because the in-process test fixtures stub Pi with a plain
+    // object; only a session that explicitly reports a dead pipe is replaced.
+    if (current && !current.pi.closed && current.pi.canSend?.() !== false) return current;
+    if (current) {
+      current.retired = true;
+      current.cancelRequested = true;
+      task._turn = (task._turn || 0) + 1;
+      await current.pi.killTree().catch(() => {});
+      this.#resolveSettle(task.id);
+      if (this.runtimes.get(task.id) === current) this.runtimes.delete(task.id);
+    }
     if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!task.workspacePath) {
       Object.assign(task, await this.#prepareWorkspace(task));
@@ -3077,7 +3180,10 @@ export class TaskManager extends EventEmitter {
 
   async state(id) {
     const runtime = this.runtimes.get(id);
-    if (!runtime) return null;
+    // The chat screen polls this while it is open. A session whose pipe is gone
+    // must answer "no live runtime" (the same null the client handles) instead
+    // of failing the request with "Pi RPC session is not writable".
+    if (!runtime || runtime.pi.closed || runtime.pi.canSend?.() === false) return null;
     return runtime.pi.getState();
   }
 
@@ -3267,7 +3373,9 @@ export class TaskManager extends EventEmitter {
   // --- extension UI requests (Pi RPC) ------------------------------------------
   async #onUiRequest(task, frame) {
     if (frame.method === 'notify') {
-      await this.#event(task, 'UI_NOTIFY', uiText(frame.message, 2000) || '', { notifyType: ['info', 'warning', 'error'].includes(frame.notifyType) ? frame.notifyType : 'info' });
+      const message = uiText(frame.message, 2000) || '';
+      if (RETRY_IN_PROGRESS_NOTICE.test(message)) return;
+      await this.#event(task, 'UI_NOTIFY', message, { notifyType: ['info', 'warning', 'error'].includes(frame.notifyType) ? frame.notifyType : 'info' });
       return;
     }
     // setStatus / setWidget / setTitle / set_editor_text: terminal decoration.

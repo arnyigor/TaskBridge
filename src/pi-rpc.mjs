@@ -190,14 +190,32 @@ export class PiRpcSession extends EventEmitter {
     this.pending.clear();
   }
 
+  // Can this session still accept a command? The one predicate send() and the
+  // session owners must agree on. Pi exiting leaves stdin closed while `closed`
+  // (set by the close event) has not necessarily been processed yet; every
+  // command sent inside that window fails, so a caller that wants to hand the
+  // command to a live Pi has to ask this, not `closed`.
+  canSend() {
+    return Boolean(this.proc) && !this.closed && this.proc.stdin?.writable === true;
+  }
+
   send(command) {
-    if (!this.proc || this.closed || !this.proc.stdin.writable) {
-      throw new Error('Pi RPC session is not writable');
+    if (!this.canSend()) {
+      // Classified and retryable: a channel that is already gone is not a server
+      // fault, and the caller's recovery is "start the session again", not
+      // "give up". Without a code this became an opaque INTERNAL_ERROR.
+      throw Object.assign(new Error('Pi RPC session is not writable'), {
+        code: 'PI_RPC_NOT_WRITABLE',
+        retryable: true
+      });
     }
     this.proc.stdin.write(JSON.stringify(command) + '\n');
   }
 
-  request(command, timeoutMs = 15000) {
+  // `bumpOnFrames: false` keeps a request's idle timer from being re-armed by the
+  // process's own output. Only abort needs it (see abort): every other request
+  // benefits from the "alive but slow" classification.
+  request(command, timeoutMs = 15000, { bumpOnFrames = true } = {}) {
     const id = command.id || randomId();
     const payload = { ...command, id };
     const startedAt = Date.now();
@@ -212,6 +230,7 @@ export class PiRpcSession extends EventEmitter {
         resolve,
         reject,
         bump: () => {
+          if (!bumpOnFrames) return;
           const remaining = startedAt + hardCapMs - Date.now();
           if (remaining <= 0) return;
           clearTimeout(pending.timer);
@@ -236,8 +255,20 @@ export class PiRpcSession extends EventEmitter {
     return this.request({ type: 'prompt', message });
   }
 
-  async getState() {
-    const response = await this.request({ type: 'get_state' });
+  // A state read decides what TaskBridge does next (steer or prompt, wait or
+  // deliver) — it is not a command the operator watches. A healthy Pi can be
+  // slower than the 15 s default: measured on 2026-09-28 with a real Pi, the
+  // first get_state after a spawn took 9.0 s and 13.2 s (the cold boot loads the
+  // extensions and the MCP adapter; #createPi documents 17-19 s), and one at a
+  // tool/turn boundary took 7.5 s. With the 15 s budget those reads were
+  // reported as "Pi RPC timeout for get_state … it looks hung" and the message
+  // failed although Pi was only slow. (Pi answers in ~1 ms while it waits out a
+  // provider rate limit, so a rate-limited Pi is not the case this covers.)
+  // 60 s matches the readiness probe #createPi already uses for the cold boot.
+  static PROBE_TIMEOUT_MS = 60000;
+
+  async getState(timeoutMs = 15000) {
+    const response = await this.request({ type: 'get_state' }, timeoutMs);
     this.lastState = response.data || null;
     return this.lastState;
   }
@@ -298,7 +329,14 @@ export class PiRpcSession extends EventEmitter {
 
   async abort(timeoutMs = 10000) {
     await this.request({ type: 'clear_queue' }, 5000).catch(() => null);
-    return this.request({ type: 'abort' }, timeoutMs);
+    // The abort must not be extended by the very stream it is stopping. Every
+    // frame Pi emits while it ignores the abort used to re-arm this request's
+    // idle timer (#bumpPending), so a Pi that kept streaming thinking deltas
+    // held STOP for the whole `timeoutMs * 8` hard cap — 80 s at the 10 s
+    // default — before the caller gave up and killed the tree. With the timer
+    // left alone it fires on time and #cancel runs its ABORT_TIMEOUT path
+    // (kill the tree) as designed.
+    return this.request({ type: 'abort' }, timeoutMs, { bumpOnFrames: false });
   }
 
   async killTree() {

@@ -115,22 +115,18 @@ export async function readSystemMetrics({ gpu = true } = {}) {
   };
 }
 
-// Adds the gap between two deltas to the streaming time, but only when the gap
-// is short enough to be generation: a long pause between deltas is tool
-// execution, and counting it would report a token rate far below the real one.
-export function accumulateStreamMs(previousAt, at, accumulated, maxGapMs = 2000) {
-  const total = Number(accumulated) || 0;
-  if (!previousAt || !at || at <= previousAt || at - previousAt > maxGapMs) return total;
-  return total + (at - previousAt);
-}
-
-// Prefer answer-text streaming time for TG: reasoning/thinking deltas can take a
-// long time but are not counted in `usage.output` by every provider. If a turn
-// has no text deltas (reasoning-only/error), fall back to all model deltas.
-export function effectiveGenerationMs(textMs, totalMs) {
-  const text = Number(textMs) || 0;
-  const total = Number(totalMs) || 0;
-  return text > 0 ? text : (total > 0 ? total : 0);
+// Generation window of one assistant message: from its first streamed delta to
+// the message_end. Idle time inside that window IS generation time — a slow
+// local engine emits one chunk every few seconds, and a tool call happens
+// BETWEEN messages, never inside one. The previous version summed only gaps of
+// at most 2 s and silently dropped the rest: for a Strata session that reported
+// 50.4 tok/s where the server's own counter said 36.7 (2026-09-29, iq3_xxs log:
+// 1054 generated in 28726 ms), and 100 tok/s in another turn.
+export function generationWindowMs(firstDeltaAt, endAt) {
+  const first = Number(firstDeltaAt);
+  const end = Number(endAt);
+  if (!Number.isFinite(first) || !Number.isFinite(end) || first <= 0 || end <= first) return 0;
+  return end - first;
 }
 
 // Output tokens over the time the model actually spent streaming them.
@@ -139,4 +135,49 @@ export function computeTokensPerSecond(outputTokens, ms) {
   const duration = Number(ms);
   if (!Number.isFinite(tokens) || !Number.isFinite(duration) || tokens <= 0 || duration <= 0) return null;
   return tokens / (duration / 1000);
+}
+
+/**
+ * Speed figures for one assistant message.
+ *
+ * TG = output tokens / the message's own generation window. `usage.output` is the
+ * provider's count of every generated token, thinking included — verified on all
+ * 4384 assistant messages in data/tasks: totalTokens = input + cacheRead +
+ * output, so reasoning tokens are a subset of output and dividing by the whole
+ * window (not by the answer-text part) is what matches the engine.
+ *
+ * PP = tokens prefilled / time to the first token, and only for providers that
+ * do NOT serve the prompt from their own cache: a local engine keeps the prompt
+ * in its KV cache and prefills just the new tail (Strata 2026-09-29: "prompt
+ * 82996 tokens = 82643 reused + 353 read in 1982 ms"), so tokens/TTFT claimed
+ * 32 895 tok/s where the honest figure was 178. Nothing to report there without
+ * the engine's own counter — `null`, never an invented number.
+ */
+export function generationMetrics({ usage, promptMs, windowMs, engine, local } = {}) {
+  const input = Number(usage?.input) || 0;
+  const cached = Number(usage?.cacheRead) || 0;
+  const output = Number(usage?.output) || 0;
+  // Cache hits are not prefill work even for a remote provider, so they are left
+  // out of the rate while still counting towards the prompt size.
+  const estimatedPp = local ? null : computeTokensPerSecond(input, promptMs);
+  const enginePp = Number(engine?.pp);
+  const engineTg = Number(engine?.tg);
+  const pp = Number.isFinite(enginePp) && enginePp > 0 ? enginePp : estimatedPp;
+  const tg = Number.isFinite(engineTg) && engineTg > 0 ? engineTg : computeTokensPerSecond(output, windowMs);
+  if (pp == null && tg == null) return null;
+  const ppSource = pp == null ? null : (pp === enginePp ? (engine?.source || 'engine') : 'ttft-estimate');
+  const tgSource = tg === engineTg ? (engine?.source || 'engine') : 'usage';
+  return {
+    pp,
+    tg,
+    inputTokens: input + cached || null,
+    outputTokens: output || null,
+    promptMs: Number(promptMs) || null,
+    ms: Number(windowMs) || null,
+    // 'mixed' only when both halves came from sources that disagree.
+    source: ppSource == null ? tgSource : (ppSource === tgSource ? ppSource : 'mixed'),
+    ppSource,
+    tgSource,
+    ppApproximate: ppSource === 'ttft-estimate'
+  };
 }

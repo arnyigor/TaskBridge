@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { normalizeModels, ModelCatalog } from '../src/model-catalog.mjs';
+import { normalizeModels, supportedThinkingLevels, providerThinkingValues, ModelCatalog } from '../src/model-catalog.mjs';
 
 // A catalog that talks to the test fixture instead of the real `pi` command.
 // PiRpcSession spawns with shell:true on Windows, so a direct node.exe path
@@ -45,6 +45,43 @@ test('normalizeModels projects Pi models to a safe, sorted shape', () => {
   assert.equal(qwen.reasoning, false);
   assert.equal(qwen.contextWindow, null);
   assert.deepEqual(qwen.cost, { input: null, output: null, cacheRead: null, cacheWrite: null });
+});
+
+test('supportedThinkingLevels mirrors Pi: null excludes a level, xhigh/max need an entry', () => {
+  // The configured local Strata models, verbatim from Pi's models.json.
+  const strata = {
+    provider: 'strata-iq3', id: 'qwen3.8-flash-next-iq3-xxs', reasoning: true,
+    thinkingLevelMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'xhigh', xhigh: 'xhigh', 'max*': null }
+  };
+  assert.deepEqual(supportedThinkingLevels(strata), ['off', 'low', 'medium', 'high', 'xhigh']);
+  // «high» reaches the engine as «xhigh», and the wildcard «max*» is not «max».
+  assert.deepEqual(providerThinkingValues(strata), { off: 'none', high: 'xhigh' });
+
+  // No map at all: the plain levels, while xhigh/max stay unsupported.
+  assert.deepEqual(supportedThinkingLevels({ provider: 'deepseek', id: 'deepseek-flash', reasoning: true }), ['off', 'minimal', 'low', 'medium', 'high']);
+  // A model that cannot think takes one level, whatever its map says.
+  assert.deepEqual(supportedThinkingLevels({ provider: 'p', id: 'plain', reasoning: false, thinkingLevelMap: { high: 'high' } }), ['off']);
+  // Other real shapes: minimal → low, xhigh null, max allowed.
+  const varied = { provider: 'p', id: 'z', reasoning: true, thinkingLevelMap: { minimal: 'low', xhigh: null, max: 'max' } };
+  assert.deepEqual(supportedThinkingLevels(varied), ['off', 'minimal', 'low', 'medium', 'high', 'max']);
+  assert.deepEqual(providerThinkingValues(varied), { minimal: 'low' });
+  // Junk maps must not throw either.
+  assert.deepEqual(supportedThinkingLevels({ provider: 'p', id: 'junk', reasoning: true, thinkingLevelMap: 'nonsense' }), ['off', 'minimal', 'low', 'medium', 'high']);
+  assert.deepEqual(supportedThinkingLevels(null), ['off']);
+});
+
+test('normalizeModels carries the per-model thinking map to the client', () => {
+  const [model] = normalizeModels([{
+    provider: 'strata-iq3', id: 'qwen3.8-flash-next-iq3-xxs', reasoning: true, input: ['text', 'image'],
+    thinkingLevelMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'xhigh', xhigh: 'xhigh', 'max*': null }
+  }]);
+  assert.deepEqual(model.thinkingLevels, ['off', 'low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(model.thinkingMap, { off: 'none', high: 'xhigh' });
+  // A model without a map still carries its levels, so the picker never falls
+  // back to the catalogue-wide list by accident.
+  const [plain] = normalizeModels([{ provider: 'p', id: 'nothink', reasoning: false }]);
+  assert.deepEqual(plain.thinkingLevels, ['off']);
+  assert.deepEqual(plain.thinkingMap, {});
 });
 
 test('normalizeModels tolerates junk and never throws', () => {

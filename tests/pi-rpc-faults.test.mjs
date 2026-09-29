@@ -87,6 +87,18 @@ test('a Pi that ignores abort is still stopped by killing its tree', { timeout: 
   assert.equal(pi.closed, true);
 });
 
+test('abort is not stretched by the stream it is stopping', { timeout: 20000 }, async t => {
+  const { pi } = await session(t);
+  await pi.prompt('fault-deaf-stream');
+  // Let the deltas flow: they are what used to re-arm the abort's idle timer.
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const started = Date.now();
+  await assert.rejects(pi.abort(400), 'a Pi that ignores abort is not acknowledged');
+  const elapsed = Date.now() - started;
+  // The 8x hard cap (3.2 s here) is what a streaming Pi used to force.
+  assert.ok(elapsed < 2000, `abort waited ${elapsed} ms for the stream it was stopping`);
+});
+
 test('killing Pi also kills the processes it started (pytest, gradle)', { timeout: 20000, skip: process.platform === 'win32' && 'taskkill /T covers this on Windows' }, async t => {
   const { pi, seen, closed } = await session(t);
   await pi.prompt('fault-child');

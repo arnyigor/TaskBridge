@@ -14,6 +14,7 @@ function publicModel(model) {
   const input = Array.isArray(model.input) ? model.input : [];
   const cost = model.cost && typeof model.cost === 'object' ? model.cost : {};
   const price = (value) => Number.isFinite(Number(value)) ? Number(value) : null;
+  const levels = supportedThinkingLevels(model);
   return {
     provider: model.provider || null,
     id: model.id,
@@ -23,6 +24,11 @@ function publicModel(model) {
     reasoning: model.reasoning === true,
     images: input.includes('image'),
     tools: model.tools === true || model.capabilities?.tools === true,
+    // Which thinking levels THIS model takes, and what each one means for the
+    // provider — the map differs per model (a local Strata model rejects
+    // «minimal» and sends «high» to the engine as «xhigh»).
+    thinkingLevels: levels,
+    thinkingMap: providerThinkingValues(model, levels),
     cost: {
       input: price(cost.input),
       output: price(cost.output),
@@ -30,6 +36,48 @@ function publicModel(model) {
       cacheWrite: price(cost.cacheWrite)
     }
   };
+}
+
+// Pi's thinking levels, in Pi's own order.
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
+/**
+ * The levels one model accepts, by Pi's own rule (getSupportedThinkingLevels in
+ * Pi's model runtime, mirrored here so the client can show exactly what the
+ * session's model will take):
+ *  - a model without reasoning supports only «off»;
+ *  - a level is unsupported when the model's thinkingLevelMap marks it `null`;
+ *  - the extended «xhigh»/«max» additionally need an explicit map entry.
+ * For the configured Strata models this yields off/low/medium/high/xhigh —
+ * «minimal» and «max» are null there, and the map's `"max*"` key is a wildcard,
+ * not «max». Pure, so it is covered without spawning Pi.
+ */
+export function supportedThinkingLevels(model) {
+  if (model?.reasoning !== true) return ['off'];
+  const map = model.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : {};
+  return THINKING_LEVELS.filter(level => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped !== undefined;
+    return true;
+  });
+}
+
+/**
+ * Level → the value the provider actually receives (`thinkingLevelMap[level] ??
+ * level`, the same expression Pi uses when it fills the request). Only the
+ * levels the model supports, and only where the value differs from the level
+ * name, so the client can say «Глубоко → xhigh» instead of inventing «xhigh».
+ */
+export function providerThinkingValues(model, levels = supportedThinkingLevels(model)) {
+  const map = model?.thinkingLevelMap && typeof model.thinkingLevelMap === 'object' ? model.thinkingLevelMap : {};
+  const values = {};
+  for (const level of levels) {
+    const mapped = map[level];
+    const value = typeof mapped === 'string' ? mapped : level;
+    if (value !== level) values[level] = value;
+  }
+  return values;
 }
 
 // Kept as a pure export so the projection can be tested without spawning Pi.

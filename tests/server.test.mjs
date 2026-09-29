@@ -156,7 +156,13 @@ test('Pi models can be listed and switched for a session', { timeout: 30000 }, a
   const catalog = await api('/api/models');
   assert.deepEqual(catalog.models.map(m => `${m.provider}/${m.id}`), ['fixture/fixture', 'other/other']);
   assert.ok(catalog.thinkingLevels.includes('high'));
-  assert.deepEqual(catalog.models.find(m => m.id === 'other'), { provider: 'other', id: 'other', name: 'Other', contextWindow: 8000, maxTokens: 512, reasoning: false, images: true, tools: false, cost: { input: null, output: null, cacheRead: null, cacheWrite: null } });
+  // «other» не умеет рассуждать: одна ступень, и карты сопоставления нет. Поля
+  // едут с каждой моделью, потому что набор уровней различается по моделям
+  // (у локальной Strata — off/low/medium/high/xhigh, а не общий список Pi).
+  assert.deepEqual(catalog.models.find(m => m.id === 'other'), { provider: 'other', id: 'other', name: 'Other', contextWindow: 8000, maxTokens: 512, reasoning: false, images: true, tools: false, thinkingLevels: ['off'], thinkingMap: {}, cost: { input: null, output: null, cacheRead: null, cacheWrite: null } });
+  const fixtureModel = catalog.models.find(m => m.id === 'fixture');
+  assert.deepEqual(fixtureModel.thinkingLevels, ['off', 'minimal', 'low', 'medium', 'high']);
+  assert.deepEqual(fixtureModel.thinkingMap, {});
 
   // A model chosen for a new task is passed to Pi as --provider/--model, and the
   // thinking level as --thinking; the captured state reflects the selection.
@@ -875,4 +881,37 @@ test('a page cut by size is delivered and the walk still reaches the start', { t
   // the client is the one that decides how to show it.
   assert.ok(seen.has(201) || seen.has(202), 'the giant turn is delivered as a fragment, not dropped');
   assert.ok(!(seen.has(201) && seen.has(302)), 'sanity: nothing above the newest exchange leaks in');
+});
+
+// Уровни размышлений сопоставляются с картой модели, а не с общим списком Pi:
+// у модели без reasoning доступен только «off», и попытка выставить «high»
+// должна получить внятный отказ со списком доступных уровней, а не молча
+// примениться (Pi бы зажал уровень к соседнему, и в UI осталась бы ложь).
+test('a thinking level the session model does not support is refused with the available ones', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  // The catalogue is what tells TaskBridge which levels a model takes, and the
+  // UI always has it loaded before the picker is shown (it is also what the
+  // picker renders). With a cold catalogue the request is passed to Pi, which
+  // clamps it itself — hence the explicit load here.
+  const catalog = await api('/api/models');
+  assert.deepEqual(catalog.models.find(m => m.id === 'other').thinkingLevels, ['off']);
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'thinking', model: { provider: 'other', id: 'other' } });
+  const task = await terminal(api, created.id);
+  assert.equal(task.status, 'SUCCEEDED', fixture.logs());
+  // Модель сессии отдаётся с картой уровней и признаком reasoning: без них
+  // клиент показывал бы общий список Pi и «Размышления» для модели без них.
+  assert.deepEqual(task.model.thinkingLevels, ['off']);
+  assert.equal(task.model.reasoning, false);
+  await assert.rejects(
+    () => api(`/api/tasks/${created.id}/thinking`, { level: 'high' }),
+    error => /не поддерживает уровень размышлений «high»/.test(error.message) && /Доступно: off/.test(error.message)
+  );
+  // Отказ ничего не меняет: уровень сессии остаётся прежним.
+  const after = await api(`/api/tasks/${created.id}`);
+  assert.notEqual(after.thinkingLevel, 'high');
+  // «off» эта модель принимает.
+  const off = await api(`/api/tasks/${created.id}/thinking`, { level: 'off' });
+  assert.equal(off.thinkingLevel, 'off');
 });

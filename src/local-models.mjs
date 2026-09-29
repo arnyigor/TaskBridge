@@ -2,6 +2,10 @@ import { spawn, execFile } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { listProcesses, processesUsingFile } from './process-info.mjs';
+
+const ORPHAN_LAUNCHER = fileURLToPath(new URL('./orphan-launcher.mjs', import.meta.url));
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failure = (code, message) => Object.assign(new Error(message), { code });
@@ -10,14 +14,36 @@ const failure = (code, message) => Object.assign(new Error(message), { code });
 // must not leak a listening process (and its log file handle) into the next
 // ensureRunning() call.
 function killTree(proc) {
-  if (!proc || proc.exitCode != null || proc.signalCode != null) return Promise.resolve();
+  if (!proc || proc.exitCode != null || proc.signalCode != null || !proc.pid) return Promise.resolve();
   return new Promise(resolve => {
     if (process.platform === 'win32') {
       execFile('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }, resolve);
     } else {
-      try { proc.kill('SIGKILL'); } catch { /* already gone */ }
+      // A bare `{ pid }` carries no ChildProcess: an orphaned server is only a
+      // pid here (see ExternalLocalServers.start).
+      try { (proc.kill ? proc.kill('SIGKILL') : process.kill(proc.pid, 'SIGKILL')); } catch { /* already gone */ }
       resolve();
     }
+  });
+}
+
+// The pid the orphan launcher printed for the server it started, or null when
+// the launcher never got that far (a bad command, an immediate exit). Its stdout
+// is a pipe and `close` follows the last chunk, so the read needs no timing
+// assumption — only a bound, so a wedged launcher cannot hang a load.
+function launcherPid(proc, { timeoutMs = 5000 } = {}) {
+  return new Promise(resolve => {
+    let buffer = '';
+    let done = false;
+    const finish = value => { if (!done) { done = true; clearTimeout(timer); resolve(value); } };
+    const read = () => {
+      const match = /^\s*(\d+)/u.exec(buffer);
+      if (match) finish(Number(match[1]));
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    proc.stdout?.on('data', chunk => { buffer += String(chunk); read(); });
+    proc.once('close', () => { read(); finish(null); });
+    proc.once('error', () => finish(null));
   });
 }
 
@@ -51,6 +77,9 @@ export function normalizeBaseUrl(value) {
 // Best-effort: там, где командную строку процесса прочитать нечем, список
 // кандидатов просто пуст и поведение остаётся прежним.
 const DETECT_CACHE_MS = 10000;
+// Status of the configured external servers (Strata и др.): two loopback
+// /health probes per poll would otherwise hammer them every 2 s.
+const STATUS_CACHE_MS = 5000;
 const DETECT_ENV = 'TASKBRIDGE_LLAMA_URL';
 
 /** `--port N` из командных строк процессов. Чистая функция — покрыта тестом. */
@@ -694,4 +723,272 @@ export class LocalModelService extends EventEmitter {
       await sleep(2000);
     }
   }
+}
+
+/* ---------------- external local servers (Strata и другие не-llama.cpp) ---------------- */
+
+// Some local engines are not llama.cpp and have no /models/load or /models/sse:
+// Strata loads the whole model before the server starts listening, so "the model
+// is loaded" = "the server answers /health". Loading a model is starting the
+// whole server, unloading it is stopping that process. The servers are
+// configured (localRuntime.externalServers), not discovered: a port that answers
+// /health says nothing about which model is behind it, and the model id Pi serves
+// is a Pi catalog fact, not a probing guess.
+export class ExternalLocalServers {
+  constructor(config = {}) {
+    this.config = config || {};
+    // Started by this process («Загрузить» in the dialog): a tracked detached
+    // process that stop() kills directly, without matching command lines.
+    this.procs = new Map();       // provider -> { proc, server }
+    this.starting = new Set();    // providers a start() is polling /health for right now
+    this.cache = null;
+    this.cacheAt = 0;
+  }
+
+  get servers() {
+    return Array.isArray(this.config.externalServers) ? this.config.externalServers : [];
+  }
+
+  get configured() {
+    return this.servers.length > 0;
+  }
+
+  /** The server behind a model id or a provider id. Matched by the model and
+   *  the provider only: an id that collides with a server's display name must
+   *  not divert a router load. null = not one of ours. */
+  find(id) {
+    if (!id) return null;
+    return this.servers.find(s => s.model === id || s.provider === id) || null;
+  }
+
+  /** A command-line fragment only this server's process has: the `--config` value
+   *  from its start command (or an explicit killMarker), so stop() never kills
+   *  an unrelated process. null = no marker, and stop() then refuses. */
+  killMarker(server) {
+    if (server.killMarker) return server.killMarker;
+    const args = (server.start || []).map(String);
+    const i = args.findIndex(a => a.toLowerCase() === '--config');
+    return i >= 0 && args[i + 1] ? args[i + 1] : null;
+  }
+
+  /**
+   * Everything that may identify the server's process in a command line: the
+   * configured path and its file name. The name matters because a server
+   * started by hand often carries a RELATIVE path (`--config strata-iq2_xs.json`
+   * from the model's folder), and then the full path never appears — the dialog
+   * said «выгружено», while the server kept answering /health.
+   */
+  processMarkers(server) {
+    const full = server.killMarker || this.killMarker(server);
+    if (!full) return [];
+    const name = String(full).split(/[\\/]/u).pop();
+    return name && name !== full ? [full, name] : [full];
+  }
+
+  async alive(server, timeoutMs = 1500) {
+    const base = normalizeBaseUrl(server.baseUrl);
+    if (!base) return false;
+    try {
+      const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The polled status (/api/info calls it every couple of seconds). Cached for
+   * a few seconds; a start in progress always reads fresh, so the dialog never
+   * pins «не загружена» while the model is being loaded.
+   */
+  status({ fresh = false } = {}) {
+    if (!this.configured) return { configured: false, servers: [], models: [] };
+    if (!fresh && !this.starting.size && this.cache && Date.now() - this.cacheAt < STATUS_CACHE_MS) return this.cache;
+    const promise = Promise.all(this.servers.map(async server => {
+      const reachable = await this.alive(server);
+      const starting = this.starting.has(server.provider) && !reachable;
+      return {
+        provider: server.provider,
+        baseUrl: normalizeBaseUrl(server.baseUrl),
+        reachable,
+        // Router states are MANAGED_RUNNING/EXTERNAL_RUNNING/STOPPED; here the
+        // dialog's badge needs the load state of the model itself.
+        state: reachable ? 'EXTERNAL_RUNNING' : 'STOPPED',
+        loading: starting,
+        models: [{
+          // Listed even when the server is down: otherwise there would be
+          // nothing to «Загрузить».
+          id: server.model || server.provider,
+          name: server.name || server.model || server.provider,
+          provider: server.provider,
+          status: reachable ? 'loaded' : starting ? 'loading' : 'unloaded',
+          external: true,
+          contextWindow: server.contextWindow ?? null
+        }]
+      };
+    })).then(servers => {
+      const value = {
+        configured: true,
+        servers: servers.map(({ provider, baseUrl, reachable, state, loading }) =>
+          ({ provider, baseUrl, reachable, state, loading })),
+        models: servers.flatMap(s => s.models)
+      };
+      this.cache = value;
+      this.cacheAt = Date.now();
+      return value;
+    });
+    return promise;
+  }
+
+  async start(server) {
+    if (await this.alive(server)) return { provider: server.provider, status: 'loaded' };
+    if (!Array.isArray(server.start) || !server.start.length) {
+      throw failure('LOCAL_RUNTIME_NOT_MANAGED',
+        `Для ${server.provider} не задана команда запуска (localRuntime.externalServers.start).`);
+    }
+    if (this.starting.has(server.provider)) {
+      throw failure('LOCAL_LOAD_IN_PROGRESS', `${server.provider} уже запускается — дождитесь ready в окне модели.`);
+    }
+    this.starting.add(server.provider);
+    try {
+      // Started through the orphan launcher, never directly: `detached: true`
+      // alone would still put the server in this process's tree, and the app's
+      // own restart kills that tree with `taskkill /T` — taking a 4-minute
+      // model load with it (the 2026-09-29 «Connection error.» in Pi's
+      // compaction summary). The launcher is the only child here and it exits
+      // at once; the server's own log (strata-<model>.log) is written by the
+      // server itself, so nothing is lost to stdio:'ignore'.
+      const proc = spawn(process.execPath, [
+        ORPHAN_LAUNCHER,
+        String(server.start[0]),
+        server.cwd || '-',
+        ...server.start.slice(1).map(String)
+      ], {
+        env: { ...process.env },
+        windowsHide: true,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+      // ENOENT/EACCES must not become an uncaught exception; the deadline loop
+      // reads it instead of waiting for a close that never comes.
+      let spawnError = null;
+      proc.on('error', error => { spawnError = error; });
+      proc.unref();
+      // The launcher's stderr is the only place a bad start command says why.
+      let launchError = '';
+      proc.stderr?.on('data', chunk => { launchError += String(chunk); });
+      const pid = await launcherPid(proc);
+      // Tracked by pid, not by ChildProcess: the launcher is already gone, and
+      // «Выгрузить» must kill the server itself.
+      this.procs.set(server.provider, { proc: pid ? { pid } : proc, server });
+      const loadTimeoutMs = Number(server.loadTimeoutMs) || 600000;
+      const deadline = Date.now() + loadTimeoutMs;
+      while (Date.now() < deadline) {
+        if (spawnError) {
+          throw failure('LOCAL_RUNTIME_FAILED', `Не удалось запустить ${server.provider}: ${spawnError.message}.`);
+        }
+        if (proc.exitCode != null && proc.exitCode !== 0) {
+          // The launcher's stderr carries why the start command failed (ENOENT
+          // on the server's interpreter, a bad --config) — the code stays the
+          // one callers already map to a 400.
+          const reason = launchError.trim().replace(/^orphan-launcher:\s*/u, '') || `код ${proc.exitCode}`;
+          throw failure('LOCAL_LOAD_FAILED', `${server.provider} завершился: ${reason}.`);
+        }
+        if (await this.alive(server, 2000)) return { provider: server.provider, status: 'loaded' };
+        await sleep(1000);
+      }
+      throw failure('LOCAL_LOAD_TIMEOUT',
+        `Таймаут ожидания ${server.provider}: сервер не поднялся за ${Math.round(loadTimeoutMs / 1000)} c.`);
+    } finally {
+      this.starting.delete(server.provider);
+    }
+  }
+
+  async stop(server) {
+    let stopped = false;
+    const tracked = this.procs.get(server.provider);
+    if (tracked) {
+      await killTree(tracked.proc).catch(() => {});
+      this.procs.delete(server.provider);
+      stopped = true;
+    } else {
+      // Started by hand (run-<model>.bat) or by a previous TaskBridge run: kill
+      // only processes whose command line carries one of this server's markers
+      // (its config path or file name) — a marker no unrelated process has.
+      // One process list for all markers: the query costs a PowerShell start.
+      const markers = this.processMarkers(server);
+      if (!markers.length) {
+        throw failure('LOCAL_RUNTIME_NOT_MANAGED',
+          `Для ${server.provider} не задан маркер процесса (start с --config или killMarker).`);
+      }
+      const list = await listProcesses({ fresh: true });
+      const pids = new Set();
+      for (const marker of markers) {
+        for (const item of (await processesUsingFile(marker, { list })) || []) pids.add(item.pid);
+      }
+      for (const pid of pids) {
+        await killTree({ pid }).catch(() => {});
+        stopped = true;
+      }
+    }
+    let up = await this.alive(server, 1000);
+    // Safety net: a wrapper (nohup, launcher) can hide the marker, or the killed
+    // wrapper may leave the real listener alive. The owner of the configured
+    // port is still our server — the config says which port it listens on.
+    const port = portOf(server.baseUrl);
+    if (up && port) {
+      for (const pid of await pidsListeningOnPort(port)) {
+        await killTree({ pid }).catch(() => {});
+        stopped = true;
+      }
+      up = await this.alive(server, 1000);
+    }
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline && up) {
+      await sleep(300);
+      up = await this.alive(server, 1000);
+    }
+    // Silent «выгружено» while the server keeps answering was the bug: say so.
+    if (up) {
+      throw failure('LOCAL_UNLOAD_FAILED',
+        `${server.provider} всё ещё отвечает на ${server.baseUrl}/health${stopped ? ' — процесс не остановился' : ' — процесс не найден (маркеры: ' + this.processMarkers(server).join(', ') + ')'}.`);
+    }
+    return { provider: server.provider, status: 'unloaded' };
+  }
+}
+
+/** Порт из baseUrl: 'http://127.0.0.1:8082' → 8082. null = не разобрать. */
+export function portOf(baseUrl) {
+  try {
+    const port = new URL(String(baseUrl)).port;
+    return port ? Number(port) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** PIDs listening on `port`, from `netstat -ano` output. Windows only: the
+ *  project's local runtime is Windows-first, and the marker path is the
+ *  primary one — this is the fallback. Pure so it can be tested. */
+export function parseListeningPids(output, port) {
+  const pids = new Set();
+  const needle = `:${Number(port)}`;
+  for (const line of String(output || '').split(/\r?\n/u)) {
+    const parts = line.trim().split(/\s+/u);
+    // Proto  Local Address  Foreign Address  State  PID
+    if (parts.length < 5 || parts[0] !== 'TCP' || parts[3] !== 'LISTENING') continue;
+    if (!parts[1].endsWith(needle)) continue;
+    const pid = Number(parts[4]);
+    if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) pids.add(pid);
+  }
+  return [...pids];
+}
+
+async function pidsListeningOnPort(port) {
+  if (process.platform !== 'win32') return [];
+  const output = await new Promise(resolve => {
+    execFile('netstat.exe', ['-ano'], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+      (error, stdout) => resolve(error ? '' : String(stdout)));
+  });
+  return parseListeningPids(output, port);
 }

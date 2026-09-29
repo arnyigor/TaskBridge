@@ -108,7 +108,27 @@
       "command": "",
       "args": [],
       "cwd": ""
-    }
+    },
+    "externalServers": [
+      {
+        "provider": "strata-iq3",
+        "name": "Strata IQ3_XXS (8082)",
+        "model": "qwen3.8-flash-next-iq3-xxs",
+        "baseUrl": "http://127.0.0.1:8082",
+        "start": [
+          "C:\\path\\to\\venv\\Scripts\\python.exe",
+          "C:\\path\\to\\Strata\\serve\\server.py",
+          "--engine",
+          "strata",
+          "--config",
+          "C:\\path\\to\\Strata\\strata-iq3_xxs.json",
+          "--port",
+          "8082"
+        ],
+        "cwd": "C:\\path\\to\\Strata",
+        "loadTimeoutMs": 600000
+      }
+    ]
   },
   "approvals": {
     "enabled": false,

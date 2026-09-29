@@ -71,6 +71,20 @@ export function resolveLocalProviderId({ configured, catalog } = {}) {
   return present.includes(configured) ? configured : present[0];
 }
 
+// Provider ids that the machine's own engines serve: the llama.cpp router under
+// either id, the configured localRuntime.provider, and every configured external
+// server (Strata). Pi lists each of them as its own provider, so without this the
+// model picker scatters local models over several groups (llama.cpp, strata-iq2,
+// strata-iq3) while they are all one machine.
+export function localProviderIds(localRuntime = {}, externalServers = []) {
+  const ids = new Set(LOCAL_PROVIDERS);
+  if (localRuntime.provider) ids.add(String(localRuntime.provider));
+  for (const server of externalServers) {
+    if (server && server.provider) ids.add(String(server.provider));
+  }
+  return ids;
+}
+
 // A provider is served by the managed local runtime only when it matches
 // `localRuntime.provider` (default "llamacpp"). Anything else — including an
 // unknown provider — is treated as remote, so the local health/busy gate and

@@ -84,9 +84,20 @@ function finish(text, fail = false, errorMessage = 'Fixture model error') {
 //   fault-deaf    like fault-hang, and ignores abort too
 //   fault-child   starts a long-lived child process (like pytest), then hangs;
 //                 its pid is reported on stderr as `fake-pi child <pid>`
+//   fault-deaf-stream  ignores abort and goes on streaming deltas meanwhile
+//   fault-abort-tail   answers abort, then starts another turn 0.5 s later (the
+//                 tail it had already queued when the abort arrived)
+//   fault-abort-tail   answers abort, then starts another turn 0.5 s later (the
+//                 tail it had already queued when the abort arrived)
+//   fault-notices emits the retry-in-progress notices a live model produces while
+//                 it is being retried, plus one genuine error notice, then answers
+//                 normally — the chat must keep only the genuine one
+//   fault-slow-stream  streams 8 tokens with a 3 s pause in the middle: a local
+//                 engine chunking slowly, where the pause IS generation time
 let deaf = false;
+let tailAfterAbort = false;
 function faultOf(message) {
-  const match = String(message || '').match(/fault-(crash|garbage|utf8|hang|deaf|child)/);
+  const match = String(message || '').match(/fault-(crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
@@ -113,6 +124,39 @@ async function runFault(fault, command, respond) {
     process.stdout.write('{"type":"message_update","assistantMessageEvent":\n');
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
     finish('после мусора');
+    return;
+  }
+  if (fault === 'slow-stream') {
+    // 8 tokens over ~3.4 s with one 3 s pause inside the SAME message: the pause
+    // is the engine generating slowly, not a tool call between messages. Output
+    // and timing are exact, so the reported TG has a known expected value (~2.4
+    // tok/s; the old gap-summing arithmetic said ~11).
+    const delta = () => send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'x' } });
+    for (let i = 0; i < 4; i++) { delta(); await new Promise(resolve => setTimeout(resolve, 120)); }
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    for (let i = 0; i < 4; i++) { delta(); await new Promise(resolve => setTimeout(resolve, 120)); }
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    const message = { role: 'assistant', content: [{ type: 'text', text: 'медленный поток' }], usage: { input: 1000, output: 8, totalTokens: 1008 }, stopReason: 'stop' };
+    persist(message);
+    send({ type: 'message_end', message });
+    streaming = false;
+    send({ type: 'agent_end' });
+    send({ type: 'agent_settled' });
+    return;
+  }
+  if (fault === 'notices') {
+    // Verbatim shapes from a live session (2026-09-29) with a local model that
+    // was being restarted: the two retry-in-progress lines and a real failure.
+    send({ type: 'extension_ui_request', id: 'notice-retry', method: 'notify', notifyType: 'info',
+      message: 'strata-iq3/qwen3.8-flash-next-iq3-xxs retrying after error in 0m 05s. Error: Connection error.' });
+    send({ type: 'extension_ui_request', id: 'notice-wait', method: 'notify', notifyType: 'info',
+      message: '⏳ pi-limits-wait: retrying after error on strata-iq3/qwen3.8-flash-next-iq3-xxs; still alive, waiting 0m 05s before the next retry. Why: Connection error.' });
+    send({ type: 'extension_ui_request', id: 'notice-rate', method: 'notify', notifyType: 'warning',
+      message: '⏳ pi-limits-wait: rate limited on wormsoft/qwen/qwen3.8:27b; still alive, waiting 0m 30s before the next retry. Why: HTTP 429' });
+    send({ type: 'extension_ui_request', id: 'notice-real', method: 'notify', notifyType: 'error',
+      message: 'Smart compaction failed safely and was cancelled: Connection error.' });
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    finish('после уведомлений');
     return;
   }
   if (fault === 'utf8') {
@@ -142,7 +186,15 @@ async function runFault(fault, command, respond) {
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     process.stderr.write(`fake-pi child ${child.pid}\n`);
   }
-  // hang / deaf / child: the tool never finishes on its own.
+  // hang / deaf / child / abort-tail: the tool never finishes on its own.
+  if (fault === 'abort-tail') { tailAfterAbort = true; return; }
+  if (fault === 'deaf-stream') {
+    // Still streaming when the abort arrives: every frame re-arms a pending
+    // request's idle timer, so this is the shape that stretched a STOP.
+    deaf = true;
+    setInterval(() => send({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'всё ещё думаю' } }), 50);
+    return;
+  }
 }
 
 readline.createInterface({ input: process.stdin }).on('line', line => {
@@ -168,7 +220,18 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (deaf) return;
     clearTimeout(pending);
     if (streaming) { streaming = false; send({ type: 'agent_settled' }); }
-    return respond();
+    respond();
+    // fault-abort-tail: the turn being unwound is not the last word — Pi starts
+    // the next one a moment later, after TaskBridge has already written the
+    // cancellation. Those frames must not revive the cancelled task.
+    if (tailAfterAbort) {
+      tailAfterAbort = false;
+      setTimeout(() => {
+        send({ type: 'agent_start' });
+        send({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'размышление после STOP' } });
+      }, 500);
+    }
+    return;
   }
   if (['prompt', 'steer', 'follow_up'].includes(command.type)) {
     if (command.message.includes('reject')) return respond({}, false);

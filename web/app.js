@@ -4203,11 +4203,22 @@ $('pcStateProvider').onclick = async () => {
 
 function renderThinkingOptions() {
   const select = $('modelThinking');
-  const levels = modelCatalog?.thinkingLevels || [];
+  const model = currentModel();
+  // Levels come from the selected model's own map (Pi's thinkingLevelMap): a
+  // local Strata model takes off/low/medium/high/xhigh and sends «high» to the
+  // engine as «xhigh», so the catalogue-wide list would offer levels that model
+  // does not have. The catalogue list stays as the fallback for a model that is
+  // not in it yet.
+  const own = Array.isArray(model?.thinkingLevels) ? model.thinkingLevels : [];
+  const levels = own.length ? own : (modelCatalog?.thinkingLevels || []);
+  const map = model?.thinkingMap && typeof model.thinkingMap === 'object' ? model.thinkingMap : {};
   const current = currentThinking();
   const values = [...new Set([current, ...levels].filter(Boolean))];
   const placeholder = selectedTaskId ? '' : '<option value="">(по умолчанию модели)</option>';
-  select.innerHTML = placeholder + values.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+  select.innerHTML = placeholder + values.map(v => {
+    const mapped = typeof map[v] === 'string' && map[v] !== v ? ` → ${map[v]}` : '';
+    return `<option value="${escapeHtml(v)}">${escapeHtml(v + mapped)}</option>`;
+  }).join('');
   select.value = current && values.includes(current) ? current : '';
 }
 
@@ -4230,23 +4241,29 @@ const modelListSentinelObserver = typeof IntersectionObserver === 'function'
   : null; // DOM-stand (tests) and very old browsers: no auto-extend, list stays batched
 if (modelListSentinelObserver) modelListSentinelObserver.observe(modelListSentinel);
 
+// Локальные модели — одна группа: у пресетов llama.cpp-роутера и настроенных
+// внешних серверов (Strata) разные Pi-провайдеры, а машина одна. Признак `local`
+// считает сервер по localRuntime (provider + externalServers) — TaskManager.listModels.
+const modelGroupLabel = model => (model && model.local === true ? 'Локальные модели' : (model?.provider || '—'));
+
 function renderModelListBatch() {
   const list = $('modelList');
   const { filtered } = modelListWindow;
   if (modelListWindow.rendered >= filtered.length) return;
   const from = modelListWindow.rendered;
   const to = Math.min(filtered.length, from + MODEL_LIST_BATCH);
-  // The provider header must consider the item rendered right before the
-  // batch start, otherwise a boundary between two batches duplicates it.
-  let provider = from > 0 ? filtered[from - 1].provider : null;
+  // The group header must consider the item rendered right before the batch
+  // start, otherwise a boundary between two batches duplicates it.
+  let group = from > 0 ? modelGroupLabel(filtered[from - 1]) : null;
   for (let i = from; i < to; i++) {
     const m = filtered[i];
-    if (m.provider !== provider) {
-      provider = m.provider;
-      const group = document.createElement('div');
-      group.className = 'modelGroup';
-      group.textContent = provider || '—';
-      list.append(group);
+    const label = modelGroupLabel(m);
+    if (label !== group) {
+      group = label;
+      const header = document.createElement('div');
+      header.className = 'modelGroup';
+      header.textContent = label;
+      list.append(header);
     }
     const item = document.createElement('button');
     item.type = 'button';
@@ -4259,6 +4276,9 @@ function renderModelListBatch() {
     const meta = document.createElement('div');
     meta.className = 'modelMeta';
     meta.textContent = [
+      // В общей локальной группе заголовок больше не называет движок, поэтому
+      // провайдер виден в самой строке.
+      m.local === true && m.provider ? m.provider : null,
       m.name && m.name !== m.id ? m.name : null,
       m.contextWindow ? `ctx ${m.contextWindow}` : null,
       m.reasoning ? 'thinking' : null,
@@ -4278,9 +4298,12 @@ function renderModelList() {
   const list = $('modelList');
   const models = modelCatalog?.models || [];
   const query = $('modelSearch').value.trim().toLowerCase();
-  const filtered = query
+  const matched = query
     ? models.filter(m => `${m.provider}/${m.id} ${m.name || ''}`.toLowerCase().includes(query))
     : models;
+  // Стабильная сортировка: локальные наверх, внутри группы — порядок каталога.
+  const filtered = [...matched].sort((a, b) =>
+    (b.local === true ? 1 : 0) - (a.local === true ? 1 : 0));
   modelListWindow = { filtered, rendered: 0 };
   list.innerHTML = '';
   if (!filtered.length) {
@@ -4305,6 +4328,11 @@ async function openModelPicker(refresh = false) {
 async function chooseModel(model) {
   const selection = { provider: model.provider, id: model.id };
   if (!selectedTaskId) {
+    // The level kept for the previous model may not exist for this one — a local
+    // Strata model takes no «minimal»/«max». Sending a level the model would
+    // silently clamp is worse than «по умолчанию модели»: that one is honest.
+    const levels = Array.isArray(model.thinkingLevels) ? model.thinkingLevels : (modelCatalog?.thinkingLevels || []);
+    if (pendingThinking && levels.length && !levels.includes(pendingThinking)) pendingThinking = null;
     pendingModel = selection;
     savePendingModel();
     updateModelChip();
@@ -4322,7 +4350,9 @@ async function chooseModel(model) {
     currentTask = updated;
     renderTaskDetails(updated);
     updateModelChip();
-    if (localEnabled && model.provider === localProviderId()) {
+    if (localEnabled && (model.provider === localProviderId() || model.external === true)) {
+      // Configured external servers (Strata) preload like router models: the
+      // dialog's «Выбрать» starts the server if it is not up already. Idempotent.
       loadLocalModel(model.id).catch(() => {});
     }
   } catch (error) {
@@ -4485,13 +4515,18 @@ function localModelRow(m) {
   choose.onclick = async () => {
     choose.disabled = true;
     choose.textContent = '…';
-    await selectLocalModel(m.id);
+    await selectLocalModel(m.id, m.provider);
   };
   actions.append(choose);
 
-  // External server models cannot be loaded/unloaded via router API
-  const isExternal = localStatus?.state === 'EXTERNAL_RUNNING' && m.status === 'unknown';
-  if (!isExternal) {
+      // Router models load/unload via the router API. Configured external servers
+  // (Strata) start/stop their whole process through the same endpoints — the
+  // backend routes. A detected external llama-server has no controllable
+  // endpoint at all, so its row stays button-less. «Отменить» during an
+  // external load works too: stop() kills the tracked process the start
+  // recorded, which is the only cancel a whole-process load has.
+  const isDetectedExternal = m.external !== true && localStatus?.state === 'EXTERNAL_RUNNING' && m.status === 'unknown';
+  if (!isDetectedExternal) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'loadBtn';
@@ -4507,8 +4542,10 @@ function localModelRow(m) {
 
 // Selecting a local preset from the dialog goes through the same path as the
 // unified picker: live session → set_model (+preload), otherwise → next task.
-async function selectLocalModel(id) {
-  const provider = localProviderId();
+async function selectLocalModel(id, provider) {
+  // Configured external servers (Strata) carry their own provider in the row;
+  // router models take the id Pi actually serves.
+  provider = provider || localProviderId();
   if (!provider) { alert('Список локальных моделей ещё не загружен — откройте окно заново.'); return; }
   try {
     await chooseModel({ provider, id });
@@ -4716,6 +4753,9 @@ function fmtMetric(value, digits = 1) {
 }
 
 const mbToGb = mb => (mb == null ? null : mb / 1024);
+// system.ram.* идёт в байтах (os.totalmem), GPU — в мегабайтах: две разные
+// единицы в одном ответе, и одна функция на них давала ошибку в 1024².
+const bytesToGb = bytes => (bytes == null ? null : bytes / (1024 * 1024 * 1024));
 
 // Live PC + model state: the answer to "is the machine the reason the model is
 // slow?". Nothing is invented — a field without data says so (TZ v3 §13).
@@ -4730,10 +4770,25 @@ function renderMachineLoad(info) {
   const metrics = engine.metrics;
   const lines = [];
 
-  // "Локальная модель", not "Модель": the panel leads with the model Pi answers
-  // with (a cloud one, usually) and this line is the machine's own llama.cpp —
-  // two different models in one panel must not read as one.
-  if (engine.configured) lines.push(`Локальная модель: ${engine.model || 'не загружена'}`);
+  // Все локальные модели в одном блоке: пресеты llama.cpp и настроенные
+  // внешние серверы (Strata). Строка называла только модель роутера и говорила
+  // «не загружена», пока Strata-модель была поднята и отвечала: у llama.cpp
+  // ничего не загружено ≠ ничего не запущено.
+  const localModels = Array.isArray(info.local?.models) ? info.local.models : [];
+  if (localModels.length) {
+    const isUp = m => m.status === 'loaded' || m.status === 'sleeping';
+    const up = localModels.filter(isUp).length;
+    lines.push(`Локальные модели: ${up} из ${localModels.length} загружено`);
+    for (const m of localModels) {
+      const state = isUp(m) ? 'загружена'
+        : m.status === 'loading' ? 'грузится'
+          : m.status === 'failed' ? 'ошибка' : 'не загружена';
+      const group = m.provider || info.local?.provider || 'llama.cpp';
+      lines.push(`  ${m.id} (${group}): ${state}`);
+    }
+  } else if (engine.configured) {
+    lines.push(`Локальная модель: ${engine.model || 'не загружена'}`);
+  }
   // Занятость контекста (KV) локальной модели. Перенесено из расширения
   // model-state, которое показывало это только в консольном виджете.
   if (metrics && metrics.available && metrics.kvRatio != null) {
@@ -4742,7 +4797,9 @@ function renderMachineLoad(info) {
   }
 
   const ram = sys?.ram;
-  if (ram) lines.push(`RAM: ${fmtMetric(mbToGb(ram.used))} / ${fmtMetric(mbToGb(ram.total))} GB (${Math.round(ram.ratio * 100)}%)`);
+  // /api/info.system.ram — БАЙТЫ (os.totalmem), а не мегабайты: mbToGb здесь
+  // давал 66 335 332 GB. GPU приходит в МБ, поэтому у него mbToGb и остаётся.
+  if (ram) lines.push(`RAM: ${fmtMetric(bytesToGb(ram.used))} / ${fmtMetric(bytesToGb(ram.total))} GB (${Math.round(ram.ratio * 100)}%)`);
   const cpu = sys?.cpu;
   if (cpu) lines.push(`CPU: ${cpu.load == null ? '—' : `${Math.round(cpu.load * 100)}%`} (${cpu.cores} ядер)`);
   const gpus = sys?.gpu;
