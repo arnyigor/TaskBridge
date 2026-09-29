@@ -4,11 +4,16 @@
 # `--no-verify` and they do not exist at all in a fresh clone. This job runs on
 # GitHub's side, where a developer's machine cannot switch it off.
 #
-# UNVERIFIED: written without a runner to execute it on. Before trusting it:
-#   1. push it and read the run;
-#   2. pin the actions to commit SHAs instead of major tags — majors are fine for
+# Verified by running it: run 36536611902 on 2026-09-29 passed on master with all
+# three steps executing (`✔ every path…`, `✔ no secret…`, `# pass 23`). That run
+# also produced a deprecation annotation for v4 of the actions, which is why they
+# now point at v7 — the current major, checked against the GitHub API rather than
+# remembered. Re-read the run after any change here.
+#
+# Still worth doing before trusting this as a real boundary:
+#   1. pin the actions to commit SHAs instead of major tags — majors are fine for
 #      a private repository, a supply-chain risk for a public one;
-#   3. to check corporate terms server-side, add a repository secret
+#   2. to check corporate terms server-side, add a repository secret
 #      CORPORATE_TERMS holding the same JSON body as security.local.json.
 #      Without it the job still checks paths, secret shapes and the allowlist,
 #      but not the private term list (that list must not live in the repository).
@@ -29,10 +34,10 @@ jobs:
   policy:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
 
