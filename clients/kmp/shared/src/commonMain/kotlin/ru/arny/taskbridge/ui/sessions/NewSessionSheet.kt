@@ -176,11 +176,11 @@ fun NewSessionSheet(
         FieldLabel("Модель", top = 16)
         ModelPicker(catalog, model, graph.settings, onPick = { model = it; thinking = clampThinkingLevel(thinking, thinkingChoices(it, catalog?.thinkingLevels.orEmpty())) })
         // Уровни — из карты выбранной модели: у локальных (Strata) набор другой,
-        // чем у модели Pi по умолчанию, и «Глубоко» там означает xhigh.
+        // чем у модели Pi по умолчанию, и «High» там означает xhigh.
         val levels = thinkingChoices(model, catalog?.thinkingLevels.orEmpty())
         if (levels.isNotEmpty() && model?.reasoning != false) {
             FieldLabel("Размышления", top = 16)
-            ThinkingPicker(levels, thinking, model = model, onPick = { thinking = it })
+            ThinkingPicker(levels, thinking, onPick = { thinking = it })
         }
 
         Spacer(Modifier.height(16.dp))
@@ -443,10 +443,10 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
 
 /** Pi's thinking levels as chips that wrap, so none hides behind a scroll on a wide window. */
 @Composable
-fun ThinkingPicker(levels: List<String>, current: String?, model: ModelRef? = null, onPick: (String) -> Unit) {
+fun ThinkingPicker(levels: List<String>, current: String?, onPick: (String) -> Unit) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         for (level in levels) {
-            FilterChip(selected = current == level, onClick = { onPick(level) }, label = { Text(thinkingOptionLabel(model, level)) })
+            FilterChip(selected = current == level, onClick = { onPick(level) }, label = { Text(thinkingLabel(level)) })
         }
     }
 }
@@ -463,21 +463,9 @@ internal fun thinkingChoices(model: ModelRef?, catalogLevels: List<String>): Lis
 }
 
 /**
- * Подпись уровня вместе с его значением у провайдера: «Глубоко → xhigh». Значение
- * показывается только там, где оно отличается от самого уровня и не является его
- * отсутствием (off → none читалось бы как лишний шум).
- */
-internal fun thinkingOptionLabel(model: ModelRef?, level: String): String {
-    val label = thinkingLabel(level)
-    val mapped = model?.thinkingMap?.get(level)
-    if (mapped.isNullOrBlank() || mapped == level || level == "off") return label
-    return "$label → $mapped"
-}
-
-/**
  * Ближайший уровень, который примет модель, — по правилу самого Pi
  * (clampThinkingLevel): вверх от запрошенного, потом вниз. Нужен при смене
- * модели в форме новой сессии: выбранный ранее «Минимум» у Strata невалиден.
+ * модели в форме новой сессии: выбранный ранее «Minimal» у Strata невалиден.
  */
 internal fun clampThinkingLevel(level: String?, levels: List<String>): String? {
     if (level == null || levels.isEmpty() || level in levels) return level
@@ -489,13 +477,19 @@ internal fun clampThinkingLevel(level: String?, levels: List<String>): String? {
     return levels.first()
 }
 
+/**
+ * Официальные имена уровней Pi (bundle: off/minimal/low/medium/high/xhigh/max).
+ * Показываем их, а не пересказ: уровень выбирается один раз и должен совпадать с
+ * тем, что человек видит в самом Pi и в движке. Набор у модели свой — что
+ * поддерживается, решает thinkingChoices по thinkingLevels модели.
+ */
 fun thinkingLabel(level: String): String = when (level) {
-    "off" -> "Без размышлений"
-    "minimal" -> "Минимум"
-    "low" -> "Коротко"
-    "medium" -> "Средне"
-    "high" -> "Глубоко"
-    "xhigh" -> "Максимум"
-    "max" -> "Предел"
+    "off" -> "None"
+    "minimal" -> "Minimal"
+    "low" -> "Low"
+    "medium" -> "Medium"
+    "high" -> "High"
+    "xhigh" -> "Xhigh"
+    "max" -> "Max"
     else -> level
 }

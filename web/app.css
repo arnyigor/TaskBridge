@@ -777,6 +777,30 @@ body {
   border-top: 1px solid var(--border);
 }
 
+// Спойлер для нескольких картинок в одном сообщении: свёрнут по умолчанию,
+// один тап по summary раскрывает/прячет все превью сразу (см. appendUserTurn).
+.imageSpoiler {
+  margin: 4px 0;
+}
+.imageSpoiler summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.71875rem;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 4px 10px;
+  user-select: none;
+}
+.imageSpoiler summary::-webkit-details-marker { display: none; }
+.imageSpoiler summary::before { content: '▸ '; color: var(--muted); }
+.imageSpoiler[open] summary::before { content: '▾ '; }
+.imageSpoiler[open] summary { color: var(--text); }
+.imageSpoiler .chatImage { margin: 4px 0 0; }
+
 .chatImage {
   display: block;
   max-width: 100%;

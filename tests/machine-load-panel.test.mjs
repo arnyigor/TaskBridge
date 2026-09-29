@@ -53,6 +53,9 @@ function makeRenderer() {
     'document', '$', 'Number',
     [
       extractConst(appSource, 'mbToGb'),
+      // renderMachineLoad читает системную RAM через bytesToGb: без этой строки
+      // вырезанная функция падала с «bytesToGb is not defined».
+      extractConst(appSource, 'bytesToGb'),
       extractFunction(appSource, 'fmtMetric'),
       extractFunction(appSource, 'renderMachineLoad'),
       'return renderMachineLoad;',

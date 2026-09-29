@@ -1040,9 +1040,36 @@ async function handleRequest(req, res) {
         // reading only the newest `limit` events made everything older
         // unreachable, and "load older" on a long session returned an empty
         // page that looked like the whole history.
-        const slice = await store.readEvents(match[1], limit + 1, after, before);
-        const events = trimStreamingDeltas(slice.length > limit ? slice.slice(1) : slice);
-        const hasOlder = slice.length > limit;
+        //
+        // One slice is not enough for a window: a turn is mostly streaming
+        // deltas, so a slice of `limit` events holds far fewer than `tail` turn
+        // boundaries and windowByTurns() has nothing to align to. The page then
+        // opened in the middle of a message, which the client renders as a
+        // partial («Часть истории») turn — a streamed session showed up as a
+        // pile of such pieces instead of its turns. So the read walks backwards
+        // until more than `tail` turn starts are in hand, the session start is
+        // reached, or one of the two ceilings is hit: the per-request event count
+        // and the response byte budget (reading past it is pointless — the size
+        // cap below keeps only the newest events that fit anyway).
+        const chunks = [];
+        let hasOlder = false;
+        let turns = 0;
+        let bytes = 0;
+        let size = 0;
+        let cursor = before;
+        while (true) {
+          const slice = await store.readEvents(match[1], limit + 1, after, cursor);
+          hasOlder = slice.length > limit;
+          const part = hasOlder ? slice.slice(1) : slice;
+          if (!part.length) break;
+          for (const event of part) bytes += Buffer.byteLength(JSON.stringify(event), 'utf8');
+          chunks.push(part);
+          size += part.length;
+          cursor = part[0].seq;
+          turns += part.filter(event => event.type === 'USER_MESSAGE').length;
+          if (!hasOlder || turns > tail || size >= maxEventsPerRequest || bytes >= maxHistoryBytes) break;
+        }
+        const events = trimStreamingDeltas(chunks.reverse().flat());
         const window = windowByTurns(events, tail, before);
         // Also bound by size: a turn (or the events read for it) can be tens of
         // megabytes, which the browser then cannot parse — that is what froze

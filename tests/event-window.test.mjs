@@ -80,8 +80,6 @@ test('capEventsByBytes bounds the payload by size, from the newest end', () => {
 });
 
 test('a byte cut is re-aligned forward to the next turn boundary', () => {
-  // budget 600 keeps [lead, user_b, tail], so the slice would open on a
-  // mid-turn event of the earlier turn; it must advance to USER_MESSAGE seq 3.
   const events = [
     { seq: 1, type: 'PI_EVENT', text: 'x'.repeat(5000) },
     { seq: 2, type: 'PI_EVENT', text: 'lead' },
@@ -102,4 +100,38 @@ test('a byte cut is re-aligned forward to the next turn boundary', () => {
   // own must be returned untouched, not dropped by the re-alignment.
   const uncut = [other(1), other(2), user(3), other(4)];
   assert.deepEqual(capEventsByBytes(uncut, 100000), uncut);
+});
+
+// A session driven by tool calls has a USER_MESSAGE only for the prompts sent to
+// it, so the cut has to align on Pi's own frames as well: otherwise the page is
+// served mid-message and the client shows it as a torn «Часть истории» piece.
+test('a byte cut with no USER_MESSAGE re-aligns forward to the next message or turn start', () => {
+  const frame = (seq, type) => ({ seq, type: 'PI_EVENT', data: { pi: { type } } });
+  const events = [
+    frame(1, 'message_start'),
+    { seq: 2, type: 'PI_EVENT', text: 'x'.repeat(5000) },
+    frame(3, 'message_start'),
+    frame(4, 'tool_execution_start'),
+    frame(5, 'message_end')
+  ];
+  // budget 400 keeps [3, 4, 5]: the slice opens on the tail of an earlier turn,
+  // so it must advance to the message_start at seq 3.
+  assert.deepEqual(capEventsByBytes(events, 400).map(e => e.seq), [3, 4, 5]);
+  // The same for turn_start, which Pi emits before the first message of a turn.
+  const turns = [
+    frame(1, 'turn_start'),
+    { seq: 2, type: 'PI_EVENT', text: 'x'.repeat(5000) },
+    frame(3, 'turn_start'),
+    frame(4, 'message_start')
+  ];
+  assert.deepEqual(capEventsByBytes(turns, 400).map(e => e.seq), [3, 4]);
+  // A mid-message delta is not a boundary: nothing survives the cut, so the
+  // newest events are kept as they are rather than dropped.
+  const deltas = [
+    frame(1, 'message_start'),
+    { seq: 2, type: 'PI_EVENT', text: 'x'.repeat(5000) },
+    frame(3, 'message_update'),
+    frame(4, 'message_update')
+  ];
+  assert.deepEqual(capEventsByBytes(deltas, 400).map(e => e.seq), [3, 4]);
 });

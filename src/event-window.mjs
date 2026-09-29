@@ -13,13 +13,24 @@
 // end until the budget is reached. At least one event is always kept (a single
 // event over the budget still shows something rather than an empty chat). The
 // byte cut can land mid-turn, so the slice is then re-aligned forward to the
-// first USER_MESSAGE still in it: a batch must open on a turn boundary, since
-// the reducer expects a current turn from the start (a stray leading event from
-// a dropped turn used to crash the chat). When nothing was dropped the window is
-// returned untouched — a session's first turn has no USER_MESSAGE of its own, so
-// aligning an uncut window would silently drop it. When no boundary survives the
-// cut the slice is kept as-is: one event is always kept, so the chat is never
-// blank.
+// first event that OPENS a message or a turn: a batch must open on such a
+// boundary, since the reducer expects a current turn from the start (a stray
+// leading event from a dropped turn used to crash the chat) and renders a batch
+// that opens inside a message as a torn partial turn. A USER_MESSAGE is not
+// enough by itself: a run of turns driven by tool calls has one only for the
+// prompts sent to it, so the Pi frames count too (the cut turn then arrives
+// whole from the next page down, which reads below this boundary). When nothing
+// was dropped the window is returned untouched — a session's first turn has no
+// USER_MESSAGE of its own, so aligning an uncut window would silently drop it.
+// When no boundary survives the cut the slice is kept as-is: one event is always
+// kept, so the chat is never blank.
+export function opensTurn(event) {
+  if (!event) return false;
+  if (event.type === 'USER_MESSAGE') return true;
+  const pi = event.data?.pi?.type;
+  return pi === 'turn_start' || pi === 'message_start';
+}
+
 export function capEventsByBytes(events, maxBytes) {
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) return events;
   let total = 0;
@@ -30,7 +41,7 @@ export function capEventsByBytes(events, maxBytes) {
     total += size;
     start = index;
   }
-  const boundary = events.findIndex((event, index) => index >= start && event.type === 'USER_MESSAGE');
+  const boundary = events.findIndex((event, index) => index >= start && opensTurn(event));
   if (start > 0 && boundary > start) start = boundary;
   return events.slice(start);
 }

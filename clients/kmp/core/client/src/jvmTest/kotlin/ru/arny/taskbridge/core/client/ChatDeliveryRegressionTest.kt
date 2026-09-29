@@ -74,6 +74,27 @@ class ChatDeliveryRegressionTest {
         assertTrue(reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last().active)
     }
 
+    @Test fun aReminderFrameKeepsItsWorkInTheTurnThatOwnsIt() {
+        // Pi sends the harness's own reminder («Правок 1, проверки ни одной…») as
+        // a user frame with no USER message of its own. Pairing it with some
+        // other user turn moved `current` back to that turn, so everything the
+        // agent did next was appended ABOVE the newer user's own message: the
+        // reasoning and the tool calls of the current prompt hung under the
+        // older bubble.
+        val reducer = ChatReducer(task)
+        reducer.apply(event(1, "USER_MESSAGE", """{"text":"Это связано с sales-feature","mode":"prompt"}"""))
+        reducer.frame(2, """{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Это связано с sales-feature"}]}}""")
+        reducer.frame(3, """{"type":"message_start","message":{"role":"assistant"}}""")
+        reducer.frame(4, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"работа по запросу"}]}}""")
+        reducer.frame(5, """{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Правок 1, проверки ни одной. Собери проект"}]}}""")
+        reducer.frame(6, """{"type":"message_start","message":{"role":"assistant"}}""")
+        reducer.frame(7, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","thinking":"продолжение работы"}]}}""")
+        val items = reducer.snapshot().items
+        assertEquals(listOf("user-initial", "assistant-initial", "user-1", "assistant-1"), items.map { it.id })
+        assertEquals("", (items[1] as ChatItem.Assistant).thinking, "чужой ход не должен получить работу напоминания")
+        assertEquals("работа по запросупродолжение работы", (items[3] as ChatItem.Assistant).thinking)
+    }
+
     @Test fun oldTerminalTaskCannotFinishAnUnacknowledgedMessage() {
         val reducer = ChatReducer(task.copy(status = "SUCCEEDED"))
         reducer.addOptimistic("cmd", "new")

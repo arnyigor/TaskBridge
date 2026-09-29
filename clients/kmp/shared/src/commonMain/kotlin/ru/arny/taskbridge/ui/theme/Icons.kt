@@ -68,14 +68,4 @@ object AppIcons {
     val Eraser = lineIcon("eraser", "M20 20H9l-6-6 10-10 7 7-6 6", "M6 11l7 7")
     val Sun = lineIcon("sun", "M12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10z", "M12 1v2", "M12 21v2", "M4.22 4.22l1.42 1.42", "M18.36 18.36l1.42 1.42", "M1 12h2", "M21 12h2", "M4.22 19.78l1.42-1.42", "M18.36 5.64l1.42-1.42")
     val Moon = lineIcon("moon", "M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z")
-
-    // Уровни размышлений: шкала интенсивности, как «палки» сигнала — от одной
-    // полосы (минимум) до пяти (максимум). Отдельного глифа на каждый уровень в
-    // наборе нет, а словами уровень в ряду иконок не прочитать.
-    val ThinkingOff = lineIcon("thinkingOff", "M4 20h16", "M4 16h16", "M4 12h10")
-    val Thinking1 = lineIcon("thinking1", "M5 19v-3")
-    val Thinking2 = lineIcon("thinking2", "M5 19v-3", "M11 19v-6")
-    val Thinking3 = lineIcon("thinking3", "M5 19v-3", "M11 19v-6", "M17 19v-10")
-    val Thinking4 = lineIcon("thinking4", "M5 19v-3", "M11 19v-6", "M17 19v-10", "M22 19v-13")
-    val Thinking5 = lineIcon("thinking5", "M4 19v-3", "M9 19v-6", "M14 19v-10", "M19 19v-13")
 }

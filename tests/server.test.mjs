@@ -838,6 +838,77 @@ test('tail pagination can page below the newest 500-event slice to the very firs
   assert.equal(Math.min(...seen), 1, 'the very first event must be reachable');
 });
 
+// A page must open on a turn boundary. A turn is mostly deltas, so a slice of
+// `limit` events holds far fewer than `tail` turns: windowByTurns then has
+// nothing to align to and the page opens in the middle of a message. The client
+// renders such a page as a partial («Часть истории») turn, so a streamed
+// session showed up as a pile of broken pieces instead of its turns.
+test('a page of a delta-heavy session opens on a turn, not mid-message', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  // 30 turns of a streamed session: one long answer each, ~70 events per turn.
+  // 500 events therefore cover about seven turns — fewer than tail=8.
+  const store = new TaskStore(path.join(root, 'data'));
+  for (let turn = 0; turn < 30; turn++) {
+    let seq = 1000 + turn * 100;
+    await store.appendEventAt(id, seq, { taskId: id, seq, type: 'USER_MESSAGE', message: `вопрос ${turn}`, data: { text: `вопрос ${turn}` } });
+    await store.appendEventAt(id, seq + 1, { taskId: id, seq: seq + 1, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+    for (let delta = 0; delta < 60; delta++) {
+      await store.appendEventAt(id, seq + 2 + delta, {
+        taskId: id, seq: seq + 2 + delta, type: 'PI_EVENT',
+        data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: `ответ ${turn} ` } } }
+      });
+    }
+    await store.appendEventAt(id, seq + 62, {
+      taskId: id, seq: seq + 62, type: 'PI_EVENT',
+      data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: `ответ ${turn}` }] } } }
+    });
+  }
+  store.close();
+
+  // Walk the pages exactly like a client does, and replay what it got.
+  const task = { id, prompt: 'первое', status: 'SUCCEEDED' };
+  let chat = null;
+  let before = null;
+  let reachedStart = false;
+  let pages = 0;
+  const midMessage = [];
+  while (!reachedStart && pages < 40) {
+    const page = await api(`/api/tasks/${id}/events?tail=8${before == null ? '' : `&before=${before}`}`);
+    if (page.events.length && page.events[0].type !== 'USER_MESSAGE' && !page.reachedStart) {
+      midMessage.push(page.events[0].seq);
+    }
+    if (pages === 0) {
+      // Same bootstrap as the clients: an unaligned window seeds the task's own
+      // prompt, an aligned one starts off the first real USER_MESSAGE.
+      chat = new ChatState(task, { seedInitial: page.reachedStart });
+      for (const event of page.events) chat.apply(event);
+    } else {
+      chat.prependOlder(task, page.events, page.reachedStart);
+      chat.snapshot(task, false);
+    }
+    reachedStart = page.reachedStart;
+    if (!page.events.length) break;
+    before = page.events[0].seq;
+    pages += 1;
+  }
+
+  assert.deepEqual(midMessage, [], 'every page must start a turn, not the middle of a message');
+  const partials = chat.turns.filter(turn => turn.id.startsWith('assistant-partial-'));
+  assert.deepEqual(partials.map(turn => turn.id), [], 'no page is shown as a broken «Часть истории» piece');
+  for (let turn = 0; turn < 30; turn++) {
+    const question = chat.turns.find(item => item.text === `вопрос ${turn}`);
+    assert.ok(question, `user turn ${turn} is in the reconstructed chat`);
+    const answer = chat.turns[chat.turns.indexOf(question) + 1];
+    assert.equal(answer?.text, `ответ ${turn}`, `answer ${turn} keeps its text`);
+  }
+});
+
 // A turn bigger than the history byte budget cannot be shipped whole: the cap
 // keeps its newest events, and that page opens mid-turn. It must still be
 // DELIVERED — the client renders it as a partial turn — and the walk must be

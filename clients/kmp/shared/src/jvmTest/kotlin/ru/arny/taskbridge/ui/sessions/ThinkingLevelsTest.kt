@@ -8,7 +8,7 @@ import kotlin.test.assertNull
 /**
  * Уровень размышлений сопоставляется с картой КОНКРЕТНОЙ модели, а не с общим
  * списком каталога: у локальных моделей (Strata) набор другой, «minimal» и «max»
- * в их карте равны null, а «Глубоко» уходит в движок как xhigh. Данные ниже —
+ * в их карте равны null, а «High» уходит в движок как xhigh. Данные ниже —
  * verbatim из models.json для strata-iq3 и из ответа сервера для обычной модели.
  */
 class ThinkingLevelsTest {
@@ -34,14 +34,18 @@ class ThinkingLevelsTest {
     }
 
     @Test
-    fun labelShowsTheProviderValueOnlyWhenItDiffers() {
-        assertEquals("Глубоко → xhigh", thinkingOptionLabel(strata, "high"))
-        assertEquals("Средне", thinkingOptionLabel(strata, "medium"))
-        // off → none — не «ошибка сопоставления», а отсутствие размышлений: шума нет.
-        assertEquals("Без размышлений", thinkingOptionLabel(strata, "off"))
-        assertEquals("Минимум", thinkingOptionLabel(plain, "minimal"))
-        // Уровень, которого нет в карте, показывается как есть.
-        assertEquals("Предел", thinkingOptionLabel(strata, "max"))
+    fun chipsShowTheOfficialPiNamesOnly() {
+        // Карта Pi (minimal→low, xhigh→high) в подписи не показывается: рядом стояли
+        // пары «Minimal → low» и «Xhigh → high», которые читаются как противоречие.
+        assertEquals("None", thinkingLabel("off"))
+        assertEquals("Minimal", thinkingLabel("minimal"))
+        assertEquals("Low", thinkingLabel("low"))
+        assertEquals("Medium", thinkingLabel("medium"))
+        assertEquals("High", thinkingLabel("high"))
+        assertEquals("Xhigh", thinkingLabel("xhigh"))
+        assertEquals("Max", thinkingLabel("max"))
+        // Неизвестное значение показывается как есть, чтобы не прятать его.
+        assertEquals("super", thinkingLabel("super"))
     }
 
     @Test

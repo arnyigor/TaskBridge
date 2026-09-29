@@ -485,7 +485,14 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 val variantUser = turns.firstOrNull { it.role == Role.USER &&
                     current.variantKey == (if (it.id == "user-initial") 0L else it.id.removePrefix("user-").toLongOrNull()) &&
                     current.id != it.id.replaceFirst("user-", "assistant-") }
-                piUserTurn = variantUser ?: candidates.firstOrNull { text != null && (it.text == text || text.startsWith(it.text + "\n")) } ?: candidates.firstOrNull()
+                // Pair by TEXT only. A Pi user frame the chat has no prompt for is
+                // the harness's own reminder («Правок 1, проверки ни одной…»): it
+                // continues the CURRENT turn. Picking some other user turn for it
+                // (the old `?: candidates.firstOrNull()` fallback took the OLDEST
+                // one) re-pointed current at that turn, so everything the agent did
+                // next was appended ABOVE the newer user's own message — the work
+                // hung under the wrong bubble, before the prompt that caused it.
+                piUserTurn = variantUser ?: candidates.firstOrNull { text != null && (it.text == text || text.startsWith(it.text + "\n")) }
                 piUserTurn?.let { piUsersSeen += it.id }
             } else if (frame.obj("message")?.str("role") == "assistant") {
                 // USER_MESSAGE says Pi accepted a steer, not that it has reached

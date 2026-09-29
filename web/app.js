@@ -407,10 +407,26 @@ function appendUserTurn(text, files = [], before = null, at = null) {
   if (files.length && selectedTaskId) {
     const list = document.createElement('div');
     list.className = 'attachedFiles';
+    // Собираю превью отдельно: более одной картинки в сообщении уходят под
+    // спойлер (свёрнуты по умолчанию), иначе N картинок подряд съедают весь
+    // экран — и скролл, и ответ агента под ними.
+    const previews = [];
     for (const f of files) {
       const preview = f.id ? imagePreview(f, selectedTaskId) : null;
-      if (preview) body.append(preview);
+      if (preview) previews.push(preview);
       list.append(f.id ? fileCard(f, selectedTaskId) : Object.assign(document.createElement('span'), { className: 'fileChip', textContent: `📎 ${f.name}` }));
+    }
+    if (previews.length > 1) {
+      // Тот же механизм, что reasoningEl и controlsSpoiler: нативный details,
+      // свёрнут по умолчанию, один тап по summary раскрывает/прячет все превью.
+      const spoiler = document.createElement('details');
+      spoiler.className = 'imageSpoiler';
+      const summary = document.createElement('summary');
+      summary.textContent = `🖼 ${previews.length} изображений`;
+      spoiler.append(summary, ...previews);
+      body.append(spoiler);
+    } else {
+      for (const preview of previews) body.append(preview);
     }
     body.append(list);
   }
@@ -2062,6 +2078,33 @@ function stopTarget() {
   return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(isWorking) || null;
 }
 
+// Модель читает промпт — фаза и прогресс чтения у внешнего локального сервера
+// (Strata): /metrics → live.phase / prompt_read / prompt_total, TaskBridge
+// вливает это в info.local.models. Строка ищется по провайдеру сессии — то же
+// правило, что в KMP ChatScreen. Показ только до первого токена ответа: как
+// только модель отвечает, факт чтения устарел и строка вводит в заблуждение.
+function readingPrompt(task) {
+  const provider = task?.model?.provider;
+  const row = provider ? (localStatus?.models || []).find(m => m.provider === provider) : null;
+  const metrics = row?.metrics;
+  if (!metrics) return '';
+  const reading = typeof metrics.phase === 'string' && /read/i.test(metrics.phase);
+  const ratio = typeof metrics.progress === 'number' && metrics.progress >= 0 && metrics.progress <= 1
+    ? metrics.progress : null;
+  if (!reading && ratio === null) return '';
+  const turn = newestTurn();
+  if (turn?.role === 'assistant' && String(turn.text || '').trim()) return '';
+  const percent = ratio === null ? null : `${Math.round(ratio * 100)}%`;
+  // «Часть от целого» — как в логах llama.cpp: по одному проценту не видно,
+  // сколько уже прочитано и сколько осталось (Strata отдаёт prompt_read/total).
+  const read = metrics.promptRead;
+  const total = metrics.promptTotal;
+  const tokens = Number.isFinite(read) && Number.isFinite(total) && total > 0
+    ? `${read.toLocaleString('ru-RU')} / ${total.toLocaleString('ru-RU')}` : null;
+  const detail = [percent, tokens].filter(Boolean).join(' · ');
+  return ` — модель читает промпт${detail ? ` · ${detail}` : ''}`;
+}
+
 // What the machine is doing, in one line: a running session must be obvious
 // (the small "ждёт модель" badge in the list is not enough), with a live timer
 // so a stuck run is visible too.
@@ -2099,9 +2142,12 @@ function renderActivity(task = currentTask) {
     const seconds = since === null ? null : Math.max(0, Math.round((Date.now() - since) / 1000));
     const wait = status === 'QUEUED' ? ` — ${queueText(task.queueReason)}` : '';
     const runtime = task.runtime?.activity === 'compacting' ? ' — сжимается контекст' : '';
+    // Чтение промпта читается из info.local.models, а она обновляется каждые 2 с
+    // (loadStatus) — краска раз в секунду этого достаточна.
+    const reading = readingPrompt(task);
     const elapsed = seconds === null ? '' : ` · ${seconds} с`;
     const model = task.model?.id ? ` · ${task.model.id}` : '';
-    host.textContent = `${label}${wait}${runtime}${elapsed}${model}`;
+    host.textContent = `${label}${wait}${runtime}${reading}${elapsed}${model}`;
   };
   paint();
   // Elapsed time keeps ticking while a session works or waits.
