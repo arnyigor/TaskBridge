@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 
 import { auditUploadSet, formatAudit, parseIgnoreFile, SENSITIVE_LOCAL_FILES } from '../cloud/lib/upload-set.mjs';
 import { matchesIgnore } from '../cloud/lib/deploy.mjs';
+import { RISKY_ALLOWED, RISKY_PATHS, riskyRule } from './repo-paths.mjs';
 
 // Audits that no secret can leave this machine — neither through a `vercel
 // deploy` (which ignores .gitignore) nor through a `git push`.
@@ -113,23 +114,9 @@ if (inGitRepo) {
 // 5. Risky path names (backups, memory snapshots, dumps, archives) ------------
 // The value-based checks above cannot see a leak whose value is prose: a memory
 // snapshot of another project, a config backup, a source dump. Those are caught
-// by name instead. A tracked file with such a name is a leak waiting for a
-// push; an untracked one that .gitignore does not cover is one `git add -A`
-// away from the same thing. This is how a memory snapshot once got in.
-const RISKY_PATHS = [
-  { name: 'agent memory snapshot', pattern: /(^|\/)\.memory[-_]backup/ },
-  { name: 'config.json backup', pattern: /(^|\/)config\.json\.(bak|backup|old)/ },
-  { name: 'backup file', pattern: /\.(bak|orig|old)$/ },
-  { name: 'source dump', pattern: /(^|\/)project-md\// },
-  { name: 'archive', pattern: /\.(zip|7z|rar|tgz|tar|tar\.gz)$/ },
-  { name: 'agent state', pattern: /^\.claude\// },
-  { name: 'security audit output', pattern: /^\.pi\/security-audit/ }
-];
-// Paths allowed to keep a risky name on purpose. Empty today.
-const RISKY_ALLOWED = [];
-
-const riskyRule = relative => RISKY_PATHS.find(({ pattern }) => pattern.test(relative));
-
+// by name instead, using the same rules scripts/repo-policy.mjs enforces before
+// every commit. A tracked file with such a name is a leak waiting for a push; an
+// untracked one that .gitignore does not cover is one `git add -A` away.
 if (inGitRepo) {
   const listings = [
     ['tracked', 'tracked by git — remove it from the repo', await git(['ls-files', '-z'])],
@@ -137,7 +124,7 @@ if (inGitRepo) {
   ];
   for (const [, hint, listing] of listings) {
     for (const relative of String(listing.stdout ?? '').split(String.fromCharCode(0)).filter(Boolean)) {
-      if (RISKY_ALLOWED.includes(relative)) continue;
+      if (RISKY_ALLOWED.has(relative)) continue;
       const rule = riskyRule(relative);
       if (rule) problems.push(`${relative} is a risky path (${rule.name}) — ${hint}`);
     }
@@ -149,7 +136,7 @@ if (inGitRepo) {
 if (inGitRepo) {
   const added = await git(['log', '--all', '--diff-filter=A', '--name-only', '--pretty=format:']);
   for (const relative of new Set(String(added.stdout ?? '').split(/\r?\n/).filter(Boolean))) {
-    if (RISKY_ALLOWED.includes(relative)) continue;
+    if (RISKY_ALLOWED.has(relative)) continue;
     const rule = riskyRule(relative);
     if (rule) problems.push(`history contains a risky path (${rule.name}): ${relative} — rewrite it with git filter-branch`);
   }

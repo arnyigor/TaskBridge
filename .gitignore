@@ -45,3 +45,11 @@ project-md/
 .claude/
 *.zip
 .pi/security-audit*
+
+# Agent scratch. Put temporary work here rather than anywhere in the tree —
+# better still, keep it outside the repository entirely (see AGENTS.md).
+.local/
+
+# Local blocklist of corporate terms for scripts/repo-policy.mjs. The list itself
+# must never be published: that is why it is not in the repository.
+security.local.json

@@ -1,0 +1,8 @@
+{
+  "_note": "Copy to security.local.json (git-ignored) and list terms that must never reach the repository. scripts/repo-policy.mjs scans staged content and the outgoing history for them. Matching is case-insensitive, so keep terms distinctive (a domain, an internal package prefix) — a short or generic word will block honest commits.",
+  "forbiddenTerms": [
+    "example-internal-domain.local",
+    "com.example.internal",
+    "internal-nexus-hostname"
+  ]
+}

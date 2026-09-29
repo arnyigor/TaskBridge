@@ -1,0 +1,20 @@
+#!/bin/sh
+# Refuse a commit that would record a file TaskBridge has no business carrying.
+# Enable it per clone with:  git config core.hooksPath .githooks
+#
+#   repo-policy --staged   allowlist + risky names + locally forbidden terms
+#   check-secrets          the Vercel upload set, tracked files, config.json
+#                          values, and the whole history
+set -e
+cd "$(git rev-parse --show-toplevel)" || exit 0
+
+node scripts/repo-policy.mjs --staged
+node scripts/check-secrets.mjs
+
+# Optional and off by default. Gitleaks is NOT installed on this machine, so the
+# invocation below is UNVERIFIED: the subcommand changed between versions
+# (v8.19+ `gitleaks git --staged`, older `gitleaks protect --staged`). Check
+# `gitleaks version` and its flags before setting TASKBRIDGE_GITLEAKS=1.
+if [ "${TASKBRIDGE_GITLEAKS:-0}" = "1" ] && command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --staged --redact --no-banner || exit 1
+fi

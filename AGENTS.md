@@ -1,13 +1,33 @@
 # TaskBridge project notes
 
-## Repository hygiene — no local scratch, backups or memory snapshots in git
+## Repository hygiene — what may live in this repository
 
-`.gitignore` covers the known offenders: `.memory-backup*/`, `config.json.bak*`,
-`project-md/`, `.claude/`, `tmp-*`, `*.zip` and the `.pi/security-audit*` reports.
+The control is an **allowlist**, not a list of forbidden names. `scripts/repo-paths.mjs`
+lists the roots TaskBridge may contain; anything else is refused, even if nobody has ever
+seen its name before. A new top-level directory is added only by editing `ALLOWED_ROOTS`
+in that file — reviewed in the diff, on purpose.
 
-`npm run check:secrets` is the gate. It audits the Vercel upload set, tracked files,
-the secret literals from `config.json`, risky path names and the whole git history.
-It runs before every push once the clone has `git config core.hooksPath .githooks`.
+| Gate | When | What it checks |
+|---|---|---|
+| `.githooks/pre-commit` | every commit | `scripts/repo-policy.mjs --staged`: allowlist, risky names, locally forbidden terms |
+| `.githooks/pre-push` | every push | `--outgoing` over `--branches --tags --not --remotes`, plus `check-secrets` |
+
+Enable both hooks in a clone: `git config core.hooksPath .githooks`.
+Manual runs: `npm run check:policy` and `npm run check:secrets`.
+
+`security.local.json` (git-ignored; format in `security.local.example.json`) holds the
+local list of corporate terms that must never be committed. It is deliberately not in the
+repository, so the list of internal names is not published either.
+
+### Git rules for agents
+
+- **Never `git add -A`, never `git add .`** — that is how unrelated files get in.
+  Stage reviewed paths explicitly: `git add src/foo.mjs tests/foo.test.mjs`.
+- Before every commit: `git status --short`, then `git diff --cached --name-status`.
+- An unexpected file is a stop signal — leave it untouched, do not stage it, say so.
+- Do not commit backups, memories, dumps, archives, agent state, local reports or
+  anything belonging to another project.
+- Scratch work goes to `.local/` (ignored) or, better, outside the repository.
 
 Why this exists: a memory-snapshot directory reached `origin` in the past. It was
 deleted and the history rewritten on 2026-09-29; every branch and tag was force-pushed,
