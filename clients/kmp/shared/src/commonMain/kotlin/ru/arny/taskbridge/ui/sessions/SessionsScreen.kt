@@ -1,5 +1,11 @@
 package ru.arny.taskbridge.ui.sessions
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -93,6 +99,9 @@ fun SessionsScreen(
     onSettings: () -> Unit,
 ) {
     val state by connection.sessions.state.collectAsState()
+    // Sessions that alerted while the operator was looking elsewhere: their rows pulse
+    // until the chat is opened, instead of the screen jumping to them.
+    val attention by connection.attention.collectAsState()
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var query by remember { mutableStateOf("") }
@@ -234,6 +243,7 @@ fun SessionsScreen(
                         selectedTaskId = selectedTaskId,
                         now = now,
                         graph = graph,
+                        attention = attention,
                         onOpen = onOpen,
                         selecting = selecting,
                         selectedIds = selectedIds,
@@ -432,6 +442,7 @@ private fun SessionList(
     selectedTaskId: String?,
     now: Long,
     graph: AppGraph,
+    attention: Set<String>,
     onOpen: (String) -> Unit,
     selecting: Boolean,
     selectedIds: Set<String>,
@@ -445,10 +456,16 @@ private fun SessionList(
 ) {
     // A folder the user never touched opens itself when something in it needs
     // attention (working, waiting, queued) or is open; a hand toggle is remembered.
+    // An unread alert overrides both: the pulsing row must be visible.
     val toggled = remember { mutableStateMapOf<String, Boolean>() }
-    fun expanded(group: SessionGroup): Boolean =
-        toggled[group.projectId] ?: graph.settings.folderExpanded(group.projectId)
-            ?: (groups.size == 1 || group.sessions.any { it.id == selectedTaskId || displayStateOf(it).active })
+    fun expanded(group: SessionGroup): Boolean {
+        // News must never hide in a folded folder: the pulsing row is the whole point
+        // of not stealing the screen — including a folder the operator folded by hand.
+        if (group.sessions.any { it.id in attention }) return true
+        val remembered = toggled[group.projectId] ?: graph.settings.folderExpanded(group.projectId)
+        if (remembered != null) return remembered
+        return groups.size == 1 || group.sessions.any { it.id == selectedTaskId || displayStateOf(it).active }
+    }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         if (!selecting && activeTasks.isNotEmpty()) {
             item(key = "active-sessions-header") {
@@ -458,6 +475,7 @@ private fun SessionList(
                 ActiveSessionRow(
                     task = task,
                     selected = task.id == selectedTaskId,
+                    attention = task.id in attention,
                     onClick = { onOpen(task.id) },
                 )
             }
@@ -487,6 +505,7 @@ private fun SessionList(
                     selecting = selecting,
                     now = now,
                     graph = graph,
+                    attention = task.id in attention,
                     onClick = { if (selecting) onToggleSelected(task) else onOpen(task.id) },
                     onLongClick = { onToggleSelected(task) },
                     onRename = { onRename(task) },
@@ -511,18 +530,46 @@ private fun ActiveSessionsHeader(count: Int) {
     }
 }
 
+/**
+ * How strongly an alerted row is lit right now; 0 for rows without an unseen alert.
+ * The pulse is what makes the row noticeable without moving the screen to it.
+ */
 @Composable
-private fun ActiveSessionRow(task: Task, selected: Boolean, onClick: () -> Unit) {
+internal fun attentionPulse(attention: Boolean): Float {
+    if (!attention) return 0f
+    val transition = rememberInfiniteTransition(label = "attention")
+    val value by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 700, easing = LinearEasing), RepeatMode.Reverse),
+        label = "attentionPulse",
+    )
+    return value
+}
+
+@Composable
+private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, onClick: () -> Unit) {
     val state = displayStateOf(task)
     val accent = MaterialTheme.colorScheme.primary
-    val background = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    val alert = LocalStatusColors.current.waiting
+    val pulse = attentionPulse(attention)
+    val background = when {
+        selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+        attention -> alert.copy(alpha = 0.10f + 0.25f * pulse)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+    }
     Row(
         Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 2.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(background)
-            .drawBehind { if (selected) drawRect(accent, size = Size(3.dp.toPx(), size.height)) }
+            .drawBehind {
+                when {
+                    selected -> drawRect(accent, size = Size(3.dp.toPx(), size.height))
+                    attention -> drawRect(alert.copy(alpha = 0.35f + 0.65f * pulse), size = Size(3.dp.toPx(), size.height))
+                }
+            }
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -635,6 +682,7 @@ private fun SessionRow(
     selecting: Boolean,
     now: Long,
     graph: AppGraph,
+    attention: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
     onRename: () -> Unit,
@@ -643,10 +691,13 @@ private fun SessionRow(
     val state = displayStateOf(task)
     var menu by remember { mutableStateOf(false) }
     val accent = MaterialTheme.colorScheme.primary
+    val alert = LocalStatusColors.current.waiting
+    val pulse = attentionPulse(attention)
     val background = when {
         checked -> MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
         selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-        state == DisplayState.WAITING_USER -> LocalStatusColors.current.waiting.copy(alpha = 0.08f)
+        attention -> alert.copy(alpha = 0.10f + 0.25f * pulse)
+        state == DisplayState.WAITING_USER -> alert.copy(alpha = 0.08f)
         else -> Color.Transparent
     }
     Box {
@@ -657,7 +708,12 @@ private fun SessionRow(
                 .clip(RoundedCornerShape(14.dp))
                 .background(background)
                 // The open session: an accent bar on the left edge, readable in both themes.
-                .drawBehind { if (selected) drawRect(accent, size = Size(3.dp.toPx(), size.height)) }
+                .drawBehind {
+                    when {
+                        selected -> drawRect(accent, size = Size(3.dp.toPx(), size.height))
+                        attention -> drawRect(alert.copy(alpha = 0.35f + 0.65f * pulse), size = Size(3.dp.toPx(), size.height))
+                    }
+                }
                 .combinedClickable(onClick = onClick, onLongClick = onLongClick)
                 .padding(horizontal = 12.dp, vertical = 12.dp),
             verticalAlignment = Alignment.Top,
@@ -698,16 +754,37 @@ private fun SessionRow(
                     )
                 }
                 Spacer(Modifier.height(6.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     if (state != DisplayState.DONE) StatusPill(state)
                     task.model?.label?.takeIf { it != "—" }?.let { model ->
-                        Text(model, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            model,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
                     }
                     task.sizeBytes?.takeIf { it > 0 }?.let { bytes ->
-                        Text(formatBytes(bytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            formatBytes(bytes),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                        )
                     }
                     if (task.pendingPrompts.isNotEmpty()) {
-                        Text("· в очереди ${task.pendingPrompts.size}", style = MaterialTheme.typography.labelSmall, color = LocalStatusColors.current.queued)
+                        Text(
+                            "· в очереди ${task.pendingPrompts.size}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = LocalStatusColors.current.queued,
+                            maxLines = 1,
+                        )
                     }
                 }
             }
