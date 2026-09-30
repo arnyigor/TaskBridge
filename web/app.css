@@ -1753,6 +1753,12 @@ body.cloud-mode [data-pc-only] { display: none; }
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
+/* Контекст внешнего локального сервера (Strata) правится прямо из строки: сервер
+   пишет --max-context в конфиг движка, поэтому это действие, а не подпись. */
+.ctxBadge.editable {
+  cursor: pointer;
+  border-bottom: 1px dotted currentColor;
+}
 
 .modelGroup {
   font-size: 0.6875rem;

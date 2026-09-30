@@ -266,3 +266,176 @@ test('stop() says so when nothing was stopped instead of a silent «выгруж
   const result = await servers.stop(config.externalServers[0]);
   assert.equal(result.status, 'unloaded');
 });
+
+// «Размер контекста» локальной модели — параметр загрузки: у внешнего сервера он
+// лежит в `--max-context` файла, из которого server.py стартует движок. Правка
+// идёт в этот файл (он же — то, что setup.py пишет при установке), а TaskBridge
+// только показывает прочитанное число: два источника правды тут недопустимы.
+test('setContext() writes --max-context into the server config and reports the previous value', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-setctx-'));
+  const configFile = path.join(dir, 'strata-iq3_s.json');
+  const original = '{\r\n "args": [\r\n  "--max-context",\r\n  "262144",\r\n  "--kv-resident",\r\n  "32768"\r\n ],\r\n "port": 8083\r\n}\r\n';
+  await fs.writeFile(configFile, original, 'utf8');
+  const server = {
+    provider: 'strata-iq3s', name: 'Strata IQ3_S (8083)', model: 'qwen3.8-flash-next-iq3-s',
+    baseUrl: 'http://127.0.0.1:18083',
+    start: [process.execPath, 'server.py', '--config', configFile, '--port', '18083'],
+    cwd: dir
+  };
+  const servers = new ExternalLocalServers({ externalServers: [server] });
+
+  const status = await servers.status({ fresh: true });
+  assert.equal(status.models[0].contextWindow, 262144, 'the badge reads the number the engine will get');
+  assert.equal(status.models[0].contextEditable, true);
+
+  const result = await servers.setContext('qwen3.8-flash-next-iq3-s', 131072);
+  assert.equal(result.context, 131072);
+  assert.equal(result.previous, 262144);
+  assert.equal(result.file, configFile);
+  assert.equal(result.kvResident, 32768);
+  // Сервер не отвечает: перезагружать нечего, значение подхватится при загрузке.
+  assert.equal(result.restartRequired, false);
+  assert.equal(await fs.readFile(configFile, 'utf8'), original.replace('262144', '131072'));
+  // Кэш статуса сброшен: панель сразу видит новое число, а не прежнее.
+  assert.equal((await servers.status()).models[0].contextWindow, 131072);
+
+  // Не наш сервер (пресет роутера) и файл без флага — понятная ошибка, не 500.
+  await assert.rejects(() => servers.setContext('qwen-27b-q3', 65536), error => error.code === 'LOCAL_CONTEXT_UNSUPPORTED');
+  const plain = path.join(dir, 'plain.json');
+  await fs.writeFile(plain, '{"args":[]}', 'utf8');
+  const bare = new ExternalLocalServers({ externalServers: [{ ...server, provider: 'strata-bare', model: 'bare', start: [process.execPath, 'server.py', '--config', plain] }] });
+  await assert.rejects(() => bare.setContext('bare', 65536), error => error.code === 'LOCAL_CONTEXT_UNSUPPORTED');
+  await assert.rejects(() => bare.setContext('bare', 100), error => error.code === 'INPUT_INVALID');
+  assert.equal(await fs.readFile(plain, 'utf8'), '{"args":[]}');
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+// Веса модели могут удалить, а её конфиг и запись в config.json — остаться. Строка
+// обязана сказать «файлов нет», а не вечно предлагать «Загрузить» то, чего нет:
+// это единственное, что отличает удалённую модель от выгруженной.
+test('status() tells a deleted model from an unloaded one', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-files-'));
+  const pack = path.join(dir, 'packs', 'iq2_xs');
+  const exe = path.join(dir, 'engine', 'strata.exe');
+  await fs.mkdir(pack, { recursive: true });
+  await fs.mkdir(path.dirname(exe), { recursive: true });
+  await fs.writeFile(exe, 'x');
+  const weights = path.join(dir, 'models', 'IQ2_XS', 'native.gguf');
+  const configFile = path.join(dir, 'strata-iq2_xs.json');
+  await fs.writeFile(configFile, JSON.stringify({
+    exe, args: ['--pack', pack, '--native', weights, '--max-context', '131072']
+  }), 'utf8');
+
+  const server = {
+    provider: 'strata-iq2', model: 'qwen3.8-flash-next-iq2-xs', name: 'Strata IQ2_XS',
+    baseUrl: 'http://127.0.0.1:18081',
+    start: [process.execPath, 'server.py', '--config', configFile, '--port', '18081'],
+    cwd: dir
+  };
+  const servers = new ExternalLocalServers({ externalServers: [server] });
+
+  // Веса не скачаны: файла нет — модель не «выгружена», а именно удалена.
+  const missing = await servers.status({ fresh: true });
+  assert.equal(missing.models[0].filesPresent, false);
+  assert.equal(missing.models[0].missingFile, weights);
+  assert.equal(missing.models[0].status, 'unloaded');
+  // Контекст всё равно читается: он нужен для правки, а не для загрузки.
+  assert.equal(missing.models[0].contextWindow, 131072);
+  assert.equal(missing.models[0].contextEditable, true);
+
+  await fs.mkdir(path.dirname(weights), { recursive: true });
+  await fs.writeFile(weights, 'x');
+  assert.equal((await servers.status({ fresh: true })).models[0].filesPresent, true);
+  assert.equal((await servers.status({ fresh: true })).models[0].missingFile, null);
+
+  // Чужой конфиг (не про файлы) — «неизвестно», а не «всё на месте».
+  const foreign = path.join(dir, 'foreign.json');
+  await fs.writeFile(foreign, JSON.stringify({ args: ['--kv', 'int8'] }), 'utf8');
+  const other = new ExternalLocalServers({
+    externalServers: [{ ...server, provider: 'strata-foreign', model: 'foreign', start: [process.execPath, 'server.py', '--config', foreign] }]
+  });
+  assert.equal((await other.status({ fresh: true })).models[0].filesPresent, null);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+// Запущенный движок — источник истины для окна контекста: /health отдаёт то, с чем
+// он реально поднялся (Strata: max_context). Файл конфига мог устареть — например,
+// контекст поменяли и перезапустили сервер не через TaskBridge.
+test('status() prefers the running engine context over the config file', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-ctx-health-'));
+  const configFile = path.join(dir, 'strata-iq3_s.json');
+  await fs.writeFile(configFile, JSON.stringify({
+    args: ['--max-context', '262144', '--kv-resident', '32768']
+  }), 'utf8');
+  const port = 19000 + Math.floor(Math.random() * 900);
+  const server = {
+    provider: 'strata-iq3s', model: 'qwen3.8-flash-next-iq3-s', name: 'Strata IQ3_S',
+    baseUrl: `http://127.0.0.1:${port}`,
+    start: [process.execPath, 'server.py', '--config', configFile, '--port', String(port)],
+    cwd: dir
+  };
+  const servers = new ExternalLocalServers({ externalServers: [server] });
+
+  // Сервер молчит: число берётся из файла — это предсказание следующей загрузки.
+  assert.equal((await servers.status({ fresh: true })).models[0].contextWindow, 262144);
+
+  const mock = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"status":"ok","max_context":131072}');
+    });
+    s.listen(port, '127.0.0.1', () => resolve(s));
+  });
+  try {
+    // …а поднятый движок говорит 131072 — файл ещё не переписан, верить надо ему.
+    const up = await servers.status({ fresh: true });
+    assert.equal(up.models[0].status, 'loaded');
+    assert.equal(up.models[0].contextWindow, 131072);
+  } finally {
+    mock.close();
+  }
+  await fs.rm(dir, { recursive: true, force: true });
+});
+
+// «Убрать из списка» — это про СПИСОК TaskBridge, а не про модель: удаляется только
+// запись в его конфиге, файлы и конфиг движка остаются. Строку из Pi (найденную
+// автоматически) так убрать нельзя — иначе кнопка обещала бы то, чего не делает.
+test('forget() drops the config entry only, and refuses a Pi-owned row', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-forget-'));
+  // Установка, по которой работает автообнаружение: провайдер в Pi с локальным
+  // baseUrl + конфиг с этим портом → строка приходит из Pi, а не из config.json.
+  const agentDir = path.join(dir, 'agent');
+  await fs.mkdir(agentDir, { recursive: true });
+  await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: { 'strata-found': { baseUrl: 'http://127.0.0.1:18099/v1', models: [{ id: 'found-model', contextWindow: 65536 }] } }
+  }), 'utf8');
+  await fs.writeFile(path.join(dir, 'strata-found.json'), JSON.stringify({ port: 18099, args: ['--max-context', '65536'] }), 'utf8');
+
+  const config = {
+    externalServers: [
+      { provider: 'strata-iq2', model: 'qwen3.8-flash-next-iq2-xs', baseUrl: 'http://127.0.0.1:18081' },
+      { provider: 'strata-iq3s', model: 'qwen3.8-flash-next-iq3-s', baseUrl: 'http://127.0.0.1:18083' }
+    ],
+    externalDiscovery: { dir, configGlob: 'strata-*.json' }
+  };
+  const servers = new ExternalLocalServers(config, { agentDir });
+  const rows = (await servers.status({ fresh: true })).models;
+  assert.deepEqual(rows.map(m => m.provider).sort(), ['strata-found', 'strata-iq2', 'strata-iq3s']);
+  // «Убрать» можно только строки из config.json; найденная в Pi — не наша.
+  assert.deepEqual(rows.map(m => `${m.provider}:${m.removable}`).sort(), ['strata-found:false', 'strata-iq2:true', 'strata-iq3s:true']);
+
+  const removed = servers.forget('qwen3.8-flash-next-iq2-xs');
+  assert.equal(removed.provider, 'strata-iq2');
+  assert.deepEqual(config.externalServers.map(entry => entry.provider), ['strata-iq3s']);
+  // Кэш сброшен: убранной строки нет сразу, а не через пять секунд.
+  assert.deepEqual((await servers.status()).models.map(m => m.provider).sort(), ['strata-found', 'strata-iq3s']);
+
+  // Строка из Pi — не наша: кнопки у неё нет, и forget() её не трогает.
+  assert.equal(servers.forget('found-model'), null);
+  assert.equal(servers.forget('нет-такого'), null);
+  assert.deepEqual(config.externalServers.map(entry => entry.provider), ['strata-iq3s']);
+
+  await fs.rm(dir, { recursive: true, force: true });
+});

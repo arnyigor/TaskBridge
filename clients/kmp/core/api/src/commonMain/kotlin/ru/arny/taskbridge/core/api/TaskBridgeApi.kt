@@ -151,6 +151,13 @@ class TaskBridgeApi(
     suspend fun local(): LocalRuntimeInfo = get("/api/local", LocalRuntimeInfo.serializer())
 
     /**
+     * Кнопка «Обновить»: без 5-секундного кэша — по ней видно то, что изменилось на
+     * диске (удалённые веса) или в конфигах, не дожидаясь следующего опроса.
+     */
+    suspend fun local(fresh: Boolean = false): LocalRuntimeInfo =
+        get("/api/local" + if (fresh) "?fresh=1" else "", LocalRuntimeInfo.serializer())
+
+    /**
      * «Загрузить»: для внешнего сервера (Strata) это запуск его процесса, а не
      * /models/load роутера — решает сервер TaskBridge. Ждёт готовности (до
      * loadTimeoutMs, для Strata это минуты), поэтому в UI кнопка висит в «…».
@@ -161,6 +168,30 @@ class TaskBridgeApi(
     /** «Выгрузить»: для Strata — остановка процесса сервера. */
     suspend fun unloadLocalModel(id: String): LocalRuntimeInfo =
         call(HttpMethod.Post, "/api/local/unload", LocalRuntimeInfo.serializer(), buildJsonObject { put("model", id) })
+
+    /**
+     * «Размер контекста» локальной модели. Контекст — параметр ЗАГРУЗКИ, поэтому
+     * сервер пишет `--max-context` в конфиг внешнего сервера (Strata), а не в
+     * сессию; новое значение подхватывается при следующей загрузке — об этом
+     * говорит [LocalContextChange.restartRequired].
+     *
+     * У пресетов роутера llama.cpp контекст задаёт `ctx-size` в `models.ini`:
+     * сервер отвечает `LOCAL_CONTEXT_UNSUPPORTED` (HTTP 400), а не молча ничего не
+     * делает — поэтому в UI кнопка есть только у [LocalModelEntry.contextEditable].
+     */
+    suspend fun setLocalContext(id: String, context: Long): LocalContextChange =
+        call(HttpMethod.Post, "/api/local/context", LocalContextChange.serializer(), buildJsonObject {
+            put("model", id)
+            put("context", context)
+        })
+
+    /**
+     * «Убрать из списка»: сервер удаляет СВОЮ запись о внешнем сервере из своего
+     * config.json. Модель, её файлы, конфиг движка и запущенный процесс не трогаются —
+     * поэтому ответ возвращает новое состояние списка, а не что-то про модель.
+     */
+    suspend fun forgetLocalModel(id: String): LocalRuntimeInfo =
+        call(HttpMethod.Post, "/api/local/forget", LocalRuntimeInfo.serializer(), buildJsonObject { put("model", id) })
 
     suspend fun refreshProvider(provider: String): Map<String, ProviderStatus> =
         call(HttpMethod.Post, "/api/providers/refresh", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),

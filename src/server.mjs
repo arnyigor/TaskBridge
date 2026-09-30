@@ -785,8 +785,10 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/local') {
       // Deliberate user action: it may probe Pi once so the advertised provider
-      // id is one Pi actually serves.
-      return json(res, 200, await manager.localStatus({ probeCatalog: true }));
+      // id is one Pi actually serves, and `?fresh=1` (кнопка «Обновить») отвечает
+      // без 5-секундного кэша — по нему видно удалённые с диска веса.
+      const fresh = url.searchParams.get('fresh') === '1';
+      return json(res, 200, await manager.localStatus({ probeCatalog: true, fresh }));
     }
     if (req.method === 'POST' && pathname === '/api/local/start') {
       return json(res, 200, await manager.startLocal());
@@ -798,6 +800,27 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && pathname === '/api/local/unload') {
       const { model } = await readJson(req);
       return json(res, 200, await manager.unloadLocalModel(model));
+    }
+    if (req.method === 'POST' && pathname === '/api/local/context') {
+      // Размер контекста — параметр ЗАГРУЗКИ: меняется не сессия, а конфиг,
+      // из которого внешний сервер стартует движок. Поэтому ответ описывает
+      // саму запись (файл, было/стало, нужна ли перезагрузка), а не статус.
+      const { model, context } = await readJson(req);
+      return json(res, 200, await manager.setLocalContext(model, context));
+    }
+    if (req.method === 'POST' && pathname === '/api/local/forget') {
+      // «Убрать из списка»: удаляем запись TaskBridge, а не модель. Запись
+      // обязательно сохраняется в config.json — иначе строка вернётся после
+      // перезапуска, и список перестанет быть правдой.
+      const { model } = await readJson(req);
+      const removed = manager.forgetLocalServer(model);
+      if (!removed) {
+        throw Object.assign(new Error(
+          'Этой модели нет в конфиге TaskBridge: список такой строки не знает — она пришла из Pi (models.json), там её и удаляют.'),
+        { code: 'INPUT_INVALID' });
+      }
+      await saveConfig(rootDir, config);
+      return json(res, 200, { removed: { provider: removed.provider ?? null, model: removed.model ?? null }, ...await manager.localStatus({}) });
     }
     if (req.method === 'POST' && pathname === '/api/local/stop') {
       return json(res, 200, await manager.stopLocal());
@@ -1437,7 +1460,7 @@ async function handleRequest(req, res) {
     if (res.headersSent) { res.destroy(); return; }
     console.error(error.message);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
-      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
+      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'LOCAL_CONTEXT_UNSUPPORTED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
       // CONFLICT / UNKNOWN_AFTER_CRASH / ACCEPTED come from the commandId journal.
       // They are answers about that command, not server faults: a 5xx would make
       // a retrying client treat them as an outage. ACCEPTED (still in flight) is

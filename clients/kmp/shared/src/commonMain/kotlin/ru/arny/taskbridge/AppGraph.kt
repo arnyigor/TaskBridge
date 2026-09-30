@@ -9,8 +9,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.ChatSession
@@ -32,6 +34,7 @@ import kotlin.uuid.Uuid
  * address) owns the API, the session list and the open chats; switching the
  * server replaces all of them.
  */
+
 class AppGraph(val platform: PlatformServices) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val settings = AppSettings(platform.store, { newId() }, platform.kind, platform.secrets)
@@ -109,6 +112,18 @@ class AppGraph(val platform: PlatformServices) {
         /** The session on screen: its alerts are not notified. */
         var visibleSession: String? = null
 
+        private val _attention = MutableStateFlow<Set<String>>(emptySet())
+
+        /**
+         * Sessions that alerted while the operator was elsewhere. Their rows pulse in
+         * the list, and the session leaves the set when its chat is opened.
+         */
+        val attention: StateFlow<Set<String>> = _attention.asStateFlow()
+
+        fun clearAttention(taskId: String) {
+            if (taskId in _attention.value) _attention.update { it - taskId }
+        }
+
         init {
             scope.launch {
                 platform.networkAvailable().distinctUntilChanged().collectLatest { available ->
@@ -127,7 +142,9 @@ class AppGraph(val platform: PlatformServices) {
                     }
                     for (alert in alerts.update(state.tasks)) {
                         val onScreen = platform.inForeground && alert.taskId == visibleSession
-                        if (!onScreen) platform.notify(alert)
+                        if (onScreen) continue
+                        _attention.update { it + alert.taskId }
+                        platform.notify(alert)
                     }
                     platform.setBackgroundWatch(state.tasks.count { displayStateOf(it).active || displayStateOf(it) == DisplayState.WAITING_USER })
                 }

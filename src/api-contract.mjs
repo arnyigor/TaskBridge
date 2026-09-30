@@ -47,7 +47,7 @@ export const API_ROUTES = [
   // --- sessions / models ----------------------------------------------------
   { method: 'GET', path: '/api/native-sessions', summary: 'Pi sessions of every project, grouped' },
   { method: 'GET', path: '/api/native-sessions/preview', summary: 'model, thinking, size and last messages of one' },
-  { method: 'GET', path: '/api/models', summary: "Pi's model catalogue (?refresh=1 to re-ask)" },
+  { method: 'GET', path: '/api/models', summary: "Pi's model catalogue (?refresh=1 to re-ask and sync modelSync.providers' model lists first)" },
 
   // --- tasks ----------------------------------------------------------------
   { method: 'GET', path: '/api/tasks', summary: 'all sessions' },
@@ -114,6 +114,8 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/local', summary: 'llama.cpp router state and models' },
   { method: 'POST', path: '/api/local/load', summary: 'load a router model' },
   { method: 'POST', path: '/api/local/unload', summary: 'unload a router model' },
+  { method: 'POST', path: '/api/local/context', summary: 'load-time context of an external local server (Strata): writes --max-context into the server config, applies on the next load' },
+  { method: 'POST', path: '/api/local/forget', summary: 'drop one external local server from TaskBridge\'s own config (the model, its files and the engine config are left alone)' },
   { method: 'POST', path: '/api/local/stop', summary: 'stop a TaskBridge-started router' },
   { method: 'POST', path: '/api/local/start', summary: 'start the router' },
   { method: 'GET', path: '/api/local/events', summary: 'SSE router status and load progress', sse: true },

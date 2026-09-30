@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -43,10 +44,12 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import io.ktor.http.Url
 import ru.arny.taskbridge.AppGraph
+import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelLatency
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.client.settings.AppSettings
+import ru.arny.taskbridge.ui.chat.liveLocalContextWindow
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import androidx.compose.material3.IconButton
 import ru.arny.taskbridge.core.api.Project
@@ -174,7 +177,10 @@ fun NewSessionSheet(
         }
 
         FieldLabel("Модель", top = 16)
-        ModelPicker(catalog, model, graph.settings, onPick = { model = it; thinking = clampThinkingLevel(thinking, thinkingChoices(it, catalog?.thinkingLevels.orEmpty())) })
+        // Живой статус локальных моделей: у локального провайдера в каталоге Pi
+        // записан статический размер окна (262K), который после загрузки врёт.
+        val sessionListState by connection.sessions.state.collectAsState()
+        ModelPicker(catalog, model, graph.settings, info = sessionListState.info, onPick = { model = it; thinking = clampThinkingLevel(thinking, thinkingChoices(it, catalog?.thinkingLevels.orEmpty())) })
         // Уровни — из карты выбранной модели: у локальных (Strata) набор другой,
         // чем у модели Pi по умолчанию, и «High» там означает xhigh.
         val levels = thinkingChoices(model, catalog?.thinkingLevels.orEmpty())
@@ -235,9 +241,10 @@ fun FieldLabel(text: String, top: Int = 0) {
     )
 }
 
-private fun ModelRef.details(latency: ModelLatency? = null): String = listOfNotNull(
+private fun ModelRef.details(latency: ModelLatency? = null, info: ApiInfo? = null): String = listOfNotNull(
     provider,
-    contextWindow?.let { "контекст ${it / 1000}K" },
+    // У локальной модели — живое окно из статуса TaskBridge, иначе каталожное.
+    (liveLocalContextWindow(this, info) ?: contextWindow)?.let { "контекст ${it / 1000}K" },
     maxTokens?.let { "ответ до ${it / 1000}K" },
     "думает".takeIf { reasoning == true },
     "картинки".takeIf { images == true },
@@ -278,7 +285,7 @@ fun formatLatencyMs(ms: Long): String =
 
 /** The chosen model as a row; tapping it opens the searchable list of Pi's models. */
 @Composable
-fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit) {
+fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, info: ApiInfo? = null) {
     var open by remember { mutableStateOf(false) }
     Surface(
         onClick = { open = true },
@@ -293,7 +300,7 @@ fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettin
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f)) {
                 Text(selected?.label ?: if (catalog == null) "Загружаю модели…" else "По умолчанию", style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                selected?.details(catalog?.latencyFor(selected))?.takeIf { it.isNotEmpty() }?.let {
+                selected?.details(catalog?.latencyFor(selected), info)?.takeIf { it.isNotEmpty() }?.let {
                     Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -301,7 +308,7 @@ fun ModelPicker(catalog: ModelCatalog?, selected: ModelRef?, settings: AppSettin
             else Text("Сменить", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         }
     }
-    if (open && catalog != null) ModelChooser(catalog, selected, settings, onPick = { open = false; onPick(it) }, onDismiss = { open = false })
+    if (open && catalog != null) ModelChooser(catalog, selected, settings, info = info, onPick = { open = false; onPick(it) }, onDismiss = { open = false })
 }
 
 /** Заголовок общей группы локальных моделей в пикере: пресеты llama.cpp-роутера и
@@ -326,7 +333,7 @@ internal fun modelGroups(models: List<ModelRef>, pinnedFirst: Set<String>): List
 }
 
 @Composable
-fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit, pendingKey: String? = null) {
+fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit, pendingKey: String? = null, info: ApiInfo? = null) {
     var query by remember { mutableStateOf("") }
     var favorites by remember { mutableStateOf(settings.favoriteModels) }
     var expanded by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -415,7 +422,9 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
                                 // движок, поэтому провайдер виден в самой строке.
                                 model.provider?.takeIf { model.local && it.isNotBlank() },
                                 model.name?.takeIf { it != model.id },
-                                model.contextWindow?.let { "контекст ${it / 1000}K" },
+                                // Локальная модель: окно берётся из живого статуса TaskBridge,
+                                // потому что в models.json у неё записан статический размер.
+                                (liveLocalContextWindow(model, info) ?: model.contextWindow)?.let { "контекст ${it / 1000}K" },
                                 "думает".takeIf { model.reasoning == true },
                                 "картинки".takeIf { model.images == true },
                                 modelLatencyLabel(catalog.latencyFor(model)),

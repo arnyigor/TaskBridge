@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
@@ -45,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
@@ -56,6 +58,7 @@ import ru.arny.taskbridge.core.api.SystemGpu
 import ru.arny.taskbridge.core.api.SystemRam
 import ru.arny.taskbridge.core.api.McpServer
 import ru.arny.taskbridge.core.api.McpStatus
+import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
@@ -80,8 +83,15 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
     // выбранная кнопкой модель загружается/выгружается через /api/local/*.
     // Загрузка внешнего сервера — это запуск его процесса на минуты, поэтому
     // строка до конца ждёт ответа и показывает «…».
+    // Загрузка внешнего сервера — это запуск его процесса на минуты, поэтому
+    // строка до конца ждёт ответа и показывает «…». Тот же флаг держит кнопку
+    // «Обновить локальные модели», чтобы два действия не спорили за состояние.
     var localBusyId by remember { mutableStateOf<String?>(null) }
+    var localRefreshing by remember { mutableStateOf(false) }
     var localError by remember { mutableStateOf<String?>(null) }
+    // «Контекст 131 072 (было 262 144) — подхватит следующая загрузка»: результат
+    // правки конфига движка, который шлёт сервер (число читается из файла модели).
+    var localNote by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(connection) {
@@ -175,8 +185,60 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                             connection.sessions.refresh()
                         }
                     },
+                    onSetContext = { id, context ->
+                        localBusyId = id
+                        localNote = null
+                        scope.launch {
+                            runCatching { connection.api.setLocalContext(id, context) }
+                                .onSuccess { change ->
+                                    localError = null
+                                    localNote = buildString {
+                                        append("${contextLabel(change.context ?: context)}")
+                                        change.previous?.let { append(" (было ${contextLabel(it)})") }
+                                        append(
+                                            if (change.restartRequired) " — сервер уже загружен, подхватит следующая загрузка"
+                                            else " — подхватится при загрузке модели",
+                                        )
+                                        // Резидентная часть KV — факт из того же файла: если она больше
+                                        // нового контекста, об этом лучше сказать, чем узнать по логу движка.
+                                        change.kvResident?.takeIf { it > (change.context ?: context) }?.let {
+                                            append(" · резидентный KV ${contextLabel(it)} больше нового контекста")
+                                        }
+                                    }
+                                }
+                                .onFailure { localError = it.message ?: "Не удалось изменить контекст $id" }
+                            localBusyId = null
+                            connection.sessions.refresh()
+                        }
+                    },
+                    // Читает статус без кэша и обновляет /api/info: так после удаления
+                    // весов или правки конфигов список приходит в себя сразу, а не
+                    // через пять секунд.
+                    onRefresh = {
+                        localRefreshing = true
+                        localError = null
+                        scope.launch {
+                            runCatching { connection.api.local(fresh = true) }
+                                .onFailure { localError = it.message ?: "Не удалось обновить список локальных моделей" }
+                            localRefreshing = false
+                            connection.sessions.refresh()
+                        }
+                    },
+                    onForget = { id ->
+                        localBusyId = id
+                        localNote = null
+                        scope.launch {
+                            runCatching { connection.api.forgetLocalModel(id) }
+                                .onSuccess { localError = null; localNote = "$id убран из списка TaskBridge" }
+                                .onFailure { localError = it.message ?: "Не удалось убрать $id" }
+                            localBusyId = null
+                            connection.sessions.refresh()
+                        }
+                    },
                     busyId = localBusyId,
+                    refreshing = localRefreshing,
                     error = localError,
+                    note = localNote,
                 )
                 info?.scheduler?.let {
                     // «2 из 4» was read as "максимум 2": name every number instead
@@ -225,12 +287,8 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                 val catalog = agentState.models
                 InfoRow("Доступно моделей", catalog?.models?.size?.toString() ?: "загрузка…")
                 catalog?.defaultModel?.let { InfoRow("По умолчанию", "${it.provider.orEmpty()}/${it.label}") }
-                catalog?.models
-                    ?.groupingBy { it.provider ?: "другие" }
-                    ?.eachCount()
-                    ?.toList()
-                    ?.sortedByDescending { it.second }
-                    ?.forEach { (provider, count) -> InfoRow(provider, "$count моделей") }
+                providerModelCounts(catalog?.models.orEmpty())
+                    .forEach { (provider, count) -> InfoRow(provider, "$count моделей") }
                 OutlinedButton(
                     onClick = { connection.settingsController.loadModels(refresh = true) },
                     enabled = !agentState.modelsLoading,
@@ -610,8 +668,13 @@ private fun LocalModelsSection(
     engineModel: String?,
     onLoad: (String) -> Unit,
     onUnload: (String) -> Unit,
+    onSetContext: (String, Long) -> Unit,
+    onForget: (String) -> Unit,
+    onRefresh: () -> Unit,
     busyId: String?,
+    refreshing: Boolean,
     error: String?,
+    note: String?,
 ) {
     if (models.isEmpty()) {
         InfoRow(label = "Локальные модели", value = engineModel ?: "нет данных")
@@ -620,7 +683,12 @@ private fun LocalModelsSection(
     val isUp: (LocalModelEntry) -> Boolean = { it.status == "loaded" || it.status == "sleeping" }
     val loaded = models.count(isUp)
     InfoRow(label = "Локальные модели", value = "загружено $loaded из ${models.size}")
+    var editing by remember { mutableStateOf<LocalModelEntry?>(null) }
+    var forgetting by remember { mutableStateOf<LocalModelEntry?>(null) }
     models.forEach { model ->
+        // Файлы удаляют, а запись в конфиге остаётся: такая модель не «выгружена»,
+        // а её больше нет — и «Загрузить» для неё бессмысленно.
+        val gone = model.filesPresent == false
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -628,27 +696,173 @@ private fun LocalModelsSection(
             Column(Modifier.weight(1f)) {
                 Text(model.id, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 val state = when {
+                    gone -> "файлов нет"
                     isUp(model) -> "загружена"
                     model.status == "loading" -> "грузится"
                     model.status == "failed" -> "ошибка"
                     else -> "не загружена"
                 }
                 val group = model.provider ?: routerProvider ?: "llama.cpp"
+                // Контекст — параметр модели, а не сессии: у внешних серверов он
+                // лежит в конфиге движка, у пресетов роутера — в models.ini.
+                val context = model.contextWindow?.takeIf { !gone }?.let { " · контекст ${contextLabel(it)}" }.orEmpty()
                 Text(
-                    "$group · $state",
+                    "$group · $state$context",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (gone) LocalStatusColors.current.waiting else MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (gone) model.missingFile?.let { missing ->
+                    Text(
+                        "нет $missing",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            // Удалённые веса: строка остаётся только потому, что запись есть в
+            // config.json TaskBridge, — её и убираем (модель и конфиг движка целы).
+            if (gone && model.removable) {
+                TextButton(onClick = { forgetting = model }, enabled = busyId == null) {
+                    Text("Убрать")
+                }
+            }
+            if (model.contextEditable) {
+                TextButton(onClick = { editing = model }, enabled = busyId == null) {
+                    Text("Контекст")
+                }
             }
             OutlinedButton(
                 onClick = { if (isUp(model)) onUnload(model.id) else onLoad(model.id) },
-                enabled = busyId == null,
+                enabled = busyId == null && !gone,
             ) {
                 Text(if (busyId == model.id) "…" else if (isUp(model)) "Выгрузить" else "Загрузить")
             }
         }
     }
+    // Список локальных моделей приходит из конфигов на диске: после удаления весов
+    // или правки конфигов его надо перечитать, не дожидаясь пятисекундного кэша.
+    OutlinedButton(
+        onClick = onRefresh,
+        enabled = !refreshing && busyId == null,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        if (refreshing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+        else Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text("Обновить локальные модели")
+    }
+    editing?.let { model ->
+        ContextDialog(
+            model = model,
+            onDismiss = { editing = null },
+            onSave = { value ->
+                editing = null
+                onSetContext(model.id, value)
+            },
+        )
+    }
+    forgetting?.let { model ->
+        AlertDialog(
+            onDismissRequest = { forgetting = null },
+            title = { Text("Убрать ${model.id} из списка?") },
+            text = {
+                Text(
+                    "Удаляется только запись TaskBridge (config.json → localRuntime.externalServers). " +
+                        "Файлы модели, конфиг движка и запущенный процесс не трогаются; если провайдер есть в Pi " +
+                        "(~/.pi/agent/models.json), он останется в списке моделей Pi.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val id = model.id
+                    forgetting = null
+                    onForget(id)
+                }) { Text("Убрать", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { forgetting = null }) { Text("Отмена") } },
+        )
+    }
+    if (note != null) InfoRow(label = "Контекст модели", value = note)
     if (error != null) InfoRow(label = "Ошибка модели", value = error, warning = true)
+}
+
+/** `262144` → `«262 144»`: шестизначное число без разрядов не прочитать. */
+internal fun contextLabel(value: Long): String =
+    value.toString().reversed().chunked(3).joinToString(" ").reversed()
+
+/**
+ * Размер контекста — параметр ЗАГРУЗКИ, а не сессии: его можно поменять только на
+ * выгруженной модели (или он подхватится при следующей загрузке) и только у того
+ * сервера, который берёт параметры из своего файла с `--max-context` (Strata).
+ * Список значений — обычные шаги 2^17..2^18: свободный ввод частоты не требует, а
+ * опечатку в шестизначном числе ловит сервер.
+ */
+@Composable
+private fun ContextDialog(model: LocalModelEntry, onDismiss: () -> Unit, onSave: (Long) -> Unit) {
+    val current = model.contextWindow
+    var text by remember(model.id) { mutableStateOf(current?.toString().orEmpty()) }
+    val parsed = text.trim().toLongOrNull()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Контекст модели") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "${model.id}. Контекст задаётся при загрузке: новое значение подхватит следующая загрузка (сейчас ${current?.let(::contextLabel) ?: "неизвестен"}).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it.filter(Char::isDigit) },
+                    label = { Text("Токенов") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                // Четыре значения — уже шире телефона: Row выдавил бы последнее в ноль.
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(32768L, 65536L, 131072L, 262144L).forEach { preset ->
+                        FilterChip(
+                            selected = parsed == preset,
+                            onClick = { text = preset.toString() },
+                            label = { Text(contextLabel(preset)) },
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { parsed?.let(onSave) }, enabled = parsed != null && parsed != current) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
+}
+
+/**
+ * Строки «провайдер — сколько моделей» для настроек: тот же признак, что у
+ * пикера моделей ([modelGroups][ru.arny.taskbridge.ui.sessions.modelGroups]), но
+ * в виде счётчика. Провайдеры одной машины (`strata-iq2`, `strata-iq3`,
+ * `strata-iq3s` — три кванта одной установки Strata на одном ПК) показываются
+ * ОДНОЙ строкой, иначе список провайдеров выглядит как три разных движка.
+ *
+ * Сводим только модели с флагом `local` (его ставит сервер по `localRuntime`),
+ * и только по первому дефису имени: облачный провайдер не сливается — у него имя
+ * провайдера это имя аккаунта, и склеивать `x-y` с `x-z` там нельзя.
+ */
+internal fun providerModelCounts(models: List<ModelRef>): List<Pair<String, Int>> =
+    models.groupingBy(::providerRowLabel)
+        .eachCount()
+        .toList()
+        .sortedWith(compareByDescending<Pair<String, Int>> { it.second }.thenBy { it.first })
+
+/** Имя строки провайдера: у локальных — до первого дефиса (`strata-iq3s` → `strata`). */
+internal fun providerRowLabel(model: ModelRef): String {
+    val provider = model.provider ?: return "другие"
+    if (!model.local) return provider
+    val prefix = provider.substringBefore('-')
+    return prefix.ifEmpty { provider }
 }
 
 @Composable

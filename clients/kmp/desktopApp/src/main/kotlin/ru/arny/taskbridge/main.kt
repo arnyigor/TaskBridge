@@ -47,16 +47,17 @@ fun main() {
         ?.bufferedReader()?.use { it.readText().trim() }.orEmpty()
     val platform = DesktopPlatformServices(appVersion = packagedVersion)
     val graph = AppGraph(platform)
-    val openTask = MutableStateFlow<String?>(null)
 
     application {
         var visible by remember { mutableStateOf(true) }
         var navigator by remember { mutableStateOf<Navigator?>(null) }
         val trayState = rememberTrayState()
         val alerts = remember { Channel<SessionAlert>(Channel.BUFFERED) }
+        // The session the window opens on: the last one seen. Alerts no longer take the
+        // screen anywhere — they pulse the row in the list instead.
+        val startTaskId = remember { graph.settings.lastSessionId }
         val connection = graph.connection
         val listState by (connection?.sessions?.state ?: flowOf(SessionListState())).collectAsState(SessionListState())
-        val opened by openTask.collectAsState()
         val shows by showRequests.collectAsState()
         LaunchedEffect(shows) { if (shows > 0) visible = true }
 
@@ -77,7 +78,8 @@ fun main() {
                         ),
                     )
                 }
-                openTask.value = alert.taskId
+                // The screen is never taken away: an alert only pulses the session row in the
+                // list, so reading another chat or typing is never interrupted.
             }
         }
 
@@ -155,7 +157,7 @@ fun main() {
                 })
             }
             LaunchedEffect(visible) { if (!visible) platform.foreground = false }
-            App(graph, openTaskId = opened ?: settings.lastSessionId, navigatorSink = { navigator = it })
+            App(graph, openTaskId = startTaskId, navigatorSink = { navigator = it })
         }
     }
 }

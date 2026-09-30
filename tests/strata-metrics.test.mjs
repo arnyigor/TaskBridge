@@ -27,10 +27,61 @@ test('parseStrataMetrics reports the idle state and the last request', () => {
   assert.equal(m.phase, null);
   assert.equal(m.model, 'qwen3.8-flash-next-iq3_s');
   assert.equal(m.contextWindow, 262144);
-  // pp считается по НОВЫМ токенам: 70026 - 69981 = 45 за 1237 мс ≈ 36 t/s,
-  // а не по всему промпту (иначе вышло бы 56 600 t/s).
-  assert.equal(Math.round(m.pp), 36);
+  // 45 новых токенов из 70 026 — промпт пришёл из кеша беседы: скорости чтения
+  // у такого запроса нет (было бы «36 tok/s» из 1.24 с накладных расходов).
+  assert.equal(m.pp, null);
+  assert.equal(m.ppUnavailable, 'conversation-cache');
+  assert.equal(m.freshTokens, 45);
+  assert.equal(m.promptTokens, 70026);
   assert.equal(m.tg, 27.5);
+});
+
+// Записи сняты с живого сервера (iq3_s, 8083, 2026-09-30): на длинной беседе
+// доля `reused` доходит до 99.9%, и «новые / prompt_ms» падает до десятков
+// токенов в секунду — это те самые «105», которые видел оператор.
+test('parseStrataMetrics не публикует PP на промпте, который пришёл из кеша', () => {
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3_s' },
+    live: { state: 'idle', tok_s: null },
+    requests: [
+      { prompt_tokens: 55496, reused: 55333, output_tokens: 392, prompt_ms: 1501.9, decode_ms: 8820.3, decode_tok_s: 44.4 },
+      { prompt_tokens: 60938, reused: 60915, output_tokens: 295, prompt_ms: 677.4, decode_ms: 8519.7, decode_tok_s: 34.6 }
+    ]
+  });
+  // 163 новых токена за 1501.9 мс — «108 tok/s» старой формулы;
+  // движок при этом читает новые токены на ~650 ток/с (см. регрессию в
+  // STRATA_CACHED_PROMPT_MAX). Скорости чтения нет — есть факт: сколько прочитано.
+  assert.equal(m.pp, null);
+  assert.equal(m.ppUnavailable, 'conversation-cache');
+  assert.equal(m.freshTokens, 163);
+  assert.equal(m.promptTokens, 55496);
+});
+
+test('parseStrataMetrics считает PP по новым токенам, когда промпт читали целиком', () => {
+  // Первый запрос сессии снял с живого сервера: 16 198 токенов, reused 0,
+  // prompt_ms 14 085 => 1 150 ток/с — сходится с измеренной таблицей самого
+  // движка (IQ3_S: 1 070 ток/с на 32K, 931 на 128K).
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3_s' },
+    live: { state: 'idle', tok_s: null },
+    requests: [{ prompt_tokens: 16198, reused: 0, output_tokens: 256, prompt_ms: 14085.4, decode_ms: 5000, decode_tok_s: 51.2 }]
+  });
+  assert.equal(Math.round(m.pp), 1150);
+  assert.equal(m.ppUnavailable, null);
+  assert.equal(m.freshTokens, 16198);
+  assert.equal(m.promptTokens, 16198);
+});
+
+test('parseStrataMetrics без поля reused считает весь промпт прочитанным', () => {
+  // Движки до 0.1.3 поля `reused` не отдают — тогда prompt_ms и есть чтение промпта.
+  const m = parseStrataMetrics({
+    engine: { model: 'old-engine' },
+    live: { state: 'idle' },
+    requests: [{ prompt_tokens: 8768, output_tokens: 100, prompt_ms: 8187, decode_tok_s: 50 }]
+  });
+  assert.equal(m.freshTokens, 8768);
+  assert.equal(m.promptTokens, 8768);
+  assert.equal(Math.round(m.pp), 1071);
 });
 
 test('parseStrataMetrics carries the phase and the prompt progress', () => {

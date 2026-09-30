@@ -57,6 +57,9 @@ function makeRenderer() {
       // вырезанная функция падала с «bytesToGb is not defined».
       extractConst(appSource, 'bytesToGb'),
       extractFunction(appSource, 'fmtMetric'),
+      // Строка о локальной модели зовёт ppUnavailableNote (объяснение, почему у
+      // внешнего сервера нет PP); без неё вырезанная функция не соберётся.
+      extractFunction(appSource, 'ppUnavailableNote'),
       extractFunction(appSource, 'renderMachineLoad'),
       'return renderMachineLoad;',
     ].join('\n'),
@@ -140,3 +143,31 @@ test('строка об автодетекте порта появляется �
   assert.match(text, /8090/u);
 });
 
+
+// У внешнего сервера (Strata) PP может отсутствовать не из-за сбоя: промпт
+// последнего запроса движок вспомнил из кеша беседы, а не прочитал, и «новые
+// токены / время промпт-фазы» — это накладные расходы, а не скорость (163 новых
+// токена за 1,5 с давали «108 tok/s», которые читались как скорость чтения).
+// Панель обязана назвать причину, а не показывать выдуманное число.
+test('локальная модель без PP называет причину: промпт из кеша беседы', () => {
+  const { document, renderMachineLoad } = makeRenderer();
+  renderMachineLoad(baseInfo({
+    local: {
+      provider: 'llama.cpp',
+      models: [
+        {
+          id: 'qwen3.8-flash-next-iq3-s', provider: 'strata-iq3s', status: 'loaded',
+          metrics: { available: true, pp: null, tg: 38.4, ppUnavailable: 'conversation-cache', promptTokens: 55496, freshTokens: 163 },
+        },
+        { id: 'qwen-27b-q3', provider: 'llama.cpp', status: 'loaded', metrics: { available: true, pp: 1137, tg: 35.6 } },
+      ],
+    },
+  }));
+  const lines = document.getElementById('pcStateSystem').textContent.split('\n');
+  const cached = lines.find(line => line.includes('strata-iq3s')) || '';
+  assert.match(cached, /qwen3\.8-flash-next-iq3-s \(strata-iq3s\): загружена/u, `строка внешней модели: ${cached}`);
+  assert.match(cached, /PP: — промпт из кеша беседы \(новых 163 из 55\u00a0496\)/u, `причина пропуска PP: ${cached}`);
+  // У модели с настоящим PP объяснения нет — причина только там, где она есть.
+  const measured = lines.find(line => line.includes('qwen-27b-q3')) || '';
+  assert.doesNotMatch(measured, /PP: —/u, `лишняя строка у модели с PP: ${measured}`);
+});

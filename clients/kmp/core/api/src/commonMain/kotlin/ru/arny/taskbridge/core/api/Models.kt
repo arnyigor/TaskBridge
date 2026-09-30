@@ -84,11 +84,52 @@ data class LocalModelEntry(
     val status: String? = null,
     val external: Boolean = false,
     val contextWindow: Long? = null,
+    /**
+     * Размер контекста этой модели можно менять отсюда: он лежит в конфиге
+     * движка (`--max-context` файла, из которого внешний сервер стартует
+     * модель), а не в самой модели. У пресетов роутера llama.cpp контекст
+     * задаёт `ctx-size` в `models.ini`, и сервер помечает их `false` —
+     * показываем число, но не даём его править.
+     */
+    val contextEditable: Boolean = false,
+    /**
+     * Есть ли на диске файлы, из которых сервер поднимает модель. `false` — веса
+     * удалили: тогда «Загрузить» не сработает никогда, и строка обязана это сказать.
+     * `null` — конфиг сервера не про файлы: судить нечем, интерфейс молчит.
+     */
+    val filesPresent: Boolean? = null,
+    /** Первый отсутствующий путь из конфига — что именно искать. */
+    val missingFile: String? = null,
+    /**
+     * Запись есть в конфиге TaskBridge (`localRuntime.externalServers`), поэтому её
+     * можно убрать из списка. Строки, найденные в Pi (`models.json`), принадлежат
+     * Pi — TaskBridge их не удаляет.
+     */
+    val removable: Boolean = false,
     /** Живая телеметрия внешнего сервера (Strata /metrics): фаза, скорости, прогресс. */
     val metrics: LocalModelMetrics? = null,
     val phase: String? = null,
     val promptRead: Long? = null,
     val promptTotal: Long? = null,
+)
+
+/**
+ * Ответ `POST /api/local/context`: размер контекста — параметр ЗАГРУЗКИ внешней
+ * локальной модели, поэтому сервер правит не сессию, а файл, из которого движок
+ * стартует, и отчитывается: что было, что стало, нужна ли перезагрузка модели.
+ */
+@Serializable
+data class LocalContextChange(
+    val provider: String? = null,
+    val model: String? = null,
+    val file: String? = null,
+    val context: Long? = null,
+    val previous: Long? = null,
+    val changed: Boolean = false,
+    /** Резидентная часть KV из того же файла (`--kv-resident`): может быть больше нового контекста. */
+    val kvResident: Long? = null,
+    /** Сервер сейчас отвечает: новый контекст подхватят только следующая загрузка. */
+    val restartRequired: Boolean = false,
 )
 
 /**
@@ -146,6 +187,15 @@ data class LocalModelMetrics(
     val progress: Double? = null,
     val elapsedS: Double? = null,
     val generated: Long? = null,
+    /**
+     * Strata: почему PP нет — сейчас только "conversation-cache": промпт
+     * последнего запроса пришёл из кеша беседы (движок его вспомнил, а не
+     * прочитал), и скорость чтения по нему не измеряется.
+     */
+    val ppUnavailable: String? = null,
+    /** Strata: размер промпта и доля, которую движок реально прочитал. */
+    val promptTokens: Long? = null,
+    val freshTokens: Long? = null,
 )
 
 @Serializable

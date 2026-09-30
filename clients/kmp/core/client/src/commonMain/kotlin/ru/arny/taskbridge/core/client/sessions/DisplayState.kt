@@ -55,6 +55,10 @@ fun activityOf(task: Task): String? {
             "RESTORED" -> "В очереди после перезапуска"
             else -> task.current ?: "В очереди"
         }
+        // Сжатие контекста — это тоже запрос к модели (она пишет сводку истории), и в
+        // ленте он выглядит как обычный ответ агента. Сервер различает его как
+        // runtime.activity: без этой строки видно «Работает», а что именно — нет.
+        state.active && task.runtime?.activity == "compacting" -> "Сжимает контекст"
         state.active -> task.current
         state == DisplayState.FAILED || state == DisplayState.RESTORABLE -> task.error
         else -> null

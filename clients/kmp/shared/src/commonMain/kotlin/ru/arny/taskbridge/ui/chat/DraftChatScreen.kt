@@ -18,6 +18,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -100,7 +101,8 @@ fun DraftChatScreen(
                 EmptyState(AppIcons.Chat, "Что сделать агенту?", "$setup\nСессия появится на компьютере с первым сообщением.")
             }
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                ModelPicker(catalog, model, graph.settings, onPick = { model = it })
+                val sessionListState by connection.sessions.state.collectAsState()
+                ModelPicker(catalog, model, graph.settings, info = sessionListState.info, onPick = { model = it })
             }
             // Above the composer rather than over it: the field and its buttons must stay reachable
             // while a notice is on screen.

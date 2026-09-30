@@ -1133,16 +1133,48 @@ function appendSystemNote(text, before = null) {
   return note;
 }
 
+// Окно контекста сессии. У локальной модели каталожное число — статическая запись
+// провайдера в Pi (262K из models.json): после загрузки движка с другим окном она
+// остаётся прежней, и шкала показывала «30000 / 262144», хотя модель поднята на
+// 131K. localStatus (он обновляется каждым /api/info и диалогом локальных моделей)
+// знает живое число; каталог Pi остаётся фолбэком — в том числе для облачных.
+function modelContextWindow(t) {
+  const model = t?.model || t?.requestedModel;
+  if (!model) return null;
+  const entry = (localStatus?.models || []).find(m => (model.id && m.id === model.id) || (model.provider && m.provider === model.provider));
+  return entry?.contextWindow || model.contextWindow || null;
+}
+
+// Живой промпт движка, пока он занят этой моделью. Пока модель работает, важен
+// именно этот размер: иначе рядом с «читает 41.0K / 63.7K» (движок) стоит
+// «143.9K» из usage Pi за прошлый ход, и это читается как баг. Strata отдаёт
+// точный размер во время чтения (promptTotal), после — счётчик запроса.
+function liveEnginePrompt(t) {
+  const model = t?.model || t?.requestedModel;
+  const entry = (localStatus?.models || []).find(m => (model?.id && m.id === model.id) || (model?.provider && m.provider === model.provider));
+  const metrics = entry?.metrics;
+  if (!metrics || metrics.busy !== true) return null;
+  return entry.promptTotal || metrics.promptTokens || null;
+}
+
+// Сколько токенов занимает контекст сессии: живое число движка важнее usage
+// прошлого хода, а оценка Pi остаётся фолбэком (для облачных моделей — единственная).
+function sessionContextUsed(t) {
+  return liveEnginePrompt(t) || t.compaction?.last?.estimatedTokensAfter || t.lastUsage?.totalTokens || null;
+}
+
 function contextUsagePercent(t) {
-  const used = t.lastUsage?.totalTokens;
-  const windowSize = t.model?.contextWindow;
+  const used = sessionContextUsed(t);
+  const windowSize = modelContextWindow(t);
   if (used == null || !windowSize) return null;
-  return Math.min(100, Math.round((used / windowSize) * 100));
+  // Без потолка в 100: 143930 из 131072 — это 110%, и именно это надо видеть, а не
+  // «100% заполнено» (провайдер такой запрос отклоняет, а не сжимает).
+  return Math.round((used / windowSize) * 100);
 }
 
 function renderContext(t) {
-  const used = t.lastUsage?.totalTokens;
-  const windowSize = t.model?.contextWindow;
+  const used = sessionContextUsed(t);
+  const windowSize = modelContextWindow(t);
   const pct = contextUsagePercent(t);
   const bar = $('contextBar');
   const fill = $('contextBarFill');
@@ -1153,7 +1185,8 @@ function renderContext(t) {
   } else if (windowSize) {
     $('usage').textContent = `${used.toLocaleString('ru-RU')} / ${windowSize.toLocaleString('ru-RU')} (${pct}%)`;
     bar.classList.remove('hidden');
-    fill.style.width = `${pct}%`;
+    // Ширина полосы — по потолку, а число рядом остаётся настоящим (может быть 110%).
+    fill.style.width = `${Math.min(100, pct)}%`;
     fill.classList.toggle('warn', pct >= 60 && pct < 85);
     fill.classList.toggle('danger', pct >= 85);
   } else {
@@ -1161,14 +1194,19 @@ function renderContext(t) {
     bar.classList.add('hidden');
   }
   const compacting = t.runtime?.activity === 'compacting';
+  // История длиннее окна — это не «скоро сжатие», а отказ провайдера: движок не
+  // режет промпт, он отвечает 400 «prompt + max tokens exceeds the context», и Pi
+  // повторяет запрос без ответа (в логе сессии это limits-wait с retries_total).
+  const overflow = pct != null && pct > 100;
   state.textContent = compacting
     ? 'Сейчас сжимается контекст…'
     : pct == null ? 'Нет данных о размере'
-      : pct >= 85 ? 'Почти заполнен — скоро нужно сжатие'
-        : pct >= 60 ? 'Заполнен больше половины'
-          : 'Запас контекста нормальный';
+      : overflow ? 'История больше окна модели — провайдер ответит 400 (промпт не обрезается): поднимите контекст модели или начните новую сессию'
+        : pct >= 85 ? 'Почти заполнен — скоро нужно сжатие'
+          : pct >= 60 ? 'Заполнен больше половины'
+            : 'Запас контекста нормальный';
   state.classList.toggle('compacting', compacting);
-  state.classList.toggle('danger', !compacting && pct != null && pct >= 85);
+  state.classList.toggle('danger', !compacting && pct != null && (overflow || pct >= 85));
   state.classList.toggle('warn', !compacting && pct != null && pct >= 60 && pct < 85);
   // Local engines report their own PP/TG counters. For cloud providers PP is
   // the effective input rate to first token and is marked as approximate.
@@ -4504,10 +4542,21 @@ function localModelRow(m) {
     info.append(titleRow);
   }
 
+  // Веса удаляют, а запись в конфиге остаётся: это не «выгружена», и кнопка
+  // «Загрузить» для такой модели не сработает никогда — говорим, чего нет.
+  const gone = m.filesPresent === false;
+  if (gone && m.missingFile) {
+    const missing = document.createElement('div');
+    missing.className = 'modelSubpath muted small';
+    missing.textContent = `нет ${m.missingFile}`;
+    missing.title = m.missingFile;
+    info.append(missing);
+  }
+
   const meta = document.createElement('div');
   meta.className = 'meta';
 
-  const [cls, label] = localStatusBadge(m.status);
+  const [cls, label] = gone ? ['err', 'нет файлов'] : localStatusBadge(m.status);
   const badge = document.createElement('span');
   badge.className = `badge ${cls}`.trim();
   badge.textContent = label;
@@ -4530,6 +4579,14 @@ function localModelRow(m) {
   const ctx = document.createElement('span');
   ctx.className = 'ctxBadge';
   ctx.textContent = m.contextWindow ? `ctx ${Number(m.contextWindow).toLocaleString('ru-RU')}` : 'ctx ?';
+  // Контекст внешнего сервера (Strata) лежит в его собственном конфиге
+  // (--max-context), и менять его разрешает только такой сервер — признак считает
+  // сам сервер. У пресетов роутера ctx-size живёт в models.ini, там править нечего.
+  if (m.contextEditable === true) {
+    ctx.classList.add('editable');
+    ctx.title = 'Изменить размер контекста (параметр загрузки модели)';
+    ctx.onclick = () => editLocalContext(m);
+  }
   meta.append(ctx);
   info.append(meta);
 
@@ -4571,6 +4628,17 @@ function localModelRow(m) {
   // endpoint at all, so its row stays button-less. «Отменить» during an
   // external load works too: stop() kills the tracked process the start
   // recorded, which is the only cancel a whole-process load has.
+  // Удалённые веса: строка держится только записью в config.json TaskBridge — её и
+  // убираем. Строку, найденную в Pi, так убрать нельзя: конфиг Pi принадлежит Pi.
+  if (gone && m.removable === true) {
+    const forget = document.createElement('button');
+    forget.type = 'button';
+    forget.className = 'loadBtn';
+    forget.textContent = 'Убрать из списка';
+    forget.onclick = () => forgetLocalModel(m);
+    actions.append(forget);
+  }
+
   const isDetectedExternal = m.external !== true && localStatus?.state === 'EXTERNAL_RUNNING' && m.status === 'unknown';
   if (!isDetectedExternal) {
     const button = document.createElement('button');
@@ -4579,6 +4647,11 @@ function localModelRow(m) {
     const loaded = m.status === 'loaded' || m.status === 'sleeping';
     button.textContent = loaded ? 'Выгрузить' : m.status === 'loading' ? 'Отменить' : 'Загрузить';
     button.onclick = () => (loaded || m.status === 'loading') ? unloadLocalModel(m.id) : loadLocalModel(m.id);
+    // Удалённые веса: загрузка всё равно кончится ошибкой через минуты ожидания.
+    if (gone && !loaded) {
+      button.disabled = true;
+      button.title = 'Файлы модели удалены с диска — загружать нечего';
+    }
     actions.append(button);
   }
 
@@ -4647,8 +4720,10 @@ function clearLocalProgress() {
   $('localProgressFill').style.width = '0%';
 }
 
-async function refreshLocalStatus() {
-  try { localStatus = await api('/api/local'); }
+async function refreshLocalStatus({ fresh = false } = {}) {
+  // `fresh` — явное действие человека («Обновить»): ответ без пятисекундного
+  // кэша сервера, по нему видно то, что изменилось на диске (удалённые веса).
+  try { localStatus = await api('/api/local' + (fresh ? '?fresh=1' : '')); }
   catch { localStatus = null; }
   renderLocalModels();
   if (localStatus) updateLocalVisibility(localStatus.enabled);
@@ -4676,9 +4751,45 @@ async function loadLocalModel(id) {
   }
 }
 
+// «Убрать из списка»: удаляется только запись TaskBridge (config.json). Модель,
+// её файлы, конфиг движка и запущенный процесс остаются — иначе кнопка делала бы
+// не то, что написано на ней.
+async function forgetLocalModel(m) {
+  const answer = confirm(`Убрать ${m.id} из списка TaskBridge?
+
+` +
+    'Удаляется только запись в config.json (localRuntime.externalServers). ' +
+    'Файлы модели, конфиг движка и запущенный процесс не трогаются. ' +
+    'Если провайдер есть в Pi (~/.pi/agent/models.json), он останется в списке моделей Pi.');
+  if (!answer) return;
+  try { await api('/api/local/forget', { method: 'POST', body: JSON.stringify({ model: m.id }) }); }
+  catch (error) { alert(error.message); }
+  await refreshLocalStatus({ fresh: true });
+}
+
 async function unloadLocalModel(id) {
   try { await api('/api/local/unload', { method: 'POST', body: JSON.stringify({ model: id }) }); }
   catch (error) { alert(error.message); }
+  await refreshLocalStatus();
+}
+
+// Размер контекста локальной модели — параметр ЗАГРУЗКИ: сервер пишет --max-context
+// в конфиг внешнего сервера (Strata), а уже запущенный сервер продолжает работать
+// со старым. Поэтому ответ говорим словами: было/стало и когда применится.
+async function editLocalContext(m) {
+  const current = m.contextWindow ? String(m.contextWindow) : '';
+  const answer = prompt(`Контекст ${m.id} (токенов). Новое значение подхватит следующая загрузка модели:`, current);
+  if (answer === null) return;
+  const context = Number(answer.trim());
+  if (!Number.isInteger(context) || context <= 0) { alert('Контекст — целое число токенов.'); return; }
+  try {
+    const change = await api('/api/local/context', { method: 'POST', body: JSON.stringify({ model: m.id, context }) });
+    const parts = [`Контекст ${Number(change.context).toLocaleString('ru-RU')}`];
+    if (change.previous) parts.push(`было ${Number(change.previous).toLocaleString('ru-RU')}`);
+    parts.push(change.restartRequired ? 'подхватит следующая загрузка' : 'подхватится при загрузке');
+    if (change.kvResident && change.kvResident > change.context) parts.push(`резидентный KV ${Number(change.kvResident).toLocaleString('ru-RU')} больше`);
+    alert(parts.join(' · '));
+  } catch (error) { alert(error.message); }
   await refreshLocalStatus();
 }
 
@@ -4712,7 +4823,7 @@ $('localModelsButton').onclick = async () => {
   await refreshLocalStatus();
 };
 $('localModelsClose').onclick = () => { $('localModelsOverlay').classList.add('hidden'); closeLocalEvents(); clearLocalProgress(); };
-$('localRefresh').onclick = () => refreshLocalStatus();
+$('localRefresh').onclick = () => refreshLocalStatus({ fresh: true });
 $('localStart').onclick = async () => {
   $('localStart').disabled = true;
   try { localStatus = await api('/api/local/start', { method: 'POST', body: '{}' }); }
@@ -4798,6 +4909,18 @@ function fmtMetric(value, digits = 1) {
     : Number(value).toLocaleString('ru-RU', { maximumFractionDigits: digits });
 }
 
+// Почему у внешнего сервера (Strata) нет PP: промпт последнего запроса он взял
+// из кеша беседы — вспомнил, а не прочитал. Делить «новые» на время всей
+// промпт-фазы нельзя (163 новых токена за 1,5 с давали «108 tok/s», которые
+// оператор читал как скорость чтения), поэтому показываем факт, а не число.
+function ppUnavailableNote(metrics) {
+  if (!metrics || metrics.ppUnavailable !== 'conversation-cache') return '';
+  const fresh = Number.isFinite(metrics.freshTokens) ? `новых ${fmtMetric(metrics.freshTokens, 0)}` : '';
+  const total = Number.isFinite(metrics.promptTokens) ? `из ${fmtMetric(metrics.promptTokens, 0)}` : '';
+  const detail = [fresh, total].filter(Boolean).join(' ');
+  return ` · PP: — промпт из кеша беседы${detail ? ` (${detail})` : ''}`;
+}
+
 const mbToGb = mb => (mb == null ? null : mb / 1024);
 // system.ram.* идёт в байтах (os.totalmem), GPU — в мегабайтах: две разные
 // единицы в одном ответе, и одна функция на них давала ошибку в 1024².
@@ -4830,7 +4953,7 @@ function renderMachineLoad(info) {
         : m.status === 'loading' ? 'грузится'
           : m.status === 'failed' ? 'ошибка' : 'не загружена';
       const group = m.provider || info.local?.provider || 'llama.cpp';
-      lines.push(`  ${m.id} (${group}): ${state}`);
+      lines.push(`  ${m.id} (${group}): ${state}${ppUnavailableNote(m.metrics)}`);
     }
   } else if (engine.configured) {
     lines.push(`Локальная модель: ${engine.model || 'не загружена'}`);

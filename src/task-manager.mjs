@@ -13,6 +13,7 @@ import { classifyEngineError } from './engine.mjs';
 import { humanizeError } from '../web/errors.mjs';
 import { chooseEngine, usesLocalRuntime, resolveRouterModel, resolveLocalProviderId, localProviderIds } from './dispatcher.mjs';
 import { ModelCatalog } from './model-catalog.mjs';
+import { syncProviderModels } from './provider-models.mjs';
 import { ModelLatency } from './model-latency.mjs';
 import { ExternalLocalServers, LocalModelService, quantFromPath } from './local-models.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
@@ -1363,7 +1364,19 @@ export class TaskManager extends EventEmitter {
   // local llama.cpp profiles). Refresh forces a fresh Pi probe. The rolling
   // per-model TTFT history is merged in so the picker can show real response
   // latency for every model, cloud ones included.
+  // Refresh also syncs the model lists of the providers opted in via
+  // config.modelSync.providers (wormsoft today): their lists in Pi's
+  // models.json are hand-written, and models the provider added later only
+  // reach Pi after the file gains them. Only-add merge, see provider-models.mjs.
   async listModels({ refresh = false } = {}) {
+    if (refresh) {
+      const sync = await syncProviderModels({
+        agentDir: piAgentDir(process.env),
+        only: this.config.modelSync?.providers ?? [],
+      }).catch(error => ({ changed: false, providers: [], error: String(error.message || error) }));
+      if (sync.error) console.log(`[TaskBridge] provider model sync skipped: ${sync.error}`);
+      else if (sync.changed) console.log(`[TaskBridge] provider model sync: ${sync.providers.filter(p => p.added).map(p => `${p.provider} +${p.added}`).join(', ')}`);
+    }
     const catalog = await this.modelCatalog.list({ refresh });
     await this.modelLatency.load();
     // `local` is a grouping fact for the pickers: llama.cpp presets and the
@@ -1381,7 +1394,7 @@ export class TaskManager extends EventEmitter {
   // `probeCatalog` is for the endpoint the user opens deliberately (the local
   // models dialog): the id Pi can serve is only knowable from Pi's own catalog,
   // and probing costs a short Pi start, so the polled /api/info must not do it.
-  async localStatus({ probeCatalog = false } = {}) {
+  async localStatus({ probeCatalog = false, fresh = false } = {}) {
     if (probeCatalog && !this.modelCatalog.peek()) await this.modelCatalog.list().catch(() => {});
     // Advertise the id Pi can really serve: with the hand-written provider
     // renamed (e.g. "llamacpp") the configured one may no longer exist, and
@@ -1392,7 +1405,7 @@ export class TaskManager extends EventEmitter {
     // server's start/stop instead of the llama.cpp router API.
     const [status, external] = await Promise.all([
       this.local.getStatus(),
-      this.localServers.status()
+      this.localServers.status({ fresh })
     ]);
     const merged = external.configured
       ? { ...status, models: [...(status.models || []), ...external.models] }
@@ -1471,6 +1484,28 @@ export class TaskManager extends EventEmitter {
     if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
     await this.localModels.unloadModel(id);
     return this.localModels.getStatus();
+  }
+
+  /**
+   * Размер контекста внешней локальной модели (Strata) — параметр ЗАГРУЗКИ,
+   * поэтому он пишется в `--max-context` файла, из которого сервер стартует
+   * движок, а не в конфиг TaskBridge (тот лишь показывает прочитанное число).
+   * Пресеты роутера llama.cpp сюда не попадают: у них контекст в ctx-size
+   * пресета models.ini, и подменить его при загрузке нечем.
+   */
+  async setLocalContext(id, context) {
+    return this.localServers.setContext(id, context);
+  }
+
+  /**
+   * Убрать внешний сервер из списка локальных моделей TaskBridge (его собственная
+   * запись в config.json). Возвращает удалённую запись или null — если такая строка
+   * пришла из Pi, а не из конфига; тогда её удаляют в Pi.
+   *
+   * Сам config.json сохраняет вызывающий (у менеджера нет rootDir).
+   */
+  forgetLocalServer(id) {
+    return this.localServers.forget(id);
   }
 
   async stopLocal() {

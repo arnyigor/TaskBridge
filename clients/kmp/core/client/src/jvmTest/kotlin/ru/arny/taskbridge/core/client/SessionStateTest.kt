@@ -6,10 +6,13 @@ import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
 import ru.arny.taskbridge.core.client.sessions.SessionAlerts
 import ru.arny.taskbridge.core.client.sessions.SessionListState
+import ru.arny.taskbridge.core.api.RuntimeInfo
+import ru.arny.taskbridge.core.client.sessions.activityOf
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.settings.normalizeServerUrl
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -68,5 +71,24 @@ class SessionStateTest {
         assertNull(normalizeServerUrl("ftp://x"))
         assertNull(normalizeServerUrl("host:99999"))
         assertNull(normalizeServerUrl("   "))
+    }
+
+    /**
+     * Pi сжимает контекст тем же запросом к модели, что и обычный ответ: в ленте это
+     * выглядит как «ответ агента», хотя модель пишет сводку истории. Сервер различает
+     * это как runtime.activity = compacting — строка списка обязана называть процесс.
+     */
+    @Test
+    fun compactionIsNamedInsteadOfAGenericWorking() {
+        val compacting = Task(
+            id = "c", status = "RUNNING", prompt = "p",
+            runtime = RuntimeInfo(state = "WORKING", activity = "compacting"),
+        )
+        assertEquals("Сжимает контекст", activityOf(compacting))
+        // Обычная работа по-прежнему берёт текст задачи, а не выдуманную подпись.
+        assertEquals(null, activityOf(Task(id = "w", status = "RUNNING", prompt = "p", current = null)))
+        assertEquals("Пишу ответ", activityOf(Task(id = "w2", status = "RUNNING", prompt = "p", current = "Пишу ответ")))
+        // Сжатие на остановленной сессии — это уже история: подписи нет.
+        assertEquals(null, activityOf(compacting.copy(status = "CANCELLED")))
     }
 }

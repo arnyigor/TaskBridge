@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listProcesses, processesUsingFile } from './process-info.mjs';
 import { discoverExternalServers } from './external-discovery.mjs';
+import { CONTEXT_FLAG, missingModelPaths, readEngineArg, writeContextFile } from './engine-context.mjs';
 
 const ORPHAN_LAUNCHER = fileURLToPath(new URL('./orphan-launcher.mjs', import.meta.url));
 
@@ -260,6 +261,21 @@ export function parsePrometheusMetrics(text, modelKey = '', samples = new Map())
   };
 }
 
+// Доля переиспользованного промпта, выше которой PP не публикуется.
+//
+// У Strata `prompt_ms` — время всей промпт-фазы запроса, и оно складывается из
+// ПОСТОЯННЫХ накладных расходов на запрос плюс чтение новых токенов. Измерено на
+// живом сервере (iq3_s, порт 8083, 2026-09-30, 12 запросов одной сессии):
+// `prompt_ms` зависит от новых токенов (регрессия: ~1.19 с на запрос + 1.55 мс на
+// токен, r²=0.91 => ~650 ток/с) и совсем не зависит от переиспользованной части
+// (r²=0.003). Поэтому на почти полностью закешированной беседе «новые / prompt_ms»
+// — это уже не скорость чтения, а накладные расходы, делённые на остаток:
+// 23 новых токена за 677 мс давали «34 tok/s», 163 за 1502 мс — «108 tok/s»
+// (та самая «посадка до 105»), хотя новые токены движок читает на ~650 ток/с
+// (документация Strata даёт 931-1070 ток/с для IQ3_S на 64K-128K). Такой промпт
+// движок вспомнил, а не прочитал — честной скорости чтения у него нет.
+const STRATA_CACHED_PROMPT_MAX = 0.5;
+
 /**
  * Телеметрия внешнего сервера Strata. В отличие от llama.cpp это JSON
  * (`GET /metrics`), а не prometheus-текст: там есть фаза работы, прогресс
@@ -268,9 +284,16 @@ export function parsePrometheusMetrics(text, modelKey = '', samples = new Map())
  *
  * Что отдаём:
  *  - phase/busy — что модель делает прямо сейчас (в т.ч. «reading the prompt»);
- *  - promptRead/promptTotal/progress — процент чтения промпта на длинном вводе;
- *  - pp — скорость ЧТЕНИЯ (новые токены за prompt_ms), а не всего промпта:
- *    доля `reused` приходит из кеша беседа и читается почти мгновенно;
+ *  - promptRead/promptTotal/progress — процент чтения промпта на длинном вводе.
+ *    Внимание: `prompt_read` считает и переиспользованный префикс прочитанным
+ *    (движок, issue #29), поэтому на кешированном промпте процент почти сразу 100% —
+ *    это счётчик движка, а не вычисленное нами число;
+ *  - pp — скорость ЧТЕНИЯ новых токенов (новые за prompt_ms) и только для
+ *    запроса, который промпт действительно читал. Промпт, пришедший из кеша
+ *    беседы, скорости чтения не даёт: pp = null, ppUnavailable = 'conversation-cache'
+ *    (см. STRATA_CACHED_PROMPT_MAX — там же измерения);
+ *  - freshTokens/reusedPrompt — сколько промпта прочитано и сколько вспомнено:
+ *    по ним видно, почему pp нет, без выдумывания скорости;
  *  - tg — скорость генерации (живая или из последнего запроса).
  */
 export function parseStrataMetrics(payload) {
@@ -285,13 +308,25 @@ export function parseStrataMetrics(payload) {
   const progress = read !== null && total !== null && total > 0 ? Math.min(1, read / total) : null;
 
   const last = Array.isArray(payload.requests) && payload.requests.length ? payload.requests[0] : null;
-  let pp = null;
+  let promptTokens = null;
+  let freshTokens = null;
+  let reusedRatio = null;
   if (last) {
     const tokens = num(last.prompt_tokens);
-    const reused = num(last.reused) ?? 0;
+    const reused = num(last.reused);
+    if (tokens !== null && tokens > 0) {
+      // Движки до 0.1.3 поля `reused` не отдают: тогда переиспользовать было нечего
+      // и весь промпт — прочитанный.
+      promptTokens = tokens;
+      freshTokens = reused === null ? tokens : Math.max(0, tokens - reused);
+      reusedRatio = reused === null ? 0 : Math.min(1, reused / tokens);
+    }
+  }
+  const cachedPrompt = reusedRatio !== null && reusedRatio > STRATA_CACHED_PROMPT_MAX;
+  let pp = null;
+  if (last && !cachedPrompt) {
     const ms = num(last.prompt_ms);
-    const fresh = tokens !== null ? tokens - reused : null;
-    if (fresh !== null && fresh > 0 && ms !== null && ms > 0) pp = fresh / ms * 1000;
+    if (freshTokens !== null && freshTokens > 0 && ms !== null && ms > 0) pp = freshTokens / ms * 1000;
   }
 
   const liveRate = num(live && live.tok_s);
@@ -310,6 +345,9 @@ export function parseStrataMetrics(payload) {
     generated: live ? num(live.generated) : null,
     elapsedS: live ? num(live.elapsed_s) : null,
     pp,
+    ppUnavailable: cachedPrompt ? 'conversation-cache' : null,
+    promptTokens,
+    freshTokens,
     tg: liveRate ?? lastRate,
     requestsProcessing: live ? num(live.queued) : null,
     kvRatio: null,
@@ -834,6 +872,28 @@ export class ExternalLocalServers {
     return this.servers.length > 0;
   }
 
+  /**
+   * Убрать внешний сервер из списка TaskBridge — то есть из его собственного
+   * конфига (`localRuntime.externalServers`). Файлы модели, конфиг движка и уже
+   * запущенный процесс не трогаются: это действие про список, а не про модель.
+   *
+   * Возвращает удалённую запись или null, если её в конфиге нет: такая строка
+   * пришла из Pi (`~/.pi/agent/models.json`) — туда TaskBridge не пишет, удалять
+   * её надо в Pi.
+   *
+   * Сам файл на диск кладёт вызывающий (saveConfig): у класса нет rootDir, и он не
+   * решает, когда переписывать config.json целиком.
+   */
+  forget(id) {
+    const list = Array.isArray(this.config.externalServers) ? this.config.externalServers : [];
+    const index = list.findIndex(entry => entry && (entry.model === id || entry.provider === id));
+    if (index < 0) return null;
+    const [removed] = list.splice(index, 1);
+    // Кэш статуса: иначе убранная строка живёт в панели до пяти секунд.
+    this.cache = null;
+    return removed;
+  }
+
   /** The server behind a model id or a provider id. Matched by the model and
    *  the provider only: an id that collides with a server's display name must
    *  not divert a router load. null = not one of ours. */
@@ -850,6 +910,79 @@ export class ExternalLocalServers {
     const args = (server.start || []).map(String);
     const i = args.findIndex(a => a.toLowerCase() === '--config');
     return i >= 0 && args[i + 1] ? args[i + 1] : null;
+  }
+
+  /**
+   * Файл, из которого сервер берёт параметры загрузки: `--config` его команды
+   * запуска (у найденных автоматически — тот же ключ, абсолютным путём).
+   * Относительный путь разрешается от cwd сервера — так его запускают вручную
+   * (`--config strata-iq3_s.json` из папки модели). null = менять нечего.
+   */
+  contextFile(server) {
+    const marker = server.killMarker || this.killMarker(server);
+    if (!marker) return null;
+    return path.isAbsolute(marker) ? marker : path.resolve(server.cwd || process.cwd(), marker);
+  }
+
+  /**
+   * Текст конфига сервера — один раз на опрос: из него и контекст (что движок
+   * получит при загрузке), и наличие файлов модели. null = файла/конфига нет.
+   */
+  async configText(server) {
+    const file = this.contextFile(server);
+    if (!file) return null;
+    try {
+      return { file, text: await fs.promises.readFile(file, 'utf8') };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Новый размер контекста внешней локальной модели (Strata).
+   *
+   * Контекст — параметр ЗАГРУЗКИ, а не сессии: он пишется в `--max-context`
+   * файла, из которого сервер стартует движок (см. src/engine-context.mjs), а
+   * уже запущенный сервер продолжает работать со старым значением — новое
+   * подхватывается при следующей загрузке. Об этом говорит `restartRequired`.
+   */
+  async setContext(id, context) {
+    const server = this.find(id);
+    if (!server) {
+      throw failure('LOCAL_CONTEXT_UNSUPPORTED',
+        `${id} — не внешний локальный сервер (Strata): у пресетов роутера llama.cpp контекст задаёт ctx-size в models.ini, и TaskBridge его не правит.`);
+    }
+    const file = this.contextFile(server);
+    let written = null;
+    if (file) {
+      try {
+        written = await writeContextFile(file, context);
+      } catch (error) {
+        if (error.code === 'ENOENT') {
+          throw failure('LOCAL_CONTEXT_UNSUPPORTED', `Файл ${file} не найден — контекст менять негде.`);
+        }
+        throw error;
+      }
+    }
+    if (!written) {
+      throw failure('LOCAL_CONTEXT_UNSUPPORTED',
+        `${server.provider}: в ${file || 'команде запуска (нет --config)'} нет ${CONTEXT_FLAG} — вставьте его вручную, TaskBridge чужие args не переписывает.`);
+    }
+    // Статус кэширован на несколько секунд: без сброса панель показывала бы старое
+    // число до следующего цикла опроса.
+    this.cache = null;
+    return {
+      provider: server.provider,
+      model: server.model || id,
+      file,
+      context: written.context,
+      previous: written.previous,
+      changed: written.changed,
+      // Резидентная часть KV — факт из того же файла: новый контекст может быть
+      // меньше неё, и решает это движок, а не TaskBridge.
+      kvResident: written.resident,
+      restartRequired: written.changed && await this.alive(server)
+    };
   }
 
   /**
@@ -874,6 +1007,28 @@ export class ExternalLocalServers {
       return response.ok;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * `/health` сервера вместе с контекстом, с которым движок реально поднялся:
+   * Strata отдаёт его в `max_context` (`{"status":"ok","max_context":131072,...}`).
+   * Это точнее файла конфига: движок мог ужать окно под память, а файл руками
+   * правил кто-то другой. Нет поля — null, и вызывающий берёт файл.
+   *
+   * alive() для этого не годится: ему нужен только факт ответа, а здесь ещё число.
+   */
+  async health(server, timeoutMs = 1500) {
+    const base = normalizeBaseUrl(server.baseUrl);
+    if (!base) return { ok: false, maxContext: null };
+    try {
+      const response = await fetch(`${base}/health`, { signal: AbortSignal.timeout(timeoutMs) });
+      if (!response.ok) return { ok: false, maxContext: null };
+      const payload = await response.json().catch(() => null);
+      const value = Number(payload?.max_context ?? payload?.n_ctx);
+      return { ok: true, maxContext: Number.isFinite(value) && value > 0 ? value : null };
+    } catch {
+      return { ok: false, maxContext: null };
     }
   }
 
@@ -903,10 +1058,22 @@ export class ExternalLocalServers {
     if (!this.configured) return { configured: false, servers: [], models: [] };
     if (!fresh && !this.starting.size && this.cache && Date.now() - this.cacheAt < STATUS_CACHE_MS) return this.cache;
     const promise = Promise.all(this.servers.map(async server => {
-      const reachable = await this.alive(server);
+      // Один /health вместо alive(): из него и «жив ли», и окно, с которым движок
+      // поднялся. Запущенный движок — источник истины для числа, а файл конфига —
+      // предсказание для выгруженного.
+      const health = await this.health(server);
+      const reachable = health.ok;
       const starting = this.starting.has(server.provider) && !reachable;
       // Телеметрия — только у живого сервера: у выгруженного и спрашивать нечего.
       const metrics = reachable ? await this.metrics(server).catch(() => null) : null;
+      // Контекст и наличие файлов берём из файла самого сервера, а не из конфига
+      // TaskBridge: контекст задан при загрузке и может быть только что изменён
+      // через настройки, а веса могли удалить с диска — тогда строка обязана это
+      // сказать, а не предлагать «Загрузить» то, чего нет. Конфиг TaskBridge
+      // остаётся фолбэком для серверов, чей файл не прочитать.
+      const config = await this.configText(server);
+      const fromFile = config ? readEngineArg(config.text, CONTEXT_FLAG) : null;
+      const missing = config ? await missingModelPaths(config.text, config.file) : null;
       const model = {
         // Listed even when the server is down: otherwise there would be
         // nothing to «Загрузить».
@@ -915,7 +1082,18 @@ export class ExternalLocalServers {
         provider: server.provider,
         status: reachable ? 'loaded' : starting ? 'loading' : 'unloaded',
         external: true,
-        contextWindow: server.contextWindow ?? null
+        contextWindow: health.maxContext ?? fromFile ?? server.contextWindow ?? null,
+        // Менять контекст можно там, где сервер берёт параметры загрузки из файла
+        // с `--max-context` (Strata). У остальных строку контекста показываем, но
+        // не редактируем: клиент по этому флагу и решает, что рисовать.
+        contextEditable: fromFile !== null,
+        // null — файлы не проверяются (конфиг чужой): клиент не показывает
+        // ничего, а не выдумывает «всё на месте».
+        filesPresent: missing === null ? null : missing.length === 0,
+        missingFile: missing?.[0] ?? null,
+        // Запись есть в config.json TaskBridge — её и можно убрать из списка.
+        // Найденные автоматически принадлежат Pi (models.json): там их и удаляют.
+        removable: server.discovered !== true
       };
       if (metrics) {
         model.metrics = metrics;

@@ -83,7 +83,9 @@ import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.Approval
 import ru.arny.taskbridge.core.api.GenerationMetrics
+import ru.arny.taskbridge.core.api.LocalModelMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
 import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.Task
@@ -168,9 +170,12 @@ fun ChatScreen(
 
     DisposableEffect(taskId) {
         connection.visibleSession = taskId
+        connection.clearAttention(taskId)
         graph.settings.lastSessionId = taskId
         platform.clearNotification(taskId)
-        onDispose { if (connection.visibleSession == taskId) connection.visibleSession = null }
+        onDispose {
+            if (connection.visibleSession == taskId) connection.visibleSession = null
+        }
     }
     LaunchedEffect(taskId) {
         snapshotFlow { draft.text }.debounce(400).collect { graph.settings.saveDraft(taskId, it) }
@@ -741,9 +746,13 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
         state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
         state.task?.status == "FAILED" -> "Ошибка · подробнее"
+        state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$readingDetail · подробнее"
         answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
         readingPp != null && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingDetail"
         readingPrompt && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingDetail"
+        // История больше окна модели: провайдер отвечает 400, Pi повторяет запрос, и
+        // «ожидается ответ агента» висит без событий — это не задержка модели.
+        contextOverflow(state.task, info) != null && answer?.active != true -> "История не влезает в окно модели · подробнее"
         answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
         answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
         answer?.active == true -> "Сообщение передано · ожидается ответ агента"
@@ -760,6 +769,7 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         "Активность: ${state.task?.runtime?.activity ?: "—"} · ${state.task?.current ?: "—"}",
         "Модель сессии: ${state.task?.let(::sessionModelLabel) ?: "—"}",
         *sessionDiagnosticsLines(state.task, info).toTypedArray(),
+        externalMetrics?.let(::strataPpLine),
         "Событие № ${state.chat.cursor} · в очереди ${state.task?.pendingPrompts?.size ?: 0}",
         state.task?.errorCode?.let { "Код ошибки: $it" },
         state.task?.error,
@@ -770,16 +780,16 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
     // user message's server timestamp (the client and the server clocks may drift
     // by seconds on a LAN, which is fine for a rough «0:34»), so a session opened
     // mid-turn shows it too.
+    //
+    // По ключам, а не по snapshotFlow { state.task?.status }: `state` здесь —
+    // значение из collectAsState(), а не наблюдаемое состояние. Поток читал
+    // обычное поле data-класса, поэтому отдавал первый статус и больше не
+    // срабатывал: счётчик, запущенный на RUNNING, продолжал идти и после
+    // SUCCEEDED, когда в задаче уже ничего не выполнялось.
+    val lastUserAt = state.chat.items.filterIsInstance<ChatItem.User>().lastOrNull()?.at
     var startedAt by remember(state.taskId) { mutableStateOf<Long?>(null) }
-    LaunchedEffect(state.taskId) {
-        snapshotFlow { state.task?.status }.collect { status ->
-            when (status) {
-                "RUNNING", "PREPARING", "PREFLIGHT", "WAITING_USER", "VERIFYING" ->
-                    if (startedAt == null) startedAt = state.chat.items.filterIsInstance<ChatItem.User>().lastOrNull()?.let { parseIsoMillis(it.at) }
-                null -> {}
-                else -> startedAt = null
-            }
-        }
+    LaunchedEffect(state.taskId, state.task?.status, lastUserAt) {
+        startedAt = turnStartedAt(state.task?.status, startedAt, lastUserAt)
     }
     var tick by remember(state.taskId) { mutableStateOf(nowMillis()) }
     LaunchedEffect(state.taskId, startedAt) {
@@ -793,9 +803,10 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         readingPp?.let { "PP ${formatSpeed(it)}" },
         (liveTg ?: state.task?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 })?.let { "TG ${formatSpeed(it)} ток/с" },
     )
-    // Line 2: model · context usage · queued count.
-    val used = state.task?.compaction?.last?.estimatedTokensAfter ?: state.task?.lastUsage?.totalTokens
-    val window = state.task?.model?.contextWindow ?: state.task?.requestedModel?.contextWindow
+    // Line 2: model · context usage · queued count. Живое число движка важнее
+    // `usage` прошлого хода: на сжатии/длинном промпте они расходятся в разы.
+    val used = sessionContextUsed(state.task, info)
+    val window = sessionContextWindow(state.task, info)
     val display = state.task?.let(::displayStateOf)
     val dotColor = when {
         state.task?.status == "FAILED" -> LocalStatusColors.current.failed
@@ -971,7 +982,10 @@ private fun QuickModelChooser(state: ChatSessionState, session: ChatSession, gra
             else OutlinedButton(onClick = { loadError = null; loadAttempt++ }) { Text("Повторить") }
         }
     } else {
-        ModelChooser(catalog!!, state.task?.model, graph.settings, onPick = { model ->
+        // Живой статус локальных моделей: в каталоге Pi у локального провайдера
+        // записан статический размер окна, и после загрузки с другим он врёт.
+        val sessionListState by connection.sessions.state.collectAsState()
+        ModelChooser(catalog!!, state.task?.model, graph.settings, info = sessionListState.info, onPick = { model ->
             if (model.key == state.task?.model?.key) onClose()
             else if (pendingKey == null) {
                 pendingKey = model.key
@@ -986,6 +1000,9 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
     val connection = graph.connection ?: return
     var catalog by remember { mutableStateOf<ModelCatalog?>(null) }
     LaunchedEffect(Unit) { connection.sessions.models().onSuccess { catalog = it } }
+    // Живой статус локальных моделей: окно контекста сессии берётся из него, а не
+    // из каталога Pi, где у локальной модели записан статический размер.
+    val sessionListState by connection.sessions.state.collectAsState()
     val task = state.task
     val running = task?.status in setOf("RUNNING", "PREPARING", "CANCELLING")
     AdaptiveSheet(
@@ -1020,7 +1037,7 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             Text(notice, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         FieldLabel("Модель", top = 16)
-        ModelPicker(catalog, task?.model, graph.settings, onPick = { session.setModel(it) })
+        ModelPicker(catalog, task?.model, graph.settings, info = sessionListState.info, onPick = { session.setModel(it) })
         Text(
             "Смена модели записывается в историю Pi и переживает перезапуск.",
             style = MaterialTheme.typography.bodySmall,
@@ -1044,7 +1061,7 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             Switch(checked = task?.autoCompactionEnabled != false, onCheckedChange = { session.setAutoCompaction(it) })
         }
         val usage = task?.lastUsage
-        val window = task?.model?.contextWindow
+        val window = sessionContextWindow(task, sessionListState.info)
         val catalogModel = catalog?.models?.firstOrNull { it.key == task?.model?.key }
         val estimatedCost = catalogModel?.cost?.let { price ->
             ((usage?.input ?: 0L) * (price.input ?: 0.0) +
@@ -1120,6 +1137,80 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
     }
 }
 
+/**
+ * Живое окно контекста локальной модели из статуса TaskBridge (конфиг движка и
+ * `/health` его сервера), или null — для облачной модели такого числа нет.
+ */
+internal fun liveLocalContextWindow(model: ModelRef?, info: ApiInfo?): Long? =
+    model?.let { ref ->
+        info?.local?.models?.firstOrNull { entry ->
+            (ref.id != null && entry.id == ref.id) || (ref.provider != null && entry.provider == ref.provider)
+        }
+    }?.contextWindow
+
+/**
+ * Окно контекста сессии. У локальной модели каталожное число — это статическая
+ * запись провайдера в Pi (262K из models.json): после загрузки с другим окном она
+ * остаётся прежней, и шкала показывала «30K/262K», хотя движок поднят на 131K.
+ * Поэтому для местных моделей берём живое число TaskBridge, а каталог Pi остаётся
+ * фолбэком — для облачных моделей он и есть единственный источник.
+ */
+internal fun sessionContextWindow(task: Task?, info: ApiInfo?): Long? {
+    val model = task?.model ?: task?.requestedModel
+    return liveLocalContextWindow(model, info) ?: model?.contextWindow
+}
+
+/**
+ * Размер промпта, который движок (Strata) обрабатывает прямо сейчас для этой модели,
+ * или null если он не занят.
+ *
+ * Пока движок занят, важен именно этот размер: панель иначе показывает `usage`
+ * прошлого хода — в замере 2026-09-30 рядом стояли «читает 41.0K / 63.7K» от
+ * движка и «55% (143.9K/262.1K)» от Pi, и это читалось как баг. Свежий запрос
+ * всегда последний в счётчиках движка, поэтому число относится к текущему ходу.
+ */
+internal fun liveEnginePrompt(model: ModelRef?, info: ApiInfo?): Long? {
+    val entry = model?.let { ref ->
+        info?.local?.models?.firstOrNull { item ->
+            (ref.id != null && item.id == ref.id) || (ref.provider != null && item.provider == ref.provider)
+        }
+    } ?: return null
+    val metrics = entry.metrics ?: return null
+    if (metrics.busy != true) return null
+    // Во время чтения промпта движок знает точный размер, после — счётчик запроса.
+    return entry.promptTotal?.takeIf { it > 0 } ?: metrics.promptTokens?.takeIf { it > 0 }
+}
+
+/**
+ * Сколько токенов занимает контекст сессии — с приоритетом на живое число движка:
+ * пока модель работает, это размер запроса в работе, а не `usage` прошлого хода
+ * (после сжатия оно вообще относится к старым числам). Оценка Pi — фолбэк.
+ */
+internal fun sessionContextUsed(task: Task?, info: ApiInfo?): Long? =
+    liveEnginePrompt(task?.model ?: task?.requestedModel, info)
+        ?: task?.compaction?.last?.estimatedTokensAfter
+        ?: task?.lastUsage?.totalTokens
+
+/**
+ * История сессии не влезает в окно модели, или null если влезает (или одного из
+ * чисел нет).
+ *
+ * Это тот случай, когда «сессия подвисла» на самом деле ждёт: движок (Strata и
+ * llama.cpp) НЕ обрезает промпт, а отвечает 400 `prompt (N tokens) + max tokens
+ * (M) exceeds the context (K); requests are never truncated`, а Pi повторяет такие
+ * запросы с паузой. В логе сессии это видно как `limits-wait` с `retries_total`,
+ * в панели — как «streaming · Pi is working» без событий модели.
+ *
+ * Считается по оценке истории TaskBridge и живому окну движка: после смены
+ * контекста у длинной сессии это первое, что видно, и это единственный выход из
+ * ситуации, которую иначе видно только по логу Pi.
+ */
+internal fun contextOverflow(task: Task?, info: ApiInfo?): Pair<Long, Long>? {
+    val window = sessionContextWindow(task, info)?.takeIf { it > 0 } ?: return null
+    val tokens = task?.compaction?.last?.estimatedTokensAfter ?: task?.lastUsage?.totalTokens ?: return null
+    return if (tokens > window) tokens to window else null
+}
+
 private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     val metrics = task?.metrics
     val speed = metrics?.let(::generationSpeedLabel)?.let { "Скорость сессии: $it ток/с" }
@@ -1127,19 +1218,38 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     // «промпт отправлен, а облако молчит».
     val firstToken = metrics?.promptMs?.takeIf { it > 0 }?.let { "Первый токен: ${formatLatencyMs(it)}" }
     val usage = task?.lastUsage
-    val window = task?.model?.contextWindow ?: task?.requestedModel?.contextWindow
+    val window = sessionContextWindow(task, info)
     val compactedTokens = task?.compaction?.last?.estimatedTokensAfter
-    val contextTokens = compactedTokens ?: usage?.totalTokens
+    // Живое число движка называем по имени: пока модель работает, это размер
+    // запроса в работе, а не накопленный контекст сессии, — разные числа.
+    val livePrompt = liveEnginePrompt(task?.model ?: task?.requestedModel, info)
+    val contextTokens = livePrompt ?: compactedTokens ?: usage?.totalTokens
+    // Первой строкой: если история больше окна, всё остальное в диагностике — уже
+    // следствие, и запрос уйдёт в повтор.
+    val overflow = contextOverflow(task, info)?.let { (tokens, limit) ->
+        "История не влезает в окно модели: $tokens ток. больше $limit — провайдер ответит 400 " +
+            "(промпт не обрезается), поэтому запрос повторяется без ответа. " +
+            "Поднимите контекст модели или начните новую сессию."
+    }
+    // Сжатие контекста — запрос к модели, но ответа агента в этом ходу не будет:
+    // без этой строки ход выглядит как обычный ответ, который «завис».
+    val compaction = task?.runtime?.activity
+        ?.takeIf { it == "compacting" }
+        ?.let { "Pi сжимает контекст: модель пишет сводку истории — это отдельный запрос, ответа агента в этом ходу не будет" }
     val sessionContext = contextTokens?.let { tokens ->
         val percent = window?.takeIf { it > 0 }?.let { " · ${(tokens * 100.0 / it).roundToInt()}%" }.orEmpty()
-        val label = if (compactedTokens != null) "Контекст после сжатия" else "Контекст сессии"
+        val label = when {
+            livePrompt != null -> "Движок обрабатывает промпт"
+            compactedTokens != null -> "Контекст после сжатия"
+            else -> "Контекст сессии"
+        }
         "$label: $tokens${window?.let { " из ${it / 1000}K" }.orEmpty()} ток.$percent"
     }
     val localProvider = info?.local?.provider
     val sessionProvider = task?.model?.provider ?: task?.requestedModel?.provider
     val isLocalSession = localProvider != null && sessionProvider == localProvider
     val localLines = if (isLocalSession) localDiagnosticsLines(info, suppressKvRatio = compactedTokens != null) else emptyList()
-    return listOfNotNull(speed, firstToken, sessionContext) + localLines
+    return listOfNotNull(compaction, overflow, speed, firstToken, sessionContext) + localLines
 }
 
 private fun localDiagnosticsLines(info: ApiInfo?, suppressKvRatio: Boolean): List<String> {
@@ -1166,7 +1276,7 @@ private fun localDiagnosticsLines(info: ApiInfo?, suppressKvRatio: Boolean): Lis
 private fun sessionModelLabel(task: Task): String =
     (task.model ?: task.requestedModel)?.let(::modelFullLabel) ?: "—"
 
-private fun modelFullLabel(model: ru.arny.taskbridge.core.api.ModelRef): String =
+private fun modelFullLabel(model: ModelRef): String =
     model.provider?.takeIf { it.isNotBlank() }?.let { provider -> "$provider/${model.id ?: "—"}" }
         ?: model.id?.takeIf { it.isNotBlank() }
         ?: model.label
@@ -1183,6 +1293,35 @@ private fun generationSpeedLabel(metrics: GenerationMetrics): String? {
 
 private fun formatSpeed(value: Double): String =
     if (value < 10.0) ((value * 10.0).roundToInt() / 10.0).toString() else value.roundToInt().toString()
+
+/** Статусы, в которых идёт ход: счётчик хода тикает только на них. */
+private val TURN_STATUSES = setOf("RUNNING", "PREPARING", "PREFLIGHT", "WAITING_USER", "VERIFYING")
+
+/**
+ * Что должно стать `startedAt` при новом статусе задачи.
+ *
+ * Задача кончилась (SUCCEEDED/FAILED/CANCELLED) — `null`, счётчик гаснет. Иначе
+ * время старта хода: первый раз из времени последнего сообщения пользователя,
+ * а дальше сохраняется, чтобы смена статуса внутри хода (RUNNING → VERIFYING)
+ * не начинала счёт заново.
+ */
+internal fun turnStartedAt(status: String?, current: Long?, lastUserMessageAt: String?): Long? =
+    if (status != null && status in TURN_STATUSES) current ?: parseIsoMillis(lastUserMessageAt) else null
+
+/**
+ * Почему у внешнего сервера (Strata) нет PP. Промпт, который движок взял из кеша
+ * беседы, он вспомнил, а не прочитал: делить «новые» на время всей промпт-фазы
+ * нельзя — получаются накладные расходы (163 новых токена за 1,5 с = «108 tok/s»).
+ * Поэтому в строке не выдуманное число, а факт: сколько прочитано из сколько.
+ */
+internal fun strataPpLine(metrics: LocalModelMetrics): String? {
+    if (metrics.ppUnavailable != "conversation-cache") return null
+    val detail = listOfNotNull(
+        metrics.freshTokens?.let { "новых ${formatTokensK(it)}" },
+        metrics.promptTokens?.let { "из ${formatTokensK(it)}" },
+    ).joinToString(" ")
+    return "PP: — промпт из кеша беседы${if (detail.isEmpty()) "" else " ($detail)"}"
+}
 
 /** «0:34», «1:02:05» — elapsed of the running turn. */
 private fun elapsedClock(ms: Long): String {

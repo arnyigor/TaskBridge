@@ -67,7 +67,7 @@
     location.reload();
   });
   addEventListener('load', function () {
-    navigator.serviceWorker.register('/sw.js?v=20260927-43', { updateViaCache: 'none' }).then(function (registration) {
+    navigator.serviceWorker.register('/sw.js?v=20260930-47', { updateViaCache: 'none' }).then(function (registration) {
       // Ask for a fresh sw.js on every load; it is tiny and the browser otherwise
       // only re-checks it on its own schedule.
       if (registration.update) registration.update().catch(function () {});
