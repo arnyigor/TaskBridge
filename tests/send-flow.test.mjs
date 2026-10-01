@@ -15,6 +15,13 @@ async function setupFixture(t, streaming = false) {
     manager.closing = true;
     if (manager.pumpTimer) clearTimeout(manager.pumpTimer);
     store.close();
+    // A background finalizer (settle → verify) spawns git with the temp
+    // workspace as its CWD; on Windows the rmdir then fails with EBUSY until
+    // that child exits. Retry instead of failing the test.
+    for (let i = 0; i < 20; i++) {
+      try { await fs.rm(root, { recursive: true, force: true }); return; }
+      catch (error) { if (error.code !== 'EBUSY') throw error; await new Promise(resolve => setTimeout(resolve, 100)); }
+    }
     await fs.rm(root, { recursive: true, force: true });
   });
   const task = {
