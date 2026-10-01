@@ -467,6 +467,28 @@ export class LocalModelService extends EventEmitter {
     return this.config.router || this.config.managed || {};
   }
 
+  /**
+   * Ключ роутера, если тот запущен с `--api-key`: llama.cpp тогда отвечает 401 на
+   * всё, кроме /health, и без заголовка список моделей/метрики/загрузка не
+   * работают (роль `Скорость сейчас no-model`, пустые «Локальные модели»).
+   *
+   * Значение — сам ключ или ссылка на переменную окружения (`$HERMES_LLAMA_KEY`),
+   * как у провайдеров в models.json. Берётся из `localRuntime.router.apiKey`, а
+   * если роутер найден автодетектом (или ключ один на весь рантайм) — из
+   * `localRuntime.apiKey`. null = ключа нет, заголовок не шлём.
+   */
+  get apiKey() {
+    const raw = String(this.config.router?.apiKey || this.config.apiKey || '');
+    if (!raw) return null;
+    return raw.startsWith('$') ? process.env[raw.slice(1)] || null : raw;
+  }
+
+  /** Заголовки к роутеру: ключ, если он есть — иначе пусто. */
+  get authHeaders() {
+    const key = this.apiKey;
+    return key ? { Authorization: `Bearer ${key}` } : {};
+  }
+
   async request(pathname, { method = 'GET', body, timeout = 15000, signal } = {}) {
     const timer = new AbortController();
     const timerId = setTimeout(() => timer.abort(new Error('timeout')), timeout);
@@ -475,7 +497,10 @@ export class LocalModelService extends EventEmitter {
     try {
       const response = await fetch(this.baseUrl + pathname, {
         method,
-        headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+        headers: {
+          ...this.authHeaders,
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {})
+        },
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: combined
       });
@@ -590,7 +615,7 @@ export class LocalModelService extends EventEmitter {
     for (const model of loaded) {
       let response;
       try {
-        response = await fetch(`${this.baseUrl}/metrics?model=${encodeURIComponent(model.id)}`, { signal: AbortSignal.timeout(2000) });
+        response = await fetch(`${this.baseUrl}/metrics?model=${encodeURIComponent(model.id)}`, { headers: this.authHeaders, signal: AbortSignal.timeout(2000) });
       } catch {
         continue;
       }
@@ -792,7 +817,7 @@ export class LocalModelService extends EventEmitter {
   async #watchLoop(signal) {
     while (!signal.aborted) {
       try {
-        const response = await fetch(`${this.baseUrl}/models/sse`, { signal });
+        const response = await fetch(`${this.baseUrl}/models/sse`, { headers: this.authHeaders, signal });
         if (!response.ok || !response.body) throw new Error('sse unavailable');
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -1054,7 +1079,12 @@ export class ExternalLocalServers {
    * a few seconds; a start in progress always reads fresh, so the dialog never
    * pins «не загружена» while the model is being loaded.
    */
-  status({ fresh = false } = {}) {
+  // async — не для вида: при попадании в кэш (и при !configured) метод раньше
+  // возвращал объект СИНХРОННО, а не промис, и .catch() у вызывающих падал
+  // «status(...).catch is not a function» — на каждой отправке сообщения при
+  // тёплом статусе (тесты это не ловили: localModels.enabled=false, вызов не
+  // доходил до status).
+  async status({ fresh = false } = {}) {
     if (!this.configured) return { configured: false, servers: [], models: [] };
     if (!fresh && !this.starting.size && this.cache && Date.now() - this.cacheAt < STATUS_CACHE_MS) return this.cache;
     const promise = Promise.all(this.servers.map(async server => {

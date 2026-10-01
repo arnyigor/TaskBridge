@@ -322,6 +322,16 @@ export class PiRpcSession extends EventEmitter {
     return response.data?.levels || [];
   }
 
+  // What Pi itself thinks the current request will weigh: `contextUsage` is the
+  // same estimate Pi compacts on and draws in its footer. TaskBridge uses it for
+  // the context report and for the per-session context limit, so the number the
+  // operator sets a limit against is the number Pi enforces against its own
+  // window — not a recount of the session file on our side.
+  async getSessionStats(timeoutMs = 30000) {
+    const response = await this.request({ type: 'get_session_stats' }, timeoutMs);
+    return response.data || null;
+  }
+
   async getCommands() {
     const response = await this.request({ type: 'get_commands' }, 30000);
     return response.data?.commands || [];

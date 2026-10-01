@@ -48,15 +48,23 @@ test('normalizeModels derives quantization and configured ctx from child args', 
 
 // Minimal llama.cpp router stand-in: enough of /models, /models/load,
 // /models/unload and /models/sse to exercise LocalModelService end to end.
-async function fakeRouter(t, models) {
+// `apiKey` ставит сервер в режим `--api-key`: всё, кроме /health, требует Bearer.
+async function fakeRouter(t, models, { apiKey = null } = {}) {
   const status = new Map(models.map(m => [m.id, { value: 'unloaded', vision: m.vision === true, ctx: m.ctx ?? null }]));
   const slotsCalls = [];
   const processing = new Map();
   const clients = new Set();
+  let sseAuthorized = false;
   const broadcast = event => { for (const res of clients) { try { res.write(`data: ${JSON.stringify(event)}\n\n`); } catch {} } };
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     if (req.method === 'GET' && url.pathname === '/health') return res.end(JSON.stringify({ status: 'ok' }));
+    // llama.cpp с `--api-key` пускает без ключа только /health; остальное — 401.
+    if (apiKey && req.headers.authorization !== `Bearer ${apiKey}`) {
+      res.statusCode = 401;
+      return res.end(JSON.stringify({ error: { message: 'Invalid API Key' } }));
+    }
+    if (apiKey && url.pathname === '/models/sse') sseAuthorized = true;
     if (req.method === 'GET' && url.pathname === '/models') {
       res.setHeader('content-type', 'application/json');
       return res.end(JSON.stringify({
@@ -119,8 +127,41 @@ async function fakeRouter(t, models) {
     server.closeAllConnections?.();
     return new Promise(resolve => server.close(resolve));
   });
-  return { baseUrl: `http://127.0.0.1:${server.address().port}`, status, slotsCalls, processing };
+  return { baseUrl: `http://127.0.0.1:${server.address().port}`, status, slotsCalls, processing, sseAuthorized: () => sseAuthorized };
 }
+
+// llama.cpp с `--api-key` отвечает 401 на всё, кроме /health: без ключа список
+// моделей не читается вообще (в панели это «Скорость сейчас no-model» и пустой
+// состав «Локальных моделей»), а с ключом из конфига рантайма роутер снова виден.
+test('a router started with --api-key is readable only with the key', async t => {
+  const router = await fakeRouter(t, [{ id: 'Qwen3.8-27B-UD-Q3_K_XL', ctx: 65536 }], { apiKey: 's3cret' });
+
+  // Без ключа: /health отвечает (потому runtime и считается живым), модели — нет.
+  const anonymous = new LocalModelService({ provider: 'llama.cpp', healthUrl: `${router.baseUrl}/health` }, t.name);
+  assert.equal(await anonymous.isReady(), true);
+  await assert.rejects(anonymous.listModels(), { code: 'LOCAL_HTTP_ERROR' });
+  assert.deepEqual((await anonymous.getStatus()).models, []);
+
+  // Ключ берётся из localRuntime.apiKey (или router.apiKey), значение — сам ключ
+  // либо ссылка на переменную окружения, как у провайдеров Pi.
+  const keyed = new LocalModelService({ provider: 'llama.cpp', healthUrl: `${router.baseUrl}/health`, apiKey: 's3cret' }, t.name);
+  assert.deepEqual((await keyed.listModels()).map(m => m.id), ['Qwen3.8-27B-UD-Q3_K_XL']);
+  keyed.startWatching();
+  const loaded = await keyed.loadModel('Qwen3.8-27B-UD-Q3_K_XL');
+  assert.equal(loaded.status, 'loaded');
+  keyed.stopWatching();
+  assert.equal(router.sseAuthorized(), true); // /models/sse тоже получил ключ
+
+  process.env.TB_TEST_LLAMA_KEY = 's3cret';
+  t.after(() => { delete process.env.TB_TEST_LLAMA_KEY; });
+  const viaEnv = new LocalModelService({ provider: 'llama.cpp', router: { apiKey: '$TB_TEST_LLAMA_KEY' }, healthUrl: `${router.baseUrl}/health` }, t.name);
+  assert.deepEqual((await viaEnv.listModels()).map(m => m.id), ['Qwen3.8-27B-UD-Q3_K_XL']);
+
+  // Нет ключа в окружении — заголовка нет, поведение как у анонимного клиента.
+  const missingEnv = new LocalModelService({ provider: 'llama.cpp', apiKey: '$TB_TEST_NO_SUCH_KEY' }, t.name);
+  assert.equal(missingEnv.apiKey, null);
+  assert.deepEqual(missingEnv.authHeaders, {});
+});
 
 test('LocalModelService lists, loads with progress, unloads and reports status', async t => {
   const router = await fakeRouter(t, [{ id: 'vision', vision: true, ctx: 33792 }, { id: 'text', vision: false, ctx: 65536 }]);
@@ -220,10 +261,15 @@ test('parsePrometheusMetrics keeps only the llama.cpp PP/TG gauges', () => {
 
 // Router stand-in that only answers /health, /models and /metrics; `metrics`
 // null means the child was started without --metrics (llama.cpp answers 501).
-async function metricsRouter(t, { metrics = '' } = {}) {
+async function metricsRouter(t, { metrics = '', apiKey = null } = {}) {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost');
     if (url.pathname === '/health') return res.end(JSON.stringify({ status: 'ok' }));
+    // С `--api-key` и /metrics требует ключ: без него «Скорость сейчас» пустая.
+    if (apiKey && req.headers.authorization !== `Bearer ${apiKey}`) {
+      res.statusCode = 401;
+      return res.end(JSON.stringify({ error: { message: 'Invalid API Key' } }));
+    }
     if (url.pathname === '/models') return res.end(JSON.stringify({ data: [{ id: 'm1', status: { value: 'loaded' } }] }));
     if (url.pathname === '/metrics') {
       if (!url.searchParams.get('model')) { res.statusCode = 400; return res.end('{}'); }
@@ -253,6 +299,14 @@ test('LocalModelService says metrics are unavailable without --metrics', async t
   const base = await metricsRouter(t, { metrics: null });
   const service = new LocalModelService({ provider: 'llama.cpp', router: { enabled: true }, healthUrl: `${base}/health` }, t.name);
   assert.deepEqual(await service.getMetrics(), { available: false, reason: 'metrics-disabled', model: 'm1' });
+});
+
+test('LocalModelService reads /metrics of a key-protected router only with the key', async t => {
+  const base = await metricsRouter(t, { apiKey: 's3cret', metrics: 'llamacpp:prompt_tokens_seconds 118.5\nllamacpp:predicted_tokens_seconds 42.25\n' });
+  const anonymous = new LocalModelService({ provider: 'llama.cpp', router: { enabled: true }, healthUrl: `${base}/health` }, t.name);
+  assert.deepEqual(await anonymous.getMetrics(), { available: false, reason: 'unreachable' });
+  const keyed = new LocalModelService({ provider: 'llama.cpp', router: { enabled: true }, healthUrl: `${base}/health`, apiKey: 's3cret' }, t.name);
+  assert.equal((await keyed.getMetrics()).pp, 118.5);
 });
 
 test('LocalModelService refuses to load when the server is not a router catalog', async t => {

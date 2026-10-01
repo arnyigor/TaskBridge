@@ -46,6 +46,7 @@
   "localRuntime": {
     "healthUrl": "http://127.0.0.1:8080/health",
     "provider": "llama.cpp",
+    "apiKey": "",
     "router": {
       "enabled": false,
       "command": "C:\\path\\to\\llama-server.exe",
@@ -190,6 +191,9 @@
     "routerai": {
       "cacheMs": 600000
     }
+  },
+  "modelSync": {
+    "providers": ["wormsoft"]
   },
   "projects": [
     {

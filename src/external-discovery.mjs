@@ -29,6 +29,20 @@ export function isLocalBaseUrl(value) {
   }
 }
 
+// «хост:порт» без схемы, пути и хвостового слэша — одна и та же точка на диске
+// машины. Нужен там, где имя провайдера в конфиге и в Pi разное, а сервер один.
+// null = адрес не разобрать.
+export function endpointKey(value) {
+  try {
+    const url = new URL(String(value));
+    const port = url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
+    if (!port) return null;
+    return `${url.hostname.toLowerCase()}:${port}`;
+  } catch {
+    return null;
+  }
+}
+
 // Порт из baseUrl (8083) — по нему сопоставляем запись Pi с конфигом сервера.
 export function portOfBaseUrl(value) {
   try {
@@ -110,6 +124,14 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
     ...(Array.isArray(exclude) ? exclude : [])
   ].filter(Boolean));
 
+  // Эндпоинты, уже описанные в конфиге TaskBridge: тот же сервер под другим
+  // именем провайдера показывать второй раз нельзя (см. проверку ниже).
+  const configuredEndpoints = new Set(
+    (Array.isArray(configured) ? configured : [])
+      .map(entry => endpointKey(entry && entry.baseUrl))
+      .filter(Boolean)
+  );
+
   const dir = discovery.dir ? String(discovery.dir) : null;
   const configs = dir ? readServerConfigs(dir, discovery.configGlob) : [];
   const routerPort = portOfBaseUrl(discovery.healthUrl);
@@ -127,6 +149,12 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
     const port = portOfBaseUrl(baseUrl);
     // Свой сервер на порту роутера — это и есть роутер.
     if (routerPort != null && port === routerPort) continue;
+    // Тот же эндпоинт уже описан в externalServers — но под другим именем
+    // провайдера (в конфиге «strata-iq3s», в Pi «strata» на том же 8083). Это
+    // один сервер, а не два: списку он показывался двумя одинаковыми строками.
+    // Остаётся ручная запись — она подробнее (в ней команда запуска) и её можно
+    // убрать из списка TaskBridge.
+    if (configuredEndpoints.has(endpointKey(baseUrl))) continue;
 
     // Главный признак «наш сервер»: в каталоге установки есть его конфиг с этим
     // портом. Иначе мы не знаем ни команды запуска, ни контекста — и не выдаём

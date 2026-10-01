@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  endpointKey,
   isLocalBaseUrl,
   portOfBaseUrl,
   readServerConfigs,
@@ -30,6 +31,18 @@ test('portOfBaseUrl reads the port, defaults by protocol', () => {
   assert.equal(portOfBaseUrl('http://localhost'), 80);
   assert.equal(portOfBaseUrl('https://localhost'), 443);
   assert.equal(portOfBaseUrl('nonsense'), null);
+});
+
+test('endpointKey() ignores the path, the tail slash and the case', () => {
+  assert.equal(endpointKey('http://127.0.0.1:8083/v1'), '127.0.0.1:8083');
+  assert.equal(endpointKey('http://127.0.0.1:8083'), '127.0.0.1:8083');
+  assert.equal(endpointKey('http://LOCALHOST:8083/v1/'), 'localhost:8083');
+  assert.equal(endpointKey('http://localhost'), 'localhost:80');
+  assert.equal(endpointKey('https://localhost/v1'), 'localhost:443');
+  // Другой хост с тем же портом — другой сервер.
+  assert.notEqual(endpointKey('http://192.168.1.10:8083/v1'), endpointKey('http://127.0.0.1:8083/v1'));
+  assert.equal(endpointKey('nonsense'), null);
+  assert.equal(endpointKey(undefined), null);
 });
 
 test('readServerConfigs picks the port and --max-context out of each run config', () => {
@@ -120,6 +133,31 @@ test('a configured entry wins over the discovered one', () => {
   }));
   const configured = [{ provider: 'strata-iq3s', model: 'qwen3.8-flash-next-iq3-s', baseUrl: 'http://127.0.0.1:8083' }];
   assert.deepEqual(discoverExternalServers({ agentDir, configured }), []);
+});
+
+// Задвоение из жизни: сервер Strata описан в config.json как «strata-iq3s», а в Pi
+// models.json тот же 8083 назван провайдером «strata». Совпадения имён нет, порт
+// один — и в списке было две одинаковые строки «qwen3.8-flash-next-iq3-s».
+test('one server under two provider names is listed once', () => {
+  const agentDir = tmpdir();
+  const install = tmpdir();
+  fs.writeFileSync(path.join(install, 'strata-iq3_s.json'), JSON.stringify({ port: 8083, args: ['--max-context', '262144'] }));
+  fs.writeFileSync(path.join(install, 'strata-iq2_xs.json'), JSON.stringify({ port: 8081, args: ['--max-context', '131072'] }));
+  fs.writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: {
+      // В Pi провайдер назван по движку, в конфиге — по кванту.
+      strata: { baseUrl: 'http://127.0.0.1:8083/v1', apiKey: 'local', models: [{ id: 'qwen3.8-flash-next-iq3-s' }] },
+      // А этот порт в конфиге не описан — его строка остаётся обнаруженной.
+      'strata-iq2': { baseUrl: 'http://127.0.0.1:8081/v1', apiKey: 'local', models: [{ id: 'qwen3.8-flash-next-iq2-xs' }] }
+    }
+  }));
+  const configured = [{
+    provider: 'strata-iq3s',
+    model: 'qwen3.8-flash-next-iq3-s',
+    baseUrl: 'http://127.0.0.1:8083'
+  }];
+  const found = discoverExternalServers({ agentDir, discovery: { dir: install }, configured });
+  assert.deepEqual(found.map(e => e.provider), ['strata-iq2']);
 });
 
 test('a local provider whose run config is not in the install dir is skipped', () => {

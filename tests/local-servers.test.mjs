@@ -43,6 +43,19 @@ test('status(): a live server is «loaded», a dead one «unloaded»', async () 
   }
 });
 
+test('status(): always a promise — .catch() у вызывающих не падает', async () => {
+  // Регрессия: status() без async возвращал объект СИНХРОННО при !configured и
+  // при попадании в кэш — .catch(...) в task-manager (#requireLocalModelLoaded)
+  // падал «.catch is not a function» на каждой отправке сообщения при тёплом
+  // статусе. В тестах выше это не ловилось: вызов никогда не доходил до status.
+  const none = new ExternalLocalServers({ externalServers: [] });
+  assert.equal(typeof none.status().catch, 'function');
+  const servers = new ExternalLocalServers({ externalServers: [{ provider: 'strata-test', model: 'm', baseUrl: 'http://127.0.0.1:1' }] });
+  const warm = await servers.status({ fresh: true });
+  const cached = await servers.status();
+  assert.deepEqual(cached, warm);
+});
+
 test('find(): by model id and by provider id', () => {
   const servers = new ExternalLocalServers({
     externalServers: [{ provider: 'strata-iq3', name: 'Strata IQ3_XXS', model: 'qwen3.8-flash-next-iq3-xxs', baseUrl: 'http://127.0.0.1:8082' }]
