@@ -60,7 +60,7 @@ test('/api/info reports the storeId and the Pi version', { timeout: 30000 }, asy
 });
 
 test('an unsupported Pi is a warning, not a failure', { timeout: 30000 }, async t => {
-  const fixture = await startFixture(undefined, { env: { FAKE_PI_VERSION: '0.99.0' } });
+  const fixture = await startFixture(undefined, { env: { FAKE_PI_VERSION: '1.5.0' } });
   t.after(() => fixture.close());
   let info;
   for (let i = 0; i < 100; i++) {
@@ -68,7 +68,7 @@ test('an unsupported Pi is a warning, not a failure', { timeout: 30000 }, async 
     if (info.pi) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  assert.equal(info.pi.version, '0.99.0');
+  assert.equal(info.pi.version, '1.5.0');
   assert.equal(info.pi.supported, false);
   assert.ok(info.warnings.some(w => w.code === 'PI_VERSION_UNSUPPORTED'), JSON.stringify(info.warnings));
 });

@@ -14,6 +14,8 @@ test('only the recorded range is supported, compared as numbers', () => {
   assert.equal(isSupportedPiVersion(SUPPORTED_PI.min), true);
   assert.equal(isSupportedPiVersion('0.85.12'), true);
   assert.equal(isSupportedPiVersion('0.87.1'), true, 'checked on the operator machine');
+  assert.equal(isSupportedPiVersion('0.99.1'), true, 'checked in real sessions (2026-10-01)');
+  assert.equal(isSupportedPiVersion('0.99.9'), true);
   assert.equal(isSupportedPiVersion(SUPPORTED_PI.below), false);
   assert.equal(isSupportedPiVersion('0.84.9'), false);
   assert.equal(isSupportedPiVersion('0.9.0'), false, '0.9 is older than 0.85, not newer');

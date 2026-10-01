@@ -14,7 +14,11 @@ import { spawn } from 'node:child_process';
 // Inclusive lower bound, exclusive upper bound.
 // 0.87.x and 0.88.x: checked on the operator's machine (smoke, real sessions
 // and the RPC recorder) before the range was widened.
-export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '0.89.0' });
+// 0.99.x: checked in real sessions on the operator's machine (2026-10-01) —
+// TaskBridge itself runs against Pi 0.99.1, steering, prompt delivery and
+// task events all exercised. Minors in between were not run on this machine:
+// outside the range TaskBridge keeps working, it just warns.
+export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '1.0.0' });
 
 // `pi --version` has printed both "0.85.1" and "pi 0.85.1"; take the first
 // x.y.z anywhere in the output rather than depend on the prefix.
