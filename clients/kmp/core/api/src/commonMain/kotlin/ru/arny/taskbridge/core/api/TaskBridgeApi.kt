@@ -31,6 +31,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -269,10 +270,11 @@ class TaskBridgeApi(
         call(HttpMethod.Post, "/api/tasks/${id.path()}/message", Task.serializer(),
             TaskBridgeJson.encodeToJsonElement(MessageRequest.serializer(), request.copy(clientId = request.clientId ?: connection.clientId)))
 
-    suspend fun cancel(id: String, commandId: String? = null): Task =
+    suspend fun cancel(id: String, commandId: String? = null, hard: Boolean = false): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/cancel", Task.serializer(), buildJsonObject {
             commandId?.let { put("commandId", it) }
             put("clientId", connection.clientId)
+            if (hard) put("hard", true)
         })
 
     suspend fun sendPendingNow(id: String, pendingId: String?): Task =
@@ -284,6 +286,9 @@ class TaskBridgeApi(
     suspend fun compact(id: String) {
         send(HttpMethod.Post, "/api/tasks/${id.path()}/compact", buildJsonObject { })
     }
+
+    suspend fun restartSession(id: String): Task =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/session/restart", Task.serializer(), buildJsonObject { })
 
     suspend fun setModel(id: String, model: ModelRef): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/model", Task.serializer(), buildJsonObject {
@@ -421,6 +426,22 @@ class TaskBridgeApi(
     /** The raw Pi session state (GET /api/tasks/:id/state → { state: … }), unwrapped. */
     suspend fun state(id: String): JsonObject =
         get("/api/tasks/${id.path()}/state", JsonObject.serializer())["state"]?.jsonObject ?: JsonObject(emptyMap())
+
+    /**
+     * Откуда в модели берётся контекст и сколько он занимает (GET
+     * /api/tasks/:id/context). Ничего не меняет: читает файлы источников и числа
+     * запущенной сессии Pi.
+     */
+    suspend fun context(id: String): SessionContextReport =
+        get("/api/tasks/${id.path()}/context", SessionContextReport.serializer())
+
+    /**
+     * Лимит контекста сессии в токенах, `null` — снять лимит. Возвращает свежий
+     * отчёт, поэтому вызывающему не нужен второй запрос, чтобы его показать.
+     */
+    suspend fun setContextLimit(id: String, limit: Long?): SessionContextReport =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/context", SessionContextReport.serializer(),
+            buildJsonObject { put("limit", limit?.let { JsonPrimitive(it) } ?: JsonNull) })
 
     // --- live stream -----------------------------------------------------------
 

@@ -33,8 +33,14 @@ private val ABORT = Regex("abort", RegexOption.IGNORE_CASE)
 // Pi announces a connected MCP surface as "MCP: 4 servers connected (48 tools)", and
 // "MCP: 2/4 servers connected (35 tools)" when a startup server failed; the count is part
 // of the wording, so it is matched here and the notice is shown in the session sheet
-// instead of the timeline. Other "MCP:" notifications (auth, failures) stay in the chat.
-private val MCP_SERVERS_CONNECTED_NOTICE = Regex("^MCP:\\s*(?:\\d+(?:/\\d+)?\\s+)?servers connected\\b", RegexOption.IGNORE_CASE)
+// instead of the timeline. The same sheet holds the adapter's surface bookkeeping,
+// "MCP: direct tools refreshed (+10, ~0, -0)": it is session state, not a message, and
+// as a note it stayed at the bottom of the chat forever. Other "MCP:" notifications
+// (auth, failures, reconnects) stay in the chat.
+private val MCP_SURFACE_NOTICE = Regex(
+    "^MCP:\\s*(?:\\d+(?:/\\d+)?\\s+)?(?:servers connected|direct tools refreshed)\\b",
+    RegexOption.IGNORE_CASE,
+)
 
 /** Mirrors isPrivatePath in src/files.mjs: such paths are never offered as viewable files. */
 fun isPrivateFilePath(value: String?): Boolean =
@@ -594,10 +600,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     private fun onUiNotify(event: TaskEvent) {
         val text = event.message.orEmpty()
-        if (MCP_SERVERS_CONNECTED_NOTICE.containsMatchIn(text)) {
+        if (MCP_SURFACE_NOTICE.containsMatchIn(text)) {
             mcpNotice = text
             return
         }
+        if (SMART_COMPACTION_NOTICE_RE.containsMatchIn(text)) return
         addNote(event, text)
     }
 
@@ -726,6 +733,14 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         return ChatSnapshot(items = items, cursor = cursor, version = version, mcpNotice = mcpNotice, newestAnswerId = newestAnswerId)
     }
 }
+
+// Everything the smart-compaction extension narrates as a notify (start info,
+// the per-stage wall of "chunk 10/25" notes, map-reduce decisions) — the stage
+// itself belongs in the diagnostics (task.current, setStatus frames), and the
+// chat keeps the итог: the compaction_end note and "Smart compact OK" numbers.
+// Failure notices start with "Smart compaction failed" — a different prefix, so
+// they stay in the timeline.
+private val SMART_COMPACTION_NOTICE_RE = Regex("^Smart compaction: ")
 
 private const val CHANGE_PREVIEW_LIMIT = 20_000
 

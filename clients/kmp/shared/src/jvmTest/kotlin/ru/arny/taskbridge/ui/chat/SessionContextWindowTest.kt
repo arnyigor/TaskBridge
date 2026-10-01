@@ -109,4 +109,31 @@ class SessionContextWindowTest {
         assertEquals(143930L, sessionContextUsed(task, idle))
         assertNull(liveEnginePrompt(task.model, null))
     }
+
+    /**
+     * Реальный случай 2026-09-30, 16:04: история 99.4K, окно 131072, резерв ответа
+     * 32768. По сравнению истории с окном всё выглядело «76% заполнено», а движок
+     * отклонял запрос: 99465 + 32768 + 8 = 132241 > 131072. Проверка обязана считать
+     * резерв ответа — иначе предупреждения нет именно там, где сессия «висит».
+     */
+    @Test
+    fun theAnswerReserveCountsTowardsTheWindow() {
+        val live = info(LocalModelEntry(id = "qwen3.8-flash-next-iq3-s", provider = "strata-iq3s", contextWindow = 131072))
+        val task = Task(
+            id = "t1",
+            model = ModelRef(provider = "strata-iq3s", id = "qwen3.8-flash-next-iq3-s", contextWindow = 262144, maxTokens = 32768),
+            lastUsage = Usage(input = 98265, output = 1111, totalTokens = 99376),
+        )
+        assertEquals(99376L to 131072L, contextOverflow(task, live))
+        // С окном 262144 (и живым числом 262144) тот же запас влезает — отказа нет.
+        val fitsLive = info(LocalModelEntry(id = "qwen3.8-flash-next-iq3-s", provider = "strata-iq3s", contextWindow = 262144))
+        assertNull(contextOverflow(task, fitsLive))
+        // Без резервного поля сравнение по истории всё равно работает.
+        val noReserve = Task(
+            id = "t1",
+            model = ModelRef(provider = "strata-iq3s", id = "qwen3.8-flash-next-iq3-s", contextWindow = 262144),
+            lastUsage = Usage(input = 143016, output = 914, totalTokens = 143930),
+        )
+        assertEquals(143930L to 131072L, contextOverflow(noReserve, live))
+    }
 }

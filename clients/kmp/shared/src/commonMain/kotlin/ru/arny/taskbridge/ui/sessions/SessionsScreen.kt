@@ -434,6 +434,25 @@ internal fun piVersionBanner(pi: PiInfo?): String? {
     return "Pi $version: версия не проверялась с TaskBridge (${pi.supportedRange.orEmpty()})"
 }
 
+/**
+ * Открыта ли папка сессий.
+ *
+ * Клик по заголовку — единственный способ сложить папку, поэтому явный выбор оператора
+ * сильнее уведомления: пока непрочитанное уведомление перебивало выбор, папка с ним не
+ * закрывалась вовсе — клик менял сохранённое значение, но на экране не происходило ничего
+ * (а уведомление снимается только открытием чата, которого в сложенной папке не видно).
+ * Роль уведомления в сложенной папке берёт на себя пульсирующий значок в заголовке.
+ *
+ * @param handExpanded выбор оператора (память экрана или настройки); null — папку не трогали.
+ * @param alerted внутри есть уведомление, которое ещё не открывали.
+ * @param autoOpen папка открыта бы сама: она одна, либо внутри выбранная или активная сессия.
+ */
+internal fun folderExpanded(handExpanded: Boolean?, alerted: Boolean, autoOpen: Boolean): Boolean = when {
+    handExpanded != null -> handExpanded
+    alerted -> true
+    else -> autoOpen
+}
+
 @Composable
 private fun SessionList(
     groups: List<SessionGroup>,
@@ -455,17 +474,15 @@ private fun SessionList(
     onSelectFinished: (SessionGroup) -> Unit,
 ) {
     // A folder the user never touched opens itself when something in it needs
-    // attention (working, waiting, queued) or is open; a hand toggle is remembered.
-    // An unread alert overrides both: the pulsing row must be visible.
+    // attention (working, waiting, queued) or is open; a hand toggle is remembered
+    // and always wins, so the header tap is never a no-op. An unread alert in a
+    // folder that was never touched opens it; in a folded one the header pulses.
     val toggled = remember { mutableStateMapOf<String, Boolean>() }
-    fun expanded(group: SessionGroup): Boolean {
-        // News must never hide in a folded folder: the pulsing row is the whole point
-        // of not stealing the screen — including a folder the operator folded by hand.
-        if (group.sessions.any { it.id in attention }) return true
-        val remembered = toggled[group.projectId] ?: graph.settings.folderExpanded(group.projectId)
-        if (remembered != null) return remembered
-        return groups.size == 1 || group.sessions.any { it.id == selectedTaskId || displayStateOf(it).active }
-    }
+    fun expanded(group: SessionGroup): Boolean = folderExpanded(
+        handExpanded = toggled[group.projectId] ?: graph.settings.folderExpanded(group.projectId),
+        alerted = group.sessions.any { it.id in attention },
+        autoOpen = groups.size == 1 || group.sessions.any { it.id == selectedTaskId || displayStateOf(it).active },
+    )
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         if (!selecting && activeTasks.isNotEmpty()) {
             item(key = "active-sessions-header") {
@@ -486,6 +503,7 @@ private fun SessionList(
             stickyHeader(key = "header:${group.projectId}") {
                 FolderHeader(
                     group, open,
+                    alerted = group.sessions.any { it.id in attention },
                     onToggle = {
                         toggled[group.projectId] = !open
                         graph.settings.setFolderExpanded(group.projectId, !open)
@@ -599,6 +617,7 @@ private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, 
 private fun FolderHeader(
     group: SessionGroup,
     open: Boolean,
+    alerted: Boolean,
     onToggle: () -> Unit,
     onNewHere: () -> Unit,
     onClearFinished: () -> Unit,
@@ -610,6 +629,10 @@ private fun FolderHeader(
     val states = group.sessions.map { displayStateOf(it) }
     val waiting = states.count { it == DisplayState.WAITING_USER }
     val working = states.count { it == DisplayState.WORKING }
+    // Сложенную папку с непрочитанным уведомлением видно по пульсирующему значку:
+    // строка с новостью скрыта, и без этого знака новость пряталась бы вместе с ней.
+    val news = alerted && !open
+    val newsPulse = attentionPulse(news)
     // Total on-disk footprint of the folder: the same number the sessions screen shows per row.
     val totalBytes = group.sessions.sumOf { it.sizeBytes ?: 0L }
     Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth()) {
@@ -624,7 +647,12 @@ private fun FolderHeader(
         ) {
             Icon(if (open) AppIcons.ChevronDown else AppIcons.ChevronRight, if (open) "Свернуть" else "Развернуть", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.width(6.dp))
-            Icon(AppIcons.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+            Icon(
+                AppIcons.Folder,
+                if (news) "Есть непрочитанное уведомление" else null,
+                tint = if (news) colors.waiting.copy(alpha = 0.45f + 0.55f * newsPulse) else MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(16.dp),
+            )
             Spacer(Modifier.width(8.dp))
             Text(
                 group.title,

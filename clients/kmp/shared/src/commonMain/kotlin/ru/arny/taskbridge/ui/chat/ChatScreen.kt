@@ -64,6 +64,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -242,7 +247,19 @@ fun ChatScreen(
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
+        Column(
+            Modifier.padding(padding).fillMaxSize().imePadding().onPreviewKeyEvent { event ->
+                // Esc = жёсткий стоп, как в консоли: подтверждение → killTree.
+                // preview-фаза доходит сюда раньше текстового поля, а открытый
+                // диалог — отдельное окно и Esc сюда вообще не пускает.
+                if (event.type == KeyEventType.KeyUp && event.key == Key.Escape && dialog == null &&
+                    task?.status in setOf("QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING")
+                ) {
+                    dialog = ChatDialog.ConfirmStop
+                    true
+                } else false
+            },
+        ) {
             if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
             LinkBanner(state.link, onRetry = { session.reconnectNow() })
             Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -300,6 +317,7 @@ fun ChatScreen(
                         DropdownMenuItem(text = { Text("Выбрать модель") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ChooseModel })
                         DropdownMenuItem(text = { Text("Настройки сессии") }, leadingIcon = { Icon(AppIcons.Layers, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
                         DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { close(); session.compact() })
+                        DropdownMenuItem(text = { Text("Перезапустить сессию") }, leadingIcon = { Icon(AppIcons.Refresh, null) }, onClick = { close(); session.restartSession() })
                     }
                 },
                 top = {
@@ -712,12 +730,18 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
     // local engine's numbers say nothing about a cloud provider.
     val localProvider = info?.local?.provider
     val sessionProvider = state.task?.model?.provider ?: state.task?.requestedModel?.provider
+    val sessionModelId = state.task?.model?.id ?: state.task?.requestedModel?.id
     // Внешний локальный сервер (Strata) — та же машина, что и роутер, но другой
     // провайдер Pi. Его строка в info.local.models несёт живую телеметрию
     // (фаза, прогресс чтения промпта, скорости): без неё сессия на Strata не
     // показывала чтение промпта вообще — условие ниже требовало равенства с
-    // провайдером роутера.
-    val externalRow = info?.local?.models?.firstOrNull { it.provider != null && it.provider == sessionProvider }
+    // провайдером роутера. Провайдер сессии ('strata') и сервер в конфиге
+    // ('strata-iq3s') тоже расходятся, поэтому строку ищем и по id модели —
+    // как liveEnginePrompt ниже.
+    val externalRow = info?.local?.models?.firstOrNull {
+        (it.provider != null && it.provider == sessionProvider) ||
+            (sessionModelId != null && it.id == sessionModelId)
+    }
     val externalMetrics = externalRow?.metrics
     val livePp = when {
         localProvider != null && sessionProvider == localProvider -> info.engine?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
@@ -735,13 +759,39 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
     // Прогресс чтения промпта у внешнего сервера (Strata отдаёт prompt_read /
     // prompt_total): «читает промпт · 64% · 80K / 126K» вместо просто факта — по
     // одному проценту не видно, сколько уже прочитано и сколько осталось.
+    val readingPrompt = externalMetrics?.phase?.contains("read", ignoreCase = true) == true
+    // Скорость чтения промпта по таймеру: опрос /api/info каждую секунду даёт
+    // прирост promptRead — прирост между замерами / время = эффективный PP,
+    // посчитанный клиентом. Strata сам PP у кеш-попаданий не отдаёт
+    // (ppUnavailable), а «читает промпт · 63%» без скорости не показывает,
+    // долго ли ждать. Скорость прошлого хода не показывается: база обнуляется,
+    // когда чтение кончилось, и при новом промпте (read меньше базы).
+    var ppSample by remember(state.taskId) { mutableStateOf<Pair<Long, Long>?>(null) }
+    var ppTimer by remember(state.taskId) { mutableStateOf<Double?>(null) }
+    LaunchedEffect(state.taskId, sessionModelId, readingPrompt, externalMetrics?.promptRead, externalMetrics?.progress) {
+        val read = externalMetrics?.promptRead
+        if (!readingPrompt || read == null || read <= 0L) {
+            ppSample = null; ppTimer = null
+            return@LaunchedEffect
+        }
+        val sample = ppSample
+        when {
+            sample == null -> ppSample = nowMillis() to read
+            read > sample.second -> {
+                val seconds = (nowMillis() - sample.first) / 1000.0
+                if (seconds > 0) ppTimer = (read - sample.second) / seconds
+                ppSample = nowMillis() to read
+            }
+            read < sample.second -> { ppSample = nowMillis() to read; ppTimer = null }
+        }
+    }
     val readingDetail = buildList {
         externalMetrics?.progress?.takeIf { it in 0.0..1.0 }?.let { add("${(it * 100).toInt()}%") }
         val read = externalMetrics?.promptRead
         val total = externalMetrics?.promptTotal
         if (read != null && total != null && total > 0) add("${formatTokensK(read)} / ${formatTokensK(total)}")
+        ppTimer?.takeIf { it > 0.0 }?.let { add("≈ ${(it * 10).roundToInt() / 10.0} ток/с") }
     }.joinToString(" · ").let { if (it.isEmpty()) "" else " · $it" }
-    val readingPrompt = externalMetrics?.phase?.contains("read", ignoreCase = true) == true
     val phase = when {
         state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
         state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
@@ -923,11 +973,12 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
         )
         ChatDialog.ConfirmStop -> ConfirmDialog(
             title = "Остановить агента?",
-            text = "STOP прервёт текущий ответ и запущенные команды" + (state.task?.pendingPrompts?.size?.takeIf { it > 0 }
-                ?.let { ", а также уберёт из очереди $it сообщ. Чтобы сохранить очередь, отправьте первое из неё «Сейчас»." } ?: "."),
+            text = "Грокнут все процессы сессии (Pi и его дочерние) — даже если модель читает промпт. " +
+                "Текущий ответ и запущенные команды прервутся" + (state.task?.pendingPrompts?.size?.takeIf { it > 0 }
+                ?.let { ", а также уберутся из очереди $it сообщ." } ?: "."),
             confirm = "Остановить",
             destructive = true,
-            onConfirm = { session.cancel(); onClose() },
+            onConfirm = { session.cancel(hard = true); onClose() },
             onDismiss = onClose,
         )
         ChatDialog.ConfirmClear -> ConfirmDialog(
@@ -1060,6 +1111,7 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             Spacer(Modifier.width(12.dp))
             Switch(checked = task?.autoCompactionEnabled != false, onCheckedChange = { session.setAutoCompaction(it) })
         }
+        ContextSection(taskId = task?.id, session = session)
         val usage = task?.lastUsage
         val window = sessionContextWindow(task, sessionListState.info)
         val catalogModel = catalog?.models?.firstOrNull { it.key == task?.model?.key }
@@ -1088,12 +1140,21 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             FileList(outputFiles, onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) }, loadFile = { session.readFile(it) })
         }
         var artifacts by remember { mutableStateOf<List<String>?>(null) }
+        var artifactsOpen by remember { mutableStateOf(false) }
         LaunchedEffect(task?.id) { artifacts = session.artifacts().getOrNull() }
         val artifactNames = artifacts.orEmpty()
+        // Артефакты — редкий/отладочный просмотр: свёрнуты по умолчанию, чипы
+        // рендерятся только по раскрытию — как «состояние Pi (JSON)» ниже.
         if (artifactNames.isNotEmpty()) {
-            FieldLabel("Artifacts", top = 20)
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                for (name in artifactNames) FileChip(name, "") { onViewFile(FileTarget.Artifact(name)) }
+            Row(Modifier.fillMaxWidth().clickable { artifactsOpen = !artifactsOpen }.padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(if (artifactsOpen) AppIcons.ChevronDown else AppIcons.ChevronRight, null, Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("Artifacts (${artifactNames.size})", style = MaterialTheme.typography.bodyMedium)
+            }
+            if (artifactsOpen) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 8.dp)) {
+                    for (name in artifactNames) FileChip(name, "") { onViewFile(FileTarget.Artifact(name)) }
+                }
             }
         }
         var followup by remember { mutableStateOf("") }
@@ -1192,8 +1253,8 @@ internal fun sessionContextUsed(task: Task?, info: ApiInfo?): Long? =
         ?: task?.lastUsage?.totalTokens
 
 /**
- * История сессии не влезает в окно модели, или null если влезает (или одного из
- * чисел нет).
+ * История с резервом ответа не влезает в окно модели, или null если влезает (или
+ * одного из чисел нет).
  *
  * Это тот случай, когда «сессия подвисла» на самом деле ждёт: движок (Strata и
  * llama.cpp) НЕ обрезает промпт, а отвечает 400 `prompt (N tokens) + max tokens
@@ -1201,14 +1262,15 @@ internal fun sessionContextUsed(task: Task?, info: ApiInfo?): Long? =
  * запросы с паузой. В логе сессии это видно как `limits-wait` с `retries_total`,
  * в панели — как «streaming · Pi is working» без событий модели.
  *
- * Считается по оценке истории TaskBridge и живому окну движка: после смены
- * контекста у длинной сессии это первое, что видно, и это единственный выход из
- * ситуации, которую иначе видно только по логу Pi.
+ * Правило движка — промпт + резерв ответа + 8 ≤ окно, поэтому одного сравнения
+ * истории с окном мало: 2026-09-30 при истории 99.4K и окне 131072 всё выглядело
+ * «76% заполнено», а запрос всё равно отклонялся: 99465 + 32768 + 8 = 132241.
  */
 internal fun contextOverflow(task: Task?, info: ApiInfo?): Pair<Long, Long>? {
     val window = sessionContextWindow(task, info)?.takeIf { it > 0 } ?: return null
     val tokens = task?.compaction?.last?.estimatedTokensAfter ?: task?.lastUsage?.totalTokens ?: return null
-    return if (tokens > window) tokens to window else null
+    val maxTokens = task?.model?.maxTokens ?: task?.requestedModel?.maxTokens ?: 0
+    return if (tokens + maxTokens > window) tokens to window else null
 }
 
 private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
@@ -1227,15 +1289,25 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     // Первой строкой: если история больше окна, всё остальное в диагностике — уже
     // следствие, и запрос уйдёт в повтор.
     val overflow = contextOverflow(task, info)?.let { (tokens, limit) ->
-        "История не влезает в окно модели: $tokens ток. больше $limit — провайдер ответит 400 " +
-            "(промпт не обрезается), поэтому запрос повторяется без ответа. " +
-            "Поднимите контекст модели или начните новую сессию."
+        val reserve = task?.model?.maxTokens ?: task?.requestedModel?.maxTokens ?: 0
+        "История не влезает в окно модели: $tokens + резерв ответа $reserve = ${tokens + reserve} ток. при окне $limit — " +
+            "провайдер ответит 400 (промпт не обрезается), поэтому запрос повторяется без ответа. " +
+            "Поднимите контекст модели хотя бы до ${tokens + reserve + 8}, уменьшите резерв ответа или начните новую сессию."
     }
     // Сжатие контекста — запрос к модели, но ответа агента в этом ходу не будет:
     // без этой строки ход выглядит как обычный ответ, который «завис».
     val compaction = task?.runtime?.activity
         ?.takeIf { it == "compacting" }
         ?.let { "Pi сжимает контекст: модель пишет сводку истории — это отдельный запрос, ответа агента в этом ходу не будет" }
+    // Сжатие уже прошло: факт и его результат из task.compaction.last — иначе
+    // в диагностике видно только «сжатий: N» без того, что именно произошло.
+    val lastCompaction = task?.compaction?.last?.let { last ->
+        val change = if (last.tokensBefore != null && last.estimatedTokensAfter != null)
+            "${tokenCount(last.tokensBefore)} → ${tokenCount(last.estimatedTokensAfter)} ток." else null
+        listOfNotNull(change, last.reason?.let(::compactionReasonLabel)).joinToString(" · ")
+            .takeIf { it.isNotEmpty() }
+            ?.let { "Последнее сжатие: $it · ${last.at?.substringBefore('.')?.replace('T', ' ') ?: "—"}" }
+    }
     val sessionContext = contextTokens?.let { tokens ->
         val percent = window?.takeIf { it > 0 }?.let { " · ${(tokens * 100.0 / it).roundToInt()}%" }.orEmpty()
         val label = when {
@@ -1249,7 +1321,15 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     val sessionProvider = task?.model?.provider ?: task?.requestedModel?.provider
     val isLocalSession = localProvider != null && sessionProvider == localProvider
     val localLines = if (isLocalSession) localDiagnosticsLines(info, suppressKvRatio = compactedTokens != null) else emptyList()
-    return listOfNotNull(compaction, overflow, speed, firstToken, sessionContext) + localLines
+    return listOfNotNull(compaction, lastCompaction, overflow, speed, firstToken, sessionContext) + localLines
+}
+
+/** Причина сжатия из кадра Pi: две известные по имени, остальное — как пришло. */
+private fun compactionReasonLabel(reason: String): String = when (reason) {
+    "threshold" -> "порог автосжатия"
+    "overflow" -> "история превысила окно"
+    "manual" -> "вручную"
+    else -> reason
 }
 
 private fun localDiagnosticsLines(info: ApiInfo?, suppressKvRatio: Boolean): List<String> {

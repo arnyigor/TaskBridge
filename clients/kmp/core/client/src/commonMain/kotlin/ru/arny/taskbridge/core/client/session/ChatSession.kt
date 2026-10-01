@@ -25,6 +25,7 @@ import ru.arny.taskbridge.core.api.Approval
 import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.MessageRequest
 import ru.arny.taskbridge.core.api.ModelRef
+import ru.arny.taskbridge.core.api.SessionContextReport
 import ru.arny.taskbridge.core.api.StreamItem
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeApi
@@ -552,8 +553,13 @@ class ChatSession(
 
     // --- commands -------------------------------------------------------------------
 
-    /** STOP: ends the current answer (and the tools it runs). */
-    fun cancel() = act("cancel") { api.cancel(taskId, ids()) }
+    /** STOP: ends the current answer (and the tools it runs).
+     *
+     *  [hard] — жёсткий стоп (Esc в чате): сервер грохает процессы сессии сразу
+     *  (process tree), без ожидания RPC abort — модель может читать промпт, а
+     *  abort на это не отвечает до 10 с.
+     */
+    fun cancel(hard: Boolean = false) = act("cancel") { api.cancel(taskId, ids(), hard = hard) }
 
     fun sendPendingNow(pendingId: String) = act("pending:$pendingId") { api.sendPendingNow(taskId, pendingId) }
 
@@ -570,6 +576,12 @@ class ChatSession(
     }
 
     fun compact() = act("compact", "Контекст сжимается…") { api.compact(taskId) }
+
+    /** Kills the session's Pi; the next message restarts it from the saved session file. */
+    fun restartSession() = act("session-restart", "Перезапускаю сессию…") {
+        val updated = api.restartSession(taskId)
+        mutex.withLock { reducer?.syncTask(updated) }
+    }
 
     fun setModel(model: ModelRef) = act("model") {
         val updated = api.setModel(taskId, model)
@@ -636,6 +648,15 @@ class ChatSession(
 
     /** The raw Pi state, as the web's debug «состояние Pi (JSON)» shows it. */
     suspend fun state(): Result<JsonObject> = runCatching { api.state(taskId) }
+
+    /** Откуда в модели берётся контекст (секция «Контекст» в шите сессии). */
+    suspend fun context(): Result<SessionContextReport> = runCatching { api.context(taskId) }
+
+    /**
+     * Лимит контекста сессии: `null` — снять. Возвращает свежий отчёт, поэтому
+     * вызывающему не нужен отдельный запрос, чтобы показать новое состояние.
+     */
+    suspend fun setContextLimit(tokens: Long?): Result<SessionContextReport> = runCatching { api.setContextLimit(taskId, tokens) }
 
     suspend fun openWorkspaceFileOnComputer(path: String, reveal: Boolean): Result<Unit> = runCatching { api.openWorkspaceFile(taskId, path, reveal) }
 

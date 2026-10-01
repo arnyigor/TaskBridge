@@ -493,6 +493,97 @@ data class CompactionLast(
 @Serializable
 data class RuntimeInfo(val state: String? = null, val activity: String? = null)
 
+/**
+ * Один источник контекста из `GET /api/tasks/:id/context`: откуда именно текст
+ * попадает в запрос к модели (системный промпт, инструкции проекта, описания
+ * навыков, объявления MCP-инструментов).
+ *
+ * [known] == false значит «источник есть, но его размер снаружи Pi не измеряется»
+ * (базовые инструкции Pi, встроенные инструменты, память проекта): показывать
+ * вместо размера ноль было бы враньём.
+ */
+@Serializable
+data class ContextSource(
+    val id: String,
+    val label: String? = null,
+    val detail: String? = null,
+    val chars: Long? = null,
+    val tokens: Long? = null,
+    val known: Boolean = false,
+    val count: Int? = null,
+    val files: List<String> = emptyList(),
+    val servers: List<String> = emptyList(),
+)
+
+/** Размер части окна модели, занятый под запрос (`get_session_stats` от Pi). */
+@Serializable
+data class ContextUsage(
+    val tokens: Long? = null,
+    val contextWindow: Long? = null,
+    val percent: Double? = null,
+    /** `pi` — числа пришли от запущенной сессии Pi; null — сессия не запущена. */
+    val source: String? = null,
+)
+
+/** Настройки сжатия Pi, которые задают, когда начинается автосжатие. */
+@Serializable
+data class ContextCompaction(
+    val auto: Boolean? = null,
+    val reserveTokens: Long? = null,
+    val keepRecentTokens: Long? = null,
+    /** Окно модели минус reserveTokens — порог, после которого Pi сжимает сам. */
+    val triggerAt: Long? = null,
+    val fromProject: Boolean = false,
+)
+
+/** Сколько сообщений и токенов прошло через сессию (за всю её жизнь, не в окне). */
+@Serializable
+data class ContextConversation(
+    val userMessages: Int? = null,
+    val assistantMessages: Int? = null,
+    val toolCalls: Int? = null,
+    val messages: Int? = null,
+    val tokens: Usage? = null,
+    val cost: Double? = null,
+)
+
+/**
+ * Ответ `GET /api/tasks/:id/context` и `POST /api/tasks/:id/context`.
+ *
+ * `totalTokens`, [conversation] и [unaccountedTokens] — числа самого Pi;
+ * размеры [sources] — оценка (символы / 4). Остаток — то, чего в читаемых
+ * файлах нет: история ветки, вложения, текст расширений.
+ */
+@Serializable
+data class SessionContextReport(
+    val taskId: String? = null,
+    val model: ModelRef? = null,
+    val contextWindow: Long? = null,
+    val usage: ContextUsage? = null,
+    val conversation: ContextConversation? = null,
+    val totalTokens: Long? = null,
+    val sources: List<ContextSource> = emptyList(),
+    val measuredTokens: Long = 0,
+    val unaccountedTokens: Long? = null,
+    /**
+     * Оценка источников больше того, что насчитал Pi. Тогда [unaccountedTokens]
+     * равен нулю из-за переоценки, а не потому что истории нет: показывать
+     * «остаток 0» в этом случае неверно.
+     */
+    val overestimated: Boolean = false,
+    val limit: ContextLimit = ContextLimit(),
+    val compaction: ContextCompaction? = null,
+    val running: Boolean = false,
+    val note: String? = null,
+)
+
+/** Лимит контекста сессии: настройка TaskBridge, а не Pi. `tokens == null` — без лимита. */
+@Serializable
+data class ContextLimit(
+    val tokens: Long? = null,
+    val exceeded: Boolean = false,
+)
+
 @Serializable
 data class Task(
     val id: String,
@@ -519,6 +610,8 @@ data class Task(
     val metrics: GenerationMetrics? = null,
     val compaction: CompactionInfo? = null,
     val autoCompactionEnabled: Boolean? = null,
+    /** Лимит контекста сессии в токенах; null — без лимита (см. SessionContextReport). */
+    val contextLimit: Long? = null,
     val sessionAvailable: Boolean? = null,
     val assistantText: String? = null,
     val thinkingText: String? = null,
