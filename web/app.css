@@ -1382,6 +1382,13 @@ button:disabled { opacity: .4; cursor: default; }
 .contextBarFill.warn { background: var(--warn); }
 .contextBarFill.danger { background: var(--danger); }
 
+/* Список источников контекста — по строке на источник; перенос по строкам
+   задаётся явно, иначе всё склеивается в один абзац. */
+#contextSources {
+  white-space: pre-line;
+  margin-top: 6px;
+}
+
 .fieldLabel { font-size: 0.71875rem; color: var(--muted); }
 .inline { display: flex; gap: 8px; }
 .inline input {

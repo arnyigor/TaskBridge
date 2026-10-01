@@ -2,9 +2,9 @@
 // cached: session data is never stored here, because a stale task list is worse
 // than an honest "machine offline" — the app always re-syncs after its cursor.
 
-const CACHE = 'taskbridge-v59';
+const CACHE = 'taskbridge-v61';
 const SHELL = [
-  '/', '/index.html', '/app.js?v=20260930-47', '/app.css', '/chat-state.mjs', '/errors.mjs', '/transport.mjs',
+  '/', '/index.html', '/app.js?v=20260930-49', '/app.css', '/chat-state.mjs', '/errors.mjs', '/transport.mjs',
   '/cloud-config.js', '/manifest.webmanifest', '/icon.svg',
   '/vendor/marked.js', '/vendor/purify.mjs', '/vendor/qrcode.mjs'
 ];

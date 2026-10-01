@@ -1194,19 +1194,22 @@ function renderContext(t) {
     bar.classList.add('hidden');
   }
   const compacting = t.runtime?.activity === 'compacting';
-  // История длиннее окна — это не «скоро сжатие», а отказ провайдера: движок не
-  // режет промпт, он отвечает 400 «prompt + max tokens exceeds the context», и Pi
-  // повторяет запрос без ответа (в логе сессии это limits-wait с retries_total).
-  const overflow = pct != null && pct > 100;
+  // История + резерв ответа длиннее окна — это не «скоро сжатие», а отказ
+  // провайдера: движок не режет промпт, он отвечает 400 «prompt + max tokens
+  // exceeds the context», и Pi повторяет запрос без ответа (в логе сессии это
+  // limits-wait с retries_total). Один процент не виден: 99.4K + 32.8K при окне
+  // 131072 — это 76% полосы и всё равно отказ.
+  const maxTokens = ((t.model || t.requestedModel) || {}).maxTokens || 0;
+  const overflow = pct != null && windowSize != null && used != null && used + maxTokens > windowSize;
   state.textContent = compacting
     ? 'Сейчас сжимается контекст…'
     : pct == null ? 'Нет данных о размере'
-      : overflow ? 'История больше окна модели — провайдер ответит 400 (промпт не обрезается): поднимите контекст модели или начните новую сессию'
+      : overflow ? `История + резерв ответа (${used.toLocaleString('ru-RU')} + ${maxTokens.toLocaleString('ru-RU')}) больше окна (${windowSize.toLocaleString('ru-RU')}) — провайдер ответит 400 (промпт не обрезается): поднимите контекст модели или начните новую сессию`
         : pct >= 85 ? 'Почти заполнен — скоро нужно сжатие'
           : pct >= 60 ? 'Заполнен больше половины'
             : 'Запас контекста нормальный';
   state.classList.toggle('compacting', compacting);
-  state.classList.toggle('danger', !compacting && pct != null && (overflow || pct >= 85));
+  state.classList.toggle('danger', !compacting && ((overflow) || (pct != null && pct >= 85)));
   state.classList.toggle('warn', !compacting && pct != null && pct >= 60 && pct < 85);
   // Local engines report their own PP/TG counters. For cloud providers PP is
   // the effective input rate to first token and is marked as approximate.
@@ -1224,6 +1227,63 @@ function renderContext(t) {
     autoBtn.disabled = false;
     autoBtn.dataset.enabled = String(t.autoCompactionEnabled);
   }
+}
+
+/* ---------------- откуда контекст и лимит сессии ---------------- */
+
+// Сервер читает источники с диска и числа самого Pi (GET /api/tasks/:id/context).
+// Размеры источников — оценка (символы / 4, как считает Pi), «всего» и остаток —
+// числа Pi. Источник, который снаружи не измеряется, так и подписан: ноль вместо
+// «не измеряется» читался бы как «источник пуст».
+function contextSourceLine(source) {
+  if (!source.known || source.tokens == null) return `${source.label || source.id}: не измеряется`;
+  const tokens = `${source.tokens.toLocaleString('ru-RU')} ток.`;
+  return `${source.label || source.id}: ${tokens}${source.count ? ` · ${source.count} шт.` : ''}`;
+}
+
+function renderContextReport(report) {
+  const lines = [];
+  if (report.totalTokens != null) {
+    const windowSize = report.contextWindow;
+    const pct = report.usage?.percent;
+    lines.push(`Всего в запросе: ${report.totalTokens.toLocaleString('ru-RU')} токенов`
+      + (windowSize ? ` из ${windowSize.toLocaleString('ru-RU')}` : '')
+      + (pct != null ? ` · ${pct}%` : ''));
+  } else {
+    // Сессия не запущена — Pi ещё не считал этот запрос, и придумывать число нечем.
+    lines.push('Сессия не запущена: размера запроса у Pi ещё нет.');
+  }
+  for (const source of report.sources || []) lines.push(contextSourceLine(source));
+  // «Остаток 0» при переоценке источников читался бы как «истории нет вообще»: в
+  // этом случае показываем оговорку, а не ноль.
+  if (report.unaccountedTokens != null && !report.overestimated) {
+    lines.push(`История диалога и расширения (остаток): ${report.unaccountedTokens.toLocaleString('ru-RU')} ток.`);
+  }
+  if (report.overestimated) lines.push('Оценка источников больше, чем Pi насчитал на этом ходу.');
+  if (report.limit?.exceeded) {
+    lines.push(`Контекст выше лимита ${report.limit.tokens.toLocaleString('ru-RU')} — он будет сжат в конце хода.`);
+  }
+  $('contextSources').textContent = lines.join('\n');
+  $('contextLimitInput').value = report.limit?.tokens != null ? String(report.limit.tokens) : '';
+}
+
+async function loadContextReport() {
+  if (!selectedTaskId) return;
+  $('contextSources').textContent = 'Загрузка…';
+  try {
+    const id = selectedTaskId;
+    const report = await api(`/api/tasks/${id}/context`);
+    if (id !== selectedTaskId) return;
+    renderContextReport(report);
+  } catch (e) { $('contextSources').textContent = e.message; }
+}
+
+async function saveContextLimit(value) {
+  if (!selectedTaskId) return;
+  try {
+    const report = await api(`/api/tasks/${selectedTaskId}/context`, { method: 'POST', body: JSON.stringify({ limit: value }) });
+    renderContextReport(report);
+  } catch (e) { alert(e.message); }
 }
 
 function scrollBottom() {
@@ -1331,6 +1391,9 @@ function resetSelection(id) {
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
   for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'contextState', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
+  // Отчёт «откуда контекст» — запрос, а не поле задачи: чистим его и просим снова.
+  if ($('contextSources')) $('contextSources').textContent = 'Откройте, чтобы прочитать источники контекста и лимит сессии.';
+  if ($('contextLimitInput')) $('contextLimitInput').value = '';
   $('worktreeActions').classList.add('hidden');
   $('contextBar').classList.add('hidden');
   $('createError').textContent = '';
@@ -3216,6 +3279,22 @@ $('stateDetails').addEventListener('toggle', async () => {
     $('stateJson').textContent = JSON.stringify(r.state, null, 2);
   } catch (e) { $('stateJson').textContent = e.message; }
 });
+
+// Отчёт тянется только когда блок раскрыли: он читает файлы с диска и
+// опрашивает Pi, а детали сессии перерисовываются на каждом событии.
+$('contextDetails').addEventListener('toggle', () => {
+  if ($('contextDetails').open) loadContextReport();
+});
+
+$('saveContextLimit').onclick = () => {
+  const raw = $('contextLimitInput').value.trim();
+  saveContextLimit(raw === '' ? null : Number(raw));
+};
+
+$('clearContextLimit').onclick = () => {
+  $('contextLimitInput').value = '';
+  saveContextLimit(null);
+};
 
 /* ---------------- markdown (regex, no deps) ---------------- */
 

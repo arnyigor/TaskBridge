@@ -376,6 +376,16 @@
         </div>
         <div id="contextBar" class="contextBar hidden"><div id="contextBarFill" class="contextBarFill"></div></div>
 
+        <details id="contextDetails">
+          <summary>Откуда контекст и лимит</summary>
+          <div id="contextSources" class="muted small">Откройте, чтобы прочитать источники контекста и лимит сессии.</div>
+          <div class="inline">
+            <input id="contextLimitInput" inputmode="numeric" placeholder="Лимит контекста, токенов" />
+            <button id="saveContextLimit" type="button">SAVE</button>
+            <button id="clearContextLimit" type="button">СНЯТЬ</button>
+          </div>
+        </details>
+
         <label class="fieldLabel" for="followup">Инструкция во время/после работы</label>
         <div class="inline">
           <input id="followup" placeholder="Например: не меняй публичный API" />
@@ -467,6 +477,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20260930-47"></script>
+  <script type="module" src="/app.js?v=20260930-49"></script>
 </body>
 </html>
