@@ -51,6 +51,64 @@ test('Pi crashing mid tool call fails the turn with the reason, and the next mes
   assert.equal(resumed.status, 'SUCCEEDED', resumed.error || '');
 });
 
+test('a steer Pi accepted but died before consuming is re-queued, not lost', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  // A hung tool keeps the session streaming, so the next message goes in as a steer.
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-hang' });
+  await until(async () => {
+    const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+    return events.some(event => event.type === 'PI_EVENT' && JSON.stringify(event.data || '').includes('tool_execution_start'));
+  });
+
+  // The steer Pi accepts into its own queue and dies before consuming it.
+  await api(`/api/tasks/${task.id}/message`, { text: 'fault-queue-crash' });
+  const failed = await settle(api, task.id);
+  assert.equal(failed.status, 'FAILED', 'not stuck in RUNNING');
+  assert.equal(failed.errorCode, 'PI_SESSION_FAILED');
+  assert.equal((failed.pendingPrompts || []).length, 1, 'the unconsumed steer is re-queued, not lost');
+  assert.equal(failed.pendingPrompts[0].text, 'fault-queue-crash');
+  const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+  const failedSeq = events.filter(event => event.type === 'TASK_FAILED').at(-1).seq;
+  assert.ok(events.some(event => event.type === 'PROMPT_QUEUED' && event.seq < failedSeq),
+    'PROMPT_QUEUED is published before the terminal event');
+
+  // The queue line delivers it via «Сейчас» or the next message; here the
+  // restored prompt is dropped and a clean message resumes the session. The
+  // fixture cannot verify the re-delivery itself: its fault fires per process,
+  // and a restart starts a fresh one (same text → same fault).
+  await api(`/api/tasks/${task.id}/pending`, null, 'DELETE');
+  await api(`/api/tasks/${task.id}/message`, { text: 'снова' });
+  const resumed = await settle(api, task.id);
+  assert.equal(resumed.status, 'SUCCEEDED', resumed.error || '');
+});
+
+test('a hung session is restarted by request, and the next message resumes it', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-hang' });
+  await until(async () => {
+    const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+    return events.some(event => event.type === 'PI_EVENT' && JSON.stringify(event.data || '').includes('tool_execution_start'));
+  });
+
+  const restarted = await api(`/api/tasks/${task.id}/session/restart`, {});
+  assert.equal(restarted.status, 'FAILED');
+  assert.equal(restarted.errorCode, 'FAILED_RECOVERY');
+  assert.match(restarted.error, /перезапущена/);
+
+  // A dead Pi must not make the session unfixable: the model switch is
+  // persisted and applies at the next start.
+  const switched = await api(`/api/tasks/${task.id}/model`, { provider: 'other', id: 'other' });
+  assert.equal(switched.model.id, 'other');
+
+  await api(`/api/tasks/${task.id}/message`, { text: 'снова' });
+  const resumed = await settle(api, task.id);
+  assert.equal(resumed.status, 'SUCCEEDED', resumed.error || '');
+});
+
 test('garbage on Pi stdout is recorded and the turn still completes', { timeout: 60000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());

@@ -1146,7 +1146,7 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && match) {
       const c = await readJson(req);
-      return json(res, 200, await manager.cancel(match[1], { commandId: c.commandId, clientId: c.clientId }));
+      return json(res, 200, await manager.cancel(match[1], { commandId: c.commandId, clientId: c.clientId, hard: c.hard === true }));
     }
 
     // Erase every message of a session, keeping the session itself. Destructive,
@@ -1257,6 +1257,29 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
       return json(res, 200, { result: await manager.compact(match[1], body.instructions || '') });
+    }
+
+    // «Перезапустить сессию»: kill the session's Pi, the next message restarts
+    // it from the saved session file. The routine exit for a hung session.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/session\/restart$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req).catch(() => ({}));
+      // The task itself, not { result }: the client parses the response as a
+      // Task, and a wrapper made every restart answer "Field 'id' is required"
+      // while the restart had already run server-side.
+      return json(res, 200, await manager.restartSession(match[1]));
+    }
+
+    // «Откуда контекст»: разбор запроса к модели по источникам (системный
+    // промпт, инструкции проекта, навыки, MCP-инструменты, история) плюс числа
+    // самого Pi. Читает с диска и из запущенного Pi, ничего не меняет.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/context$/);
+    if (req.method === 'GET' && match) return json(res, 200, await manager.contextReport(match[1]));
+    // Лимит контекста этой сессии: верхняя граница, после которой TaskBridge сам
+    // сжимает историю (см. task-manager #enforceContextLimit). `limit: null` — снять.
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.setContextLimit(match[1], body.limit));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/apply$/);

@@ -321,6 +321,10 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   assert.equal(compactedTask.compaction.last.estimatedTokensAfter, 500);
   assert.equal(compactedTask.compaction.last.summary, 'Сжатая сводка предыдущего контекста');
   assert.equal(compactedTask.lastUsage.totalTokens, 500);
+  // The compaction stage the extension ticks arrive as setStatus frames with
+  // statusKey "smart-compaction": the diagnostics panel (Активность) must keep
+  // the last stage instead of dropping it, so a stuck compaction is visible.
+  assert.match(compactedTask.current, /Smart compaction: final merge \(\d+s\)/);
   await api(`/api/tasks/${id}/message`, { text: 'slow' });
   await api(`/api/tasks/${id}/cancel`, {});
   task = await terminal(api, id);

@@ -25,6 +25,9 @@ import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs'
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 import { piAgentDir } from './pi-settings.mjs';
+import {
+  assertContextLimit, buildContextReport, collectContextSources, estimateTokens, readCompactionSettings,
+} from './context-report.mjs';
 
 function now() { return new Date().toISOString(); }
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
@@ -1553,6 +1556,23 @@ export class TaskManager extends EventEmitter {
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     const model = this.#normalizeModelSelection({ provider, id: modelId });
     if (!model) throw Object.assign(new Error('Укажите provider и id модели.'), { code: 'INPUT_INVALID' });
+    // Cached ids only: the selection must not wait on a catalog probe.
+    const targetModelId = await this.#resolvePiModelId(model.provider, model.id, { probe: false });
+    // A session whose Pi is dead (or gone) has nothing to apply the switch to
+    // over RPC. Failing here made a dead session unfixable — the operator could
+    // not even point it at a working model (observed 2026-10-01: Strata was
+    // unloaded, Pi exited code=0, and the switch answered "Pi RPC session is
+    // not writable"). The selection is persisted instead: the next start uses
+    // it. This is also what makes a model switch a way OUT of a hung session.
+    const live = this.runtimes.get(id);
+    if (!live || live.pi.closed || live.pi.canSend?.() === false) {
+      task.requestedModel = { provider: model.provider, id: targetModelId };
+      task.model = this.#taskModel({ id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null });
+      task.updatedAt = now();
+      await this.store.save(this.#publicTask(task));
+      await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id} (применится при следующем запуске сессии)`, { provider: model.provider, modelId: task.requestedModel.id });
+      return this.#publicTask(task);
+    }
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState().catch(async error => {
       await this.#recoverRpcFailure(task, error);
@@ -1560,7 +1580,6 @@ export class TaskManager extends EventEmitter {
     });
     if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Дождитесь завершения ответа перед сменой модели.'), { code: 'BUSY' });
     // Cached ids only: the selection must not wait on a catalog probe.
-    const targetModelId = await this.#resolvePiModelId(model.provider, model.id, { probe: false });
     const applied = await runtime.pi.setModel(model.provider, targetModelId).catch(async (error) => {
       if (['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) {
         await this.#recoverRpcFailure(task, error);
@@ -1658,6 +1677,52 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
+  // ---- «откуда контекст» и лимит контекста сессии --------------------------
+
+  // Разбор запроса к модели по источникам (см. context-report.mjs). Живые числа
+  // берутся у Pi (`get_session_stats`), поэтому открывать сессию не нужно, а если
+  // она открыта — числа относятся к ней, а не к файлу на диске.
+  async contextReport(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const cwd = task.workspacePath || null;
+    const mcp = await this.mcp.status().catch(() => null);
+    const [sources, compaction] = await Promise.all([
+      collectContextSources({ cwd, mcp }),
+      readCompactionSettings({ cwd }),
+    ]);
+    const runtime = this.runtimes.get(id);
+    const live = runtime && !runtime.pi.closed && runtime.pi.canSend?.() !== false;
+    const stats = live ? await runtime.pi.getSessionStats().catch(() => null) : null;
+    const model = task.model || task.requestedModel || null;
+    return buildContextReport({
+      taskId: task.id,
+      model: model ? { provider: model.provider ?? null, id: model.id ?? null, contextWindow: model.contextWindow ?? null } : null,
+      contextWindow: model?.contextWindow ?? null,
+      stats,
+      sources,
+      compaction: { ...compaction, auto: task.autoCompactionEnabled },
+      limit: task.contextLimit ?? null,
+      running: !RUN_TERMINAL.has(task.status),
+    });
+  }
+
+  // Лимит контекста этой сессии. Не настройка Pi: Pi знает только своё окно
+  // модели, а лимит — верхняя граница, после которой TaskBridge сам сжимает
+  // историю (см. #enforceContextLimit). `null` — без лимита.
+  async setContextLimit(id, value) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const limit = assertContextLimit(value);
+    task.contextLimit = limit;
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'CONTEXT_LIMIT_SET',
+      limit === null ? 'Лимит контекста снят' : `Лимит контекста: ${limit} токенов`,
+      { limit });
+    return this.contextReport(id);
+  }
+
   async #handlePiEvent(task, frame, runtime = null) {
     if (this.deleted.has(task.id)) return;
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
@@ -1684,8 +1749,24 @@ export class TaskManager extends EventEmitter {
       task._promptMs = 0;
       task._firstTokenAt = 0;
     }
-    if (frame.type === 'compaction_start' || frame.type === 'auto_compaction_start') task._compacting = true;
-    if (frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') task._compacting = false;
+    if (frame.type === 'compaction_start' || frame.type === 'auto_compaction_start') {
+      task._compacting = true;
+      // A second compaction in the same task must re-emit chunk 1 (task-manager #onUiRequest).
+      task._compactionStage = null;
+      // Статусная строка чата и «Активность» в диагностике должны называть
+      // сжатие: без этого в начале хода было только уведомление PI_EVENT,
+      // а само состояние сессии выглядело «работает» без видимой причины.
+      task.current = 'Pi сжимает контекст…';
+    }
+    if (frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
+      task._compacting = false;
+      // Строку сжатия не оставляем висеть: дальше либо терминальный статус
+      // («Done»), либо кадры следующего хода, которые её перезапишут. Но только
+      // СВОЮ строку: стадию smart-compaction-расширения («Smart compaction: …»),
+      // выставленную setStatus-кадрами, убирать нельзя — по ней видно, что
+      // сжатие застряло.
+      if (task.current === 'Pi сжимает контекст…') task.current = '';
+    }
     if (frame.type === 'agent_settled') {
       task._toolsRunning = 0;
       // A dialog cannot outlive its turn.
@@ -1698,7 +1779,9 @@ export class TaskManager extends EventEmitter {
       if (delta?.type === 'text_delta') task.assistantText = appendTail(task.assistantText, delta.delta, TEXT_TAIL);
       if (delta?.type === 'thinking_delta') {
         task.thinkingText = appendTail(task.thinkingText, delta.delta, THINKING_TAIL);
-        task.current = `Pi is thinking… (${task.thinkingText.length} chars)`;
+        // Токены, а не символы: та же эвристика, что у Pi и в отчёте «Откуда
+      // контекст» (chars/4 вверх), и число сопоставимо с остальными подписями.
+      task.current = `Pi is thinking… (~${estimateTokens(task.thinkingText.length)} tok)`;
       }
       if (frame.usage?.totalTokens > 0) task.lastUsage = frame.usage;
     }
@@ -1830,13 +1913,29 @@ export class TaskManager extends EventEmitter {
     // external server (Strata) is a different process with its own cache, so its
     // numbers must never be read as this session's.
     const routerEngine = this.localModels?.enabled && this.#usesLocalRuntime(task);
-    const engine = routerEngine ? await this.localModels.getMetrics().catch(() => null) : null;
+    // Сессия на внешнем сервере: Pi называет провайдера по-своему ('strata'), а
+    // сервер в конфиге — по имени профиля ('strata-iq3s'), поэтому поиск только
+    // по провайдеру не находил сервер. PP тогда считался оценкой «новые токены /
+    // TTFT» (141K промпт почти целиком из кеша → честные 1845 новых за 4,4 с
+    // показывались как «PP ≈422 tok/s», на другом ходу «≈23»). Сервер ищем и по
+    // id модели — как это делает liveEnginePrompt на клиенте, — а PP/TG берём из
+    // телеметрии самого сервера: у кеш-попаданий Strata сам не отдаёт PP
+    // (ppUnavailable: 'conversation-cache'), и оценка не выдумывается.
+    const providerId = task.model?.provider || task.requestedModel?.provider;
+    const modelId = task.model?.id || task.requestedModel?.id;
+    const externalServer = (providerId && this.localServers?.find(providerId))
+      || (modelId && this.localServers?.find(modelId))
+      || null;
+    let engine = routerEngine ? await this.localModels.getMetrics().catch(() => null) : null;
+    if (!engine && externalServer) {
+      engine = await this.localServers.metrics(externalServer).catch(() => null);
+    }
     const metrics = generationMetrics({
       usage: task.lastUsage,
       promptMs,
       windowMs,
       engine,
-      local: routerEngine || Boolean(this.localServers?.find(task.model?.provider || task.requestedModel?.provider))
+      local: routerEngine || Boolean(externalServer)
     });
     if (!metrics) return;
     task.metrics = metrics;
@@ -1909,6 +2008,12 @@ export class TaskManager extends EventEmitter {
     if (turn != null && task._turn !== turn) return;
 
     const commands = (this.projects.get(task.projectId)?.verification) || [];
+    // Turn's context is final here, so the limit is applied before the terminal
+    // status is published: the next message from the queue must not reach the
+    // model with an over-limit context, and the slot is still ours until
+    // #releaseSlot runs in the caller.
+    await this.#enforceContextLimit(task);
+    if (this.deleted.has(task.id) || task.status === 'CANCELLED' || runtime?.cancelRequested) return;
     // The turn's outcome is decided by the MODEL, not by the project's checks.
     // A check that fails after a complete answer used to mark the whole task
     // FAILED and hide the answer; verification now runs detached below and only
@@ -1930,6 +2035,38 @@ export class TaskManager extends EventEmitter {
     this.#finishRun(task, task.status);
     await this.#writeResult(task).catch(() => {});
     if (commands.length) this.#runVerification(task, commands, turn);
+  }
+
+  // Лимит контекста сессии (настройка TaskBridge, не Pi). Контекст хода к этому
+  // моменту уже собран, и если Pi оценивает его выше лимита, история сжимается
+  // здесь — до публикации терминального статуса и до `#releaseSlot`. Сжатие то
+  // же самое, что Pi делает при подходе к окну модели (сводка + последние
+  // сообщения); лимит лишь задаёт свой порог вместо размера окна.
+  //
+  // Ждём его намеренно: очередь за это время не стартует, зато следующее
+  // сообщение уйдёт в модель с контекстом не больше лимита. Кадры самого сжатия
+  // (compaction_start/end) приходят асинхронно и могут лечь уже после
+  // TASK_SUCCEEDED — как и у кнопки «Сжать контекст» на завершённой сессии; они
+  // не события хода. Один ход — одна попытка; ошибка (провайдер, отмена) на
+  // исход хода не влияет и видна отдельным событием.
+  async #enforceContextLimit(task) {
+    const limit = task.contextLimit;
+    if (!Number.isSafeInteger(limit) || limit <= 0) return;
+    if (this.closing || this.deleted.has(task.id) || task.status === 'CANCELLED') return;
+    if (task._compacting) return;
+    const runtime = this.runtimes.get(task.id);
+    if (!runtime || runtime.retired || runtime.cancelRequested) return;
+    if (runtime.pi.closed || runtime.pi.canSend?.() === false) return;
+    const stats = await runtime.pi.getSessionStats().catch(() => null);
+    const used = stats?.contextUsage?.tokens;
+    if (!Number.isFinite(used) || used <= limit) return;
+    await this.#event(task, 'CONTEXT_LIMIT_REACHED',
+      `Контекст ${used} токенов выше лимита ${limit} — сжимаю историю.`, { used, limit });
+    try {
+      await runtime.pi.compact('');
+    } catch (error) {
+      await this.#event(task, 'CONTEXT_LIMIT_FAILED', `Сжатие по лимиту контекста не удалось: ${error.message}`, { limit }, false).catch(() => {});
+    }
   }
 
   // Project verification is advisory and detached (see #verifyAndFinalize): it
@@ -2244,8 +2381,9 @@ export class TaskManager extends EventEmitter {
 
   async cancel(id, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
-    if (!commandId) return this.#cancel(id);
-    return this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id));
+    const hard = opts?.hard === true;
+    if (!commandId) return this.#cancel(id, { hard });
+    return this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id, { hard }));
   }
 
   // "Repeat message": permanently removes the last failed exchange (the
@@ -2523,6 +2661,57 @@ export class TaskManager extends EventEmitter {
     return this.#admit(() => this.#continueTurn(id, turnId), id);
   }
 
+  // «Перезапустить сессию»: retire the session's Pi process and let the next
+  // message restart it from the saved session file. For a hung Pi (alive, not
+  // responding) this is the routine exit — the message probe answers "hung Pi"
+  // and fails, so a hung session is otherwise at the mercy of a server restart,
+  // which is the emergency exit that hits every session.
+  async restartSession(id) {
+    return this.#admit(() => this.#restartSession(id), id);
+  }
+
+  async #restartSession(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const current = this.runtimes.get(id);
+    if (current) {
+      // The same retire #ensureSession does: a hung Pi that still accepts
+      // writes must not be reused as if it were alive. The flags go up before
+      // the kill: the close event is then ignored (retired), and a pending turn
+      // settles without racing into verifyAndFinalize.
+      current.retired = true;
+      current.cancelRequested = true;
+      task._turn = (task._turn || 0) + 1;
+      await current.pi.killTree().catch(() => {});
+      this.#resolveSettle(task.id);
+      if (this.runtimes.get(task.id) === current) this.runtimes.delete(task.id);
+    }
+    // A queued session has nothing hung: its prompts keep waiting, and the
+    // restart must not turn waiting into a failure. A finished session has
+    // nothing to recover either: the next message just works.
+    const terminal = ['SUCCEEDED', 'CANCELLED', 'FAILED'].includes(task.status);
+    if (task.status === 'QUEUED' || (terminal && !task.inFlightPrompt)) {
+      task.updatedAt = now();
+      await this.store.save(this.#publicTask(task));
+      return this.#publicTask(task);
+    }
+    // The session was mid-run (or its Pi hung): mark it restorable the way the
+    // daemon restart does (R3.6) — the next message resumes it, and the chat
+    // says «Прервана — можно продолжить». A message Pi accepted but the kill
+    // consumed nothing of is re-queued, so the restart does not lose the
+    // operator's text. History is intact: the restart is not destructive.
+    await this.#requeueUnconsumedPrompt(task);
+    if (task.inFlightPrompt) task.inFlightPrompt = null;
+    task.status = 'FAILED';
+    task.errorCode = 'FAILED_RECOVERY';
+    task.error = 'Сессия перезапущена по запросу. Следующее сообщение продолжит сессию.';
+    task.current = 'Failed';
+    task.updatedAt = now();
+    await this.#event(task, 'TASK_FAILED', task.error, { errorCode: task.errorCode });
+    await this.store.save(this.#publicTask(task));
+    return this.#publicTask(task);
+  }
+
   async #continueTurn(id, turnId) {
     const task = this.#mutableTask(id);
     const events = await this.store.readEvents(id, 0);
@@ -2651,7 +2840,7 @@ export class TaskManager extends EventEmitter {
     return task;
   }
 
-  async #cancel(id, { keepPending = false } = {}) {
+  async #cancel(id, { keepPending = false, hard = false } = {}) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
@@ -2683,14 +2872,26 @@ export class TaskManager extends EventEmitter {
       await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'stopped' });
     }
     await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
-    try {
-      await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
-    } catch (error) {
-      await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`);
+    if (hard) {
+      // Жёсткий стоп (Esc в чате): грохнуть процессы сессии сразу — модель может
+      // читать промпт, и RPC abort на это не отвечает до 10 с (тот самый «стой и
+      // жди»). Дочерние процессы умирают вместе с Pi (process tree).
+      await this.#event(task, 'HARD_STOP', 'Жёсткий стоп: убиваю процессы сессии.');
       try {
         await runtime.pi.killTree();
       } catch {
         // The process may already be gone. Ownership still has to be released.
+      }
+    } else {
+      try {
+        await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
+      } catch (error) {
+        await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`);
+        try {
+          await runtime.pi.killTree();
+        } catch {
+          // The process may already be gone. Ownership still has to be released.
+        }
       }
     }
     await runtime.eventChain.catch(() => {});
@@ -3168,6 +3369,76 @@ export class TaskManager extends EventEmitter {
     return response.data || null;
   }
 
+  // Normalizes the task's model selection against the live catalog before Pi
+  // is started: Pi names providers/models its own way (strata-iq3s → strata,
+  // qwen3.8-flash-next-iq3-s → qwen3.8-flash-next-iq3_s), and a selection that
+  // resolved yesterday can carry a name Pi cannot resolve today. Without this
+  // Pi is started with a pattern it cannot resolve and exits «code=0» with no
+  // explanation (observed 2026-10-01: «Error: Unknown provider strata-iq3s».).
+  // Match by the dash/underscore-normalized id across providers: the profile
+  // name and the provider name Pi serves differ, so the provider alone cannot
+  // be the key. Several providers serving the same id → the same provider wins,
+  // otherwise the rewrite is skipped (a wrong rewrite must never happen).
+  async #normalizeTaskModel(task) {
+    const model = task.requestedModel || task.model || null;
+    if (!model?.id) return null;
+    const known = this.modelCatalog.peek()?.models || [];
+    if (!known.length) return null;
+    const norm = (value) => String(value || '').toLowerCase().replace(/[_\s]+/g, '-');
+    const wanted = norm(model.id);
+    const exact = known.filter(m => norm(m.id) === wanted);
+    if (!exact.length) return null;
+    const match = exact.find(m => m.provider === model.provider) || (exact.length === 1 ? exact[0] : null);
+    if (!match || (match.provider === model.provider && match.id === model.id)) return match;
+    task.requestedModel = { provider: match.provider, id: match.id };
+    task.model = this.#taskModel({ id: match.id, provider: match.provider, contextWindow: match.contextWindow ?? null, maxTokens: match.maxTokens ?? null });
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task)).catch(() => {});
+    await this.#event(task, 'MODEL_SWITCH', `Модель: ${match.provider}/${match.id} (имя нормализовано по каталогу)`, { provider: match.provider, modelId: match.id }, false);
+    return match;
+  }
+
+  // A session bound to a local model that is not loaded dies exactly like the
+  // name-mismatch case above: Pi is started against weights that are not there
+  // and exits «code=0» with no explanation (observed 2026-10-01: Strata was
+  // unloaded, every start died with PI_SESSION_FAILED). The readable reason
+  // replaces the silent exit: the operator loads the model or switches.
+  // Only an explicitly unloaded external model fails here: router models have
+  // no tracked status and their own autoload, and cloud models are not in the
+  // local list at all.
+  async #requireLocalModelLoaded(task) {
+    if (!this.localModels.enabled) return;
+    const model = task.requestedModel || task.model || null;
+    if (!model?.id) return;
+    const norm = (value) => String(value || '').toLowerCase().replace(/[_\s]+/g, '-');
+    const wanted = norm(model.provider ? `${model.provider}/${model.id}` : model.id);
+    const wantedId = norm(model.id);
+    const external = await this.localServers.status().catch(() => null);
+    // The session's provider may differ from the server's config provider
+    // ('strata' vs 'strata-iq3s') while the model id is the same: without the
+    // bare-id match the entry is not found, the unloaded check is skipped, and
+    // Pi is started against a dead server and hangs with no model events
+    // (observed 2026-10-01: Strata down, session on strata, start hung).
+    const entry = (external?.models || []).find(m => norm(m.id) === wanted || norm(`${m.provider}/${m.id}`) === wanted || norm(m.id) === wantedId);
+    if (entry) {
+      if (entry.status === 'unloaded') {
+        throw Object.assign(new Error(`Модель ${entry.provider}/${entry.id} сейчас выгружена. Загрузите её в локальных моделях или смените модель сессии.`), { code: 'MODEL_NOT_FOUND' });
+      }
+      if (entry.status === 'loading') {
+        throw Object.assign(new Error(`Модель ${entry.provider}/${entry.id} ещё загружается — подождите немного.`), { code: 'BUSY' });
+      }
+      return;
+    }
+    // A router-model session: the router must be reachable, or Pi would be
+    // started against a server that is not there.
+    if (this.#usesLocalRuntime(task)) {
+      const status = await this.local.getStatus().catch(() => null);
+      if (status && !status.reachable) {
+        throw Object.assign(new Error('Локальный сервер моделей недоступен. Запустите его или смените модель сессии.'), { code: 'MODEL_NOT_FOUND' });
+      }
+    }
+  }
+
   async #ensureSession(task) {
     const current = this.runtimes.get(task.id);
     // `closed` alone is not enough: Pi that exited leaves stdin closed while the
@@ -3185,6 +3456,16 @@ export class TaskManager extends EventEmitter {
       this.#resolveSettle(task.id);
       if (this.runtimes.get(task.id) === current) this.runtimes.delete(task.id);
     }
+    // The model the session is about to run, normalized against the live
+    // catalog: Pi names providers/models its own way (strata-iq3s → strata,
+    // qwen3.8-flash-next-iq3-s → qwen3.8-flash-next-iq3_s), and a selection that
+    // resolved yesterday can carry a name Pi cannot resolve today. Without this
+    // Pi is started with a pattern it cannot resolve and exits «code=0» with no
+    // explanation (observed 2026-10-01: «Error: Unknown provider strata-iq3s»).).
+    await this.#normalizeTaskModel(task);
+    // A session bound to a local model that is not loaded dies the same way:
+    // the readable reason replaces the silent exit.
+    await this.#requireLocalModelLoaded(task);
     if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом. Повторите чуть позже.'), { code: 'MODEL_BUSY' });
     if (!task.workspacePath) {
       Object.assign(task, await this.#prepareWorkspace(task));
@@ -3285,9 +3566,36 @@ export class TaskManager extends EventEmitter {
     this.#schedulePump();
   }
 
+  // A message Pi accepted into its own queue (a steer) but that never got
+  // consumed is otherwise lost silently: the chat kept showing «ожидание
+  // события агента» while nothing would ever deliver it (observed 2026-09-30,
+  // deepseek-flash, code=4294967295 four hundred ms after the steer). Pi
+  // records the user message as the turn consumes it, so the session file
+  // tells the two cases apart: nothing there → the text is re-queued the way
+  // the restart resume does (announce: false — the chat already has it), and
+  // the queue line delivers it via «Сейчас» or the next message; already
+  // there → nothing to bring back.
+  async #requeueUnconsumedPrompt(task) {
+    if (!task.inFlightPrompt?.text) return;
+    if (await sessionContainsUserMessage(task.piSessionFile, task.inFlightPrompt.text).catch(() => false)) return;
+    const pendingId = crypto.randomUUID();
+    task.pendingPrompts = [...(task.pendingPrompts || []), {
+      id: pendingId,
+      text: task.inFlightPrompt.text,
+      mode: 'auto',
+      announce: false,
+    }];
+    await this.#event(task, 'PROMPT_QUEUED', 'Сообщение осталось в очереди: Pi завершился до его обработки.', { pendingId }, false);
+  }
+
   async #fail(task, error) {
     if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
+    // A message Pi accepted into its own queue (a steer) but died before
+    // consuming is otherwise lost silently: the chat kept showing «ожидание
+    // события агента» while nothing would ever deliver it (observed 2026-09-30,
+    // deepseek-flash, code=4294967295 four hundred ms after the steer).
+    await this.#requeueUnconsumedPrompt(task);
     // The turn reached a terminal state: the in-flight command is spent.
     if (task.inFlightPrompt) task.inFlightPrompt = null;
     const classified = classifyEngineError(error) || classifyEngineError(task._modelError);
@@ -3412,6 +3720,25 @@ export class TaskManager extends EventEmitter {
       const message = uiText(frame.message, 2000) || '';
       if (RETRY_IN_PROGRESS_NOTICE.test(message)) return;
       await this.#event(task, 'UI_NOTIFY', message, { notifyType: ['info', 'warning', 'error'].includes(frame.notifyType) ? frame.notifyType : 'info' });
+      return;
+    }
+    // Extension progress ticks (smart-compaction) arrive as setStatus frames
+    // with statusKey "smart-compaction" — terminal decoration on Pi's side, but
+    // the stage is exactly what the diagnostics panel is for: «Сжимается
+    // контекст · Smart compaction: chunk 10/25 (35s)» in Активность instead of a
+    // wall of one note per chunk in the chat.
+    if (frame.method === 'setStatus' && String(frame.statusKey || '').startsWith('smart-compaction')) {
+      const text = uiText(frame.statusText, 500) || '';
+      // The ticker re-sends the same stage every second with a new elapsed time:
+      // emit once per stage change, not once per tick.
+      const stage = text.replace(/ \(\d+s\)$/, '');
+      if (text && stage !== task._compactionStage) {
+        task._compactionStage = stage;
+        task.current = text;
+        task.updatedAt = now();
+        await this.store.save(this.#publicTask(task));
+        await this.#event(task, 'STATUS', text, { status: task.status }, false);
+      }
       return;
     }
     // setStatus / setWidget / setTitle / set_editor_text: terminal decoration.

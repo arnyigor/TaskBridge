@@ -28,6 +28,7 @@ const FIXTURE_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAIAAABqVuVZAAAAh0lEQVR42u3
 let streaming = false;
 let pending;
 let automatic = true;
+let queueCrashFired = false;
 let turn = messages.filter(x => x.role === 'assistant').length;
 const state = () => ({ sessionFile, messageCount: messages.length, isStreaming: streaming, isCompacting: false, autoCompactionEnabled: automatic, model, thinkingLevel });
 const availableModels = [
@@ -85,6 +86,9 @@ function finish(text, fail = false, errorMessage = 'Fixture model error') {
 //   fault-child   starts a long-lived child process (like pytest), then hangs;
 //                 its pid is reported on stderr as `fake-pi child <pid>`
 //   fault-deaf-stream  ignores abort and goes on streaming deltas meanwhile
+//   fault-queue-crash accepts a message into its own queue (queue_update) and
+//                 exits before the turn that would consume it — the
+//                 lost-message shape (steer accepted, then Pi died)
 //   fault-abort-tail   answers abort, then starts another turn 0.5 s later (the
 //                 tail it had already queued when the abort arrived)
 //   fault-abort-tail   answers abort, then starts another turn 0.5 s later (the
@@ -97,7 +101,7 @@ function finish(text, fail = false, errorMessage = 'Fixture model error') {
 let deaf = false;
 let tailAfterAbort = false;
 function faultOf(message) {
-  const match = String(message || '').match(/fault-(crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|slow-stream)/);
+  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
@@ -113,6 +117,20 @@ function startTurn(message) {
 }
 async function runFault(fault, command, respond) {
   respond();
+  // queue-crash dies before the turn that would consume the message: no
+  // startTurn, the user message must stay out of the session file — otherwise
+  // the failure looks like a consumed prompt and the re-queue has nothing to
+  // bring back.
+  if (fault === 'queue-crash') {
+    // Only the first delivery dies: the re-delivered message consumes normally,
+    // so a test can assert the re-queue is spent, not a retry loop.
+    if (!queueCrashFired) {
+      queueCrashFired = true;
+      send({ type: 'queue_update', steering: [command.message], followUp: [] });
+      setTimeout(() => process.exit(3), 20);
+      return;
+    }
+  }
   startTurn(command.message);
   if (fault === 'crash') {
     process.stderr.write('fake-pi: simulated crash during a tool call\n');
@@ -201,6 +219,30 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const command = JSON.parse(line);
   const respond = (data = {}, success = true) => send({ type: 'response', id: command.id, command: command.type, success, data, ...(!success ? { error: 'Fixture rejected prompt' } : {}) });
   if (command.type === 'get_state') return respond(state());
+  // Pi's own context estimate. FAKE_PI_CONTEXT_TOKENS pins it so a test can put
+  // the session over a context limit on purpose; otherwise it is derived from
+  // the transcript like Pi's chars/4 heuristic.
+  if (command.type === 'get_session_stats') {
+    const pinned = Number(process.env.FAKE_PI_CONTEXT_TOKENS || 0);
+    const derived = Math.ceil(messages.reduce((sum, message) =>
+      sum + JSON.stringify(message.content ?? '').length, 0) / 4);
+    const tokens = pinned > 0 ? pinned : derived;
+    const contextWindow = model.contextWindow ?? null;
+    return respond({
+      sessionFile: sessionFile ?? undefined,
+      sessionId: 'fixture-session',
+      userMessages: messages.filter(x => x.role === 'user').length,
+      assistantMessages: messages.filter(x => x.role === 'assistant').length,
+      toolCalls: 0,
+      toolResults: 0,
+      totalMessages: messages.length,
+      tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, total: tokens },
+      cost: 0,
+      contextUsage: contextWindow
+        ? { tokens, contextWindow, percent: Math.round((tokens / contextWindow) * 100) }
+        : { tokens, contextWindow: null, percent: null },
+    });
+  }
   if (command.type === 'get_available_models') return respond({ models: availableModels });
   if (command.type === 'get_available_thinking_levels') return respond({ levels: ['off', 'low', 'medium', 'high'] });
   if (command.type === 'set_thinking_level') { thinkingLevel = command.level; return respond(); }
@@ -211,6 +253,19 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (command.type === 'set_auto_compaction') { automatic = command.enabled; return respond(); }
   if (command.type === 'compact') {
     const result = { tokensBefore: 1100, estimatedTokensAfter: 500, summary: 'Сжатая сводка предыдущего контекста' };
+    // Shaped like the real smart-compaction extension (real session 2026-09-30):
+    // compaction_start, a start notify, per-stage setStatus ticks with elapsed
+    // seconds, then the compaction_end result — the stage the diagnostics panel
+    // must show instead of a chat note per chunk.
+    send({ type: 'compaction_start', reason: 'manual' });
+    send({ type: 'extension_ui_request', id: 'compact-start', method: 'notify', notifyType: 'info',
+      message: 'Smart compaction: 1100 tokens; fixture/fixture; summary reasoning=none.' });
+    for (const stage of ['chunk 1/2', 'chunk 2/2', 'final merge']) {
+      for (const s of [0, 1]) {
+        send({ type: 'extension_ui_request', id: `compact-${stage}-${s}`, method: 'setStatus', statusKey: 'smart-compaction',
+          statusText: `Smart compaction: ${stage} (${s}s)` });
+      }
+    }
     send({ type: 'compaction_end', reason: 'manual', result });
     return respond(result);
   }

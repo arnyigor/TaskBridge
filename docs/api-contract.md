@@ -67,6 +67,13 @@ Cookie старого формата `<expires>.<nonce>.<sig>` принимаю�
    сессию — новым сообщением. Остановить работу может только сама модель или
    `/cancel`. `POST /api/tasks/:id/pending/send` делает то же с сообщением из очереди.
 5. `POST /api/tasks/:id/cancel` — STOP.
+6. `POST /api/tasks/:id/session/restart` — перезапустить сессию: убивает Pi-процесс
+   этой сессии, следующее сообщение перезапускает её из сохранённого файла сессии.
+   Рутинный выход для зависшей сессии (Pi жив, но не отвечает) — рестарт сервера
+   здесь аварийный выход, он затрагивает все сессии. История не теряется; сообщение,
+   которое Pi принял, но не успел обработать, перепоставляется в очередь. Ответ:
+   200, задача в `FAILED_RECOVERY` («Прервана — можно продолжить»); для уже
+   завершённой или стоящей в очереди сессии — no-op.
 
 **Ключевое свойство для мобильного:** задача живёт часами и **не держит HTTP**.
 Клиент может уйти в фон и вернуться — он догоняет историю по `seq`.
@@ -284,6 +291,56 @@ INPUT_INVALID`, при занятой машине — `409 MODEL_BUSY`. Отв�
 llama.cpp получают тот же `400 LOCAL_CONTEXT_UNSUPPORTED`: их `ctx-size` живёт в
 `models.ini`, и TaskBridge его не правит (в списке моделей у таких строк просто нет
 признака `contextEditable`).
+
+### Откуда берётся контекст и лимит контекста сессии
+
+`GET /api/tasks/:id/context` отвечает на вопрос «из чего собран запрос к модели»:
+
+```json
+{
+  "taskId": "…",
+  "model": { "provider": "wormsoft", "id": "gpt-6-luna", "contextWindow": 1000000 },
+  "contextWindow": 1000000,
+  "usage": { "tokens": 60000, "contextWindow": 1000000, "percent": 6, "source": "pi" },
+  "totalTokens": 60000,
+  "sources": [
+    { "id": "system-prompt", "label": "Системный промпт (SYSTEM.md)", "detail": "…", "chars": 2230, "tokens": 558, "known": true },
+    { "id": "instructions", "label": "Инструкции проекта (AGENTS.md)", "detail": "…", "chars": 21770, "tokens": 5443, "known": true, "count": 2 },
+    { "id": "skills", "label": "Навыки (описания)", "chars": 440, "tokens": 110, "known": true, "count": 11 },
+    { "id": "mcp-tools", "label": "MCP-инструменты", "chars": 21000, "tokens": 5250, "known": true, "count": 120, "servers": ["web-search", "mcpServer"] },
+    { "id": "builtin-tools", "label": "Встроенные инструменты Pi", "tokens": null, "known": false },
+    { "id": "memory", "label": "Память проекта", "tokens": null, "known": false }
+  ],
+  "measuredTokens": 11361,
+  "unaccountedTokens": 48639,
+  "limit": { "tokens": 40000, "exceeded": true },
+  "compaction": { "auto": true, "reserveTokens": 16384, "keepRecentTokens": 20000, "triggerAt": 983616, "fromProject": false },
+  "conversation": { "userMessages": 5, "assistantMessages": 5, "toolCalls": 12, "messages": 22, "tokens": {…}, "cost": 0.45 },
+  "running": false,
+  "note": "Размеры источников — оценка (символы / 4, как считает Pi)…"
+}
+```
+
+Источники читаются с диска: `SYSTEM.md`/`APPEND_SYSTEM.md` (агентский каталог, проектный
+`<проект>/.pi/` важнее), цепочка `AGENTS.md`/`AGENTS.override.md`/`CLAUDE.md` от рабочей
+папки вверх, описания навыков из `skills/*/SKILL.md`, объявления MCP-инструментов из кэша
+адаптера. Их размер — **оценка** `chars/4` (та же эвристика, что у Pi), поэтому она
+подписана как оценка. `totalTokens`, `conversation` и остаток `unaccountedTokens`
+(`totalTokens − measuredTokens`, не меньше нуля) взяты из `get_session_stats` самого Pi:
+так честнее, чем показывать нулём то, чего снаружи не видно (базовые инструкции Pi,
+объявления встроенных инструментов, текст, который дописывают расширения). `known: false`
+означает «источник есть, размер не измеряется», а не «источник пуст». Если сессия не
+запущена, `totalTokens` = `null`: числа выдумывать нечем.
+
+`POST /api/tasks/:id/context` с телом `{ "limit": 40000 }` ставит лимит контекста
+сессии, `{ "limit": null }` — снимает. Лимит — настройка TaskBridge, а не Pi: Pi знает
+только окно своей модели и своё сжатие по нему. Когда ход закончен и Pi оценивает
+контекст выше лимита, TaskBridge сам сжимает историю (то же сжатие, что делает Pi при
+подходе к окну) — до публикации `TASK_SUCCEEDED`, чтобы следующее сообщение из очереди
+не ушло в модель с переполненным контекстом. Событие `CONTEXT_LIMIT_REACHED` несёт
+`{ used, limit }`; неудача сжатия — `CONTEXT_LIMIT_FAILED` и на исход хода не влияет.
+Ответ обоих маршрутов — тот же отчёт, поле `limit.tokens` хранится в задаче
+(`contextLimit`).
 
 ### Открытие файла на компьютере
 
