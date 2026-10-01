@@ -186,7 +186,9 @@ Taskbridge/
 │  ├─ engine.mjs            классификация ошибок провайдера (quota/rate limit/context)
 │  ├─ dispatcher.mjs        AUTO-выбор профиля/модели
 │  ├─ local-models.mjs      llama.cpp router: процесс, /models, load/unload, прогресс
+│  ├─ provider-models.mjs   синхронизация списков моделей внешних provider'ов (modelSync.providers)
 │  ├─ model-catalog.mjs     список моделей Pi (get_available_models)
+│  ├─ context-report.mjs    отчёт «из чего собран запрос» и лимит контекста сессии
 │  ├─ pi-settings.mjs       чтение ~/.pi/agent/settings.json (blockImages)
 │  ├─ mcp-manager.mjs       MCP для задач: свой конфиг, вкл/выкл, import из Pi
 │  ├─ session-history.mjs   восстановление истории после restart
@@ -496,7 +498,9 @@ TG у Strata всегда из самого движка: живая `live.tok_s
 | `pi.abortTimeoutMs` | сколько ждать RPC `abort` до kill |
 | `pi.sessionRoots` | дополнительные папки сессий Pi для импорта |
 | `localRuntime.healthUrl` | health-check локальной модели |
-| `localRuntime.provider` | provider Pi, который обслуживает локальный runtime (по умолчанию `llama.cpp` в router-режиме, иначе `llamacpp`); для других provider'ов локальный health-check пропускается || `localRuntime.router` | router-режим llama.cpp: `enabled`, `command`, `args`, `cwd`, `env`, `startTimeoutMs`, `loadTimeoutMs` |
+| `localRuntime.provider` | provider Pi, который обслуживает локальный runtime (по умолчанию `llama.cpp` в router-режиме, иначе `llamacpp`); для других provider'ов локальный health-check пропускается ||
+| `localRuntime.apiKey` | ключ роутера llama.cpp, если тот запущен с `--api-key` (`--api-key` пускает без ключа только `/health`): значение — сам ключ или `$ENV_NAME`, как у провайдеров Pi |
+| `localRuntime.router` | router-режим llama.cpp: `enabled`, `command`, `args`, `cwd`, `env`, `apiKey`, `startTimeoutMs`, `loadTimeoutMs` |
 | `localRuntime.profiles` | (legacy) профили одного процесса (`text`, `vision`, …) |
 | `localRuntime.managed` | управляемый запуск llama.cpp |
 | `localRuntime.auto.enabled` | AUTO-выбор профиля под задачу (vision при картинках) |
@@ -506,6 +510,7 @@ TG у Strata всегда из самого движка: живая `live.tok_s
 | `workspace.useGitWorktreeByDefault` | изолировать задачу в worktree |
 | `projectBrowser.roots` | корни, которые видит браузер папок |
 | `deepseek.costHistoryPath` | CSV расходов для прогноза, на сколько дней хватит баланса DeepSeek |
+| `modelSync.providers` | provider'ы, чьи списки моделей синхронизируются с их собственным API при `GET /api/models?refresh=1` (сегодня `wormsoft`); пусто — никого не трогать |
 | `providerStatus.wormsoft` / `routerai` | настройки кэша и переопределения URL для статуса аккаунта; ключи по умолчанию берутся из `WORMSOFT_API_KEY` / `ROUTERAI_API_KEY` |
 | `projects[]` | зарегистрированные проекты |
 
@@ -550,6 +555,9 @@ TG у Strata всегда из самого движка: живая `live.tok_s
 | `POST` | `/api/tasks/:id/message` | follow-up / steering |
 | `POST` | `/api/tasks/:id/cancel` | STOP |
 | `POST` | `/api/tasks/:id/compact` | COMPACT |
+| `POST` | `/api/tasks/:id/session/restart` | убить Pi-процесс этой сессии; следующее сообщение перезапускает её из файла сессии — рутинный выход для зависшей сессии (рестарт сервера — аварийный, он затрагивает все сессии) |
+| `GET` | `/api/tasks/:id/context` | из чего собран запрос к модели: системный промпт, инструкции проекта, навыки, MCP-инструменты (оценки в токенах) плюс собственные итоги Pi |
+| `POST` | `/api/tasks/:id/context` | лимит контекста сессии (`{"limit": N}` или `null`); выше лимита TaskBridge сам сжимает историю в конце хода |
 | `POST` | `/api/tasks/:id/auto-compaction` | вкл/выкл auto compaction |
 | `POST` | `/api/tasks/:id/model` | сменить модель сессии (как `/model` в Pi) |
 | `POST` | `/api/tasks/:id/thinking` | задать thinking level сессии |
@@ -691,7 +699,15 @@ Dirty source repository по умолчанию блокируется:
 
 ### COMPACT
 
-TaskBridge отправляет RPC `{"type":"compact"}` и может показать статистику вида `1 · 51832 → 19416`. `estimatedTokensAfter` — оценка Pi, а не точный счётчик провайдера. Своего сжатия TaskBridge не делает.
+TaskBridge отправляет RPC `{"type":"compact"}` и может показать статистику вида `1 · 51832 → 19416`. `estimatedTokensAfter` — оценка Pi, а не точный счётчик провайдера. Своего сжатия TaskBridge не делает — кроме случая, когда у сессии задан лимит контекста (ниже).
+
+### Контекст сессии и лимит
+
+- `GET /api/tasks/:id/context` отвечает на вопрос «из чего собран запрос к модели»: системный промпт, инструкции проекта, навыки, MCP-инструменты (оценка `символы/4`, как считает Pi, — подписана как оценка), а `totalTokens`, `conversation` и остаток берутся из `get_session_stats` самого Pi. Сессия не запущена — `totalTokens = null`: числа выдумывать нечем.
+- `POST /api/tasks/:id/context` с `{ "limit": N }` ставит лимит контекста сессии, `{ "limit": null }` — снимает. Лимит — настройка TaskBridge, а не Pi: когда ход закончен и оценка выше лимита, TaskBridge сам сжимает историю до публикации `TASK_SUCCEEDED` (события `CONTEXT_LIMIT_REACHED` / `CONTEXT_LIMIT_FAILED`; неудача сжатия на исход хода не влияет).
+- зависшая сессия (Pi жив, но не отвечает) перезапускается точечно: `POST /api/tasks/:id/session/restart` убивает Pi-процесс этой сессии, следующее сообщение перезапускает её из файла сессии; история не теряется, сообщение, которое Pi принял, но не обработал, перепоставляется в очередь. Рестарт сервера остаётся аварийным вариантом — он затрагивает все сессии.
+
+Подробности и ответ маршрутов — [docs/api-contract.md](docs/api-contract.md) (раздел «Откуда берётся контекст и лимит контекста сессии»).
 
 ### PI STATE
 
@@ -703,6 +719,7 @@ RPC `get_state`: текущая модель, thinking level, `isStreaming`, `is
 
 - новая задача: `POST /api/tasks` принимает `model: { provider, id }` и `thinkingLevel`; TaskBridge передаёт их Pi как `--provider/--model/--thinking` поверх `pi.args`;
 - живая сессия: `POST /api/tasks/:id/model` вызывает RPC `set_model` (и `set_thinking_level` для `/thinking`). Pi пишет смену в транскрипт сессии, поэтому она переживает restart TaskBridge;
+- `GET /api/models?refresh=1` заново опрашивает Pi и первым делом синхронизирует списки моделей provider'ов из `modelSync.providers` (сегодня `wormsoft`) — модели, добавленные в кабинете провайдера, появляются в селекторе без правки `models.json`;
 - если задача ещё не запускалась, смена модели поднимет/восстановит Pi-сессию.
 
 Локальный health-check и переключение профиля применяются только к провайдеру `localRuntime.provider` (по умолчанию `llamacpp`). Для остальных провайдеров они пропускаются, поэтому удалённая модель работает даже при остановленном локальном llama.cpp.
@@ -844,6 +861,7 @@ PWA с живым стримингом ответа, tool-карточками, 
 - **«сессия подвисла» без событий модели — это обычно отказ провайдера, а не задержка.** Движок не обрезает промпт: если история длиннее окна, он отвечает `400 prompt (N tokens) + max tokens (M) exceeds the context (K); requests are never truncated`, а Pi повторяет запрос с паузой (в логе сессии — `limits-wait` с `retries_total`). Панель теперь говорит это словами: фазой «История не влезает в окно модели» и первой строкой диагностики с числами (в веб-панели — состоянием контекста и процентом больше 100), а не «ожидается ответ агента». Лечится сжатием сессии или окном побольше: `262144` для IQ3_S влезает (144 к + 32 к вывода), `131072` — нет;
 - **окно контекста сессии для локальной модели берётся у движка, а не из каталога Pi.** В `models.json` у провайдера записан статический размер (256K), и после загрузки модели с окном 131K шкала хода показывала `30000/262144` — теперь живое число приходит из статуса TaskBridge (конфиг движка и `/health` его сервера), это же число видно в пикере моделей и в веб-панели; каталог остаётся фолбэком — для облачных моделей он и есть единственный источник;
 - Pi подключается к router автоматически: TaskBridge прокидывает `LLAMA_BASE_URL` в окружение Pi (`pi.env`), без ручного `/login llama.cpp`; локальные модели попадают в общий селектор моделей вместе с облачными.
+- **роутер с `--api-key` тоже читается.** Такой llama.cpp отвечает `401` на всё, кроме `/health`, поэтому без ключа список моделей пуст — «Локальные модели» без пресетов, «Скорость сейчас no-model», «Контекст нет данных» — хотя роутер жив (и это заметно именно тогда, когда он найден автодетектом на незнакомом порту). Ключ задаётся в `localRuntime.apiKey` (или в `localRuntime.router.apiKey`) самим значением либо ссылкой на переменную окружения: `"apiKey": "$HERMES_LLAMA_KEY"`. Заголовок уходит в `/models`, `/slots`, `/models/load`, `/models/unload`, `/models/sse` и `/metrics`; `/health` ключа не требует.
 
 `--models-max` (по умолчанию 4) — опасно на одной GPU: ставьте `1`, иначе модели могут не помещаться в VRAM. `--sleep-idle-seconds` выгружает простаивающие модели. `--models-max`/`--models-autoload` — это флаги router, их нужно писать в `args`, а не в INI.
 
