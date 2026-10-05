@@ -32,6 +32,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,8 +54,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.api.QuickAction
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
+import ru.arny.taskbridge.platform.fileDropTarget
 import ru.arny.taskbridge.platform.rememberClipboardFiles
 import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.ui.common.formatBytes
@@ -94,6 +98,12 @@ fun Composer(
     var filesLoaded by remember { mutableStateOf(false) }
     val atFile = atFileQuery(value.text, value.selection.min)
     val atOpen = slashMatches.isEmpty() && atFile != null
+    // Файлы, перетащенные из проводника на поле ввода (desktop): те же вложения,
+    // что Ctrl+V — через onPaste, чтобы не плодить параллельные пути. Обёртка
+    // remember+rememberUpdatedState держит стабильную лямбду, чтобы нода DnD
+    // не пересоздавалась на каждой рекомпозиции.
+    val onPasteRef = rememberUpdatedState(onPaste)
+    val fileDropHandler = remember { { dropped: List<UploadFile> -> onPasteRef.value(dropped) } }
     LaunchedEffect(atOpen) {
         if (atOpen && !filesLoaded) {
             filesLoaded = true
@@ -146,7 +156,13 @@ fun Composer(
             else -> false
         }
     }
-    Surface(modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.surface, tonalElevation = 2.dp) {
+    Surface(
+        modifier
+            .fillMaxWidth()
+            .fileDropTarget(fileDropHandler),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 2.dp,
+    ) {
         // Inside the Surface: its tint runs under the navigation bar instead of a blank strip.
         Column(Modifier.navigationBarsPadding().padding(horizontal = 10.dp, vertical = 8.dp)) {
             top()

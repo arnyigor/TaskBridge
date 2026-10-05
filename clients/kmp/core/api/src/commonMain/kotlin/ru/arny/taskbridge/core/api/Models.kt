@@ -73,6 +73,11 @@ data class LocalRuntimeInfo(
      * Состояние берётся отсюда, `loaded` знает только про роутер.
      */
     val models: List<LocalModelEntry> = emptyList(),
+    /**
+     * Скрытые строки (провайдеры/модели найденных автоматически серверов): они не в
+     * `models`, но их можно вернуть — клиент показывает их отдельным блоком.
+     */
+    val hidden: List<String> = emptyList(),
 )
 
 @Serializable
@@ -82,6 +87,13 @@ data class LocalModelEntry(
     /** Провайдер Pi для внешних серверов (у роутера — null, там общий provider). */
     val provider: String? = null,
     val status: String? = null,
+    /**
+     * Доля загрузки весов 0..1, пока [status] == "loading": llama.cpp отдаёт
+     * сцены (stages) с прогрессом текущей, сервер сворачивает их в одно число
+     * (то же, чем живут события LOCAL_MODEL_PROGRESS). `null` — прогресса нет:
+     * внешний сервер поднимается целиком, порциями движок не отчитывается.
+     */
+    val loadRatio: Double? = null,
     val external: Boolean = false,
     val contextWindow: Long? = null,
     /**
@@ -101,16 +113,56 @@ data class LocalModelEntry(
     /** Первый отсутствующий путь из конфига — что именно искать. */
     val missingFile: String? = null,
     /**
-     * Запись есть в конфиге TaskBridge (`localRuntime.externalServers`), поэтому её
-     * можно убрать из списка. Строки, найденные в Pi (`models.json`), принадлежат
-     * Pi — TaskBridge их не удаляет.
+     * Запись есть в конфиге TaskBridge, поэтому её можно убрать из списка. Строки, найденные в Pi
+     * (`models.json`), принадлежат Pi — TaskBridge их не удаляет. У пресета роутера конфиг — его
+     * секция в models.ini: такая строка тоже убирается, но только вместе с секцией.
      */
     val removable: Boolean = false,
+    /**
+     * Строку можно убрать из списка TaskBridge — но только скрыть: она найдена автоматически
+     * (провайдер Pi + каталог установки), и удалять её неоткуда. Отменяется через [hidden].
+     */
+    val hideable: Boolean = false,
+    /**
+     * Наличие mmproj-проектора у пресета роутера (из его секции models.ini): оно и
+     * делает модель vision. `null`-поведения нет — у внешних серверов и строк из Pi
+     * vision задаётся их собственным конфигом, а не models.ini.
+     */
+    val vision: Boolean = false,
+    /**
+     * Vision этой строки правится отсюда: секция пресета есть в `models.ini` роутера.
+     * Флаг нужен клиенту, чтобы показать переключатель, а не выдумывать его у строки,
+     * чей конфиг принадлежит движку или Pi.
+     */
+    val visionEditable: Boolean = false,
     /** Живая телеметрия внешнего сервера (Strata /metrics): фаза, скорости, прогресс. */
     val metrics: LocalModelMetrics? = null,
     val phase: String? = null,
     val promptRead: Long? = null,
     val promptTotal: Long? = null,
+)
+
+/**
+ * Ответ `POST /api/local/vision`: vision — свойство ПРЕСЕТА роутера (ключи
+ * `mmproj`/`no-mmproj` его секции в `models.ini`), поэтому ответ описывает
+ * правку записи, а не статус — как у контекста.
+ */
+@Serializable
+data class LocalVisionChange(
+    val provider: String? = null,
+    val model: String? = null,
+    val file: String? = null,
+    val vision: Boolean = false,
+    val previous: Boolean? = null,
+    /**
+     * Путь АКТИВНОГО проектора: у включённого vision — он, у выключенного — null
+     * (путь остаётся в файле закомментированной строкой `; mmproj = …`, поэтому
+     * включение обратно не ищет файл заново).
+     */
+    val mmproj: String? = null,
+    val changed: Boolean = false,
+    /** Роутер сейчас отвечает: `models.ini` он читает при старте — нужен перезапуск. */
+    val restartRequired: Boolean = false,
 )
 
 /**
@@ -491,7 +543,7 @@ data class CompactionLast(
 )
 
 @Serializable
-data class RuntimeInfo(val state: String? = null, val activity: String? = null)
+data class RuntimeInfo(val state: String? = null, val activity: String? = null, /** Epoch ms when the current compaction started; only present while activity == "compacting". */ val compactingSince: Long? = null)
 
 /**
  * Один источник контекста из `GET /api/tasks/:id/context`: откуда именно текст
@@ -738,3 +790,223 @@ internal fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 internal fun JsonElement.asObjectOrNull(): JsonObject? = runCatching { jsonObject }.getOrNull()
 
 internal fun JsonElement.asStringOrNull(): String? = runCatching { jsonPrimitive.contentOrNull }.getOrNull()
+
+// --- Hugging Face: поиск, варианты GGUF, загрузки (Local Model Library) ---
+
+/** Строка поиска /api/hf/search. */
+@Serializable
+data class HfSearchResult(
+    val repo: String,
+    val author: String? = null,
+    val downloads: Long = 0,
+    val likes: Long = 0,
+    val lastModified: String? = null,
+    /** Gated/private репозиторий: скачать без токена на сервере не выйдет. */
+    val gated: Boolean = false,
+)
+
+/** Один файл модели в дереве репозитория (размеры берёт сервер). */
+@Serializable
+data class HfFileRef(val path: String, val size: Long? = null)
+
+/** Вариант модели: квант + все его файлы (у шардированных — части). */
+@Serializable
+data class HfVariant(
+    val quant: String,
+    val files: List<HfFileRef> = emptyList(),
+    val totalBytes: Long = 0,
+    /** Число частей шардированного файла (00001-of-N); null — файл один. */
+    val shards: Int? = null,
+    /** Неполный набор частей качать нельзя. */
+    val complete: Boolean = true,
+)
+
+/** mmproj-проектор для vision-моделей; скачивается автоматически вместе с квантом. */
+@Serializable
+data class HfProjector(val path: String, val size: Long? = null, val quant: String? = null)
+
+@Serializable
+data class HfRepoInfo(
+    val repo: String,
+    /** Конкретная ревизия (commit sha) — она и попадёт в реестр библиотеки. */
+    val revision: String,
+    val variants: List<HfVariant> = emptyList(),
+    val projectors: List<HfProjector> = emptyList(),
+)
+
+/** Задание загрузки из /api/hf/downloads. */
+@Serializable
+data class HfDownloadJob(
+    val id: String,
+    val repo: String,
+    val revision: String? = null,
+    val label: String? = null,
+    val files: List<HfFileRef> = emptyList(),
+    val totalBytes: Long = 0,
+    val downloadedBytes: Long = 0,
+    val state: String,
+    val error: String? = null,
+    /** Байт/с — только у активных заданий. */
+    val speed: Double? = null,
+    /** id записи библиотеки, вычисленный при старте загрузки: нужен кнопке «Прописать в Pi». */
+    val libraryId: String? = null,
+) {
+    val active: Boolean get() = state in setOf("QUEUED", "DOWNLOADING", "VERIFYING")
+    val resumable: Boolean get() = state in setOf("FAILED", "INTERRUPTED", "CANCELLED")
+}
+
+@Serializable
+data class HfDownloads(val jobs: List<HfDownloadJob> = emptyList())
+
+/** Сколько завершённых заданий убрано из списка загрузок. */
+@Serializable
+data class HfDownloadsClear(val removed: Int = 0)
+
+/** Запись библиотеки установленных моделей (или standalone-файл после скана). */
+@Serializable
+data class LibraryEntry(
+    val id: String,
+    val name: String? = null,
+    val quant: String? = null,
+    val format: String? = null,
+    val vision: Boolean = false,
+    val files: List<HfFileRef> = emptyList(),
+    /** Проверка наличия файлов на диске (свежая — по ?fresh=1). */
+    val filesPresent: Boolean = true,
+    /** Пресет в models.ini роутера, если модель уже «Прописана в Pi». */
+    val preset: String? = null,
+    val missingFiles: List<String> = emptyList(),
+    val source: HfSource? = null,
+)
+
+@Serializable
+data class HfSource(val type: String? = null, val repo: String? = null, val revision: String? = null)
+
+@Serializable
+data class LibraryStatus(
+    val models: List<LibraryEntry> = emptyList(),
+    val standalone: List<LibraryEntry> = emptyList(),
+    val root: String? = null,
+)
+
+/** Результат «Прописать в Pi»: пресет в models.ini роутера llama.cpp. */
+@Serializable
+data class LibraryRegistration(
+    val preset: String,
+    val file: String,
+    val changed: Boolean = false,
+    /** Роутер сейчас жив: models.ini он читает при старте — нужен перезапуск. */
+    val restartRequired: Boolean = false,
+    val model: String? = null,
+    val mmproj: String? = null,
+)
+
+/** Результат удаления модели из библиотеки: файлы, общие с другими записями (например vision-проектор), остаются. */
+@Serializable
+data class LibraryDeletion(
+    val removed: List<String> = emptyList(),
+    val kept: List<String> = emptyList(),
+    val freedBytes: Long = 0,
+    val presetRemoved: Boolean = false,
+)
+
+/** Один процесс машины с сервером: снапшот из /api/processes для панели «Процессы». */
+@Serializable
+data class ProcessEntry(
+    val pid: Long,
+    val name: String? = null,
+    /** Резидентная память в байтах; null — ОС её не сообщила (POSIX-список). */
+    val memoryBytes: Long? = null,
+    /** Момент старта процесса, ms epoch; null — ОС не сообщила. */
+    val startedAt: Long? = null,
+    val commandLine: String? = null,
+)
+
+/** Обёртка ответа GET /api/processes: сервер отдаёт {"processes":[...]} (null — ОС не ответила). */
+@Serializable
+data class ProcessList(
+    val processes: List<ProcessEntry> = emptyList(),
+)
+
+@Serializable
+data class GpuProcessEntry(
+    val pid: Long,
+    val name: String? = null,
+    val memoryMb: Long? = null,
+)
+
+@Serializable
+data class GpuProcessList(
+    val processes: List<GpuProcessEntry>? = null,
+)
+
+/**
+ * Pi-сессия на диске, найденная сервером (GET /api/native-sessions): единица импорта
+ * в TaskBridge. `key` — непрозрачный sha256 от пути, клиент не имеет права присылать
+ * путь сам; `existingTaskId` не null, если эта сессия уже импортирована.
+ */
+@Serializable
+data class NativeSession(
+    val key: String,
+    val id: String? = null,
+    val name: String? = null,
+    val cwd: String? = null,
+    /** ISO-время изменения файла сессии; null — сервер не сообщил. */
+    val mtime: String? = null,
+    val preview: String? = null,
+    val existingTaskId: String? = null,
+) {
+    val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: id ?: key.take(8)
+}
+
+/** Сессии одного проекта; `suggestion` — свежая неимпортированная, которую сервер предлагает первой. */
+@Serializable
+data class NativeSessionGroup(
+    val id: String,
+    val name: String? = null,
+    val path: String? = null,
+    val sessions: List<NativeSession> = emptyList(),
+    val suggestion: NativeSessionSuggestion? = null,
+) {
+    val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: id
+}
+
+@Serializable
+data class NativeSessionSuggestion(
+    val key: String,
+    val name: String? = null,
+    val mtime: String? = null,
+    val preview: String? = null,
+)
+
+/** Предпросмотр перед импортом (GET /api/native-sessions/preview): что внутри сессии. */
+@Serializable
+data class NativeSessionPreview(
+    val projectId: String,
+    val key: String,
+    val projectPath: String? = null,
+    val id: String? = null,
+    val name: String? = null,
+    val mtime: String? = null,
+    val entryCount: Int = 0,
+    val messageCount: Int = 0,
+    val model: NativeSessionModel? = null,
+    val thinkingLevel: String? = null,
+    val tokens: Long? = null,
+    val lastUser: String? = null,
+    val lastAssistant: String? = null,
+    val existingTaskId: String? = null,
+)
+
+@Serializable
+data class NativeSessionModel(val provider: String? = null, val id: String? = null)
+
+/**
+ * Как импортировать: `clone` копирует JSONL в папку задачи (терминальная сессия Pi
+ * остаётся живой), `take-over` забирает оригинал и требует явного подтверждения,
+ * что сессия в терминале закрыта.
+ */
+enum class NativeImportMode(val wire: String, val label: String) {
+    Clone("clone", "Копия"),
+    TakeOver("take-over", "Забрать оригинал"),
+}

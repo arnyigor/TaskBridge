@@ -17,6 +17,7 @@
 
 import http from 'node:http';
 import https from 'node:https';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { loadConfig } from './config.mjs';
@@ -172,6 +173,10 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       console.error(`[proxy] HTTPS disabled: failed to prepare certificate (${error.message}). Is 'openssl' on PATH?`);
     }
   }
+
+  // The launcher must distinguish this listener from an older process already
+  // answering on the same port. Only signal readiness after our bind succeeds.
+  if (process.env.LAN_READY_FILE) fs.writeFileSync(process.env.LAN_READY_FILE, String(process.pid));
 
   let closing = false;
   const shutdown = async () => {

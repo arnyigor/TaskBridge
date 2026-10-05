@@ -158,8 +158,11 @@ async function startServer(config, timeoutMs = 15000) {
 }
 
 async function stopServer(timeoutMs = 9000) {
-  const lan = runningLan();
-  if (lan) {
+  // readLan(), not runningLan(): a half-dead pair (app crashed, detached proxy
+  // outlived it and still holds the public port) must still be stopped, or the
+  // next start fails with EADDRINUSE. The LAN stop tolerates dead pids.
+  const lan = readLan();
+  if (lan && Number.isSafeInteger(lan.appPid) && Number.isSafeInteger(lan.proxyPid)) {
     log(`stopping LAN mode: app PID ${lan.appPid}, proxy PID ${lan.proxyPid}`);
     // The proxy goes first: while it still forwards, the app would answer a
     // request that is about to be cut off.

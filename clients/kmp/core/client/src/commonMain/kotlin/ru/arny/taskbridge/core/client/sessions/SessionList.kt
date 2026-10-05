@@ -65,6 +65,14 @@ class SessionList(
     private val clockMillis: () -> Long,
     private val activeIntervalMillis: Long = 1_000,
     private val idleIntervalMillis: Long = 10_000,
+    /** Desktop: поднимает потушенный сервер скрытым процессом, без консоли (см. DesktopServerLauncher). */
+    private val startLocalServer: (suspend () -> Unit)? = null,
+    /**
+     * Может ли [startLocalServer] вообще сработать: на desktop это найденный корень
+     * TaskBridge (`scripts/start-lan.mjs`). Без него обещание «запустим на этом
+     * компьютере» — ложь, и диалог должен говорить другое.
+     */
+    private val localServerAvailable: () -> Boolean = { startLocalServer != null },
 ) {
     private val _state = MutableStateFlow(SessionListState())
     val state: StateFlow<SessionListState> = _state.asStateFlow()
@@ -137,24 +145,39 @@ class SessionList(
         }
     }
 
+    /** Поднимет ли приложение сервер само: лаунчер есть и каталог TaskBridge найден. */
+    fun canStartLocalServer(): Boolean = startLocalServer != null && localServerAvailable()
+
     /**
-     * Restarts TaskBridge on the PC and returns once a new process answers,
-     * like the web UI: /api/info with another bootId, or answering again after
-     * it was down. Chats reconnect by themselves.
+     * Перезапуск TaskBridge на ПК; возвращается, когда отвечает новый процесс.
+     * Если сервер вообще не отвечает, desktop-клиент ЗАПУСКАЕТ его сам —
+     * скрытым процессом через [startLocalServer], без консольного окна; Android
+     * в этом случае сразу сообщает, что сервер надо запустить на компьютере.
      */
     suspend fun restartServer(timeoutMillis: Long = 120_000, stepMillis: Long = 700): Result<Unit> = runCatching {
         val before = runCatching { api.info().bootId }.getOrNull()
-        api.restartServer()
-        var sawDown = false
+        if (before == null) {
+            val launch = startLocalServer
+                ?: throw IllegalStateException("Сервер недоступен — запустите TaskBridge на компьютере (start.cmd)")
+            if (!localServerAvailable()) throw IllegalStateException(
+                "Сервер недоступен, а запустить его из приложения нельзя: каталог TaskBridge " +
+                    "(scripts/start-lan.mjs) не найден — укажите его в настройках приложения",
+            )
+            launch()
+        } else {
+            api.restartServer()
+        }
+        var sawDown = before != null
         val back = withTimeoutOrNull(timeoutMillis) {
             while (true) {
                 delay(stepMillis)
                 val now = runCatching { api.info().bootId }.getOrNull()
                 if (now == null) sawDown = true
-                else if (sawDown || (before != null && now != before)) break
+                // before == null (сервер запускали с нуля): первое же «жив» — успех.
+                else if (sawDown || before == null || now != before) break
             }
         }
-        if (back == null) throw IllegalStateException("Сервер не вернулся за ${timeoutMillis / 1000} с — проверьте окно запуска TaskBridge на компьютере")
+        if (back == null) throw IllegalStateException("Сервер не вернулся за ${timeoutMillis / 1000} с — проверьте логи TaskBridge на компьютере")
         infoTick = 0 // a new process: read its info and projects again
         refresh()
     }

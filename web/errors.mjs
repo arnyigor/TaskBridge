@@ -42,6 +42,40 @@ function parseEnvelope(text) {
   }
 }
 
+function parseNestedObject(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text.startsWith('{') || !text.endsWith('}')) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function findMessage(body, depth = 0) {
+  if (!body || depth > 4) return { message: '', code: '', param: '' };
+  const nestedError = body.error && typeof body.error === 'object'
+    ? body.error
+    : parseNestedObject(body.error);
+  const nestedMessage = parseNestedObject(body.message);
+  const nested = nestedError || nestedMessage;
+  if (nested) {
+    const found = findMessage(nested, depth + 1);
+    if (found.message || found.code || found.param) return found;
+  }
+  const message = pickString(
+    typeof body.message === 'string' && !parseNestedObject(body.message) ? body.message : '',
+    typeof body.error === 'string' && !parseNestedObject(body.error) ? body.error : '',
+    body.detail, body.reason, body.description
+  );
+  const rawCode = pickString(body.error_type, body.type, body.code, body.errorCode, body.status);
+  const code = /^[A-Za-z][\w-]*$/.test(rawCode) ? rawCode : '';
+  const param = pickString(body.param);
+  return { message, code, param };
+}
+
 function clip(text) {
   return text.length > MAX_LENGTH ? `${text.slice(0, MAX_LENGTH - 1)}…` : text;
 }
@@ -56,16 +90,13 @@ export function humanizeError(value) {
   const body = parseEnvelope(text);
   if (!body) return clip(text);
 
-  const nested = body.error && typeof body.error === 'object' ? body.error : null;
-  const message = pickString(
-    body.message, nested?.message, typeof body.error === 'string' ? body.error : '',
-    body.detail, body.reason, body.description
-  );
+  const found = findMessage(body);
+  const message = found.message;
   // A numeric or HTTP-ish "code" is the status echoed in the body, not an error
-  // name — only keep identifier-looking values.
-  const rawCode = pickString(body.error_type, body.type, nested?.type, nested?.code, body.errorCode, body.code);
-  const named = /^[A-Za-z][\w-]*$/.test(rawCode) ? rawCode : '';
-  const param = pickString(body.param, nested?.param);
+  // name — only keep identifier-looking values. Nested provider responses are
+  // common: error.message may itself contain a JSON string with escaped newlines.
+  const named = found.code;
+  const param = found.param;
 
   let human = message || named;
   if (!human) return clip(text);

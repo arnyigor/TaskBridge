@@ -29,17 +29,30 @@ export function parseWmiDate(value) {
 
 async function query() {
   if (process.platform === 'win32') {
-    const script = 'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}" -f $_.ProcessId, $_.CreationDate.ToString("yyyyMMddHHmmss.fff000zzz").Replace(":", ""), $_.CommandLine }';
+    // Five tab-separated fields: pid, created, name, working-set bytes, command
+    // line. The command line is the last field on purpose — it may contain tabs,
+    // and the parser re-joins the remainder.
+    const script = 'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}`t{3}`t{4}" -f $_.ProcessId, $_.CreationDate.ToString("yyyyMMddHHmmss.fff000zzz").Replace(":", ""), $_.Name, $_.WorkingSetSize, $_.CommandLine }';
     const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
     return out.split(/\r?\n/).filter(Boolean).map(line => {
-      const [pid, created, ...rest] = line.split('\t');
-      return { pid: Number(pid), startedAt: parsePsOffsetDate(created), commandLine: rest.join('\t') };
+      const [pid, created, name, workingSet, ...rest] = line.split('\t');
+      const bytes = Number(workingSet);
+      return {
+        pid: Number(pid),
+        startedAt: parsePsOffsetDate(created),
+        name: name || null,
+        memoryBytes: Number.isFinite(bytes) && bytes >= 0 ? bytes : null,
+        commandLine: rest.join('\t')
+      };
     }).filter(item => Number.isInteger(item.pid));
   }
   const out = await run('ps', ['-eo', 'pid=,lstart=,args=']);
   return out.split('\n').filter(Boolean).map(line => {
     const match = /^\s*(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4})\s+(.*)$/.exec(line);
-    return match ? { pid: Number(match[1]), startedAt: Date.parse(match[2]) || null, commandLine: match[3] } : null;
+    if (!match) return null;
+    // No per-process RSS in this format; the panel treats null memory as "unknown".
+    const first = String(match[3]).split(/\s+/)[0] || '';
+    return { pid: Number(match[1]), startedAt: Date.parse(match[2]) || null, name: first.split('/').pop() || null, memoryBytes: null, commandLine: match[3] };
   }).filter(Boolean);
 }
 
@@ -51,7 +64,7 @@ function parsePsOffsetDate(value) {
   return parseWmiDate(`${stamp}.${ms}000${sign}${String(Number(hh) * 60 + Number(mm)).padStart(3, '0')}`);
 }
 
-/** [{pid, startedAt (ms epoch or null), commandLine}], or null when the OS would not say. */
+/** [{pid, startedAt (ms epoch or null), name, memoryBytes, commandLine}], or null when the OS would not say. */
 export async function listProcesses({ fresh = false } = {}) {
   if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return cached.list;
   const list = await query().catch(() => null);
@@ -60,6 +73,22 @@ export async function listProcesses({ fresh = false } = {}) {
 }
 
 const normalizePath = value => String(value || '').replace(/\\/g, '/').toLowerCase();
+
+/** Processes reported by NVIDIA's compute accounting. null means nvidia-smi unavailable. */
+export async function listGpuProcesses({ timeoutMs = 1500 } = {}) {
+  if (process.platform !== 'win32' && process.platform !== 'linux') return null;
+  try {
+    const out = await run('nvidia-smi', ['--query-compute-apps=pid,process_name,used_gpu_memory', '--format=csv,noheader,nounits']);
+    return out.split(/\r?\n/).filter(Boolean).map(line => {
+      const [pid, name, memory] = line.split(',').map(value => value.trim());
+      const pidNum = Number(pid);
+      const memoryMb = Number(memory);
+      return Number.isInteger(pidNum) ? { pid: pidNum, name: name || null, memoryMb: Number.isFinite(memoryMb) ? memoryMb : null } : null;
+    }).filter(Boolean);
+  } catch {
+    return null;
+  }
+}
 
 /** Processes whose command line names `file`, except the pids in `exclude`. null = unknown. */
 export async function processesUsingFile(file, { exclude = new Set(), list } = {}) {

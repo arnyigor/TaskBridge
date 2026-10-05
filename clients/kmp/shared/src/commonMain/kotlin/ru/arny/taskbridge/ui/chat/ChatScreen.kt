@@ -792,11 +792,20 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         if (read != null && total != null && total > 0) add("${formatTokensK(read)} / ${formatTokensK(total)}")
         ppTimer?.takeIf { it > 0.0 }?.let { add("≈ ${(it * 10).roundToInt() / 10.0} ток/с") }
     }.joinToString(" · ").let { if (it.isEmpty()) "" else " · $it" }
+    // Сколько длится сжатие: сервер ставит compactingSince на compaction_start.
+    // Часы клиента и сервера расходятся на секунды по LAN — для счётчика это ок.
+    val compactingSince = state.task?.runtime?.compactingSince
+    var compactTick by remember(state.taskId) { mutableStateOf(nowMillis()) }
+    LaunchedEffect(state.taskId, compactingSince) {
+        if (compactingSince != null && compactingSince > 0) while (true) { delay(1000); compactTick = nowMillis() }
+    }
+    val compactElapsed = compactingSince?.takeIf { it > 0 }?.let { (compactTick - it).coerceAtLeast(0) }
+    val compactingDetail = compactElapsed?.let { " · ${elapsedClock(it)}" }.orEmpty()
     val phase = when {
         state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
         state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
         state.task?.status == "FAILED" -> "Ошибка · подробнее"
-        state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$readingDetail · подробнее"
+        state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$compactingDetail$readingDetail · подробнее"
         answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
         readingPp != null && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingDetail"
         readingPrompt && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingDetail"

@@ -15,6 +15,7 @@
 // State: data/lan.json (pids + ports), logs: data/lan-app.log, data/lan-proxy.log.
 
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
@@ -65,15 +66,27 @@ function freePort() {
   });
 }
 
-async function health(port, timeoutMs = 500) {
+async function health(port, timeoutMs = 500, host = '127.0.0.1') {
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
+    const address = host === '0.0.0.0' ? '127.0.0.1' : host;
+    const response = await fetch(`http://${address.includes(':') ? `[${address}]` : address}:${port}/api/health`, { signal: AbortSignal.timeout(timeoutMs) });
     return response.ok;
   } catch { return false; }
 }
 
 // Waits for the public face to answer. The app is polled on its internal port so
 // a failure says which process is at fault, not just "nothing works".
+async function waitForProxy(proxy, readyFile, port, host) {
+  const deadline = Date.now() + 20000;
+  while (Date.now() < deadline && proxy.exitCode === null) {
+    try {
+      if (fs.readFileSync(readyFile, 'utf8') === String(proxy.pid) && await health(port, 500, host)) return true;
+    } catch { /* proxy has not bound yet */ }
+    await sleep(250);
+  }
+  return false;
+}
+
 async function waitForHealth(port, { timeoutMs = 20000, onFail } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -84,9 +97,46 @@ async function waitForHealth(port, { timeoutMs = 20000, onFail } = {}) {
   return false;
 }
 
-function tail(file, lines = 8) {
-  try { return fs.readFileSync(file, 'utf8').trim().split('\n').slice(-lines).join('\n'); }
-  catch { return ''; }
+// How long the app gets to answer /api/health. Measured 2026-10-05 on the real data
+// directory: 22.4 s (a fresh empty one boots in a couple of seconds). The old 20 s
+// budget killed a healthy server mid-boot, so the button reported «the app did not
+// come up» while CTRL+C-free `run` (30 s) started the very same build.
+const APP_START_TIMEOUT_MS = Number(process.env.LAN_APP_TIMEOUT_MS) || 60000;
+
+// Both log files are opened for append, so a tail shows the history of every earlier
+// run — on 2026-10-05 that produced a diagnosis about an instance lock that belonged
+// to a run from an hour before. A marker before each launch makes the tail this run's.
+function markLog(file, text) {
+  const marker = `=== ${text} ${new Date().toISOString()} ===`;
+  try { fs.appendFileSync(file, `\n${marker}\n`); } catch { /* the tail will just show history */ }
+  return marker;
+}
+
+/** Tail of a log after its last marker — what this run's child actually wrote. */
+function tailSince(file, marker, lines = 12) {
+  try {
+    const text = fs.readFileSync(file, 'utf8');
+    const index = text.lastIndexOf(marker);
+    return text.slice(index >= 0 ? index + marker.length : 0);
+  } catch { return ''; }
+}
+
+// The child processes log Node warnings (DEP0190 from spawn with shell: true) that would
+// fill the whole tail and hide the reason — e.g. an instance-lock refusal from
+// src/server.mjs (2026-10-05: the operator saw three DeprecationWarnings and no cause).
+const NODE_NOISE = /DeprecationWarning|--trace-deprecation|ExperimentalWarning/;
+function meaningfulTail(text, lines = 12) {
+  const kept = String(text || '').split('\n').filter(line => !NODE_NOISE.test(line) && line.trim() !== '');
+  return kept.slice(-lines).join('\n');
+}
+
+// Who holds the data directory: the lock is written by src/server.mjs, and a live holder
+// without lan.json is a leftover (an interrupted run) that the state file cannot show.
+function readLockPid() {
+  try {
+    const holder = JSON.parse(fs.readFileSync(path.join(DATA, 'taskbridge.lock'), 'utf8'));
+    return Number.isSafeInteger(holder?.pid) ? holder.pid : null;
+  } catch { return null; }
 }
 
 function spawnDetached({ file, args, env, log }) {
@@ -104,10 +154,17 @@ function spawnDetached({ file, args, env, log }) {
 
 async function start() {
   const existing = readState();
-  if (existing && alive(existing.appPid) && alive(existing.proxyPid)) {
+  if (existing && alive(existing.appPid) && alive(existing.proxyPid)
+      && await health(existing.internalPort) && await health(existing.publicPort)) {
     console.log(`[lan] already running: app ${existing.appPid}, proxy ${existing.proxyPid}`);
     console.log(`[lan] http://127.0.0.1:${existing.publicPort}`);
     return 0;
+  }
+  // A half-dead pair may still own the port or data lock. Do not kill PIDs from
+  // stale state: the OS may have reused them for unrelated processes.
+  if (existing && (alive(existing.appPid) || alive(existing.proxyPid))) {
+    console.error(`[lan] incomplete pair in ${STATE} (app ${existing.appPid}, proxy ${existing.proxyPid}). Inspect the processes before restarting.`);
+    return 1;
   }
 
   const config = await loadConfig(ROOT);
@@ -122,6 +179,7 @@ async function start() {
 
   // The app: full TaskBridge, loopback only, TLS left to the proxy, and told the
   // public port so the links it prints (and /api/info) point at the proxy.
+  const appMarker = markLog(appLog, 'start-lan app');
   const app = spawnDetached({
     file: process.execPath,
     args: ['src/server.mjs'],
@@ -134,28 +192,38 @@ async function start() {
     },
   });
 
-  const appUp = await waitForHealth(internalPort, { onFail: () => app.exitCode !== null });
+  const appStartedAt = Date.now();
+  const appUp = await waitForHealth(internalPort, { timeoutMs: APP_START_TIMEOUT_MS, onFail: () => app.exitCode !== null });
   if (!appUp) {
     killTree(app.pid);
-    console.error('[lan] the app did not come up. Its log says:');
-    console.error(tail(appLog, 12) || '  (empty)');
-    if (app.exitCode !== null) console.error('[lan] is another TaskBridge already running on this data directory?');
+    console.error(`[lan] the app did not come up in ${Math.round((Date.now() - appStartedAt) / 1000)} s. Its log says:`);
+    console.error(meaningfulTail(tailSince(appLog, appMarker)) || '  (empty)');
+    if (app.exitCode !== null) {
+      const lockPid = readLockPid();
+      console.error(lockPid
+        ? `[lan] каталог данных ${DATA} занят другим экземпляром TaskBridge (PID ${lockPid}) — остановите его и повторите. ` +
+          'Если этот процесс уже не работает, запустите ещё раз: блокировка от мёртвого процесса перехватывается.'
+        : '[lan] is another TaskBridge already running on this data directory?');
+    }
     return 1;
   }
 
+  const readyFile = path.join(DATA, `lan-proxy-ready-${randomUUID()}`);
+  const proxyMarker = markLog(proxyLog, 'start-lan proxy');
   const proxy = spawnDetached({
     file: process.execPath,
     args: ['src/proxy.mjs'],
     log: proxyLog,
-    env: { LAN_INTERNAL_PORT: String(internalPort), LAN_PORT: String(publicPort) },
+    env: { LAN_INTERNAL_PORT: String(internalPort), LAN_PORT: String(publicPort), LAN_READY_FILE: readyFile },
   });
 
-  const proxyUp = await waitForHealth(publicPort, { onFail: () => proxy.exitCode !== null });
-  if (!proxyUp) {
+  const proxyUp = await waitForProxy(proxy, readyFile, publicPort, lanHost);
+  try { fs.unlinkSync(readyFile); } catch { /* proxy failed before binding */ }
+  if (!proxyUp || proxy.exitCode !== null) {
     killTree(proxy.pid);
     killTree(app.pid);
     console.error('[lan] the proxy did not come up. Its log says:');
-    console.error(tail(proxyLog, 12) || '  (empty)');
+    console.error(meaningfulTail(tailSince(proxyLog, proxyMarker)) || '  (empty)');
     return 1;
   }
 
@@ -171,10 +239,21 @@ async function start() {
   return 0;
 }
 
-// Foreground mode: what `npm start` and start.cmd have always felt like — the
-// app's log stays on this terminal — with the proxy alongside it. Ctrl+C reaches
-// both (same console), the proxy goes first, and the exit code is the app's.
+// Foreground mode: when no pair is running, the app's log stays on this
+// terminal. Ctrl+C reaches both (same console); the proxy goes first.
+// When a healthy pair already exists, report it instead of starting a rival.
 async function runForeground() {
+  const existing = readState();
+  if (existing && alive(existing.appPid) && alive(existing.proxyPid)
+      && await health(existing.internalPort) && await health(existing.publicPort)) {
+    console.log(`[lan] already running: app ${existing.appPid}, proxy ${existing.proxyPid}`);
+    console.log(`[lan] http://127.0.0.1:${existing.publicPort}`);
+    return 0;
+  }
+  if (existing && (alive(existing.appPid) || alive(existing.proxyPid))) {
+    console.error(`[lan] incomplete pair in ${STATE} (app ${existing.appPid}, proxy ${existing.proxyPid}). Inspect the processes before restarting.`);
+    return 1;
+  }
   const config = await loadConfig(ROOT);
   const publicPort = Number(process.env.LAN_PORT || config.server?.port || 8787);
   const lanHost = proxyHost(config);
@@ -193,25 +272,28 @@ async function runForeground() {
     },
   });
 
-  const appUp = await waitForHealth(internalPort, { timeoutMs: 30000, onFail: () => app.exitCode !== null });
+  const appUp = await waitForHealth(internalPort, { timeoutMs: APP_START_TIMEOUT_MS, onFail: () => app.exitCode !== null });
   if (!appUp) {
     killTree(app.pid);
     console.error('[lan] the app did not come up — see its output above.');
     return 1;
   }
 
+  const readyFile = path.join(DATA, `lan-proxy-ready-${randomUUID()}`);
+  const proxyMarker = markLog(path.join(DATA, 'lan-proxy.log'), 'start-lan proxy (foreground)');
   const proxy = spawnDetached({
     file: process.execPath,
     args: ['src/proxy.mjs'],
     log: path.join(DATA, 'lan-proxy.log'),
-    env: { LAN_INTERNAL_PORT: String(internalPort), LAN_PORT: String(publicPort) },
+    env: { LAN_INTERNAL_PORT: String(internalPort), LAN_PORT: String(publicPort), LAN_READY_FILE: readyFile },
   });
-  const proxyUp = await waitForHealth(publicPort, { onFail: () => proxy.exitCode !== null });
-  if (!proxyUp) {
+  const proxyUp = await waitForProxy(proxy, readyFile, publicPort, lanHost);
+  try { fs.unlinkSync(readyFile); } catch { /* proxy failed before binding */ }
+  if (!proxyUp || proxy.exitCode !== null) {
     killTree(proxy.pid);
     killTree(app.pid);
     console.error('[lan] the proxy did not come up. Its log says:');
-    console.error(tail(path.join(DATA, 'lan-proxy.log'), 12) || '  (empty)');
+    console.error(meaningfulTail(tailSince(path.join(DATA, 'lan-proxy.log'), proxyMarker)) || '  (empty)');
     return 1;
   }
 

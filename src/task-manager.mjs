@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
+import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
@@ -16,6 +17,11 @@ import { ModelCatalog } from './model-catalog.mjs';
 import { syncProviderModels } from './provider-models.mjs';
 import { ModelLatency } from './model-latency.mjs';
 import { ExternalLocalServers, LocalModelService, quantFromPath } from './local-models.mjs';
+import { HuggingFaceService } from './huggingface.mjs';
+import { DownloadManager } from './download-manager.mjs';
+import { ModelLibrary, idForEntry } from './model-library.mjs';
+import { modelsPresetPath, registerLibraryPreset, patchPresetContext, patchPresetVision, parsePresets, removePreset } from './router-presets.mjs';
+import { quantFromFilename } from './huggingface.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
 import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
@@ -191,6 +197,7 @@ export class TaskManager extends EventEmitter {
     this.localModels = new LocalModelService(config.localRuntime || {}, dataRoot);
     this.localServers = new ExternalLocalServers(config.localRuntime || {}, { agentDir: piAgentDir(process.env) });
     this.local = this.localModels.enabled ? this.localModels : this.runtimeManager;
+    this.#initModelLibrary(config, dataRoot);
     this.mcp = new McpManager(config.pi || {}, dataRoot);
     this.modelCatalog = new ModelCatalog({ pi: config.pi, cwd: dataRoot, env: this.#llamaEnv() });
     // Per-model TTFT history (local + cloud): the UI shows "this model usually
@@ -893,7 +900,7 @@ export class TaskManager extends EventEmitter {
   #publicTask(task) {
     const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt,
-      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
+      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
@@ -1329,6 +1336,7 @@ export class TaskManager extends EventEmitter {
       task._lastPiExitAt = Date.now();
       task._toolsRunning = 0;
       task._compacting = false;
+      task._compactingSince = 0;
       if (task.pendingUiRequest) this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'pi_closed' }).catch(() => {});
       this.#syncRuntime(task, 'pi_closed');
       if (this.deleted.has(task.id) || runtime.cancelRequested) { this.#resolveSettle(task.id); return; }
@@ -1413,7 +1421,50 @@ export class TaskManager extends EventEmitter {
     const merged = external.configured
       ? { ...status, models: [...(status.models || []), ...external.models] }
       : status;
-    return { ...merged, provider: this.#localProviderId() };
+    // Пресеты роутера теперь тоже правим: их ctx-size лежит в секции models.ini
+    // (см. patchPresetContext). Флаг нужен клиенту, чтобы показать кнопку «Контекст».
+    const models = (await this.#annotateRouterPresets(merged.models || [])).map(m =>
+      m.contextEditable === undefined && this.localModels.enabled ? { ...m, contextEditable: true } : m);
+    // Скрытые найденные строки: клиент показывает их отдельно и может вернуть.
+    return { ...merged, provider: this.#localProviderId(), models, hidden: this.localServers.hidden };
+  }
+
+  /**
+   * Строки пресетов роутера дополняются тем, что видно только в models.ini:
+   * есть ли файлы модели на диске, включён ли vision (mmproj) и можно ли это
+   * править отсюда. Строка, которой в файле нет (роутер поднят с --models-dir),
+   * остаётся как есть: править нечего, и врать про её конфиг нельзя.
+   *
+   * Права на правку — по наличию секции: models.ini пишет только TaskBridge
+   * (прописывание моделей библиотеки), поэтому строка с секцией — его запись, и
+   * её можно убрать («Убрать» у пресета с удалёнными весами).
+   */
+  async #annotateRouterPresets(models) {
+    if (!models.length || !this.localModels.enabled) return models;
+    const file = modelsPresetPath(this.config.localRuntime?.router?.args);
+    if (!file) return models;
+    const text = await fs.readFile(file, 'utf8').catch(() => null);
+    if (text == null) return models;
+    const presets = new Map(parsePresets(text).map(preset => [preset.id, preset]));
+    const rows = [];
+    for (const model of models) {
+      const preset = model.external === true ? null : presets.get(model.id);
+      if (!preset) { rows.push(model); continue; }
+      let missingFile = null;
+      for (const entry of preset.paths) {
+        try { await fs.stat(entry.value); }
+        catch { missingFile = entry.value; break; }
+      }
+      rows.push({
+        ...model,
+        filesPresent: missingFile === null,
+        missingFile,
+        vision: preset.vision,
+        visionEditable: true,
+        removable: true,
+      });
+    }
+    return rows;
   }
 
   // The local provider id Pi actually exposes (see resolveLocalProviderId).
@@ -1497,13 +1548,130 @@ export class TaskManager extends EventEmitter {
    * пресета models.ini, и подменить его при загрузке нечем.
    */
   async setLocalContext(id, context) {
-    return this.localServers.setContext(id, context);
+    const external = this.localServers.find(id);
+    if (external) return this.localServers.setContext(id, context);
+    // Пресет роутера llama.cpp: ctx-size живёт в его секции models.ini — правим
+    // её. Живой роутер перечитывает models.ini только при старте, поэтому правка
+    // подхватывается после перезапуска роутера (об этом говорит restartRequired).
+    const status = await this.localModels.getStatus();
+    const model = (status.models || []).find(m => m.id === id);
+    // Модель из библиотеки, чей пресет ещё не виден живому роутеру: путь весов
+    // берём из её записи — секция в models.ini всё равно ищется по файлу.
+    // id может быть как id записи библиотеки, так и именем её пресета.
+    let libraryEntry = model ? null : this.modelLibrary.get(id);
+    if (!libraryEntry) {
+      for (const candidate of await this.modelLibrary.list()) {
+        if (candidate.runtime?.preset === id) { libraryEntry = candidate; break; }
+      }
+    }
+    const modelPath = model?.modelPath || model?.path
+      || (libraryEntry?.runtime?.preset ? libraryEntry.files.find(f => !/mmproj/i.test(f.path))?.path : null);
+    if (!model && !(libraryEntry?.runtime?.preset)) {
+      throw Object.assign(new Error(`${id} — ни внешний сервер, ни модель роутера, ни прописанная модель библиотеки.`), { code: 'NOT_FOUND' });
+    }
+    if (!modelPath) {
+      throw Object.assign(new Error(`Для ${id} не найден файл весов — контекст править негде.`), { code: 'LOCAL_CONTEXT_UNSUPPORTED' });
+    }
+    const file = modelsPresetPath(this.config.localRuntime?.router?.args);
+    if (!file) {
+      throw Object.assign(new Error('Роутер запущен без --models-preset: контекст менять негде.'), { code: 'LOCAL_CONTEXT_UNSUPPORTED' });
+    }
+    const text = await fs.readFile(file, 'utf8').catch(() => null);
+    if (text == null) {
+      throw Object.assign(new Error(`Файл ${file} не найден — контекст менять негде.`), { code: 'LOCAL_CONTEXT_UNSUPPORTED' });
+    }
+    const patched = patchPresetContext(text, modelPath, context);
+    if (!patched) {
+      throw Object.assign(new Error(`В ${file} нет секции с model = ${modelPath}: контекст правится только у пресетов из models.ini.`), { code: 'LOCAL_CONTEXT_UNSUPPORTED' });
+    }
+    if (patched.changed) {
+      const tmp = `${file}.tmp`;
+      await fs.writeFile(tmp, patched.text, 'utf8');
+      await fs.rename(tmp, file);
+    }
+    return {
+      provider: this.#localProviderId(),
+      model: model?.id || id,
+      file,
+      context,
+      previous: patched.previous,
+      changed: patched.changed,
+      restartRequired: patched.changed && await this.localModels.isReady()
+    };
   }
 
   /**
-   * Убрать внешний сервер из списка локальных моделей TaskBridge (его собственная
-   * запись в config.json). Возвращает удалённую запись или null — если такая строка
-   * пришла из Pi, а не из конфига; тогда её удаляют в Pi.
+   * Vision пресета роутера — это ключи `mmproj`/`no-mmproj` его секции в
+   * models.ini (llama.cpp читает файл при старте), поэтому правка устроена как
+   * «Контекст»: меняется конфиг, значение подхватит следующий запуск роутера.
+   *
+   * Путь проектора при включении берётся из самой секции, иначе — из другой
+   * секции с теми же весами, иначе из файла рядом с весами. Выдумывать проектор
+   * нельзя: если ничего не нашлось — честная ошибка, а не правка файла вслепую.
+   */
+  async setLocalVision(id, vision) {
+    if (typeof vision !== 'boolean') {
+      throw Object.assign(new Error('Поле vision — это true или false.'), { code: 'INPUT_INVALID' });
+    }
+    if (this.localServers.find(id)) {
+      throw Object.assign(new Error(`Vision у ${id} задаётся конфигом самого движка, а не models.ini.`), { code: 'LOCAL_VISION_UNSUPPORTED' });
+    }
+    const file = modelsPresetPath(this.config.localRuntime?.router?.args);
+    if (!file) {
+      throw Object.assign(new Error('Роутер запущен без --models-preset: пресет менять негде.'), { code: 'LOCAL_VISION_UNSUPPORTED' });
+    }
+    const text = await fs.readFile(file, 'utf8').catch(() => null);
+    if (text == null) {
+      throw Object.assign(new Error(`Файл ${file} не найден — пресет менять негде.`), { code: 'LOCAL_VISION_UNSUPPORTED' });
+    }
+    const presets = parsePresets(text);
+    const preset = presets.find(candidate => candidate.id === id);
+    if (!preset) {
+      throw Object.assign(new Error(`В ${file} нет секции [${id}]: это не пресет роутера, vision правится только у них.`), { code: 'LOCAL_VISION_UNSUPPORTED' });
+    }
+    const projector = preset.mmproj || await this.#findProjector(preset, presets);
+    if (vision === true && !projector) {
+      throw Object.assign(new Error(`Для [${id}] не нашёл mmproj-проектор ни в другой секции с теми же весами, ни рядом с весами — добавьте строку mmproj = <файл> в models.ini.`), { code: 'LOCAL_VISION_UNSUPPORTED' });
+    }
+    const patched = patchPresetVision(text, id, { vision, mmproj: projector });
+    if (!patched) {
+      throw Object.assign(new Error(`В ${file} нет секции [${id}].`), { code: 'LOCAL_VISION_UNSUPPORTED' });
+    }
+    if (patched.changed) {
+      const tmp = `${file}.tmp`;
+      await fs.writeFile(tmp, patched.text, 'utf8');
+      await fs.rename(tmp, file);
+    }
+    return {
+      provider: this.#localProviderId(),
+      model: id,
+      file,
+      vision,
+      previous: patched.previous,
+      mmproj: patched.mmproj,
+      changed: patched.changed,
+      restartRequired: patched.changed && await this.localModels.isReady(),
+    };
+  }
+
+  /** Проектор для пресета, у которого строки mmproj нет: сначала соседняя секция
+   *  с тем же файлом весов, затем файл mmproj*.gguf рядом с весами. */
+  async #findProjector(preset, presets) {
+    const weights = preset.paths.find(entry => entry.key === 'model')?.value;
+    if (!weights) return null;
+    const sameWeights = presets.find(candidate => candidate.id !== preset.id && candidate.mmproj
+      && candidate.paths.some(entry => entry.key === 'model' && entry.value.toLowerCase() === weights.toLowerCase()));
+    if (sameWeights) return sameWeights.mmproj;
+    const dir = path.dirname(weights);
+    const names = await fs.readdir(dir).catch(() => []);
+    const found = names.find(name => /mmproj/i.test(name) && /\.gguf$/i.test(name));
+    return found ? path.join(dir, found) : null;
+  }
+
+  /**
+   * Убрать внешний сервер из списка: запись TaskBridge из config.json (её можно
+   * удалить) либо найденную автоматически строку — скрытием ([hideLocalServer]).
+   * Возврат null означает «в конфиге нет»: строку надо скрывать, а не удалять.
    *
    * Сам config.json сохраняет вызывающий (у менеджера нет rootDir).
    */
@@ -1511,9 +1679,269 @@ export class TaskManager extends EventEmitter {
     return this.localServers.forget(id);
   }
 
+  /** Убрать ИЗ СПИСКА найденную автоматически строку (Pi/каталог установки): она скрывается. */
+  hideLocalServer(id) {
+    return this.localServers.hide(id);
+  }
+
+  /** Вернуть скрытую строку в список. */
+  unhideLocalServer(id) {
+    return this.localServers.unhide(id);
+  }
+
+  /**
+   * Убрать пресет роутера из models.ini — это вторая половина «Убрать»: у строки
+   * роутера нет записи в config.json, её конфиг — секция в models.ini. Веса могли
+   * удалить, а секция осталась: без правки файла строка возвращалась бы после
+   * каждого перезапуска роутера. Файлы модели не трогаются.
+   *
+   * Возвращает { preset, file, changed } или null — если секции нет (тогда и
+   * убирать нечего: строка не из этого файла).
+   */
+  async forgetLocalPreset(id) {
+    const file = modelsPresetPath(this.config.localRuntime?.router?.args);
+    if (!file) return null;
+    const text = await fs.readFile(file, 'utf8').catch(() => null);
+    if (text == null || !parsePresets(text).some(preset => preset.id === id)) return null;
+    // Живой роутер держит пресет в памяти: убрать секцию под ним — оставить
+    // строку без конфига. Сначала «Остановить».
+    const status = this.localModels.enabled ? await this.localModels.getStatus().catch(() => null) : null;
+    const model = (status?.models || []).find(entry => entry.id === id);
+    if (model && ['loaded', 'loading', 'sleeping'].includes(model.status)) {
+      throw Object.assign(new Error(`${id} сейчас запущена — сначала остановите модель.`), { code: 'MODEL_BUSY' });
+    }
+    const removed = removePreset(text, id);
+    if (!removed) return null;
+    const tmp = `${file}.tmp`;
+    await fs.writeFile(tmp, removed.text, 'utf8');
+    await fs.rename(tmp, file);
+    return { preset: id, file, changed: true };
+  }
+
   async stopLocal() {
     if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
     return this.localModels.stop();
+  }
+
+  // ---- локальная библиотека моделей + Hugging Face ----
+
+  /**
+   * Настройки — config.modelLibrary: { root: каталог для скачанных моделей }.
+   * Токен HF берётся из env HF_TOKEN/HUGGING_FACE_HUB_TOKEN или из файла
+   * <dataRoot>/hf-token (data/ вне git) — в config.json токен не пишется.
+   */
+  #initModelLibrary(config, dataRoot) {
+    const settings = config.modelLibrary || {};
+    const root = settings.root || path.join(dataRoot, 'models');
+    const token = settings.token
+      || process.env.HF_TOKEN
+      || process.env.HUGGING_FACE_HUB_TOKEN
+      || (() => { try { return fsSync.readFileSync(path.join(dataRoot, 'hf-token'), 'utf8').trim(); } catch { return null; } })();
+    this.hf = new HuggingFaceService({ token, baseUrl: settings.baseUrl });
+    this.modelLibrary = new ModelLibrary(dataRoot);
+    this.downloads = new DownloadManager(dataRoot, {
+      onInstalled: (job) => this.modelLibrary.addFromJob(job)
+    });
+    this.modelLibraryRoot = root;
+  }
+
+  hfSearch(query) {
+    return this.hf.search(query, { limit: 20 });
+  }
+
+  /** Репозиторий, разобранный на кванты/проекторы. */
+  hfRepo(repo, revision) {
+    return this.hf.analyze(repo, revision);
+  }
+
+  /**
+   * Начать загрузку: { repo, revision?, files: [path], vision?: bool }.
+   * Размеры файлов сервер берёт сам из дерева репозитория — клиент присылает
+   * только пути. vision (по умолчанию true) добавляет mmproj-проектор из дерева,
+   * если он там есть, — без него vision-модель потеряет зрение.
+   */
+  async hfDownload({ repo, revision = 'main', files, vision = true } = {}) {
+    if (!repo || !Array.isArray(files) || !files.length) {
+      throw Object.assign(new Error('Нужны repo и список файлов.'), { code: 'INPUT_INVALID' });
+    }
+    const tree = await this.hf.repoTree(repo, revision);
+    const requested = [...files];
+    if (vision !== false) {
+      for (const entry of tree) {
+        if (/\.gguf$/i.test(String(entry.path)) && /mmproj/i.test(entry.path) && !requested.includes(entry.path)) {
+          requested.push(entry.path);
+        }
+      }
+    }
+    const plan = this.hf.plan(tree, requested);
+    if (!plan) throw Object.assign(new Error('Часть файлов из запроса отсутствует в дереве репозитория.'), { code: 'INPUT_INVALID' });
+    // id записи библиотеки известен уже здесь (квант и ревизия определены):
+    // UI сможет предложить «Прописать в Pi» сразу после установки.
+    const weightPath = plan.files.map(f => f.path).find(p => !/mmproj/i.test(p) && /\.gguf$/i.test(p)) || '';
+    const libraryId = idForEntry({ repo, revision, quant: quantFromFilename(weightPath.split('/').pop()) });
+    const slug = repo.split('/').pop();
+    const dir = path.join(this.modelLibraryRoot, slug);
+    return this.downloads.start({ repo, revision, files: plan.files, dir, label: slug, libraryId });
+  }
+
+  hfDownloads() {
+    return { jobs: this.downloads.list() };
+  }
+
+  /** Очистить завершённые задания из списка загрузок (файлы не трогаются). */
+  hfDownloadsClear() {
+    return { removed: this.downloads.clearFinished() };
+  }
+
+  hfCancelDownload(id) {
+    return this.downloads.cancel(id);
+  }
+
+  hfRetryDownload(id) {
+    return this.downloads.retry(id);
+  }
+
+  async libraryStatus({ fresh = false } = {}) {
+    const models = await this.modelLibrary.list({ fresh });
+    const standalone = await this.modelLibrary.scan(this.modelLibraryRoot);
+    return { models, standalone, root: this.modelLibraryRoot };
+  }
+
+  async libraryScan() {
+    return this.libraryStatus({ fresh: true });
+  }
+
+  libraryForget(id) {
+    const removed = this.modelLibrary.remove(id);
+    if (!removed) throw Object.assign(new Error('Модели нет в библиотеке.'), { code: 'NOT_FOUND' });
+    return this.libraryStatus();
+  }
+
+  /**
+   * Удалить скачанную модель из библиотеки — аккуратно:
+   *   1. запущенную/загружаемую модель не трогаем (сначала «Остановить»);
+   *   2. пресет убирается из models.ini;
+   *   3. удаляются ТОЛЬКО файлы этой записи, на которые не ссылается другая
+   *      запись (vision-проектор может быть общим с соседним квантом);
+   *   4. каталог записи убирается, только если опустел.
+   */
+  async libraryDelete(id) {
+    const entry = this.modelLibrary.get(id);
+    if (!entry) throw Object.assign(new Error('Модели нет в библиотеке.'), { code: 'NOT_FOUND' });
+
+    // 1. Не удалять то, чем пользуются прямо сейчас.
+    if (this.localModels.enabled) {
+      const status = await this.localModels.getStatus();
+      const preset = entry.runtime?.preset;
+      const samePath = (a, b) => a && b && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+      const busy = (status.models || []).find(m =>
+        (preset && m.id === preset) || (m.modelPath && (entry.files || []).some(f => samePath(f.path, m.modelPath))));
+      if (busy && ['loaded', 'sleeping', 'loading'].includes(busy.status)) {
+        throw Object.assign(new Error(`Модель ${busy.id} сейчас запущена — сначала остановите её.`), { code: 'MODEL_BUSY' });
+      }
+    }
+
+    // 2. Пресет из models.ini.
+    let presetRemoved = false;
+    const iniFile = modelsPresetPath(this.config.localRuntime?.router?.args);
+    if (entry.runtime?.preset && iniFile) {
+      const text = await fs.readFile(iniFile, 'utf8').catch(() => null);
+      if (text != null) {
+        const removed = removePreset(text, entry.runtime.preset);
+        if (removed) {
+          const tmp = `${iniFile}.tmp`;
+          await fs.writeFile(tmp, removed.text, 'utf8');
+          await fs.rename(tmp, iniFile);
+          presetRemoved = true;
+        }
+      }
+    }
+
+    // 3. Файлы записи, кроме тех, на которые ссылается другая запись.
+    const others = await this.modelLibrary.list({ fresh: true });
+    const usedElsewhere = new Set(others.filter(e => e.id !== id)
+      .flatMap(e => (e.files || []).map(f => path.resolve(f.path).toLowerCase())));
+    const removed = [];
+    const kept = [];
+    let freedBytes = 0;
+    for (const file of entry.files || []) {
+      if (usedElsewhere.has(path.resolve(file.path).toLowerCase())) { kept.push(file.path); continue; }
+      try {
+        const stat = await fs.stat(file.path);
+        await fs.unlink(file.path);
+        freedBytes += stat.size;
+        removed.push(file.path);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+    }
+
+    // 4. Каталог записи — только если опустел (rm без recursive падает на
+    // непустом каталоге: чужие файлы рядом остаются целыми).
+    if (entry.dir) {
+      const root = path.resolve(this.modelLibraryRoot);
+      const dir = path.resolve(entry.dir);
+      if (dir.startsWith(root) && dir !== root) {
+        await fs.rm(dir, { force: true }).catch(() => {});
+      }
+    }
+
+    // 5. Из реестра.
+    this.modelLibrary.remove(id);
+    return { removed, kept, freedBytes, presetRemoved };
+  }
+
+  /**
+   * «Запустить» для модели из библиотеки: пресет уже в models.ini (или будет
+   * добавлен сейчас), роутер при необходимости перезапускается, чтобы перечитать
+   * пресеты, и модель грузится. Управляемый роутер перезапускаем сами; запущенный
+   * извне не трогаем — честная ошибка вместо убийства чужого процесса.
+   */
+  async libraryRun(id) {
+    const entry = this.modelLibrary.get(id);
+    if (!entry) throw Object.assign(new Error('Модели нет в библиотеке.'), { code: 'NOT_FOUND' });
+    if (!this.localModels.enabled) throw Object.assign(new Error('Router не настроен (localRuntime.router).'), { code: 'NOT_CONFIGURED' });
+    let preset = entry.runtime?.preset;
+    if (!preset) ({ preset } = await this.libraryRegister(id));
+    const status = await this.localModels.getStatus();
+    const known = (status.models || []).some(m => m.id === preset);
+    if (!known && status.state === 'EXTERNAL_RUNNING') {
+      throw Object.assign(new Error('Роутер запущен извне и не знает нового пресета — перезапустите его вручную, models.ini уже обновлён.'), { code: 'LOCAL_RUNTIME_FAILED' });
+    }
+    if (!known && status.state === 'MANAGED_RUNNING') {
+      await this.localModels.stop();
+    }
+    // ensureRunning поднимает остановленный роутер (перечитывая models.ini)
+    // и загружает пресет; если пресет уже известен живому роутеру — просто грузит.
+    await this.localModels.ensureRunning(() => {}, preset);
+    this.modelLibrary.add({ ...entry, runtime: { ...(entry.runtime || {}), preset, lastRunAt: Date.now() } });
+    return this.localStatus({});
+  }
+
+  /**
+   * «Прописать в Pi»: пресет в models.ini роутера llama.cpp. Pi перечисляет
+   * модели роутера через свой провайдер — после перезапуска роутера модель
+   * появляется в его пикере. В ~/.pi/agent/models.json TaskBridge не пишет:
+   * это файл Pi (то же правило, что у внешних серверов).
+   */
+  async libraryRegister(id, { ctxSize } = {}) {
+    const entry = this.modelLibrary.get(id);
+    if (!entry) throw Object.assign(new Error('Модели нет в библиотеке.'), { code: 'NOT_FOUND' });
+    const file = modelsPresetPath(this.config.localRuntime?.router?.args);
+    // Живой роутер читает models.ini только при старте: новый пресет он увидит
+    // после перезапуска, и пользователь должен об этом знать.
+    const routerAlive = this.localModels.enabled && await this.localModels.isReady();
+    const result = await registerLibraryPreset({
+      entry,
+      file,
+      ctxSize: Number.isInteger(ctxSize) && ctxSize > 0 ? ctxSize : undefined,
+      routerAlive
+    });
+    this.modelLibrary.add({
+      ...entry,
+      runtime: { ...(entry.runtime || {}), preferred: 'llama.cpp', preset: result.preset }
+    });
+    return result;
   }
 
   // Translates a raw file path or alias into the exact model id Pi lists in its
@@ -1622,6 +2050,12 @@ export class TaskManager extends EventEmitter {
       // take, and the UI must show the effective value, not the request.
       const nextState = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(() => null);
       task.thinkingLevelActual = nextState?.thinkingLevel ?? value;
+    } else {
+      // A stopped session has no live Pi to apply the level: it is saved here
+      // and picked up when the session starts again (#selectionArgs passes
+      // --thinking), so the effective level is the saved one right away —
+      // showing the stale old value reads as «кнопка не работает».
+      task.thinkingLevelActual = value;
     }
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
@@ -1751,6 +2185,9 @@ export class TaskManager extends EventEmitter {
     }
     if (frame.type === 'compaction_start' || frame.type === 'auto_compaction_start') {
       task._compacting = true;
+      // Отметка старта: клиенты показывают, сколько длится сжатие (компакт%
+      // сводки может писать минуты, и без таймера это выглядит как зависание).
+      task._compactingSince = Date.now();
       // A second compaction in the same task must re-emit chunk 1 (task-manager #onUiRequest).
       task._compactionStage = null;
       // Статусная строка чата и «Активность» в диагностике должны называть
@@ -1766,6 +2203,7 @@ export class TaskManager extends EventEmitter {
       // выставленную setStatus-кадрами, убирать нельзя — по ней видно, что
       // сжатие застряло.
       if (task.current === 'Pi сжимает контекст…') task.current = '';
+      task._compactingSince = 0;
     }
     if (frame.type === 'agent_settled') {
       task._toolsRunning = 0;
@@ -2863,7 +3301,12 @@ export class TaskManager extends EventEmitter {
       await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
       return this.#publicTask(task);
     }
+    // Retire the runtime before touching Pi.  The abort response is not an
+    // ownership boundary: Pi may acknowledge it while already queued frames
+    // are still in flight.  Retiring here makes both the event handler and
+    // #ensureSession reject that old runtime immediately.
     runtime.cancelRequested = true;
+    runtime.retired = true;
     this.approvals.cancelTask(id);
     // STOP answers an open dialog with «cancelled» first: the extension is
     // blocked on it and would otherwise hold the abort up.
@@ -3447,7 +3890,12 @@ export class TaskManager extends EventEmitter {
     // writable" instead of the session being started again. `canSend` is checked
     // defensively because the in-process test fixtures stub Pi with a plain
     // object; only a session that explicitly reports a dead pipe is replaced.
-    if (current && !current.pi.closed && current.pi.canSend?.() !== false) return current;
+    // A cancelled runtime is retired immediately, before the abort/kill RPC
+    // finishes.  Keeping it reusable here lets a newly opened chat attach to
+    // the old Pi process while its queued frames are still draining; that is
+    // how a session can show CANCELLED in the list and continue answering in
+    // the details screen.  A new turn must start a fresh runtime instead.
+    if (current && !current.retired && !current.cancelRequested && !current.pi.closed && current.pi.canSend?.() !== false) return current;
     if (current) {
       current.retired = true;
       current.cancelRequested = true;
@@ -3560,6 +4008,7 @@ export class TaskManager extends EventEmitter {
     task.piStartedAt = null;
     task._toolsRunning = 0;
     task._compacting = false;
+    task._compactingSince = 0;
     this.#releaseSlot(task.id);
     if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'rpc_failed' });
     await this.#fail(task, error);
@@ -3666,6 +4115,7 @@ export class TaskManager extends EventEmitter {
       sleeping: Boolean(task._sleeping),
       hasSession: Boolean(task.piSessionFile || task.workspacePath) && !task._sessionLost,
       compacting: Boolean(task._compacting),
+      compactingSince: task._compactingSince || 0,
       toolsRunning: task._toolsRunning || 0,
     });
   }

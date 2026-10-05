@@ -50,11 +50,16 @@ async function openSession(file) {
   }
 }
 
-async function validateHeader(header, projectPath) {
+function validateHeaderShape(header) {
   if (!header || header.type !== 'session' || header.version !== 3 || typeof header.id !== 'string' || !header.id.trim()
     || typeof header.timestamp !== 'string' || !Number.isFinite(Date.parse(header.timestamp))) {
     throw new Error('Invalid Pi v3 session header');
   }
+  return header;
+}
+
+async function validateHeader(header, projectPath) {
+  validateHeaderShape(header);
   if (await canonical(header.cwd) !== projectPath) throw new Error('Pi session belongs to a different project');
   return header;
 }
@@ -77,13 +82,15 @@ function previewText(message) {
 
 // Reuses the single bounded read already done for the header (no extra I/O):
 // a session's first user message almost always falls within that same chunk.
-async function readHeaderAndPreview(handle, projectPath) {
+// Only the header's shape is checked here: which project a session belongs to is
+// decided by the caller against the canonical cwd (see [scanPiSessions]).
+async function readHeaderAndPreview(handle) {
   const buffer = Buffer.alloc(MAX_HEADER_BYTES + 1);
   const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
   const text = buffer.subarray(0, bytesRead).toString('utf8').replace(/^\uFEFF/, '');
   const lines = text.split('\n');
   if (Buffer.byteLength(lines[0] ?? '', 'utf8') > MAX_HEADER_BYTES) throw new Error('Pi session header is too large');
-  const header = await validateHeader(JSON.parse(lines[0] ?? ''), projectPath);
+  const header = validateHeaderShape(JSON.parse(lines[0] ?? ''));
   let preview = null;
   for (let i = 1; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -94,9 +101,28 @@ async function readHeaderAndPreview(handle, projectPath) {
   return { header, preview };
 }
 
-/** Bounded header-only discovery. `file` is internal; expose `key` to clients. */
-export async function listPiSessions(project, roots) {
-  const projectPath = await canonical(project.path);
+/**
+ * One bounded, header-only walk of `roots`, with every candidate's canonical
+ * `cwd` attached. Split out of [listPiSessions] because the project filter is
+ * applied per project: registered projects usually share the same roots, and
+ * filtering inside the walk made /api/native-sessions read the same tree once
+ * per project (13 projects × 959 session files measured ~27 s per request — the
+ * phone client gives up on a GET after 30 s). Each file is now read once; the
+ * per-project check is the same comparison [validateHeader] used to make.
+ *
+ * `cache` is an optional caller-owned Map keyed by the root set, so one request
+ * (listAll) walks each distinct root set once. `file` is internal; expose `key`.
+ */
+export async function scanPiSessions(roots, cache) {
+  const list = (roots || []).filter(root => typeof root === 'string' && path.isAbsolute(root)).map(root => path.normalize(root));
+  const signature = list.join('\u0000');
+  if (cache?.has(signature)) return cache.get(signature);
+  const scan = scanRoots(list);
+  cache?.set(signature, scan);
+  return scan;
+}
+
+async function scanRoots(roots) {
   const results = [];
   const seen = new Set();
   let scanned = 0;
@@ -118,24 +144,32 @@ export async function listPiSessions(project, roots) {
         let handle;
         try {
           handle = await openSession(file);
-          const { header, preview } = await readHeaderAndPreview(handle, projectPath);
+          const { header, preview } = await readHeaderAndPreview(handle);
           const resolved = await fs.realpath(file);
           const identity = comparable(resolved);
           if (seen.has(identity)) continue;
           seen.add(identity);
           const stat = await handle.stat();
           results.push({ key: crypto.createHash('sha256').update(identity).digest('hex'), file: resolved,
-            id: header.id, cwd: header.cwd, mtime: stat.mtime.toISOString(), preview,
+            id: header.id, cwd: header.cwd, canonicalCwd: await canonical(header.cwd),
+            mtime: stat.mtime.toISOString(), preview,
             name: typeof header.name === 'string' ? header.name : path.basename(file, path.extname(file)) });
         } catch { /* Malformed, unrelated, inaccessible and concurrently removed files are not candidates. */ }
         finally { await handle?.close(); }
       }
     }
   }
-  for (const root of roots || []) {
-    if (typeof root === 'string' && path.isAbsolute(root)) await scan(path.normalize(root), 0);
-  }
+  for (const root of roots) await scan(root, 0);
   return results.sort((a, b) => b.mtime.localeCompare(a.mtime) || a.key.localeCompare(b.key));
+}
+
+/** Bounded header-only discovery of one project's sessions. `file` is internal; expose `key` to clients. */
+export async function listPiSessions(project, roots, cache) {
+  const projectPath = await canonical(project.path);
+  // A session only ever reaches the project whose canonical path its cwd equals.
+  return (await scanPiSessions(roots, cache))
+    .filter(session => session.canonicalCwd === projectPath)
+    .map(({ canonicalCwd, ...session }) => session);
 }
 
 function toMessage(entry) {

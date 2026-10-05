@@ -57,6 +57,7 @@ object AppIcons {
     val Play = lineIcon("play", "M5 3l14 9-14 9V3z")
     val Offline = lineIcon("offline", "M1 1l22 22", "M16.72 11.06A10.94 10.94 0 0 1 19 12.55", "M5 12.55a10.94 10.94 0 0 1 5.17-2.39", "M10.71 5.05A16 16 0 0 1 22.58 9", "M1.42 9a15.91 15.91 0 0 1 4.7-2.88", "M8.53 16.11a6 6 0 0 1 6.95 0", "M12 20h.01")
     val Computer = lineIcon("computer", "M2 3h20v14H2z", "M8 21h8", "M12 17v4")
+    val Power = lineIcon("power", "M18.36 6.64a9 9 0 1 1-12.73 0", "M12 2v10")
     val Folder = lineIcon("folder", "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z")
     val ArrowDown = lineIcon("arrowDown", "M12 5v14", "M19 12l-7 7-7-7")
     val File = lineIcon("file", "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z", "M13 2v7h7")

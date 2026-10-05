@@ -44,8 +44,22 @@ fun stageLabel(status: String?): String = when (status) {
 }
 
 /** What the session is doing right now, for the second line of a list row. */
-fun activityOf(task: Task): String? {
+fun activityOf(task: Task, nowMillis: Long = 0L): String? {
     val state = displayStateOf(task)
+    val compacting = task.runtime?.activity == "compacting"
+    // Сжатие — это тоже запрос к модели (она пишет сводку истории), и в
+    // ленте он выглядит как обычный ответ агента. Сервер различает его как
+    // runtime.activity: без этой строки видно «Работает», а что именно — нет.
+    // Сколько длится — от compactingSince сервера: часы расходятся на секунды
+    // по LAN, для счётчика минут это не важно.
+    val compactingLabel = if (compacting) {
+        val since = task.runtime?.compactingSince
+        val minutes = if (nowMillis > 0 && since != null && since > 0) ((nowMillis - since).coerceAtLeast(0)) / 60_000 else null
+        buildString {
+            append("Сжимает контекст")
+            if (minutes != null) append(if (minutes < 1) " · меньше минуты" else " · $minutes мин")
+        }
+    } else null
     return when {
         state == DisplayState.QUEUED -> when (task.queueReason) {
             "MODEL_BUSY" -> "Ждёт освобождения модели"
@@ -55,10 +69,7 @@ fun activityOf(task: Task): String? {
             "RESTORED" -> "В очереди после перезапуска"
             else -> task.current ?: "В очереди"
         }
-        // Сжатие контекста — это тоже запрос к модели (она пишет сводку истории), и в
-        // ленте он выглядит как обычный ответ агента. Сервер различает его как
-        // runtime.activity: без этой строки видно «Работает», а что именно — нет.
-        state.active && task.runtime?.activity == "compacting" -> "Сжимает контекст"
+        state.active && compacting -> compactingLabel
         state.active -> task.current
         state == DisplayState.FAILED || state == DisplayState.RESTORABLE -> task.error
         else -> null

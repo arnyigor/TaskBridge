@@ -12,7 +12,7 @@ import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorks
 import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
-import { contentType, containedFile, serveFile, FILE_LIMITS } from './files.mjs';
+import { contentType, containedExistingAncestor, containedFile, isPrivatePath, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
 import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
@@ -32,6 +32,8 @@ import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { listQuickActions } from './pi-quick-actions.mjs';
+import { listProcesses, listGpuProcesses } from './process-info.mjs';
+import { killProcess, killProcessesByRuntime } from './process-kill.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
 import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
@@ -419,6 +421,48 @@ function workspacePathQuery(url, body) {
   return requested;
 }
 
+const observedPathFields = ['path', 'file_path', 'filePath'];
+const comparablePath = value => path.resolve(String(value)).replaceAll('\\', '/').toLowerCase();
+
+function* observedToolPathValues(value) {
+  if (!value || typeof value !== 'object') return;
+  const args = (value.args && typeof value.args === 'object') ? value.args
+    : (value.arguments && typeof value.arguments === 'object') ? value.arguments
+      : null;
+  if (args) {
+    for (const field of observedPathFields) {
+      if (typeof args[field] === 'string') yield args[field];
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) yield* observedToolPathValues(item);
+    return;
+  }
+  for (const item of Object.values(value)) yield* observedToolPathValues(item);
+}
+
+async function observedToolFile(taskId, requestedPath) {
+  if (!path.isAbsolute(requestedPath) || isPrivatePath(requestedPath)) throw Object.assign(new Error('Путь выходит за пределы рабочей папки.'), { code: 'INPUT_INVALID' });
+  const requested = comparablePath(requestedPath);
+  const events = await store.readEvents(taskId, 0);
+  for (const event of events) {
+    for (const value of observedToolPathValues(event)) {
+      if (!path.isAbsolute(value) || isPrivatePath(value)) continue;
+      if (comparablePath(value) !== requested) continue;
+      const resolved = await fs.realpath(value).catch(error => {
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+          throw Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
+        }
+        throw error;
+      });
+      const stat = await fs.stat(resolved);
+      if (!stat.isFile()) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
+      return resolved;
+    }
+  }
+  throw Object.assign(new Error('Путь выходит за пределы рабочей папки.'), { code: 'INPUT_INVALID' });
+}
+
 const SHELL_PREVIEW_BYTES = 16 * 1024;
 async function boundShellOutput(result, taskId) {
   const total = Buffer.byteLength(result.stdout, 'utf8') + Buffer.byteLength(result.stderr, 'utf8');
@@ -757,6 +801,50 @@ async function handleRequest(req, res) {
       return json(res, 202, { restarting: true, mode, pid: child.pid });
     }
 
+    // Power off the machine the server runs on. The same confirm-gate as
+    // /api/server/restart: the contract probe in tests/api-contract.test.mjs
+    // POSTs {} to every route and must never power anything down. The
+    // 10-second cancel countdown lives in the client; the server only runs
+    // the final command, so a dead app cannot leave a scheduled shutdown behind.
+    if (req.method === 'POST' && pathname === '/api/system/shutdown') {
+      const body = await readJson(req).catch(() => ({}));
+      if (body?.confirm !== true) {
+        return errorJson(res, 400, Object.assign(new Error('Выключение компьютера требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' }));
+      }
+      const command = process.platform === 'win32'
+        ? { file: 'shutdown', args: ['/s', '/t', '60'] /*TEMP-TEST*/ }
+        : process.platform === 'darwin'
+          ? { file: 'osascript', args: ['-e', 'tell application "System Events" to shut down'] }
+          : { file: 'shutdown', args: ['-h', 'now'] };
+      try {
+        const child = spawn(command.file, command.args, { windowsHide: true, stdio: 'ignore' });
+        // A missing shutdown binary reports asynchronously: swallow it instead
+        // of crashing the whole server over one failed power-off.
+        child.on('error', () => {});
+        return json(res, 200, { shuttingDown: true, command: command.file });
+      } catch (error) {
+        return errorJson(res, 500, Object.assign(new Error(`Выключить компьютер не удалось: ${error.message}`), { code: 'SHUTDOWN_FAILED' }));
+      }
+    }
+    if (req.method === 'POST' && pathname === '/api/system/reboot') {
+      const body = await readJson(req).catch(() => ({}));
+      if (body?.confirm !== true) {
+        return errorJson(res, 400, Object.assign(new Error('Перезагрузка компьютера требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' }));
+      }
+      const command = process.platform === 'win32'
+        ? { file: 'shutdown', args: ['/r', '/t', '0'] }
+        : process.platform === 'darwin'
+          ? { file: 'osascript', args: ['-e', 'tell application "System Events" to restart'] }
+          : { file: 'shutdown', args: ['-r', 'now'] };
+      try {
+        const child = spawn(command.file, command.args, { windowsHide: true, stdio: 'ignore' });
+        child.on('error', () => {});
+        return json(res, 200, { rebooting: true, command: command.file });
+      } catch (error) {
+        return errorJson(res, 500, Object.assign(new Error(`Перезагрузить компьютер не удалось: ${error.message}`), { code: 'REBOOT_FAILED' }));
+      }
+    }
+
     // Refresh only the selected account; repeated clicks share a request and
     // never generate more than one provider read per 20 seconds.
     if (req.method === 'POST' && pathname === '/api/providers/refresh') {
@@ -808,22 +896,134 @@ async function handleRequest(req, res) {
       const { model, context } = await readJson(req);
       return json(res, 200, await manager.setLocalContext(model, context));
     }
+    if (req.method === 'POST' && pathname === '/api/local/vision') {
+      // Vision пресета роутера — ключи mmproj/no-mmproj его секции в models.ini,
+      // то есть та же правка конфига, что и контекст: ответ описывает запись, а
+      // не статус (запускать/перезапускать роутер решает пользователь).
+      const { model, vision } = await readJson(req);
+      return json(res, 200, await manager.setLocalVision(model, vision));
+    }
     if (req.method === 'POST' && pathname === '/api/local/forget') {
-      // «Убрать из списка»: удаляем запись TaskBridge, а не модель. Запись
-      // обязательно сохраняется в config.json — иначе строка вернётся после
-      // перезапуска, и список перестанет быть правдой.
+      // «Убрать из списка»: удаляем запись из конфига, а не модель. У строки
+      // внешнего сервера это config.json (localRuntime.externalServers), у
+      // пресета роутера — секция в models.ini, у найденной автоматически строки
+      // (провайдер Pi + каталог установки) удалять нечего — она скрывается
+      // (localRuntime.externalHidden). Запись обязательно сохраняется — иначе
+      // строка вернётся после перезапуска, и список перестанет быть правдой.
       const { model } = await readJson(req);
       const removed = manager.forgetLocalServer(model);
-      if (!removed) {
-        throw Object.assign(new Error(
-          'Этой модели нет в конфиге TaskBridge: список такой строки не знает — она пришла из Pi (models.json), там её и удаляют.'),
-        { code: 'INPUT_INVALID' });
+      if (removed) {
+        await saveConfig(rootDir, config);
+        return json(res, 200, { removed: { provider: removed.provider ?? null, model: removed.model ?? null }, ...await manager.localStatus({}) });
+      }
+      const preset = await manager.forgetLocalPreset(model);
+      if (preset) {
+        return json(res, 200, { removed: { provider: null, model, preset: preset.preset }, ...await manager.localStatus({}) });
+      }
+      const hidden = manager.hideLocalServer(model);
+      if (hidden) {
+        await saveConfig(rootDir, config);
+        return json(res, 200, { removed: { provider: hidden.provider, model: hidden.model, hidden: true }, ...await manager.localStatus({}) });
+      }
+      throw Object.assign(new Error(
+        'Этой модели нет ни в конфиге TaskBridge, ни в models.ini, ни среди найденных по Pi — убирать нечего.'),
+      { code: 'INPUT_INVALID' });
+    }
+    if (req.method === 'POST' && pathname === '/api/local/unhide') {
+      // Вернуть скрытую строку: она снова появится в списке (её источник — Pi и
+      // каталог установки, туда мы не пишем).
+      const { model } = await readJson(req);
+      const restored = manager.unhideLocalServer(model);
+      if (!restored) {
+        throw Object.assign(new Error(`${model} нет среди скрытых.`), { code: 'INPUT_INVALID' });
       }
       await saveConfig(rootDir, config);
-      return json(res, 200, { removed: { provider: removed.provider ?? null, model: removed.model ?? null }, ...await manager.localStatus({}) });
+      return json(res, 200, await manager.localStatus({}));
     }
     if (req.method === 'POST' && pathname === '/api/local/stop') {
       return json(res, 200, await manager.stopLocal());
+    }
+
+    // --- процессы машины: список для панели «Процессы» и точечный kill ---
+    if (req.method === 'GET' && pathname === '/api/processes') {
+      // Без ?fresh=1 — кэш 5 с из process-info (WMI-опрос стоит ~1 с).
+      const fresh = url.searchParams.get('fresh') === '1';
+      const processes = await listProcesses({ fresh });
+      return json(res, 200, { processes });
+    }
+    if (req.method === 'GET' && pathname === '/api/processes/gpu') {
+      return json(res, 200, { processes: await listGpuProcesses() });
+    }
+    if (req.method === 'POST' && pathname === '/api/processes/kill') {
+      const body = await readJson(req).catch(() => ({}));
+      // Пустое тело от contract-пробы обязано уйти в ошибку ввода, а не в kill:
+      // без pid/name здесь не стреляем (см. защиту в process-kill.mjs).
+      return json(res, 200, await killProcess(body));
+    }
+    if (req.method === 'POST' && pathname === '/api/processes/kill-group') {
+      const body = await readJson(req).catch(() => ({}));
+      return json(res, 200, await killProcessesByRuntime(body.runtime));
+    }
+
+    // --- локальная библиотека моделей + Hugging Face ---
+    if (req.method === 'GET' && pathname === '/api/hf/search') {
+      const query = url.searchParams.get('q') || '';
+      return json(res, 200, await manager.hfSearch(query));
+    }
+    if (req.method === 'GET' && pathname === '/api/hf/repo') {
+      const repo = url.searchParams.get('repo');
+      if (!repo) throw Object.assign(new Error('Нужен параметр repo.'), { code: 'INPUT_INVALID' });
+      const revision = url.searchParams.get('revision') || 'main';
+      return json(res, 200, await manager.hfRepo(repo, revision));
+    }
+    if (req.method === 'POST' && pathname === '/api/hf/download') {
+      const body = await readJson(req);
+      return json(res, 202, await manager.hfDownload(body));
+    }
+    if (req.method === 'GET' && pathname === '/api/hf/downloads') {
+      return json(res, 200, manager.hfDownloads());
+    }
+    if (req.method === 'POST' && pathname === '/api/hf/downloads/clear') {
+      // Убрать завершённые задания из списка: файлы установленных моделей
+      // не трогаются — они живут в библиотеке.
+      return json(res, 200, manager.hfDownloadsClear());
+    }
+    if (req.method === 'POST' && pathname === '/api/hf/downloads/cancel') {
+      const { id } = await readJson(req);
+      return json(res, 200, manager.hfCancelDownload(id));
+    }
+    if (req.method === 'POST' && pathname === '/api/hf/downloads/retry') {
+      const { id } = await readJson(req);
+      return json(res, 200, await manager.hfRetryDownload(id));
+    }
+    if (req.method === 'GET' && pathname === '/api/library') {
+      const fresh = url.searchParams.get('fresh') === '1';
+      return json(res, 200, await manager.libraryStatus({ fresh }));
+    }
+    if (req.method === 'POST' && pathname === '/api/library/scan') {
+      return json(res, 200, await manager.libraryScan());
+    }
+    if (req.method === 'POST' && pathname === '/api/library/forget') {
+      const { id } = await readJson(req);
+      return json(res, 200, await manager.libraryForget(id));
+    }
+    if (req.method === 'POST' && pathname === '/api/library/register') {
+      // «Прописать в Pi»: пресет в models.ini роутера. Pi перечисляет модели
+      // роутера через своего провайдера; в его models.json TaskBridge не пишет.
+      const { id, ctxSize } = await readJson(req);
+      return json(res, 200, await manager.libraryRegister(id, { ctxSize }));
+    }
+    if (req.method === 'POST' && pathname === '/api/library/run') {
+      // «Запустить» модель из библиотеки: при необходимости перезапускает
+      // управляемый роутер (перечитать models.ini) и грузит пресет.
+      const { id } = await readJson(req);
+      return json(res, 200, await manager.libraryRun(id));
+    }
+    if (req.method === 'POST' && pathname === '/api/library/delete') {
+      // Удаление скачанной модели: пресет из models.ini, файлы записи (кроме
+      // общих с другими записями, например vision-проектора), пустой каталог.
+      const { id } = await readJson(req);
+      return json(res, 200, await manager.libraryDelete(id));
     }
     if (req.method === 'GET' && pathname === '/api/local/events') {
       res.writeHead(200, {
@@ -1347,7 +1547,14 @@ async function handleRequest(req, res) {
     if (['GET', 'HEAD'].includes(req.method) && match) {
       const task = manager.getTask(match[1]);
       if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
-      const target = await containedFile(task.workspacePath, String(url.searchParams.get('path') || ''));
+      const requestedPath = String(url.searchParams.get('path') || '');
+      let target;
+      try {
+        target = await containedFile(task.workspacePath, requestedPath);
+      } catch (error) {
+        if (error.code !== 'INPUT_INVALID') throw error;
+        target = await observedToolFile(task.id, requestedPath);
+      }
       await serveFile(req, res, target, path.basename(target), url.searchParams.get('download') === '1');
       return;
     }
@@ -1425,8 +1632,24 @@ async function handleRequest(req, res) {
       // The path travels in the query string, exactly as the GET route reads it.
       // Reading it from the body left it empty, so the target resolved to the
       // workspace folder and "reveal" opened the folder instead of the file.
-      const target = await containedFile(task.workspacePath, workspacePathQuery(url, body));
-      await openLocalPath(target, { reveal: body.reveal === true });
+      const requestedPath = workspacePathQuery(url, body);
+      let target;
+      let reveal = body.reveal === true;
+      try {
+        target = await containedFile(task.workspacePath, requestedPath);
+      } catch (error) {
+        if (error.code === 'INPUT_INVALID') {
+          target = await observedToolFile(task.id, requestedPath);
+        } else {
+          // The file viewer can outlive scratch files the agent rewrites/deletes
+          // (image frames are the common case). «Open in app» must still 404, but
+          // «Show in folder» can open the nearest surviving containing folder.
+          if (!reveal || error.code !== 'NOT_FOUND') throw error;
+          target = await containedExistingAncestor(task.workspacePath, requestedPath);
+          reveal = false;
+        }
+      }
+      await openLocalPath(target, { reveal });
       return json(res, 200, { opened: true, reveal: body.reveal === true, name: path.basename(target) });
     }
 

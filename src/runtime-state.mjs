@@ -33,10 +33,19 @@ const ACTIVE_STATUSES = new Set(['PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING
  * @param {boolean} facts.sleeping    stopped by the idle timeout
  * @param {boolean} facts.hasSession  a session file exists to resume from
  * @param {boolean} facts.compacting
+ * @param {number}  facts.compactingSince  epoch ms of the compaction start, 0 when not compacting
  * @param {number}  facts.toolsRunning
- * @returns {{state: string, activity: string|null}}
+ * @returns {{state: string, activity: string|null, compactingSince?: number}}
  */
-export function deriveRuntimeState({ status, live = false, starting = false, sleeping = false, hasSession = false, compacting = false, toolsRunning = 0 }) {
+export function deriveRuntimeState({ status, live = false, starting = false, sleeping = false, hasSession = false, compacting = false, compactingSince = 0, toolsRunning = 0 }) {
+  const result = deriveRuntimeStateBase({ status, live, starting, sleeping, hasSession, compacting, toolsRunning });
+  // Only the compacting result carries the start time: clients show the elapsed
+  // minutes from it, and a stale value must never outlive the compaction itself.
+  if (result.activity === 'compacting') result.compactingSince = compactingSince || null;
+  return result;
+}
+
+function deriveRuntimeStateBase({ status, live = false, starting = false, sleeping = false, hasSession = false, compacting = false, toolsRunning = 0 }) {
   const working = activity => ({ state: 'WORKING', activity });
   if (starting) return { state: 'STARTING', activity: null };
   // A prompt waiting for the model (or for its turn in the queue) counts as

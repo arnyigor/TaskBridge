@@ -1,6 +1,8 @@
 package ru.arny.taskbridge.platform
 
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
 import io.ktor.client.HttpClient
 import kotlinx.coroutines.flow.Flow
 import ru.arny.taskbridge.core.api.UploadFile
@@ -57,8 +59,52 @@ interface PlatformServices {
     /** Opens a link or a file URL with the system (browser, viewer). */
     fun openUrl(url: String)
 
+    /**
+     * The «Выход» button: stop the background watch and close the app for good
+     * (Android kills the process, so nothing polls the server until relaunch).
+     * Desktop: no-op, its window/tray has its own close.
+     */
+    fun exitApp() {}
+
     /** Desktop folder dialog; null when cancelled or unavailable on this device. */
     fun chooseProjectFolder(): String? = null
+
+    /**
+     * Desktop: файлы, перетащенные из проводника на окно приложения, уходят
+     * последнему зарегистрированному получателю (активный чат); null снимает.
+     * Android — no-op (перетаскивание не поддерживается).
+     */
+    fun setFileDropHandler(handler: ((List<UploadFile>) -> Unit)?) {}
+
+    /**
+     * Запуск/перезапуск локального TaskBridge-сервера силами самого приложения
+     * (только desktop): потушенный сервер поднимается скрытым процессом, без
+     * консольного окна. null — платформа не умеет (Android и не должна:
+     * сервер на телефоне не живёт).
+     */
+    val localServerLauncher: LocalServerLauncher? get() = null
+}
+
+/** Запуск локального сервера скрытым процессом. Бросает исключение с причиной, если не вышелось. */
+interface LocalServerLauncher {
+    /** Каталог сервера найден: кнопку запуска можно показывать. */
+    fun available(): Boolean
+
+    /**
+     * Найденный корень TaskBridge, из которого запускается сервер; null — не найден.
+     * Нужен UI, чтобы показать, какой именно каталог выбран: «найден автоматически»
+     * не даёт понять, что поиск ушёл не туда.
+     */
+    fun root(): String? = null
+
+    /**
+     * Последние строки логов сервера (`lan-app.log`, `lan-proxy.log` и вывод запуска из
+     * приложения) — для показа в настройках. null — платформа логов не знает (Android).
+     */
+    fun logTail(lines: Int = 200): String? = null
+
+    /** Поднимает сервер (scripts/start-lan.mjs start) и ждёт его готовности. */
+    suspend fun start()
 }
 
 /** Status and navigation bar icons follow the app theme, not the system one (Android); no-op on desktop. */
@@ -76,3 +122,15 @@ expect fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit
 /** Returns a function that reads the pictures (or copied files) in the clipboard; empty when it holds none. */
 @Composable
 expect fun rememberClipboardFiles(): () -> List<UploadFile>
+
+/**
+ * Файлы, перетащенные из проводника на окно (десктоп). Оба объявления — про
+ * буфер AWT, поэтому и проверка, и чтение живут в платформе; на телефоне
+ * возвращается false и пустой список (перетаскивания там нет).
+ */
+expect fun hasFileDrop(event: DragAndDropEvent): Boolean
+
+expect fun dragDroppedFiles(event: DragAndDropEvent): List<UploadFile>
+
+/** Приём файлов, перетащенных в окно приложения; на телефоне — no-op. */
+expect fun Modifier.fileDropTarget(onFiles: (List<UploadFile>) -> Unit): Modifier

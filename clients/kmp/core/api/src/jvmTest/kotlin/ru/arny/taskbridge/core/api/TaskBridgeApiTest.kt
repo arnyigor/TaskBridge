@@ -188,4 +188,43 @@ class TaskBridgeApiTest {
         assertEquals(null, TaskBridgeApi.parseSessionCookie("other=1"))
         assertEquals(null, TaskBridgeApi.parseSessionCookie("taskbridge_session=; Max-Age=0"))
     }
+
+    @Test
+    fun processesDecodeTheWrapperAndFreshAddsTheQuery() = runBlocking<Unit> {
+        val api = api { request ->
+            when {
+                request.url.encodedPath != "/api/processes" -> json("""{"error":"Not found"}""", HttpStatusCode.NotFound)
+                request.url.parameters["fresh"] == "1" -> json("""{"processes":[]}""")
+                else -> json("""{"processes":[{"pid":1284,"name":"llama-server.exe","memoryBytes":16090427392,"startedAt":1791087506389,"commandLine":"llama-server --port 54107"}]}""")
+            }
+        }
+        val list = api.processes()
+        assertEquals(1, list.size)
+        assertEquals(1284L, list.single().pid)
+        assertEquals("llama-server.exe", list.single().name)
+        assertEquals(16090427392L, list.single().memoryBytes)
+        assertEquals("llama-server --port 54107", list.single().commandLine)
+        assertEquals(listOf("/api/processes"), requests.map { it.url.encodedPath })
+        val empty = api.processes(fresh = true)
+        assertEquals(0, empty.size)
+        // Пустой список — это {"processes":[]}, а не null: экран показывает «ОС не вернула процессов».
+        assertEquals("1", requests.last().url.parameters["fresh"])
+    }
+
+    @Test
+    fun killProcessPostsPidAndNameAndSurfacesTheServerRefusal() = runBlocking<Unit> {
+        val api = api { request ->
+            if (request.url.encodedPath == "/api/processes/kill") {
+                json("""{"error":"«explorer.exe» — системный процесс, панель его не убивает.","code":"PROTECTED"}""", HttpStatusCode.Forbidden)
+            } else json("""{}""")
+        }
+        val failure = assertFailsWith<ApiException> { api.killProcess(10068, "explorer.exe") }
+        assertTrue(failure.message!!.contains("системный процесс"))
+        val request = requests.single()
+        assertEquals(HttpMethod.Post, request.method)
+        assertEquals("/api/processes/kill", request.url.encodedPath)
+        val body = TaskBridgeJson.parseToJsonElement(request.bodyText()).jsonObject
+        assertEquals("10068", body["pid"]!!.jsonPrimitive.content)
+        assertEquals("explorer.exe", body["name"]!!.jsonPrimitive.content)
+    }
 }

@@ -7,6 +7,7 @@ import crypto from 'node:crypto';
 
 const invalid = message => Object.assign(new Error(message), { code: 'INPUT_INVALID' });
 const forbidden = () => Object.assign(new Error('Этот файл недоступен для выдачи.'), { code: 'FILE_FORBIDDEN' });
+const missingFile = () => Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
 export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, uploadFileBytes: 64 * 1024 * 1024, uploadBytes: 128 * 1024 * 1024, outputBytes: 256 * 1024 * 1024, outputTotalBytes: 512 * 1024 * 1024 };
 const skippedDirs = new Set(['.git', '.pi', '.taskbridge-input', 'node_modules', 'data', '.gradle', '.idea']);
 
@@ -56,17 +57,52 @@ export function metadata(file) {
   return rest;
 }
 
-export async function containedFile(rootDir, requestedPath, { allowPrivate = false } = {}) {
-  const root = await fs.realpath(rootDir);
-  const requested = path.resolve(root, requestedPath);
-  const check = target => {
+function containedChecker(root, { allowPrivate = false } = {}) {
+  return target => {
     const rel = path.relative(root, target);
     if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) throw invalid('Путь выходит за пределы рабочей папки.');
     if (!allowPrivate && isPrivatePath(rel)) throw forbidden();
     return target;
   };
+}
+
+export async function containedFile(rootDir, requestedPath, { allowPrivate = false } = {}) {
+  const root = await fs.realpath(rootDir);
+  const requested = path.resolve(root, requestedPath);
+  const check = containedChecker(root, { allowPrivate });
   check(requested);
-  return check(await fs.realpath(requested));
+  let resolved;
+  try {
+    resolved = await fs.realpath(requested);
+  } catch (error) {
+    // A path the chat still shows often points at a file the agent has already
+    // deleted — its own scratch frames, rewritten every run. Letting the raw
+    // error through painted «ENOENT: no such file or directory, realpath
+    // 'G:\…'» in the file viewer and handed the server's own paths to whoever
+    // asked, a phone on the LAN included.
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw missingFile();
+    throw error;
+  }
+  return check(resolved);
+}
+
+export async function containedExistingAncestor(rootDir, requestedPath, { allowPrivate = false } = {}) {
+  const root = await fs.realpath(rootDir);
+  const requested = path.resolve(root, requestedPath);
+  const check = containedChecker(root, { allowPrivate });
+  check(requested);
+  for (let candidate = path.dirname(requested); ; candidate = path.dirname(candidate)) {
+    if (candidate === root || candidate === path.dirname(candidate)) break;
+    const resolved = await fs.realpath(candidate).catch(error => {
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return null;
+      throw error;
+    });
+    if (resolved) {
+      const safe = check(resolved);
+      if ((await fs.stat(safe)).isDirectory()) return safe;
+    }
+  }
+  throw missingFile();
 }
 
 async function makeInputDirectory(workspace, taskId, fileId) {

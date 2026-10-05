@@ -17,6 +17,13 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class SessionStateTest {
+
+    @Test
+    fun nestedProviderJsonErrorIsHumanized() {
+        val raw = """{"error":{"message":"{\\n \\\"error\\\": {\\n \\\"code\\\": 503,\\n \\\"message\\\": \\\"This model is currently experiencing high demand.\\\",\\n \\\"status\\\": \\\"UNAVAILABLE\\\"\\n}\\n}"},"code":503}"""
+        assertEquals("This model is currently experiencing high demand. (UNAVAILABLE)", humanizeError(raw))
+    }
+
     private fun task(id: String, status: String, updated: String = "2026-09-24T10:00:00.000Z", errorCode: String? = null, project: String? = "p") =
         Task(id = id, status = status, updatedAt = updated, errorCode = errorCode, prompt = "задача $id", projectId = project)
 
@@ -90,5 +97,19 @@ class SessionStateTest {
         assertEquals("Пишу ответ", activityOf(Task(id = "w2", status = "RUNNING", prompt = "p", current = "Пишу ответ")))
         // Сжатие на остановленной сессии — это уже история: подписи нет.
         assertEquals(null, activityOf(compacting.copy(status = "CANCELLED")))
+    }
+
+    @Test
+    fun compactionShowsElapsedTimeWhenTheClockIsKnown() {
+        val compacting = Task(
+            id = "c", status = "RUNNING", prompt = "p",
+            runtime = RuntimeInfo(state = "WORKING", activity = "compacting", compactingSince = 1_000_000L),
+        )
+        // Без часов клиента — просто факт сжатия, без выдуманного времени.
+        assertEquals("Сжимает контекст", activityOf(compacting))
+        assertEquals("Сжимает контекст · меньше минуты", activityOf(compacting, nowMillis = 1_000_000L + 59_999))
+        assertEquals("Сжимает контекст · 3 мин", activityOf(compacting, nowMillis = 1_000_000L + 3 * 60_000))
+        // Часы клиента отстали от серверных: отрицательное время не показываем.
+        assertEquals("Сжимает контекст · меньше минуты", activityOf(compacting, nowMillis = 999))
     }
 }

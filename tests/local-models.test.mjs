@@ -27,6 +27,22 @@ test('normalizeModels distinguishes a router catalog from a single-model endpoin
   assert.equal(models[1].contextWindow, 65536);
   assert.equal(models[2].failed, true);
   assert.equal(models[2].exitCode, 3);
+  // Прогресс загрузки: клиент рисует полосу только по этому числу — то же
+  // свернутое значение, что приходит событиями LOCAL_MODEL_PROGRESS.
+  assert.equal(models[0].loadRatio, null);
+});
+
+test('normalizeModels folds llama.cpp load stages into one ratio', () => {
+  const [model] = normalizeModels({
+    data: [{
+      id: 'vision',
+      status: { value: 'loading', progress: { current: 'loading_tensors', stages: ['loading_tensors', 'warming_up'], value: 0.5 } }
+    }]
+  });
+  assert.equal(model.status, 'loading');
+  assert.equal(model.loadRatio, 0.25); // сцена 0 из 2 и половина её
+  const [plain] = normalizeModels({ data: [{ id: 'x', status: { value: 'loading', progress: { value: 4 } } }] });
+  assert.equal(plain.loadRatio, 1); // значение шире единицы зажимается, как в parseLoadProgress
 });
 
 test('normalizeModels derives quantization and configured ctx from child args', () => {

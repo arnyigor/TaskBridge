@@ -101,7 +101,12 @@ class AppGraph(val platform: PlatformServices) {
     inner class Connected(val baseUrl: String) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val api = TaskBridgeApi(http, StoredConnection(settings, baseUrl))
-        val sessions = SessionList(api, scope, clockMillis = { nowMillis() })
+        val sessions = SessionList(
+            api, scope, clockMillis = { nowMillis() },
+            startLocalServer = platform.localServerLauncher?.let { launcher -> { launcher.start() } },
+            // Проверяется в момент нажатия, а не при создании графа: каталог можно задать в настройках уже после подключения.
+            localServerAvailable = { platform.localServerLauncher?.available() == true },
+        )
         val settingsController = SettingsController(api, scope)
         private val persistence = platform.chatPersistence(baseUrl)
         private val chats = mutableMapOf<String, ChatSession>()

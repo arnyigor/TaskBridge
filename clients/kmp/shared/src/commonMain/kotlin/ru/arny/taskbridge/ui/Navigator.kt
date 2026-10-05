@@ -12,6 +12,10 @@ sealed interface Screen {
     /** A new session not yet on the PC: it is created by its first message. */
     data class Draft(val draft: SessionDraft) : Screen
     data object Settings : Screen
+    /** Управление локальными моделями: рабочий экран, а не настройка. */
+    data object LocalModels : Screen
+    /** Процессы машины с сервером: список, память и kill. */
+    data object Processes : Screen
 }
 
 /** A plain back stack: the app has four screens, a library would add more than it saves. */

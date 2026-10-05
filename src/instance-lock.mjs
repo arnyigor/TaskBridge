@@ -5,31 +5,59 @@ import { execFileSync } from 'node:child_process';
 
 // process.kill(pid, 0) throws ESRCH when the process is gone and EPERM when it
 // exists but belongs to another user (still alive for our purposes).
+// A live PID is not proof that OUR server is alive: Windows reuses numbers, and this
+// machine runs dozens of node processes (2026-10-05: «TaskBridge уже запущен (PID 13220)»
+// about a PID that no longer belonged to TaskBridge, so the button could not start the
+// server). Identity is the command line — the lock is taken only by src/server.mjs.
 function alive(pid) {
-  try { process.kill(pid, 0); return true; }
+  try { process.kill(pid, 0); }
   catch (error) {
     if (error.code !== 'EPERM') return false;
-    // EPERM only means the process belongs to another user — it can be a stale
-    // lock whose PID was reused by an unrelated system process (e.g. PID reuse
-    // after a crashed server). Verify the holder is actually a node process
-    // before treating it as a live TaskBridge instance.
-    return isNodeProcess(pid);
   }
+  return isNodeProcess(pid) && isOurServer(pid);
 }
 
 // Returns true when the PID exists and its image name looks like a node/
 // electron/bun runtime. On failure (missing tool, unknown platform) falls back
 // to true so a legitimate running instance from another user is not killed off.
+// The image name is taken from CSV and must look like an executable: on a
+// Russian Windows a missing PID prints «ИНФОРМАЦИЯ: нет задач…» instead of
+// «INFO:», and the old check for the literal 'INFO:' parsed that text as an image
+// name — one more way to answer the wrong thing about a reused PID.
 function isNodeProcess(pid) {
   try {
     const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
       encoding: 'utf8', timeout: 5000, windowsHide: true,
     }).trim();
-    if (!out || out.includes('INFO:')) return false;
-    const image = (out.split(',')[0] || '').replace(/"/g, '').toLowerCase();
+    const image = imageNameOf(out);
+    if (!image) return false;
     return /node|electron|bun|deno/.test(image);
   } catch {
     return true;
+  }
+}
+
+/** Image name from `tasklist /FO CSV /NH` output; null when there is no process row. */
+export function imageNameOf(csvOutput) {
+  const first = (csvOutput || '').trim().split('\n')[0]?.split(',')[0]?.replace(/"/g, '').trim().toLowerCase();
+  return first && first.endsWith('.exe') ? first : null;
+}
+
+// A reused PID is the reason a dead server can look alive: the lock stores a PID,
+// Windows hands that number to an unrelated process (this machine runs dozens of
+// node processes), and the image check alone cannot tell them apart. The command
+// line can: our server is started as `... server.mjs`.
+function isOurServer(pid) {
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\" -ErrorAction SilentlyContinue).CommandLine`], {
+      encoding: 'utf8', timeout: 8000, windowsHide: true,
+    });
+    const command = out.trim();
+    if (!command) return false; // процесс есть, но не наш (или расспросить не удалось)
+    return /server\.mjs/.test(command);
+  } catch {
+    return true; // не смогли проверить — лучше отказать, чем поделить каталог данных
   }
 }
 

@@ -21,6 +21,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
@@ -55,6 +56,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.system.exitProcess
 
 class SharedPreferencesStore(context: Context) : KeyValueStore {
     private val prefs = context.getSharedPreferences("taskbridge", Context.MODE_PRIVATE)
@@ -162,6 +164,10 @@ class AndroidPlatformServices(
     var foreground: Boolean = false
     override val inForeground: Boolean get() = foreground
 
+    /** The visible activity, kept so [exitApp] can close the app from the shared UI. */
+    @Volatile
+    var activity: Activity? = null
+
     private val notifications = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     override fun httpClient(): HttpClient = HttpClient(OkHttp) {
@@ -229,6 +235,17 @@ class AndroidPlatformServices(
 
     override fun setBackgroundWatch(activeSessions: Int) = watcher(activeSessions)
 
+    /**
+     * «Выход»: the watch service goes first, then the whole process — without
+     * the kill the coroutines would keep polling the server in the background
+     * until the system gets around to reclaiming the process.
+     */
+    override fun exitApp() {
+        setBackgroundWatch(0)
+        activity?.finishAffinity()
+        exitProcess(0)
+    }
+
     override fun openUrl(url: String) {
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -281,6 +298,14 @@ actual fun rememberClipboardFiles(): () -> List<UploadFile> {
         }
     }
 }
+
+// Перетаскивание файлов из проводника — десктопная механика; на телефоне
+// вложения идут через кнопку скрепки и буфер обмена.
+actual fun hasFileDrop(event: DragAndDropEvent): Boolean = false
+
+actual fun dragDroppedFiles(event: DragAndDropEvent): List<UploadFile> = emptyList()
+
+actual fun androidx.compose.ui.Modifier.fileDropTarget(onFiles: (List<UploadFile>) -> Unit): androidx.compose.ui.Modifier = this
 
 private fun readUri(context: Context, uri: Uri): UploadFile? = runCatching {
     val resolver = context.contentResolver

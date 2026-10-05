@@ -60,6 +60,56 @@ test('listing groups native sessions by project and suggests the freshly closed 
   assert.equal(older[0].suggestion, null);
 });
 
+// The importer asks for every project in one call, and registered projects
+// normally share the same session roots (one tree, many projects). The walk is
+// expensive — every .jsonl is read for its header and preview — so it must be
+// shared: filtering inside the walk read the same tree once per project, and on
+// a 959-session tree that took ~27 s, just under the client's 30 s GET timeout.
+// Counted, not timed: a stopwatch would make this flaky.
+test('one listAll walks the shared session roots once, not once per project', async t => {
+  const f = await fixture(t);
+  const fsp = (await import('node:fs/promises')).default;
+  const opendir = fsp.opendir;
+  let walks = 0;
+  fsp.opendir = (...args) => { walks++; return opendir.apply(fsp, args); };
+  t.after(() => { fsp.opendir = opendir; });
+
+  assert.equal((await f.manager.nativeSessions.listAll()).length, 1);
+  const oneProject = walks;
+  assert.ok(oneProject > 0, 'the fixture session must be found by walking its root');
+
+  const other = path.join(f.root, 'other-project');
+  await fs.mkdir(other, { recursive: true });
+  f.manager.registerProject({ id: 'q', name: 'Q', path: other, useWorktree: false, verification: [] });
+
+  walks = 0;
+  const both = await f.manager.nativeSessions.listAll();
+  assert.equal(both.length, 1); // the second project has no native session of its own
+  assert.equal(walks, oneProject); // ...and costs no second walk of the shared roots
+});
+
+// Same defect from the other side: finding out whether a candidate is already
+// imported resolved EVERY task's session file per candidate. Resolving each task
+// file once (then answering from maps) is what the count pins down.
+test('listing resolves each task session file once, not once per native session', async t => {
+  const f = await fixture(t);
+  const task = await f.manager.importSession({ projectId: 'p', sessionKey: f.key });
+  for (let i = 2; i <= 5; i++) await fs.writeFile(path.join(f.sessions, `terminal-session-${i}.jsonl`), f.body);
+
+  const fsp = (await import('node:fs/promises')).default;
+  const realpath = fsp.realpath;
+  const tasksRoot = path.join(f.manager.dataRoot, 'tasks');
+  let resolves = 0;
+  fsp.realpath = (file, ...rest) => { if (String(file).startsWith(tasksRoot)) resolves++; return realpath(file, ...rest); };
+  t.after(() => { fsp.realpath = realpath; });
+
+  const listed = await f.manager.nativeSessions.list('p');
+  assert.equal(listed.length, 5); // the copies are distinct files, hence distinct sessions
+  assert.equal(resolves, 1); // one task file, resolved once
+  // The session the task came from is still marked as already imported.
+  assert.deepEqual(listed.filter(session => session.existingTaskId).map(session => session.existingTaskId), [task.id]);
+});
+
 test('preview reports model, thinking level, size and both last messages', async t => {
   const f = await fixture(t);
   const preview = await f.manager.nativeSessions.preview({ projectId: 'p', sessionKey: f.key });

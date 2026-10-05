@@ -42,7 +42,8 @@ export class NativeSessionService {
     return [...roots];
   }
 
-  async existing(candidate) {
+  async existing(candidate, index = null) {
+    if (index) return index.byKey.get(candidate.key) ?? index.byFile.get(identity(candidate.file)) ?? null;
     for (const task of this.manager.tasks.values()) {
       if (task.nativeSourceKey === candidate.key) return task.id;
       if (task.piSessionFile) {
@@ -53,11 +54,32 @@ export class NativeSessionService {
     return null;
   }
 
-  async list(projectId) {
+  // `existing` resolves every task's session file once per CANDIDATE: on the
+  // list route that was 365 sessions × 97 task files ≈ 35k realpath calls per
+  // request (~5 s on top of the walk). Resolving each task file once and
+  // answering from the maps keeps both directions of the match — the opaque
+  // source key first, then the resolved file — with the same first-task-wins
+  // order the loop above used.
+  async existingIndex() {
+    const byKey = new Map();
+    const byFile = new Map();
+    for (const task of this.manager.tasks.values()) {
+      if (task.nativeSourceKey && !byKey.has(task.nativeSourceKey)) byKey.set(task.nativeSourceKey, task.id);
+      if (task.piSessionFile) {
+        const resolved = await fs.realpath(task.piSessionFile).catch(() => null);
+        if (resolved && !byFile.has(identity(resolved))) byFile.set(identity(resolved), task.id);
+      }
+    }
+    return { byKey, byFile };
+  }
+
+  /** [context] carries one request's shared work: the root walk and the existing-session index. */
+  async list(projectId, context = null) {
     const project = this.project(projectId);
-    const sessions = await listPiSessions(project, this.roots(project));
+    const sessions = await listPiSessions(project, this.roots(project), context?.scans);
+    const index = context?.existing ?? await this.existingIndex();
     return Promise.all(sessions.map(async ({ file, ...session }) => {
-      const existingTaskId = await this.existing({ ...session, file });
+      const existingTaskId = await this.existing({ ...session, file }, index);
       // The raw first message includes TaskBridge's own prompt wrapper
       // ("Work only inside the current working directory...") for sessions
       // it created itself; the task's own clean prompt reads far better.
@@ -72,10 +94,14 @@ export class NativeSessionService {
   // to pick a project first.
   async listAll() {
     const groups = [];
+    // Every project here shares the same roots, so the walk and the existing-task
+    // index are done once and reused for all of them (they only differ by the
+    // project their canonical cwd resolves to).
+    const context = { scans: new Map(), existing: await this.existingIndex() };
     for (const project of this.manager.projects.values()) {
       if (project.id === '__scratch__') continue;
       let sessions = [];
-      try { sessions = await this.list(project.id); } catch { sessions = []; }
+      try { sessions = await this.list(project.id, context); } catch { sessions = []; }
       if (!sessions.length) continue;
       const fresh = sessions.find(session => !session.existingTaskId
         && Number.isFinite(Date.parse(session.mtime)) && Date.now() - Date.parse(session.mtime) <= RECENT_MS) || null;

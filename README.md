@@ -2,7 +2,7 @@
 
 **Пульт управления локальным coding-агентом Pi с телефона по Wi‑Fi.**
 
-TaskBridge (v0.10.0) — небольшой локальный HTTP/PWA-сервер, который запускается на компьютере рядом с проектом и даёт с телефона:
+TaskBridge (v0.11.0) — небольшой локальный HTTP/PWA-сервер, который запускается на компьютере рядом с проектом и даёт с телефона:
 
 - поставить задачу выбранной модели в выбранном проекте;
 - видеть в реальном времени, что делает агент (tools, streaming, статусы);
@@ -42,6 +42,7 @@ TaskBridge (v0.10.0) — небольшой локальный HTTP/PWA-серв
 
 - [Возможности](#возможности)
 - [Технологии](#технологии)
+- [Текущее состояние кода](#текущее-состояние-кода)
 - [Хранилище (SQLite)](#хранилище-sqlite)
 - [Архитектура](#архитектура)
 - [Структура проекта](#структура-проекта)
@@ -57,6 +58,8 @@ TaskBridge (v0.10.0) — небольшой локальный HTTP/PWA-серв
 - [Файлы с телефона](#файлы-с-телефона)
 - [Cloud transport (remote access)](#cloud-transport-remote-access)
 - [Local Runtime Manager](#local-runtime-manager)
+- [Библиотека моделей и загрузки Hugging Face](#библиотека-моделей-и-загрузки-hugging-face)
+- [Панель процессов и питание машины](#панель-процессов-и-питание-машины)
 - [AUTO dispatcher](#auto-dispatcher)
 - [Engine health](#engine-health)
 - [Cloud bridge (Vercel Queues)](#cloud-bridge-vercel-queues)
@@ -111,7 +114,11 @@ TaskBridge (v0.10.0) — небольшой локальный HTTP/PWA-серв
 - `git status`, `git diff`, `diff.patch`;
 - изолированный `git worktree` на задачу, применение результата и очистка worktree;
 - project-specific verification commands;
-- проверка здоровья локального llama.cpp endpoint и managed-запуск профилей `text` / `vision`;
+- проверка здоровья локального llama.cpp endpoint, managed router и legacy managed-запуск профилей `text` / `vision`;
+- экран «Локальные модели»: пресеты llama.cpp router, внешние серверы, прогресс загрузки, скрытие/возврат автонайденных строк, переключение vision у router-пресетов и удаление мёртвых записей без удаления файлов;
+- библиотека локальных GGUF-моделей: поиск Hugging Face, разбор квантов/шардов/mmproj, фоновые загрузки с retry/cancel/progress, регистрация модели в `models.ini`, запуск через router и безопасное удаление скачанных файлов;
+- панель процессов машины: список процессов, kill одного PID с защитой от переиспользования PID/системных процессов и групповой kill видимых `node`/`python`;
+- серверные действия из UI/API: перезапуск TaskBridge, выключение и перезагрузка машины с клиентским таймером отмены;
 - AUTO-выбор профиля модели под задачу и классификация ошибок движка (quota / rate limit / context);
 - скорости загруженной модели (PP/TG) и состояние ПК — CPU (дельтами `os.cpus()`), RAM и GPU через `nvidia-smi` — в `GET /api/info` (`engine.metrics`, `system`);
 - `GET /api/metrics` — счётчики задач/событий/облака, в том числе в формате Prometheus;
@@ -130,10 +137,23 @@ TaskBridge (v0.10.0) — небольшой локальный HTTP/PWA-серв
 | Транспорт UI | HTTP + SSE |
 | Frontend | нативный HTML/CSS/JS, PWA, без фреймворков |
 | Markdown | `marked` + `DOMPurify` (лежат в `web/vendor`, без CDN) |
-| Тесты | встроенный `node:test` + `linkedom` для DOM-тестов (54 файла) |
-| Хранилище | SQLite через встроенный `node:sqlite` (`data/taskbridge.db`, WAL) |
+| Тесты | встроенный `node:test` + `linkedom` для DOM-тестов (актуальный счётчик — в разделе [Тесты](#тесты)) |
+| Хранилище | SQLite через встроенный `node:sqlite` (`data/taskbridge.db`, WAL), плюс JSON-реестры для скачиваний/локальной библиотеки моделей |
 | Наблюдаемость | `/api/metrics` (+ Prometheus), PP/TG из `/metrics` llama.cpp, GPU через `nvidia-smi` |
 | Облако (опция) | `cloud/` — Vercel-совместимый control plane: роутер, store (memory/sqlite/postgres), relay, WS; локально `npm run cloud` |
+
+---
+
+## Текущее состояние кода
+
+Состояние README синхронизировано с кодом рабочей ветки на 2026-10-05. Ключевые изменения относительно предыдущего описания:
+
+- **версия и клиенты:** серверный пакет остаётся Node.js/PWA-приложением (`package.json` — `0.11.0`), KMP-клиенты собираются с `taskbridgeVersion=1.2.0`;
+- **локальные модели:** router-режим стал основной веткой развития. В коде есть отдельные слои `local-models`, `router-presets`, `model-library`, `huggingface` и `download-manager`; UI умеет искать/скачивать GGUF, регистрировать их в `models.ini`, запускать через router, прятать автонайденные внешние строки и править vision у пресетов;
+- **сессии Pi:** импорт нативных Pi-сессий вынесен в отдельный API/клиентский экран; по умолчанию используется копия, а takeover требует явного подтверждения;
+- **администрирование машины:** добавлены API и UI для перезапуска TaskBridge, просмотра/остановки процессов, shutdown/reboot машины; потенциально опасные действия требуют подтверждения и выполняют серверные проверки;
+- **контракты:** опубликованный список маршрутов в `src/api-contract.mjs` и [`docs/api-contract.md`](docs/api-contract.md) обновлён под local library, downloads, processes, vision, hide/unhide, shutdown/reboot;
+- **покрытие:** добавлены тесты для Hugging Face tree parser, download manager, model library, router presets, процессов, local vision/hide, restart/import сессий и KMP UI-моделей.
 
 ---
 
@@ -185,7 +205,11 @@ Taskbridge/
 │  ├─ uploads.mjs           стейджинг загрузок с TTL
 │  ├─ engine.mjs            классификация ошибок провайдера (quota/rate limit/context)
 │  ├─ dispatcher.mjs        AUTO-выбор профиля/модели
-│  ├─ local-models.mjs      llama.cpp router: процесс, /models, load/unload, прогресс
+│  ├─ local-models.mjs      llama.cpp router: процесс, /models, load/unload, прогресс, внешние серверы
+│  ├─ router-presets.mjs    чтение/правка секций models.ini: файлы, vision, регистрация пресетов
+│  ├─ huggingface.mjs       поиск HF и разбор GGUF-вариантов/шардов/mmproj
+│  ├─ download-manager.mjs  фоновые загрузки моделей с progress/cancel/retry и .taskbridge-part
+│  ├─ model-library.mjs     локальный реестр GGUF-моделей, scan/register/delete
 │  ├─ provider-models.mjs   синхронизация списков моделей внешних provider'ов (modelSync.providers)
 │  ├─ model-catalog.mjs     список моделей Pi (get_available_models)
 │  ├─ context-report.mjs    отчёт «из чего собран запрос» и лимит контекста сессии
@@ -194,6 +218,8 @@ Taskbridge/
 │  ├─ session-history.mjs   восстановление истории после restart
 │  ├─ native-sessions.mjs   импорт существующих Pi-сессий
 │  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
+│  ├─ process-info.mjs      снимок процессов ОС для диагностики панели
+│  ├─ process-kill.mjs      безопасная остановка PID/групп node/python
 │  ├─ event-trim.mjs        отбрасывание устаревших streaming-дельт
 │  ├─ event-window.mjs      постраничная выдача истории по turn'ам
 │  ├─ text-tail.mjs         ограниченный хвост текста (streaming)
@@ -894,6 +920,38 @@ PWA с живым стримингом ответа, tool-карточками, 
 
 Чтобы картинки дошли до модели, нужны два условия: (1) в Pi выключен `images.blockImages` в `~/.pi/agent/settings.json` — иначе Pi заменяет любую картинку на «Image reading is disabled.»; (2) у модели в Pi заявлен `input: ["text","image"]` — для router-моделей это приходит из llama.cpp автоматически. TaskBridge читает `settings.json` только для предупреждения: при `blockImages=true` `GET /api/info` возвращает `warnings` с кодом `PI_IMAGES_BLOCKED` и баннер в UI.
 
+## Библиотека моделей и загрузки Hugging Face
+
+Локальная библиотека — это слой поверх `localRuntime`: она скачивает и учитывает GGUF-файлы, но не меняет `~/.pi/agent/models.json`. Модель становится доступной Pi через llama.cpp router: TaskBridge добавляет/обновляет секцию в `models.ini`, а затем router должен увидеть пресет при следующем старте/перечитывании списка.
+
+Основной поток:
+
+1. `GET /api/hf/search?q=...` ищет репозитории Hugging Face, по умолчанию ориентируясь на GGUF.
+2. `GET /api/hf/repo?repo=...` читает дерево репозитория и группирует файлы в варианты: кванты, шардированные GGUF, `mmproj`-проекторы и прочие файлы. Неполный набор шардов помечается как недоступный для скачивания.
+3. `POST /api/hf/download` создаёт фоновую задачу. Состояние хранится в `data/downloads.json`; недокачанные файлы лежат в `.taskbridge-part`, поэтому они не выглядят установленными.
+4. `GET /api/hf/downloads` показывает прогресс/скорость; доступны cancel, retry и очистка завершённых задач. После рестарта активные загрузки становятся `INTERRUPTED`, а retry пропускает уже готовые файлы по размеру.
+5. Установленная модель попадает в `data/model-library.json`. `GET /api/library` совмещает реестр с проверкой наличия файлов и сканом standalone `.gguf` внутри `modelLibrary.root`.
+6. `POST /api/library/register` пишет router-пресет в `models.ini`, `POST /api/library/run` при необходимости регистрирует модель, перезапускает managed-router и загружает пресет.
+7. `POST /api/library/delete` удаляет скачанную модель и её пресет, но не трогает файлы, которые всё ещё нужны другим записям (например общий `mmproj`).
+
+Настройки библиотеки живут в `config.json` в секции `modelLibrary`; корень по умолчанию — внутри data-каталога TaskBridge. Для больших моделей лучше указывать отдельный диск с достаточным свободным местом: перед скачиванием сервер проверяет `statfs`.
+
+---
+
+## Панель процессов и питание машины
+
+В веб-UI и KMP-клиенте есть диагностическая панель машины:
+
+- `GET /api/processes` возвращает снимок процессов (`pid`, имя, память, время старта, command line); `?fresh=1` обходит 5-секундный кэш;
+- `POST /api/processes/kill` убивает один PID только если имя совпадает со снимком (защита от переиспользования PID), процесс не системный и не относится к самому TaskBridge;
+- `POST /api/processes/kill-group` применяет те же проверки к видимым процессам `node` или `python`;
+- `POST /api/server/restart` перезапускает сервер TaskBridge отдельным detached-процессом;
+- `POST /api/system/shutdown` и `POST /api/system/reboot` выполняют выключение/перезагрузку машины только после `{ "confirm": true }`. Таймер отмены живёт в клиенте: если пользователь отменил до отправки запроса, серверной команды нет.
+
+Эти действия предназначены для доверенного LAN/Tailscale-доступа. Если сервер открыт телефону, `server.auth.enabled` должен быть включён, иначе доступ к панели фактически равен доступу к shell/agent на ПК.
+
+---
+
 ### AUTO dispatcher
 
 При `localRuntime.auto.enabled = true` модель выбирается на задачу:
@@ -1008,10 +1066,12 @@ DNS на телефоне: системный «Частный DNS» с Tailscal
 ## Тесты
 
 ```powershell
-npm test            # 504 теста в 61 файле (502 pass, 2 skip: живой Postgres и облачный DOM-тест)
+npm test            # 829 тестов в 96 файлах (825 pass, 4 skip на Windows)
 npm run test:cloud  # только тесты облачного транспорта
 npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
 npm run check       # синтаксическая проверка основных файлов + аудит секретов
+cd clients/kmp/core && ../gradlew :api:jvmTest :client:jvmTest --console=plain
+cd clients/kmp && ./gradlew :shared:jvmTest :desktopApp:test --console=plain
 ```
 
 Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals (политика, менеджер, маршрутизация и end-to-end через Pi-хук), ограничение вывода инструментов и загрузка полного лога, смена модели/reasoning, метрики, API настроек облака, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP. Стресс-набор (`npm run stress`) масштабируется переменными `TASKBRIDGE_STRESS_EVENTS`, `TASKBRIDGE_STRESS_LOG_MB`, `TASKBRIDGE_STRESS_SECONDS`.

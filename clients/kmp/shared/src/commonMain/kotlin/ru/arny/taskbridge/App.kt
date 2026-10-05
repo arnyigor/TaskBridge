@@ -21,7 +21,9 @@ import ru.arny.taskbridge.ui.Screen
 import ru.arny.taskbridge.ui.chat.ChatScreen
 import ru.arny.taskbridge.ui.chat.DraftChatScreen
 import ru.arny.taskbridge.ui.common.EmptyState
+import ru.arny.taskbridge.ui.models.LocalModelsScreen
 import ru.arny.taskbridge.ui.connect.ConnectScreen
+import ru.arny.taskbridge.ui.processes.ProcessesScreen
 import ru.arny.taskbridge.ui.sessions.SessionsScreen
 import ru.arny.taskbridge.ui.settings.SettingsScreen
 import ru.arny.taskbridge.ui.theme.AppIcons
@@ -82,7 +84,9 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             onCreated = { navigator.openChat(it) },
             showBack = true,
         )
-        Screen.Settings -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) })
+        Screen.Settings -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) })
+        Screen.LocalModels -> LocalModelsScreen(graph, connection, onBack = { navigator.pop() })
+        Screen.Processes -> ProcessesScreen(connection, onBack = { navigator.pop() })
     }
 }
 
@@ -92,6 +96,8 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
     val open = navigator.stack.lastOrNull { it is Screen.Chat || it is Screen.Draft }
     val chat = open as? Screen.Chat
     val settingsOpen = navigator.current == Screen.Settings
+    val localModelsOpen = navigator.current == Screen.LocalModels
+    val processesOpen = navigator.current == Screen.Processes
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(360.dp).fillMaxHeight()) {
             SessionsScreen(
@@ -105,7 +111,9 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
         VerticalDivider()
         Box(Modifier.weight(1f).fillMaxHeight()) {
             when {
-                settingsOpen -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) })
+                localModelsOpen -> LocalModelsScreen(graph, connection, onBack = { navigator.pop() })
+                processesOpen -> ProcessesScreen(connection, onBack = { navigator.pop() })
+                settingsOpen -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) })
                 chat != null -> ChatScreen(
                     graph, connection, chat.taskId,
                     onBack = { navigator.pop() },

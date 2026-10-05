@@ -58,3 +58,60 @@ tasks.register<Sync>("installPortable") {
     from(rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge"))
     into(rootProject.layout.projectDirectory.dir("dist/TaskBridge"))
 }
+
+// Standalone distribution: the same app image plus a copy of the Node server inside it
+// (`<dist>/server`), so a ZIP unpacked on a machine without this repository still can
+// start the local server. The copy is deliberately NOT taken by the development build:
+// the app prefers the live repository and only falls back to `<dist>/server`
+// (DesktopServerLauncher.bundledServer), otherwise edits to src/*.mjs would stop
+// affecting the running app.
+// `node` itself is still required in PATH — bundling a runtime is a separate decision.
+// ./gradlew :desktopApp:standalonePortable
+val repositoryRoot: File = generateSequence(rootProject.projectDir) { it.parentFile }
+    .firstOrNull { File(it, "scripts/start-lan.mjs").isFile }
+    ?: error("рядом с clients/kmp нет корня TaskBridge (scripts/start-lan.mjs)")
+
+tasks.register<Sync>("standalonePortable") {
+    dependsOn("portable")
+    into(rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge/server"))
+    from(repositoryRoot) {
+        include("scripts/**", "src/**", "web/**", "pi-extension/**", "package.json", "config.example.json")
+        exclude("**/node_modules/**", "**/*.log")
+    }
+    // Verify after the copy: the gate looks for the repository above `app/`, so the
+    // standalone layout has to be checked with the bundled server in place.
+    finalizedBy("verifyPortableRoot")
+}
+
+// The app starts the local server by running scripts/start-lan.mjs from the TaskBridge
+// repository root; it finds that root by walking up from its own code location (the
+// `app/` directory of the distribution). Two checks together, because the 2026-10-05
+// bug slipped through both kinds of blindness:
+//   * :shared:jvmTest — the shipped algorithm on synthetic layouts and on its own code
+//     anchor (a depth bound fails there);
+//   * this task — the PACKAGED tree: either scripts/start-lan.mjs is above `app/`
+//     (development layout) or the standalone copy sits in `server/` beside it.
+// Override for a different distribution root: -PtaskbridgeStagingDir=<path>
+tasks.register("verifyPortableRoot") {
+    dependsOn(":shared:jvmTest")
+    val staging = providers.gradleProperty("taskbridgeStagingDir")
+        .map { File(it) }
+        .orElse(rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge").asFile)
+    doLast {
+        val dist = staging.get()
+        val app = File(dist, "app")
+        check(app.isDirectory) { "verifyPortableRoot: нет каталога $app — сначала соберите :desktopApp:portable" }
+        val bundled = File(dist, "server/scripts/start-lan.mjs")
+        val root = generateSequence(app) { it.parentFile }.firstOrNull { File(it, "scripts/start-lan.mjs").isFile }
+        check(root != null || bundled.isFile) {
+            "verifyPortableRoot: вверх от $app нет scripts/start-lan.mjs и нет встроенной копии ($bundled) — " +
+                "собранное приложение не сможет запустить локальный сервер"
+        }
+        logger.lifecycle(
+            "verifyPortableRoot: корень TaskBridge — " +
+                (root?.toString() ?: "встроенная копия ${bundled.parentFile.parentFile}"),
+        )
+    }
+}
+
+tasks.named("portable") { finalizedBy("verifyPortableRoot") }

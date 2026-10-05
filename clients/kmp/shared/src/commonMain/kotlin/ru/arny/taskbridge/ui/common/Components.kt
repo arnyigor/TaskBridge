@@ -132,3 +132,21 @@ fun SectionTitle(text: String, modifier: Modifier = Modifier) {
         color = MaterialTheme.colorScheme.primary,
     )
 }
+
+/** Строка «метка — значение» для информационных экранов (Настройки, Локальные модели). */
+@Composable
+fun InfoRow(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector? = null, warning: Boolean = false) {
+    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (icon != null) {
+            Icon(icon, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.width(12.dp))
+        }
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(140.dp))
+        Text(
+            value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (warning) LocalStatusColors.current.waiting else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}

@@ -1857,3 +1857,24 @@ body.cloud-mode [data-pc-only] { display: none; }
 /* Each pending message owns its actions on desktop and phone. */
 .queuedRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%; min-width: 0; }
 .queuedRow .queuedText { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+
+/* Вкладки диалога локальных моделей: «Установленные» / «Hugging Face» / «Загрузки». */
+.localTab {
+  font-size: 0.75rem;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.localTab.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(167, 139, 250, 0.12);
+}
+.badge.err {
+  color: var(--danger);
+  border-color: rgba(251, 113, 133, 0.4);
+  background: rgba(251, 113, 133, 0.08);
+}

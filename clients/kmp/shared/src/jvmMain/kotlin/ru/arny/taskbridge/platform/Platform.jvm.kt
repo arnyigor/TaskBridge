@@ -1,6 +1,12 @@
 package ru.arny.taskbridge.platform
 
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.runtime.remember
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -29,6 +35,7 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
 import java.io.File
+import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -37,6 +44,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.prefs.Preferences
+import kotlin.concurrent.thread
 import java.util.Base64
 import javax.swing.JFileChooser
 
@@ -164,7 +172,186 @@ class DesktopPlatformServices(
         }
         return if (chooser.showOpenDialog(null) == JFileChooser.APPROVE_OPTION) chooser.selectedFile?.absolutePath else null
     }
+
+    override val localServerLauncher: LocalServerLauncher = DesktopServerLauncher(store)
 }
+
+/**
+ * Запуск локального TaskBridge-сервера без консоли. Вместо своей логики запуска
+ * вызывает готовый демон-режим `node scripts/start-lan.mjs start`: он гасит
+ * остатки прошлой пары, поднимает app+proxy скрытыми процессами (windowsHide),
+ * сам ждёт health и пишет data/lan.json — тот же файл, по которому серверный
+ * перезапуск (restart-lan-now) находит процессы. Консольного окна нет, потому
+ * что у GUI-процесса (jpackage) нет своей консоли, а вывод дочернего процесса
+ * перенаправлен в пайпы — JVM на Windows ставит таким дочерним CREATE_NO_WINDOW.
+ */
+class DesktopServerLauncher(private val store: KeyValueStore) : LocalServerLauncher {
+
+    override fun available(): Boolean = findRoot() != null
+
+    override fun root(): String? = findRoot()?.path
+
+    override fun logTail(lines: Int): String? {
+        val root = findRoot() ?: return null
+        return serverLogTail(serverDataDir(root), lines)
+    }
+
+    /**
+     * Каталог TaskBridge: настройка `server.root`, иначе — от местоположения своего кода
+     * (jar в `app/` у jpackage-сборки, каталог классов при `gradle run`) и от рабочего
+     * каталога процесса; каждый якорь проверяется вверх до корня диска.
+     * Местоположение кода — якорь, не зависящий от того, кто и с каким cwd запустил процесс.
+     */
+    private fun findRoot(): File? = findTaskBridgeRoot(store.get("server.root"), anchors())
+
+    private fun anchors(): List<File> = listOfNotNull(
+        codeLocation(DesktopServerLauncher::class.java),
+        File(System.getProperty("user.dir")),
+        // Последним — копия сервера внутри дистрибутива (см. :desktopApp:standalonePortable):
+        // она идёт после репозитория, поэтому в разработке побеждает живой код, а в
+        // распакованном ZIP, где репозитория нет, — копия.
+        bundledServer(),
+    )
+
+    private fun bundledServer(): File? =
+        codeLocation(DesktopServerLauncher::class.java)?.parentFile?.let { File(it, "server") }
+
+    override suspend fun start(): Unit = withContext(Dispatchers.IO) {
+        val root = findRoot() ?: throw IllegalStateException(
+            "Каталог TaskBridge (scripts/start-lan.mjs) не найден — задайте настройку server.root в настройках. " +
+                "Проверено: " + checkedPathList(store.get("server.root"), anchors()),
+        )
+        // node обязателен в PATH: его же требует сам сервер (start.cmd проверяет то же).
+        val process = ProcessBuilder("node", "scripts/start-lan.mjs", "start")
+            .directory(root)
+            .redirectErrorStream(true)
+            .start()
+        val output = StringBuilder()
+        val reader = thread(isDaemon = true) {
+            runCatching { process.inputStream.bufferedReader().forEachLine { output.appendLine(it) } }
+        }
+        if (!process.waitFor(180, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            writeStartLog(root, output.toString())
+            throw IllegalStateException("Запуск сервера не завершился за 180 с. Вывод: ${startLogPath(root)}")
+        }
+        runCatching { reader.join(1000) }
+        // Полный вывод всегда в файл: в тосте видно только хвост, а причина (блокировка
+        // экземпляра, порт, конфиг) часто оказывается выше по тексту или в lan-app.log.
+        writeStartLog(root, output.toString())
+        if (process.exitValue() != 0) {
+            val port = lanPublicPort(serverDataDir(root))
+            if (port != null && healthAnswers(port)) {
+                // Ненулевой код при живом сервере — это гонка: пара уже поднята
+                // (например, её подняло предыдущее нажатие или соседний запуск).
+                return@withContext
+            }
+            throw IllegalStateException(
+                "Не удалось запустить сервер:\n" + readableOutput(output.toString()) +
+                    "\n\nПолные логи: ${startLogPath(root)}, ${File(serverDataDir(root), "lan-app.log")}",
+            )
+        }
+    }
+
+    private fun startLogPath(root: File): File = File(serverDataDir(root), "lan-client-start.log")
+
+    private fun writeStartLog(root: File, text: String) {
+        runCatching {
+            val file = startLogPath(root)
+            file.parentFile?.mkdirs()
+            file.writeText(text)
+        }
+    }
+
+    /** Кандидаты для текста ошибки: первые 10 путей, дальше — многоточие (вверх до корня диска их бывает много). */
+    private fun checkedPathList(setting: String?, anchors: List<File>): String =
+        taskBridgeRootCandidates(setting, anchors)
+            .let { it.take(10).joinToString(", ") { dir -> dir.path } + if (it.size > 10) " …" else "" }
+}
+
+/**
+ * Кандидаты на корень TaskBridge: сначала настройка `server.root`, затем якоря и все их
+ * родители до корня диска. Раньше поиск ограничивался четырьмя кандидатами от `user.dir`,
+ * а портативная сборка `clients/kmp/dist/TaskBridge` лежит на четыре уровня ниже корня —
+ * корень был пятым кандидатом и не проверялся, поэтому сервер не запускался.
+ */
+internal fun taskBridgeRootCandidates(setting: String?, anchors: List<File>): List<File> = buildList {
+    setting?.trim()?.takeIf { it.isNotEmpty() }?.let { add(File(it)) }
+    for (anchor in anchors) {
+        var dir: File? = anchor
+        while (dir != null) {
+            add(dir)
+            dir = dir.parentFile
+        }
+    }
+}
+
+/** Корень TaskBridge — каталог, в котором лежит `scripts/start-lan.mjs`. */
+internal fun findTaskBridgeRoot(setting: String?, anchors: List<File>): File? =
+    taskBridgeRootCandidates(setting, anchors).firstOrNull { File(it, "scripts/start-lan.mjs").isFile }
+
+/**
+ * То, что показывает тост при неудачном запуске сервера: вывод `start-lan.mjs` без шума Node.
+ * Предупреждения `(node:NNN) ... DeprecationWarning` занимали весь хвост, и в сообщении не было
+ * видно причины — например, «TaskBridge уже запущен (PID 13220)» из lan-app.log.
+ */
+internal fun readableOutput(text: String, tail: Int = 12): String {
+    val noise = listOf("DeprecationWarning", "ExperimentalWarning", "(Use `node --trace-deprecation", "--trace-warnings")
+    val meaningful = text.lines().map { it.trim() }.filterNot { line -> noise.any { line.contains(it) } }.filter { it.isNotEmpty() }
+    return meaningful.takeLast(tail).joinToString("\n").ifEmpty { "вывод пуст — причину смотрите в lan-app.log" }
+}
+
+/** Каталог состояния сервера: тот же, что выбирает start-lan и src/server.mjs (`TASKBRIDGE_DATA_DIR` или `<корень>/data`). */
+internal fun serverDataDir(root: File): File =
+    System.getenv("TASKBRIDGE_DATA_DIR")?.takeIf { it.isNotBlank() }?.let { File(it) } ?: File(root, "data")
+
+/** Публичный порт из `lan.json` — того состояния, по которому серверный перезапуск находит процессы. */
+internal fun lanPublicPort(dataDir: File): Int? = runCatching {
+    val state = File(dataDir, "lan.json").readText()
+    Regex("\"publicPort\"\\s*:\\s*(\\d+)").find(state)?.groupValues?.get(1)?.toIntOrNull()
+}.getOrNull()
+
+/** Короткая проба: жив ли сервер на публичном порту (тот же `/api/health`, что ждёт start-lan). */
+internal fun healthAnswers(port: Int): Boolean = runCatching {
+    val connection = URI("http://127.0.0.1:$port/api/health").toURL().openConnection().apply {
+        connectTimeout = 1500
+        readTimeout = 1500
+    }
+    (connection as HttpURLConnection).responseCode == 200
+}.getOrDefault(false)
+
+/**
+ * Последние [lines] строк файла: читаем окно с конца, а не весь лог — логи копятся без ротации.
+ * Окно больше [lines] строк, чтобы после отбрасывания пустых строк хватало содержательных.
+ */
+internal fun fileTail(file: File, lines: Int, window: Int = 64 * 1024): String = runCatching {
+    java.io.RandomAccessFile(file, "r").use { raf ->
+        val size = minOf(raf.length(), window.toLong()).toInt()
+        raf.seek(raf.length() - size)
+        val bytes = ByteArray(size)
+        raf.readFully(bytes)
+        String(bytes, Charsets.UTF_8).lines().takeLast(lines).joinToString("\n")
+    }
+}.getOrDefault("(не удалось прочитать ${file.name})")
+
+/** Хвосты логов сервера одним текстом для настроек; null — логов ещё нет. */
+internal fun serverLogTail(dataDir: File, lines: Int): String? = listOf(
+    "lan-client-start.log" to "запуск из приложения",
+    "lan-app.log" to "сервер",
+    "lan-proxy.log" to "прокси",
+).mapNotNull { (name, title) ->
+    val file = File(dataDir, name)
+    if (!file.isFile) null else "=== $title ($name) ===\n" + fileTail(file, lines)
+}.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
+
+/** Каталог с кодом класса: у jpackage-сборки это `app/` (jar), при `gradle run` и в тестах —
+ * каталог классов. Через `toURI()` + `File`, а не через `path`, чтобы пробелы и кириллица
+ * в пути не ломали якорь.
+ */
+internal fun codeLocation(anchor: Class<*>): File? = runCatching {
+    val location = anchor.protectionDomain?.codeSource?.location?.toURI() ?: return null
+    File(location).let { if (it.isFile) it.parentFile else it }
+}.getOrNull()
 
 @Composable
 actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) = Unit
@@ -188,6 +375,42 @@ actual fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit 
 
 @Composable
 actual fun rememberClipboardFiles(): () -> List<UploadFile> = remember { { clipboardFiles(Toolkit.getDefaultToolkit().systemClipboard) } }
+
+/** Файлы, перетащенные из проводника на окно: тот же формат, что у Ctrl+V (javaFileListFlavor). */
+@OptIn(ExperimentalComposeUiApi::class)
+actual fun hasFileDrop(event: DragAndDropEvent): Boolean =
+    event.awtTransferable.isDataFlavorSupported(DataFlavor.javaFileListFlavor)
+
+@OptIn(ExperimentalComposeUiApi::class)
+actual fun dragDroppedFiles(event: DragAndDropEvent): List<UploadFile> = runCatching {
+    (event.awtTransferable.getTransferData(DataFlavor.javaFileListFlavor) as List<*>)
+        .filterIsInstance<File>().filter(File::isFile).map { file ->
+            UploadFile(file.name, runCatching { Files.probeContentType(file.toPath()) }.getOrNull(), file.readBytes())
+        }
+}.getOrDefault(emptyList())
+
+/**
+ * Приём файлов, перетащенных из проводника: Modifier.dragAndDropTarget из
+ * foundation (в CMP 1.12 он есть, самодельная нода не нужна) плюс чтение файлов
+ * через javaFileListFlavor — тот же путь, что у Ctrl+V.
+ */
+actual fun Modifier.fileDropTarget(onFiles: (List<UploadFile>) -> Unit): Modifier =
+    dragAndDropTarget(shouldStartDragAndDrop = { hasFileDrop(it) }, target = FileDropTarget(onFiles))
+
+private class FileDropTarget(val onFiles: (List<UploadFile>) -> Unit) : DragAndDropTarget {
+    override fun onDrop(event: DragAndDropEvent): Boolean {
+        val dropped = dragDroppedFiles(event)
+        if (dropped.isEmpty()) return false
+        onFiles(dropped)
+        return true
+    }
+
+    // Сравнение по самой лямбде: Composer держит её стабильной (remember), поэтому
+    // при перерисовке поля нода не пересобирается.
+    override fun equals(other: Any?): Boolean = other is FileDropTarget && other.onFiles === onFiles
+
+    override fun hashCode(): Int = onFiles.hashCode()
+}
 
 /** Files copied in the file manager, or a picture (a screenshot, a copied image) saved as PNG. */
 internal fun clipboardFiles(clipboard: Clipboard): List<UploadFile> = runCatching {

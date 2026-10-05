@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { startFixture } from './server-fixture.mjs';
 
 // The open-on-machine routes launch OS applications, so they must be impossible
@@ -24,6 +27,30 @@ function post(fixture, routePath, { headers = {}, body } = {}) {
     });
     req.on('error', reject);
     req.end(payload);
+  });
+}
+
+function insertEvent(fixture, taskId, payload) {
+  const db = new DatabaseSync(path.join(fixture.root, 'data', 'taskbridge.db'));
+  try {
+    const seq = Number(db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE task_id = ?').get(taskId).seq);
+    db.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run(taskId, seq, JSON.stringify({ taskId, ...payload }));
+  } finally {
+    db.close();
+  }
+}
+
+function insertPiToolPath(fixture, taskId, absolutePath) {
+  insertEvent(fixture, taskId, {
+    type: 'PI_EVENT',
+    data: { pi: { type: 'tool_execution_start', toolName: 'read', args: { path: absolutePath } } },
+  });
+}
+
+function insertMessageToolPath(fixture, taskId, absolutePath) {
+  insertEvent(fixture, taskId, {
+    type: 'PI_EVENT',
+    data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'toolCall', name: 'read', arguments: { path: absolutePath } }] } } },
   });
 }
 
@@ -77,11 +104,56 @@ test('workspace-file open/run read the path from the query, not an empty body', 
   // silently fall back to the workspace folder (which the panel then "opened").
   const missing = await post(fixture, `${route}?path=does-not-exist.txt`, { body: { confirm: true } });
   assert.equal(missing.status, 404);
+  // The reason is the operator's, not Node's: a file the agent has deleted is the
+  // usual cause, and the raw error ("ENOENT … realpath 'G:\…'") also handed the
+  // server's own paths to whoever asked, a phone on the LAN included.
+  assert.equal(missing.body.code, 'NOT_FOUND');
+  assert.match(missing.body.error, /не найден/i);
+  assert.doesNotMatch(missing.body.error, /ENOENT|realpath|[A-Za-z]:\\/);
+
+  // Reading such a path — what the file viewer does first — says the same thing
+  // instead of painting the raw error in red.
+  const read = await fetch(`${fixture.base}/api/tasks/${task.id}/workspace-file?path=does-not-exist.txt`);
+  assert.equal(read.status, 404);
+  const readBody = await read.json();
+  assert.equal(readBody.code, 'NOT_FOUND');
+  assert.match(readBody.error, /не найден/i);
+  assert.doesNotMatch(readBody.error, /ENOENT|realpath|[A-Za-z]:\\/);
 
   // No path at all is a client error, not "reveal the folder".
   const empty = await post(fixture, route, { body: { confirm: true } });
   assert.equal(empty.status, 400);
   assert.equal(empty.body.code, 'INPUT_INVALID');
+});
+
+test('workspace-file may read an absolute file only after a tool event named it', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-external-file-'));
+  t.after(async () => { await fs.rm(externalDir, { recursive: true, force: true }); await fixture.close(); });
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'external file probe' });
+  for (let i = 0; i < 200 && !(await fixture.api(`/api/tasks/${task.id}`)).workspacePath; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const external = path.join(externalDir, 'outside.txt');
+  await fs.writeFile(external, 'outside file contents');
+  const route = `/api/tasks/${task.id}/workspace-file?path=${encodeURIComponent(external)}`;
+
+  const before = await fetch(`${fixture.base}${route}`);
+  assert.equal(before.status, 400);
+  assert.equal((await before.json()).code, 'INPUT_INVALID');
+
+  insertPiToolPath(fixture, task.id, external);
+  const afterPi = await fetch(`${fixture.base}${route}`);
+  assert.equal(afterPi.status, 200);
+  assert.equal(await afterPi.text(), 'outside file contents');
+
+  const second = path.join(externalDir, 'from-message-tool-call.txt');
+  await fs.writeFile(second, 'from message tool call');
+  const secondRoute = `/api/tasks/${task.id}/workspace-file?path=${encodeURIComponent(second)}`;
+  insertMessageToolPath(fixture, task.id, second);
+  const afterMessage = await fetch(`${fixture.base}${secondRoute}`);
+  assert.equal(afterMessage.status, 200);
+  assert.equal(await afterMessage.text(), 'from message tool call');
 });
 
 test('run-on-machine routes keep the same guard and never run without it', { timeout: 60000 }, async t => {

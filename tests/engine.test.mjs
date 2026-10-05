@@ -29,6 +29,11 @@ test('provider JSON error bodies are flattened into one readable line', () => {
     'Invalid value for temperature (invalid_request_error)'
   );
   assert.equal(humanizeError('Request aborted'), 'Request aborted');
+  // Pi may forward an outer JSON envelope whose message is an escaped JSON body.
+  assert.equal(
+    humanizeError('{"error":{"message":"{\\n \\"error\\": {\\n \\"code\\": 503,\\n \\"message\\": \\"This model is currently experiencing high demand.\\",\\n \\"status\\": \\"UNAVAILABLE\\"\\n}\\n}"},"code":503}'),
+    'This model is currently experiencing high demand. (UNAVAILABLE)'
+  );
   // A param not mentioned in the message is kept.
   assert.equal(
     humanizeError('{"message":"Bad request","type":"invalid_request_error","param":"tools"}'),

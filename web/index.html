@@ -37,6 +37,7 @@
       </div>
       <button id="modelButton" type="button" class="modelChip" title="Выбрать модель Pi" aria-label="Выбрать модель Pi"><span class="modelChipLabel">Модель: </span><span class="modelChipName">—</span></button>
       <button id="localModelsButton" data-pc-only type="button" class="small hidden" title="Локальные модели llama.cpp">Локальные модели</button>
+      <button id="processesButton" data-pc-only type="button" class="small" title="Процессы машины и память">Процессы</button>
       <button id="mcpButton" data-pc-only type="button" class="small" title="MCP-серверы для задач">MCP</button>
       <button id="serverRestartButton" data-pc-only type="button" class="bareIcon" title="Перезагрузить сервер" aria-label="Перезагрузить сервер">
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
@@ -193,12 +194,37 @@
         <div class="localProgressTrack"><div id="localProgressFill" class="localProgressFill"></div></div>
         <span id="localProgressText" class="muted small"></span>
       </div>
+      <div id="localTabs" class="inline">
+        <button id="localTabInstalled" type="button" class="localTab active">Установленные</button>
+        <button id="localTabHf" type="button" class="localTab">Hugging Face</button>
+        <button id="localTabDownloads" type="button" class="localTab">Загрузки</button>
+      </div>
       <div id="localModelsList" class="sessionPickerList">Загрузка…</div>
+      <div id="hfPanel" class="hidden">
+        <div class="inline">
+          <input id="hfQuery" type="search" placeholder="Поиск моделей на Hugging Face (GGUF)" aria-label="Поиск моделей на Hugging Face" style="flex:1">
+          <button id="hfSearchBtn" type="button">Найти</button>
+        </div>
+        <div id="hfResults" class="sessionPickerList"></div>
+      </div>
+      <div id="hfDownloadsPanel" class="sessionPickerList hidden"></div>
       <div class="inline wrap">
         <button id="localRefresh" type="button">Обновить</button>
         <button id="localStart" type="button">Запустить router</button>
         <button id="localStop" type="button">Остановить router</button>
         <button id="localModelsClose" type="button">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="processesOverlay" class="authGate hidden">
+    <div class="authCard wide">
+      <h2>Процессы машины</h2>
+      <p class="muted small" id="processesHint">Загрузка…</p>
+      <div id="processesList" class="sessionPickerList">Загрузка…</div>
+      <div class="inline wrap">
+        <button id="processesRefresh" type="button">Обновить</button>
+        <button id="processesClose" type="button">Закрыть</button>
       </div>
     </div>
   </div>

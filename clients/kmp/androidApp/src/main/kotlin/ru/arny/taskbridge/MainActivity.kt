@@ -27,6 +27,8 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) window.isNavigationBarContrastEnforced = false
         super.onCreate(savedInstanceState)
         val app = application as TaskBridgeApplication
+        // Kept for platform.exitApp(): the shared UI's «Выход» closes this activity.
+        app.platform.activity = this
         openTaskId = intent?.getStringExtra(EXTRA_TASK_ID)
         askForNotifications()
         setContent {
@@ -50,6 +52,12 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         (application as TaskBridgeApplication).platform.foreground = false
         super.onStop()
+    }
+
+    override fun onDestroy() {
+        val app = application as? TaskBridgeApplication
+        if (app?.platform?.activity === this) app.platform.activity = null
+        super.onDestroy()
     }
 
     /** Android 13+: without the permission the app still works, only silently. */

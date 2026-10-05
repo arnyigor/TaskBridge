@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -22,6 +23,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -39,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -46,13 +49,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.SUPPORTED_API_VERSIONS
 import ru.arny.taskbridge.core.api.LocalModelEntry
+import ru.arny.taskbridge.core.api.HfDownloadJob
+import ru.arny.taskbridge.core.api.HfRepoInfo
+import ru.arny.taskbridge.core.api.HfSearchResult
+import ru.arny.taskbridge.core.api.LibraryRegistration
 import ru.arny.taskbridge.core.api.SystemCpu
 import ru.arny.taskbridge.core.api.SystemGpu
 import ru.arny.taskbridge.core.api.SystemRam
@@ -70,28 +80,27 @@ import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 @Composable
-fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit) {
+fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit, onOpenLocalModels: () -> Unit, onOpenProcesses: () -> Unit) {
     val state by connection.sessions.state.collectAsState()
     val agentState by connection.settingsController.state.collectAsState()
     val online by connection.online.collectAsState()
     val info = state.info
     var confirmDisconnect by remember { mutableStateOf(false) }
+    var confirmExit by remember { mutableStateOf(false) }
+    // Выключение компьютера: фаза «спросить» → отсчёт 10 с (можно отменить) →
+    // отправка на сервер. Таймер живёт в клиенте: если приложение умрёт,
+    // выключение просто не уйдёт, а не сработает без присмотра.
+    var confirmShutdown by remember { mutableStateOf(false) }
+    var shutdownCountdown by remember { mutableStateOf<Int?>(null) }
+    var shutdownSending by remember { mutableStateOf(false) }
+    var shutdownError by remember { mutableStateOf<String?>(null) }
+    var confirmReboot by remember { mutableStateOf(false) }
+    var rebootCountdown by remember { mutableStateOf<Int?>(null) }
+    var rebootSending by remember { mutableStateOf(false) }
+    var rebootError by remember { mutableStateOf<String?>(null) }
     var enterSends by remember { mutableStateOf(graph.settings.enterSends) }
     var editMcpServer by remember { mutableStateOf<McpServer?>(null) }
     var addMcpServer by remember { mutableStateOf(false) }
-    // Локальные модели (роутер llama.cpp + внешние серверы вроде Strata):
-    // выбранная кнопкой модель загружается/выгружается через /api/local/*.
-    // Загрузка внешнего сервера — это запуск его процесса на минуты, поэтому
-    // строка до конца ждёт ответа и показывает «…».
-    // Загрузка внешнего сервера — это запуск его процесса на минуты, поэтому
-    // строка до конца ждёт ответа и показывает «…». Тот же флаг держит кнопку
-    // «Обновить локальные модели», чтобы два действия не спорили за состояние.
-    var localBusyId by remember { mutableStateOf<String?>(null) }
-    var localRefreshing by remember { mutableStateOf(false) }
-    var localError by remember { mutableStateOf<String?>(null) }
-    // «Контекст 131 072 (было 262 144) — подхватит следующая загрузка»: результат
-    // правки конфига движка, который шлёт сервер (число читается из файла модели).
-    var localNote by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(connection) {
@@ -115,6 +124,60 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
             Column(Modifier.widthIn(max = 720.dp)) {
                 SectionTitle("Компьютер")
                 InfoRow(label = "Адрес", value = connection.baseUrl, icon = AppIcons.Computer)
+                // Локальный сервер приложение поднимает через scripts/start-lan.mjs, то есть из корня
+                // репозитория. Автопоиск (от кода приложения и рабочего каталога вверх) обычно его
+                // находит, но если рядом репозитория нет — каталог задаётся здесь: без этого запуск
+                // локального сервера отвечал «не найден — задайте настройку server.root», а задать её было негде.
+                graph.platform.localServerLauncher?.let { launcher ->
+                    var serverRoot by remember { mutableStateOf(graph.platform.store.get("server.root").orEmpty()) }
+                    var logs by remember { mutableStateOf<String?>(null) }
+                    // Поиск корня — это обход файловой системы: считаем вне кадра композиции
+                    // и заново при смене настройки (экран перерисовывается каждую секунду).
+                    val found by produceState<String?>(null, serverRoot) {
+                        value = withContext(Dispatchers.Default) { launcher.root() }
+                    }
+                    InfoRow(
+                        label = "Каталог TaskBridge",
+                        value = serverRoot.ifBlank { found?.let { "найден: $it" } ?: "не найден" },
+                        warning = found == null,
+                    )
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = {
+                            graph.platform.chooseProjectFolder()?.let { picked ->
+                                graph.platform.store.put("server.root", picked)
+                                serverRoot = picked
+                            }
+                        }) { Text("Выбрать каталог…") }
+                        if (serverRoot.isNotBlank()) {
+                            TextButton(onClick = {
+                                graph.platform.store.put("server.root", null)
+                                serverRoot = ""
+                            }) { Text("Сбросить") }
+                        }
+                        // Логи сервера живут файлами рядом с данными (data/lan-*.log): при неудачном
+                        // запуске тост показывает только хвост, а причина — в lan-app.log.
+                        TextButton(onClick = {
+                            scope.launch { logs = withContext(Dispatchers.Default) { launcher.logTail(200) } ?: "Логов пока нет" }
+                        }) { Text("Логи сервера") }
+                    }
+                    logs?.let { text ->
+                        AlertDialog(
+                            onDismissRequest = { logs = null },
+                            title = { Text("Логи сервера") },
+                            text = {
+                                Column(Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
+                                    Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                                }
+                            },
+                            confirmButton = {
+                                Row {
+                                    TextButton(onClick = { graph.platform.copyText(text) }) { Text("Копировать") }
+                                    TextButton(onClick = { logs = null }) { Text("Закрыть") }
+                                }
+                            },
+                        )
+                    }
+                }
                 InfoRow(label = "Сеть устройства", value = if (online) "доступна" else "offline", warning = !online)
                 InfoRow(label = "TaskBridge", value = info?.name ?: "—")
                 InfoRow(label = "Версия API", value = info?.let { "${it.apiVersion} (приложение знает: ${SUPPORTED_API_VERSIONS.joinToString()})" } ?: "—")
@@ -163,83 +226,24 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     ).joinToString(" · ")
                     if (queue.isNotBlank()) InfoRow(label = "Очередь llama.cpp", value = queue)
                 }
-                LocalModelsSection(
-                    models = info?.local?.models.orEmpty(),
-                    routerProvider = info?.local?.provider,
-                    engineModel = engine?.model,
-                    onLoad = { id ->
-                        localBusyId = id
-                        scope.launch {
-                            runCatching { connection.api.loadLocalModel(id) }
-                                .onFailure { localError = it.message ?: "Не удалось загрузить $id" }
-                            localBusyId = null
-                            connection.sessions.refresh()
-                        }
-                    },
-                    onUnload = { id ->
-                        localBusyId = id
-                        scope.launch {
-                            runCatching { connection.api.unloadLocalModel(id) }
-                                .onFailure { localError = it.message ?: "Не удалось выгрузить $id" }
-                            localBusyId = null
-                            connection.sessions.refresh()
-                        }
-                    },
-                    onSetContext = { id, context ->
-                        localBusyId = id
-                        localNote = null
-                        scope.launch {
-                            runCatching { connection.api.setLocalContext(id, context) }
-                                .onSuccess { change ->
-                                    localError = null
-                                    localNote = buildString {
-                                        append("${contextLabel(change.context ?: context)}")
-                                        change.previous?.let { append(" (было ${contextLabel(it)})") }
-                                        append(
-                                            if (change.restartRequired) " — сервер уже загружен, подхватит следующая загрузка"
-                                            else " — подхватится при загрузке модели",
-                                        )
-                                        // Резидентная часть KV — факт из того же файла: если она больше
-                                        // нового контекста, об этом лучше сказать, чем узнать по логу движка.
-                                        change.kvResident?.takeIf { it > (change.context ?: context) }?.let {
-                                            append(" · резидентный KV ${contextLabel(it)} больше нового контекста")
-                                        }
-                                    }
-                                }
-                                .onFailure { localError = it.message ?: "Не удалось изменить контекст $id" }
-                            localBusyId = null
-                            connection.sessions.refresh()
-                        }
-                    },
-                    // Читает статус без кэша и обновляет /api/info: так после удаления
-                    // весов или правки конфигов список приходит в себя сразу, а не
-                    // через пять секунд.
-                    onRefresh = {
-                        localRefreshing = true
-                        localError = null
-                        scope.launch {
-                            runCatching { connection.api.local(fresh = true) }
-                                .onFailure { localError = it.message ?: "Не удалось обновить список локальных моделей" }
-                            localRefreshing = false
-                            connection.sessions.refresh()
-                        }
-                    },
-                    onForget = { id ->
-                        localBusyId = id
-                        localNote = null
-                        scope.launch {
-                            runCatching { connection.api.forgetLocalModel(id) }
-                                .onSuccess { localError = null; localNote = "$id убран из списка TaskBridge" }
-                                .onFailure { localError = it.message ?: "Не удалось убрать $id" }
-                            localBusyId = null
-                            connection.sessions.refresh()
-                        }
-                    },
-                    busyId = localBusyId,
-                    refreshing = localRefreshing,
-                    error = localError,
-                    note = localNote,
+                // Управление локальными моделями — отдельный экран (действие, а не настройка):
+                // здесь только сводка и вход.
+                SectionTitle("Локальные модели")
+                val localModels = info?.local?.models.orEmpty()
+                val localUp = localModels.count { it.status == "loaded" || it.status == "sleeping" }
+                InfoRow(
+                    label = "Локальные модели",
+                    value = if (localModels.isEmpty()) info?.engine?.model ?: "нет данных"
+                            else "установлено ${localModels.size} · запущено $localUp",
                 )
+                TextButton(onClick = onOpenLocalModels, modifier = Modifier.padding(horizontal = 16.dp)) {
+                    Text("Управление локальными моделями")
+                }
+                // Процессы — то же разделение: сводка здесь не нужна, весь список
+                // и kill живут на отдельном экране.
+                TextButton(onClick = onOpenProcesses, modifier = Modifier.padding(horizontal = 16.dp)) {
+                    Text("Процессы и память")
+                }
                 info?.scheduler?.let {
                     // «2 из 4» was read as "максимум 2": name every number instead
                     // of leaving the operator to guess which one is the limit.
@@ -368,6 +372,32 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                     Spacer(Modifier.width(8.dp))
                     Text("Отключиться от компьютера")
                 }
+                // Машина, на которой живёт сервер, выключается целиком — и с телефона,
+                // и из десктопного приложения: действие адресовано серверу, а не
+                // устройству, на котором рисуется экран.
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = { confirmShutdown = true; shutdownError = null; shutdownCountdown = null; shutdownSending = false }, modifier = Modifier.padding(horizontal = 16.dp)) {
+                    Icon(AppIcons.Power, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Выключить компьютер")
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(onClick = { confirmReboot = true; rebootError = null; rebootCountdown = null; rebootSending = false }, modifier = Modifier.padding(horizontal = 16.dp)) {
+                    Icon(AppIcons.Power, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Перезагрузить компьютер")
+                }
+                if (graph.platform.kind == "android") {
+                    // Полный выход, а не «отключиться»: закрывает процесс целиком, чтобы
+                    // за пределами домашнего Wi-Fi ничего не опрашивало сервер и не
+                    // держало службу. Адрес и вход остаются сохранёнными.
+                    Spacer(Modifier.height(12.dp))
+                    OutlinedButton(onClick = { confirmExit = true }, modifier = Modifier.padding(horizontal = 16.dp)) {
+                        Icon(AppIcons.Close, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Выход из приложения")
+                    }
+                }
             }
         }
     }
@@ -386,6 +416,133 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
             },
             dismissButton = { TextButton(onClick = { confirmDisconnect = false }) { Text("Отмена") } },
         )
+    }
+    if (confirmExit) {
+        AlertDialog(
+            onDismissRequest = { confirmExit = false },
+            title = { Text("Выйти?") },
+            text = { Text("Приложение закроется полностью: фоновая служба остановится и уведомления о сессиях перестанут приходить, пока вы снова его не откроете. Сессии на компьютере не пострадают.") },
+            confirmButton = {
+                TextButton(onClick = { confirmExit = false; graph.platform.exitApp() }) { Text("Выйти", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmExit = false }) { Text("Отмена") } },
+        )
+    }
+    if (confirmShutdown) {
+        val countdown = shutdownCountdown
+        AlertDialog(
+            onDismissRequest = { if (!shutdownSending) { confirmShutdown = false; shutdownCountdown = null } },
+            title = { Text(
+                when {
+                    shutdownSending -> "Выключаю компьютер…"
+                    countdown != null -> "Компьютер выключится через $countdown…"
+                    else -> "Выключить компьютер?"
+                }
+            ) },
+            text = {
+                when {
+                    shutdownSending -> Text("Команда уже ушла на компьютер.")
+                    countdown != null -> Column {
+                        LinearProgressIndicator(progress = { countdown / 10f }, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(12.dp))
+                        Text("Отменить можно, пока идёт отсчёт.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    else -> Text("TaskBridge остановится вместе с машиной: запущенные сессии будут прерваны. Отмена возможна только в первые 10 секунд после подтверждения.")
+                }
+                shutdownError?.let { error ->
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+                }
+            },
+            confirmButton = {
+                when {
+                    shutdownSending -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    countdown != null -> {}
+                    else -> TextButton(onClick = { shutdownCountdown = 10 }) { Text("Выключить", color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    confirmShutdown = false; shutdownCountdown = null; shutdownSending = false
+                }) { Text(if (countdown != null && !shutdownSending) "Отменить выключение" else "Закрыть") }
+            },
+        )
+        LaunchedEffect(confirmShutdown, shutdownCountdown) {
+            if (confirmShutdown && countdown != null && !shutdownSending) {
+                while (countdown > 0) {
+                    delay(1_000)
+                    shutdownCountdown = countdown - 1
+                }
+                shutdownSending = true
+            }
+        }
+        LaunchedEffect(shutdownSending) {
+            if (!shutdownSending) return@LaunchedEffect
+            try {
+                connection.api.shutdownComputer()
+                confirmShutdown = false; shutdownCountdown = null; shutdownSending = false
+            } catch (e: Exception) {
+                shutdownError = e.message ?: "Не удалось связаться с компьютером."
+                shutdownSending = false; shutdownCountdown = null
+            }
+        }
+    }
+    if (confirmReboot) {
+        val countdown = rebootCountdown
+        AlertDialog(
+            onDismissRequest = { if (!rebootSending) { confirmReboot = false; rebootCountdown = null } },
+            title = { Text(
+                when {
+                    rebootSending -> "Перезагружаю компьютер…"
+                    countdown != null -> "Компьютер перезагрузится через $countdown…"
+                    else -> "Перезагрузить компьютер?"
+                }
+            ) },
+            text = {
+                when {
+                    rebootSending -> Text("Команда уже ушла на компьютер.")
+                    countdown != null -> Column {
+                        LinearProgressIndicator(progress = { countdown / 10f }, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(12.dp))
+                        Text("Отменить можно, пока идёт отсчёт.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    else -> Text("TaskBridge остановится вместе с машиной: запущенные сессии будут прерваны. Отмена возможна только в первые 10 секунд после подтверждения.")
+                }
+                rebootError?.let { error ->
+                    Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp))
+                }
+            },
+            confirmButton = {
+                when {
+                    rebootSending -> CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    countdown != null -> {}
+                    else -> TextButton(onClick = { rebootCountdown = 10 }) { Text("Перезагрузить", color = MaterialTheme.colorScheme.error) }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    confirmReboot = false; rebootCountdown = null; rebootSending = false
+                }) { Text(if (countdown != null && !rebootSending) "Отменить перезагрузку" else "Закрыть") }
+            },
+        )
+        LaunchedEffect(confirmReboot, rebootCountdown) {
+            if (confirmReboot && countdown != null && !rebootSending) {
+                while (countdown > 0) {
+                    delay(1_000)
+                    rebootCountdown = countdown - 1
+                }
+                rebootSending = true
+            }
+        }
+        LaunchedEffect(rebootSending) {
+            if (!rebootSending) return@LaunchedEffect
+            try {
+                connection.api.rebootComputer()
+                confirmReboot = false; rebootCountdown = null; rebootSending = false
+            } catch (e: Exception) {
+                rebootError = e.message ?: "Не удалось связаться с компьютером."
+                rebootSending = false; rebootCountdown = null
+            }
+        }
     }
     if (addMcpServer || editMcpServer != null) {
         McpServerDialog(
@@ -647,194 +804,6 @@ private fun McpServerDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSave(name.trim(), endpoint.trim().takeIf { useUrl }, endpoint.trim().takeIf { !useUrl }, args.lines().map(String::trim).filter(String::isNotEmpty)) }, enabled = name.isNotBlank() && endpoint.isNotBlank()) { Text("Сохранить") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
-    )
-}
-
-/**
- * Все локальные модели одним блоком — пресеты роутера llama.cpp и настроенные
- * внешние серверы (Strata), ровно как в веб-панели «Локальные модели».
- *
- * Состояние берётся из [LocalModelEntry.status]: «загружена» = роутер отдаёт
- * модель или внешний сервер отвечает /health. Кнопка шлёт /api/local/load или
- * /api/local/unload: для Strata это запуск и остановка всего процесса, поэтому
- * загрузка занимает минуты и кнопка всё это время показывает «…».
- */
-@Composable
-private fun LocalModelsSection(
-    models: List<LocalModelEntry>,
-    routerProvider: String?,
-    engineModel: String?,
-    onLoad: (String) -> Unit,
-    onUnload: (String) -> Unit,
-    onSetContext: (String, Long) -> Unit,
-    onForget: (String) -> Unit,
-    onRefresh: () -> Unit,
-    busyId: String?,
-    refreshing: Boolean,
-    error: String?,
-    note: String?,
-) {
-    if (models.isEmpty()) {
-        InfoRow(label = "Локальные модели", value = engineModel ?: "нет данных")
-        return
-    }
-    val isUp: (LocalModelEntry) -> Boolean = { it.status == "loaded" || it.status == "sleeping" }
-    val loaded = models.count(isUp)
-    InfoRow(label = "Локальные модели", value = "загружено $loaded из ${models.size}")
-    var editing by remember { mutableStateOf<LocalModelEntry?>(null) }
-    var forgetting by remember { mutableStateOf<LocalModelEntry?>(null) }
-    models.forEach { model ->
-        // Файлы удаляют, а запись в конфиге остаётся: такая модель не «выгружена»,
-        // а её больше нет — и «Загрузить» для неё бессмысленно.
-        val gone = model.filesPresent == false
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(model.id, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                val state = when {
-                    gone -> "файлов нет"
-                    isUp(model) -> "загружена"
-                    model.status == "loading" -> "грузится"
-                    model.status == "failed" -> "ошибка"
-                    else -> "не загружена"
-                }
-                val group = model.provider ?: routerProvider ?: "llama.cpp"
-                // Контекст — параметр модели, а не сессии: у внешних серверов он
-                // лежит в конфиге движка, у пресетов роутера — в models.ini.
-                val context = model.contextWindow?.takeIf { !gone }?.let { " · контекст ${contextLabel(it)}" }.orEmpty()
-                Text(
-                    "$group · $state$context",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (gone) LocalStatusColors.current.waiting else MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (gone) model.missingFile?.let { missing ->
-                    Text(
-                        "нет $missing",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-            // Удалённые веса: строка остаётся только потому, что запись есть в
-            // config.json TaskBridge, — её и убираем (модель и конфиг движка целы).
-            if (gone && model.removable) {
-                TextButton(onClick = { forgetting = model }, enabled = busyId == null) {
-                    Text("Убрать")
-                }
-            }
-            if (model.contextEditable) {
-                TextButton(onClick = { editing = model }, enabled = busyId == null) {
-                    Text("Контекст")
-                }
-            }
-            OutlinedButton(
-                onClick = { if (isUp(model)) onUnload(model.id) else onLoad(model.id) },
-                enabled = busyId == null && !gone,
-            ) {
-                Text(if (busyId == model.id) "…" else if (isUp(model)) "Выгрузить" else "Загрузить")
-            }
-        }
-    }
-    // Список локальных моделей приходит из конфигов на диске: после удаления весов
-    // или правки конфигов его надо перечитать, не дожидаясь пятисекундного кэша.
-    OutlinedButton(
-        onClick = onRefresh,
-        enabled = !refreshing && busyId == null,
-        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-    ) {
-        if (refreshing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        else Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
-        Spacer(Modifier.width(8.dp))
-        Text("Обновить локальные модели")
-    }
-    editing?.let { model ->
-        ContextDialog(
-            model = model,
-            onDismiss = { editing = null },
-            onSave = { value ->
-                editing = null
-                onSetContext(model.id, value)
-            },
-        )
-    }
-    forgetting?.let { model ->
-        AlertDialog(
-            onDismissRequest = { forgetting = null },
-            title = { Text("Убрать ${model.id} из списка?") },
-            text = {
-                Text(
-                    "Удаляется только запись TaskBridge (config.json → localRuntime.externalServers). " +
-                        "Файлы модели, конфиг движка и запущенный процесс не трогаются; если провайдер есть в Pi " +
-                        "(~/.pi/agent/models.json), он останется в списке моделей Pi.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val id = model.id
-                    forgetting = null
-                    onForget(id)
-                }) { Text("Убрать", color = MaterialTheme.colorScheme.error) }
-            },
-            dismissButton = { TextButton(onClick = { forgetting = null }) { Text("Отмена") } },
-        )
-    }
-    if (note != null) InfoRow(label = "Контекст модели", value = note)
-    if (error != null) InfoRow(label = "Ошибка модели", value = error, warning = true)
-}
-
-/** `262144` → `«262 144»`: шестизначное число без разрядов не прочитать. */
-internal fun contextLabel(value: Long): String =
-    value.toString().reversed().chunked(3).joinToString(" ").reversed()
-
-/**
- * Размер контекста — параметр ЗАГРУЗКИ, а не сессии: его можно поменять только на
- * выгруженной модели (или он подхватится при следующей загрузке) и только у того
- * сервера, который берёт параметры из своего файла с `--max-context` (Strata).
- * Список значений — обычные шаги 2^17..2^18: свободный ввод частоты не требует, а
- * опечатку в шестизначном числе ловит сервер.
- */
-@Composable
-private fun ContextDialog(model: LocalModelEntry, onDismiss: () -> Unit, onSave: (Long) -> Unit) {
-    val current = model.contextWindow
-    var text by remember(model.id) { mutableStateOf(current?.toString().orEmpty()) }
-    val parsed = text.trim().toLongOrNull()
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Контекст модели") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    "${model.id}. Контекст задаётся при загрузке: новое значение подхватит следующая загрузка (сейчас ${current?.let(::contextLabel) ?: "неизвестен"}).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = { text = it.filter(Char::isDigit) },
-                    label = { Text("Токенов") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                )
-                // Четыре значения — уже шире телефона: Row выдавил бы последнее в ноль.
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(32768L, 65536L, 131072L, 262144L).forEach { preset ->
-                        FilterChip(
-                            selected = parsed == preset,
-                            onClick = { text = preset.toString() },
-                            label = { Text(contextLabel(preset)) },
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = { parsed?.let(onSave) }, enabled = parsed != null && parsed != current) { Text("Сохранить") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )

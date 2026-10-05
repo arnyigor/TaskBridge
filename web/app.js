@@ -3020,11 +3020,11 @@ function isTouchDevice() {
 // wrapped the header onto a second line). On a wide screen every control goes
 // back into the header in its original order.
 // Nothing is hidden: without JS the header is exactly what index.html says.
-const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
 // Menu order, not header order: the model switcher is what a phone opens this
 // menu for. The status dot stays in the header — 12px of a live indicator costs
 // no row, and the model chip was what pushed the header onto a second line.
-const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
 // The one width the phone layout starts at, shared by the header menu, the
 // session drawer and the CSS (see the media queries in web/app.css).
 const MOBILE_QUERY = '(max-width: 900px)';
@@ -4900,8 +4900,13 @@ $('localModelsButton').onclick = async () => {
   $('localModelsOverlay').classList.remove('hidden');
   openLocalEvents();
   await refreshLocalStatus();
+  refreshHfDownloads();
 };
-$('localModelsClose').onclick = () => { $('localModelsOverlay').classList.add('hidden'); closeLocalEvents(); clearLocalProgress(); };
+$('localModelsClose').onclick = () => {
+  $('localModelsOverlay').classList.add('hidden');
+  closeLocalEvents(); clearLocalProgress();
+  if (hfDownloadsTimer) { clearTimeout(hfDownloadsTimer); hfDownloadsTimer = null; }
+};
 $('localRefresh').onclick = () => refreshLocalStatus({ fresh: true });
 $('localStart').onclick = async () => {
   $('localStart').disabled = true;
@@ -4915,6 +4920,377 @@ $('localStop').onclick = async () => {
   catch (error) { alert(error.message); }
   await refreshLocalStatus();
 };
+
+/* ---------------- Процессы машины: кто съедает память, кого прибить ---------------- */
+
+let processesCache = [];
+
+$('processesButton').onclick = () => {
+  $('processesOverlay').classList.remove('hidden');
+  refreshProcesses();
+};
+$('processesClose').onclick = () => $('processesOverlay').classList.add('hidden');
+$('processesRefresh').onclick = () => refreshProcesses({ fresh: true });
+
+//hf формат не переиспользуем: у процессов память от килобайт до гигабайт, нужен и Б-диапазон.
+function processFormatMemory(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '—';
+  const mb = bytes / (1024 * 1024);
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} ГБ`;
+  if (mb >= 1) return `${Math.round(mb)} МБ`;
+  return `${Math.max(1, Math.round(bytes / 1024))} КБ`;
+}
+
+async function refreshProcesses({ fresh = false } = {}) {
+  const list = $('processesList');
+  const hint = $('processesHint');
+  try {
+    const data = await api('/api/processes' + (fresh ? '?fresh=1' : ''));
+    processesCache = Array.isArray(data.processes) ? data.processes : [];
+    const withMemory = processesCache.filter(p => Number.isFinite(p.memoryBytes));
+    const totalMb = withMemory.reduce((sum, p) => sum + p.memoryBytes, 0) / (1024 * 1024);
+    hint.textContent = withMemory.length
+      ? `Процессов: ${processesCache.length} · память учтённых: ${totalMb >= 1024 ? `${(totalMb / 1024).toFixed(1)} ГБ` : `${Math.round(totalMb)} МБ`}`
+      : `Процессов: ${processesCache.length}`;
+    renderProcesses();
+  } catch (error) {
+    hint.textContent = 'Не удалось получить список процессов.';
+    list.textContent = error.message;
+  }
+}
+
+function renderProcesses() {
+  const list = $('processesList');
+  list.innerHTML = '';
+  if (!processesCache.length) {
+    list.textContent = 'Список пуст — ОС не вернула процессов.';
+    return;
+  }
+  // Самые прожорливые сверху; без памяти — в конец, а не вперемешку.
+  const sorted = [...processesCache].sort((a, b) =>
+    (Number.isFinite(b.memoryBytes) ? b.memoryBytes : -1) - (Number.isFinite(a.memoryBytes) ? a.memoryBytes : -1));
+  for (const p of sorted) list.append(processRow(p));
+}
+
+function processRow(p) {
+  const row = document.createElement('div');
+  row.className = 'localModel';
+  const info = document.createElement('div');
+  info.className = 'info';
+  const titleRow = document.createElement('div');
+  titleRow.className = 'titleRow';
+  const name = document.createElement('div');
+  name.className = 'name';
+  name.textContent = p.name || '(без имени)';
+  titleRow.append(name);
+  const mem = document.createElement('div');
+  mem.className = 'meta';
+  mem.textContent = processFormatMemory(p.memoryBytes);
+  titleRow.append(mem);
+  info.append(titleRow);
+  const sub = document.createElement('div');
+  sub.className = 'modelSubpath muted small';
+  sub.textContent = `pid ${p.pid}${p.commandLine ? ` · ${p.commandLine}` : ''}`;
+  sub.title = p.commandLine || '';
+  info.append(sub);
+
+  const kill = document.createElement('button');
+  kill.type = 'button';
+  kill.textContent = 'Остановить';
+  kill.onclick = async () => {
+    const label = p.name || 'этот процесс';
+    if (!confirm(`Остановить ${label} (pid ${p.pid})? Процесс и его дочерние будут завершены принудительно.`)) return;
+    kill.disabled = true;
+    try {
+      await api('/api/processes/kill', { method: 'POST', body: { pid: p.pid, name: p.name || '' } });
+    } catch (error) {
+      alert(error.message);
+    }
+    await refreshProcesses({ fresh: true });
+  };
+  row.append(info, kill);
+  return row;
+}
+
+/* ---------------- Hugging Face — источник моделей ---------------- */
+
+// Поиск → репозиторий (кванты) → задание загрузки. Панели живут внутри диалога
+// локальных моделей: «Установленные» — прежний список router/Strata, «Hugging
+// Face» — поиск и выбор кванта, «Загрузки» — очередь DownloadManager с прогрессом.
+let hfPanel = 'installed';
+let hfSearchResults = [];
+let hfRepoDetail = null;      // результат /api/hf/repo для открытого репозитория
+let hfDownloadsBusy = false;  // один опрос за раз
+let hfDownloadsTimer = null;
+
+// formatBytes рассчитан на КиБ/МиБ — размеры моделей читаются в ГБ.
+function hfFormatSize(bytes) {
+  const gb = (Number(bytes) || 0) / 1e9;
+  return gb >= 1 ? `${gb.toFixed(1)} ГБ` : `${Math.round((Number(bytes) || 0) / 1e6)} МБ`;
+}
+
+function switchLocalTab(tab) {
+  hfPanel = tab;
+  const map = { installed: 'localModelsList', hf: 'hfPanel', downloads: 'hfDownloadsPanel' };
+  for (const [name, id] of Object.entries(map)) $(id).classList.toggle('hidden', name !== tab);
+  $('localTabInstalled').classList.toggle('active', tab === 'installed');
+  $('localTabHf').classList.toggle('active', tab === 'hf');
+  $('localTabDownloads').classList.toggle('active', tab === 'downloads');
+  if (tab === 'downloads') refreshHfDownloads();
+}
+
+$('localTabInstalled').onclick = () => switchLocalTab('installed');
+$('localTabHf').onclick = () => switchLocalTab('hf');
+$('localTabDownloads').onclick = () => switchLocalTab('downloads');
+
+async function searchHf() {
+  const query = $('hfQuery').value.trim();
+  if (!query) return;
+  const box = $('hfResults');
+  box.textContent = 'Поиск…';
+  try { hfSearchResults = await api('/api/hf/search?q=' + encodeURIComponent(query)); }
+  catch (error) { box.textContent = `Ошибка поиска: ${error.message}`; return; }
+  renderHfResults();
+}
+
+function renderHfResults() {
+  const box = $('hfResults');
+  box.innerHTML = '';
+  if (!hfSearchResults.length) { box.textContent = 'Ничего не найдено.'; return; }
+  for (const item of hfSearchResults) {
+    const row = document.createElement('div');
+    row.className = 'localModel';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = item.repo;
+    info.append(name);
+    const meta = document.createElement('div');
+    meta.className = 'meta muted small';
+    meta.textContent = `⬇ ${Number(item.downloads).toLocaleString('ru-RU')} · ♥ ${item.likes}${item.gated ? ' · gated' : ''}`;
+    info.append(meta);
+    const actions = document.createElement('div');
+    actions.className = 'rowActions';
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'loadBtn';
+    open.textContent = 'Варианты';
+    open.onclick = () => openHfRepo(item.repo);
+    actions.append(open);
+    row.append(info, actions);
+    box.append(row);
+  }
+}
+
+async function openHfRepo(repo) {
+  const box = $('hfResults');
+  box.textContent = `Читаю ${repo}…`;
+  try { hfRepoDetail = await api('/api/hf/repo?repo=' + encodeURIComponent(repo)); }
+  catch (error) { box.textContent = `Ошибка: ${error.message}`; return; }
+  renderHfRepo();
+}
+
+function renderHfRepo() {
+  const box = $('hfResults');
+  box.innerHTML = '';
+  if (!hfRepoDetail) return;
+  const back = document.createElement('button');
+  back.type = 'button';
+  back.className = 'loadBtn';
+  back.textContent = '← К результатам поиска';
+  back.onclick = renderHfResults;
+  box.append(back);
+  if (!hfRepoDetail.variants.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted small';
+    empty.textContent = 'В репозитории нет GGUF-вариантов.';
+    box.append(empty);
+  }
+  for (const variant of hfRepoDetail.variants) {
+    const row = document.createElement('div');
+    row.className = 'localModel';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const titleRow = document.createElement('div');
+    titleRow.className = 'titleRow';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = variant.quant;
+    titleRow.append(name);
+    info.append(titleRow);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const size = document.createElement('span');
+    size.className = 'badge quant';
+    size.textContent = hfFormatSize(variant.totalBytes);
+    meta.append(size);
+    if (variant.shards) {
+      const shards = document.createElement('span');
+      shards.className = 'badge mutedBadge';
+      shards.textContent = `${variant.shards} части`;
+      meta.append(shards);
+    }
+    if (variant.complete === false) {
+      const broken = document.createElement('span');
+      broken.className = 'badge err';
+      broken.textContent = 'неполный набор частей';
+      meta.append(broken);
+    }
+    info.append(meta);
+    const actions = document.createElement('div');
+    actions.className = 'rowActions';
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.className = 'loadBtn';
+    download.textContent = 'Скачать';
+    download.disabled = variant.complete === false;
+    download.onclick = () => startHfDownload(variant);
+    actions.append(download);
+    row.append(info, actions);
+    box.append(row);
+  }
+  if (hfRepoDetail.projectors.length) {
+    const note = document.createElement('div');
+    note.className = 'muted small';
+    note.textContent = `Vision: ${hfRepoDetail.projectors.map(p => p.name).join(', ')} — скачается автоматически.`;
+    box.append(note);
+  }
+}
+
+async function startHfDownload(variant) {
+  if (!hfRepoDetail) return;
+  try {
+    await api('/api/hf/download', {
+      method: 'POST',
+      body: JSON.stringify({ repo: hfRepoDetail.repo, revision: hfRepoDetail.revision, files: variant.files.map(f => f.path) })
+    });
+    switchLocalTab('downloads');
+  } catch (error) { alert(`Не удалось начать загрузку: ${error.message}`); }
+}
+
+const HF_JOB_LABELS = {
+  QUEUED: ['mutedBadge', 'в очереди'], DOWNLOADING: ['run', 'качается'], VERIFYING: ['run', 'проверка'],
+  INSTALLED: ['ok', 'установлена'], FAILED: ['err', 'ошибка'], CANCELLED: ['mutedBadge', 'отменена'],
+  INTERRUPTED: ['err', 'прервана рестартом']
+};
+
+async function refreshHfDownloads() {
+  if (hfDownloadsBusy) return;
+  hfDownloadsBusy = true;
+  try {
+    const { jobs } = await api('/api/hf/downloads');
+    renderHfDownloads(jobs);
+  } catch { /* диалог может пережить недоступный сервер */ }
+  finally { hfDownloadsBusy = false; }
+  // Пока есть живые задания — продолжаем обновлять прогресс.
+  const active = [...$('hfDownloadsPanel').children].some(el => el.dataset.active === '1');
+  if (hfPanel === 'downloads' && active && !hfDownloadsTimer) hfDownloadsTimer = setTimeout(() => { hfDownloadsTimer = null; refreshHfDownloads(); }, 2000);
+}
+
+function renderHfDownloads(jobs) {
+  const box = $('hfDownloadsPanel');
+  box.innerHTML = '';
+  if (!jobs.length) { box.textContent = 'Загрузок пока нет.'; return; }
+  if (jobs.some(j => !['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(j.state))) {
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'loadBtn';
+    clear.textContent = 'Очистить завершённые';
+    clear.onclick = async () => {
+      try {
+        const result = await api('/api/hf/downloads/clear', { method: 'POST', body: '{}' });
+        if (result.removed) refreshHfDownloads();
+      } catch (error) { alert(error.message); }
+    };
+    const wrap = document.createElement('div');
+    wrap.className = 'rowActions';
+    wrap.append(clear);
+    box.append(wrap);
+  }
+  for (const job of jobs) {
+    const row = document.createElement('div');
+    row.className = 'localModel';
+    row.dataset.active = ['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(job.state) ? '1' : '0';
+    const info = document.createElement('div');
+    info.className = 'info';
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = job.label || job.repo;
+    info.append(name);
+    const track = document.createElement('div');
+    track.className = 'localProgressTrack';
+    const fill = document.createElement('div');
+    fill.className = 'localProgressFill';
+    const ratio = job.totalBytes ? Math.min(1, (job.downloadedBytes || 0) / job.totalBytes) : 0;
+    fill.style.width = `${Math.round(ratio * 100)}%`;
+    track.append(fill);
+    info.append(track);
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    const [cls, label] = HF_JOB_LABELS[job.state] || ['mutedBadge', job.state];
+    const badge = document.createElement('span');
+    badge.className = `badge ${cls}`.trim();
+    badge.textContent = label;
+    meta.append(badge);
+    const detail = document.createElement('span');
+    detail.className = 'ctxBadge';
+    detail.textContent = `${hfFormatSize(job.downloadedBytes)} / ${hfFormatSize(job.totalBytes)}`
+      + (job.speed ? ` · ${hfFormatSize(job.speed)}/с` : '')
+      + (job.error ? ` · ${job.error}` : '');
+    meta.append(detail);
+    info.append(meta);
+    const actions = document.createElement('div');
+    actions.className = 'rowActions';
+    if (['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(job.state)) {
+      const cancel = document.createElement('button');
+      cancel.type = 'button';
+      cancel.className = 'loadBtn';
+      cancel.textContent = 'Отменить';
+      cancel.onclick = async () => {
+        try { await api('/api/hf/downloads/cancel', { method: 'POST', body: JSON.stringify({ id: job.id }) }); }
+        catch (error) { alert(error.message); }
+        refreshHfDownloads();
+      };
+      actions.append(cancel);
+    } else if (['FAILED', 'INTERRUPTED', 'CANCELLED'].includes(job.state)) {
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'loadBtn';
+      retry.textContent = 'Продолжить';
+      retry.onclick = async () => {
+        try { await api('/api/hf/downloads/retry', { method: 'POST', body: JSON.stringify({ id: job.id }) }); }
+        catch (error) { alert(error.message); }
+        refreshHfDownloads();
+      };
+      actions.append(retry);
+    }
+    // Установленная модель: пресет в models.ini роутера — после его перезапуска
+    // модель появится в пикере Pi. Строки перерисовываются при каждом опросе,
+    // так что кнопка просто есть у каждого установленного задания с libraryId.
+    if (job.state === 'INSTALLED' && job.libraryId) {
+      const register = document.createElement('button');
+      register.type = 'button';
+      register.dataset.register = '1';
+      register.className = 'loadBtn';
+      register.textContent = 'В llama.cpp';
+      register.onclick = async () => {
+        try {
+          const result = await api('/api/library/register', { method: 'POST', body: JSON.stringify({ id: job.libraryId }) });
+          alert(result.restartRequired
+            ? `Пресет «${result.preset}» добавлен в ${result.file}. Перезапустите router, чтобы модель появилась в Pi.`
+            : `Пресет «${result.preset}» добавлен в ${result.file}.`);
+        } catch (error) { alert(error.message); }
+      };
+      actions.append(register);
+    }
+    row.append(info, actions);
+    box.append(row);
+  }
+}
+
+$('hfSearchBtn').onclick = searchHf;
+$('hfQuery').addEventListener('keydown', (e) => { if (e.key === 'Enter') searchHf(); });
 
 /* ---------------- model runtime ---------------- */
 

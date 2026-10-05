@@ -278,6 +278,13 @@ fun SessionsScreen(
                 creating = false
                 onOpen(task.id)
             },
+            // Импорт сессии Pi из выбранной папки: список обновляем, чтобы новая
+            // задача встала на своё место в списке сессий.
+            onImported = { task ->
+                creating = false
+                scope.launch { connection.sessions.refresh() }
+                onOpen(task.id)
+            },
         )
     }
 
@@ -300,21 +307,41 @@ fun SessionsScreen(
     }
 
     if (confirmRestart) {
+        // Недоступный сервер меняет смысл кнопки: перезапускать нечего —
+        // desktop-приложение запустит его само, скрытым процессом без консоли.
+        val wasOnline = connection.online.value
         AlertDialog(
             onDismissRequest = { confirmRestart = false },
-            title = { Text("Перезапустить сервер TaskBridge?") },
-            text = { Text("Активные сессии будут прерваны. Приложение переподключится само через несколько секунд.") },
+            title = { Text(if (wasOnline) "Перезапустить сервер TaskBridge?" else "Запустить сервер TaskBridge?") },
+            text = { Text(
+                when {
+                    wasOnline -> "Активные сессии будут прерваны. Приложение переподключится само через несколько секунд."
+                    // Обещать скрытый запуск можно только когда это правда: на Android лаунчера нет,
+                    // а на desktop он бесполезен без найденного каталога TaskBridge.
+                    connection.sessions.canStartLocalServer() ->
+                        "Сервер сейчас недоступен. Он будет запущен на этом компьютере скрытым процессом — без консольного окна."
+                    else ->
+                        "Сервер сейчас недоступен, а запустить его из приложения нечем: каталог TaskBridge не найден. " +
+                            "Укажите его в настройках → «Каталог TaskBridge» или запустите сервер на компьютере вручную."
+                }
+            ) },
             confirmButton = {
                 TextButton(onClick = {
                     confirmRestart = false
                     restarting = true
                     scope.launch {
                         connection.sessions.restartServer()
-                            .onSuccess { snackbar.showSnackbar("Сервер перезапущен") }
+                            .onSuccess { snackbar.showSnackbar(if (wasOnline) "Сервер перезапущен" else "Сервер запущен") }
                             .onFailure { snackbar.showSnackbar(messageOf(it)) }
                         restarting = false
                     }
-                }) { Text("Перезапустить", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold) }
+                }) {
+                    Text(
+                        if (wasOnline) "Перезапустить" else "Запустить",
+                        color = MaterialTheme.colorScheme.error,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
             },
             dismissButton = { TextButton(onClick = { confirmRestart = false }) { Text("Отмена") } },
         )
@@ -493,6 +520,7 @@ private fun SessionList(
                     task = task,
                     selected = task.id == selectedTaskId,
                     attention = task.id in attention,
+                    now = now,
                     onClick = { onOpen(task.id) },
                 )
             }
@@ -566,7 +594,7 @@ internal fun attentionPulse(attention: Boolean): Float {
 }
 
 @Composable
-private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, onClick: () -> Unit) {
+private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, now: Long, onClick: () -> Unit) {
     val state = displayStateOf(task)
     val accent = MaterialTheme.colorScheme.primary
     val alert = LocalStatusColors.current.waiting
@@ -603,7 +631,7 @@ private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, 
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            activityOf(task)?.takeIf { it.isNotBlank() }?.let {
+            activityOf(task, now)?.takeIf { it.isNotBlank() }?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -770,7 +798,7 @@ private fun SessionRow(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                val activity = activityOf(task)
+                val activity = activityOf(task, now)
                 if (!activity.isNullOrBlank()) {
                     Spacer(Modifier.height(2.dp))
                     Text(

@@ -167,6 +167,10 @@ export function normalizeModels(payload) {
     .filter(model => model && typeof model.id === 'string')
     .map((model) => {
       const status = model.status && typeof model.status === 'object' ? model.status : {};
+      // Прогресс загрузки весов: llama.cpp отдаёт сцены (stages) и долю текущей.
+      // parseLoadProgress сворачивает их в одно число 0..1 — то же, чем живут
+      // события LOCAL_MODEL_PROGRESS, поэтому клиент рисует полосу по нему же.
+      const load = parseLoadProgress({ progress: status.progress });
       const modalities = model.architecture?.input_modalities;
       const args = Array.isArray(status.args) ? status.args : [];
       const isPath = String(model.id || '').includes('\\') || String(model.id || '').includes('/');
@@ -184,6 +188,7 @@ export function normalizeModels(payload) {
         name: displayName,
         status: typeof status.value === 'string' ? status.value : (typeof model.status === 'string' ? model.status : 'unknown'),
         progress: status.progress ?? null,
+        loadRatio: load ? load.ratio : null,
         failed: status.failed === true,
         exitCode: Number.isFinite(status.exit_code) ? status.exit_code : null,
         vision: Array.isArray(modalities) ? modalities.includes('image') : Boolean(argValue(args, '--mmproj')),
@@ -725,6 +730,31 @@ export class LocalModelService extends EventEmitter {
     return { state: this.state, pid: this.proc?.pid ?? null, modelId: modelId || null };
   }
 
+  /**
+   * Последние строки ошибок из лога роутера (data/runtime/router.log): при
+   * неудачной загрузке модели движок пишет причину в stderr, который роутер
+   * транслирует в свой лог. Читаем хвост файла (до 256 КБ), чтобы не тащить
+   * гигабайтный лог целиком. null — файла нет или ошибок не нашлось.
+   */
+  #routerLogErrors() {
+    try {
+      const file = path.join(this.dataRoot, 'runtime', 'router.log');
+      const stat = fs.statSync(file);
+      const start = Math.max(0, stat.size - 262144);
+      const fd = fs.openSync(file, 'r');
+      const buf = Buffer.alloc(stat.size - start);
+      fs.readSync(fd, buf, 0, buf.length, start);
+      fs.closeSync(fd);
+      const lines = buf.toString('utf8').split(/\r?\n/)
+        .filter(line => /(^|\s)E\s/.test(line) || /error/i.test(line))
+        .map(line => line.trim())
+        .filter(Boolean);
+      return lines.slice(-3).join(' | ').slice(0, 400) || null;
+    } catch {
+      return null;
+    }
+  }
+
   async loadModel(id, { onProgress, signal } = {}) {
     if (!id) throw failure('INPUT_INVALID', 'Не указана модель.');
     const models = await this.listModels().catch(() => []);
@@ -753,7 +783,10 @@ export class LocalModelService extends EventEmitter {
           return entry;
         }
         if (entry?.failed) {
-          throw failure('LOCAL_LOAD_FAILED', `Модель ${id} не загрузилась${entry.exitCode != null ? ` (код ${entry.exitCode})` : ''}.`);
+          // Прессовать код выхода мало: реальная причина — в логе роутера
+          // (stderr моделей). Достаём последние строки ошибок оттуда.
+          const detail = this.#routerLogErrors();
+          throw failure('LOCAL_LOAD_FAILED', `Модель ${id} не загрузилась${entry.exitCode != null ? ` (код ${entry.exitCode})` : ''}${detail ? `: ${detail}` : ''}.`);
         }
         if (Date.now() > deadline) throw failure('LOCAL_LOAD_TIMEOUT', `Таймаут загрузки модели ${id}.`);
         await sleep(500);
@@ -872,15 +905,32 @@ export class ExternalLocalServers {
   // Записи конфига плюс найденные автоматически (провайдер с локальным baseUrl
   // в Pi models.json + каталог установки из localRuntime.externalDiscovery).
   // Ручная запись сильнее обнаружения: провайдер из конфига в объединение не
-  // попадает второй раз (см. discoverExternalServers).
+  // попадает второй раз (см. discoverExternalServers). Скрытые (см. hide)
+  // найденные записи в список не попадают, их никто и не опрашивает.
   get servers() {
-    const configured = Array.isArray(this.config.externalServers) ? this.config.externalServers : [];
-    let discovered = [];
+    const hidden = new Set(this.hidden);
+    return [
+      ...this.#discovered.filter(entry => !hidden.has(entry.provider) && !hidden.has(entry.model)),
+      ...this.#configured
+    ];
+  }
+
+  get #configured() {
+    return Array.isArray(this.config.externalServers) ? this.config.externalServers : [];
+  }
+
+  /** Идентификаторы скрытых строк (провайдеры и/или модели) — list `externalHidden`. */
+  get hidden() {
+    return Array.isArray(this.config.externalHidden) ? this.config.externalHidden.map(String).filter(Boolean) : [];
+  }
+
+  /** Найденные автоматически записи БЕЗ учёта скрытых: нужны hide()/unhide(). */
+  get #discovered() {
     try {
-      discovered = discoverExternalServers({
+      return discoverExternalServers({
         agentDir: this.agentDir,
         discovery: { ...(this.config.externalDiscovery || {}), healthUrl: this.config.healthUrl },
-        configured,
+        configured: this.#configured,
         // Провайдеры самого локального рантайма обнаруживать не нужно: они уже
         // обслуживаются роутером и его health/busy-гейтом.
         exclude: [this.config.provider, 'llama.cpp', 'llamacpp']
@@ -888,9 +938,45 @@ export class ExternalLocalServers {
     } catch {
       // Обнаружение вспомогательное: его сбой не должен ломать статус и запуск
       // уже настроенных серверов.
-      discovered = [];
+      return [];
     }
-    return [...discovered, ...configured];
+  }
+
+  /**
+   * Убрать найденную автоматически строку из СПИСКА TaskBridge. Удалять её
+   * неоткуда: она живёт в Pi (`models.json`) и в каталоге установки
+   * (`externalDiscovery.dir`), а не в конфиге TaskBridge. Поэтому строка
+   * запоминается в `localRuntime.externalHidden` и больше не показывается, пока
+   * её не вернут ([unhide]). Файлы, конфиг движка и models.json Pi не трогаются.
+   *
+   * Возвращает { provider, model, hidden: true, already } или null — если такой
+   * найденной строки нет (тогда её убирают как запись конфига, [forget]).
+   */
+  hide(id) {
+    if (!id) return null;
+    const found = this.#discovered.find(entry => entry.model === id || entry.provider === id);
+    if (!found) return null;
+    const already = this.hidden.some(value => value === found.provider || value === found.model);
+    this.config.externalHidden = [...new Set([...this.hidden, found.provider])];
+    this.#invalidate();
+    return { provider: found.provider, model: found.model, hidden: true, already };
+  }
+
+  /** Вернуть скрытую строку в список: убрать id из `externalHidden`. */
+  unhide(id) {
+    if (!id) return null;
+    const current = this.hidden;
+    const next = current.filter(value => value !== id);
+    if (next.length === current.length) return null;
+    this.config.externalHidden = next;
+    this.#invalidate();
+    return { id };
+  }
+
+  /** Кэш статуса и списка: после правки конфига он врёт до пяти секунд. */
+  #invalidate() {
+    this.cache = null;
+    this.cacheAt = 0;
   }
 
   get configured() {
@@ -915,7 +1001,7 @@ export class ExternalLocalServers {
     if (index < 0) return null;
     const [removed] = list.splice(index, 1);
     // Кэш статуса: иначе убранная строка живёт в панели до пяти секунд.
-    this.cache = null;
+    this.#invalidate();
     return removed;
   }
 
@@ -1122,8 +1208,10 @@ export class ExternalLocalServers {
         filesPresent: missing === null ? null : missing.length === 0,
         missingFile: missing?.[0] ?? null,
         // Запись есть в config.json TaskBridge — её и можно убрать из списка.
-        // Найденные автоматически принадлежат Pi (models.json): там их и удаляют.
-        removable: server.discovered !== true
+        // Найденные автоматически принадлежат Pi (models.json): там их и удаляют, а
+        // список TaskBridge может только не показывать строку ([hide]).
+        removable: server.discovered !== true,
+        hideable: server.discovered === true
       };
       if (metrics) {
         model.metrics = metrics;

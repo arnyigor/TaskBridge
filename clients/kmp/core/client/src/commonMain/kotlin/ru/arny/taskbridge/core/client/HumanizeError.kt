@@ -17,14 +17,33 @@ fun humanizeError(value: String?): String {
     val text = value.orEmpty().replace(WHITESPACE, " ").trim()
     if (text.isEmpty()) return ""
     val body = parseEnvelope(text) ?: return clip(text)
-    val nested = body["error"] as? JsonObject
     fun JsonObject?.str(key: String): String = ((this?.get(key)) as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.trim().orEmpty()
-    val message = listOf(body.str("message"), nested.str("message"), body.str("error"), body.str("detail"), body.str("reason"), body.str("description"))
-        .firstOrNull { it.isNotEmpty() }.orEmpty()
-    val rawCode = listOf(body.str("error_type"), body.str("type"), nested.str("type"), nested.str("code"), body.str("errorCode"), body.str("code"))
-        .firstOrNull { it.isNotEmpty() }.orEmpty()
+    fun nested(value: String): JsonObject? {
+        fun parse(candidate: String): JsonObject? = runCatching {
+            TaskBridgeJson.parseToJsonElement(candidate) as? JsonObject
+        }.getOrNull()
+        return parse(value) ?: parse(value.replace("\\n", "\n").replace("\\\"", "\""))
+    }
+    fun find(source: JsonObject, depth: Int = 0): Triple<String, String, String> {
+        if (depth > 4) return Triple("", "", "")
+        val error = (source["error"] as? JsonObject) ?: nested(source.str("error"))
+        val messageObject = nested(source.str("message"))
+        val child = error ?: messageObject
+        if (child != null) {
+            val found = find(child, depth + 1)
+            if (found.first.isNotEmpty() || found.second.isNotEmpty() || found.third.isNotEmpty()) return found
+        }
+        val message = listOf(source.str("message"), source.str("error"), source.str("detail"), source.str("reason"), source.str("description"))
+            .firstOrNull { it.isNotEmpty() && nested(it) == null }.orEmpty()
+        val code = listOf(source.str("error_type"), source.str("type"), source.str("code"), source.str("errorCode"), source.str("status"))
+            .firstOrNull { it.isNotEmpty() }.orEmpty()
+        return Triple(message, code, source.str("param"))
+    }
+    val found = find(body)
+    val message = found.first
+    val rawCode = found.second
     val named = if (IDENTIFIER.matches(rawCode)) rawCode else ""
-    val param = listOf(body.str("param"), nested.str("param")).firstOrNull { it.isNotEmpty() }.orEmpty()
+    val param = found.third
     val human = message.ifEmpty { named }
     if (human.isEmpty()) return clip(text)
     val suffix = buildList {

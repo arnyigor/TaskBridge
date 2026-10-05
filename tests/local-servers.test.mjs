@@ -452,3 +452,52 @@ test('forget() drops the config entry only, and refuses a Pi-owned row', async (
 
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+// У найденной автоматически строки удалять нечего (провайдер Pi + конфиг в
+// каталоге установки), но убрать её ИЗ СПИСКА человек должен мочь: строка
+// скрывается (`externalHidden`), а не пропадает навсегда — [unhide] возвращает.
+test('hide()/unhide() drop a discovered row from the list and never touch other files', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-hide-'));
+  try {
+    const agentDir = path.join(dir, 'agent');
+    await fs.mkdir(agentDir, { recursive: true });
+    const piFile = path.join(agentDir, 'models.json');
+    const installFile = path.join(dir, 'strata-found.json');
+    await fs.writeFile(piFile, JSON.stringify({ providers: { 'strata-found': { baseUrl: 'http://127.0.0.1:18098/v1', models: [{ id: 'found-model' }] } } }), 'utf8');
+    await fs.writeFile(installFile, JSON.stringify({ port: 18098, args: ['--max-context', '65536'] }), 'utf8');
+
+    const config = {
+      externalServers: [{ provider: 'strata-iq2', model: 'qwen3.8-flash-next-iq2-xs', baseUrl: 'http://127.0.0.1:18081' }],
+      externalDiscovery: { dir, configGlob: 'strata-*.json' }
+    };
+    const servers = new ExternalLocalServers(config, { agentDir });
+    const rows = (await servers.status({ fresh: true })).models;
+    assert.deepEqual(rows.map(m => `${m.provider}:removable=${m.removable}:hideable=${m.hideable}`).sort(), [
+      'strata-found:removable=false:hideable=true',
+      'strata-iq2:removable=true:hideable=false',
+    ]);
+    assert.deepEqual(servers.hidden, []);
+
+    // Скрытие: строка уходит из списка без перезапуска (кэш сброшен).
+    assert.deepEqual(servers.hide('found-model'), { provider: 'strata-found', model: 'found-model', hidden: true, already: false });
+    assert.deepEqual(servers.hidden, ['strata-found']);
+    assert.deepEqual((await servers.status()).models.map(m => m.provider).sort(), ['strata-iq2']);
+    // Повторное скрытие идемпотентно, чужую строку так убрать нельзя.
+    assert.equal(servers.hide('found-model').already, true);
+    assert.equal(servers.hide('qwen3.8-flash-next-iq2-xs'), null, 'у своей записи конфига есть удаление, а не скрытие');
+    assert.equal(servers.hide('нет-такого'), null);
+    // Ни файл Pi, ни конфиг установки, ни конфиг TaskBridge не тронуты.
+    assert.ok(JSON.parse(await fs.readFile(piFile, 'utf8')).providers['strata-found']);
+    assert.ok(await fs.readFile(installFile, 'utf8'));
+    assert.deepEqual(config.externalServers.map(entry => entry.provider), ['strata-iq2']);
+
+    // Возврат: строка снова в списке, скрытых нет.
+    assert.deepEqual(servers.unhide('strata-found'), { id: 'strata-found' });
+    assert.deepEqual(servers.hidden, []);
+    assert.deepEqual((await servers.status()).models.map(m => m.provider).sort(), ['strata-found', 'strata-iq2']);
+    assert.equal(servers.unhide('strata-found'), null);
+    assert.equal(servers.unhide(''), null);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});

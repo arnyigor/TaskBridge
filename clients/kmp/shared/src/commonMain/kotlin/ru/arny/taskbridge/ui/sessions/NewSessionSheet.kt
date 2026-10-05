@@ -71,10 +71,16 @@ fun NewSessionSheet(
     initialProjectId: String? = null,
     onDismiss: () -> Unit,
     onCreated: (Task) -> Unit,
+    /** Сессия Pi импортирована в выбранной папке: открыть готовую задачу. */
+    onImported: (Task) -> Unit,
     /** No task typed: open the chat now, the session is created by its first message. */
     onDraft: (SessionDraft) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    // Два способа начать: новая задача или продолжение сессии Pi из этой папки.
+    // Импорт живёт здесь, а не отдельной панелью, потому что папка уже выбрана
+    // — искать сессии можно ровно в ней.
+    var continuing by remember { mutableStateOf(false) }
     var projectId by remember { mutableStateOf(initialProjectId ?: projects.firstOrNull()?.id ?: SCRATCH_PROJECT_ID) }
     var prompt by remember { mutableStateOf("") }
     var title by remember { mutableStateOf("") }
@@ -107,9 +113,19 @@ fun NewSessionSheet(
 
     AdaptiveSheet(
         title = "Новая сессия",
+        subtitle = if (continuing) "Продолжить сессию Pi из выбранной папки" else null,
         onDismiss = onDismiss,
         maxWidth = 640,
-        footer = {
+        footer = footer@{
+            if (continuing) {
+                Text(
+                    "Импорт переносит историю сессии Pi в TaskBridge — дальше это обычная сессия.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                return@footer
+            }
             OutlinedButton(onClick = pick) {
                 Icon(AppIcons.Attach, null, Modifier.size(18.dp))
                 Spacer(Modifier.size(6.dp))
@@ -143,7 +159,14 @@ fun NewSessionSheet(
             }
         },
     ) {
-        FieldLabel("Проект")
+        FieldLabel("Что делаем")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FilterChip(selected = !continuing, onClick = { continuing = false }, label = { Text("Новая сессия") })
+            FilterChip(selected = continuing, onClick = { continuing = true }, label = { Text("Продолжить сессию Pi") })
+        }
+
+        // Папка выбирается в обоих случаях, но в импорте она ещё и область поиска.
+        FieldLabel(if (continuing) "Папка" else "Проект", top = 16)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             for (project in visibleProjects) {
                 FilterChip(
@@ -153,7 +176,11 @@ fun NewSessionSheet(
                     leadingIcon = { Icon(AppIcons.Folder, null, Modifier.size(16.dp)) },
                 )
             }
-            FilterChip(selected = projectId == SCRATCH_PROJECT_ID, onClick = { projectId = SCRATCH_PROJECT_ID }, label = { Text("Без проекта") })
+            // «Без проекта» — это отсутствие папки: искать сессии негде, поэтому
+            // в режиме продолжения чипа нет.
+            if (!continuing) {
+                FilterChip(selected = projectId == SCRATCH_PROJECT_ID, onClick = { projectId = SCRATCH_PROJECT_ID }, label = { Text("Без проекта") })
+            }
             OutlinedButton(onClick = {
                 if (localDesktop) {
                     val selected = runCatching { graph.platform.chooseProjectFolder() }
@@ -174,6 +201,13 @@ fun NewSessionSheet(
                 Spacer(Modifier.size(4.dp))
                 Text(if (addingFolder) "Добавляю…" else if (localDesktop) "Выбрать любую папку…" else "Добавить папку")
             }
+        }
+
+        if (continuing) {
+            Spacer(Modifier.height(16.dp))
+            // projectId == SCRATCH_PROJECT_ID — папки нет, искать негде (см. сам раздел).
+            ImportSessionSection(graph, connection, projectId.takeIf { it != SCRATCH_PROJECT_ID }, onImported)
+            return@AdaptiveSheet
         }
 
         FieldLabel("Модель", top = 16)

@@ -98,6 +98,41 @@ class TaskBridgeApi(
         send(HttpMethod.Post, "/api/server/restart", buildJsonObject { put("confirm", true) })
     }
 
+    /** Powers off the machine the server runs on; the cancel countdown lives in the UI, not on the server. */
+    suspend fun shutdownComputer() {
+        send(HttpMethod.Post, "/api/system/shutdown", buildJsonObject { put("confirm", true) })
+    }
+
+    /** Reboots the machine the server runs on; the cancel countdown lives in the UI, not on the server. */
+    suspend fun rebootComputer() {
+        send(HttpMethod.Post, "/api/system/reboot", buildJsonObject { put("confirm", true) })
+    }
+
+    // --- процессы машины (панель «Процессы») ---------------------------------
+
+    /** Список процессов машины с сервером; кэш сервера 5 с, [fresh] — без него. */
+    suspend fun processes(fresh: Boolean = false): List<ProcessEntry> =
+        get("/api/processes" + if (fresh) "?fresh=1" else "", ProcessList.serializer()).processes
+
+    /**
+     * «Остановить»: серверу нужны pid И имя ровно из [processes] — имя защищает
+     * от выстрела в переиспользованный pid. Системные процессы и дерево самого
+     * TaskBridge сервер откажется убивать: [ApiException] с готовым сообщением.
+     */
+    suspend fun killProcess(pid: Long, name: String) {
+        send(HttpMethod.Post, "/api/processes/kill", buildJsonObject {
+            put("pid", pid)
+            put("name", name)
+        })
+    }
+
+    suspend fun gpuProcesses(): List<GpuProcessEntry> =
+        get("/api/processes/gpu", GpuProcessList.serializer()).processes.orEmpty()
+
+    suspend fun killProcessGroup(runtime: String) {
+        send(HttpMethod.Post, "/api/processes/kill-group", buildJsonObject { put("runtime", runtime) })
+    }
+
     /**
      * Exchanges the pairing code shown on the PC for this device's token and
      * keeps it in [connection]. The token lives until the PC revokes the device;
@@ -187,12 +222,97 @@ class TaskBridgeApi(
         })
 
     /**
-     * «Убрать из списка»: сервер удаляет СВОЮ запись о внешнем сервере из своего
-     * config.json. Модель, её файлы, конфиг движка и запущенный процесс не трогаются —
-     * поэтому ответ возвращает новое состояние списка, а не что-то про модель.
+     * «Vision» пресета роутера llama.cpp: сервер правит секцию пресета в `models.ini` — выключение
+     * комментирует строку `mmproj` (явный проектор сильнее `no-mmproj`, т.е. `--no-mmproj-auto`),
+     * а включение раскомментирует её; llama.cpp читает файл при старте.
+     * Кнопка есть только у [LocalModelEntry.visionEditable]; внешним серверам и
+     * строкам из Pi сервер отвечает `LOCAL_VISION_UNSUPPORTED` (HTTP 400).
+     */
+    suspend fun setLocalVision(id: String, vision: Boolean): LocalVisionChange =
+        call(HttpMethod.Post, "/api/local/vision", LocalVisionChange.serializer(), buildJsonObject {
+            put("model", id)
+            put("vision", vision)
+        })
+
+    /**
+     * «Убрать из списка»: сервер удаляет запись из конфига, которым владеет, —
+     * внешний сервер из своего config.json (`localRuntime.externalServers`) или
+     * секцию пресета роутера из `models.ini`. У найденной автоматически строки
+     * (`hideable`) удалять нечего: она только скрывается
+     * (`localRuntime.externalHidden`) и возвращается через [unhideLocalModel].
+     * Модель, её файлы, конфиг движка и запущенный процесс не трогаются — поэтому
+     * ответ возвращает новое состояние списка, а не что-то про модель.
      */
     suspend fun forgetLocalModel(id: String): LocalRuntimeInfo =
         call(HttpMethod.Post, "/api/local/forget", LocalRuntimeInfo.serializer(), buildJsonObject { put("model", id) })
+
+    /** Вернуть скрытую строку в список (она снова появляется в [LocalRuntimeInfo.models]). */
+    suspend fun unhideLocalModel(id: String): LocalRuntimeInfo =
+        call(HttpMethod.Post, "/api/local/unhide", LocalRuntimeInfo.serializer(), buildJsonObject { put("model", id) })
+
+    // --- Hugging Face: библиотека локальных моделей ---
+
+    suspend fun hfSearch(query: String): List<HfSearchResult> =
+        get("/api/hf/search?q=" + query.encodeURLParameter(), ListSerializer(HfSearchResult.serializer()))
+
+    /** Репозиторий, разобранный сервером на кванты/проекторы. */
+    suspend fun hfRepo(repo: String, revision: String = "main"): HfRepoInfo =
+        get("/api/hf/repo?repo=" + repo.encodeURLParameter() + "&revision=" + revision.encodeURLParameter(), HfRepoInfo.serializer())
+
+    /**
+     * Начать загрузку: сервер сам берёт размеры из дерева и добавляет
+     * mmproj-проектор, если он есть в репозитории (vision). Ответ — созданное
+     * задание (202); прогресс опрашивается через [hfDownloads].
+     */
+    suspend fun hfDownload(repo: String, revision: String, files: List<String>): HfDownloadJob =
+        call(HttpMethod.Post, "/api/hf/download", HfDownloadJob.serializer(), buildJsonObject {
+            put("repo", repo)
+            put("revision", revision)
+            put("files", kotlinx.serialization.json.buildJsonArray { files.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+        })
+
+    suspend fun hfDownloads(): HfDownloads = get("/api/hf/downloads", HfDownloads.serializer())
+
+    /** Убрать завершённые задания из списка (файлы моделей остаются в библиотеке). */
+    suspend fun clearHfDownloads(): HfDownloadsClear =
+        call(HttpMethod.Post, "/api/hf/downloads/clear", HfDownloadsClear.serializer(), buildJsonObject {})
+
+    suspend fun hfCancelDownload(id: String): HfDownloadJob =
+        call(HttpMethod.Post, "/api/hf/downloads/cancel", HfDownloadJob.serializer(), buildJsonObject { put("id", id) })
+
+    /** Продолжить прерванное/неудавшееся: готовые файлы пропускаются по размеру. */
+    suspend fun hfRetryDownload(id: String): HfDownloadJob =
+        call(HttpMethod.Post, "/api/hf/downloads/retry", HfDownloadJob.serializer(), buildJsonObject { put("id", id) })
+
+    suspend fun library(fresh: Boolean = false): LibraryStatus =
+        get("/api/library" + if (fresh) "?fresh=1" else "", LibraryStatus.serializer())
+
+    /**
+     * «Прописать в Pi»: пресет модели из библиотеки в models.ini роутера.
+     * Pi перечисляет модели роутера через своего провайдера; [LibraryRegistration]
+     * говорит, нужен ли перезапуск роутера (models.ini читается при старте).
+     */
+    suspend fun registerLibraryModel(id: String, ctxSize: Long? = null): LibraryRegistration =
+        call(HttpMethod.Post, "/api/library/register", LibraryRegistration.serializer(), buildJsonObject {
+            put("id", id)
+            ctxSize?.let { put("ctxSize", it) }
+        })
+
+    /**
+     * «Запустить» модель из библиотеки: при необходимости сервер сам перезапустит
+     * управляемый роутер (перечитать models.ini) и загрузит пресет. Ответ —
+     * свежий localStatus.
+     */
+    suspend fun runLibraryModel(id: String): LocalRuntimeInfo =
+        call(HttpMethod.Post, "/api/library/run", LocalRuntimeInfo.serializer(), buildJsonObject { put("id", id) })
+
+    /**
+     * Удалить скачанную модель: пресет из models.ini и её файлы; файлы, общие
+     * с другими записями (vision-проектор соседнего кванта), остаются. Запущенную
+     * модель сервер откажется удалять.
+     */
+    suspend fun deleteLibraryModel(id: String): LibraryDeletion =
+        call(HttpMethod.Post, "/api/library/delete", LibraryDeletion.serializer(), buildJsonObject { put("id", id) })
 
     suspend fun refreshProvider(provider: String): Map<String, ProviderStatus> =
         call(HttpMethod.Post, "/api/providers/refresh", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),
@@ -236,6 +356,40 @@ class TaskBridgeApi(
     // --- sessions ------------------------------------------------------------
 
     suspend fun tasks(): List<Task> = get("/api/tasks", ListSerializer(Task.serializer()))
+
+    /**
+     * Pi-сессии на диске, сгруппированные по проектам — источник для импорта
+     * (GET /api/native-sessions). Сессия адресуется непрозрачным [NativeSession.key].
+     */
+    suspend fun nativeSessions(): List<NativeSessionGroup> =
+        get("/api/native-sessions", ListSerializer(NativeSessionGroup.serializer()))
+
+    /** Сессии одного проекта — роут совместимости рядом с общим списком. */
+    suspend fun nativeSessions(projectId: String): List<NativeSession> =
+        get("/api/projects/${projectId.encodeURLPathPart()}/pi-sessions", ListSerializer(NativeSession.serializer()))
+
+    /** Что внутри сессии: модель, число сообщений, последние реплики, импортирована ли уже. */
+    suspend fun nativeSessionPreview(projectId: String, sessionKey: String): NativeSessionPreview =
+        get(
+            "/api/native-sessions/preview?projectId=${projectId.encodeURLParameter()}&key=${sessionKey.encodeURLParameter()}",
+            NativeSessionPreview.serializer(),
+        )
+
+    /**
+     * Импорт Pi-сессии как задачи. `take-over` забирает оригинальный файл, поэтому
+     * сервер требует [confirmedClosed]: оператор подтверждает, что закрыл сессию в терминале.
+     */
+    suspend fun importNativeSession(
+        projectId: String,
+        sessionKey: String,
+        mode: NativeImportMode = NativeImportMode.Clone,
+        confirmedClosed: Boolean = false,
+    ): Task = call(HttpMethod.Post, "/api/tasks/from-session", Task.serializer(), buildJsonObject {
+        put("projectId", projectId)
+        put("sessionKey", sessionKey)
+        put("mode", mode.wire)
+        put("confirmedClosed", confirmedClosed)
+    })
 
     suspend fun task(id: String): Task = get("/api/tasks/${id.path()}", Task.serializer())
 
