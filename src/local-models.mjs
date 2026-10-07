@@ -293,9 +293,10 @@ const STRATA_CACHED_PROMPT_MAX = 0.5;
  *    Внимание: `prompt_read` считает и переиспользованный префикс прочитанным
  *    (движок, issue #29), поэтому на кешированном промпте процент почти сразу 100% —
  *    это счётчик движка, а не вычисленное нами число;
- *  - pp — скорость ЧТЕНИЯ новых токенов (новые за prompt_ms) и только для
- *    запроса, который промпт действительно читал. Промпт, пришедший из кеша
- *    беседы, скорости чтения не даёт: pp = null, ppUnavailable = 'conversation-cache'
+ *  - pp — скорость ЧТЕНИЯ новых токенов. Пока движок читает промпт, это его
+ *    живое `prefill_tok_s_mean` (скорость ИДУЩЕГО запроса); после запроса —
+ *    «новые за prompt_ms». Промпт, пришедший из кеша беседы, скорости чтения не
+ *    даёт: pp = null, ppUnavailable = 'conversation-cache'
  *    (см. STRATA_CACHED_PROMPT_MAX — там же измерения);
  *  - freshTokens/reusedPrompt — сколько промпта прочитано и сколько вспомнено:
  *    по ним видно, почему pp нет, без выдумывания скорости;
@@ -328,8 +329,23 @@ export function parseStrataMetrics(payload) {
     }
   }
   const cachedPrompt = reusedRatio !== null && reusedRatio > STRATA_CACHED_PROMPT_MAX;
+
+  // Живая скорость чтения промпта: движок отдаёт её сам (`prefill_tok_s_mean`),
+  // пока читает, — это среднее по токенам, которые он прочёл в ТЕКУЩЕМ запросе.
+  // Без неё строка во время длинного чтения показывала PP прошлого запроса, а
+  // «новые / prompt_ms» для идущего запроса ещё не существует (записи в
+  // `requests` появляются только по завершении). Замер 2026-10-06, 0.1.40,
+  // iq3_s порт 8083 (чтение 16.4K/39.1K и 47.5K токенов, reused 0): live-блок
+  // давал 2275-2515 ток/с, итоговая запись в /metrics — 2381-2383 ток/с.
+  // Берём живое число только во время чтения: у запроса из кеша беседы чтения
+  // почти нет, движок уходит в `generating` сразу, и подменить кеш-артефакт
+  // (см. STRATA_CACHED_PROMPT_MAX) живое значение не может.
+  const reading = typeof (live && live.phase) === 'string' && live.phase.toLowerCase().includes('read');
+  const livePp = num(live && live.prefill_tok_s_mean);
   let pp = null;
-  if (last && !cachedPrompt) {
+  if (reading && livePp !== null && livePp > 0) {
+    pp = livePp;
+  } else if (last && !cachedPrompt) {
     const ms = num(last.prompt_ms);
     if (freshTokens !== null && freshTokens > 0 && ms !== null && ms > 0) pp = freshTokens / ms * 1000;
   }
@@ -350,7 +366,8 @@ export function parseStrataMetrics(payload) {
     generated: live ? num(live.generated) : null,
     elapsedS: live ? num(live.elapsed_s) : null,
     pp,
-    ppUnavailable: cachedPrompt ? 'conversation-cache' : null,
+    // Причину называем только когда числа нет: живое чтение PP даёт.
+    ppUnavailable: pp === null && cachedPrompt ? 'conversation-cache' : null,
     promptTokens,
     freshTokens,
     tg: liveRate ?? lastRate,

@@ -94,6 +94,20 @@ test('stage 2: clients connecting in the middle of a stream miss nothing and see
   }
 });
 
+test('stage 2: replay over the per-request cap starts at the cursor, not the tail', { timeout: 60000 }, async t => {
+  const fixture = await startFixture(undefined, { server: { maxEventsPerRequest: 5 } });
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'hello' });
+  for (let i = 0; i < 100; i++) {
+    const snapshot = await fixture.api(`/api/tasks/${task.id}`);
+    if (snapshot.status === 'SUCCEEDED') break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+
+  const resumed = await stream(fixture.base, task.id, { query: '?after=0', timeoutMs: 1500 });
+  assert.deepEqual(resumed.events.map(item => item.id), [1, 2, 3, 4, 5], 'first reconnect page starts at the cursor');
+});
+
 test('stage 2: the heartbeat keeps an idle stream alive at server.sse.heartbeatSec', { timeout: 30000 }, async t => {
   const fixture = await startFixture(undefined, { server: { sse: { heartbeatSec: 1 } } });
   t.after(() => fixture.close());

@@ -258,6 +258,7 @@ export class EventNormalizer {
         break;
       }
       case 'compaction_start':
+      case 'auto_compaction_start':
         out.push({ type: 'compaction_started', payload: { reason: frame.reason ?? null }, timestamp: at });
         break;
       case 'compaction_end':

@@ -131,12 +131,16 @@
       }
     ],
     "externalDiscovery": {
-      "dir": "C:\\path\to\\strata",
+      "dir": "C:\\path\\to\\strata",
       "engine": "strata",
       "configGlob": "strata-*.json",
       "python": ".venv\\Scripts\\python.exe",
       "server": "serve\\server.py"
     }
+  },
+  "modelLibrary": {
+    "root": "D:\\AI\\Models",
+    "baseUrl": "https://huggingface.co"
   },
   "approvals": {
     "enabled": false,

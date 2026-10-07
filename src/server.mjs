@@ -35,7 +35,7 @@ import { listQuickActions } from './pi-quick-actions.mjs';
 import { listProcesses, listGpuProcesses } from './process-info.mjs';
 import { killProcess, killProcessesByRuntime } from './process-kill.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
-import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus } from './provider-status.mjs';
+import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenAiCodexStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
 import { PiVersionProbe } from './pi-version.mjs';
 import { API_VERSION } from './api-contract.mjs';
@@ -812,7 +812,7 @@ async function handleRequest(req, res) {
         return errorJson(res, 400, Object.assign(new Error('Выключение компьютера требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' }));
       }
       const command = process.platform === 'win32'
-        ? { file: 'shutdown', args: ['/s', '/t', '60'] /*TEMP-TEST*/ }
+        ? { file: 'shutdown', args: ['/s', '/t', '0'] }
         : process.platform === 'darwin'
           ? { file: 'osascript', args: ['-e', 'tell application "System Events" to shut down'] }
           : { file: 'shutdown', args: ['-h', 'now'] };
@@ -849,7 +849,7 @@ async function handleRequest(req, res) {
     // never generate more than one provider read per 20 seconds.
     if (req.method === 'POST' && pathname === '/api/providers/refresh') {
       const { provider } = await readJson(req);
-      if (!['wormsoft', 'routerai', 'deepseek'].includes(provider)) {
+      if (!['wormsoft', 'routerai', 'deepseek', 'openai-codex'].includes(provider)) {
         throw Object.assign(new Error('Неизвестный провайдер.'), { code: 'INPUT_INVALID' });
       }
       const last = providerRefreshes.get(provider);
@@ -859,6 +859,7 @@ async function handleRequest(req, res) {
       const promise = (async () => {
         if (provider === 'wormsoft') return readWormsoftStatus(config.providerStatus?.wormsoft, options);
         if (provider === 'routerai') return readRouterAiStatus(config.providerStatus?.routerai, options);
+        if (provider === 'openai-codex') return readOpenAiCodexStatus(config.providerStatus?.openaiCodex, options);
         const status = await readDeepseekCost(config.deepseek, options);
         return { ...status, provider: 'deepseek', label: 'DeepSeek', kind: 'balance' };
       })();
@@ -1324,7 +1325,9 @@ async function handleRequest(req, res) {
       // replay is complete, closing the gap between history and subscription.
       const client = addSseClient(match[1], res, after);
       try {
-        const history = await store.readEvents(match[1], maxEventsPerRequest, after);
+        const history = await (typeof store.readEventsForward === 'function'
+          ? store.readEventsForward(match[1], maxEventsPerRequest, after)
+          : store.readEvents(match[1], maxEventsPerRequest, after));
         for (const event of history) deliver(client, event);
         for (const event of client.pending.sort((a, b) => a.seq - b.seq)) deliver(client, event);
         client.pending = [];

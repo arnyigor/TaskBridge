@@ -60,11 +60,12 @@ export class ModelLatency {
     for (const [key, samples] of this.byModel) {
       const values = samples.map(s => Number(s.ttftMs)).filter(Number.isFinite).sort((a, b) => a - b);
       if (!values.length) continue;
+      const last = [...samples].reverse().find(s => Number.isFinite(Number(s.ttftMs)));
       out[key] = {
         count: values.length,
         avgMs: Math.round(values.reduce((a, b) => a + b, 0) / values.length),
         p50Ms: median(values),
-        lastMs: values[values.length - 1],
+        lastMs: last ? Number(last.ttftMs) : values[values.length - 1],
         samples: samples.slice(-10)
       };
     }

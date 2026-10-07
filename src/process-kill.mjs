@@ -79,14 +79,18 @@ export async function killProcess({ pid, name } = {}) {
   return { killed: true, pid: pidNum, name: target.name };
 }
 
+const RUNTIME_PROCESS_NAMES = {
+  node: new Set(['node', 'nodejs']),
+  python: new Set(['python', 'python3', 'py']),
+  java: new Set(['java', 'javaw', 'javac', 'jshell']),
+};
+
 function matchesRuntime(target, runtime) {
   const executable = baseName(String(target.name || '').trim());
   const firstToken = String(target.commandLine || '').trim().split(/\s+/)[0] || '';
   const commandExecutable = baseName(firstToken.split(/[\\/]/).pop());
-  const names = runtime === 'node'
-    ? new Set(['node', 'nodejs', 'node.exe'])
-    : new Set(['python', 'python3', 'py', 'python.exe', 'python3.exe', 'py.exe']);
-  return names.has(executable) || names.has(commandExecutable);
+  const names = RUNTIME_PROCESS_NAMES[runtime];
+  return Boolean(names) && (names.has(executable) || names.has(commandExecutable));
 }
 
 /**
@@ -95,8 +99,8 @@ function matchesRuntime(target, runtime) {
  * protection rules still apply. The calling server is never included.
  */
 export async function killProcessesByRuntime(runtime) {
-  if (runtime !== 'node' && runtime !== 'python') {
-    throw Object.assign(new Error('Поддерживаются только группы node и python.'), { code: 'INPUT_INVALID' });
+  if (!RUNTIME_PROCESS_NAMES[runtime]) {
+    throw Object.assign(new Error('Поддерживаются только группы node, python и java.'), { code: 'INPUT_INVALID' });
   }
   const list = await listProcesses({ fresh: true });
   if (!list) throw Object.assign(new Error('Не удалось получить список процессов.'), { code: 'KILL_FAILED' });

@@ -185,6 +185,15 @@ test('steering during a message does not move its remaining text into the next r
   assert.equal(state.current.text, '');
 });
 
+test('compaction summary is placed before the answer that follows it', () => {
+  const state = new ChatState({ ...task(), status: 'RUNNING' });
+  state.apply({ seq: 1, type: 'PI_EVENT', data: { pi: { type: 'compaction_end', result: { summary: 'Сводка прошлого контекста' } } } });
+  state.apply({ seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ seq: 3, type: 'PI_EVENT', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Ответ после сжатия' } } } });
+  assert.deepEqual(state.turns.map(x => x.id), ['user-initial', 'note-1', 'assistant-initial']);
+  assert.equal(state.turns[2].text, 'Ответ после сжатия');
+});
+
 // app.js is a module in the browser; the harness runs it as a script, so the
 // names it imports are resolved from the real modules — and only those. A name
 // used without an import throws here, exactly as it would in the browser.

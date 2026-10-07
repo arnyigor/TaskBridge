@@ -258,6 +258,124 @@ export async function readRouterAiStatus(config = {}, options = {}) {
   });
 }
 
+function normalizeOpenAiLimit(value) {
+  if (!value || typeof value !== 'object') return null;
+  const usedRaw = value.used_percent ?? value.usedPercent;
+  const windowSecondsRaw = value.limit_window_seconds ?? value.window_seconds ?? value.windowSeconds;
+  let resetsAtRaw = value.reset_at ?? value.resetsAt ?? value.resets_at;
+  const resetAfter = value.reset_after_seconds ?? value.resetAfterSeconds;
+  if (resetsAtRaw == null && resetAfter != null && Number.isFinite(Number(resetAfter))) {
+    resetsAtRaw = Date.now() / 1000 + Number(resetAfter);
+  }
+  if (usedRaw == null && windowSecondsRaw == null && resetsAtRaw == null) return null;
+  const usedPercent = Number(usedRaw);
+  const windowSeconds = Number(windowSecondsRaw);
+  const resetsAtNumber = Number(resetsAtRaw);
+  const resetAt = Number.isFinite(resetsAtNumber)
+    ? new Date(resetsAtNumber * 1000).toISOString()
+    : (typeof resetsAtRaw === 'string' && Number.isFinite(Date.parse(resetsAtRaw)) ? new Date(resetsAtRaw).toISOString() : null);
+  return {
+    usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
+    remainingPercent: Number.isFinite(usedPercent) ? Math.max(0, 100 - usedPercent) : null,
+    windowSeconds: Number.isFinite(windowSeconds) ? windowSeconds : null,
+    resetAt,
+  };
+}
+
+export function parseOpenAiCodexUsage(payload) {
+  const rateLimit = payload?.rate_limit || payload?.rateLimits || {};
+  let fiveHour = normalizeOpenAiLimit(rateLimit.primary_window || rateLimit.primary);
+  let weekly = normalizeOpenAiLimit(rateLimit.secondary_window || rateLimit.secondary);
+  for (const window of [fiveHour, weekly]) {
+    if (!window?.windowSeconds) continue;
+    if (window.windowSeconds === 18_000 && !fiveHour) fiveHour = window;
+    if (window.windowSeconds === 604_800 && !weekly) weekly = window;
+  }
+  const limits = {};
+  if (fiveHour) limits.fiveHour = fiveHour;
+  if (weekly) limits.weekly = weekly;
+  return Object.keys(limits).length ? limits : null;
+}
+
+function parseOpenAiResetCredits(payload) {
+  const credits = Array.isArray(payload?.credits) ? payload.credits : [];
+  const availableCount = Number(payload?.available_count ?? payload?.availableCount);
+  const totalEarnedCount = Number(payload?.total_earned_count ?? payload?.totalEarnedCount);
+  const available = Number.isFinite(availableCount)
+    ? availableCount
+    : credits.filter(credit => credit?.status === 'available').length;
+  const nextExpiresAt = credits
+    .filter(credit => credit?.status === 'available' && credit?.expires_at && Number.isFinite(Date.parse(credit.expires_at)))
+    .map(credit => new Date(credit.expires_at).toISOString())
+    .sort()[0] || null;
+  return {
+    available,
+    total: credits.length || null,
+    earned: Number.isFinite(totalEarnedCount) ? totalEarnedCount : null,
+    nextExpiresAt,
+  };
+}
+
+async function readOpenAiAuth(config, env) {
+  if (config?.accessToken) return { accessToken: config.accessToken, accountId: config.accountId || null, key: 'config-token' };
+  const authPath = config?.authPath || env.CODEX_AUTH_PATH || path.join(env.USERPROFILE || env.HOME || '', '.codex', 'auth.json');
+  if (!authPath || authPath.includes('undefined')) return null;
+  try {
+    const auth = JSON.parse(await fs.readFile(authPath, 'utf8'));
+    const tokens = auth?.tokens || auth;
+    const accessToken = tokens?.access_token || tokens?.accessToken;
+    if (!accessToken) return null;
+    return { accessToken, accountId: tokens?.account_id || tokens?.accountId || null, key: authPath };
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+async function fetchOpenAiJson(fetchImpl, url, auth, timeoutMs) {
+  const headers = {
+    Authorization: `Bearer ${auth.accessToken}`,
+    'OpenAI-Beta': 'codex-1',
+    originator: 'Codex Desktop',
+    Accept: 'application/json',
+  };
+  if (auth.accountId) headers['ChatGPT-Account-ID'] = auth.accountId;
+  const response = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+export async function readOpenAiCodexStatus(config = {}, options = {}) {
+  const env = options.env || process.env;
+  let auth = null;
+  try {
+    auth = await readOpenAiAuth(config, env);
+  } catch (error) {
+    return { provider: 'openai-codex', label: 'OpenAI Codex', kind: 'subscription', available: false, reason: error?.message || String(error) };
+  }
+  if (!auth) return { provider: 'openai-codex', label: 'OpenAI Codex', kind: 'subscription', available: false, reason: 'no-auth' };
+  const baseUrl = String(config.baseUrl || 'https://chatgpt.com/backend-api').replace(/\/+$/, '');
+  const fetchImpl = options.fetch || fetch;
+  const timeoutMs = Number(config.timeoutMs || options.timeoutMs || 10000);
+  const cacheMs = Number(config.cacheMs || DEFAULT_CACHE_MS);
+  return cached('openai-codex', auth.key, cacheMs, options, async () => {
+    const usage = await fetchOpenAiJson(fetchImpl, `${baseUrl}/wham/usage`, auth, timeoutMs);
+    const limits = parseOpenAiCodexUsage(usage);
+    if (!limits) throw new Error('unexpected usage payload');
+    const status = {
+      provider: 'openai-codex',
+      label: 'OpenAI Codex',
+      kind: 'subscription',
+      available: true,
+      asOf: new Date().toISOString(),
+      limits,
+    };
+    const credits = await fetchOpenAiJson(fetchImpl, `${baseUrl}/wham/rate-limit-reset-credits`, auth, timeoutMs).catch(() => null);
+    if (credits) status.resetCredits = parseOpenAiResetCredits(credits);
+    return status;
+  });
+}
+
 /**
  * Normalized status registry for account-backed Pi providers. Unsupported
  * providers simply have no entry; adding one adapter does not change the UI or
@@ -265,10 +383,11 @@ export async function readRouterAiStatus(config = {}, options = {}) {
  */
 export async function readProviderStatuses(config = {}, options = {}) {
   const statusConfig = config.providerStatus || {};
-  const [deepseek, wormsoft, routerai] = await Promise.all([
+  const [deepseek, wormsoft, routerai, openaiCodex] = await Promise.all([
     readDeepseekCost(config.deepseek, options),
     readWormsoftStatus(statusConfig.wormsoft, options),
     readRouterAiStatus(statusConfig.routerai, options),
+    readOpenAiCodexStatus(statusConfig.openaiCodex, options),
   ]);
   return {
     deepseek: {
@@ -279,5 +398,6 @@ export async function readProviderStatuses(config = {}, options = {}) {
     },
     wormsoft,
     routerai,
+    'openai-codex': openaiCodex,
   };
 }

@@ -65,6 +65,7 @@ import ru.arny.taskbridge.core.client.markdown.Markdown
 import ru.arny.taskbridge.core.client.markdown.MdAlign
 import ru.arny.taskbridge.core.client.markdown.MdBlock
 import ru.arny.taskbridge.core.client.markdown.MdRun
+import ru.arny.taskbridge.ui.common.softBreakLongText
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import ru.arny.taskbridge.ui.theme.MonoStyle
@@ -304,15 +305,16 @@ fun inlineText(runs: List<MdRun>): AnnotatedString {
                     fontSize = if (run.code) 0.9.em else androidx.compose.ui.unit.TextUnit.Unspecified,
                     textDecoration = if (run.strike) TextDecoration.LineThrough else null,
                 )
+                val displayText = softBreakLongText(run.text)
                 if (run.link != null) {
                     val linkStyle = TextLinkStyles(SpanStyle(color = colors.primary, textDecoration = TextDecoration.Underline))
                     val file = workspaceLinkPath(run.link!!)
                     val annotation = if (file != null && openFile != null) LinkAnnotation.Clickable(file, linkStyle) { openFile(file) } else LinkAnnotation.Url(run.link!!, linkStyle)
                     withLink(annotation) {
-                        withStyle(style) { append(run.text) }
+                        withStyle(style) { append(displayText) }
                     }
                 } else {
-                    withStyle(style) { append(run.text) }
+                    withStyle(style) { append(displayText) }
                 }
             }
         }

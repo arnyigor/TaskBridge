@@ -135,6 +135,21 @@ class ChatReducerGoldenTest {
     }
 
     @Test
+    fun compactionStartIsVisibleInTimeline() {
+        val task = Task(id = "compact", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        val frame = buildJsonObject {
+            put("type", "compaction_start")
+            put("reason", "auto")
+        }
+
+        reducer.apply(TaskEvent(taskId = task.id, seq = 1, type = "PI_EVENT", data = buildJsonObject { put("pi", frame) }))
+
+        val note = reducer.snapshot().items.single() as ChatItem.Note
+        assertEquals("Контекст сжимается…", note.text)
+    }
+
+    @Test
     fun compactionNoteShowsSummaryText() {
         val task = Task(id = "compact", status = "RUNNING")
         val reducer = ChatReducer(task, seedInitial = false)
@@ -152,6 +167,38 @@ class ChatReducerGoldenTest {
 
         val note = reducer.snapshot().items.single() as ChatItem.Note
         assertEquals("Контекст сжат:\nКраткая сводка прошлого контекста", note.text)
+    }
+
+    @Test
+    fun compactionNoteStaysBeforeTheAnswerThatFollowsIt() {
+        val task = Task(id = "compact", status = "RUNNING", prompt = "Сделай")
+        val reducer = ChatReducer(task)
+
+        reducer.apply(TaskEvent(taskId = task.id, seq = 1, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "compaction_end")
+                put("result", buildJsonObject { put("summary", "Сводка прошлого контекста") })
+            })
+        }))
+        reducer.apply(TaskEvent(taskId = task.id, seq = 2, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_start")
+                put("message", buildJsonObject { put("role", "assistant") })
+            })
+        }))
+        reducer.apply(TaskEvent(taskId = task.id, seq = 3, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_update")
+                put("assistantMessageEvent", buildJsonObject {
+                    put("type", "text_delta")
+                    put("delta", "Ответ после сжатия")
+                })
+            })
+        }))
+
+        val items = reducer.snapshot().items
+        assertEquals(listOf("user-initial", "note-1", "assistant-initial"), items.map { it.id })
+        assertEquals("Ответ после сжатия", (items[2] as ChatItem.Assistant).text)
     }
 
     @Test
@@ -216,6 +263,39 @@ class ChatReducerGoldenTest {
         val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last()
         assertEquals(listOf("result.png"), answer.files.map { it.name })
         assertEquals("f1", answer.files.single().id)
+    }
+
+    @Test
+    fun mcpAdapterIgnoredSettingsNoticeIsNotShownAsAnswerText() {
+        val task = Task(id = "mcp-noise", status = "RUNNING", prompt = "Сделай")
+        val reducer = ChatReducer(task)
+        reducer.apply(TaskEvent(taskId = task.id, seq = 1, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_start")
+                put("message", buildJsonObject { put("role", "assistant") })
+            })
+        }))
+        reducer.apply(TaskEvent(taskId = task.id, seq = 2, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_update")
+                put("assistantMessageEvent", buildJsonObject {
+                    put("type", "text_delta")
+                    put("delta", "C:\\Users\\ArnyPC\\.pi\\agent\\mcp.json: Ignored settings (details in /mcp-adapter): \"adb-mcp\": directTools.\n")
+                })
+            })
+        }))
+        reducer.apply(TaskEvent(taskId = task.id, seq = 3, type = "PI_EVENT", data = buildJsonObject {
+            put("pi", buildJsonObject {
+                put("type", "message_update")
+                put("assistantMessageEvent", buildJsonObject {
+                    put("type", "text_delta")
+                    put("delta", "Нормальный ответ")
+                })
+            })
+        }))
+
+        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().single()
+        assertEquals("Нормальный ответ", answer.text)
     }
 
     @Test

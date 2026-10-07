@@ -1,6 +1,8 @@
 package ru.arny.taskbridge.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
@@ -162,8 +164,17 @@ fun TaskBridgeTheme(mode: String = "system", content: @Composable () -> Unit) {
         else -> isSystemInDarkTheme()
     }
     val colors: ColorScheme = if (dark) DarkColors else LightColors
+    val selectionColors = TextSelectionColors(
+        handleColor = colors.primary,
+        backgroundColor = colors.primary.copy(alpha = if (dark) 0.34f else 0.26f),
+    )
     androidx.compose.runtime.CompositionLocalProvider(LocalStatusColors provides if (dark) DarkStatus else LightStatus) {
         SystemBarsAppearance(dark)
-        MaterialTheme(colorScheme = colors, typography = AppTypography, shapes = AppShapes, content = content)
+        MaterialTheme(colorScheme = colors, typography = AppTypography, shapes = AppShapes) {
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalTextSelectionColors provides selectionColors,
+                content = content,
+            )
+        }
     }
 }

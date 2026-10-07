@@ -108,6 +108,16 @@ private class DesktopChatPersistence(root: File, serverUrl: String) : ChatPersis
     }
 }
 
+private fun uniqueFile(dir: File, name: String): File {
+    val dot = name.lastIndexOf('.').takeIf { it > 0 }
+    val base = dot?.let { name.substring(0, it) } ?: name
+    val ext = dot?.let { name.substring(it) }.orEmpty()
+    var candidate = File(dir, name)
+    var index = 1
+    while (candidate.exists()) candidate = File(dir, "$base ($index)$ext").also { index++ }
+    return candidate
+}
+
 /**
  * Desktop services. Notifications go through [notifier] (the tray, wired by
  * the desktop app); [foreground] is updated from the window focus.
@@ -130,7 +140,7 @@ class DesktopPlatformServices(
 
     override val inForeground: Boolean get() = foreground
 
-    override fun httpClient(): HttpClient = HttpClient(OkHttp) {
+    override fun httpClient(baseUrl: String?): HttpClient = HttpClient(OkHttp) {
         engine {
             config {
                 connectTimeout(10, TimeUnit.SECONDS)
@@ -161,6 +171,17 @@ class DesktopPlatformServices(
     override fun openUrl(url: String) {
         runCatching {
             if (Desktop.isDesktopSupported()) Desktop.getDesktop().browse(URI(url))
+        }
+    }
+
+    override suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String?, open: Boolean): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val safeName = name.substringAfterLast('/').substringAfterLast('\\').ifBlank { "taskbridge-file" }
+            val downloads = File(System.getProperty("user.home"), "Downloads").apply { mkdirs() }
+            val target = uniqueFile(downloads, safeName)
+            target.writeBytes(bytes)
+            if (open && Desktop.isDesktopSupported()) Desktop.getDesktop().open(target)
+            "Сохранено: ${target.absolutePath}"
         }
     }
 

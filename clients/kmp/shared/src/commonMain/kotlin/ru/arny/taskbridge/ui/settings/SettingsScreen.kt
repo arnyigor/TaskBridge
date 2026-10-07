@@ -577,6 +577,7 @@ private fun ProviderRow(status: ProviderStatus, refreshing: Boolean, onRefresh: 
 private fun providerStatusText(status: ProviderStatus): String {
     if (!status.available) return when (status.reason) {
         "no-key" -> "Ключ не настроен"
+        "no-auth" -> "Вход Codex не найден"
         "not-fetched" -> "Нажмите, чтобы получить данные"
         else -> status.reason ?: "Данные недоступны"
     }
@@ -592,7 +593,14 @@ private fun providerStatusText(status: ProviderStatus): String {
         val parts = listOfNotNull(balance.cny?.let { "¥${number(it)}" }, balance.usd?.let { "\$${number(it)}" })
         val rub = status.rub?.total?.let { " · ≈ ${number(it)} ₽" }.orEmpty()
         val runway = status.runway?.historyDays?.let { " · примерно на $it дн." }.orEmpty()
-        return parts.joinToString(" · ") + rub + runway + stale
+        val month = status.pace?.medianMonthlyRub?.let { " · ~${number(it)} ₽/мес" }.orEmpty()
+        return parts.joinToString(" · ") + rub + runway + month + stale
+    }
+    if (status.limits.isNotEmpty()) {
+        val fiveHour = status.limits["fiveHour"]?.remainingPercent?.let { "5 ч: ${number(it)}%" }
+        val weekly = status.limits["weekly"]?.remainingPercent?.let { "7 дн.: ${number(it)}%" }
+        val credits = status.resetCredits?.available?.let { "сбросов: $it" }
+        return listOfNotNull(fiveHour, weekly, credits).joinToString(" · ").ifBlank { "Данные получены" } + stale
     }
     return "Данные получены$stale"
 }

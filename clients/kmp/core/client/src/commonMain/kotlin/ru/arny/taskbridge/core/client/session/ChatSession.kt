@@ -1,6 +1,7 @@
 package ru.arny.taskbridge.core.client.session
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -14,6 +15,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
@@ -134,6 +137,7 @@ class ChatSession(
     private var oldestSeq: Long? = null
     private var streamJob: Job? = null
     private var refreshJob: Job? = null
+    private var cachePersistJob: Job? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
     private var started = false
@@ -158,6 +162,12 @@ class ChatSession(
     fun close() {
         streamJob?.cancel()
         refreshJob?.cancel()
+        cachePersistJob?.cancel()
+        // The owning Connected scope is cancelled immediately after close(). Use an
+        // independent non-cancellable job so the final cache snapshot is not lost.
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            withContext(NonCancellable) { persistCache() }
+        }
     }
 
     /** The network came back or the app returned to the foreground: skip the backoff wait. */
@@ -279,17 +289,22 @@ class ChatSession(
 
     private fun backoff(attempt: Int, floor: Long): Long {
         if (attempt <= 1) return floor.coerceAtMost(1500)
-        val base = (500L shl (attempt - 1).coerceAtMost(6)).coerceAtMost(30_000)
+        val base = (500L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(5_000)
         val jitter = (base * 0.2 * (random.nextDouble() * 2 - 1)).toLong()
-        return (base + jitter).coerceIn(500, 30_000)
+        return (base + jitter).coerceIn(500, 5_000)
     }
 
     private suspend fun onEvent(event: TaskEvent) {
+        var outboxChanged = false
         mutex.withLock {
             val chat = reducer ?: return
             if (!chat.apply(event)) return
             if (event.type == "USER_MESSAGE") {
-                event.string("commandId")?.let { id -> _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == id }) } }
+                event.string("commandId")?.let { id ->
+                    val before = _state.value.outbox.size
+                    _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == id }) }
+                    outboxChanged = _state.value.outbox.size != before
+                }
             }
             if (cachedEvents.none { it.seq == event.seq }) {
                 cachedEvents += lightenEvent(event)
@@ -304,11 +319,17 @@ class ChatSession(
             }
             _state.update { it.copy(task = if (status != null) it.task?.copy(status = status) else it.task, chat = chat.snapshot(), lastEventAt = event.at ?: now(), lastEventType = kind) }
         }
-        persistCache()
-        persistOutbox()
+        if (outboxChanged) saveOutbox()
+        scheduleCachePersist(immediate = event.shouldFlushCacheImmediately())
         if (event.type.startsWith("APPROVAL_")) scope.launch { loadApprovals() }
         val frameType = event.piFrame?.get("type")?.toString()?.trim('"')
-        if (event.type != "PI_EVENT" || frameType == "agent_settled" || frameType == "compaction_end" || frameType == "auto_compaction_end") refreshRequests.trySend(Unit)
+        if (event.type != "PI_EVENT"
+            || frameType == "agent_settled"
+            || frameType == "compaction_start"
+            || frameType == "auto_compaction_start"
+            || frameType == "compaction_end"
+            || frameType == "auto_compaction_end"
+        ) refreshRequests.trySend(Unit)
     }
 
     private suspend fun refreshTask() {
@@ -527,6 +548,32 @@ class ChatSession(
             _state.update { it.copy(task = cached.task, chat = chat.snapshot(), loading = false, reachedStart = cached.reachedStart) }
         }
         return true
+    }
+
+    private fun scheduleCachePersist(immediate: Boolean = false) {
+        if (immediate) {
+            cachePersistJob?.cancel()
+            cachePersistJob = scope.launch { persistCache() }
+            return
+        }
+        if (cachePersistJob?.isActive == true) return
+        cachePersistJob = scope.launch {
+            delay(1_500)
+            persistCache()
+        }
+    }
+
+    private fun TaskEvent.shouldFlushCacheImmediately(): Boolean {
+        val frameType = piFrame?.get("type")?.toString()?.trim('"')
+        return type == "USER_MESSAGE"
+            || type == "TASK_SUCCEEDED"
+            || type == "TASK_FAILED"
+            || type == "TASK_CANCELLED"
+            || type.startsWith("APPROVAL_")
+            || frameType == "message_end"
+            || frameType == "agent_settled"
+            || frameType == "compaction_end"
+            || frameType == "auto_compaction_end"
     }
 
     private suspend fun persistCache() {

@@ -160,7 +160,7 @@ test('editTurn refuses an unknown turn and an empty text', async t => {
   assert.equal((await store.readEvents('a', 0)).filter(event => event.type === 'TURN_EDITED').length, 1, 'only the real edit was written');
 });
 
-test('forkTask branches the conversation through the chosen exchange and leaves the source alone', async t => {
+test('forkTask branches the conversation through the chosen message and leaves the source alone', async t => {
   const { manager, store } = await fixture(t, 'SUCCEEDED');
   await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', message: 'второе', data: { text: 'второе' } });
   await store.appendEvent('a', { ...at(), type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
@@ -176,9 +176,12 @@ test('forkTask branches the conversation through the chosen exchange and leaves 
   assert.equal(forked.status, 'SUCCEEDED');
   assert.notEqual(forked.id, 'a');
 
-  // The branch stops at the end of the chosen exchange, so it never carries a
-  // question nobody has asked yet — and every copied event names the new session.
-  const expected = source.filter(e => e.seq < third.seq);
+  assert.equal(forked.prompt, 'original');
+
+  // The branch keeps the history prefix through the chosen user message, so it
+  // carries earlier context but never carries later turns — and every copied
+  // event names the new session.
+  const expected = source.filter(e => e.seq <= second.seq);
   const copied = (await store.readEvents(forked.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
   assert.equal(copied.at(-1).type, 'TASK_FORKED');
   assert.deepEqual(
@@ -194,9 +197,11 @@ test('forkTask branches the conversation through the chosen exchange and leaves 
   await assert.rejects(() => manager.forkTask('a', 'user-999'), err => err.code === 'NOT_FOUND');
   const fromAnswer = await manager.forkTask('a', `assistant-${second.seq}`);
   const answerCopy = await store.readEvents(fromAnswer.id, 0);
+  const answerExpected = source.filter(e => e.seq < third.seq);
+  assert.equal(fromAnswer.prompt, 'original');
   assert.deepEqual(
-    answerCopy.slice(0, expected.length).map(e => `${e.type}|${JSON.stringify(e.data)}`),
-    expected.map(e => `${e.type}|${JSON.stringify(e.data)}`)
+    answerCopy.slice(0, answerExpected.length).map(e => `${e.type}|${JSON.stringify(e.data)}`),
+    answerExpected.map(e => `${e.type}|${JSON.stringify(e.data)}`)
   );
 });
 

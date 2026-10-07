@@ -126,7 +126,7 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/local/events', summary: 'SSE router status and load progress', sse: true },
   { method: 'GET', path: '/api/processes', summary: 'processes of the server machine (pid, name, memoryBytes, startedAt, commandLine); ?fresh=1 skips the 5 s cache' },
   { method: 'POST', path: '/api/processes/kill', summary: 'force-kill one process by pid + name (name must match the list, system and TaskBridge processes are refused)' },
-  { method: 'POST', path: '/api/processes/kill-group', summary: 'force-kill visible node or python processes; body {runtime:"node"|"python"}; protected processes are skipped and failures are reported' },
+  { method: 'POST', path: '/api/processes/kill-group', summary: 'force-kill visible node, python or java processes; body {runtime:"node"|"python"|"java"}; protected processes are skipped and failures are reported' },
 
   // --- model library / hugging face -----------------------------------------
   { method: 'GET', path: '/api/hf/search?q=', summary: 'search Hugging Face model repositories (GGUF by default)' },

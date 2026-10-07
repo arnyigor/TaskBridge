@@ -63,8 +63,8 @@ class SessionList(
     private val api: TaskBridgeApi,
     private val scope: CoroutineScope,
     private val clockMillis: () -> Long,
-    private val activeIntervalMillis: Long = 1_000,
-    private val idleIntervalMillis: Long = 10_000,
+    private val activeIntervalMillis: Long = 5_000,
+    private val idleIntervalMillis: Long = 30_000,
     /** Desktop: поднимает потушенный сервер скрытым процессом, без консоли (см. DesktopServerLauncher). */
     private val startLocalServer: (suspend () -> Unit)? = null,
     /**

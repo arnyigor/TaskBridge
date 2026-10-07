@@ -1,6 +1,8 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+rem провайдеры Strata в ~/.pi/agent/models.json — синхронизация по конфигам Strata
+node scripts\strata-providers.mjs --quiet
 
 if not exist config.json (
   copy /Y config.example.json config.json >nul

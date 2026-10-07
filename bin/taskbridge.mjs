@@ -307,7 +307,8 @@ async function cmdOpen(config, arg) {
   try {
     const res = await fetch(effectiveUrl(config) + '/api/tasks');
     if (res.ok) {
-      const list = Array.isArray(await res.json()) ? await res.json() : [];
+      const data = await res.json();
+      const list = Array.isArray(data) ? data : [];
       const scoped = project ? list.filter((t) => t.projectId === project.id) : list;
       const latest = (scoped.length ? scoped : list)[0];
       if (latest?.id) sessionPath = `/session/${encodeURIComponent(latest.id)}`;

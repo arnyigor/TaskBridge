@@ -28,8 +28,12 @@ interface PlatformServices {
     /** Durable cache/outbox scoped to one server URL. */
     fun chatPersistence(serverUrl: String): ChatPersistence
 
-    /** An HTTP client whose socket reads never time out: SSE streams stay open for hours. */
-    fun httpClient(): HttpClient
+    /**
+     * An HTTP client whose socket reads never time out: SSE streams stay open for hours.
+     * [baseUrl] lets Android route LAN TaskBridge traffic over Wi-Fi even when that
+     * Wi-Fi has no validated Internet and is not the system default network.
+     */
+    fun httpClient(baseUrl: String? = null): HttpClient
 
     /** Emits connectivity changes so suspended SSE/outbox work can resume immediately. */
     fun networkAvailable(): Flow<Boolean>
@@ -58,6 +62,10 @@ interface PlatformServices {
 
     /** Opens a link or a file URL with the system (browser, viewer). */
     fun openUrl(url: String)
+
+    /** Saves bytes to a user-visible Downloads location; when [open] is true, also asks the system to open it. */
+    suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String? = null, open: Boolean = false): Result<String> =
+        Result.failure(UnsupportedOperationException("Сохранение файлов на этой платформе не поддерживается"))
 
     /**
      * The «Выход» button: stop the background watch and close the app for good

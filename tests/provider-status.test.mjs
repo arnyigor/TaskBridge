@@ -5,8 +5,10 @@ import path from 'node:path';
 import { test } from 'node:test';
 import {
   computeWormsoftUsage,
+  parseOpenAiCodexUsage,
   parseRouterAiCredits,
   parseWormsoftSubscription,
+  readOpenAiCodexStatus,
   readRouterAiStatus,
   readWormsoftStatus,
 } from '../src/provider-status.mjs';
@@ -195,6 +197,45 @@ test('RouterAI credits parser and reader reject invented units', async () => {
   assert.equal(result.kind, 'credits');
   assert.equal(result.credits, 2097.61);
   assert.equal('currency' in result, false, 'API does not declare a currency');
+});
+
+test('OpenAI Codex usage parser and reader expose remaining windows', async () => {
+  const limits = parseOpenAiCodexUsage({
+    rate_limit: {
+      primary_window: { used_percent: 25, limit_window_seconds: 18_000, reset_at: 1_800_000_000 },
+      secondary_window: { used_percent: 60, limit_window_seconds: 604_800, reset_at: 1_800_086_400 },
+    },
+  });
+  assert.equal(limits.fiveHour.remainingPercent, 75);
+  assert.equal(limits.fiveHour.windowSeconds, 18_000);
+  assert.equal(limits.weekly.remainingPercent, 40);
+
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'openai-codex-auth-'));
+  try {
+    const authPath = path.join(dir, 'auth.json');
+    await fs.writeFile(authPath, JSON.stringify({ tokens: { access_token: 'oa-test', account_id: 'acct-test' } }));
+    const calls = [];
+    const result = await readOpenAiCodexStatus({ authPath, baseUrl: 'https://chatgpt.test/backend-api' }, {
+      fetch: async (url, options) => {
+        calls.push({ url: String(url), headers: options.headers });
+        return {
+          ok: true,
+          json: async () => String(url).endsWith('/wham/usage')
+            ? { rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18_000 } } }
+            : { available_count: 2, total_earned_count: 3, credits: [{ status: 'available', expires_at: '2026-09-29T00:00:00Z' }] },
+        };
+      },
+      noCache: true,
+    });
+    assert.equal(result.available, true);
+    assert.equal(result.limits.fiveHour.remainingPercent, 90);
+    assert.equal(result.resetCredits.available, 2);
+    assert.equal(calls.length, 2);
+    assert.ok(calls.every(call => call.headers.Authorization === 'Bearer oa-test'));
+    assert.ok(calls.every(call => call.headers['ChatGPT-Account-ID'] === 'acct-test'));
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('provider readers are non-throwing without keys or on network failure', async () => {

@@ -20,7 +20,7 @@ test('ModelLatency records TTFT samples and computes avg/p50/last', async t => {
   assert.equal(entry.count, 3);
   assert.equal(entry.avgMs, 2067);
   assert.equal(entry.p50Ms, 2000);
-  assert.equal(entry.lastMs, 3000);
+  assert.equal(entry.lastMs, 2000);
   assert.equal(entry.samples.length, 3);
   assert.ok(entry.samples[0].at, 'samples carry a timestamp');
 });

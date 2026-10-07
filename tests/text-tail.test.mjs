@@ -1,6 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from '../src/text-tail.mjs';
+import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail, stripMcpAdapterNoise } from '../src/text-tail.mjs';
+
+test('the mcp-adapter noise line is cut from accumulated text', () => {
+  const noise = 'C:\\Users\\ArnyPC\\.pi\\agent\\mcp.json: Ignored settings (details in /mcp-adapter): "adb-mcp": directTools.';
+  assert.equal(stripMcpAdapterNoise(`${noise}\nНормальный ответ`), 'Нормальный ответ');
+  assert.equal(stripMcpAdapterNoise('Нормальный ответ'), 'Нормальный ответ');
+  assert.equal(stripMcpAdapterNoise(''), '');
+  assert.equal(stripMcpAdapterNoise(undefined), '');
+  // A standalone noise line is dropped whole.
+  assert.equal(stripMcpAdapterNoise(`Ответ\n${noise}\nДальше`), 'Ответ\nДальше');
+  // Documented trade-off: a delta boundary that merged answer text into the
+  // noise line loses that shared line too.
+  let text = '';
+  text = appendTail(text, 'Ответ. ', 64 * 1024);
+  text = stripMcpAdapterNoise(appendTail(text, `${noise}\n`, 64 * 1024));
+  assert.equal(text, '');
+});
 
 test('short text is returned unchanged', () => {
   assert.equal(tailText('hello', 100), 'hello');

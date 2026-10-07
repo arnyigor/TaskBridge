@@ -171,3 +171,41 @@ test('локальная модель без PP называет причину:
   const measured = lines.find(line => line.includes('qwen-27b-q3')) || '';
   assert.doesNotMatch(measured, /PP: —/u, `лишняя строка у модели с PP: ${measured}`);
 });
+
+// У сессии на внешнем сервере (Strata) телеметрии в info.engine нет: там
+// роутер llama.cpp, которого может не быть вовсе. Скорости такой сессии лежат
+// в info.local.models[].metrics, и живая строка молчала — PP/TG были видны
+// только по итогам хода. Записи сняты с живого движка 0.1.40 (iq3_s, 8083,
+// 2026-10-06): во время чтения 39 077-токенного промпта живая PP 2 419.5 —
+// это скорость ИДУЩЕГО запроса, а не прошлого (его запись в `requests` давала
+// 175 ток/с от короткого предыдущего запроса).
+test('живая строка берёт PP и TG у внешнего сервера, когда роутера нет', () => {
+  const { document, renderMachineLoad } = makeRenderer();
+  const live = document.getElementById('liveMetrics');
+  const external = {
+    engine: { configured: true, reachable: false, model: null },
+    local: {
+      provider: 'strata',
+      models: [{
+        id: 'qwen3.8-flash-next-iq3-s', provider: 'strata-iq3s', status: 'loaded',
+        metrics: { available: true, source: 'strata', state: 'reading', phase: 'reading the prompt', pp: 2419.5, tg: 47.5 },
+      }],
+    },
+  };
+  renderMachineLoad(baseInfo(external));
+  assert.match(live.textContent, /PP 2\u00a0419,5/u, `PP внешнего сервера: ${live.textContent}`);
+  assert.match(live.textContent, /TG 47,5 tok\/s/u, `TG внешнего сервера: ${live.textContent}`);
+  // Число не выдумывается: без измеримой PP (кеш беседы) остаётся только TG.
+  renderMachineLoad(baseInfo({
+    ...external,
+    local: {
+      provider: 'strata',
+      models: [{
+        id: 'qwen3.8-flash-next-iq3-s', provider: 'strata-iq3s', status: 'loaded',
+        metrics: { available: true, source: 'strata', pp: null, ppUnavailable: 'conversation-cache', tg: 38.4 },
+      }],
+    },
+  }));
+  assert.doesNotMatch(live.textContent, /PP/u, `PP кеш-промпта не показываем: ${live.textContent}`);
+  assert.match(live.textContent, /TG 38,4 tok\/s/u, `TG остаётся: ${live.textContent}`);
+});

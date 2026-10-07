@@ -34,6 +34,16 @@ test('concurrent writes preserve order, metadata and contiguous event cursors', 
   assert.equal((await store.readEvents('a', 0, 35)).length, 5);
 });
 
+test('forward event replay returns the first page after the cursor', async t => {
+  const { open } = await fixture(t);
+  const store = open();
+  await store.create({ id: 'a' });
+  for (let i = 1; i <= 5; i++) await store.appendEvent('a', { value: i });
+  assert.deepEqual((await store.readEvents('a', 2, 0)).map(event => event.value), [4, 5], 'history keeps tail semantics');
+  assert.deepEqual((await store.readEventsForward('a', 2, 0)).map(event => event.value), [1, 2], 'SSE replay gets the first missed events');
+  assert.deepEqual((await store.readEventsForward('a', 2, 2)).map(event => event.value), [3, 4]);
+});
+
 test('tasks and events survive reopening the database', async t => {
   const { open } = await fixture(t);
   const first = open();

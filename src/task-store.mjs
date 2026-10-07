@@ -479,6 +479,20 @@ export class TaskStore {
     return rows.map(toEvent);
   }
 
+  // Forward replay for SSE reconnect: return the first events after the cursor,
+  // not the history tail. If more than `limit` events accumulated, the client
+  // reconnects again from the last delivered seq instead of silently skipping
+  // the beginning of the gap.
+  async readEventsForward(id, limit = 500, after = 0) {
+    this.taskDir(id);
+    if (!Number.isSafeInteger(limit) || limit < 0 || !Number.isSafeInteger(after) || after < 0) {
+      throw Object.assign(new Error('Invalid event cursor or limit'), { code: 'INPUT_INVALID' });
+    }
+    const toEvent = row => ({ ...JSON.parse(row.payload), seq: Number(row.seq) });
+    if (!limit) return this.db.prepare('SELECT seq, payload FROM events WHERE task_id = ? AND seq > ? ORDER BY seq').all(id, after).map(toEvent);
+    return this.db.prepare('SELECT seq, payload FROM events WHERE task_id = ? AND seq > ? ORDER BY seq LIMIT ?').all(id, after, limit).map(toEvent);
+  }
+
   // Bounded-memory scan for recovery; readEvents(id, 0) would materialize the
   // whole history at once for a very long session.
   async *iterateEvents(id, after = 0, page = 2000) {

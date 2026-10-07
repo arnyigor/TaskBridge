@@ -83,7 +83,7 @@ private const val SHOWN_BYTES = 300_000
 /** What the viewer got: text to show, or a binary it cannot. */
 private sealed interface Loaded {
     data class Text(val text: String, val bytes: Int, val cut: Boolean) : Loaded
-    data class Binary(val bytes: Int) : Loaded
+    data class Binary(val bytes: ByteArray) : Loaded
     data class Picture(val bitmap: ImageBitmap, val original: ByteArray) : Loaded
     data class Failed(val message: String) : Loaded
 }
@@ -91,9 +91,27 @@ private sealed interface Loaded {
 internal fun looksBinary(bytes: ByteArray): Boolean = bytes.take(8000).any { it == 0.toByte() }
 
 private val MARKDOWN_NAME = Regex("\\.(?:md|markdown|mdx)$", RegexOption.IGNORE_CASE)
+private val VIDEO_NAME = Regex("\\.(?:mp4|webm|mov|m4v|mkv|avi)$", RegexOption.IGNORE_CASE)
 
 /** A file the viewer renders as Markdown instead of showing as source (the web's `MARKDOWN_EXT_RE`). */
 internal fun isMarkdownName(name: String?): Boolean = name != null && MARKDOWN_NAME.containsMatchIn(name)
+
+internal fun isVideoName(name: String?): Boolean = name != null && VIDEO_NAME.containsMatchIn(name)
+
+private fun mimeTypeOf(name: String): String = when (name.substringAfterLast('.', "").lowercase()) {
+    "mp4", "m4v" -> "video/mp4"
+    "webm" -> "video/webm"
+    "mov" -> "video/quicktime"
+    "mkv" -> "video/x-matroska"
+    "avi" -> "video/x-msvideo"
+    "png" -> "image/png"
+    "jpg", "jpeg" -> "image/jpeg"
+    "gif" -> "image/gif"
+    "webp" -> "image/webp"
+    "bmp" -> "image/bmp"
+    "pdf" -> "application/pdf"
+    else -> "application/octet-stream"
+}
 
 /**
  * Reads the file through the API with this client's session (a browser given
@@ -123,7 +141,7 @@ fun FileViewer(
                 val picture = if (isImageName(target.name)) decodeImage(bytes) else null
                 when {
                     picture != null -> Loaded.Picture(picture, bytes)
-                    looksBinary(bytes) -> Loaded.Binary(bytes.size)
+                    looksBinary(bytes) -> Loaded.Binary(bytes)
                     else -> Loaded.Text(bytes.copyOf(minOf(bytes.size, SHOWN_BYTES)).decodeToString(), bytes.size, bytes.size > SHOWN_BYTES)
                 }
             },
@@ -141,10 +159,17 @@ fun FileViewer(
             onFailure = { (it as? ApiException)?.let { e -> describe(e.error) } ?: it.message },
         )
     }
+    fun saveOnDevice(bytes: ByteArray, open: Boolean) = scope.launch {
+        notice = if (open) "Открываю…" else "Сохраняю…"
+        notice = platform.saveFile(target.name, bytes, mimeTypeOf(target.name), open).fold(
+            onSuccess = { it },
+            onFailure = { it.message ?: "Не удалось сохранить файл" },
+        )
+    }
 
     val info = when (val state = loaded) {
         is Loaded.Text -> formatBytes(state.bytes.toLong()) + if (state.cut) " · показано начало" else ""
-        is Loaded.Binary -> formatBytes(state.bytes.toLong())
+        is Loaded.Binary -> formatBytes(state.bytes.size.toLong())
         is Loaded.Picture -> "${state.bitmap.width}×${state.bitmap.height} · " + formatBytes(state.original.size.toLong())
         else -> null
     }
@@ -163,6 +188,10 @@ fun FileViewer(
                 TextButton(onClick = { openOnComputer(reveal = true) }) { Text("Показать в папке") }
             }
             Spacer(Modifier.weight(1f))
+            (loaded as? Loaded.Binary)?.let { binary ->
+                TextButton(onClick = { saveOnDevice(binary.bytes, open = false) }) { Text("Скачать") }
+                if (platform.kind == "android") OutlinedButton(onClick = { saveOnDevice(binary.bytes, open = true) }) { Text("Открыть") }
+            }
             (loaded as? Loaded.Text)?.let { text ->
                 TextButton(onClick = { platform.copyText(text.text); notice = "Скопировано" }) {
                     Icon(AppIcons.Copy, null, Modifier.size(16.dp))
@@ -178,7 +207,7 @@ fun FileViewer(
             is Loaded.Failed -> Text(state.message, color = MaterialTheme.colorScheme.error)
             is Loaded.Picture -> Image(state.bitmap, target.name, Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)), contentScale = ContentScale.FillWidth)
             is Loaded.Binary -> Text(
-                "Это не текстовый файл — показать его здесь нельзя." + if (platform.kind == "desktop") " Откройте его в приложении на компьютере." else "",
+                if (isVideoName(target.name)) "Это видео можно скачать или открыть во внешнем плеере." else "Это не текстовый файл — его можно скачать." + if (platform.kind == "desktop") " Или открыть в приложении на компьютере." else "",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             is Loaded.Text -> if (isMarkdownName(target.name)) {

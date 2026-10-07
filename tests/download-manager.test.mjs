@@ -5,6 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import http from 'node:http';
+import crypto from 'node:crypto';
 import { DownloadManager } from '../src/download-manager.mjs';
 
 // Локальный HTTP-сервер вместо Hugging Face: отдаёт статические файлы,
@@ -34,6 +35,13 @@ function startServer(files) {
 
 async function tempRoot(label) {
   return fs.mkdtemp(path.join(os.tmpdir(), `taskbridge-${label}-`));
+}
+
+function waitFor(manager, state, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`job did not reach ${state}`)), timeoutMs);
+    manager.on('update', j => { if (j.state === state) { clearTimeout(timer); resolve(j); } });
+  });
 }
 
 test('DownloadManager downloads files, verifies sizes and reports INSTALLED', async () => {
@@ -104,6 +112,257 @@ test('DownloadManager cancels a job and retry skips complete files', async () =>
     assert.equal(done.downloadedBytes, big.length + 10);
   } finally {
     await close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager resumes a part file with Range 206 and verifies SHA-256', async () => {
+  const body = Buffer.from('0123456789');
+  const ranges = [];
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      ranges.push(req.headers.range || null);
+      const range = /^bytes=(\d+)-$/.exec(req.headers.range || '');
+      if (range) {
+        const start = Number(range[1]);
+        res.writeHead(206, { 'content-range': `bytes ${start}-${body.length - 1}/${body.length}`, 'content-length': body.length - start });
+        res.end(body.subarray(start));
+        return;
+      }
+      res.writeHead(200, { 'content-length': body.length });
+      res.end(body);
+    });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  const root = await tempRoot('dl-range');
+  try {
+    const dir = path.join(root, 'model');
+    await fs.mkdir(path.join(dir, '.taskbridge-part'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.taskbridge-part', 'model.gguf'), body.subarray(0, 5));
+    const manager = new DownloadManager(root);
+    const job = await manager.start({
+      repo: 'org/model', files: [{ path: 'model.gguf', size: body.length, sha256: crypto.createHash('sha256').update(body).digest('hex') }],
+      dir, resolveBase: server.base
+    });
+    await waitFor(manager, 'INSTALLED');
+    assert.equal((await fs.readFile(path.join(dir, 'model.gguf'))).toString(), body.toString());
+    assert.equal(manager.list({ id: job.id }).downloadedBytes, body.length);
+    assert.deepEqual(ranges, ['bytes=5-']);
+  } finally {
+    await server.close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager restarts instead of appending when Range is ignored', async () => {
+  const body = Buffer.from('abcdefghij');
+  const root = await tempRoot('dl-range-200');
+  const { base, close } = await startServer({ 'model.gguf': body });
+  try {
+    const dir = path.join(root, 'model');
+    await fs.mkdir(path.join(dir, '.taskbridge-part'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.taskbridge-part', 'model.gguf'), Buffer.from('wrong'));
+    const manager = new DownloadManager(root);
+    const job = await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: body.length }], dir, resolveBase: base });
+    await waitFor(manager, 'INSTALLED');
+    assert.equal((await fs.readFile(path.join(dir, 'model.gguf'))).toString(), body.toString());
+    assert.equal(manager.list({ id: job.id }).downloadedBytes, body.length);
+  } finally {
+    await close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager rejects a mismatched Content-Range offset', async () => {
+  const root = await tempRoot('dl-bad-range');
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      res.writeHead(206, { 'content-range': 'bytes 0-9/10', 'content-length': 5 });
+      res.end('56789');
+    });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  try {
+    const dir = path.join(root, 'model');
+    await fs.mkdir(path.join(dir, '.taskbridge-part'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.taskbridge-part', 'model.gguf'), '01234');
+    const manager = new DownloadManager(root);
+    const job = await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: 10 }], dir, resolveBase: server.base });
+    await waitFor(manager, 'FAILED');
+    assert.match(manager.list({ id: job.id }).error, /Content-Range/);
+  } finally {
+    await server.close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager treats 416 with a complete part as installed', async () => {
+  const body = Buffer.from('complete');
+  const root = await tempRoot('dl-416');
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => { res.writeHead(416); res.end(); });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  try {
+    const dir = path.join(root, 'model');
+    await fs.mkdir(path.join(dir, '.taskbridge-part'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.taskbridge-part', 'model.gguf'), body);
+    const manager = new DownloadManager(root);
+    await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: body.length }], dir, resolveBase: server.base });
+    await waitFor(manager, 'INSTALLED');
+    assert.equal((await fs.readFile(path.join(dir, 'model.gguf'))).toString(), body.toString());
+  } finally {
+    await server.close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager retries after a broken HTTP stream and resumes the part', async () => {
+  const body = Buffer.from('broken-stream-body');
+  let first = true;
+  const root = await tempRoot('dl-broken-stream');
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      const range = /^bytes=(\d+)-$/.exec(req.headers.range || '');
+      if (first) {
+        first = false;
+        res.writeHead(200, { 'content-length': body.length });
+        res.write(body.subarray(0, 6));
+        res.destroy();
+        return;
+      }
+      const start = range ? Number(range[1]) : 0;
+      res.writeHead(range ? 206 : 200, {
+        ...(range ? { 'content-range': `bytes ${start}-${body.length - 1}/${body.length}` } : {}),
+        'content-length': body.length - start
+      });
+      res.end(body.subarray(start));
+    });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  try {
+    const dir = path.join(root, 'model');
+    const manager = new DownloadManager(root);
+    const job = await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: body.length }], dir, resolveBase: server.base });
+    await waitFor(manager, 'FAILED');
+    await manager.retry(job.id);
+    await waitFor(manager, 'INSTALLED');
+    assert.equal((await fs.readFile(path.join(dir, 'model.gguf'))).toString(), body.toString());
+  } finally {
+    await server.close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager restarts after 416 when the part is incomplete', async () => {
+  const body = Buffer.from('restarted');
+  let calls = 0;
+  const root = await tempRoot('dl-416-restart');
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      calls += 1;
+      if (calls === 1) { res.writeHead(416); res.end(); return; }
+      res.writeHead(200, { 'content-length': body.length });
+      res.end(body);
+    });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  try {
+    const dir = path.join(root, 'model');
+    await fs.mkdir(path.join(dir, '.taskbridge-part'), { recursive: true });
+    await fs.writeFile(path.join(dir, '.taskbridge-part', 'model.gguf'), 'old');
+    const manager = new DownloadManager(root);
+    await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: body.length }], dir, resolveBase: server.base });
+    await waitFor(manager, 'INSTALLED');
+    assert.equal((await fs.readFile(path.join(dir, 'model.gguf'))).toString(), body.toString());
+    assert.equal(calls, 2);
+  } finally {
+    await server.close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager limits concurrent downloads', async () => {
+  let active = 0;
+  let maxActive = 0;
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      setTimeout(() => {
+        const body = Buffer.alloc(5, 1);
+        res.writeHead(200, { 'content-length': body.length });
+        res.end(body, () => { active -= 1; });
+      }, 80);
+    });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  const root = await tempRoot('dl-queue');
+  try {
+    const manager = new DownloadManager(root, { maxConcurrentDownloads: 2 });
+    const jobs = await Promise.all([0, 1, 2, 3].map(i => manager.start({
+      repo: `org/model-${i}`, files: [{ path: `m${i}.gguf`, size: 5 }], dir: path.join(root, `m${i}`), resolveBase: server.base
+    })));
+    await Promise.all(jobs.map(job => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('download did not finish')), 5000);
+      manager.on('update', j => { if (j.id === job.id && j.state === 'INSTALLED') { clearTimeout(timer); resolve(); } });
+    })));
+    assert.equal(maxActive, 2);
+  } finally {
+    await server.close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('DownloadManager preserves libraryId and sends download headers', async () => {
+  let auth = null;
+  const server = await new Promise(resolve => {
+    const s = http.createServer((req, res) => {
+      auth = req.headers.authorization || null;
+      const body = Buffer.alloc(12, 4);
+      res.writeHead(200, { 'content-length': body.length });
+      res.end(body);
+    });
+    s.listen(0, '127.0.0.1', () => resolve({
+      base: `http://127.0.0.1:${s.address().port}`,
+      close: () => new Promise(done => { s.closeAllConnections(); s.close(() => done()); })
+    }));
+  });
+  const root = await tempRoot('dl-headers');
+  try {
+    const manager = new DownloadManager(root, { downloadHeaders: () => ({ authorization: 'Bearer test-token' }) });
+    const job = await manager.start({
+      repo: 'org/private', revision: 'main', libraryId: 'hf:org/private@main:Q4_K_M',
+      files: [{ path: 'private.gguf', size: 12 }], dir: path.join(root, 'private'), resolveBase: server.base
+    });
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('download did not finish')), 5000);
+      manager.on('update', j => { if (j.state === 'INSTALLED') { clearTimeout(timer); resolve(); } });
+    });
+    const final = manager.list({ id: job.id });
+    assert.equal(final.libraryId, 'hf:org/private@main:Q4_K_M');
+    assert.equal(auth, 'Bearer test-token');
+    assert.doesNotMatch(await fs.readFile(path.join(root, 'downloads.json'), 'utf8'), /test-token|authorization/i);
+  } finally {
+    await server.close();
     fsSync.rmSync(root, { recursive: true, force: true });
   }
 });

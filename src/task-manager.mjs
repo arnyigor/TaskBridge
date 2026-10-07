@@ -23,7 +23,7 @@ import { ModelLibrary, idForEntry } from './model-library.mjs';
 import { modelsPresetPath, registerLibraryPreset, patchPresetContext, patchPresetVision, parsePresets, removePreset } from './router-presets.mjs';
 import { quantFromFilename } from './huggingface.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
-import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail } from './text-tail.mjs';
+import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail, stripMcpAdapterNoise } from './text-tail.mjs';
 import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
 import { generationWindowMs, generationMetrics } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
@@ -1733,13 +1733,13 @@ export class TaskManager extends EventEmitter {
   #initModelLibrary(config, dataRoot) {
     const settings = config.modelLibrary || {};
     const root = settings.root || path.join(dataRoot, 'models');
-    const token = settings.token
-      || process.env.HF_TOKEN
+    const token = process.env.HF_TOKEN
       || process.env.HUGGING_FACE_HUB_TOKEN
       || (() => { try { return fsSync.readFileSync(path.join(dataRoot, 'hf-token'), 'utf8').trim(); } catch { return null; } })();
     this.hf = new HuggingFaceService({ token, baseUrl: settings.baseUrl });
     this.modelLibrary = new ModelLibrary(dataRoot);
     this.downloads = new DownloadManager(dataRoot, {
+      downloadHeaders: () => token ? { authorization: `Bearer ${token}` } : {},
       onInstalled: (job) => this.modelLibrary.addFromJob(job)
     });
     this.modelLibraryRoot = root;
@@ -1755,23 +1755,20 @@ export class TaskManager extends EventEmitter {
   }
 
   /**
-   * Начать загрузку: { repo, revision?, files: [path], vision?: bool }.
+   * Начать загрузку: { repo, revision?, files: [path], vision?: bool, projectorPath? }.
    * Размеры файлов сервер берёт сам из дерева репозитория — клиент присылает
-   * только пути. vision (по умолчанию true) добавляет mmproj-проектор из дерева,
-   * если он там есть, — без него vision-модель потеряет зрение.
+   * только пути. Для vision скачивается один выбранный mmproj-проектор, а не
+   * все проекторы из репозитория.
    */
-  async hfDownload({ repo, revision = 'main', files, vision = true } = {}) {
+  async hfDownload({ repo, revision = 'main', files, vision = true, projectorPath = null } = {}) {
     if (!repo || !Array.isArray(files) || !files.length) {
       throw Object.assign(new Error('Нужны repo и список файлов.'), { code: 'INPUT_INVALID' });
     }
     const tree = await this.hf.repoTree(repo, revision);
     const requested = [...files];
     if (vision !== false) {
-      for (const entry of tree) {
-        if (/\.gguf$/i.test(String(entry.path)) && /mmproj/i.test(entry.path) && !requested.includes(entry.path)) {
-          requested.push(entry.path);
-        }
-      }
+      const projector = projectorPath || this.#chooseProjector(tree);
+      if (projector && !requested.includes(projector)) requested.push(projector);
     }
     const plan = this.hf.plan(tree, requested);
     if (!plan) throw Object.assign(new Error('Часть файлов из запроса отсутствует в дереве репозитория.'), { code: 'INPUT_INVALID' });
@@ -1780,8 +1777,35 @@ export class TaskManager extends EventEmitter {
     const weightPath = plan.files.map(f => f.path).find(p => !/mmproj/i.test(p) && /\.gguf$/i.test(p)) || '';
     const libraryId = idForEntry({ repo, revision, quant: quantFromFilename(weightPath.split('/').pop()) });
     const slug = repo.split('/').pop();
-    const dir = path.join(this.modelLibraryRoot, slug);
+    const dir = this.#downloadDirFor(repo, revision);
     return this.downloads.start({ repo, revision, files: plan.files, dir, label: slug, libraryId });
+  }
+
+  #chooseProjector(tree) {
+    const projectors = (Array.isArray(tree) ? tree : [])
+      .filter(entry => /\.gguf$/i.test(String(entry.path)) && /mmproj/i.test(String(entry.path)));
+    if (!projectors.length) return null;
+    const rank = (entry) => {
+      const name = String(entry.path);
+      if (/Q5_K_M/i.test(name)) return 0;
+      if (/Q4_K_M/i.test(name)) return 1;
+      if (/Q8_0/i.test(name)) return 2;
+      if (/BF16/i.test(name)) return 3;
+      if (/F16|FP16/i.test(name)) return 4;
+      return 10;
+    };
+    return projectors
+      .sort((a, b) => rank(a) - rank(b) || Number(a.lfs?.size ?? a.size ?? Infinity) - Number(b.lfs?.size ?? b.size ?? Infinity))
+      [0].path;
+  }
+
+  #downloadDirFor(repo, revision) {
+    const safe = (value) => String(value || 'main')
+      .replace(/[<>:"\\|?*\x00-\x1F]+/g, '-')
+      .replace(/^\.+|\.+$/g, '')
+      .slice(0, 120) || 'main';
+    const parts = String(repo).split('/').filter(Boolean).map(safe);
+    return path.join(this.modelLibraryRoot, ...parts, safe(revision));
   }
 
   hfDownloads() {
@@ -2197,12 +2221,12 @@ export class TaskManager extends EventEmitter {
     }
     if (frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
       task._compacting = false;
-      // Строку сжатия не оставляем висеть: дальше либо терминальный статус
-      // («Done»), либо кадры следующего хода, которые её перезапишут. Но только
-      // СВОЮ строку: стадию smart-compaction-расширения («Smart compaction: …»),
-      // выставленную setStatus-кадрами, убирать нельзя — по ней видно, что
-      // сжатие застряло.
-      if (task.current === 'Pi сжимает контекст…') task.current = '';
+      // The active compaction line must not outlive the explicit end frame. A
+      // stuck compaction is still visible while no end frame arrives; after the
+      // end, keeping the last smart-compaction tick as `current` makes the UI
+      // look busy even though runtime.activity is no longer compacting.
+      if (task.current === 'Pi сжимает контекст…' || String(task.current || '').startsWith('Smart compaction: ')) task.current = '';
+      task._compactionStage = null;
       task._compactingSince = 0;
     }
     if (frame.type === 'agent_settled') {
@@ -2214,7 +2238,7 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
       if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task);
-      if (delta?.type === 'text_delta') task.assistantText = appendTail(task.assistantText, delta.delta, TEXT_TAIL);
+      if (delta?.type === 'text_delta') task.assistantText = stripMcpAdapterNoise(appendTail(task.assistantText, delta.delta, TEXT_TAIL));
       if (delta?.type === 'thinking_delta') {
         task.thinkingText = appendTail(task.thinkingText, delta.delta, THINKING_TAIL);
         // Токены, а не символы: та же эвристика, что у Pi и в отчёте «Откуда
@@ -3185,11 +3209,11 @@ export class TaskManager extends EventEmitter {
     return output;
   }
 
-  // "Fork": a new session in the same project whose conversation is a copy of
-  // this one through the chosen exchange. Nothing runs and no model is asked —
-  // the copy is replayed by the client at once, and the fork's first message
-  // rebuilds Pi's session file from those events (session-history.mjs), so the
-  // branch keeps its context. The source is left untouched.
+  // "Fork": a new session in the same project whose conversation is copied from
+  // the beginning through the chosen message. Nothing runs and no model is asked
+  // — the prefix is replayed by the client at once, and the fork's first message
+  // rebuilds Pi's session file from those events (session-history.mjs). The
+  // source is left untouched.
   async forkTask(id, turnId) {
     return this.#admit(() => this.#forkTask(id, turnId), id);
   }
@@ -3197,8 +3221,8 @@ export class TaskManager extends EventEmitter {
   async #forkTask(id, turnId) {
     const source = this.#mutableTask(id);
     const events = await this.store.readEvents(id, 0);
-    const boundary = this.#forkBoundary(events, turnId);
-    const kept = events.filter(event => event.seq <= boundary);
+    const fork = this.#forkRange(events, turnId);
+    const kept = events.filter(event => event.seq <= fork.boundary);
     const task = {
       id: shortId(),
       createdAt: now(),
@@ -3229,7 +3253,7 @@ export class TaskManager extends EventEmitter {
       metrics: null,
       model: source.model,
       autoCompactionEnabled: null,
-      files: [],
+      files: Array.isArray(source.files) ? source.files : [],
       attachments: [],
       outputFiles: [],
       forkedFrom: id
@@ -3237,29 +3261,30 @@ export class TaskManager extends EventEmitter {
     await this.store.create(task);
     this.tasks.set(task.id, task);
     for (const event of kept) await this.store.appendEvent(task.id, { ...event, taskId: task.id });
-    await this.#event(task, 'TASK_FORKED', `Ветка сессии ${id}: перенесено ходов — ${kept.length}.`, { from: id, throughSeq: boundary });
+    await this.#event(task, 'TASK_FORKED', `Ветка сессии ${id}: перенесено событий — ${kept.length}.`, { from: id, fromSeq: fork.fromSeq, throughSeq: fork.boundary });
     return this.#publicTask(task);
   }
 
-  // Where a fork stops: the end of the chosen exchange. "user-<seq>" and
-  // "assistant-<seq>" name the same exchange (the message that started it and
-  // the answer it got), and the copy stops just before the next message in
-  // either case — so it always ends on a settled answer, never on a question
-  // nobody has asked yet.
-  #forkBoundary(events, turnId) {
+  // Where a fork stops. A click on an operator message keeps history from the
+  // session start through that message. A click on an answer keeps history
+  // through that answer, which ends just before the next operator message.
+  #forkRange(events, turnId) {
     const value = String(turnId || '');
-    if (value === 'user-initial' || value === 'assistant-initial') {
+    if (value === 'user-initial') return { fromSeq: 0, boundary: 0 };
+    if (value === 'assistant-initial') {
       const first = events.find(event => event.type === 'USER_MESSAGE');
-      return first ? first.seq - 1 : Number.MAX_SAFE_INTEGER;
+      return { fromSeq: 0, boundary: first ? first.seq - 1 : Number.MAX_SAFE_INTEGER };
     }
-    const match = /^(?:user|assistant)-(\d+)$/.exec(value);
+    const match = /^(user|assistant)-(\d+)$/.exec(value);
     if (!match) throw Object.assign(new Error('Ответвить можно только от сообщения или ответа.'), { code: 'INPUT_INVALID' });
-    const fromSeq = Number(match[1]);
+    const role = match[1];
+    const fromSeq = Number(match[2]);
     if (!events.some(event => event.type === 'USER_MESSAGE' && event.seq === fromSeq)) {
       throw Object.assign(new Error('Ход не найден в истории.'), { code: 'NOT_FOUND' });
     }
+    if (role === 'user') return { fromSeq, boundary: fromSeq };
     const next = events.find(event => event.type === 'USER_MESSAGE' && event.seq > fromSeq);
-    return next ? next.seq - 1 : Number.MAX_SAFE_INTEGER;
+    return { fromSeq, boundary: next ? next.seq - 1 : Number.MAX_SAFE_INTEGER };
   }
 
   // Shared guard for history mutations: the session must exist and must not be
@@ -4121,12 +4146,23 @@ export class TaskManager extends EventEmitter {
   }
 
   #runtimeChange(task) {
-    const next = this.#runtimeFacts(task).state;
-    const from = task._runtimeState || null;
-    if (from === next) return null;
-    if (!transitionAllowed(from, next)) console.warn(`[TaskBridge] runtime ${task.id}: unexpected ${from} → ${next} (status ${task.status})`);
-    task._runtimeState = next;
-    return { from, to: next };
+    const next = this.#runtimeFacts(task);
+    const previous = task._runtimeFacts || null;
+    const changed = !previous
+      || previous.state !== next.state
+      || previous.activity !== next.activity
+      || (previous.compactingSince || null) !== (next.compactingSince || null);
+    if (!changed) return null;
+    if (!transitionAllowed(previous?.state || null, next.state)) console.warn(`[TaskBridge] runtime ${task.id}: unexpected ${previous?.state || null} → ${next.state} (status ${task.status})`);
+    task._runtimeFacts = next;
+    task._runtimeState = next.state;
+    return {
+      from: previous?.state || null,
+      to: next.state,
+      fromActivity: previous?.activity || null,
+      toActivity: next.activity || null,
+      compactingSince: next.compactingSince || null,
+    };
   }
 
   // For changes no event announces (a Pi starting or exiting).
@@ -4179,10 +4215,20 @@ export class TaskManager extends EventEmitter {
     // wall of one note per chunk in the chat.
     if (frame.method === 'setStatus' && String(frame.statusKey || '').startsWith('smart-compaction')) {
       const text = uiText(frame.statusText, 500) || '';
+      if (!text) {
+        task._compactionStage = null;
+        if (String(task.current || '').startsWith('Smart compaction: ')) {
+          task.current = '';
+          task.updatedAt = now();
+          await this.store.save(this.#publicTask(task));
+          await this.#event(task, 'STATUS', '', { status: task.status }, false);
+        }
+        return;
+      }
       // The ticker re-sends the same stage every second with a new elapsed time:
       // emit once per stage change, not once per tick.
       const stage = text.replace(/ \(\d+s\)$/, '');
-      if (text && stage !== task._compactionStage) {
+      if (stage !== task._compactionStage) {
         task._compactionStage = stage;
         task.current = text;
         task.updatedAt = now();

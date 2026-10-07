@@ -13,7 +13,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -35,6 +34,7 @@ import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.SessionDraft
+import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.sessions.messageOf
 import ru.arny.taskbridge.ui.sessions.ModelPicker
@@ -106,7 +106,7 @@ fun DraftChatScreen(
             }
             // Above the composer rather than over it: the field and its buttons must stay reachable
             // while a notice is on screen.
-            SnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
+            AppSnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
             Composer(
                 value = text,
                 onValueChange = { text = it },

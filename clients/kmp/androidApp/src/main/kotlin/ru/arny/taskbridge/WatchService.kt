@@ -62,21 +62,28 @@ class WatchService : Service() {
         private const val NOTIFICATION_ID = 42
         private const val EXTRA_ACTIVE = "active"
         @Volatile private var running = false
+        @Volatile private var lastActive = 0
 
         /** Called on every list update: runs while something is active, stops otherwise. */
         fun update(context: Context, activeSessions: Int) {
             val intent = Intent(context, WatchService::class.java).putExtra(EXTRA_ACTIVE, activeSessions)
-            if (activeSessions > 0) {
-                // Android 12+ refuses to start a foreground service from the
-                // background; it is started while the app is open and simply
-                // keeps running after it is hidden.
-                runCatching {
-                    if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
-                    running = true
+            if (activeSessions <= 0) {
+                if (running) {
+                    context.stopService(intent)
+                    running = false
+                    lastActive = 0
                 }
-            } else if (running) {
-                context.stopService(intent)
-                running = false
+                return
+            }
+            if (running && lastActive == activeSessions) return
+            lastActive = activeSessions
+            // Android 12+ refuses to start a foreground service from the
+            // background; it is started while the app is open and simply
+            // keeps running after it is hidden. If only the count changed,
+            // one more start updates the notification; identical polls do not.
+            runCatching {
+                if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent) else context.startService(intent)
+                running = true
             }
         }
     }

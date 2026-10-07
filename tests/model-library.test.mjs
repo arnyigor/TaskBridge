@@ -20,7 +20,7 @@ test('ModelLibrary registers a model from a finished download job and checks fil
         { path: 'mmproj-f16.gguf', size: 50 }
       ]
     });
-    assert.match(entry.id, /^qwen3\.8-27b-gguf-abc123d-q4km$/);
+    assert.equal(entry.id, 'hf:org/qwen3.8-27b-gguf@abc123def:q4km');
     assert.equal(entry.quant, 'Q4_K_M');
     assert.equal(entry.vision, true); // mmproj в задании — модель vision
     assert.equal(entry.source.repo, 'org/Qwen3.8-27B-GGUF');

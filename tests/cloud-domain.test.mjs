@@ -84,6 +84,15 @@ test('Pi frames become normalized task events with tool lifecycle and message id
   assert.equal(normalizer.assistantText('t'), 'Checking tests');
 });
 
+test('manual and automatic compaction starts normalize symmetrically', () => {
+  const normalizer = new EventNormalizer();
+  const manual = normalizer.normalizePiFrame('t', { type: 'compaction_start', reason: 'manual' });
+  const automatic = normalizer.normalizePiFrame('t', { type: 'auto_compaction_start', reason: 'auto' });
+  assert.deepEqual(manual.map(event => event.type), ['compaction_started']);
+  assert.deepEqual(automatic.map(event => event.type), ['compaction_started']);
+  assert.equal(automatic[0].payload.reason, 'auto');
+});
+
 test('tool update declares delta versus snapshot mode', () => {
   // Under the rolling window every chunk is a delta; over it the client gets a
   // bounded snapshot instead (§35, §38).

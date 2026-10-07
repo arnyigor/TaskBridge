@@ -16,9 +16,10 @@ import { spawn } from 'node:child_process';
 // and the RPC recorder) before the range was widened.
 // 0.99.x: checked in real sessions on the operator's machine (2026-10-01) —
 // TaskBridge itself runs against Pi 0.99.1, steering, prompt delivery and
-// task events all exercised. Minors in between were not run on this machine:
-// outside the range TaskBridge keeps working, it just warns.
-export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '1.0.0' });
+// task events all exercised. 1.0.4 is the current Pi line used with TaskBridge
+// on the operator machine; keep the upper bound on the next minor so 1.0.x does
+// not show a false version warning.
+export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '1.1.0' });
 
 // `pi --version` has printed both "0.85.1" and "pi 0.85.1"; take the first
 // x.y.z anywhere in the output rather than depend on the prefix.

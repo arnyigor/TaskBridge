@@ -134,6 +134,7 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             OutlinedButton(onClick = { pendingGroup = "node" }) { Text("Завершить все Node") }
                             OutlinedButton(onClick = { pendingGroup = "python" }) { Text("Завершить все Python") }
+                            OutlinedButton(onClick = { pendingGroup = "java" }) { Text("Завершить все Java") }
                         }
                         for (entry in sortedProcesses(list)) ProcessCard(
                             entry, killingPid,
@@ -151,10 +152,11 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
     }
 
     pendingGroup?.let { runtime ->
+        val runtimeLabel = processRuntimeLabel(runtime)
         AlertDialog(
             onDismissRequest = { pendingGroup = null },
-            title = { Text("Освободить ресурсы: $runtime?") },
-            text = { Text("Будут принудительно завершены все видимые процессы $runtime, кроме защищённых процессов TaskBridge и системы.") },
+            title = { Text("Освободить ресурсы: $runtimeLabel?") },
+            text = { Text("Будут принудительно завершены все видимые процессы $runtimeLabel, кроме защищённых процессов TaskBridge и системы.") },
             confirmButton = { TextButton(onClick = {
                 pendingGroup = null
                 scope.launch { runCatching { connection.api.killProcessGroup(runtime) }.onFailure { error = it.message }; refresh(true); gpuProcesses = runCatching { connection.api.gpuProcesses() }.getOrNull() }
@@ -275,3 +277,10 @@ internal fun processAgeLabel(startedAtMs: Long, nowMs: Long? = null): String {
 /** Самые прожорливые сверху; без памяти — в конец, а не вперемешку. */
 internal fun sortedProcesses(list: List<ProcessEntry>): List<ProcessEntry> =
     list.sortedByDescending { it.memoryBytes ?: -1L }
+
+internal fun processRuntimeLabel(runtime: String): String = when (runtime) {
+    "node" -> "Node"
+    "python" -> "Python"
+    "java" -> "Java"
+    else -> runtime
+}

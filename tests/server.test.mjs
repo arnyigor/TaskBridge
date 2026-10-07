@@ -321,10 +321,9 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   assert.equal(compactedTask.compaction.last.estimatedTokensAfter, 500);
   assert.equal(compactedTask.compaction.last.summary, 'Сжатая сводка предыдущего контекста');
   assert.equal(compactedTask.lastUsage.totalTokens, 500);
-  // The compaction stage the extension ticks arrive as setStatus frames with
-  // statusKey "smart-compaction": the diagnostics panel (Активность) must keep
-  // the last stage instead of dropping it, so a stuck compaction is visible.
-  assert.match(compactedTask.current, /Smart compaction: final merge \(\d+s\)/);
+  // The smart-compaction stage is active only until Pi sends compaction_end;
+  // after that the diagnostics panel must not keep showing a busy final merge.
+  assert.equal(compactedTask.current, '');
   await api(`/api/tasks/${id}/message`, { text: 'slow' });
   await api(`/api/tasks/${id}/cancel`, {});
   task = await terminal(api, id);
@@ -636,7 +635,7 @@ test('regenerate over HTTP adds another answer of the same exchange and keeps th
   await assert.rejects(() => api(`/api/tasks/${id}/regenerate`, { turnId: 'assistant-999' }), err => err.code === 'NOT_ALLOWED');
 });
 
-test('fork over HTTP copies the conversation and leaves the source alone', { timeout: 30000 }, async t => {
+test('fork over HTTP copies through the chosen message and leaves the source alone', { timeout: 30000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api } = fixture;
@@ -652,15 +651,17 @@ test('fork over HTTP copies the conversation and leaves the source alone', { tim
   const forked = await api(`/api/tasks/${id}/fork`, { turnId: `user-${users[0].seq}` });
   assert.notEqual(forked.id, id);
   assert.equal(forked.forkedFrom, id);
+  assert.equal(forked.prompt, 'первое');
   assert.equal((await api('/api/tasks')).length, 2, 'the branch is a session of its own');
 
-  // The branch replays the source conversation; only its own marker is extra.
+  // The branch replays the source prefix through the chosen user message; only its own marker is extra.
   const source = await api(`/api/tasks/${id}/events?limit=0`);
   const copy = await api(`/api/tasks/${forked.id}/events?limit=0`);
   const forkIndex = copy.findIndex(e => e.type === 'TASK_FORKED');
   assert.ok(forkIndex >= 0);
   assert.ok(copy.slice(forkIndex + 1).every(e => e.type === 'RUNTIME_STATE'));
-  assert.deepEqual(copy.slice(0, forkIndex).map(e => e.type), source.map(e => e.type));
+  const expected = source.filter(e => e.seq <= users[0].seq);
+  assert.deepEqual(copy.slice(0, forkIndex).map(e => e.type), expected.map(e => e.type));
   assert.deepEqual((await api(`/api/tasks/${id}/events?limit=0`)).map(e => e.seq), source.map(e => e.seq));
 
   // A message that never existed is a 404; an answer is not a branch point.
@@ -670,7 +671,9 @@ test('fork over HTTP copies the conversation and leaves the source alone', { tim
   // copies the very same conversation.
   const fromAnswer = await api(`/api/tasks/${id}/fork`, { turnId: `assistant-${users[0].seq}` });
   const answerCopy = await api(`/api/tasks/${fromAnswer.id}/events?limit=0`);
-  assert.deepEqual(answerCopy.slice(0, answerCopy.findIndex(e => e.type === 'TASK_FORKED')).map(e => e.type), source.map(e => e.type));
+  const answerExpected = source;
+  assert.equal(fromAnswer.prompt, 'первое');
+  assert.deepEqual(answerCopy.slice(0, answerCopy.findIndex(e => e.type === 'TASK_FORKED')).map(e => e.type), answerExpected.map(e => e.type));
 });
 
 test('/api/info carries a bootId that changes only when the process restarts', { timeout: 30000 }, async t => {
@@ -694,10 +697,11 @@ test('/api/info exposes normalized provider statuses and keeps legacy DeepSeek d
   t.after(() => fixture.close());
 
   const info = await fixture.api('/api/info');
-  assert.deepEqual(Object.keys(info.providerStatuses).sort(), ['deepseek', 'routerai', 'wormsoft']);
+  assert.deepEqual(Object.keys(info.providerStatuses).sort(), ['deepseek', 'openai-codex', 'routerai', 'wormsoft']);
   assert.equal(info.providerStatuses.deepseek.available, false);
   assert.equal(info.providerStatuses.wormsoft.available, false);
   assert.equal(info.providerStatuses.routerai.available, false);
+  assert.equal(info.providerStatuses['openai-codex'].available, false);
   assert.equal(info.providerStatuses.deepseek.reason, 'no-key');
   assert.deepEqual(info.deepseek, info.providerStatuses.deepseek, 'legacy field stays compatible');
   assert.equal(info.scheduler.activeTasks, 0);

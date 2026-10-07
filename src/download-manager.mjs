@@ -18,12 +18,14 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 
 export const JOB_STATES = ['QUEUED', 'DOWNLOADING', 'VERIFYING', 'INSTALLED', 'FAILED', 'CANCELLED', 'INTERRUPTED'];
 
 const PERSIST_EVERY_MS = 1000;
 const PART_DIR = '.taskbridge-part';
+const CONTENT_RANGE_RE = /^bytes (\d+)-(\d+)\/(\d+|\*)$/i;
 
 // Путь файла из HF-дерева внутри локальной директории. Пути с '..' или
 // абсолютные пути — отказ: имя пришло из внешнего API.
@@ -49,9 +51,13 @@ export class DownloadManager extends EventEmitter {
     // onInstalled вызывается после успешной установки: так DownloadManager
     // остаётся слоем загрузки, а регистрацию модели делает ModelLibrary.
     this.onInstalled = options.onInstalled || null;
+    this.downloadHeaders = options.downloadHeaders || null;
+    this.maxConcurrentDownloads = Math.max(1, Math.min(8, Number(options.maxConcurrentDownloads ?? 2) || 2));
+    this.activeDownloads = 0;
     this.stateFile = path.join(dataRoot, 'downloads.json');
     this.jobs = new Map();
     this.#restore();
+    queueMicrotask(() => this.#schedule());
   }
 
   #restore() {
@@ -62,9 +68,9 @@ export class DownloadManager extends EventEmitter {
     for (const job of Array.isArray(saved) ? saved : []) {
       if (!job || typeof job.id !== 'string') continue;
       // Состояние на момент смерти процесса сохранено, но процесс умер: всё,
-      // что «шло», прерывается, а не продолжает притворяться живым. Retry
-      // поднимает такие задания заново (готовые файлы пропускаются по размеру).
-      if (job.state === 'DOWNLOADING' || job.state === 'QUEUED' || job.state === 'VERIFYING') {
+      // что уже «шло», прерывается, а не продолжает притворяться живым. Retry
+      // поднимает такие задания заново (готовые файлы и .part учитываются).
+      if (job.state === 'DOWNLOADING' || job.state === 'VERIFYING') {
         job.state = 'INTERRUPTED';
         job.error = 'TaskBridge перезапущен во время загрузки.';
       }
@@ -115,10 +121,10 @@ export class DownloadManager extends EventEmitter {
   }
 
   /**
-   * Запустить задание. { repo, revision, files: [{path,size}], dir, label }
+   * Запустить задание. { repo, revision, files: [{path,size}], dir, label, libraryId }
    * Возвращает задание в состоянии QUEUED; сама загрузка идёт в фоне.
    */
-  async start({ repo, revision = 'main', files, dir, label, resolveBase } = {}) {
+  async start({ repo, revision = 'main', files, dir, label, resolveBase, libraryId } = {}) {
     if (!Array.isArray(files) || !files.length) {
       throw Object.assign(new Error('Список файлов загрузки пуст.'), { code: 'INPUT_INVALID' });
     }
@@ -139,6 +145,7 @@ export class DownloadManager extends EventEmitter {
     const job = {
       id: `dl-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       repo, revision, dir, label: label || repo,
+      libraryId: libraryId || null,
       // resolveBase — точка моноплачивания URL скачивания (по умолчанию HF
       // resolve-эндпоинт); тесты подставляют локальный http-сервер.
       resolveBase: resolveBase || null,
@@ -154,8 +161,22 @@ export class DownloadManager extends EventEmitter {
     this.jobs.set(job.id, job);
     this.#persist();
     this.#emit(job);
-    this.#run(job).catch(() => {}); // ошибки уже записаны в job
+    this.#schedule();
     return { ...job };
+  }
+
+  #schedule() {
+    while (this.activeDownloads < this.maxConcurrentDownloads) {
+      const job = [...this.jobs.values()].find(candidate => candidate.state === 'QUEUED' && !candidate.cancelRequested);
+      if (!job) return;
+      this.activeDownloads += 1;
+      this.#run(job)
+        .catch(() => {}) // ошибки уже записаны в job
+        .finally(() => {
+          this.activeDownloads = Math.max(0, this.activeDownloads - 1);
+          this.#schedule();
+        });
+    }
   }
 
   #emit(job) {
@@ -196,14 +217,17 @@ export class DownloadManager extends EventEmitter {
       }
       job.state = 'VERIFYING';
       this.#touch(job);
-      // Верификация: каждый файл существует и имеет ожидаемый размер. Хэши
-      // HF для LFS-файлов доступны в дереве (lfs.oid), но сравнение размера —
-      // достаточная первая проверка целостности; хэш-верификация — следующий шаг.
       for (const file of job.files) {
         const target = safeJoin(job.dir, file.path);
         const stat = await fsp.stat(target);
         if (file.size != null && stat.size !== file.size) {
           throw new Error(`Размер ${file.path} не совпал: ${stat.size} вместо ${file.size}.`);
+        }
+        if (file.sha256) {
+          const actual = await this.#sha256File(target);
+          if (actual !== String(file.sha256).toLowerCase()) {
+            throw new Error(`SHA-256 ${file.path} не совпал.`);
+          }
         }
       }
       job.state = 'INSTALLED';
@@ -243,18 +267,61 @@ export class DownloadManager extends EventEmitter {
       }
     } catch { /* файла нет — качаем */ }
 
+    const part = path.join(job.dir, PART_DIR, file.path);
+    await fsp.mkdir(path.dirname(part), { recursive: true });
+    let partSize = 0;
+    try { partSize = (await fsp.stat(part)).size; } catch { /* частичного файла нет */ }
+    if (partSize > 0 && job.downloadedBytes < partSize) job.downloadedBytes += partSize;
+    if (file.size != null && partSize === file.size) {
+      await fsp.rename(part, target);
+      file.done = true;
+      this.#touch(job);
+      return;
+    }
+
     const url = `${this.baseUrlFor(job)}/${file.path}`;
-    const res = await fetch(url, { signal });
+    const baseHeaders = await this.#headersFor(job, file);
+    let headers = { ...baseHeaders };
+    if (partSize > 0) headers.range = `bytes=${partSize}-`;
+    let res = await fetch(url, { signal, headers });
+    if (partSize > 0 && res.status === 416 && file.size != null) {
+      await res.body?.cancel().catch(() => {});
+      const stat = await fsp.stat(part).catch(() => null);
+      if (stat?.size === file.size) {
+        await fsp.rename(part, target);
+        file.done = true;
+        this.#touch(job);
+        return;
+      }
+      job.downloadedBytes = Math.max(0, job.downloadedBytes - partSize);
+      await fsp.rm(part, { force: true });
+      partSize = 0;
+      headers = { ...baseHeaders };
+      res = await fetch(url, { signal, headers });
+    }
     if (!res.ok || !res.body) {
       throw new Error(`HTTP ${res.status} при загрузке ${file.path}.`);
+    }
+    const append = partSize > 0 && res.status === 206;
+    if (partSize > 0 && res.status === 206) {
+      try { this.#assertContentRange(res, partSize, file.path); }
+      catch (error) {
+        await res.body.cancel().catch(() => {});
+        throw error;
+      }
+    }
+    const initialWritten = append ? partSize : 0;
+    // Сервер может игнорировать Range и вернуть 200: тогда безопасно начинаем
+    // файл заново, а не склеиваем две копии.
+    if (partSize > 0 && !append) {
+      job.downloadedBytes = Math.max(0, job.downloadedBytes - partSize);
+      partSize = 0;
     }
     // При отмене/ошибке посреди стрима соединение обязано вернуться в пул:
     // недочитанный body держит сокет и uv-хендл, без cancel() процесс
     // падает на teardown (uv_handle_closing под --test-force-exit).
-    const part = path.join(job.dir, PART_DIR, file.path);
-    await fsp.mkdir(path.dirname(part), { recursive: true });
     try {
-      const written = await this.#pump(res.body, job, part);
+      const written = await this.#pump(res.body, job, part, { append, initialWritten });
       const expected = file.size;
       if (expected != null && written !== expected) {
         throw new Error(`Недокачан ${file.path}: ${written} из ${expected} байт.`);
@@ -267,9 +334,9 @@ export class DownloadManager extends EventEmitter {
     this.#touch(job);
   }
 
-  async #pump(body, job, part) {
-    const out = fs.createWriteStream(part);
-    let written = 0;
+  async #pump(body, job, part, { append = false, initialWritten = 0 } = {}) {
+    const out = fs.createWriteStream(part, { flags: append ? 'a' : 'w' });
+    let written = initialWritten;
     for await (const chunk of body) {
       out.write(chunk);
       written += chunk.length;
@@ -281,6 +348,33 @@ export class DownloadManager extends EventEmitter {
       out.on('error', reject);
     });
     return written;
+  }
+
+  #assertContentRange(res, expectedStart, filePath) {
+    const header = res.headers.get('content-range') || '';
+    const match = CONTENT_RANGE_RE.exec(header);
+    if (!match || Number(match[1]) !== expectedStart) {
+      throw new Error(`Content-Range ${filePath} не совпал с ожидаемым offset ${expectedStart}.`);
+    }
+  }
+
+  async #sha256File(filePath) {
+    const hash = crypto.createHash('sha256');
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(filePath);
+      stream.on('data', chunk => hash.update(chunk));
+      stream.on('error', reject);
+      stream.on('end', resolve);
+    });
+    return hash.digest('hex');
+  }
+
+  async #headersFor(job, file) {
+    if (!this.downloadHeaders) return {};
+    const value = typeof this.downloadHeaders === 'function'
+      ? await this.downloadHeaders({ ...job, abort: undefined }, file)
+      : this.downloadHeaders;
+    return Object.fromEntries(Object.entries(value || {}).filter(([, v]) => v != null && v !== ''));
   }
 
   baseUrlFor(job) {
@@ -302,6 +396,7 @@ export class DownloadManager extends EventEmitter {
       job.error = 'Загрузка отменена.';
       this.#touch(job);
     }
+    this.#schedule();
     return { ...job };
   }
 
@@ -324,11 +419,17 @@ export class DownloadManager extends EventEmitter {
         job.downloadedBytes += file.size;
       } else {
         file.done = false;
-        if (size != null) job.downloadedBytes += size;
+        const part = safeJoin(path.join(job.dir, PART_DIR), file.path);
+        let partSize = null;
+        try { partSize = (await fsp.stat(part)).size; } catch { /* нет частичного файла */ }
+        if (partSize != null) job.downloadedBytes += partSize;
+        else if (size != null) job.downloadedBytes += size;
       }
     }
     job.error = null;
-    this.#run(job).catch(() => {});
+    job.state = 'QUEUED';
+    this.#touch(job);
+    this.#schedule();
     return { ...job };
   }
 }

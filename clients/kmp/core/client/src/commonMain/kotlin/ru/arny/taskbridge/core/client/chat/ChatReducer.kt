@@ -41,6 +41,7 @@ private val MCP_SURFACE_NOTICE = Regex(
     "^MCP:\\s*(?:\\d+(?:/\\d+)?\\s+)?(?:servers connected|direct tools refreshed)\\b",
     RegexOption.IGNORE_CASE,
 )
+private const val MCP_ADAPTER_IGNORED_SETTINGS = "Ignored settings (details in /mcp-adapter):"
 
 /** Mirrors isPrivatePath in src/files.mjs: such paths are never offered as viewable files. */
 fun isPrivateFilePath(value: String?): Boolean =
@@ -479,6 +480,21 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (turn.at == null) turn.at = at
     }
 
+    private fun appendAssistantTextDelta(turn: Turn, delta: String) {
+        if (delta.isEmpty()) return
+        turn.text = filterMcpAdapterNoise(turn.text + delta)
+    }
+
+    /** The whole line holding the mcp-adapter warning is session noise, not the answer. */
+    private fun filterMcpAdapterNoise(text: String): String {
+        if (MCP_ADAPTER_IGNORED_SETTINGS !in text) return text
+        return text
+            .lineSequence()
+            .filterNot { MCP_ADAPTER_IGNORED_SETTINGS in it }
+            .joinToString("\n")
+            .trimStart('\n')
+    }
+
     private fun applyFrame(event: TaskEvent, frame: JsonObject) {
         when (frame.str("type")) {
             "agent_start" -> markAnswerRunning(current, event.at)
@@ -549,7 +565,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 when (delta?.str("type")) {
                     "text_delta" -> {
                         if (textSeparator.isNotEmpty() && !separatorApplied) { turn.text += textSeparator; separatorApplied = true }
-                        turn.text += delta.str("delta").orEmpty()
+                        appendAssistantTextDelta(turn, delta.str("delta").orEmpty())
                     }
                     "thinking_delta" -> turn.thinking += delta.str("delta").orEmpty()
                 }
@@ -594,7 +610,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 if (tool.name == "subagent") subagentProgress(frame.obj("result"), null)?.let { tool.progress = it }
             }
             "agent_settled" -> finish("DONE", null, event.at)
-            "compaction_end", "auto_compaction_end" -> compactionNote(frame)?.let { addNote(event, it) }
+            "compaction_start", "auto_compaction_start" -> addNote(event, "Контекст сжимается…", beforeEmptyCurrentAnswer = true)
+            "compaction_end", "auto_compaction_end" -> compactionNote(frame)?.let { addNote(event, it, beforeEmptyCurrentAnswer = true) }
         }
     }
 
@@ -608,12 +625,22 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         addNote(event, text)
     }
 
-    private fun addNote(event: TaskEvent, text: String) {
+    private fun addNote(event: TaskEvent, text: String, beforeEmptyCurrentAnswer: Boolean = false) {
         if (!notes.add(event.seq)) return
         if (text in noteTexts || turns.any { it.role == Role.NOTE && it.text == text }) return
         noteTexts += text
-        turns += Turn(id = "note-${event.seq}", role = Role.NOTE, text = text)
+        val note = Turn(id = "note-${event.seq}", role = Role.NOTE, text = text)
+        if (beforeEmptyCurrentAnswer && current.role == Role.ASSISTANT && current.isEmptyPlaceholder()) {
+            val index = turns.indexOf(current)
+            if (index >= 0) {
+                turns.add(index, note)
+                return
+            }
+        }
+        turns += note
     }
+
+    private fun Turn.isEmptyPlaceholder(): Boolean = !final && text.isBlank() && thinking.isBlank() && tools.isEmpty() && files.isEmpty()
 
     private fun onMessageEnd(event: TaskEvent, message: JsonObject) {
         val sink = messageTurn ?: current
@@ -633,7 +660,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             ?.joinToString("") { it.str("text").orEmpty() }
             .orEmpty()
         if (content != null) {
-            val text = markerText
+            val text = filterMcpAdapterNoise(markerText)
             val thinking = content.mapNotNull { it as? JsonObject }.filter { it.str("type") == "thinking" }.joinToString("") { it.str("thinking").orEmpty() }
             val rebuild = orphan != null || messageTurn != null
             val prefix = orphan?.textPrefix ?: textPrefix
@@ -689,7 +716,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (initial && turns.none { it.role == Role.ASSISTANT && (it.text.isNotEmpty() || it.thinking.isNotEmpty()) }) {
             // Very early sessions have only session-wide saved text.
             if (turns.count { it.role == Role.ASSISTANT } == 1) {
-                current.text = task.assistantText.orEmpty()
+                current.text = filterMcpAdapterNoise(task.assistantText.orEmpty())
                 current.thinking = task.thinkingText.orEmpty()
             }
         }

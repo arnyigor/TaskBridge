@@ -6,13 +6,17 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
+import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -44,10 +48,12 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.KeyStore
 import javax.crypto.Cipher
+import javax.net.SocketFactory
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
@@ -170,9 +176,10 @@ class AndroidPlatformServices(
 
     private val notifications = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
-    override fun httpClient(): HttpClient = HttpClient(OkHttp) {
+    override fun httpClient(baseUrl: String?): HttpClient = HttpClient(OkHttp) {
         engine {
             config {
+                lanSocketFactory(baseUrl)?.let { socketFactory(it) }
                 connectTimeout(10, TimeUnit.SECONDS)
                 readTimeout(0, TimeUnit.MILLISECONDS)
                 retryOnConnectionFailure(true)
@@ -182,15 +189,38 @@ class AndroidPlatformServices(
 
     override fun networkAvailable(): Flow<Boolean> = callbackFlow {
         val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        fun current() = connectivity.activeNetwork != null
+        fun current() = connectivity.hasUsableNetwork()
         trySend(current())
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { trySend(true) }
             override fun onLost(network: Network) { trySend(current()) }
-            override fun onUnavailable() { trySend(false) }
+            override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) { trySend(current()) }
+            override fun onUnavailable() { trySend(current()) }
         }
-        connectivity.registerDefaultNetworkCallback(callback)
+        val request = NetworkRequest.Builder()
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .build()
+        connectivity.registerNetworkCallback(request, callback)
         awaitClose { runCatching { connectivity.unregisterNetworkCallback(callback) } }
+    }
+
+    private fun lanSocketFactory(baseUrl: String?): SocketFactory? {
+        val host = runCatching { URI(baseUrl ?: return null).host }.getOrNull() ?: return null
+        if (!isLocalNetworkIpv4(host)) return null
+        val connectivity = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val wifi = connectivity.allNetworks.firstOrNull { network ->
+            connectivity.getNetworkCapabilities(network)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        } ?: return null
+        return wifi.socketFactory
+    }
+
+    private fun ConnectivityManager.hasUsableNetwork(): Boolean = allNetworks.any { network ->
+        val caps = getNetworkCapabilities(network) ?: return@any false
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+            || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
+            || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }
 
     override fun copyText(text: String) {
@@ -249,6 +279,38 @@ class AndroidPlatformServices(
     override fun openUrl(url: String) {
         runCatching {
             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+
+    override suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String?, open: Boolean): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val safeName = name.substringAfterLast('/').substringAfterLast('\\').ifBlank { "taskbridge-file" }
+            val resolver = context.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType ?: "application/octet-stream")
+                if (Build.VERSION.SDK_INT >= 29) put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("Не удалось создать файл в Downloads")
+            try {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("Не удалось открыть файл для записи")
+                if (Build.VERSION.SDK_INT >= 29) {
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    resolver.update(uri, values, null, null)
+                }
+                if (open) {
+                    val intent = Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, mimeType ?: "application/octet-stream")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    context.startActivity(intent)
+                }
+                "Сохранено в Загрузки: $safeName"
+            } catch (e: Throwable) {
+                resolver.delete(uri, null, null)
+                throw e
+            }
         }
     }
 

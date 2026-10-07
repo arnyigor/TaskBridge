@@ -18,13 +18,13 @@ import { quantFromFilename } from './huggingface.mjs';
 const SCAN_DEPTH = 6;
 
 export function idForEntry({ repo, revision, quant }) {
-  const slug = String(repo || 'local')
-    .split('/').pop()
+  const repoId = String(repo || 'local')
     .toLowerCase()
-    .replace(/[^a-z0-9.]+/g, '-')
+    .replace(/[^a-z0-9./_-]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  const rev = revision ? String(revision).slice(0, 7) : 'local';
-  return `${slug}-${rev}-${(quant || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '')}`;
+  const rev = revision ? String(revision).slice(0, 12) : 'local';
+  const q = (quant || 'default').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  return `hf:${repoId}@${rev}:${q}`;
 }
 
 // Рекурсивный обход в поисках .gguf. Скрытые и служебные директории
@@ -72,7 +72,7 @@ export class ModelLibrary extends EventEmitter {
 
   /** Зарегистрировать модель из завершённого задания загрузки. */
   addFromJob(job) {
-    const files = (job.files || []).map(f => ({ path: path.join(job.dir, f.path), size: f.size ?? null }));
+    const files = (job.files || []).map(f => ({ path: path.join(job.dir, f.path), size: f.size ?? null, sha256: f.sha256 || null }));
     const quants = [...new Set(files.map(f => quantFromFilename(path.basename(f.path))).filter(Boolean))];
     const quant = quants.length === 1 ? quants[0] : (quants[0] || null);
     const entry = {

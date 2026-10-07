@@ -38,8 +38,6 @@ import kotlin.uuid.Uuid
 class AppGraph(val platform: PlatformServices) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val settings = AppSettings(platform.store, { newId() }, platform.kind, platform.secrets)
-    private val http = platform.httpClient()
-
     var connection: Connected? by mutableStateOf(settings.serverUrl?.let { Connected(it) })
         private set
 
@@ -96,10 +94,11 @@ class AppGraph(val platform: PlatformServices) {
     }
 
     /** An API for an address that is not saved yet (the connect screen checks it first). */
-    fun probe(baseUrl: String): TaskBridgeApi = TaskBridgeApi(http, StoredConnection(settings, baseUrl))
+    fun probe(baseUrl: String): TaskBridgeApi = TaskBridgeApi(platform.httpClient(baseUrl), StoredConnection(settings, baseUrl))
 
     inner class Connected(val baseUrl: String) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        private val http = platform.httpClient(baseUrl)
         val api = TaskBridgeApi(http, StoredConnection(settings, baseUrl))
         val sessions = SessionList(
             api, scope, clockMillis = { nowMillis() },
@@ -132,10 +131,15 @@ class AppGraph(val platform: PlatformServices) {
         init {
             scope.launch {
                 platform.networkAvailable().distinctUntilChanged().collectLatest { available ->
-                    _online.value = available
-                    if (available) wakeUp()
+                    if (!available) {
+                        _online.value = false
+                        return@collectLatest
+                    }
+                    refreshHostReachability()
+                    wakeUp()
                 }
             }
+            scope.launch { refreshHostReachability() }
             // Notifications and the background watch follow the list.
             scope.launch {
                 sessions.state.collectLatest { state ->
@@ -168,6 +172,10 @@ class AppGraph(val platform: PlatformServices) {
             chats.remove(taskId)?.close()
         }
 
+        private suspend fun refreshHostReachability() {
+            _online.value = api.health()
+        }
+
         /** Network back or app in front again: reconnect streams now instead of waiting out the backoff. */
         fun wakeUp() {
             sessions.refresh()
@@ -178,6 +186,7 @@ class AppGraph(val platform: PlatformServices) {
             sessions.stop()
             chats.values.forEach { it.close() }
             chats.clear()
+            http.close()
             scope.cancel()
         }
     }

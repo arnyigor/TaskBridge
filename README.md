@@ -153,7 +153,9 @@ TaskBridge (v0.11.0) — небольшой локальный HTTP/PWA-серв
 - **сессии Pi:** импорт нативных Pi-сессий вынесен в отдельный API/клиентский экран; по умолчанию используется копия, а takeover требует явного подтверждения;
 - **администрирование машины:** добавлены API и UI для перезапуска TaskBridge, просмотра/остановки процессов, shutdown/reboot машины; потенциально опасные действия требуют подтверждения и выполняют серверные проверки;
 - **контракты:** опубликованный список маршрутов в `src/api-contract.mjs` и [`docs/api-contract.md`](docs/api-contract.md) обновлён под local library, downloads, processes, vision, hide/unhide, shutdown/reboot;
-- **покрытие:** добавлены тесты для Hugging Face tree parser, download manager, model library, router presets, процессов, local vision/hide, restart/import сессий и KMP UI-моделей.
+- **провайдеры и локальные модели:** добавлены статус лимитов OpenAI Codex, bearer-загрузка приватных Hugging Face-репозиториев, SHA-256-проверка, возобновление `.taskbridge-part` и ограниченная параллельная очередь загрузок; Strata-провайдеры синхронизируются отдельным скриптом при запуске Windows;
+- **клиенты:** KMP-клиенты умеют сохранять файлы в Downloads/папку Downloads, выбирать LAN-сокет для локального адреса и показывать начало/окончание compaction без задержки heartbeat; панель процессов дополнена Java;
+- **покрытие:** добавлены тесты для Hugging Face tree parser, download manager, model library, router presets, процессов, local vision/hide, restart/import сессий и KMP UI-моделей. Подробные технические разборы доставки сообщений и вложений — [`docs/message-delivery-analysis.md`](docs/message-delivery-analysis.md) и [`docs/attachment-delivery-analysis.md`](docs/attachment-delivery-analysis.md).
 
 ---
 
@@ -257,7 +259,7 @@ Taskbridge/
 │  ├─ app.css               стили
 │  ├─ manifest.webmanifest  PWA-манифест
 │  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   54 файла тестов на node:test (~398 проверок)
+├─ tests/                   тесты на node:test (актуальный результат запуска — в разделе «Тесты»)
 ├─ scripts/
 │  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
 │  ├─ cloud-secrets.mjs     генерация токенов/секретов (npm run cloud:secrets)
@@ -928,8 +930,8 @@ PWA с живым стримингом ответа, tool-карточками, 
 
 1. `GET /api/hf/search?q=...` ищет репозитории Hugging Face, по умолчанию ориентируясь на GGUF.
 2. `GET /api/hf/repo?repo=...` читает дерево репозитория и группирует файлы в варианты: кванты, шардированные GGUF, `mmproj`-проекторы и прочие файлы. Неполный набор шардов помечается как недоступный для скачивания.
-3. `POST /api/hf/download` создаёт фоновую задачу. Состояние хранится в `data/downloads.json`; недокачанные файлы лежат в `.taskbridge-part`, поэтому они не выглядят установленными.
-4. `GET /api/hf/downloads` показывает прогресс/скорость; доступны cancel, retry и очистка завершённых задач. После рестарта активные загрузки становятся `INTERRUPTED`, а retry пропускает уже готовые файлы по размеру.
+3. `POST /api/hf/download` создаёт фоновую задачу. Состояние хранится в `data/downloads.json`; недокачанные файлы лежат в `.taskbridge-part`, поэтому они не выглядят установленными. Загрузки возобновляются через HTTP Range, проверяют SHA-256, если он указан в дереве Hugging Face, и выполняются ограниченной очередью (по умолчанию до двух одновременно); bearer-токен передаётся только в HTTP-запрос и не сохраняется в состоянии задачи.
+4. `GET /api/hf/downloads` показывает прогресс/скорость; доступны cancel, retry и очистка завершённых задач. После рестарта активные загрузки становятся `INTERRUPTED`, а retry использует готовые файлы и частичные `.taskbridge-part`; для vision выбирается один проектор `mmproj` или принимается явно заданный `projectorPath`.
 5. Установленная модель попадает в `data/model-library.json`. `GET /api/library` совмещает реестр с проверкой наличия файлов и сканом standalone `.gguf` внутри `modelLibrary.root`.
 6. `POST /api/library/register` пишет router-пресет в `models.ini`, `POST /api/library/run` при необходимости регистрирует модель, перезапускает managed-router и загружает пресет.
 7. `POST /api/library/delete` удаляет скачанную модель и её пресет, но не трогает файлы, которые всё ещё нужны другим записям (например общий `mmproj`).
@@ -1065,14 +1067,20 @@ DNS на телефоне: системный «Частный DNS» с Tailscal
 
 ## Тесты
 
+Команды и фактически подтверждённый результат последней проверки:
+
 ```powershell
-npm test            # 829 тестов в 96 файлах (825 pass, 4 skip на Windows)
+npm test            # 850 тестов: 845 pass, 4 skip, 1 fail (cloud-relay-socket; отдельный повтор прошёл)
 npm run test:cloud  # только тесты облачного транспорта
 npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
 npm run check       # синтаксическая проверка основных файлов + аудит секретов
+npm run check:policy
+npm run check:secrets
 cd clients/kmp/core && ../gradlew :api:jvmTest :client:jvmTest --console=plain
 cd clients/kmp && ./gradlew :shared:jvmTest :desktopApp:test --console=plain
 ```
+
+Полный `npm test` в этом рабочем дереве завершился одним сбоем файла `tests/cloud-relay-socket.test.mjs`; повтор этого файла отдельно дал 6/6 pass, поэтому единичный сбой полного параллельного прогона требует повторной проверки в CI и не считается полностью объяснённым. KMP Gradle-сборка в этой сессии не запускалась.
 
 Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals (политика, менеджер, маршрутизация и end-to-end через Pi-хук), ограничение вывода инструментов и загрузка полного лога, смена модели/reasoning, метрики, API настроек облака, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP. Стресс-набор (`npm run stress`) масштабируется переменными `TASKBRIDGE_STRESS_EVENTS`, `TASKBRIDGE_STRESS_LOG_MB`, `TASKBRIDGE_STRESS_SECONDS`.
 
@@ -1184,7 +1192,7 @@ LAN-режим (турникет + приложение на loopback); `taskbri
    возврат входа в облачные настройки в UI
 2. ClaudeCodeRunner
 3. CodexRunner
-4. KMP Android client
+4. Расширение KMP-клиентов и полная матрица Android/Desktop-приёмки
 ```
 
 Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.

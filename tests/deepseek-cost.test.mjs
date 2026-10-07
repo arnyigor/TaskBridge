@@ -47,6 +47,7 @@ test('computeRunway повторяет логику apicost: ceil(баланс /
   // завершённые: 20,10,3,1,10,100,1 (09-18…09-25, включая 09-23)
   assert.equal(result.recentPerDay, (10 + 100 + 1) / 3);
   assert.equal(result.historyPerDay, 145 / 7);
+  assert.equal(result.medianPerDay, 10);
   assert.equal(result.recentDays, 3);
   assert.equal(result.historyDays, 5);
 });
@@ -144,6 +145,7 @@ test('readDeepseekCost: баланс, курсы и прогноз без сет
   const effRubPerCny = result.rub.total / result.totalCny;
   assert.equal(result.rates.effectiveRubPerCny, effRubPerCny);
   assert.ok(Math.abs(result.pace.historyPerDayRub - result.pace.historyPerDay * effRubPerCny) < 1e-9);
+  assert.equal(result.pace.medianMonthlyRub, result.pace.medianPerDayRub * 30);
   // Инвариант: рублёвый темп × дни ≈ рубли баланса.
   const rubTotal = result.pace.historyPerDayRub * result.runway.historyDays;
   assert.ok(rubTotal >= result.rub.total, `${rubTotal} должно покрывать баланс ${result.rub.total}`);

@@ -45,10 +45,13 @@ function normalizeEntry(entry) {
   if (!entry || typeof entry.path !== 'string') return null;
   // Размер у LFS-файлов лежит в entry.lfs.size; у мелких файлов — в entry.size.
   const size = Number(entry.lfs?.size ?? entry.size);
+  const oid = typeof entry.lfs?.oid === 'string' ? entry.lfs.oid : null;
+  const sha256 = oid?.startsWith('sha256:') ? oid.slice('sha256:'.length).toLowerCase() : null;
   return {
     path: entry.path,
     name: entry.path.split('/').pop(),
     size: Number.isFinite(size) && size >= 0 ? size : null,
+    sha256,
     type: entry.type || null
   };
 }
@@ -198,7 +201,7 @@ export class HuggingFaceService {
     for (const requested of requestedPaths || []) {
       const entry = byPath.get(String(requested));
       if (!entry) return null; // неизвестный путь — план недействителен целиком
-      files.push({ path: entry.path, size: entry.size });
+      files.push({ path: entry.path, size: entry.size, sha256: entry.sha256 });
     }
     return { files, totalBytes: files.reduce((sum, f) => sum + (f.size ?? 0), 0) };
   }

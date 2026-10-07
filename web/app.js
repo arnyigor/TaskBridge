@@ -1804,8 +1804,8 @@ async function regenerateTurn(turn) {
   }
 }
 
-// A fork is a session of its own: the server copies the conversation through
-// this message, then we open it so the operator can continue differently.
+// A fork is a session of its own: the server copies history through this
+// message, then we open it so the operator can continue differently.
 async function forkTurn(turn) {
   if (!selectedTaskId) return;
   try {
@@ -4262,6 +4262,7 @@ function renderProviderStatus(statuses, model) {
 function providerStatusText(status) {
   if (status.kind === 'balance' && status.provider === 'deepseek') return deepseekStatusText(status);
   if (status.kind === 'subscription' && status.provider === 'wormsoft') return wormsoftStatusText(status);
+  if (status.kind === 'subscription' && status.provider === 'openai-codex') return openAiCodexStatusText(status);
   if (status.kind === 'credits' && status.credits != null) {
     return `${status.label || status.provider}: ${Number(status.credits).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} кредитов${status.stale ? ' · данные устарели' : ''}`;
   }
@@ -4283,10 +4284,21 @@ function deepseekStatusText(ds) {
   const paceParts = [];
   if (pace != null) paceParts.push(`¥${pace.toFixed(1)}`);
   if (paceRub != null) paceParts.push(`≈ ${Math.round(paceRub).toLocaleString('ru-RU')} ₽`);
-  const paceLabel = paceParts.length ? ` (расход ~${paceParts.join('/день ')}/день)` : '';
+  const month = ds.pace?.medianMonthlyRub != null ? ` · ~${Math.round(ds.pace.medianMonthlyRub).toLocaleString('ru-RU')} ₽/мес` : '';
+  const paceLabel = paceParts.length ? ` (расход ~${paceParts.join('/день ')}/день${month})` : (month ? ` (${month.slice(3)})` : '');
   if (days === 0) lines.push(`Средства DeepSeek исчерпаны${paceLabel}`);
   else if (days != null) lines.push(`Хватит примерно на ${days} дн.${paceLabel}`);
   return lines.join('\n');
+}
+
+function openAiCodexStatusText(status) {
+  const number = value => Number(value).toLocaleString('ru-RU', { maximumFractionDigits: 0 });
+  const limit = (key, label) => status.limits?.[key]?.remainingPercent != null
+    ? `${label}: ${number(status.limits[key].remainingPercent)}% осталось`
+    : null;
+  const credits = status.resetCredits?.available != null ? `сбросов: ${status.resetCredits.available}` : null;
+  const parts = [limit('fiveHour', '5 ч'), limit('weekly', '7 дн.'), credits].filter(Boolean);
+  return parts.length ? `OpenAI Codex: ${parts.join(' · ')}${status.stale ? ' · данные устарели' : ''}` : '';
 }
 
 function wormsoftStatusText(status) {
@@ -4344,7 +4356,7 @@ $('pcStateProvider').onclick = async () => {
   const el = $('pcStateProvider');
   if (!el || el.classList.contains('hidden') || el.dataset.refreshing === '1') return;
   const provider = currentModel()?.provider;
-  if (!['wormsoft', 'deepseek', 'routerai'].includes(provider)) return;
+  if (!['wormsoft', 'deepseek', 'routerai', 'openai-codex'].includes(provider)) return;
   el.dataset.refreshing = '1';
   const previous = el.textContent;
   el.textContent = 'Обновляем данные провайдера…';
@@ -4931,6 +4943,9 @@ $('processesButton').onclick = () => {
 };
 $('processesClose').onclick = () => $('processesOverlay').classList.add('hidden');
 $('processesRefresh').onclick = () => refreshProcesses({ fresh: true });
+$('processesKillNode').onclick = () => killProcessGroup('node', 'Node');
+$('processesKillPython').onclick = () => killProcessGroup('python', 'Python');
+$('processesKillJava').onclick = () => killProcessGroup('java', 'Java');
 
 //hf формат не переиспользуем: у процессов память от килобайт до гигабайт, нужен и Б-диапазон.
 function processFormatMemory(bytes) {
@@ -4957,6 +4972,19 @@ async function refreshProcesses({ fresh = false } = {}) {
     hint.textContent = 'Не удалось получить список процессов.';
     list.textContent = error.message;
   }
+}
+
+async function killProcessGroup(runtime, label) {
+  if (!confirm(`Завершить все видимые процессы ${label}? Защищённые процессы TaskBridge и системы будут пропущены.`)) return;
+  try {
+    const result = await api('/api/processes/kill-group', { method: 'POST', body: { runtime } });
+    const failed = Array.isArray(result.failed) ? result.failed.length : 0;
+    const killed = Array.isArray(result.killed) ? result.killed.length : 0;
+    if (failed) alert(`Завершено: ${killed}; не удалось: ${failed}. Подробности см. в списке после обновления.`);
+  } catch (error) {
+    alert(error.message);
+  }
+  await refreshProcesses({ fresh: true });
 }
 
 function renderProcesses() {
@@ -5449,12 +5477,22 @@ function renderMachineLoad(info) {
 
   // Live line right above the composer: speeds only.
   if (panel && panel.textContent !== lines.join('\n')) panel.textContent = lines.join('\n');
+  // У сессии на внешнем сервере (Strata) телеметрии в info.engine нет — там
+  // роутер llama.cpp, и строка молчала: PP/TG показывались только по итогам хода.
+  // Скорости такой сессии лежат в info.local.models[].metrics — по той же строке
+  // ищет фазу чтения readingPrompt. Сессию выбираем по её провайдеру, а если его
+  // нет (стенд, первая отрисовка) — по первой поднятой строке.
+  const sessionProvider = typeof currentTask === 'object' && currentTask ? currentTask.model?.provider : null;
+  const sessionRow = (sessionProvider && localModels.find(m => m.provider === sessionProvider))
+    || localModels.find(m => m.status === 'loaded' || m.status === 'sleeping')
+    || null;
+  const liveMetrics = metrics && metrics.available ? metrics : (sessionRow?.metrics ?? null);
   const live = $('liveMetrics');
   if (live) {
     const parts = [];
-    if (metrics && metrics.available) {
-      if (metrics.pp != null) parts.push(`PP ${fmtMetric(metrics.pp)}`);
-      if (metrics.tg != null) parts.push(`TG ${fmtMetric(metrics.tg)} tok/s`);
+    if (liveMetrics && liveMetrics.available) {
+      if (liveMetrics.pp != null) parts.push(`PP ${fmtMetric(liveMetrics.pp)}`);
+      if (liveMetrics.tg != null) parts.push(`TG ${fmtMetric(liveMetrics.tg)} tok/s`);
     }
     const liveText = parts.join(' · ');
     if (live.textContent !== liveText) live.textContent = liveText;

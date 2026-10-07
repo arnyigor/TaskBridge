@@ -284,6 +284,8 @@ data class ProviderStatus(
     val runway: ProviderRunway? = null,
     val subscription: ProviderSubscription? = null,
     val usage: ProviderUsage? = null,
+    val limits: Map<String, ProviderLimit> = emptyMap(),
+    val resetCredits: ProviderResetCredits? = null,
 )
 
 @Serializable data class ProviderBalance(val cny: Double? = null, val usd: Double? = null)
@@ -291,8 +293,11 @@ data class ProviderStatus(
 @Serializable data class ProviderPace(
     val recentPerDay: Double? = null,
     val historyPerDay: Double? = null,
+    val medianPerDay: Double? = null,
     val recentPerDayRub: Double? = null,
     val historyPerDayRub: Double? = null,
+    val medianPerDayRub: Double? = null,
+    val medianMonthlyRub: Double? = null,
 )
 @Serializable data class ProviderRunway(val recentDays: Int? = null, val historyDays: Int? = null)
 @Serializable data class ProviderSubscription(
@@ -314,6 +319,18 @@ data class ProviderStatus(
     val nextResetAt: String? = null,
     val projectedEmptyAt: String? = null,
     val perDay: Double? = null,
+)
+@Serializable data class ProviderLimit(
+    val usedPercent: Double? = null,
+    val remainingPercent: Double? = null,
+    val windowSeconds: Double? = null,
+    val resetAt: String? = null,
+)
+@Serializable data class ProviderResetCredits(
+    val available: Int? = null,
+    val total: Int? = null,
+    val earned: Int? = null,
+    val nextExpiresAt: String? = null,
 )
 
 @Serializable

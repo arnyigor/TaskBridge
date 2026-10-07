@@ -46,6 +46,13 @@ class ProcessesScreenTest {
     }
 
     @Test
+    fun runtimeLabelUsesOperatorFriendlyNames() {
+        assertEquals("Node", processRuntimeLabel("node"))
+        assertEquals("Python", processRuntimeLabel("python"))
+        assertEquals("Java", processRuntimeLabel("java"))
+    }
+
+    @Test
     fun sortingPutsMemoryEatersFirstAndUnknownLast() {
         val sorted = sortedProcesses(
             listOf(

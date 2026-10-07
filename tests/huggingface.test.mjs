@@ -4,8 +4,8 @@ import { analyzeGgufTree, quantFromFilename, HuggingFaceService } from '../src/h
 
 const GB = 1e9;
 
-function entry(path, sizeGb) {
-  return { path, lfs: { size: Math.round(sizeGb * GB) } };
+function entry(path, sizeGb, oid = null) {
+  return { path, lfs: { size: Math.round(sizeGb * GB), ...(oid ? { oid } : {}) } };
 }
 
 test('analyzeGgufTree groups quant variants, merges shards and detects projectors', () => {
@@ -47,11 +47,12 @@ test('quantFromFilename recognizes llama.cpp quants including imatrix suffixes',
 });
 
 test('plan takes sizes from the tree and rejects unknown paths', () => {
-  const tree = [entry('a.gguf', 1), entry('b.gguf', 2)];
+  const tree = [entry('a.gguf', 1, 'sha256:' + 'a'.repeat(64)), entry('b.gguf', 2)];
   const service = new HuggingFaceService({});
   const plan = service.plan(tree, ['a.gguf', 'b.gguf']);
   assert.equal(plan.totalBytes, 3 * GB);
   assert.deepEqual(plan.files.map(f => f.path), ['a.gguf', 'b.gguf']);
+  assert.equal(plan.files[0].sha256, 'a'.repeat(64));
   assert.equal(service.plan(tree, ['missing.gguf']), null);
   assert.equal(service.plan(tree, []), null);
 });

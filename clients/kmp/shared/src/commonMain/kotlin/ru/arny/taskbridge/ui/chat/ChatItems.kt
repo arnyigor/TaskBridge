@@ -323,6 +323,7 @@ private fun ThinkingBlock(thinking: String, streaming: Boolean) {
     var open by remember { mutableStateOf(false) }
     val pinned = rememberPinned()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val trimmed = remember(thinking) { thinking.trim() }
     Column(Modifier.padding(bottom = 6.dp).then(pinned.modifier)) {
         Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { pinned.toggle { open = !open } }.padding(vertical = 4.dp, horizontal = 2.dp),
@@ -334,19 +335,9 @@ private fun ThinkingBlock(thinking: String, streaming: Boolean) {
             // producing output, the way the web's «Рассуждение · N симв.» does.
             Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted)
         }
-        if (!open && streaming) {
-            Text(
-                thinking.trim().lineSequence().lastOrNull { it.isNotBlank() }.orEmpty(),
-                style = MaterialTheme.typography.bodySmall,
-                color = muted.copy(alpha = 0.7f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(start = 20.dp),
-            )
-        }
         AnimatedVisibility(open) {
             Column {
-                SecondaryPane { SelectionContainer { Text(thinking.trim(), style = MaterialTheme.typography.bodySmall, color = muted) } }
+                SecondaryPane { ThinkingText(trimmed, muted) }
                 QuietRow(
                     leading = { Icon(AppIcons.ChevronUp, null, Modifier.size(14.dp), tint = muted) },
                     text = "Свернуть",
@@ -357,6 +348,28 @@ private fun ThinkingBlock(thinking: String, streaming: Boolean) {
         }
     }
 }
+
+@Composable
+private fun ThinkingText(text: String, color: Color) {
+    val displayed = remember(text) { thinkingTail(text, ThinkingExpandedMaxChars) }
+    SelectionContainer {
+        Text(
+            displayed,
+            style = MaterialTheme.typography.bodySmall,
+            color = color,
+            maxLines = ThinkingExpandedMaxLines,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+private fun thinkingTail(text: String, maxChars: Int): String = when {
+    text.length <= maxChars -> text
+    else -> "…" + text.takeLast(maxChars)
+}
+
+private const val ThinkingExpandedMaxLines = 30
+private const val ThinkingExpandedMaxChars = 12_000
 
 /** Indented, left-ruled secondary content under a quiet row: reasoning, tool output. */
 @Composable

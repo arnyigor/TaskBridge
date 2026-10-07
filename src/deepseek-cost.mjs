@@ -44,16 +44,26 @@ export function computeRunway(balanceCny, dayCosts, today) {
   }
   const costs = completed.map(d => d.cost);
   const mean = (values) => values.reduce((sum, v) => sum + v, 0) / values.length;
+  const median = (values) => {
+    if (!values.length) return null;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  };
   const ceilDays = (balance, pace) => {
     if (!(pace > 0)) return null;
     if (!(balance > 0)) return 0;
     return Math.ceil(balance / pace);
   };
   const recentPerDay = mean(costs.slice(-Math.min(3, costs.length)));
-  const historyPerDay = mean(costs.slice(-Math.min(7, costs.length)));
+  const historyValues = costs.slice(-Math.min(30, costs.length));
+  const runwayValues = costs.slice(-Math.min(7, costs.length));
+  const historyPerDay = mean(runwayValues);
+  const medianPerDay = median(historyValues);
   return {
     recentPerDay,
     historyPerDay,
+    medianPerDay,
     recentDays: ceilDays(balanceCny, recentPerDay),
     historyDays: ceilDays(balanceCny, historyPerDay),
   };
@@ -268,6 +278,7 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
   // баланса, а не расходится с ними на разнице курсов.
   const effRubPerCny = rates ? (totalCny > 0 ? rub.total / totalCny : rates.cnyRub) : null;
   const rubPerDay = (value) => (value != null && effRubPerCny != null ? value * effRubPerCny : null);
+  const medianPerDayRub = rubPerDay(runway.medianPerDay);
 
   const result = {
     available: true,
@@ -280,8 +291,11 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
     pace: {
       recentPerDay: runway.recentPerDay,
       historyPerDay: runway.historyPerDay,
+      medianPerDay: runway.medianPerDay,
       recentPerDayRub: rubPerDay(runway.recentPerDay),
       historyPerDayRub: rubPerDay(runway.historyPerDay),
+      medianPerDayRub,
+      medianMonthlyRub: medianPerDayRub == null ? null : medianPerDayRub * 30,
     },
     runway: { recentDays: runway.recentDays, historyDays: runway.historyDays },
     costHistory,

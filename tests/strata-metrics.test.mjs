@@ -117,3 +117,46 @@ test('parseStrataMetrics keeps a payload that only has the engine block', () => 
   assert.equal(m.busy, false);
   assert.equal(m.pp, null);
 });
+
+// Записи сняты с живого движка 0.1.40 (iq3_s, порт 8083, 2026-10-06) во время
+// чтения промпта: live-блок отдаёт `prefill_tok_s_mean` по ИДУЩЕМУ запросу, а
+// `requests` ещё содержит только прошлый. Итоговая запись того же запроса в
+// /metrics дала 2381-2383 ток/с — живое число и запись сходятся.
+test('parseStrataMetrics берёт PP идущего запроса из живой скорости чтения', () => {
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3_s', context: 204800 },
+    live: { state: 'reading', phase: 'reading the prompt', prompt_read: 16384, prompt_total: 39087, generated: 0, elapsed_s: null, tok_s: null, prefill_tok_s_mean: 2416.3 },
+    requests: [{ prompt_tokens: 55496, reused: 55333, output_tokens: 392, prompt_ms: 1501.9, decode_ms: 8820.3, decode_tok_s: 44.4 }]
+  });
+  // Прошлый запрос пришёл из кеша беседы (PP у него нет), но читается новый —
+  // строка показывает 2 416 ток/с, а не «—» и не числа прошлого запроса.
+  assert.equal(m.pp, 2416.3);
+  assert.equal(m.ppUnavailable, null);
+  assert.equal(m.phase, 'reading the prompt');
+  // Живой TG во время чтения движок не отдаёт — остаётся скорость прошлого запроса.
+  assert.equal(m.tg, 44.4);
+});
+
+test('parseStrataMetrics без живой скорости чтения падает на прошлый запрос', () => {
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3_s' },
+    live: { state: 'reading', phase: 'reading the prompt', prompt_read: 8192, prompt_total: 16198, generated: 0, tok_s: null },
+    requests: [{ prompt_tokens: 16198, reused: 0, output_tokens: 256, prompt_ms: 14085.4, decode_tok_s: 51.2 }]
+  });
+  assert.equal(Math.round(m.pp), 1150);
+  assert.equal(m.ppUnavailable, null);
+});
+
+test('parseStrataMetrics не подменяет PP на кеш-артефакт живым числом', () => {
+  // Запрос из кеша беседы: движок сразу в `generating`, поля чтения в live пусты.
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3_s' },
+    live: { state: 'generating', phase: 'thinking', prompt_read: null, prompt_total: null, generated: 9, tok_s: 36.0, prefill_tok_s_mean: 19.6 },
+    requests: [{ prompt_tokens: 8477, reused: 8472, output_tokens: 16, prompt_ms: 203.8, decode_ms: 433.6, decode_tok_s: 36.9 }]
+  });
+  // 19.6 — это `prefill_tok_s_mean` от запроса, который почти ничего не читал
+  // (5 новых токенов): во время генерации оно не берётся, и строка честно молчит.
+  assert.equal(m.pp, null);
+  assert.equal(m.ppUnavailable, 'conversation-cache');
+  assert.equal(m.tg, 36.0);
+});

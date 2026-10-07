@@ -21,6 +21,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -34,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -78,8 +82,52 @@ fun Banner(
         Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(icon, null, tint = color, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(10.dp))
-            Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+            Text(
+                softBreakLongText(text),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
             if (action != null && onAction != null) TextButton(onClick = onAction) { Text(action) }
+        }
+    }
+}
+
+@Composable
+fun AppSnackbarHost(hostState: SnackbarHostState, modifier: Modifier = Modifier) {
+    SnackbarHost(hostState = hostState, modifier = modifier) { data ->
+        val actionLabel = data.visuals.actionLabel
+        Snackbar(
+            action = actionLabel?.let { label ->
+                { TextButton(onClick = { data.performAction() }) { Text(label) } }
+            },
+            dismissAction = if (data.visuals.withDismissAction) {
+                { TextButton(onClick = { data.dismiss() }) { Text("Закрыть") } }
+            } else null,
+        ) {
+            Text(
+                softBreakLongText(data.visuals.message),
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+fun softBreakLongText(text: String): String = buildString(text.length + text.length / 8) {
+    var token = 0
+    for (char in text) {
+        append(char)
+        if (char.isWhitespace()) {
+            token = 0
+            continue
+        }
+        token++
+        if (char in "\\/,:;{}[]()=|" || token >= 16) {
+            append('\u200B')
+            token = 0
         }
     }
 }

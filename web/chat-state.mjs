@@ -62,6 +62,10 @@ function paragraphSeparator(text) {
   return trimmed.endsWith('\n') ? '\n' : '\n\n';
 }
 
+function isEmptyAssistantPlaceholder(turn) {
+  return turn?.role === 'assistant' && !turn.final && !turn.text && !turn.thinking && !turn.tools?.length && !turn.files?.length;
+}
+
 export class ChatState {
   // seedInitial: false when constructing from a paginated *tail* window that
   // doesn't reach the task's original prompt — that first turn has no
@@ -534,7 +538,10 @@ export class ChatState {
       const note = humanizeError(frame.errorMessage) || (summary ? `Контекст сжат:\n${summary}` : (frame.result ? 'Контекст сжат.' : null));
       if (note && !this.notes.has(event.seq)) {
         this.notes.add(event.seq);
-        this.turns.push({ id: `note-${event.seq}`, role: 'note', text: note });
+        const item = { id: `note-${event.seq}`, role: 'note', text: note };
+        const currentIndex = isEmptyAssistantPlaceholder(this.current) ? this.turns.indexOf(this.current) : -1;
+        if (currentIndex >= 0) this.turns.splice(currentIndex, 0, item);
+        else this.turns.push(item);
       }
     }
     return true;
