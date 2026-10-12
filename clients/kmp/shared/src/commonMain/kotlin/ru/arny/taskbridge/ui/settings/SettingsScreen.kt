@@ -593,7 +593,7 @@ private fun providerStatusText(status: ProviderStatus): String {
         val parts = listOfNotNull(balance.cny?.let { "¥${number(it)}" }, balance.usd?.let { "\$${number(it)}" })
         val rub = status.rub?.total?.let { " · ≈ ${number(it)} ₽" }.orEmpty()
         val runway = status.runway?.historyDays?.let { " · примерно на $it дн." }.orEmpty()
-        val month = status.pace?.medianMonthlyRub?.let { " · ~${number(it)} ₽/мес" }.orEmpty()
+        val month = status.pace?.monthlyRub?.let { " · ~${number(it)} ₽/мес" }.orEmpty()
         return parts.joinToString(" · ") + rub + runway + month + stale
     }
     if (status.limits.isNotEmpty()) {

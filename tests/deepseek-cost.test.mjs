@@ -9,10 +9,28 @@ import { test } from 'node:test';
 import {
   aggregateCostHistory,
   computeRunway,
+  decimalAdd,
+  decimalCeilRatio,
+  decimalMean,
+  decimalMultiply,
   parseCbrRates,
   parseBalance,
   readDeepseekCost,
 } from '../src/deepseek-cost.mjs';
+
+test('десятичная арифметика: деньги не считаются double', () => {
+  // 0.1 + 0.2 в double — уже не 0.3, а Math.ceil(0.07 / 0.01) уезжает на день.
+  assert.equal((0.1 + 0.2) / 2, 0.15000000000000002);
+  assert.equal(decimalMean([0.1, 0.2]), 0.15);
+  assert.equal(Math.ceil(0.07 / 0.01), 8);
+  assert.equal(decimalCeilRatio(0.07, 0.01), 7);
+  assert.equal(decimalAdd(0.1, 0.2), 0.3);
+  assert.equal(decimalMultiply(0.1, 0.3), 0.03);
+  // Нули и пропуски: пустой баланс/темп — не исключение.
+  assert.equal(decimalCeilRatio(100, 0), null);
+  assert.equal(decimalCeilRatio(null, 5), 0);
+  assert.equal(decimalMean([]), null);
+});
 
 test('aggregateCostHistory суммирует дни и сортирует по датам', () => {
   const csv = [
@@ -46,8 +64,7 @@ test('computeRunway повторяет логику apicost: ceil(баланс /
   const result = computeRunway(100, days.concat(history), '2026-09-26');
   // завершённые: 20,10,3,1,10,100,1 (09-18…09-25, включая 09-23)
   assert.equal(result.recentPerDay, (10 + 100 + 1) / 3);
-  assert.equal(result.historyPerDay, 145 / 7);
-  assert.equal(result.medianPerDay, 10);
+  assert.ok(Math.abs(result.historyPerDay - 145 / 7) < 1e-11, 'среднее — десятичное, а не 20.714285714285715');
   assert.equal(result.recentDays, 3);
   assert.equal(result.historyDays, 5);
 });
@@ -136,16 +153,18 @@ test('readDeepseekCost: баланс, курсы и прогноз без сет
   );
   assert.equal(result.available, true);
   assert.deepEqual(result.balance, { cny: -1.45, usd: 21.52 });
-  assert.equal(result.rates.usdCny, 84.0954 / 11.8123);
+  assert.ok(Math.abs(result.rates.usdCny - 84.0954 / 11.8123) < 1e-11, 'курс USD/CNY — десятичное частное');
   assert.ok(Math.abs(result.rub.total - (-1.45 * 11.8123 + 21.52 * 84.0954)) < 1e-6);
   assert.equal(result.costHistory.lastDay, '2026-09-21');
   assert.ok(result.pace.historyPerDay > 0);
   assert.ok(result.runway.historyDays > 0);
   // Темп в рублях — по тому же эффективному курсу, что и баланс.
-  const effRubPerCny = result.rub.total / result.totalCny;
-  assert.equal(result.rates.effectiveRubPerCny, effRubPerCny);
+  const effRubPerCny = result.rates.effectiveRubPerCny;
+  assert.ok(Math.abs(effRubPerCny - result.rub.total / result.totalCny) < 1e-9);
   assert.ok(Math.abs(result.pace.historyPerDayRub - result.pace.historyPerDay * effRubPerCny) < 1e-9);
-  assert.equal(result.pace.medianMonthlyRub, result.pace.medianPerDayRub * 30);
+  // «₽/мес» выводится из того же темпа, что и «примерно на N дн.», иначе строка
+  // в настройках противоречит сама себе (дни × темп ≠ баланс).
+  assert.equal(result.pace.monthlyRub, result.pace.historyPerDayRub * 30);
   // Инвариант: рублёвый темп × дни ≈ рубли баланса.
   const rubTotal = result.pace.historyPerDayRub * result.runway.historyDays;
   assert.ok(rubTotal >= result.rub.total, `${rubTotal} должно покрывать баланс ${result.rub.total}`);

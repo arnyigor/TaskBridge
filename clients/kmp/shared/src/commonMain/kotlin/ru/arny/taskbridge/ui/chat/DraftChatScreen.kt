@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.launch
@@ -109,7 +110,16 @@ fun DraftChatScreen(
             AppSnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
             Composer(
                 value = text,
-                onValueChange = { text = it },
+                onValueChange = { next ->
+                    val paste = pastedTextDraft(text.text, next.text, graph.nowIso())
+                    text = paste.caret
+                        ?.let { TextFieldValue(paste.text, TextRange(it.coerceIn(0, paste.text.length))) }
+                        ?: next
+                    paste.attached?.let { attached ->
+                        files = files + attached
+                        scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
+                    }
+                },
                 files = files,
                 onRemoveFile = { files = files - it },
                 onAttach = pickFiles,

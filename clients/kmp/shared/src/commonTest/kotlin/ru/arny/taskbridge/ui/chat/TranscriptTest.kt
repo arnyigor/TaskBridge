@@ -42,4 +42,80 @@ class TranscriptTest {
             text,
         )
     }
+
+    private fun items() = listOf(
+        ChatItem.User("u1", "Запусти тесты", emptyList(), "10:00", false, null, "prompt", "user-1"),
+        ChatItem.Assistant(
+            id = "assistant-1", text = "Тесты прошли.", thinking = "", tools = emptyList(),
+            active = false, status = "SUCCEEDED", error = null, final = true, at = "10:00", endedAt = "10:01",
+            partial = false, superseded = false, stopReason = null, variants = null,
+        ),
+        ChatItem.Note("n1", "Контекст сжат"),
+        ChatItem.User("u2", "Спасибо", emptyList(), "10:02", false, null, "prompt", "user-2"),
+    )
+
+    /**
+     * Выбор нескольких сообщений (как «Copy» в ChatGPT): порядок задаёт лента, а не
+     * порядок нажатий — иначе копия зависела бы от того, что нажали первым.
+     */
+    @Test
+    fun selectedMessagesFollowTheFeedOrderNotTheTapOrder() {
+        val feed = items()
+        assertEquals(
+            "Запусти тесты\n\nТесты прошли.\n\nСпасибо",
+            selectedMessagesText(feed, setOf("u2", "assistant-1", "u1")),
+        )
+    }
+
+    /**
+     * Текст выбранных — ровно то же, что даёт кнопка «Копировать» у сообщения, плюс
+     * заметка в своём виде (у неё одиночной кнопки нет). Поэтому скопировать одно и
+     * скопировать несколько не могут разойтись.
+     */
+    @Test
+    fun selectedMessagesUseTheSameTextAsTheSingleCopy() {
+        val feed = items()
+        assertEquals("Запусти тесты", feed[0].copyText())
+        assertEquals("— Контекст сжат —", feed[2].copyText())
+        assertEquals(
+            "Тесты прошли.\n\n— Контекст сжат —\n\nСпасибо",
+            selectedMessagesText(feed, setOf("assistant-1", "n1", "u2")),
+        )
+    }
+
+    /**
+     * Список и его соединение — из одного источника: счётчик «скопировано сообщений»
+     * берёт размер списка, поэтому в нём не может оказаться то, чего нет в буфере.
+     */
+    @Test
+    fun theSelectedTextsAreListedWithoutBlanks() {
+        val feed = items()
+        assertEquals(listOf("Запусти тесты", "Тесты прошли."), selectedMessages(feed, setOf("u1", "assistant-1")))
+        assertEquals(emptyList(), selectedMessages(feed, emptySet()))
+    }
+
+    @Test
+    fun anEmptySelectionGivesAnEmptyText() {
+        assertEquals("", selectedMessagesText(items(), emptySet()))
+        // Чужой id (сообщение ушло из окна истории) ничего не добавляет.
+        assertEquals("", selectedMessagesText(items(), setOf("нет-такого")))
+    }
+
+    /**
+     * Ход без текста (из одних вызовов инструментов) не оставляет в буфере пустых
+     * абзацев: иначе между сообщениями оказывались бы двойные пустые строки.
+     */
+    @Test
+    fun aMessageWithoutTextLeavesNoBlankParagraph() {
+        val feed = listOf(
+            ChatItem.User("u1", "Сделай", emptyList(), null, false, null, null, "user-1"),
+            ChatItem.Assistant(
+                id = "assistant-1", text = "   ", thinking = "", tools = emptyList(),
+                active = false, status = "SUCCEEDED", error = null, final = true, at = null, endedAt = null,
+                partial = false, superseded = false, stopReason = null, variants = null,
+            ),
+            ChatItem.Note("n1", "Готово"),
+        )
+        assertEquals("Сделай\n\n— Готово —", selectedMessagesText(feed, setOf("u1", "assistant-1", "n1")))
+    }
 }

@@ -27,8 +27,23 @@ const TITLES = {
 
 export function notificationFor(event, task = null) {
   if (!PUSH_EVENTS.has(event?.type)) return null;
+  // A scheduled run carries its own policy (MR-06): a nightly audit that finished
+  // cleanly and changed nothing is not worth waking anyone up for, and «notify
+  // always» on a job that runs every hour is a way to get notifications turned off
+  // altogether.
+  const policy = task?.scheduleNotify ?? null;
+  const failed = event.type === 'TASK_FAILED' || event.type === 'TASK_CANCELLED';
+  const approval = event.type === 'APPROVAL_REQUIRED';
+  const changed = Array.isArray(task?.git?.changedFiles) && task.git.changedFiles.length > 0;
+  const verificationFailed = task?.verificationStatus === 'FAILED';
+  if (policy === 'never') return null;
+  if (policy === 'errors-only' && !failed && !approval) return null;
+  if (policy === 'action-required' && !failed && !approval && !changed && !verificationFailed) return null;
   const title = `TaskBridge: ${TITLES[event.type]}`;
-  const body = String(task?.title || task?.prompt || event.message || '').slice(0, 140);
+  const reason = policy && !failed && !approval
+    ? (changed ? ' · есть изменения' : '') + (verificationFailed ? ' · проверка не прошла' : '')
+    : '';
+  const body = (String(task?.title || task?.prompt || event.message || '').slice(0, 140) + reason).trim();
   return { title, body, taskId: event.taskId, type: event.type, at: event.at || new Date().toISOString() };
 }
 

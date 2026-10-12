@@ -16,8 +16,19 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import androidx.compose.ui.window.Notification
 import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
@@ -83,6 +94,15 @@ fun main() {
             }
         }
 
+        val installDir = DesktopUpdater.installDir()
+        var stagedUpdate by remember { mutableStateOf(installDir?.let { DesktopUpdater.stagedUpdate(it) }) }
+        LaunchedEffect(installDir) {
+            while (true) {
+                stagedUpdate = installDir?.let { DesktopUpdater.stagedUpdate(it) }
+                delay(5_000)
+            }
+        }
+
         val summary = buildList {
             if (listState.waitingCount > 0) add("ждут ответа: ${listState.waitingCount}")
             if (listState.workingCount > 0) add("работают: ${listState.workingCount}")
@@ -98,12 +118,10 @@ fun main() {
             menu = {
                 Item("Открыть TaskBridge", onClick = { visible = true })
                 Item(summary, enabled = false, onClick = {})
-                val installDir = DesktopUpdater.installDir()
-                val staged = installDir?.let { DesktopUpdater.stagedUpdate(it) }
-                if (installDir != null && staged != null) {
+                if (installDir != null && stagedUpdate != null) {
                     Separator()
                     Item("Установить обновление и перезапустить", onClick = {
-                        if (DesktopUpdater.applyAndRestart(installDir, staged)) exitApplication()
+                        if (DesktopUpdater.applyAndRestart(installDir, stagedUpdate!!)) exitApplication()
                     })
                 }
                 Separator()
@@ -157,7 +175,29 @@ fun main() {
                 })
             }
             LaunchedEffect(visible) { if (!visible) platform.foreground = false }
-            App(graph, openTaskId = startTaskId, navigatorSink = { navigator = it })
+            Box(Modifier.fillMaxSize()) {
+                App(graph, openTaskId = startTaskId, navigatorSink = { navigator = it })
+                if (stagedUpdate != null) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(12.dp)
+                            .size(40.dp)
+                            .background(Color.Transparent)
+                            .clickable {
+                                if (installDir != null && DesktopUpdater.applyAndRestart(installDir, stagedUpdate!!)) {
+                                    exitApplication()
+                                }
+                            },
+                    ) {
+                        Image(
+                            painter = rememberVectorPainter(AppIcons.Refresh),
+                            contentDescription = "Установить обновление и перезапустить",
+                            modifier = Modifier.fillMaxSize().padding(8.dp),
+                        )
+                    }
+                }
+            }
         }
     }
 }

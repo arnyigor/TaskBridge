@@ -1,5 +1,7 @@
 package ru.arny.taskbridge.ui.chat
 
+import ru.arny.taskbridge.core.api.UploadFile
+
 internal const val PASTED_TEXT_FILE_THRESHOLD = 8000
 
 internal data class LargeTextAttachment(
@@ -7,6 +9,33 @@ internal data class LargeTextAttachment(
     val remainingText: String,
     val caret: Int,
 )
+
+/**
+ * Поле ввода после вставки.
+ *
+ * Один разбор на оба поля — в чате и в черновике нового сообщения. Черновик
+ * разбирал вставку иначе, и большой текст, вставленный первым сообщением,
+ * оставался стеной в поле вместо вложения (наблюдение оператора 2026-10-12).
+ *
+ * [caret] == null — вставка осталась текстом: значение поля берётся у самого поля,
+ * и каретка не переставляется.
+ */
+internal data class PastedTextDraft(
+    val text: String,
+    val caret: Int?,
+    val attached: UploadFile?,
+)
+
+/** Разбирает вставку: большой текст уезжает файлом, остаток остаётся в поле. */
+internal fun pastedTextDraft(previousText: String, nextText: String, nowIso: String): PastedTextDraft {
+    val attachment = largeTextAttachmentFromDraftChange(previousText, nextText)
+        ?: return PastedTextDraft(nextText, null, null)
+    return PastedTextDraft(
+        text = attachment.remainingText,
+        caret = attachment.caret.coerceIn(0, attachment.remainingText.length),
+        attached = UploadFile(pastedTextFileName(nowIso), "text/plain", attachment.text.encodeToByteArray()),
+    )
+}
 
 /**
  * Mirrors the web composer: text that would turn the prompt into a wall of text

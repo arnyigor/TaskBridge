@@ -293,11 +293,9 @@ data class ProviderStatus(
 @Serializable data class ProviderPace(
     val recentPerDay: Double? = null,
     val historyPerDay: Double? = null,
-    val medianPerDay: Double? = null,
     val recentPerDayRub: Double? = null,
     val historyPerDayRub: Double? = null,
-    val medianPerDayRub: Double? = null,
-    val medianMonthlyRub: Double? = null,
+    val monthlyRub: Double? = null,
 )
 @Serializable data class ProviderRunway(val recentDays: Int? = null, val historyDays: Int? = null)
 @Serializable data class ProviderSubscription(
@@ -413,6 +411,433 @@ data class Project(
 ) {
     val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: id
 }
+
+/**
+ * One row of the project dashboard (`GET /api/projects/overview`, MR-01).
+ *
+ * The server computes these from the project registry and the sessions, so they
+ * are always in step with the session list; only [pinned] and [archived] are
+ * stored (SQLite), which is why they survive a restart.
+ */
+@Serializable
+data class ProjectSummary(
+    val id: String,
+    val name: String? = null,
+    val path: String? = null,
+    val useWorktree: Boolean = false,
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    val sessions: Int = 0,
+    /** Sessions that are not finished (working now or waiting in the queue). */
+    val working: Int = 0,
+    /** Sessions that will not move without the operator: failed, or waiting for an answer. */
+    val needsAttention: Int = 0,
+    /** MR-02: work items of this project, and how many of them are still open. */
+    val workItems: Int = 0,
+    val activeWork: Int = 0,
+    val lastActivityAt: String? = null,
+) {
+    val displayName: String get() = name?.takeIf { it.isNotBlank() } ?: id
+}
+
+@Serializable
+data class ProjectOverviewTotals(
+    val projects: Int = 0,
+    val pinned: Int = 0,
+    val archived: Int = 0,
+    val sessions: Int = 0,
+    val working: Int = 0,
+    val needsAttention: Int = 0,
+    val workItems: Int = 0,
+    val activeWork: Int = 0,
+)
+
+/**
+ * The dashboard answer. [unassignedSessions] is the count of sessions whose
+ * project is not in the registry any more: removing a registration never deletes
+ * its sessions, so the screen can say where they went instead of hiding them.
+ */
+@Serializable
+data class ProjectOverview(
+    val projects: List<ProjectSummary> = emptyList(),
+    val unassignedSessions: Int = 0,
+    val totals: ProjectOverviewTotals = ProjectOverviewTotals(),
+)
+
+/** Pinned/archived of one project; the server answers with the merged values. */
+@Serializable
+data class ProjectPreferences(
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    val updatedAt: String? = null,
+)
+
+/**
+ * A work item (MR-02): the semantic state of the work — what we are trying to do,
+ * the criteria of done, and where it stands. Deliberately not a container: no
+ * prompt, no chat history, no diff, no tool output.
+ */
+@Serializable
+data class WorkItem(
+    val id: String,
+    val projectId: String,
+    val title: String,
+    val goal: String? = null,
+    /** BACKLOG, READY, IN_PROGRESS, BLOCKED, DONE, CANCELLED. */
+    val status: String = "BACKLOG",
+    val priority: Int? = null,
+    val acceptanceCriteria: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+    val completedAt: String? = null,
+) {
+    val open: Boolean get() = status != "DONE" && status != "CANCELLED"
+}
+
+/**
+ * A session that did the work (MR-03). This is NOT a run: runs live inside one
+ * session, while a work item groups sessions. [available] is false when the
+ * session disappeared on another device — the link stays visible instead of
+ * silently vanishing.
+ */
+@Serializable
+data class WorkItemSession(
+    val workItemId: String,
+    val sessionId: String,
+    /** implementation, investigation, review, verification, resume. */
+    val relation: String = "implementation",
+    val createdAt: String? = null,
+    val available: Boolean = true,
+    val status: String? = null,
+    val title: String? = null,
+    val prompt: String? = null,
+    val projectId: String? = null,
+    val updatedAt: String? = null,
+    val events: Int = 0,
+)
+
+/** `GET /api/work-items/:id` adds the sessions to the item itself. */
+@Serializable
+data class WorkItemDetail(
+    val id: String,
+    val projectId: String,
+    val title: String,
+    val goal: String? = null,
+    val status: String = "BACKLOG",
+    val priority: Int? = null,
+    val acceptanceCriteria: List<String> = emptyList(),
+    val tags: List<String> = emptyList(),
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+    val completedAt: String? = null,
+    val sessions: List<WorkItemSession> = emptyList(),
+) {
+    val open: Boolean get() = status != "DONE" && status != "CANCELLED"
+}
+
+/** `GET /api/work-items/:id/sessions` and `GET /api/tasks/:id/work-items`. */
+@Serializable
+data class WorkItemSessionList(val items: List<WorkItemSession> = emptyList())
+
+/**
+ * A run recipe (MR-05): HOW a recurring piece of work is done — the prompt
+ * template, its parameters, the agent and model, the context profile, the
+ * workspace strategy and the verification. WHEN it runs is a schedule (MR-06),
+ * and the fact that it ran is the session it created.
+ */
+@Serializable
+data class RunRecipe(
+    val id: String,
+    val projectId: String,
+    val workItemId: String? = null,
+    val name: String,
+    val promptTemplate: String,
+    val parameters: Map<String, RecipeParameter> = emptyMap(),
+    val runtime: RecipeRuntime = RecipeRuntime(),
+    val context: RecipeContext = RecipeContext(),
+    val workspace: RecipeWorkspace = RecipeWorkspace(),
+    val verification: RecipeVerification = RecipeVerification(),
+    val limits: RecipeLimits = RecipeLimits(),
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+) {
+    /** The parameters a phone can offer: every one has a declared kind. */
+    val orderedParameters: List<Pair<String, RecipeParameter>> get() = parameters.entries.map { it.key to it.value }.sortedBy { it.first }
+}
+
+/** string | enum | boolean | number; `values` is present for an enum only. */
+@Serializable
+data class RecipeParameter(
+    val type: String = "string",
+    val values: List<String> = emptyList(),
+    val description: String? = null,
+    /** Types differ per kind, so the default travels as text and is read by `type`. */
+    val `default`: kotlinx.serialization.json.JsonElement? = null,
+) {
+    val defaultText: String?
+        get() = when (`default`) {
+            null -> null
+            is kotlinx.serialization.json.JsonPrimitive -> `default`.content
+            else -> null
+        }
+
+    val defaultBoolean: Boolean get() = (`default` as? kotlinx.serialization.json.JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false
+    val defaultNumber: Double? get() = (`default` as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull()
+}
+
+@Serializable
+data class RecipeRuntime(val id: String = "pi", val model: String? = null, val thinking: String? = null)
+
+@Serializable
+data class RecipeContext(
+    val profile: String = "work-item",
+    val includeMemory: Boolean = true,
+    val includeRecap: Boolean = true,
+    val includeGit: Boolean = true,
+)
+
+@Serializable
+data class RecipeWorkspace(val strategy: String = "fresh-worktree", val baseRef: String? = null)
+
+@Serializable
+data class RecipeVerification(val required: Boolean = false, val command: String? = null)
+
+@Serializable
+data class RecipeLimits(val timeoutMinutes: Int? = null)
+
+/** `GET /api/recipes`. */
+@Serializable
+data class RecipeList(val items: List<RunRecipe> = emptyList())
+
+/**
+ * What `POST /api/recipes/:id` sends. Every field is optional: an absent one keeps
+ * its stored value, which is what makes the same type usable for create and patch.
+ */
+@Serializable
+data class RecipeRequest(
+    val projectId: String? = null,
+    val workItemId: String? = null,
+    val name: String? = null,
+    val promptTemplate: String? = null,
+    val parameters: Map<String, RecipeParameter>? = null,
+    /**
+     * A nested object is sent WHOLE and replaces the stored one; leaving it out keeps
+     * it. It is nullable on purpose: a default-filled `RecipeRuntime()` would reset a
+     * stored model and thinking level on a patch that only renamed the recipe.
+     */
+    val runtime: RecipeRuntime? = null,
+    val context: RecipeContext? = null,
+    val workspace: RecipeWorkspace? = null,
+    val verification: RecipeVerification? = null,
+    val limits: RecipeLimits? = null,
+)
+
+/** The rendered recipe of `POST /api/recipes/:id/run`: what the session will actually get. */
+@Serializable
+data class RenderedRecipe(
+    val recipeId: String,
+    val projectId: String,
+    val workItemId: String? = null,
+    val name: String,
+    val prompt: String,
+    val parameters: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.JsonObject(emptyMap()),
+    val runtime: RecipeRuntime = RecipeRuntime(),
+    val workspace: RecipeWorkspace = RecipeWorkspace(),
+)
+
+/** The invocation a run created — the session itself, not a second record of it. */
+@Serializable
+data class RecipeInvocation(
+    val recipeId: String,
+    val recipeName: String? = null,
+    val trigger: String = "manual",
+    val parameters: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.JsonObject(emptyMap()),
+    val at: String? = null,
+)
+
+@Serializable
+data class RecipeRunResult(
+    val task: Task,
+    val invocation: RecipeInvocation? = null,
+    val rendered: RenderedRecipe,
+)
+
+/** `DELETE /api/recipes/:id` answers with the recipe it removed. */
+@Serializable
+data class RecipeDeleted(val ok: Boolean = true, val removed: RunRecipe)
+
+/** The session's own view of the run that produced it. */
+@Serializable
+data class RecipeRunInfo(
+    val recipeId: String,
+    val recipeName: String? = null,
+    val trigger: String = "manual",
+    val at: String? = null,
+)
+
+/**
+ * A schedule (MR-06): WHEN a recipe runs. The scheduler lives on the PC — a phone
+ * that is off changes nothing about whether 09:00 happens.
+ */
+@Serializable
+data class Schedule(
+    val id: String,
+    val recipeId: String,
+    val enabled: Boolean = true,
+    val spec: ScheduleSpec = ScheduleSpec(),
+    /** SKIP | RUN_ONCE (default) | CATCH_UP — what to do about a moment missed while the machine was off. */
+    val misfirePolicy: String = "RUN_ONCE",
+    /** SKIP_IF_RUNNING (default) | QUEUE | PARALLEL | REPLACE. */
+    val concurrencyPolicy: String = "SKIP_IF_RUNNING",
+    /** action-required (default) | always | errors-only | never. */
+    val notify: String = "action-required",
+    /** pause: an approval the agent asks for waits for a human, as in a manual session. */
+    val approvalMode: String = "pause",
+    val parameters: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.JsonObject(emptyMap()),
+    val nextRunAt: String? = null,
+    val lastRunAt: String? = null,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+)
+
+/** daily (`at`), weekly (`weekday` + `at`) or interval (`everyMinutes`). */
+@Serializable
+data class ScheduleSpec(
+    val kind: String = "daily",
+    val at: String? = null,
+    /** mon…sun; a number would need a convention nobody agrees on. */
+    val weekday: String? = null,
+    val everyMinutes: Int? = null,
+)
+
+/** What `POST`/`PATCH /api/schedules` sends: an absent field keeps its stored value. */
+@Serializable
+data class ScheduleRequest(
+    val recipeId: String? = null,
+    val enabled: Boolean? = null,
+    val spec: ScheduleSpec? = null,
+    val misfirePolicy: String? = null,
+    val concurrencyPolicy: String? = null,
+    val notify: String? = null,
+    val approvalMode: String? = null,
+    val parameters: kotlinx.serialization.json.JsonObject? = null,
+)
+
+@Serializable
+data class ScheduleList(val items: List<Schedule> = emptyList())
+
+@Serializable
+data class ScheduleDeleted(val ok: Boolean = true, val removed: Schedule)
+
+/**
+ * One run of a recipe (MR-06). The hierarchy is schedule → invocation → session →
+ * run(s): this record says WHEN it was due and HOW it ended, the session holds the
+ * work itself.
+ */
+@Serializable
+data class Invocation(
+    val id: String,
+    val recipeId: String,
+    val scheduleId: String? = null,
+    val trigger: String = "manual",
+    val scheduledAt: String? = null,
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
+    /** RUNNING | SUCCEEDED | FAILED | SKIPPED. */
+    val status: String = "RUNNING",
+    val reason: String? = null,
+    val misfire: Boolean = false,
+    val parameters: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.JsonObject(emptyMap()),
+    val sessionId: String? = null,
+    val verification: String? = null,
+    val workspaceRef: String? = null,
+    val resultArtifact: String? = null,
+) {
+    val running: Boolean get() = status == "RUNNING"
+}
+
+@Serializable
+data class InvocationList(val items: List<Invocation> = emptyList())
+
+/** What one scheduler tick decided, for diagnostics and for the tests. */
+@Serializable
+data class SchedulerDecision(
+    val scheduleId: String,
+    val action: String,
+    val invocationId: String? = null,
+    val sessionId: String? = null,
+    val scheduledAt: String? = null,
+    val reason: String? = null,
+    val missed: Int? = null,
+)
+
+@Serializable
+data class SchedulerTickResult(
+    val at: String,
+    val decisions: List<SchedulerDecision> = emptyList(),
+    val reconciled: List<String> = emptyList(),
+)
+
+/** A work item as seen from a session (the session's own view). */
+@Serializable
+data class WorkItemRef(
+    val id: String,
+    val projectId: String,
+    val title: String,
+    val status: String = "BACKLOG",
+    val relation: String = "implementation",
+)
+
+/** `GET /api/tasks/:id/work-items`. */
+@Serializable
+data class WorkItemRefList(val items: List<WorkItemRef> = emptyList())
+
+/** The answer to unlinking: `removed = false` means there was nothing to unlink. */
+@Serializable
+data class WorkItemUnlink(val removed: Boolean = false)
+
+/** `DELETE /api/work-items/:id` answers with the item it removed. */
+@Serializable
+data class WorkItemDeleted(val ok: Boolean = true, val removed: WorkItem)
+
+/** `GET /api/work-items`: newest first, filtered by the server. */
+@Serializable
+data class WorkItemList(val items: List<WorkItem> = emptyList())
+
+/** What `POST`/`PATCH` send: an absent field keeps its stored value. */
+@Serializable
+data class WorkItemRequest(
+    val projectId: String? = null,
+    val title: String? = null,
+    val goal: String? = null,
+    val status: String? = null,
+    val priority: Int? = null,
+    val acceptanceCriteria: List<String>? = null,
+    val tags: List<String>? = null,
+    /**
+     * A null field means «do not change it», so clearing the goal needs its own
+     * flag — otherwise an empty goal would be unreachable from a client.
+     */
+    val clearGoal: Boolean = false,
+)
+
+/**
+ * One page of a project's sessions (`GET /api/projects/:id/sessions`).
+ *
+ * [registered] is false for a project that was removed from the registry: the
+ * sessions are still there, and the screen shows them rather than a 404.
+ */
+@Serializable
+data class ProjectSessionsPage(
+    val projectId: String? = null,
+    val registered: Boolean = true,
+    val items: List<Task> = emptyList(),
+    val total: Int = 0,
+    val offset: Int = 0,
+    val limit: Int = 0,
+    val endReached: Boolean = false,
+)
 
 /** Folders exposed by the server inside projectBrowser.roots. */
 @Serializable
@@ -545,6 +970,20 @@ data class GenerationMetrics(
 )
 
 @Serializable
+data class SessionSpeeds(
+    /** Ходов, за которые посчитаны скорости сессии. */
+    val turns: Int = 0,
+    /** Максимальный PP за сессию; null — ни один ход не дал числа. */
+    val ppMax: Double? = null,
+    val ppAvg: Double? = null,
+    /** Средняя TG за сессию. */
+    val tgAvg: Double? = null,
+    /** Ходов, у которых вообще был PP / TG (кеш-попадания и ходы без вывода не считаются). */
+    val ppTurns: Int = 0,
+    val tgTurns: Int = 0,
+)
+
+@Serializable
 data class CompactionInfo(
     val count: Int = 0,
     val last: CompactionLast? = null,
@@ -561,6 +1000,33 @@ data class CompactionLast(
 
 @Serializable
 data class RuntimeInfo(val state: String? = null, val activity: String? = null, /** Epoch ms when the current compaction started; only present while activity == "compacting". */ val compactingSince: Long? = null)
+
+/**
+ * Почему сессия стоит, хотя Pi жив: провайдер не принял запрос и Pi ждёт повтора
+ * (обычно HTTP 429 с `retry-after`).
+ *
+ * Без этих полей отказ провайдера неотличим от сломанного моста: событий модели
+ * нет, статус RUNNING, активность streaming — оператор видел «работает» полтора
+ * часа, пока провайдер держал `retry-after` в 1 ч 31 мин. Причина — своими
+ * словами провайдера ([reason]), момент повтора — абсолютный ([retryAt]), чтобы
+ * счётчик шёл на клиенте, а не по чужим секундам.
+ */
+@Serializable
+data class ProviderWait(
+    /** `rate-limit` (провайдер отказал по лимиту) или `retry` (сбой, Pi повторяет). */
+    val kind: String? = null,
+    val provider: String? = null,
+    val model: String? = null,
+    val httpStatus: Int? = null,
+    val reason: String? = null,
+    /** Сколько ждать от момента объявления, мс. */
+    val waitMs: Long? = null,
+    /** Момент, когда Pi повторит запрос (ISO). */
+    val retryAt: String? = null,
+    /** Когда это ожидание началось и когда о нём сообщили в последний раз. */
+    val since: String? = null,
+    val at: String? = null,
+)
 
 /**
  * Один источник контекста из `GET /api/tasks/:id/context`: откуда именно текст
@@ -672,11 +1138,14 @@ data class Task(
     val thinkingLevel: String? = null,
     val thinkingLevelActual: String? = null,
     val workspacePath: String? = null,
+    val workspaceTrusted: Boolean = false,
     val pendingPrompts: List<PendingPrompt> = emptyList(),
     val files: List<FileRef> = emptyList(),
     val outputFiles: List<FileRef> = emptyList(),
     val lastUsage: Usage? = null,
     val metrics: GenerationMetrics? = null,
+    /** Скорости всей сессии (макс./средний PP, средняя TG); null — ходов ещё не было. */
+    val speeds: SessionSpeeds? = null,
     val compaction: CompactionInfo? = null,
     val autoCompactionEnabled: Boolean? = null,
     /** Лимит контекста сессии в токенах; null — без лимита (см. SessionContextReport). */
@@ -686,6 +1155,8 @@ data class Task(
     val thinkingText: String? = null,
     val retryable: Boolean? = null,
     val runtime: RuntimeInfo? = null,
+    /** Заполнено, только пока провайдер держит ход: Pi объявил повтор и ждёт. */
+    val providerWait: ProviderWait? = null,
     /** On-disk footprint of the session (task folder + Pi session + workspace), absent when the server did not compute it. */
     val sizeBytes: Long? = null,
 ) {

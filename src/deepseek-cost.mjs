@@ -12,6 +12,76 @@ import fs from 'node:fs/promises';
 // Чистые функции (тестируются без сети)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Десятичная арифметика (BigInt)
+// ---------------------------------------------------------------------------
+// BigDecimal в JS нет, но деньги и здесь нельзя считать double: 0.1 + 0.2 уже
+// не 0.3, а накопленная ошибка решает, будет ceil(баланс / темп) равен N или
+// N+1 (Math.ceil(0.07 / 0.01) — 8, а не 7). Поэтому все денежные суммы,
+// средние и деления идут через BigInt с фиксированным масштабом 1e12: восемь
+// знаков есть в cost_history.csv, остальное — запас на деление.
+
+const DEC_PLACES = 12;
+const DEC_FACTOR = 10n ** BigInt(DEC_PLACES);
+
+/** Number → BigInt × 1e12. toFixed даёт десятичную запись самого double, а не его хвост. */
+export function decimalOf(value) {
+  const text = Number(value).toFixed(DEC_PLACES);
+  const match = /^(-?)(\d+)\.(\d+)$/.exec(text);
+  if (!match) throw new Error(`не десятичное число: ${value}`);
+  const sign = match[1] === '-' ? -1n : 1n;
+  return sign * (BigInt(match[2]) * DEC_FACTOR + BigInt(match[3]));
+}
+
+/** BigInt × 1e12 → Number. */
+export function numberOfDecimal(scaled) {
+  const sign = scaled < 0n ? '-' : '';
+  const abs = scaled < 0n ? -scaled : scaled;
+  const frac = String(abs % DEC_FACTOR).padStart(DEC_PLACES, '0').replace(/0+$/, '');
+  return Number(frac ? `${sign}${abs / DEC_FACTOR}.${frac}` : `${sign}${abs / DEC_FACTOR}`);
+}
+
+/** Делит два BigInt (масштаб остаётся у делимого), половина — вверх. */
+function divideDecimal(numerator, denominator) {
+  const sign = (numerator < 0n) !== (denominator < 0n) ? -1n : 1n;
+  const a = numerator < 0n ? -numerator : numerator;
+  const b = denominator < 0n ? -denominator : denominator;
+  const quotient = a / b;
+  return sign * (a % b * 2n >= b ? quotient + 1n : quotient);
+}
+
+/** Частное с округлением половины вверх до 1e-12. */
+export function decimalRatio(numerator, denominator) {
+  // Оба аргумента уже × 1e12 — масштаб частного надо вернуть вручную.
+  return numberOfDecimal(divideDecimal(decimalOf(numerator) * DEC_FACTOR, decimalOf(denominator)));
+}
+
+/** Произведение точно: (a·1e12 · b·1e12) / 1e12. */
+export function decimalMultiply(left, right) {
+  return numberOfDecimal(decimalOf(left) * decimalOf(right) / DEC_FACTOR);
+}
+
+/** Сумма точно. */
+export function decimalAdd(left, right) {
+  return numberOfDecimal(decimalOf(left) + decimalOf(right));
+}
+
+/** Среднее по десятичным значениям; пустой список — null. */
+export function decimalMean(values) {
+  if (!values.length) return null;
+  const sum = values.reduce((acc, v) => acc + decimalOf(v), 0n);
+  return numberOfDecimal(divideDecimal(sum, BigInt(values.length)));
+}
+
+/** ceil(баланс / темп) точно: темп, посчитанный средним, — тоже десятичное число. */
+export function decimalCeilRatio(balance, pace) {
+  const b = balance == null ? 0n : decimalOf(balance);
+  const p = pace == null ? 0n : decimalOf(pace);
+  if (p <= 0n) return null;
+  if (b <= 0n) return 0;
+  return Number((b + p - 1n) / p);
+}
+
 /** day,model,cost → [{day, cost}] с суммой по дням, в порядке дат. */
 export function aggregateCostHistory(text) {
   const byDay = new Map();
@@ -23,10 +93,10 @@ export function aggregateCostHistory(text) {
     const day = cols[0].trim();
     const cost = Number(cols[2]);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(cost)) continue;
-    byDay.set(day, (byDay.get(day) || 0) + cost);
+    byDay.set(day, (byDay.get(day) || 0n) + decimalOf(cost));
   }
   return [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([day, cost]) => ({ day, cost }));
+    .map(([day, cost]) => ({ day, cost: numberOfDecimal(cost) }));
 }
 
 /**
@@ -43,29 +113,13 @@ export function computeRunway(balanceCny, dayCosts, today) {
     return { recentPerDay: null, historyPerDay: null, recentDays: null, historyDays: null };
   }
   const costs = completed.map(d => d.cost);
-  const mean = (values) => values.reduce((sum, v) => sum + v, 0) / values.length;
-  const median = (values) => {
-    if (!values.length) return null;
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-  };
-  const ceilDays = (balance, pace) => {
-    if (!(pace > 0)) return null;
-    if (!(balance > 0)) return 0;
-    return Math.ceil(balance / pace);
-  };
-  const recentPerDay = mean(costs.slice(-Math.min(3, costs.length)));
-  const historyValues = costs.slice(-Math.min(30, costs.length));
-  const runwayValues = costs.slice(-Math.min(7, costs.length));
-  const historyPerDay = mean(runwayValues);
-  const medianPerDay = median(historyValues);
+  const recentPerDay = decimalMean(costs.slice(-Math.min(3, costs.length)));
+  const historyPerDay = decimalMean(costs.slice(-Math.min(7, costs.length)));
   return {
     recentPerDay,
     historyPerDay,
-    medianPerDay,
-    recentDays: ceilDays(balanceCny, recentPerDay),
-    historyDays: ceilDays(balanceCny, historyPerDay),
+    recentDays: decimalCeilRatio(balanceCny, recentPerDay),
+    historyDays: decimalCeilRatio(balanceCny, historyPerDay),
   };
 }
 
@@ -244,12 +298,12 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
   const cfgUsdCny = Number(deepseekConfig.usdCnyRate);
   const usdCny = Number.isFinite(cfgUsdCny) && cfgUsdCny > 0
     ? cfgUsdCny
-    : rates ? rates.usdRub / rates.cnyRub : null;
+    : rates ? decimalRatio(rates.usdRub, rates.cnyRub) : null;
 
   const balance = balanceResult.balance;
   const cny = balance.CNY ?? 0;
   const usd = balance.USD ?? 0;
-  const totalCny = usdCny != null ? cny + usd * usdCny : null;
+  const totalCny = usdCny != null ? decimalAdd(decimalMultiply(usd, usdCny), cny) : null;
 
   let costHistory = null;
   let runway = { recentPerDay: null, historyPerDay: null, recentDays: null, historyDays: null };
@@ -266,9 +320,9 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
 
   const rub = rates
     ? {
-        cny: cny * rates.cnyRub,
-        usd: usd * rates.usdRub,
-        total: cny * rates.cnyRub + usd * rates.usdRub,
+        cny: decimalMultiply(cny, rates.cnyRub),
+        usd: decimalMultiply(usd, rates.usdRub),
+        total: decimalAdd(decimalMultiply(usd, rates.usdRub), decimalMultiply(cny, rates.cnyRub)),
       }
     : null;
 
@@ -276,9 +330,12 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
   // баланс лежит и в юанях, и в долларах: в рубли переводим по тому же
   // эффективному курсу, что и баланс, — тогда «темп × дни» совпадает с рублями
   // баланса, а не расходится с ними на разнице курсов.
-  const effRubPerCny = rates ? (totalCny > 0 ? rub.total / totalCny : rates.cnyRub) : null;
-  const rubPerDay = (value) => (value != null && effRubPerCny != null ? value * effRubPerCny : null);
-  const medianPerDayRub = rubPerDay(runway.medianPerDay);
+  const effRubPerCny = rates ? (totalCny > 0 ? decimalRatio(rub.total, totalCny) : rates.cnyRub) : null;
+  const rubPerDay = (value) => (value != null && effRubPerCny != null ? decimalMultiply(value, effRubPerCny) : null);
+  const historyPerDayRub = rubPerDay(runway.historyPerDay);
+  // «₽/мес» считается по тому же темпу, что и «примерно на N дн.»: два разных
+  // темпа в одной строке противоречили друг другу (дни × ₽/мес ≠ баланс).
+  const monthlyRub = historyPerDayRub == null ? null : decimalMultiply(historyPerDayRub, 30);
 
   const result = {
     available: true,
@@ -291,11 +348,9 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
     pace: {
       recentPerDay: runway.recentPerDay,
       historyPerDay: runway.historyPerDay,
-      medianPerDay: runway.medianPerDay,
       recentPerDayRub: rubPerDay(runway.recentPerDay),
-      historyPerDayRub: rubPerDay(runway.historyPerDay),
-      medianPerDayRub,
-      medianMonthlyRub: medianPerDayRub == null ? null : medianPerDayRub * 30,
+      historyPerDayRub,
+      monthlyRub,
     },
     runway: { recentDays: runway.recentDays, historyDays: runway.historyDays },
     costHistory,

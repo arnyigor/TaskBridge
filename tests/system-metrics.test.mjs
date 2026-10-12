@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseNvidiaSmi, cpuLoadFromSamples, readRam, computeTokensPerSecond, generationWindowMs, generationMetrics } from '../src/system-metrics.mjs';
+import { parseNvidiaSmi, cpuLoadFromSamples, readRam, computeTokensPerSecond, generationWindowMs, generationMetrics, accumulateSessionSpeeds } from '../src/system-metrics.mjs';
 
 // The UI must never show an invented GPU/CPU number. Every reader is exercised
 // on both the "data present" and the "data absent" path.
@@ -126,4 +126,38 @@ test('generationMetrics returns nothing when there is nothing to report', () => 
   const noWindow = generationMetrics({ usage: { input: 900, output: 0 }, promptMs: 1000, windowMs: 0, local: false });
   assert.equal(noWindow.tg, null);
   assert.equal(noWindow.pp, 900);
+});
+
+test('accumulateSessionSpeeds: max and average cover the turns that had a number', () => {
+  const first = accumulateSessionSpeeds(null, { pp: 100, tg: 40 });
+  assert.deepEqual(first, { turns: 1, ppMax: 100, ppAvg: 100, ppTurns: 1, tgAvg: 40, tgTurns: 1 });
+  // A cache hit: Strata publishes no PP for it, so the session PP stays untouched
+  // while the turn and its TG are counted.
+  const second = accumulateSessionSpeeds(first, { pp: null, tg: 20 });
+  assert.equal(second.turns, 2);
+  assert.equal(second.ppTurns, 1);
+  assert.equal(second.ppAvg, 100);
+  assert.equal(second.tgAvg, 30);
+  // A faster turn lifts the maximum but not the average by itself.
+  const third = accumulateSessionSpeeds(second, { pp: 400, tg: 60 });
+  assert.equal(third.ppMax, 400);
+  assert.equal(third.ppAvg, 250);
+  assert.equal(third.tgAvg, 40);
+  assert.equal(third.turns, 3);
+});
+
+test('accumulateSessionSpeeds: garbage and zeros never become a measurement', () => {
+  const zero = accumulateSessionSpeeds(null, { pp: 0, tg: 0 });
+  assert.deepEqual(zero, { turns: 1, ppMax: null, ppAvg: null, ppTurns: 0, tgAvg: null, tgTurns: 0 });
+  const nan = accumulateSessionSpeeds(null, { pp: 'fast', tg: Number.NaN });
+  assert.equal(nan.ppMax, null);
+  assert.equal(nan.tgAvg, null);
+  // State that came back from disk with junk in it is repaired, not trusted.
+  const repaired = accumulateSessionSpeeds({ turns: 'x', ppMax: 'no', ppAvg: -5, tgAvg: 10 }, { pp: 8, tg: 2 });
+  assert.equal(repaired.turns, 1);
+  assert.equal(repaired.ppTurns, 1);
+  assert.equal(repaired.ppAvg, 8);
+  assert.equal(repaired.ppMax, 8);
+  assert.equal(repaired.tgTurns, 1);
+  assert.equal(repaired.tgAvg, 2);
 });

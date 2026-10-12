@@ -674,6 +674,28 @@ test('fork over HTTP copies through the chosen message and leaves the source alo
   const answerExpected = source;
   assert.equal(fromAnswer.prompt, 'первое');
   assert.deepEqual(answerCopy.slice(0, answerCopy.findIndex(e => e.type === 'TASK_FORKED')).map(e => e.type), answerExpected.map(e => e.type));
+
+  // The other direction: the copy opens at the chosen message — its text becomes
+  // the new session's own prompt — and carries everything that came after it.
+  const fromHere = await api(`/api/tasks/${id}/fork`, { turnId: `user-${users[0].seq}`, direction: 'from' });
+  assert.equal(fromHere.prompt, 'второе');
+  assert.equal(fromHere.forkedFrom, id);
+  const tail = (await api(`/api/tasks/${fromHere.id}/events?limit=0`)).filter(e => e.type !== 'RUNTIME_STATE');
+  const tailIndex = tail.findIndex(e => e.type === 'TASK_FORKED');
+  const tailExpected = source.filter(e => e.seq > users[0].seq).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.ok(tailIndex > 0, 'the copy carries the events of the chosen turn');
+  assert.deepEqual(tail.slice(0, tailIndex).map(e => e.type), tailExpected.map(e => e.type));
+  assert.deepEqual(tail.slice(0, tailIndex).map(e => e.seq), tailExpected.map(e => e.seq), 'the copy keeps the source cursors its events refer to');
+  assert.ok(!tail.slice(0, tailIndex).some(e => e.type === 'USER_MESSAGE'), 'the chosen line travels as the prompt, not as an event');
+
+  // And the copy is a session that works: the next message reaches a model with
+  // the copied history (Pi's session file is rebuilt from those events).
+  await api(`/api/tasks/${fromHere.id}/message`, { text: 'третье' });
+  assert.equal((await terminal(api, fromHere.id)).status, 'SUCCEEDED', fixture.logs());
+  assert.equal((await api(`/api/tasks/${fromHere.id}/events?limit=0`)).filter(e => e.type === 'USER_MESSAGE').length, 1,
+    'the message sent to the branch is its second turn, not a duplicate of the prompt');
+
+  await assert.rejects(() => api(`/api/tasks/${id}/fork`, { turnId: `user-${users[0].seq}`, direction: 'sideways' }), err => err.code === 'INPUT_INVALID');
 });
 
 test('/api/info carries a bootId that changes only when the process restarts', { timeout: 30000 }, async t => {

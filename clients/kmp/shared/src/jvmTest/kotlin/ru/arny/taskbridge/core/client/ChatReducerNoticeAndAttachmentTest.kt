@@ -111,4 +111,23 @@ class ChatReducerNoticeAndAttachmentTest {
             reducer.snapshot().items.filterIsInstance<ChatItem.Note>().single().text,
         )
     }
+
+    /**
+     * Отказ провайдера: сервер публикует PROVIDER_WAIT один раз на раунд ожидания,
+     * и заметка объясняет, откуда взялась пауза длиной в час (2026-10-09 сессия
+     * стояла 1 ч 31 мин, а в ленте не было ни строки о причине). Повтор того же
+     * текста вторую заметку не создаёт — раунд один и тот же.
+     */
+    @Test
+    fun providerWaitBecomesOneNotePerWaitRound() {
+        val reducer = ChatReducer(task, seedInitial = false)
+        val message = "Провайдер wormsoft/anthropic/claude-opus-5.5 не принял запрос: HTTP 429 «user reached the limit». " +
+            "Pi жив и повторит через 1 ч 31 мин — сессия не зависла."
+        reducer.apply(TaskEvent(taskId = "t", seq = 1, type = "PROVIDER_WAIT", message = message))
+        reducer.apply(TaskEvent(taskId = "t", seq = 2, type = "PROVIDER_WAIT", message = message))
+        // Конец ожидания — не текст для ленты: его видно в статусе и диагностике.
+        reducer.apply(TaskEvent(taskId = "t", seq = 3, type = "PROVIDER_WAIT_END", message = "Провайдер снова отвечает"))
+
+        assertEquals(listOf(message), reducer.snapshot().items.filterIsInstance<ChatItem.Note>().map { it.text })
+    }
 }

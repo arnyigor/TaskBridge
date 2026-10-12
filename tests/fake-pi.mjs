@@ -57,7 +57,7 @@ async function approvalGate(toolCallId, toolName, args) {
 // The answer arrives as several deltas a few ms apart, like a streamed
 // response: that is what lets TaskBridge measure TG from usage (output tokens
 // over the time the deltas actually spanned).
-function finish(text, fail = false, errorMessage = 'Fixture model error') {
+function finish(text, fail = false, errorMessage = 'Fixture model error', thinking = null) {
   // `stream-many` answers are long: one delta per character, so a client can
   // (re)connect in the middle of a stream.
   const parts = text.length > 40 ? [...text] : text.length >= 3 ? [text.slice(0, 1), text.slice(1, 2), text.slice(2)] : [text];
@@ -66,7 +66,11 @@ function finish(text, fail = false, errorMessage = 'Fixture model error') {
     send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: parts[index] } });
     index += 1;
     if (index < parts.length) { setTimeout(emit, parts.length > 40 ? 8 : 25); return; }
-    const message = { role: 'assistant', content: [{ type: 'text', text }], usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage } : {}) };
+    // Reasoning arrives as a `thinking` content part, not as a stream of deltas:
+    // on the live server 159 sessions carried 1002 such parts and zero
+    // thinking_delta frames (models in use do not stream reasoning).
+    const content = [...(thinking ? [{ type: 'thinking', thinking }] : []), { type: 'text', text }];
+    const message = { role: 'assistant', content, usage: { input: 1000, output: 100, totalTokens: 1100 }, stopReason: fail ? 'error' : 'stop', ...(fail ? { errorMessage } : {}) };
     persist(message);
     send({ type: 'message_end', message });
     streaming = false;
@@ -96,12 +100,23 @@ function finish(text, fail = false, errorMessage = 'Fixture model error') {
 //   fault-notices emits the retry-in-progress notices a live model produces while
 //                 it is being retried, plus one genuine error notice, then answers
 //                 normally — the chat must keep only the genuine one
+//   fault-provider-wait  the provider refuses the request (HTTP 429 with
+//                 retry-after) and Pi announces the wait twice, then nothing:
+//                 the reported shape of a session that looked idle-but-working
+//                 for 90 minutes (2026-10-09)
+//   fault-provider-flap  one retry episode announced by every shape Pi uses:
+//                 its own sentence, the extension's sentence and the machine
+//                 frame — one `periodId`, then a tick inside it and a new
+//                 episode (2026-10-12)
+//   fault-provider-give-up  the extension announces a retry, then gives up
+//                 («… failed and pi-limits-wait is not retrying: …»): the wait
+//                 state must not survive it (2026-10-12)
 //   fault-slow-stream  streams 8 tokens with a 3 s pause in the middle: a local
 //                 engine chunking slowly, where the pause IS generation time
 let deaf = false;
 let tailAfterAbort = false;
 function faultOf(message) {
-  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|slow-stream)/);
+  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
@@ -198,6 +213,100 @@ async function runFault(fault, command, respond) {
   }
   // deaf and child combine: `fault-deaf fault-child` is a hung tool that
   // ignores abort and holds a child process.
+  if (fault === 'provider-wait') {
+    // Verbatim from a live session (2026-10-09): wormsoft answered HTTP 429
+    // «user reached the limit» with `retry-after-ms 5452000`, and the extension
+    // announced the same ~1h31m wait every 15 s. Two announcements here — the
+    // same round, so the tick must not become a second note — then silence.
+    const startedAt = Date.now();
+    const deadline = startedAt + 5_472_000;
+    // «Ждать осталось столько-то» для всех объявлений одного раунда: остаток —
+    // это дедлайн минус текущий момент, поэтому текстовое и машинное объявления
+    // указывают на один и тот же момент повтора (у живой сессии было именно так).
+    const waitNotice = () => {
+      const left = Math.round((deadline - Date.now()) / 1000);
+      const remaining = `${Math.floor(left / 3600)}h ${Math.floor((left % 3600) / 60)}m ${left % 60}s`;
+      return `⏳ pi-limits-wait: rate limited on wormsoft/anthropic/claude-opus-5.5; still alive, waiting ${remaining} before the next retry. Why: HTTP 429 retry-after-ms 5452000; Error: 429: {"statusCode":429,"message":"user reached the limit","timestamp":"2026-10-09T23:08:52.863Z"}`;
+    };
+    // The tool result is in and the model call is what the provider refused.
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    // Both shapes the extension emits for one wait: the machine-readable frame
+    // (provider, model, reason, plannedDeadline) and the human sentence that
+    // follows it. One round — one report, whichever source is read first.
+    send({ type: 'extension_ui_request', id: 'wait-json-1', method: 'setStatus', statusKey: 'oira666.pi-limits-wait.json', statusText: JSON.stringify({
+      v: 1, ext: '0.6.5', event: 'wait', waitId: 'wait-1', periodId: 'period-1', reason: 'rate-limit',
+      message: waitNotice(),
+      error: 'HTTP 429 retry-after-ms 5452000; Error: 429: {"statusCode":429,"message":"user reached the limit","timestamp":"2026-10-09T23:08:52.863Z"}',
+      model: { provider: 'wormsoft', id: 'anthropic/claude-opus-5.5' },
+      plannedDurationMs: 5_472_000, plannedDeadline: deadline, startedAt, remainingMs: deadline - Date.now(),
+      attempt: null, maxAttempts: null, livelinessIntervalMs: 15000, controlFile: null,
+    }) });
+    send({ type: 'extension_ui_request', id: 'wait-1', method: 'notify', notifyType: 'info', message: waitNotice() });
+    setTimeout(() => send({ type: 'extension_ui_request', id: 'wait-2', method: 'notify', notifyType: 'info', message: waitNotice() }), 120);
+    return;
+  }
+  if (fault === 'provider-flap') {
+    // Живая сессия 2026-10-12 (openai-codex/gpt-5.6-sol): один эпизод отказа Pi
+    // объявляет трижды и разными словами — сам («<модель> network/timeout error
+    // for 0m 15s; waiting, then retrying. Error: fetch failed»), расширение
+    // («⏳ pi-limits-wait: network/timeout error on <модель>; … Why: fetch failed»)
+    // и машинным кадром с тем же `periodId`. Внутри эпизода причина и срок
+    // меняются (retry, 5 с), после чего эпизод закрывается своим ходом.
+    const startedAt = Date.now();
+    const waitFrame = (id, periodId, reason, durationMs, message) => send({
+      type: 'extension_ui_request', id, method: 'setStatus', statusKey: 'oira666.pi-limits-wait.json',
+      statusText: JSON.stringify({
+        v: 1, ext: '0.7.0', event: 'wait', waitId: id, periodId, reason, message, error: 'fetch failed',
+        model: { provider: 'openai-codex', id: 'gpt-5.6-sol' },
+        plannedDurationMs: durationMs, plannedDeadline: startedAt + durationMs, startedAt,
+        remainingMs: durationMs, attempt: 1, maxAttempts: null, livelinessIntervalMs: 15000, controlFile: null,
+      }),
+    });
+    const notice = (id, message) => send({ type: 'extension_ui_request', id, method: 'notify', notifyType: 'info', message });
+    const extensionProse = (clock) => `⏳ pi-limits-wait: network/timeout error on openai-codex/gpt-5.6-sol; still alive, waiting ${clock} before the next retry. Why: fetch failed`;
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    notice('flap-core-1', 'openai-codex/gpt-5.6-sol network/timeout error for 0m 15s; waiting, then retrying. Error: fetch failed');
+    waitFrame('flap-json-1', 'period-flap-1', 'network', 15000, extensionProse('0m 15s'));
+    notice('flap-ext-1', extensionProse('0m 15s'));
+    setTimeout(() => {
+      // Тик того же эпизода: другой `waitId`, другая причина и срок, `periodId` тот же.
+      waitFrame('flap-json-2', 'period-flap-1', 'retry', 5000, '⏳ pi-limits-wait: retrying after error on openai-codex/gpt-5.6-sol; still alive, waiting 0m 05s before the next retry. Why: fetch failed');
+      notice('flap-core-2', 'openai-codex/gpt-5.6-sol retrying after error in 0m 05s. Error: fetch failed');
+    }, 120);
+    // Новый эпизод: другой `periodId` — об этом уже надо сказать снова.
+    setTimeout(() => waitFrame('flap-json-3', 'period-flap-2', 'retry', 5000, '⏳ pi-limits-wait: retrying after error on openai-codex/gpt-5.6-sol; still alive, waiting 0m 05s before the next retry. Why: fetch failed'), 260);
+    setTimeout(() => finish('после повтора провайдера'), 420);
+    return;
+  }
+  if (fault === 'provider-give-up') {
+    // 2026-10-12: отказ, после которого повтора НЕ будет. Расширение говорит об этом двумя
+    // способами — прозой («<модель> failed and pi-limits-wait is not retrying: <причина>»)
+    // и машинным кадром `give_up` (без полей model/periodId: модель и причина — в тексте).
+    // Сначала обычное ожидание: оно взводит состояние «ждём провайдера».
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    send({
+      type: 'extension_ui_request', id: 'give-wait-1', method: 'setStatus', statusKey: 'oira666.pi-limits-wait.json',
+      statusText: JSON.stringify({
+        v: 1, ext: '0.6.5', event: 'wait', waitId: 'wait-give-1', periodId: 'period-give-1', reason: 'retry',
+        message: '⏳ pi-limits-wait: retrying after error on strata-iq3/qwen3.8-flash; still alive, waiting 0m 15s before the next retry. Why: Connection error.',
+        error: 'Connection error.', model: { provider: 'strata-iq3', id: 'qwen3.8-flash' },
+        plannedDurationMs: 15000, plannedDeadline: Date.now() + 15000, startedAt: Date.now(), remainingMs: 15000,
+        attempt: 1, maxAttempts: null, livelinessIntervalMs: 15000, controlFile: null,
+      }),
+    });
+    const giveUp = 'strata-iq3/qwen3.8-flash failed and pi-limits-wait is not retrying: Connection error.';
+    send({ type: 'extension_ui_request', id: 'give-notify', method: 'notify', notifyType: 'info', message: giveUp });
+    send({
+      type: 'extension_ui_request', id: 'give-json', method: 'setStatus', statusKey: 'oira666.pi-limits-wait.json',
+      statusText: JSON.stringify({
+        v: 1, ext: '0.6.5', event: 'give_up', waitId: null, reason: null, message: giveUp, error: 'Connection error.',
+        plannedDurationMs: null, plannedDeadline: null, startedAt: null, remainingMs: null, attempt: null,
+        maxAttempts: null, livelinessIntervalMs: 15000, controlFile: null,
+      }),
+    });
+    // Ход остаётся открытым: состояние ожидания обязано сняться ДО терминального статуса.
+    return;
+  }
   if (command.message.includes('fault-deaf')) deaf = true;
   if (command.message.includes('fault-child')) {
     const { spawn } = await import('node:child_process');
@@ -242,6 +351,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         ? { tokens, contextWindow, percent: Math.round((tokens / contextWindow) * 100) }
         : { tokens, contextWindow: null, percent: null },
     });
+  }
+  // The command list TaskBridge asks for before deciding how to deliver a slash text.
+  // 'nudge' is the extension command the delivery test drives; the fake does not run
+  // commands — it only has to be honest about which ones exist.
+  if (command.type === 'get_commands') {
+    return respond({ commands: [{ name: 'nudge', source: 'command', description: 'Надзиратель bench-harness' }] });
   }
   if (command.type === 'get_available_models') return respond({ models: availableModels });
   if (command.type === 'get_available_thinking_levels') return respond({ levels: ['off', 'low', 'medium', 'high'] });
@@ -289,6 +404,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     return;
   }
   if (['prompt', 'steer', 'follow_up'].includes(command.type)) {
+    // Which RPC the text arrived by decides whether a command is queued (Pi refuses)
+    // or executed at once: the test reads this log instead of guessing from frames.
+    try {
+      fs.appendFileSync('pi-deliveries.ndjson', JSON.stringify({ type: command.type, message: command.message }) + '\n');
+    } catch { /* a fixture without a writable cwd must not fail the turn */ }
     if (command.message.includes('reject')) return respond({}, false);
     const fault = faultOf(command.message);
     if (fault) return runFault(fault, command, respond);
@@ -356,6 +476,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const modelError = command.message.includes('model-error-json')
       ? '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}'
       : 'Fixture model error';
-    pending = setTimeout(() => finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError), command.message.includes('slow') ? 10000 : 80);
+    const thinkingText = command.message.includes('think') ? 'Сначала взвешу варианты, потом отвечу.' : null;
+    pending = setTimeout(() => finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError, thinkingText), command.message.includes('slow') ? 10000 : 80);
   }
 });

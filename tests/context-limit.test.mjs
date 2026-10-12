@@ -92,8 +92,16 @@ test('a context limit is stored per session and compacts the history when exceed
 
   const task = await api(`/api/tasks/${id}`);
   assert.equal(task.status, 'SUCCEEDED');
-  assert.equal(task.compaction.count, 1);
-  assert.equal(task.compaction.last.summary, 'Сжатая сводка предыдущего контекста');
+  // Сжатие стримит свои кадры асинхронно: сразу после терминального события
+  // счётчик ещё может быть нулевым (гонка поймана под нагрузкой 2026-10-12 —
+  // тест падал то у одного прогона, то у другого, независимо от правок в коде).
+  let compacted = task;
+  for (let i = 0; i < 100 && compacted.compaction.count !== 1; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    compacted = await api(`/api/tasks/${id}`);
+  }
+  assert.equal(compacted.compaction.count, 1, 'сжатие состоит и считается само, пусть и не в том же кадре');
+  assert.equal(compacted.compaction.last.summary, 'Сжатая сводка предыдущего контекста');
   assert.equal((await api(`/api/tasks/${id}/context`)).limit.tokens, 40000);
 
   // Clearing the limit is explicit: null means "no limit".

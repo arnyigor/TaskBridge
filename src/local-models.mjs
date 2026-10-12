@@ -328,6 +328,11 @@ export function parseStrataMetrics(payload) {
       reusedRatio = reused === null ? 0 : Math.min(1, reused / tokens);
     }
   }
+  // Абсолютный порог: сотни новых токенов читаются за счёт накладных расходов, и «новые / prompt_ms»
+  // даёт 40-500 tok/s — это разгон, а не prefill (замер 2026-10-08: 387 новых за 1896 мс = «204 tok/s»,
+  // 33 за 756 мс = «43.7»). Порог тот же, что в панели Strata.
+  const FRESH_TOKENS_FOR_PP = 4096;
+  const fewFreshTokens = freshTokens !== null && freshTokens < FRESH_TOKENS_FOR_PP;
   const cachedPrompt = reusedRatio !== null && reusedRatio > STRATA_CACHED_PROMPT_MAX;
 
   // Живая скорость чтения промпта: движок отдаёт её сам (`prefill_tok_s_mean`),
@@ -345,7 +350,7 @@ export function parseStrataMetrics(payload) {
   let pp = null;
   if (reading && livePp !== null && livePp > 0) {
     pp = livePp;
-  } else if (last && !cachedPrompt) {
+  } else if (last && !cachedPrompt && !fewFreshTokens) {
     const ms = num(last.prompt_ms);
     if (freshTokens !== null && freshTokens > 0 && ms !== null && ms > 0) pp = freshTokens / ms * 1000;
   }
@@ -367,7 +372,7 @@ export function parseStrataMetrics(payload) {
     elapsedS: live ? num(live.elapsed_s) : null,
     pp,
     // Причину называем только когда числа нет: живое чтение PP даёт.
-    ppUnavailable: pp === null && cachedPrompt ? 'conversation-cache' : null,
+    ppUnavailable: pp === null ? (cachedPrompt ? 'conversation-cache' : (fewFreshTokens ? 'few-fresh-tokens' : null)) : null,
     promptTokens,
     freshTokens,
     tg: liveRate ?? lastRate,

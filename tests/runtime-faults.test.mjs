@@ -190,6 +190,115 @@ test('retry-in-progress notices are not shown as errors while the model is worki
   assert.match(raw, /retrying after error in 0m 05s/);
 });
 
+// Тишина провайдера — не работа модели, но без разбора уведомления она выглядела
+// именно работой: 2026-10-09 wormsoft ответил HTTP 429 «user reached the limit»
+// с `retry-after-ms 5452000`, и сессия полтора часа показывала «Pi is working»
+// без событий модели, без ошибки и без способа отличить молчащего провайдера от
+// сломанного моста. Известное ожидание показывается один раз на раунд (объявление
+// приходит каждые 15 с), с моментом повтора и без пузыря в чате.
+test('a provider wait is reported with its retry moment and stays one note per round', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-provider-wait' });
+
+  const waiting = await until(async () => {
+    const current = await api(`/api/tasks/${task.id}`);
+    return current.providerWait ? current : null;
+  });
+  const wait = waiting.providerWait;
+  assert.equal(wait.kind, 'rate-limit');
+  assert.equal(wait.model, 'wormsoft/anthropic/claude-opus-5.5');
+  assert.equal(wait.provider, 'wormsoft');
+  assert.equal(wait.httpStatus, 429);
+  assert.equal(wait.reason, 'user reached the limit', 'причина — словами провайдера, а не сырой строкой уведомления');
+  assert.equal(wait.waitMs, 5_472_000, '1h 31m 12s из объявления');
+  const left = Date.parse(wait.retryAt) - Date.parse(wait.at);
+  assert.ok(Math.abs(left - wait.waitMs) < 2000, `retryAt — абсолютный момент повтора (${left} мс)`);
+  assert.equal(waiting.runtime.state, 'WORKING');
+  assert.equal(waiting.runtime.activity, 'waiting_model', '«streaming» означало бы, что провайдер отвечает');
+  assert.match(waiting.current, /^Ждём провайдера: HTTP 429/);
+
+  const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+  const waits = events.filter(event => event.type === 'PROVIDER_WAIT');
+  assert.equal(waits.length, 1, 'тик того же раунда — не второе сообщение');
+  assert.match(waits[0].message, /не принял запрос: HTTP 429 «user reached the limit»/);
+  assert.match(waits[0].message, /повторит через 1 ч 31 мин/);
+  assert.equal(waits[0].data.retryAt, wait.retryAt);
+  assert.deepEqual(events.filter(event => event.type === 'UI_NOTIFY'), [], 'объявление о повторе по-прежнему не пузырь чата');
+});
+
+// Тот же отказ, но так, как его объявляет живой Pi (2026-10-12, сессия
+// openai-codex/gpt-5.6-sol): один эпизод пришёл тремя кадрами и разными словами —
+// «<модель> network/timeout error for 0m 15s; waiting, then retrying. Error: fetch
+// failed» (сам Pi), «⏳ pi-limits-wait: network/timeout error on <модель>; … Why:
+// fetch failed» (расширение) и машинным кадром с тем же `periodId`. Раундом
+// считался дедлайн, поэтому на один отказ в чат уходило три заметки: «Провайдер
+// не принял запрос: fetch failed», «… через 15 с» и «Провайдер
+// openai-codex/gpt-5.6-sol … через 15 с». Оператор читал это как ошибку там, где
+// субагент ещё работал («немного бредово… ошибок стало больше»).
+test('a retry episode stays one note, and Pi\'s own wording names the model', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-provider-flap' });
+  const done = await settle(api, task.id);
+  assert.equal(done.status, 'SUCCEEDED', done.error || '');
+  assert.equal(done.providerWait, null, 'ожидание не переживает свой эпизод');
+
+  const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+  const waits = events.filter(event => event.type === 'PROVIDER_WAIT');
+  assert.equal(waits.length, 2, 'тик того же эпизода — не второе сообщение, новый период — сообщение');
+  // Первый эпизод объявила проза самого Pi: модель названа, «retrying after error
+  // in …» не делает моделью слово «in».
+  assert.match(waits[0].message,
+    /^Провайдер openai-codex\/gpt-5\.6-sol не принял запрос: fetch failed\./);
+  assert.match(waits[0].message, /повторит через 15 с/, 'текст — снимок начала эпизода, а не последнего тика (5 с)');
+  assert.equal(waits[0].data.model, 'openai-codex/gpt-5.6-sol');
+  assert.equal(waits[0].data.reason, 'fetch failed', 'причина — из оборота «Error:/Why: …», без точки на конце');
+  assert.equal(waits[0].data.waitMs, 15000, 'срок — из оборота «error for 0m 15s»');
+  // Второй эпизод назвал машинный кадр — и по нему же видно, что эпизод новый.
+  assert.equal(waits[1].data.periodId, 'period-flap-2');
+  assert.match(waits[1].message, /повторит через 5 с/);
+  assert.deepEqual(events.filter(event => event.type === 'PROVIDER_WAIT_END').map(event => event.message),
+    ['Провайдер снова отвечает']);
+  assert.deepEqual(events.filter(event => event.type === 'UI_NOTIFY'), [], 'объявление о повторе — не пузырь чата');
+});
+
+// Отказ, после которого повтора не будет (2026-10-12). Расширение говорит об этом
+// прозой («<модель> failed and pi-limits-wait is not retrying: <причина>») и машинным
+// кадром `give_up`. До этой правки состояние «ждём провайдера» оставалось взведённым до
+// терминального статуса сессии (то есть обещало повтор, которого не будет), а в чат
+// уходила сырая английская строка без модели и причины.
+test('a give-up ends the wait and reaches the chat in our own words', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-provider-give-up' });
+
+  const notice = await until(async () => {
+    const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+    return events.find(event => event.type === 'UI_NOTIFY' && event.data?.giveUp) || null;
+  });
+  assert.equal(notice.message, 'Провайдер strata-iq3/qwen3.8-flash не принял запрос и повторять не будет: Connection error.');
+
+  // Состояние ожидания снимает сам кадр `give_up`, а не конец сессии: ход в фикстуре
+  // остаётся открытым, поэтому статус ещё RUNNING.
+  const cleared = await until(async () => {
+    const current = await api(`/api/tasks/${task.id}`);
+    return current.status === 'RUNNING' && current.providerWait === null ? current : null;
+  });
+  assert.equal(cleared.providerWait, null, '«ждём провайдера» после give_up — ложь');
+
+  const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+  assert.equal(events.filter(event => event.type === 'PROVIDER_WAIT').length, 1, 'ожидание до отказа объявляется один раз');
+  assert.deepEqual(
+    events.filter(event => event.type === 'UI_NOTIFY').map(event => event.message),
+    ['Провайдер strata-iq3/qwen3.8-flash не принял запрос и повторять не будет: Connection error.'],
+    'сырая строка расширения в чат не попадает',
+  );
+});
+
 // Speeds for a local model. Two measured errors, both fixed and pinned here:
 //  - PP was prompt-tokens / time-to-first-token. A local engine keeps the prompt
 //    in its KV cache and prefills only the new tail — Strata's own log for one
@@ -220,4 +329,12 @@ test('local model speeds: no invented PP, and TG over the real generation window
   assert.ok(metrics.tg > 0 && metrics.tg < 5, `tg=${metrics.tg} (expected ~2.4 tok/s)`);
   assert.equal(metrics.tgSource, 'usage');
   assert.equal(metrics.source, 'usage');
+  // Session speeds: one turn with TG and no PP must leave the PP average empty
+  // instead of counting a zero (that is how a cache hit would drag it down).
+  assert.equal(done.speeds.turns, 1);
+  assert.equal(done.speeds.ppMax, null);
+  assert.equal(done.speeds.ppAvg, null);
+  assert.equal(done.speeds.ppTurns, 0);
+  assert.equal(done.speeds.tgTurns, 1);
+  assert.equal(done.speeds.tgAvg, metrics.tg);
 });

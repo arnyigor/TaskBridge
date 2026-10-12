@@ -5,21 +5,33 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
 import ru.arny.taskbridge.platform.PlatformBackHandler
 import ru.arny.taskbridge.ui.Navigator
 import ru.arny.taskbridge.ui.Screen
 import ru.arny.taskbridge.ui.chat.ChatScreen
 import ru.arny.taskbridge.ui.chat.DraftChatScreen
+import ru.arny.taskbridge.ui.projects.ProjectWorkspaceScreen
+import ru.arny.taskbridge.ui.projects.ProjectsScreen
+import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.models.LocalModelsScreen
 import ru.arny.taskbridge.ui.connect.ConnectScreen
@@ -39,7 +51,7 @@ fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) 
     TaskBridgeTheme(graph.theme) {
         val connection = graph.connection
         val navigator = remember(connection?.baseUrl) {
-            Navigator(if (connection == null) Screen.Connect else Screen.Sessions).also(navigatorSink)
+            Navigator(if (connection == null) Screen.Connect else Screen.Sessions()).also(navigatorSink)
         }
         // A saved address is trusted until the server says it needs a code: without this
         // the session list looks alive and every write fails with an auth error.
@@ -47,14 +59,49 @@ fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) 
         LaunchedEffect(openTaskId, connection) {
             if (connection != null && openTaskId != null) navigator.openChat(openTaskId)
         }
+        val scope = rememberCoroutineScope()
+        val exitSnackbar = remember { SnackbarHostState() }
+        fun exitApplication() {
+            graph.platform.exitApp()
+        }
         PlatformBackHandler(enabled = navigator.canPop) { navigator.pop() }
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             if (connection == null) {
-                ConnectScreen(graph, onConnected = { navigator.reset(Screen.Sessions) })
+                ConnectScreen(graph, onConnected = { navigator.reset(Screen.Sessions()) })
             } else {
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val wide = maxWidth >= 840.dp
-                    if (wide) WideLayout(graph, connection, navigator) else NarrowLayout(graph, connection, navigator)
+                    if (wide) {
+                        WideLayout(graph, connection, navigator)
+                    } else {
+                        PlatformBackHandler(enabled = graph.platform.kind == "android" && !navigator.canPop) {
+                            val visibleSnackbar = exitSnackbar.currentSnackbarData
+                            if (visibleSnackbar != null) {
+                                visibleSnackbar.dismiss()
+                                exitApplication()
+                            } else {
+                                scope.launch {
+                                    val result = exitSnackbar.showSnackbar(
+                                        message = "Нажмите «Выйти» или назад ещё раз",
+                                        actionLabel = "Выйти",
+                                        duration = SnackbarDuration.Indefinite,
+                                    )
+                                    if (result == SnackbarResult.ActionPerformed) exitApplication()
+                                }
+                                scope.launch {
+                                    delay(2_000)
+                                    exitSnackbar.currentSnackbarData?.dismiss()
+                                }
+                            }
+                        }
+                        Box(Modifier.fillMaxSize()) {
+                            NarrowLayout(graph, connection, navigator)
+                            AppSnackbarHost(
+                                hostState = exitSnackbar,
+                                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(16.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -65,12 +112,36 @@ fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) 
 @Composable
 private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, navigator: Navigator) {
     when (val screen = navigator.current) {
-        Screen.Connect, Screen.Sessions -> SessionsScreen(
+        Screen.Connect -> SessionsScreen(
             graph, connection,
+            projectId = null,
             selectedTaskId = null,
             onOpen = { navigator.openChat(it) },
             onDraft = { navigator.openDraft(it) },
             onSettings = { navigator.push(Screen.Settings) },
+            onProjects = { navigator.push(Screen.Projects) },
+        )
+        is Screen.Sessions -> SessionsScreen(
+            graph, connection,
+            projectId = screen.projectId,
+            selectedTaskId = null,
+            onOpen = { navigator.openChat(it) },
+            onDraft = { navigator.openDraft(it) },
+            onSettings = { navigator.push(Screen.Settings) },
+            onProjects = { navigator.push(Screen.Projects) },
+            onClearProject = { navigator.reset(Screen.Sessions()) },
+        )
+        Screen.Projects -> ProjectsScreen(
+            graph, connection,
+            onOpenProject = { navigator.openProject(it) },
+            onOpenAllSessions = { navigator.reset(Screen.Sessions()) },
+            onSettings = { navigator.push(Screen.Settings) },
+        )
+        is Screen.Project -> ProjectWorkspaceScreen(
+            graph, connection, screen.projectId,
+            onBack = { navigator.pop() },
+            onOpenSessions = { navigator.openProjectSessions(screen.projectId) },
+            onOpenSession = { navigator.openChat(it) },
         )
         is Screen.Chat -> ChatScreen(
             graph, connection, screen.taskId,
@@ -93,20 +164,41 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
 /** Desktop and tablets: the list stays on the left, the chat on the right. */
 @Composable
 private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigator: Navigator) {
-    val open = navigator.stack.lastOrNull { it is Screen.Chat || it is Screen.Draft }
+    // Only a chat/draft at the top owns the detail pane. Searching the whole stack
+    // resurrected an old chat while the operator was browsing Projects.
+    val open = navigator.current.takeIf { it is Screen.Chat || it is Screen.Draft }
     val chat = open as? Screen.Chat
+    // A project-filtered Sessions entry remains immediately below Chat/Draft. Read
+    // that stack context instead of `current`, which is the chat itself.
+    val projectSessions = navigator.stack.lastOrNull { it is Screen.Sessions } as? Screen.Sessions
     val settingsOpen = navigator.current == Screen.Settings
     val localModelsOpen = navigator.current == Screen.LocalModels
     val processesOpen = navigator.current == Screen.Processes
+    val projectsOpen = navigator.current == Screen.Projects || navigator.current is Screen.Project
+    val projectOpen = navigator.current as? Screen.Project
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(360.dp).fillMaxHeight()) {
-            SessionsScreen(
-                graph, connection,
-                selectedTaskId = chat?.taskId,
-                onOpen = { navigator.openChat(it) },
-                onDraft = { navigator.openDraft(it) },
-                onSettings = { navigator.push(Screen.Settings) },
-            )
+            // The left pane is the navigation level the operator is on: the dashboard,
+            // or the sessions of one project — never both at once.
+            if (projectsOpen) {
+                ProjectsScreen(
+                    graph, connection,
+                    onOpenProject = { navigator.openProject(it) },
+                    onOpenAllSessions = { navigator.reset(Screen.Sessions()) },
+                    onSettings = { navigator.push(Screen.Settings) },
+                )
+            } else {
+                SessionsScreen(
+                    graph, connection,
+                    projectId = projectSessions?.projectId,
+                    selectedTaskId = chat?.taskId,
+                    onOpen = { navigator.openChat(it) },
+                    onDraft = { navigator.openDraft(it) },
+                    onSettings = { navigator.push(Screen.Settings) },
+                    onProjects = { navigator.push(Screen.Projects) },
+                    onClearProject = { navigator.reset(Screen.Sessions()) },
+                )
+            }
         }
         VerticalDivider()
         Box(Modifier.weight(1f).fillMaxHeight()) {
@@ -114,6 +206,12 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
                 localModelsOpen -> LocalModelsScreen(graph, connection, onBack = { navigator.pop() })
                 processesOpen -> ProcessesScreen(connection, onBack = { navigator.pop() })
                 settingsOpen -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) })
+                projectOpen != null -> ProjectWorkspaceScreen(
+                    graph, connection, projectOpen.projectId,
+                    onBack = { navigator.pop() },
+                    onOpenSessions = { navigator.openProjectSessions(projectOpen.projectId) },
+                    onOpenSession = { navigator.openChat(it) },
+                )
                 chat != null -> ChatScreen(
                     graph, connection, chat.taskId,
                     onBack = { navigator.pop() },

@@ -1,0 +1,391 @@
+{
+  "task": {
+    "id": "c46c7ed85a29",
+    "createdAt": "2026-10-11T19:52:43.538Z",
+    "updatedAt": "2026-10-11T19:52:43.543Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "второй вопрос",
+    "title": null,
+    "workspacePath": null,
+    "sourcePath": null,
+    "worktree": false,
+    "current": "Ветка",
+    "assistantText": "",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": null,
+    "git": null,
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": null,
+    "metrics": null,
+    "speeds": null,
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": null,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "forkedFrom": "0852e52d51e4",
+    "_runtimeFacts": {
+      "state": "STOPPED",
+      "activity": null
+    },
+    "runtime": {
+      "state": "STOPPED",
+      "activity": null
+    },
+    "providerWait": null,
+    "sessionAvailable": false
+  },
+  "events": [
+    {
+      "at": "2026-10-11T19:52:43.281Z",
+      "taskId": "c46c7ed85a29",
+      "type": "STATUS",
+      "message": "Follow-up sent to Pi",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 30
+    },
+    {
+      "at": "2026-10-11T19:52:43.281Z",
+      "taskId": "c46c7ed85a29",
+      "type": "RUNTIME_STATE",
+      "message": "IDLE → WORKING",
+      "data": {
+        "from": "IDLE",
+        "to": "WORKING",
+        "fromActivity": null,
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "STATUS"
+      },
+      "seq": 31
+    },
+    {
+      "at": "2026-10-11T19:52:43.283Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 32
+    },
+    {
+      "at": "2026-10-11T19:52:43.284Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "второй вопрос"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 33
+    },
+    {
+      "at": "2026-10-11T19:52:43.285Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "второй вопрос"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 34
+    },
+    {
+      "at": "2026-10-11T19:52:43.286Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 35
+    },
+    {
+      "at": "2026-10-11T19:52:43.286Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 36
+    },
+    {
+      "at": "2026-10-11T19:52:43.287Z",
+      "taskId": "c46c7ed85a29",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "streaming",
+        "toActivity": "tool",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 37
+    },
+    {
+      "at": "2026-10-11T19:52:43.287Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "tool_execution_update",
+      "data": {
+        "pi": {
+          "type": "tool_execution_update",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          },
+          "partialResult": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 38
+    },
+    {
+      "at": "2026-10-11T19:52:43.288Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 39
+    },
+    {
+      "at": "2026-10-11T19:52:43.289Z",
+      "taskId": "c46c7ed85a29",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "tool",
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 40
+    },
+    {
+      "at": "2026-10-11T19:52:43.429Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 2"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 44
+    },
+    {
+      "at": "2026-10-11T19:52:43.430Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 45
+    },
+    {
+      "at": "2026-10-11T19:52:43.433Z",
+      "taskId": "c46c7ed85a29",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 46
+    },
+    {
+      "at": "2026-10-11T19:52:43.434Z",
+      "taskId": "c46c7ed85a29",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 47
+    },
+    {
+      "at": "2026-10-11T19:52:43.475Z",
+      "taskId": "c46c7ed85a29",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → IDLE",
+      "data": {
+        "from": "WORKING",
+        "to": "IDLE",
+        "fromActivity": "streaming",
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "TASK_SUCCEEDED"
+      },
+      "seq": 48
+    },
+    {
+      "at": "2026-10-11T19:52:43.475Z",
+      "taskId": "c46c7ed85a29",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 49
+    },
+    {
+      "at": "2026-10-11T19:52:43.543Z",
+      "taskId": "c46c7ed85a29",
+      "type": "TASK_FORKED",
+      "message": "Ветка сессии 0852e52d51e4: перенесено событий — 17.",
+      "data": {
+        "from": "0852e52d51e4",
+        "fromSeq": 29,
+        "throughSeq": null
+      },
+      "seq": 50
+    },
+    {
+      "at": "2026-10-11T19:52:43.543Z",
+      "taskId": "c46c7ed85a29",
+      "type": "RUNTIME_STATE",
+      "message": "— → STOPPED",
+      "data": {
+        "from": null,
+        "to": "STOPPED",
+        "fromActivity": null,
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "TASK_FORKED"
+      },
+      "seq": 51
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "второй вопрос",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-initial",
+      "role": "assistant",
+      "text": "Ответ 2",
+      "thinking": "",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": [
+        {
+          "id": "call-2",
+          "name": "read",
+          "state": "done"
+        }
+      ]
+    }
+  ]
+}

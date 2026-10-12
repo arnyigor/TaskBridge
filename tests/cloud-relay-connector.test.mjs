@@ -180,14 +180,38 @@ test('the cloud allowlist is a method+path match, and traversal is never allowed
   assert.equal(isCloudRequestAllowed('GET', '/api/tasks'), true);
   assert.equal(isCloudRequestAllowed('GET', '/api/tasks/tb_1'), true);
   assert.equal(isCloudRequestAllowed('POST', '/api/tasks/tb_1/message'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/tasks/tb_1/workspace/trust'), true);
   assert.equal(isCloudRequestAllowed('GET', '/api/models'), true);
   assert.equal(isCloudRequestAllowed('GET', '/api/tasks/tb_1/events?tail=20'), true);
+  // The project dashboard, work items and the resume engine travel the same way as
+  // everything else (ROADMAP_FULL.md: «если операция работает локально, она должна
+  // быть транспортабельна через Relay»). A path with two ids included.
+  assert.equal(isCloudRequestAllowed('GET', '/api/projects/overview'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/projects/fixture/memory?q=worktree'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/projects/fixture/sessions?limit=20'), true);
+  assert.equal(isCloudRequestAllowed('PATCH', '/api/projects/fixture/preferences'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/work-items?projectId=fixture'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/work-items'), true);
+  assert.equal(isCloudRequestAllowed('PATCH', '/api/work-items/wi_1'), true);
+  assert.equal(isCloudRequestAllowed('DELETE', '/api/work-items/wi_1/sessions/tb_1'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/work-items/wi_1/resume'), true);
+  assert.equal(isCloudRequestAllowed('PUT', '/api/tasks/tb_1/recap'), true);
+  assert.equal(isCloudRequestAllowed('GET', '/api/tasks/tb_1/work-items'), true);
   // Denied: wrong method, PC-only surfaces, traversal, anything outside /api.
+  // Memory is read-only on the phone too: no method but GET reaches it, so a
+  // future write path cannot be opened by accident through the allowlist.
+  assert.equal(isCloudRequestAllowed('POST', '/api/projects/fixture/memory'), false);
+  assert.equal(isCloudRequestAllowed('PUT', '/api/projects/fixture/memory'), false);
+  assert.equal(isCloudRequestAllowed('DELETE', '/api/projects/fixture/memory'), false);
+  // And the search itself cannot be widened into another project's folder.
+  assert.equal(isCloudRequestAllowed('GET', '/api/projects/../../memory'), false);
   assert.equal(isCloudRequestAllowed('DELETE', '/api/tasks'), false);
   assert.equal(isCloudRequestAllowed('POST', '/api/tasks/tb_1/apply'), false);
   assert.equal(isCloudRequestAllowed('GET', '/api/project-browser'), false);
   assert.equal(isCloudRequestAllowed('POST', '/api/cloud/config'), false);
   assert.equal(isCloudRequestAllowed('POST', '/api/uploads'), false);
+  assert.equal(isCloudRequestAllowed('PUT', '/api/work-items/wi_1'), false, 'методы не подменяются');
+  assert.equal(isCloudRequestAllowed('POST', '/api/tasks/tb_1/recap'), false, 'recap пишется PUT, а не POST по этому пути');
   assert.equal(isCloudRequestAllowed('GET', '/api/tasks/../config.json'), false);
   assert.equal(isCloudRequestAllowed('GET', '/session/tb_1'), false);
   assert.equal(isCloudRequestAllowed('GET', 'http://evil.example/api/tasks'), false);
@@ -227,4 +251,19 @@ test('a REQUEST outside the allowlist is denied with a code, not executed', asyn
   await waitFor(() => client.received.filter(frame => frame.type === 'RESPONSE').length === 2, 'the allowed answer');
   assert.deepEqual(requested, [{ url: 'http://127.0.0.1:1/api/tasks', method: 'GET' }]);
   assert.equal(client.received.filter(frame => frame.type === 'RESPONSE').at(-1).status, 'OK');
+
+  // Project memory is readable from the phone and only readable: the search travels
+  // to the machine's own API, while a write to the same path is refused before it
+  // is ever executed.
+  client.send(JSON.stringify(createEnvelope({ type: 'REQUEST', machineId: MACHINE.id, commandId: 'r-3', payload: { method: 'GET', path: '/api/projects/fixture/memory?q=worktree' } })));
+  await waitFor(() => client.received.filter(frame => frame.type === 'RESPONSE').length === 3, 'the memory answer');
+  assert.deepEqual(requested.at(-1), { url: 'http://127.0.0.1:1/api/projects/fixture/memory?q=worktree', method: 'GET' });
+  assert.equal(client.received.filter(frame => frame.type === 'RESPONSE').at(-1).status, 'OK');
+
+  client.send(JSON.stringify(createEnvelope({ type: 'REQUEST', machineId: MACHINE.id, commandId: 'r-4', payload: { method: 'POST', path: '/api/projects/fixture/memory' } })));
+  await waitFor(() => client.received.filter(frame => frame.type === 'RESPONSE').length === 4, 'the write denial');
+  const writeDenied = client.received.filter(frame => frame.type === 'RESPONSE').at(-1);
+  assert.equal(writeDenied.status, 'DENIED');
+  assert.equal(writeDenied.payload.error.code, 'CLOUD_PATH_DENIED');
+  assert.equal(requested.length, 2, 'запись в память не дошла до API машины');
 });

@@ -55,6 +55,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -91,6 +92,7 @@ import ru.arny.taskbridge.core.api.LocalModelMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
+import ru.arny.taskbridge.core.api.ProviderWait
 import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.UploadFile
@@ -105,13 +107,17 @@ import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.sessions.stageLabel
+import ru.arny.taskbridge.platform.PlatformServices
 import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.common.StatusDot
+import ru.arny.taskbridge.ui.common.formatMoment
+import ru.arny.taskbridge.ui.common.humanDuration
 import ru.arny.taskbridge.ui.common.parseIsoMillis
+import ru.arny.taskbridge.ui.common.sinceLabel
 import ru.arny.taskbridge.ui.common.sourceLabel
 import ru.arny.taskbridge.ui.common.timeRange
 import ru.arny.taskbridge.ui.sessions.FieldLabel
@@ -136,9 +142,13 @@ private sealed interface ChatDialog {
     data object ConfirmStop : ChatDialog
     data object ConfirmClear : ChatDialog
     data object ConfirmDelete : ChatDialog
+    data object ConfirmTrustWorkspace : ChatDialog
     data object Rename : ChatDialog
     data object ModelSettings : ChatDialog
     data object ChooseModel : ChatDialog
+
+    /** MR-07: повтор последнего ответа с выбором параметров (модели). */
+    data class Rerun(val turnId: String) : ChatDialog
 }
 
 @OptIn(FlowPreview::class)
@@ -215,6 +225,14 @@ fun ChatScreen(
         scope.launch { listState.animateScrollToItem(0) }
     }
 
+    // Выбор нескольких сообщений (как «Select messages» в ChatGPT): тап по сообщению
+    // отмечает его, «Копировать» отправляет отмеченные в буфер в порядке ленты.
+    var selecting by remember(taskId) { mutableStateOf(false) }
+    val selectedIds = remember(taskId) { mutableStateMapOf<String, Boolean>() }
+    fun toggleSelected(id: String) {
+        selectedIds[id] = selectedIds[id] != true
+    }
+
     var copyingHistory by remember { mutableStateOf(false) }
     LaunchedEffect(copyingHistory) {
         if (!copyingHistory) return@LaunchedEffect
@@ -242,12 +260,16 @@ fun ChatScreen(
                 onBack = onBack,
                 onDialog = { dialog = it },
                 onCopyHistory = { copyingHistory = true },
+                onSelectMessages = { selectedIds.clear(); selecting = true },
             )
         },
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
         Column(
+            // Полоса выбора идёт над лентой: счётчик и кнопки должны быть видны там же,
+            // где отметки, а не в меню, которое уже закрылось.
+
             Modifier.padding(padding).fillMaxSize().imePadding().onPreviewKeyEvent { event ->
                 // Esc = жёсткий стоп, как в консоли: подтверждение → killTree.
                 // preview-фаза доходит сюда раньше текстового поля, а открытый
@@ -262,6 +284,23 @@ fun ChatScreen(
         ) {
             if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
             LinkBanner(state.link, onRetry = { session.reconnectNow() })
+            // Полоса выбора стоит над лентой: счётчик и кнопки должны быть видны там же,
+            // где отметки, а не в меню, которое уже закрылось.
+            if (selecting) {
+                SelectionBar(
+                    count = selectedIds.count { it.value },
+                    onCopy = {
+                        // Тексты те же, что у одиночного «Копировать», в порядке ленты.
+                        val texts = selectedMessages(state.chat.items, selectedIds.filterValues { it }.keys)
+                        platform.copyText(texts.joinToString("\n\n"))
+                        snackbar.currentSnackbarData?.dismiss()
+                        scope.launch { snackbar.showSnackbar(if (texts.size == 1) "Сообщение скопировано" else "Скопировано сообщений: ${texts.size}") }
+                        selecting = false
+                        selectedIds.clear()
+                    },
+                    onCancel = { selecting = false; selectedIds.clear() },
+                )
+            }
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 when {
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -283,6 +322,9 @@ fun ChatScreen(
                             snackbar.currentSnackbarData?.dismiss()
                             scope.launch { snackbar.showSnackbar("Сообщение скопировано") }
                         },
+                        selectionMode = selecting,
+                        selectedIds = selectedIds,
+                        onToggleSelect = ::toggleSelected,
                     )
                 }
                 // Reading older messages: the list stays put; new output only lights up the jump button.
@@ -318,10 +360,16 @@ fun ChatScreen(
                         DropdownMenuItem(text = { Text("Настройки сессии") }, leadingIcon = { Icon(AppIcons.Layers, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
                         DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { close(); session.compact() })
                         DropdownMenuItem(text = { Text("Перезапустить сессию") }, leadingIcon = { Icon(AppIcons.Refresh, null) }, onClick = { close(); session.restartSession() })
+                        DropdownMenuItem(
+                            text = { Text(if (task.workspaceTrusted) "Папка доверенная" else "Доверять папке") },
+                            leadingIcon = { Icon(AppIcons.Shield, null) },
+                            enabled = task.workspacePath != null && !task.workspaceTrusted && "workspace-trust" !in state.busy,
+                            onClick = { close(); dialog = ChatDialog.ConfirmTrustWorkspace },
+                        )
                     }
                 },
                 top = {
-                    DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
+                    DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                     if (task != null && task.pendingPrompts.isNotEmpty()) {
                         QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
                     }
@@ -339,15 +387,12 @@ fun ChatScreen(
                 },
                 value = draft,
                 onValueChange = { next ->
-                    val attachment = largeTextAttachmentFromDraftChange(draft.text, next.text)
-                    if (attachment == null) {
-                        draft = next
-                    } else {
-                        files = files + UploadFile(pastedTextFileName(graph.nowIso()), "text/plain", attachment.text.encodeToByteArray())
-                        draft = TextFieldValue(
-                            attachment.remainingText,
-                            TextRange(attachment.caret.coerceIn(0, attachment.remainingText.length)),
-                        )
+                    val paste = pastedTextDraft(draft.text, next.text, graph.nowIso())
+                    draft = paste.caret
+                        ?.let { TextFieldValue(paste.text, TextRange(it.coerceIn(0, paste.text.length))) }
+                        ?: next
+                    paste.attached?.let { attached ->
+                        files = files + attached
                         scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
                     }
                 },
@@ -388,6 +433,7 @@ private fun ChatTopBar(
     onBack: () -> Unit,
     onDialog: (ChatDialog) -> Unit,
     onCopyHistory: () -> Unit,
+    onSelectMessages: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val task = state.task
@@ -435,6 +481,7 @@ private fun ChatTopBar(
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Копировать историю") }, leadingIcon = { Icon(AppIcons.Copy, null) }, enabled = state.chat.items.isNotEmpty(), onClick = { menu = false; onCopyHistory() })
+                    DropdownMenuItem(text = { Text("Выбрать сообщения") }, leadingIcon = { Icon(AppIcons.Check, null) }, enabled = state.chat.items.isNotEmpty(), onClick = { menu = false; onSelectMessages() })
                     DropdownMenuItem(text = { Text("Переименовать") }, leadingIcon = { Icon(AppIcons.Edit, null) }, onClick = { menu = false; onDialog(ChatDialog.Rename) })
                     DropdownMenuItem(text = { Text("Очистить чат") }, leadingIcon = { Icon(AppIcons.Eraser, null) }, enabled = !working, onClick = { menu = false; onDialog(ChatDialog.ConfirmClear) })
                     DropdownMenuItem(
@@ -446,6 +493,29 @@ private fun ChatTopBar(
             }
         },
     )
+}
+
+/**
+ * Полоса выбора сообщений: сколько отмечено, скопировать отмеченные или выйти из
+ * режима. «Копировать» выключена, пока ничего не отмечено — иначе в буфер ушла бы
+ * пустая строка.
+ */
+@Composable
+private fun SelectionBar(count: Int, onCopy: () -> Unit, onCancel: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                if (count > 0) "Выбрано: $count" else "Отметьте сообщения",
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Spacer(Modifier.weight(1f))
+            TextButton(onClick = onCopy, enabled = count > 0) { Text("Копировать") }
+            TextButton(onClick = onCancel) { Text("Отмена") }
+        }
+    }
 }
 
 /**
@@ -481,6 +551,35 @@ internal fun chatTranscript(items: List<ChatItem>, title: String?, time: (start:
     }
 }.trimEnd() + "\n"
 
+/**
+ * Один элемент так, как его копирует кнопка «Копировать» у сообщения: для заметки —
+ * в том же виде, в каком она стоит в транскрипте («— … —»), иначе текст как есть.
+ *
+ * Вынесено из обработчиков кнопок, чтобы «скопировать одно» и «скопировать
+ * выбранные» не расходились: второе — это те же тексты через пустую строку.
+ */
+internal fun ChatItem.copyText(): String = when (this) {
+    is ChatItem.User -> text.trim()
+    is ChatItem.Assistant -> text.trim()
+    is ChatItem.Note -> "— ${text.trim()} —"
+}
+
+/**
+ * Тексты выбранных сообщений — как «Copy» после выбора сообщений в ChatGPT: в порядке
+ * ленты, без заголовков и пометок ролей.
+ *
+ * Порядок задаёт сама лента (`items`), а не порядок нажатий: в буфер уезжает то, что
+ * видно сверху вниз. Пустые (ход без текста, из одних вызовов инструментов)
+ * выбрасываются здесь же — иначе в тексте оставались бы пустые абзацы, а счётчик
+ * «скопировано сообщений» считал бы то, чего в буфере нет.
+ */
+internal fun selectedMessages(items: List<ChatItem>, selected: Set<String>): List<String> =
+    items.filter { it.id in selected }.map { it.copyText() }.filter { it.isNotEmpty() }
+
+/** Те же тексты одним куском: между сообщениями пустая строка. */
+internal fun selectedMessagesText(items: List<ChatItem>, selected: Set<String>): String =
+    selectedMessages(items, selected).joinToString("\n\n")
+
 @Composable
 private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
     when (link) {
@@ -513,6 +612,10 @@ private fun MessageList(
     onDialog: (ChatDialog) -> Unit,
     onViewFile: (FileTarget) -> Unit,
     onCopyMessage: (String) -> Unit,
+    /** Режим выбора сообщений: у каждого видна отметка, тап переключает выбор. */
+    selectionMode: Boolean = false,
+    selectedIds: Map<String, Boolean> = emptyMap(),
+    onToggleSelect: (String) -> Unit = {},
 ) {
     val platform = graph.platform
     val ownClient = graph.settings.clientId
@@ -520,7 +623,16 @@ private fun MessageList(
     val reversed = remember(items) { items.asReversed() }
     // Older history loads when the top of the chat comes into view.
     val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 10 } == true } }
-    LaunchedEffect(nearTop, state.reachedStart) { if (nearTop && !state.reachedStart) session.loadOlder() }
+    // The effect must restart when a page ARRIVES, not only when `nearTop` flips:
+    // after the first page both `nearTop` and `reachedStart` keep their values, so
+    // the old key pair never changed again and the operator had to tap «Показать
+    // более раннюю историю» once per page. The loaded size is what moves; a page
+    // that brings nothing does not change it, so this cannot spin, and
+    // `loadingOlder` keeps the next page from starting before the previous one
+    // has been applied.
+    LaunchedEffect(nearTop, state.reachedStart, state.loadingOlder, items.size) {
+        if (nearTop && !state.reachedStart && !state.loadingOlder) session.loadOlder()
+    }
 
     if (items.isEmpty() && !state.reachedStart) {
         // The newest window had nothing to show; the session is paging back for it.
@@ -558,9 +670,12 @@ private fun MessageList(
                                 time = parseIsoMillis(item.at)?.let { platform.formatClock(it) }.orEmpty(),
                                 source = sourceLabel(item.clientId, ownClient),
                                 actions = MessageActions(
-                                    copy = { onCopyMessage(item.text) },
+                                    copy = { onCopyMessage(item.copyText()) },
+                                    onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                                    selected = selectedIds[item.id] == true,
                                     edit = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.EditMessage(it, item.text)) } },
                                     fork = turnId?.takeIf { !historyLocked }?.let { { session.fork(it) } },
+                                    forkFrom = turnId?.takeIf { !historyLocked }?.let { { session.fork(it, from = true) } },
                                     deleteFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.DeleteFrom(it)) } },
                                 ),
                                 onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
@@ -574,10 +689,14 @@ private fun MessageList(
                                 item = item,
                                 time = timeRange(platform, item.at, item.endedAt),
                                 actions = MessageActions(
-                                    copy = { onCopyMessage(item.text) },
+                                    copy = { onCopyMessage(item.copyText()) },
+                                    onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                                    selected = selectedIds[item.id] == true,
                                     edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.id, item.text)) }) else null,
                                     fork = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
+                                    forkFrom = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it, from = true) } },
                                     regenerate = if (newest) ({ session.regenerate(item.id) }) else null,
+                                    rerunWith = if (newest) ({ onDialog(ChatDialog.Rerun(item.id)) }) else null,
                                     continueAnswer = if (newest && (item.text.isNotBlank() || item.tools.isNotEmpty())) ({ session.continueAnswer(item.id) }) else null,
                                     deleteFrom = item.id.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
                                 ),
@@ -595,7 +714,12 @@ private fun MessageList(
                                 },
                             )
                         }
-                        is ChatItem.Note -> NoteRow(item, onCopy = { onCopyMessage(item.text) })
+                        is ChatItem.Note -> NoteRow(
+                            item = item,
+                            onCopy = { onCopyMessage(item.copyText()) },
+                            selected = selectedIds[item.id] == true,
+                            onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                        )
                     }
                 }
             }
@@ -721,8 +845,27 @@ private fun QueueLine(
 }
 
 @Composable
-private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog: ModelCatalog?, nowMillis: () -> Long, onRefresh: () -> Unit, onCopy: (String) -> Unit) {
+private fun DeliveryDiagnostics(
+    state: ChatSessionState,
+    info: ApiInfo?,
+    catalog: ModelCatalog?,
+    platform: PlatformServices,
+    nowMillis: () -> Long,
+    onRefresh: () -> Unit,
+    onCopy: (String) -> Unit,
+) {
     var open by remember(state.taskId) { mutableStateOf(false) }
+    // Возраст событий и длительность сессии в диагностике должны идти, пока панель
+    // открыта, — иначе «12 с назад» застыло бы на моменте открытия.
+    var openTick by remember(state.taskId) { mutableStateOf(nowMillis()) }
+    LaunchedEffect(state.taskId, open) {
+        if (open) {
+            // Сразу свежий замер: без него первую секунду после открытия видны
+            // возрасты с прошлого открытия панели.
+            openTick = nowMillis()
+            while (true) { delay(1000); openTick = nowMillis() }
+        }
+    }
     val answer = state.chat.items.filterIsInstance<ChatItem.Assistant>().lastOrNull()
     // Live engine PP (llama.cpp reports it in /api/info before the first token)
     // makes «Модель читает промпт» work for a local session even on its first
@@ -755,7 +898,8 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         localProvider != null && sessionProvider == localProvider -> info.engine?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 }
         else -> externalMetrics?.tg?.takeIf { it.isFinite() && it > 0.0 }
     }
-    val readingPp = livePp ?: state.task?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
+    val sessionMetrics = state.task?.metrics
+    val readingPp = livePp ?: sessionMetrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
     // Прогресс чтения промпта у внешнего сервера (Strata отдаёт prompt_read /
     // prompt_total): «читает промпт · 64% · 80K / 126K» вместо просто факта — по
     // одному проценту не видно, сколько уже прочитано и сколько осталось.
@@ -801,40 +945,13 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
     }
     val compactElapsed = compactingSince?.takeIf { it > 0 }?.let { (compactTick - it).coerceAtLeast(0) }
     val compactingDetail = compactElapsed?.let { " · ${elapsedClock(it)}" }.orEmpty()
-    val phase = when {
-        state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
-        state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
-        state.task?.status == "FAILED" -> "Ошибка · подробнее"
-        state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$compactingDetail$readingDetail · подробнее"
-        answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
-        readingPp != null && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingDetail"
-        readingPrompt && answer?.text.isNullOrBlank() == true -> "Модель читает промпт$readingDetail"
-        // История больше окна модели: провайдер отвечает 400, Pi повторяет запрос, и
-        // «ожидается ответ агента» висит без событий — это не задержка модели.
-        contextOverflow(state.task, info) != null && answer?.active != true -> "История не влезает в окно модели · подробнее"
-        answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
-        answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
-        answer?.active == true -> "Сообщение передано · ожидается ответ агента"
-        state.task?.pendingPrompts?.isNotEmpty() == true -> "Сообщение в очереди"
-        else -> "Диагностика доставки"
-    }
-    val details = listOfNotNull(
-        "Сессия: ${state.taskId}",
-        "Связь: ${if (state.link is LinkState.Live) "поток подключён" else state.link}",
-        "Последний контакт: ${state.lastContactAt ?: "ещё нет"}",
-        "Последнее событие: ${state.lastEventType ?: "ещё нет"} · ${state.lastEventAt ?: "—"}",
-        "Pi: ${state.task?.let { if (displayStateOf(it).active) stageLabel(it.status) else displayStateOf(it).label } ?: "—"}",
-        "Статус сервера: ${state.task?.status ?: "—"} · ${state.task?.runtime?.state ?: "—"}",
-        "Активность: ${state.task?.runtime?.activity ?: "—"} · ${state.task?.current ?: "—"}",
-        "Модель сессии: ${state.task?.let(::sessionModelLabel) ?: "—"}",
-        *sessionDiagnosticsLines(state.task, info).toTypedArray(),
-        externalMetrics?.let(::strataPpLine),
-        "Событие № ${state.chat.cursor} · в очереди ${state.task?.pendingPrompts?.size ?: 0}",
-        state.task?.errorCode?.let { "Код ошибки: $it" },
-        state.task?.error,
-        "Подтверждение агента не означает ответ провайдера. Пока нет событий модели, источник задержки неизвестен."
-            .takeIf { answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty()) },
-    ).joinToString("\n")
+    // «Читает промпт» — только по живому признаку: фаза движка (Strata: «reading the
+    // prompt») или PP из /api/info, и только пока модель ещё ничего не выдала.
+    // `task.metrics.pp` прошлого хода не гаснет, и с ним подпись «Модель читает
+    // промпт» висела над уже идущими размышлениями модели.
+    val answerSilent = answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty())
+    val readsPrompt = readsPromptNow(readingPrompt = readingPrompt, livePp = livePp, answerSilent = answerSilent)
+    val details = buildDiagnosticsDetails(state, info, externalMetrics, now = openTick) { formatMoment(platform, it) }
     // Elapsed since the turn started, ticking every second. Seeded from the last
     // user message's server timestamp (the client and the server clocks may drift
     // by seconds on a LAN, which is fine for a rough «0:34»), so a session opened
@@ -855,16 +972,41 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         if (startedAt != null) while (true) { delay(1000); tick = nowMillis() }
     }
     val elapsed = startedAt?.let { (tick - it).coerceAtLeast(0) }
+    // Подпись состояния — после счётчика: «повтор через 1 ч 31 мин» идёт по секундам
+    // клиента (`tick`), и с застывшим «сейчас» она показывала бы уже прошедший повтор.
+    val phase = when {
+        state.link !is LinkState.Live -> "Связь с сервером не подтверждена"
+        state.outbox.isNotEmpty() -> "Отправка сообщения · подробнее"
+        state.task?.status == "FAILED" -> "Ошибка · подробнее"
+        // Отказ провайдера важнее прочего: пока он держит ход, не идёт ничего.
+        state.task?.providerWait != null -> providerWaitPhase(state.task.providerWait, tick)
+        state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$compactingDetail$readingDetail · подробнее"
+        answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
+        readsPrompt && answerSilent -> "Модель читает промпт$readingDetail"
+        // История больше окна модели: провайдер отвечает 400, Pi повторяет запрос, и
+        // «ожидается ответ агента» висит без событий — это не задержка модели.
+        contextOverflow(state.task, info) != null && answer?.active != true -> "История не влезает в окно модели · подробнее"
+        answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
+        answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
+        answer?.active == true -> "Сообщение передано · ожидается ответ агента"
+        state.task?.pendingPrompts?.isNotEmpty() == true -> "Сообщение в очереди"
+        else -> "Диагностика доставки"
+    }
     // Line 1 segments: elapsed · TTFT · PP · TG.
     val stats = listOfNotNull(
         elapsed?.let { elapsedClock(it) },
         catalog?.latencyFor(state.task?.model ?: state.task?.requestedModel)?.let { l -> (l.p50Ms ?: l.avgMs)?.let { "TTFT ${formatLatencyMs(it)}" } },
-        readingPp?.let { "PP ${formatSpeed(it)}" },
+        readingPp?.let { "PP ${formatSpeed(it)}" + (if (livePp != null) " (ход)" else "") },
+        // Сессионный агрегат рядом с текущим ходом: живые PP и медиана сессии — разные метрики,
+        // и без подписи их принимают за противоречие (PP 1672 в прогрессе против ≈2220 в диагностике).
+        sessionMetrics?.pp?.takeIf {
+            it.isFinite() && it > 0.0 && livePp != null && readingPp != null && it != readingPp
+        }?.let { "сессия: PP ${if (sessionMetrics.ppApproximate) "≈" else ""}${formatSpeed(it)}" },
         (liveTg ?: state.task?.metrics?.tg?.takeIf { it.isFinite() && it > 0.0 })?.let { "TG ${formatSpeed(it)} ток/с" },
     )
     // Line 2: model · context usage · queued count. Живое число движка важнее
     // `usage` прошлого хода: на сжатии/длинном промпте они расходятся в разы.
-    val used = sessionContextUsed(state.task, info)
+    val used = sessionContextUsed(state.task)
     val window = sessionContextWindow(state.task, info)
     val display = state.task?.let(::displayStateOf)
     val dotColor = when {
@@ -873,31 +1015,33 @@ private fun DeliveryDiagnostics(state: ChatSessionState, info: ApiInfo?, catalog
         state.task?.status == "QUEUED" -> LocalStatusColors.current.queued
         else -> LocalStatusColors.current.muted
     }
+    val contextLabel = if (window != null && window > 0 && used != null) {
+        "Контекст ${(used * 100.0 / window).roundToInt()}% (${formatTokensK(used)}/${formatTokensK(window)})"
+    } else null
+    val queueLabel = state.task?.pendingPrompts?.size?.takeIf { it > 0 }?.let { "В очереди: $it" }
+    // Живой запрос движка — отдельным сегментом с подписью: у первого хода своего
+    // числа у Pi ещё нет (lastUsage пуст), и раньше панель показывала в этом месте
+    // размер промпта движка — тем самым числом, которое расходилось с настройками.
+    val enginePrompt = liveEnginePrompt(state.task?.model ?: state.task?.requestedModel, info)
+    val engineLabel = enginePrompt?.takeIf { it > 0 && it != used }?.let { "Промпт движка: ${formatTokensK(it)}" }
+    val meta = stats + listOfNotNull(contextLabel, engineLabel, queueLabel)
     Column(Modifier.fillMaxWidth().clickable { open = true }) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(8.dp).clip(CircleShape).background(dotColor))
             Spacer(Modifier.width(6.dp))
             Text(phase, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            if (stats.isNotEmpty()) {
-                Spacer(Modifier.width(8.dp))
-                Text(stats.joinToString("  ·  "), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-            }
             Spacer(Modifier.width(4.dp))
             Icon(AppIcons.ChevronRight, "Открыть диагностику", Modifier.size(16.dp))
         }
-        state.task?.let { task ->
-            Row(Modifier.fillMaxWidth().padding(top = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (window != null && window > 0 && used != null) {
-                    Spacer(Modifier.width(8.dp))
-                    // A plain box bar: no LinearProgressIndicator overload surprises across platforms.
-                    Box(Modifier.weight(1f).height(4.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-                        Box(Modifier.fillMaxHeight().fillMaxWidth(((used * 1.0 / window).coerceIn(0.0, 1.0)).toFloat()).background(MaterialTheme.colorScheme.primary))
-                    }
-                    Spacer(Modifier.width(6.dp))
-                    Text("${(used * 100.0 / window).roundToInt()}% (${formatTokensK(used)}/${formatTokensK(window)})", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                Spacer(Modifier.width(8.dp))
-                Text("оч. ${task.pendingPrompts.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (meta.isNotEmpty()) {
+            FlowRow(Modifier.fillMaxWidth().padding(start = 14.dp, top = 2.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                for (line in meta) Text(line, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+            }
+        }
+        if (window != null && window > 0 && used != null) {
+            // A plain box bar: no LinearProgressIndicator overload surprises across platforms.
+            Box(Modifier.fillMaxWidth().padding(start = 14.dp, top = 4.dp).height(4.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
+                Box(Modifier.fillMaxHeight().fillMaxWidth(((used * 1.0 / window).coerceIn(0.0, 1.0)).toFloat()).background(MaterialTheme.colorScheme.primary))
             }
         }
     }
@@ -1006,6 +1150,15 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             onConfirm = { session.delete(); onClose() },
             onDismiss = onClose,
         )
+        ChatDialog.ConfirmTrustWorkspace -> ConfirmDialog(
+            title = "Доверять папке проекта?",
+            text = "Pi сможет загружать из этой папки локальные инструкции, навыки и расширения. " +
+                "Текущий процесс Pi будет остановлен; следующее сообщение продолжит сохранённую сессию.",
+            confirm = "Доверять",
+            destructive = false,
+            onConfirm = { session.trustWorkspace(); onClose() },
+            onDismiss = onClose,
+        )
         ChatDialog.Rename -> TextEditDialog(
             title = "Название сессии",
             hint = null,
@@ -1017,6 +1170,7 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
         )
         ChatDialog.ModelSettings -> ModelSheet(state, session, graph, onDialog = onDialog, onViewFile = onViewFile, onClose = onClose)
         ChatDialog.ChooseModel -> QuickModelChooser(state, session, graph, onClose)
+        is ChatDialog.Rerun -> QuickRerunChooser(state, session, graph, turnId = dialog.turnId, onClose = onClose)
     }
 }
 
@@ -1052,6 +1206,61 @@ private fun QuickModelChooser(state: ChatSessionState, session: ChatSession, gra
                 session.setModel(model)
             }
         }, onDismiss = onClose, pendingKey = pendingKey ?: if ("model" in state.busy) "" else null)
+    }
+}
+
+/**
+ * MR-07: «повторить с параметрами» — выбор модели, которой запросить последний ответ
+ * заново. Модель выбирается тем же списком, что и смена модели сессии
+ * ([ModelChooser]): второй список моделей разошёлся бы с первым. Уровень мышления
+ * здесь не спрашивается — он остаётся настройкой сессии (её видно и меняется в
+ * «Сессия»); сервер принимает и его, но показывать два выбора в одном шаге значит
+ * обещать больше, чем видно на экране.
+ */
+@Composable
+private fun QuickRerunChooser(
+    state: ChatSessionState,
+    session: ChatSession,
+    graph: AppGraph,
+    turnId: String,
+    onClose: () -> Unit,
+) {
+    val connection = graph.connection ?: return
+    var catalog by remember(connection) { mutableStateOf(connection.sessions.peekModels()) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+    var loadAttempt by remember { mutableStateOf(0) }
+    var chosen by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(connection, loadAttempt) {
+        connection.sessions.models().onSuccess { catalog = it }.onFailure { loadError = it.message ?: "Не удалось загрузить модели" }
+    }
+    // Выбор сделан — повтор ушёл. Закрываем, когда сервер перестал держать ключ
+    // «rerun» в занятых: до этого шаг выглядит незавершённым.
+    LaunchedEffect(state.busy, chosen) {
+        if (chosen != null && "rerun" !in state.busy) onClose()
+    }
+    if (catalog == null) {
+        AdaptiveSheet(title = "Повторить с параметрами", onDismiss = onClose, subtitle = loadError) {
+            if (loadError == null) CircularProgressIndicator()
+            else OutlinedButton(onClick = { loadError = null; loadAttempt++ }) { Text("Повторить") }
+        }
+    } else {
+        val sessionListState by connection.sessions.state.collectAsState()
+        ModelChooser(
+            catalog = catalog!!,
+            selected = state.task?.model,
+            settings = graph.settings,
+            info = sessionListState.info,
+            pendingKey = chosen,
+            onPick = { model ->
+                if (chosen == null) {
+                    chosen = model.key
+                    // Дальше всё делает сервер: применяет модель к сессии и задаёт
+                    // вопрос заново. Уровень не назван — значит остаётся прежним.
+                    session.rerun(turnId, model = model)
+                }
+            },
+            onDismiss = onClose,
+        )
     }
 }
 
@@ -1252,14 +1461,17 @@ internal fun liveEnginePrompt(model: ModelRef?, info: ApiInfo?): Long? {
 }
 
 /**
- * Сколько токенов занимает контекст сессии — с приоритетом на живое число движка:
- * пока модель работает, это размер запроса в работе, а не `usage` прошлого хода
- * (после сжатия оно вообще относится к старым числам). Оценка Pi — фолбэк.
+ * Сколько токенов занимает контекст сессии по числам Pi — то же число, что в
+ * настройках сессии («Текущий размер контекста (Pi)» из `get_session_stats.contextUsage`).
+ *
+ * Размер промпта, который движок обрабатывает прямо сейчас (`liveEnginePrompt`), сюда
+ * не подставляется: 2026-10-08 панель показывала «Контекст 25% (50.4K/204.8K)» (живой
+ * запрос движка), а настройки — «Всего в запросе: 99K из 204K · 48%», и один и тот же
+ * контекст читался двумя разными числами. Живое число движка показывается отдельной
+ * строкой с подписью «Движок обрабатывает промпт».
  */
-internal fun sessionContextUsed(task: Task?, info: ApiInfo?): Long? =
-    liveEnginePrompt(task?.model ?: task?.requestedModel, info)
-        ?: task?.compaction?.last?.estimatedTokensAfter
-        ?: task?.lastUsage?.totalTokens
+internal fun sessionContextUsed(task: Task?): Long? =
+    task?.lastUsage?.totalTokens ?: task?.compaction?.last?.estimatedTokensAfter
 
 /**
  * История с резервом ответа не влезает в окно модели, или null если влезает (или
@@ -1274,17 +1486,224 @@ internal fun sessionContextUsed(task: Task?, info: ApiInfo?): Long? =
  * Правило движка — промпт + резерв ответа + 8 ≤ окно, поэтому одного сравнения
  * истории с окном мало: 2026-09-30 при истории 99.4K и окне 131072 всё выглядело
  * «76% заполнено», а запрос всё равно отклонялся: 99465 + 32768 + 8 = 132241.
+ *
+ * Резерв берётся не из каталога, а из того, что провайдер действительно отправляет
+ * (см. answerReserveTokens): у Codex его нет вовсе, и там правило сводится к
+ * «история против окна».
  */
 internal fun contextOverflow(task: Task?, info: ApiInfo?): Pair<Long, Long>? {
     val window = sessionContextWindow(task, info)?.takeIf { it > 0 } ?: return null
     val tokens = task?.compaction?.last?.estimatedTokensAfter ?: task?.lastUsage?.totalTokens ?: return null
-    val maxTokens = task?.model?.maxTokens ?: task?.requestedModel?.maxTokens ?: 0
-    return if (tokens + maxTokens > window) tokens to window else null
+    val reserve = answerReserveTokens(task)
+    return if (tokens + reserve > window) tokens to window else null
+}
+
+/**
+ * Отправляет ли провайдер лимит вывода полем запроса.
+ *
+ * Лимит вывода есть у всех адаптеров Pi, кроме Codex: `openai-codex-responses`
+ * собирает тело запроса из model/store/stream/instructions/input/text/include/
+ * prompt_cache_key/tool_choice/parallel_tool_calls, и поля лимита вывода там нет
+ * ни одного (проверено по установленному пакету 2026-10-12). У остальных — есть:
+ * openai-responses (`max_output_tokens`), openai-completions (`max_completion_tokens`/
+ * `max_tokens`), anthropic и mistral (`max_tokens`), google (`maxOutputTokens`).
+ */
+internal fun providerSendsOutputLimit(provider: String?): Boolean = provider != "openai-codex"
+
+/**
+ * Резерв ответа — сколько токенов провайдер держит под ответ в том же запросе.
+ *
+ * Число в каталоге модели — это её потолок вывода, а не обязательство провайдера:
+ * Codex лимит вывода не отправляет, поэтому `maxTokens` 128000 у gpt-5.5 в окне
+ * 272000 не занимает ничего, и вычитать его из окна нельзя.
+ *
+ * Проверено на живой сессии 8855fa011534 (openai-codex/gpt-5.5, окно 272000):
+ * промпт 217571 токен прошёл и ответ получен, а сравнение с резервом объявляло
+ * именно эту сессию «не влезает в окно» (217767 + 128000 > 272000) и советовало
+ * поднять окно до 345775.
+ */
+internal fun answerReserveTokens(task: Task?): Long {
+    val model = task?.model ?: task?.requestedModel ?: return 0
+    if (!providerSendsOutputLimit(model.provider)) return 0
+    return model.maxTokens ?: 0
+}
+
+/**
+ * Идёт ли чтение промпта прямо сейчас.
+ *
+ * Признаки только живые: фаза движка (Strata отдаёт «reading the prompt») или его PP
+ * из `/api/info`. PP прошлого хода (`task.metrics.pp`) сюда не попадает: он не
+ * гаснет после ответа, и с ним «Модель читает промпт» висела над уже идущими
+ * размышлениями — пока в ответе не появится текст, то есть всё время работы think-
+ * блока. Пока модель выдала что-то видимое ([answerSilent] == false), чтения нет.
+ */
+internal fun readsPromptNow(readingPrompt: Boolean, livePp: Double?, answerSilent: Boolean): Boolean =
+    answerSilent && (readingPrompt || livePp != null)
+
+/**
+ * Текст панели «Диагностика» (и кнопки «Копировать»).
+ *
+ * Вынесено из composable, чтобы это можно было проверить текстом: здесь сходятся
+ * четыре источника (задача, история чата, возраст событий, метрики движка), и
+ * перепутанное поле («Начало сессии» из updatedAt, «Текущее сообщение» из ответа
+ * модели) видно только на живом экране.
+ *
+ * Диагностику читает человек: вместо сырых ISO-моментов («2026-10-09T06:53:56.9Z»)
+ * — местное время [moment] и возраст события (секунды/минуты назад).
+ */
+internal fun buildDiagnosticsDetails(
+    state: ChatSessionState,
+    info: ApiInfo?,
+    externalMetrics: LocalModelMetrics?,
+    now: Long,
+    moment: (Long) -> String,
+): String {
+    val task = state.task
+    val pendingPrompts = task?.pendingPrompts.orEmpty()
+    val lastUserMessage = state.chat.items.filterIsInstance<ChatItem.User>().lastOrNull()
+    val sessionStart = parseIsoMillis(task?.createdAt)
+    val sessionActive = task?.let(::displayStateOf)?.active == true
+    // У законченной сессии длительность считается до последнего обновления, у
+    // идущей — до текущего момента (пока панель открыта, now идёт вперёд).
+    val sessionEnd = if (sessionActive) null else parseIsoMillis(task?.updatedAt) ?: parseIsoMillis(state.lastEventAt)
+    val sessionDuration = sessionStart?.let { start ->
+        val end = sessionEnd ?: now
+        humanDuration(end - start).takeIf { end > start }
+    }
+    val sessionTitle = task?.let { t ->
+        t.title?.takeIf { it.isNotBlank() } ?: t.prompt?.lineSequence()?.firstOrNull { it.isNotBlank() }?.trim()?.take(80)
+    }
+    val answer = state.chat.items.filterIsInstance<ChatItem.Assistant>().lastOrNull()
+    return listOfNotNull(
+        "Сессия: ${state.taskId}" + sessionTitle?.let { " · «$it»" }.orEmpty(),
+        "Начало сессии: " + (sessionStart?.let(moment) ?: "неизвестно") +
+            sessionDuration?.let { if (sessionActive) " · идёт $it" else " · длительность $it" }.orEmpty(),
+        "Связь: ${if (state.link is LinkState.Live) "поток подключён" else state.link}",
+        "Последний контакт: ${sinceLabel(state.lastContactAt, now, moment) ?: "ещё нет"}",
+        "Последнее событие: ${lastEventLabel(state.lastEventType) ?: "ещё нет"} · ${sinceLabel(state.lastEventAt, now, moment) ?: "—"}",
+        "Pi: ${task?.let { if (displayStateOf(it).active) stageLabel(it.status) else displayStateOf(it).label } ?: "—"}",
+        "Статус сервера: ${task?.status ?: "—"} · ${task?.runtime?.state ?: "—"}",
+        "Активность: ${task?.runtime?.activity ?: "—"} · ${task?.current ?: "—"}",
+        "Модель сессии: ${task?.let(::sessionModelLabel) ?: "—"}",
+        // Текущее сообщение — то, на что сессия отвечает в этом ходу: без него
+        // непонятно, о чём вообще идёт разговор, когда история не на экране.
+        lastUserMessage?.let { message ->
+            val text = message.text.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(120).orEmpty()
+            "Текущее сообщение: «$text»" + (sinceLabel(message.at, now, moment)?.let { " · отправлено $it" }.orEmpty())
+        },
+        pendingPrompts.takeIf { it.isNotEmpty() }?.let { prompts ->
+            val listed = prompts.take(3).joinToString("; ") { "«${it.text.lineSequence().firstOrNull().orEmpty().take(60)}»" }
+            "Ждут очереди (${prompts.size}): $listed" + if (prompts.size > 3) " и ещё ${prompts.size - 3}" else ""
+        },
+        // Пока провайдер держит ход, источник задержки известен — и этот факт идёт
+        // первым: остальные числа ниже, а без него полуторачасовая тишина выглядела
+        // как обычная работа модели.
+        providerWaitLine(task?.providerWait, now, moment),
+        *sessionDiagnosticsLines(task, info).toTypedArray(),
+        externalMetrics?.let(::strataPpLine),
+        "Событий получено от сервера: ${state.chat.cursor} · сообщений в очереди: ${pendingPrompts.size}",
+        task?.errorCode?.let { "Код ошибки: $it" },
+        task?.error,
+        "Подтверждение агента не означает ответ провайдера. Пока нет событий модели, источник задержки неизвестен."
+            .takeIf { task?.providerWait == null && (answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty())) },
+    ).joinToString("\n")
+}
+
+/**
+ * Сколько осталось до объявленного повтора: «1 ч 31 мин», «30 с». null — момента
+ * нет или он уже прошёл (тогда ждать нечего, и выдумывать нельзя).
+ */
+internal fun providerWaitRemaining(wait: ProviderWait?, now: Long): String? =
+    wait?.retryAt?.let(::parseIsoMillis)?.takeIf { it > now }?.let { humanDuration(it - now) }
+
+/** Короткая причина отказа для строки состояния: код HTTP или слова провайдера. */
+private fun providerWaitCause(wait: ProviderWait): String =
+    wait.httpStatus?.let { "HTTP $it" } ?: wait.reason?.takeIf { it.isNotBlank() } ?: "нет ответа"
+
+/** Фаза в панели диагностики: отказ провайдера и остаток до повтора. */
+internal fun providerWaitPhase(wait: ProviderWait?, now: Long): String =
+    "Провайдер не принял запрос (${wait?.let(::providerWaitCause) ?: "—"})" +
+        (providerWaitRemaining(wait, now)?.let { " · повтор через $it" }.orEmpty()) +
+        " · подробнее"
+
+/** Строка диагностики: что отказал провайдер, почему и когда Pi повторит. */
+internal fun providerWaitLine(wait: ProviderWait?, now: Long, moment: (Long) -> String): String? = wait?.let { w ->
+    val who = w.model?.takeIf { it.isNotBlank() }?.let { " $it" }.orEmpty()
+    val cause = providerWaitCause(w)
+    // Причина, совпадающая с самим кодом («HTTP 507 «HTTP 507»»), — шум: код уже
+    // назван. Без кода причина и есть код, и цитата повторила бы её дважды.
+    val reason = w.reason?.takeIf { it.isNotBlank() && it != cause }?.let { " «$it»" }.orEmpty()
+    val left = providerWaitRemaining(w, now)?.let { " через $it" }.orEmpty()
+    val at = parseIsoMillis(w.retryAt)?.let { " (в ${moment(it)})" }.orEmpty()
+    "Провайдер$who не принял запрос: $cause$reason. Pi жив и повторит$left$at — сессия не зависла, ответа модели пока нет."
+}
+
+/**
+ * Последнее событие сессии: техническое имя кадра → короткая подпись, иначе
+ * «Последнее событие: VERIFICATION» требует знать внутренние имена. Незнакомое
+ * имя печатается как есть — выдуманная подпись хуже, чем raw.
+ */
+internal fun lastEventLabel(kind: String?): String? = when (kind) {
+    null -> null
+    // Кадры Pi (см. ChatReducer): по ним видно, на чём именно стоит сессия.
+    "agent_start" -> "агент начал ход"
+    "agent_settled" -> "агент закончил ход"
+    "message_start" -> "модель начала сообщение"
+    "message_update" -> "модель пишет ответ"
+    "message_end" -> "модель закончила сообщение"
+    "turn_end" -> "ход закончен"
+    "tool_execution_start" -> "запущен инструмент"
+    "tool_execution_update" -> "инструмент работает"
+    "tool_execution_end" -> "инструмент завершён"
+    "compaction_start", "auto_compaction_start" -> "начато сжатие контекста"
+    "compaction_end", "auto_compaction_end" -> "сжатие контекста закончено"
+    // События TaskBridge.
+    "STATUS", "RUNTIME_STATE" -> "смена состояния"
+    "USER_MESSAGE" -> "сообщение пользователя"
+    "PROMPT_ACCEPTED" -> "запрос принят"
+    "PROMPT_QUEUED" -> "запрос в очереди"
+    "QUEUE_WAITING" -> "ждёт освобождения"
+    "QUEUE_RETRY" -> "повтор из очереди"
+    "QUEUE_DROPPED" -> "запрос убран из очереди"
+    "RUNTIME_READY" -> "движок готов"
+    "PI_EVENT" -> "кадр Pi"
+    "PI_STDERR" -> "вывод Pi в stderr"
+    "PI_PROTOCOL_ERROR" -> "сбой протокола Pi"
+    "TOOL_OUTPUT" -> "вывод инструмента"
+    "APPROVAL_REQUIRED" -> "ждёт подтверждения"
+    "APPROVAL_RESOLVED" -> "подтверждение получено"
+    "VERIFICATION" -> "проверка результата"
+    "VERIFICATION_ERROR" -> "проверка результата упала"
+    "TASK_SUCCEEDED" -> "сессия завершена"
+    "TASK_FAILED" -> "сессия упала"
+    "TASK_CANCELLED" -> "сессия остановлена"
+    "MODEL_SWITCH" -> "смена модели"
+    "ENGINE_SWITCH" -> "смена движка"
+    "PROVIDER_WAIT" -> "провайдер не принял запрос, ждём повтор"
+    "PROVIDER_WAIT_END" -> "провайдер снова отвечает"
+    "SESSION_RESTORED" -> "сессия восстановлена"
+    "THINKING_LEVEL" -> "смена уровня размышлений"
+    "CONTEXT_LIMIT_REACHED" -> "достигнут лимит контекста"
+    "CONTEXT_LIMIT_FAILED" -> "лимит контекста не сработал"
+    "HARD_STOP" -> "жёсткая остановка"
+    "UI_NOTIFY", "UI_REQUEST" -> "уведомление"
+    else -> kind
 }
 
 private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     val metrics = task?.metrics
-    val speed = metrics?.let(::generationSpeedLabel)?.let { "Скорость сессии: $it ток/с" }
+    // «Последний ход», а не «скорость сессии»: это числа одного хода, и рядом с ними
+    // стоят средние по сессии — иначе два разных числа назывались бы одинаково.
+    val speed = metrics?.let(::generationSpeedLabel)?.let { "Последний ход: $it ток/с" }
+    // Скорости всей сессии, а не последнего хода: PP у облака оценка, у локального
+    // движка — его счётчик, и один ход про модель не говорит. Средние считаются
+    // только по ходам с числом (см. accumulateSessionSpeeds на сервере).
+    val speeds = task?.speeds
+    val sessionSpeedLines = listOfNotNull(
+        speeds?.ppMax?.let { "Макс. PP за сессию: ${formatSpeed(it)} ток/с" },
+        speeds?.ppAvg?.let { "Средняя PP за сессию: ${formatSpeed(it)} ток/с" + speedTurns(speeds.ppTurns) },
+        speeds?.tgAvg?.let { "Средняя TG за сессию: ${formatSpeed(it)} ток/с" + speedTurns(speeds.tgTurns) },
+    )
     // How long the last turn waited for the first token — the direct answer to
     // «промпт отправлен, а облако молчит».
     val firstToken = metrics?.promptMs?.takeIf { it > 0 }?.let { "Первый токен: ${formatLatencyMs(it)}" }
@@ -1294,14 +1713,21 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     // Живое число движка называем по имени: пока модель работает, это размер
     // запроса в работе, а не накопленный контекст сессии, — разные числа.
     val livePrompt = liveEnginePrompt(task?.model ?: task?.requestedModel, info)
-    val contextTokens = livePrompt ?: compactedTokens ?: usage?.totalTokens
+    val contextTokens = usage?.totalTokens ?: compactedTokens
     // Первой строкой: если история больше окна, всё остальное в диагностике — уже
     // следствие, и запрос уйдёт в повтор.
     val overflow = contextOverflow(task, info)?.let { (tokens, limit) ->
-        val reserve = task?.model?.maxTokens ?: task?.requestedModel?.maxTokens ?: 0
-        "История не влезает в окно модели: $tokens + резерв ответа $reserve = ${tokens + reserve} ток. при окне $limit — " +
-            "провайдер ответит 400 (промпт не обрезается), поэтому запрос повторяется без ответа. " +
-            "Поднимите контекст модели хотя бы до ${tokens + reserve + 8}, уменьшите резерв ответа или начните новую сессию."
+        val reserve = answerReserveTokens(task)
+        // Резерв есть — это правило движка («prompt + max tokens exceeds the context»).
+        // Резерва нет — в окно не влезает сама история, и это тоже отказ, но другой:
+        // обещать 400 «за резерв» здесь нельзя, резерва в запросе нет.
+        if (reserve > 0)
+            "История не влезает в окно модели: $tokens + резерв ответа $reserve = ${tokens + reserve} ток. при окне $limit — " +
+                "провайдер ответит 400 (промпт не обрезается), поэтому запрос повторяется без ответа. " +
+                "Поднимите контекст модели хотя бы до ${tokens + reserve + 8}, уменьшите резерв ответа или начните новую сессию."
+        else
+            "История не влезает в окно модели: $tokens ток. при окне $limit — запрос уйдёт целиком (промпт не обрезается), " +
+                "и ответа не будет. Начните новую сессию или сожмите контекст."
     }
     // Сжатие контекста — запрос к модели, но ответа агента в этом ходу не будет:
     // без этой строки ход выглядит как обычный ответ, который «завис».
@@ -1317,21 +1743,23 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
             .takeIf { it.isNotEmpty() }
             ?.let { "Последнее сжатие: $it · ${last.at?.substringBefore('.')?.replace('T', ' ') ?: "—"}" }
     }
+    val livePromptLine = livePrompt
+        ?.takeIf { prompt -> prompt > 0 && prompt != contextTokens }
+        ?.let { prompt -> "Движок обрабатывает промпт: $prompt${window?.let { " из ${it / 1000}K" }.orEmpty()} ток." }
     val sessionContext = contextTokens?.let { tokens ->
         val percent = window?.takeIf { it > 0 }?.let { " · ${(tokens * 100.0 / it).roundToInt()}%" }.orEmpty()
-        val label = when {
-            livePrompt != null -> "Движок обрабатывает промпт"
-            compactedTokens != null -> "Контекст после сжатия"
-            else -> "Контекст сессии"
-        }
+        val label = if (usage?.totalTokens != null) "Контекст сессии" else "Контекст после сжатия"
         "$label: $tokens${window?.let { " из ${it / 1000}K" }.orEmpty()} ток.$percent"
     }
     val localProvider = info?.local?.provider
     val sessionProvider = task?.model?.provider ?: task?.requestedModel?.provider
     val isLocalSession = localProvider != null && sessionProvider == localProvider
     val localLines = if (isLocalSession) localDiagnosticsLines(info, suppressKvRatio = compactedTokens != null) else emptyList()
-    return listOfNotNull(compaction, lastCompaction, overflow, speed, firstToken, sessionContext) + localLines
+    return listOfNotNull(compaction, lastCompaction, overflow, speed, firstToken, sessionContext, livePromptLine) + sessionSpeedLines + localLines
 }
+
+/** Сколько ходов легло в среднюю: без числа ходов средняя читалась бы как по всем ходам. */
+private fun speedTurns(turns: Int): String = if (turns > 0) " (ходов: $turns)" else ""
 
 /** Причина сжатия из кадра Pi: две известные по имени, остальное — как пришло. */
 private fun compactionReasonLabel(reason: String): String = when (reason) {

@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.core.client.sessions.DisplayState
@@ -156,6 +157,12 @@ class AppGraph(val platform: PlatformServices) {
                         platform.notify(alert)
                     }
                     platform.setBackgroundWatch(state.tasks.count { displayStateOf(it).active || displayStateOf(it) == DisplayState.WAITING_USER })
+                    if (!state.loading) {
+                        val reachable = state.error !is ApiError.Unreachable
+                        val recovered = !_online.value && reachable
+                        _online.value = reachable
+                        if (recovered) chats.values.forEach { it.reconnectNow() }
+                    }
                 }
             }
             sessions.start()

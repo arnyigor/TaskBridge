@@ -97,6 +97,11 @@ fun SessionsScreen(
     onOpen: (String) -> Unit,
     onDraft: (SessionDraft) -> Unit,
     onSettings: () -> Unit,
+    /** Narrowed to one project when the dashboard drilled into it (MR-01). */
+    projectId: String? = null,
+    onProjects: (() -> Unit)? = null,
+    /** Leaves the drill-down: the list of every session again. */
+    onClearProject: (() -> Unit)? = null,
 ) {
     val state by connection.sessions.state.collectAsState()
     // Sessions that alerted while the operator was looking elsewhere: their rows pulse
@@ -119,7 +124,7 @@ fun SessionsScreen(
     var restarting by remember { mutableStateOf(false) }
     // Relative times ("5 мин") move on their own.
     var now by remember { mutableLongStateOf(graph.nowMillis()) }
-    val groups = state.groups(query)
+    val groups = state.groups(query, projectId)
     val activeTasks = state.sorted.filter { displayStateOf(it).active }
     val visibleTasks = groups.flatMap { it.sessions }
     val visibleIds = visibleTasks.mapTo(mutableSetOf()) { it.id }
@@ -148,7 +153,9 @@ fun SessionsScreen(
                             modifier = Modifier.fillMaxWidth(),
                         )
                         else -> Column {
-                            Text("Сессии")
+                            // Drilled into a project (MR-01): the title says which one,
+                            // and «Все сессии» in the actions leaves the narrow view.
+                            Text(projectId?.let { id -> state.projects.firstOrNull { it.id == id }?.displayName ?: id } ?: "Сессии")
                             val summary = buildList {
                                 if (state.waitingCount > 0) add("ждут: ${state.waitingCount}")
                                 if (state.workingCount > 0) add("работают: ${state.workingCount}")
@@ -158,6 +165,12 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
+                    if (!selecting && projectId != null && onClearProject != null) {
+                        TextButton(onClick = onClearProject) { Text("Все сессии") }
+                    }
+                    if (!selecting && onProjects != null) {
+                        IconButton(onClick = onProjects) { Icon(AppIcons.Folder, "Проекты") }
+                    }
                     if (selecting) {
                         IconButton(onClick = { selectedIds = visibleIds; if (selectedIds.isNotEmpty()) selecting = true }, enabled = visibleIds.isNotEmpty()) {
                             Icon(AppIcons.Check, "Выбрать все видимые")
@@ -307,43 +320,44 @@ fun SessionsScreen(
     }
 
     if (confirmRestart) {
-        // Недоступный сервер меняет смысл кнопки: перезапускать нечего —
-        // desktop-приложение запустит его само, скрытым процессом без консоли.
+        // Недоступный сервер меняет смысл кнопки: перезапускать нечего, а запустить его
+        // получается не всегда — что именно обещать и какие кнопки показывать решает
+        // serverStartOffer (телефон не умеет поднимать сервер вовсе).
         val wasOnline = connection.online.value
+        val offer = serverStartOffer(
+            online = wasOnline,
+            canStartLocalServer = connection.sessions.canStartLocalServer(),
+            phone = graph.platform.kind != "desktop",
+        )
         AlertDialog(
             onDismissRequest = { confirmRestart = false },
-            title = { Text(if (wasOnline) "Перезапустить сервер TaskBridge?" else "Запустить сервер TaskBridge?") },
-            text = { Text(
-                when {
-                    wasOnline -> "Активные сессии будут прерваны. Приложение переподключится само через несколько секунд."
-                    // Обещать скрытый запуск можно только когда это правда: на Android лаунчера нет,
-                    // а на desktop он бесполезен без найденного каталога TaskBridge.
-                    connection.sessions.canStartLocalServer() ->
-                        "Сервер сейчас недоступен. Он будет запущен на этом компьютере скрытым процессом — без консольного окна."
-                    else ->
-                        "Сервер сейчас недоступен, а запустить его из приложения нечем: каталог TaskBridge не найден. " +
-                            "Укажите его в настройках → «Каталог TaskBridge» или запустите сервер на компьютере вручную."
-                }
-            ) },
+            title = { Text(offer.title) },
+            text = { Text(offer.text) },
             confirmButton = {
-                TextButton(onClick = {
-                    confirmRestart = false
-                    restarting = true
-                    scope.launch {
-                        connection.sessions.restartServer()
-                            .onSuccess { snackbar.showSnackbar(if (wasOnline) "Сервер перезапущен" else "Сервер запущен") }
-                            .onFailure { snackbar.showSnackbar(messageOf(it)) }
-                        restarting = false
+                if (!offer.canStart) {
+                    TextButton(onClick = { confirmRestart = false }) { Text(offer.confirmLabel) }
+                } else {
+                    TextButton(onClick = {
+                        confirmRestart = false
+                        restarting = true
+                        scope.launch {
+                            connection.sessions.restartServer()
+                                .onSuccess { snackbar.showSnackbar(if (wasOnline) "Сервер перезапущен" else "Сервер запущен") }
+                                .onFailure { snackbar.showSnackbar(messageOf(it)) }
+                            restarting = false
+                        }
+                    }) {
+                        Text(
+                            offer.confirmLabel,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold,
+                        )
                     }
-                }) {
-                    Text(
-                        if (wasOnline) "Перезапустить" else "Запустить",
-                        color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.SemiBold,
-                    )
                 }
             },
-            dismissButton = { TextButton(onClick = { confirmRestart = false }) { Text("Отмена") } },
+            dismissButton = if (offer.canStart) {
+                { TextButton(onClick = { confirmRestart = false }) { Text("Отмена") } }
+            } else null,
         )
     }
 

@@ -91,7 +91,10 @@ const tlsDisabled = process.env.TASKBRIDGE_DISABLE_TLS === '1';
 await fs.mkdir(dataRoot, { recursive: true });
 let instanceLock;
 try {
-  instanceLock = acquireInstanceLock(dataRoot);
+  const internalPort = portOverride || Number(config.server?.port || 8787);
+  const publicPort = publicPortOverride || internalPort;
+  const mode = bindHostOverride === '127.0.0.1' && tlsDisabled && publicPortOverride ? 'lan' : 'monolith';
+  instanceLock = acquireInstanceLock(dataRoot, { mode, internalPort, publicPort });
 } catch (error) {
   console.error(`\n${error.message}\n`);
   process.exit(1);
@@ -275,6 +278,24 @@ manager.on('task-event', (event) => {
   if (notification) push.notify(notification).catch(() => {});
 });
 
+// The scheduler tick (MR-06). One timer for the whole machine, and a tick that can
+// run late without starting a run twice: the decision is recorded per invocation,
+// and the schedule's next moment is advanced with it.
+// `schedules`, not `scheduler`: the latter already means the session-queue scheduler in
+// /api/info and in the docs, and two different things under one name is how a
+// configuration mistake gets made.
+const schedulerConfig = config.schedules || {};
+if (schedulerConfig.enabled !== false) {
+  const tickSec = Math.min(Math.max(Number(schedulerConfig.tickSec) || 30, 5), 3600);
+  const tick = () => manager.schedulerTick().catch((error) => {
+    console.error(`scheduler tick failed: ${error.message}`);
+  });
+  // The first tick waits one interval: startup is not the moment for a backlog.
+  const schedulerTimer = setInterval(tick, tickSec * 1000);
+  schedulerTimer.unref?.();
+  process.on('exit', () => clearInterval(schedulerTimer));
+}
+
 // R2.5: a client counts the stream dead after 3 silent intervals.
 setInterval(() => {
   for (const clients of sseClients.values()) {
@@ -300,7 +321,10 @@ function json(res, status, body) {
 function errorJson(res, status, error) {
   json(res, status, {
     error: error.message || String(error),
-    code: error.code || 'INTERNAL_ERROR'
+    code: error.code || 'INTERNAL_ERROR',
+    // A few refusals are informative: which fields of the preview no longer match
+    // (MR-04) — «context changed» alone tells the operator nothing to do.
+    ...(Array.isArray(error.changes) ? { changes: error.changes } : {})
   });
 }
 
@@ -340,6 +364,48 @@ function restartEnv() {
     if (['PI_SESSION_FILE', 'TASKBRIDGE_TASK_ID'].includes(key) || key.startsWith('TASKBRIDGE_APPROVAL_')) delete env[key];
   }
   return env;
+}
+
+// Wait for the intermediate launcher to exit before accepting the restart.
+// `detached` alone does not leave a Windows process tree; if taskkill /T runs
+// while that launcher is still a descendant, it kills the restart worker after
+// stop and leaves no process to perform start.
+function launchRestartWorker(args) {
+  const launcher = spawn(process.execPath, [
+    path.join(__dirname, 'orphan-launcher.mjs'),
+    process.execPath,
+    rootDir,
+    ...args,
+  ], {
+    cwd: rootDir,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...restartEnv(), TASKBRIDGE_RESTART_ORPHAN: '1' },
+  });
+  return new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (error, pid) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(pid);
+    };
+    launcher.stdout.on('data', chunk => { stdout += String(chunk); });
+    launcher.stderr.on('data', chunk => { stderr += String(chunk); });
+    launcher.once('error', error => finish(error));
+    launcher.once('close', code => {
+      const pid = Number(/^\s*(\d+)/u.exec(stdout)?.[1]);
+      if (code === 0 && Number.isSafeInteger(pid) && pid > 0) finish(null, pid);
+      else finish(new Error(`Не удалось отделить процесс перезапуска${stderr.trim() ? `: ${stderr.trim()}` : '.'}`));
+    });
+    const timer = setTimeout(() => {
+      launcher.kill();
+      finish(new Error('Процесс запуска перезапуска не отделился за 5 с.'));
+    }, 5000);
+  });
 }
 
 function uniqueProjectId(manager, name) {
@@ -796,9 +862,8 @@ async function handleRequest(req, res) {
       const mode = await detectServerMode();
       const script = mode === 'lan' ? 'scripts/restart-lan-now.mjs' : 'scripts/restart-and-verify.mjs';
       const args = mode === 'lan' ? [script, '--delay-ms=1500'] : [script, '--delay-ms=1500', `--port=${port}`];
-      const child = spawn(process.execPath, args, { cwd: rootDir, detached: true, windowsHide: true, stdio: 'ignore', env: restartEnv() });
-      child.unref();
-      return json(res, 202, { restarting: true, mode, pid: child.pid });
+      const workerPid = await launchRestartWorker(args);
+      return json(res, 202, { restarting: true, mode, pid: workerPid });
     }
 
     // Power off the machine the server runs on. The same confirm-gate as
@@ -1149,6 +1214,205 @@ async function handleRequest(req, res) {
       return json(res, 200, manager.listProjects());
     }
 
+    // Project dashboard (MR-01): the overview is computed from the registry and
+    // the sessions, only pinned/archived are stored (SQLite, survives a restart).
+    // Declared before `/api/projects/:id` so "overview" is never read as an id.
+    if (req.method === 'GET' && pathname === '/api/projects/overview') {
+      return json(res, 200, manager.projectOverview());
+    }
+
+    const projectMemoryRoute = pathname.match(/^\/api\/projects\/([^/]+)\/memory$/);
+    if (req.method === 'GET' && projectMemoryRoute) {
+      return json(res, 200, await manager.projectMemory(decodeURIComponent(projectMemoryRoute[1]), {
+        query: url.searchParams.get('q'),
+      }));
+    }
+
+    // Work Items (MR-02): the semantic state of the work — what we are trying to
+    // do, the criteria of done and where it stands. Nothing else lives here.
+    if (req.method === 'GET' && pathname === '/api/work-items') {
+      return json(res, 200, {
+        items: manager.listWorkItems({
+          projectId: url.searchParams.get('projectId'),
+          status: url.searchParams.get('status'),
+          includeClosed: url.searchParams.get('includeClosed') !== '0'
+        })
+      });
+    }
+    if (req.method === 'POST' && pathname === '/api/work-items') {
+      return json(res, 201, manager.createWorkItem(await readJson(req)));
+    }
+
+    // A work item with the sessions that did the work (MR-03). Declared before the
+    // plain /:id route so «sessions» is never read as part of an id.
+    const workItemSessionsRoute = pathname.match(/^\/api\/work-items\/([^/]+)\/sessions(?:\/([^/]+))?$/);
+    if (workItemSessionsRoute) {
+      const workItemId = decodeURIComponent(workItemSessionsRoute[1]);
+      const sessionId = workItemSessionsRoute[2] ? decodeURIComponent(workItemSessionsRoute[2]) : null;
+      if (req.method === 'GET' && !sessionId) {
+        return json(res, 200, { items: manager.workItemDetail(workItemId).sessions });
+      }
+      if (req.method === 'POST' && !sessionId) {
+        const body = await readJson(req);
+        return json(res, 201, manager.linkWorkItemSession(workItemId, body.sessionId, body.relation ?? null));
+      }
+      if (req.method === 'DELETE' && sessionId) {
+        return json(res, 200, manager.unlinkWorkItemSession(workItemId, sessionId));
+      }
+    }
+
+    // MR-04: the resume engine. GET is the preview (what the operator confirms),
+    // POST starts a NEW short session from the rendered brief. The launch re-reads
+    // the facts and refuses with the list of changes when the preview no longer
+    // matches — «preview ≠ launch».
+    const resumeRoute = pathname.match(/^\/api\/work-items\/([^/]+)\/resume$/);
+    if (resumeRoute) {
+      const workItemId = decodeURIComponent(resumeRoute[1]);
+      if (req.method === 'GET') {
+        return json(res, 200, await manager.resumePreview(workItemId, {
+          strategy: url.searchParams.get('strategy'),
+          memoryMode: url.searchParams.get('memory'),
+        }));
+      }
+      if (req.method === 'POST') {
+        const body = await readJson(req);
+        const started = await manager.startResume(workItemId, {
+          strategy: body.strategy ?? null,
+          memoryMode: body.memory ?? null,
+          preview: body.preview ?? null,
+          sessionIds: Array.isArray(body.sessionIds) ? body.sessionIds : null,
+          clientId: body.clientId ?? null,
+          deviceId: access.device(req)?.deviceId,
+        });
+        return json(res, 201, started);
+      }
+    }
+
+    // Run recipes (MR-05): HOW the work is done, reusable by hand, by the
+    // scheduler (MR-06), from the phone or by an event. The run itself is a
+    // session — there is no second table about the same fact.
+    if (req.method === 'GET' && pathname === '/api/recipes') {
+      return json(res, 200, { items: manager.listRecipes({ projectId: url.searchParams.get('projectId') }) });
+    }
+    if (req.method === 'POST' && pathname === '/api/recipes') {
+      return json(res, 201, manager.createRecipe(await readJson(req)));
+    }
+    const recipeRunRoute = pathname.match(/^\/api\/recipes\/([^/]+)\/run$/);
+    if (req.method === 'POST' && recipeRunRoute) {
+      const body = await readJson(req).catch(() => ({}));
+      const started = await manager.runRecipe(decodeURIComponent(recipeRunRoute[1]), {
+        parameters: body.parameters ?? {},
+        trigger: body.trigger === 'schedule' ? 'schedule' : 'manual',
+        clientId: body.clientId ?? null,
+        deviceId: access.device(req)?.deviceId,
+      });
+      return json(res, 201, started);
+    }
+    const recipeRoute = pathname.match(/^\/api\/recipes\/([^/]+)$/);
+    if (recipeRoute) {
+      const id = decodeURIComponent(recipeRoute[1]);
+      if (req.method === 'GET') return json(res, 200, manager.getRecipe(id));
+      if (req.method === 'PATCH') return json(res, 200, manager.updateRecipe(id, await readJson(req).catch(() => ({}))));
+      if (req.method === 'DELETE') return json(res, 200, { ok: true, removed: manager.deleteRecipe(id) });
+    }
+
+    // Schedules and their invocations (MR-06): the scheduler runs HERE, on the
+    // machine, so a phone that is off changes nothing about whether 09:00 happens.
+    if (req.method === 'GET' && pathname === '/api/schedules') {
+      return json(res, 200, { items: manager.listSchedules({ recipeId: url.searchParams.get('recipeId') }) });
+    }
+    if (req.method === 'POST' && pathname === '/api/schedules') {
+      return json(res, 201, manager.createSchedule(await readJson(req)));
+    }
+    const scheduleRunRoute = pathname.match(/^\/api\/schedules\/([^/]+)\/run$/);
+    if (req.method === 'POST' && scheduleRunRoute) {
+      const body = await readJson(req).catch(() => ({}));
+      const invocation = await manager.runScheduleNow(decodeURIComponent(scheduleRunRoute[1]), {
+        clientId: body.clientId ?? null,
+        deviceId: access.device(req)?.deviceId,
+      });
+      return json(res, 201, invocation);
+    }
+    const scheduleRoute = pathname.match(/^\/api\/schedules\/([^/]+)$/);
+    if (scheduleRoute) {
+      const id = decodeURIComponent(scheduleRoute[1]);
+      if (req.method === 'GET') return json(res, 200, manager.getSchedule(id));
+      if (req.method === 'PATCH') return json(res, 200, manager.updateSchedule(id, await readJson(req).catch(() => ({}))));
+      if (req.method === 'DELETE') return json(res, 200, { ok: true, removed: manager.deleteSchedule(id) });
+    }
+
+    // «Выполнить тик сейчас»: диагностика расписаний, не дожидаясь 09:00, и то, чем
+    // проверяются политики пропусков. Только на самой машине: это операция над
+    // всеми расписаниями сразу, а не над одним из них (для одного есть
+    // POST /api/schedules/:id/run).
+    if (req.method === 'POST' && pathname === '/api/scheduler/tick') {
+      if (!access.local(req)) return errorJson(res, 403, Object.assign(new Error('Тик планировщика можно запустить только на компьютере сервера.'), { code: 'FORBIDDEN' }));
+      const body = await readJson(req).catch(() => ({}));
+      const nowIso = typeof body.now === 'string' && !Number.isNaN(Date.parse(body.now)) ? new Date(body.now).toISOString() : undefined;
+      return json(res, 200, await manager.schedulerTick(nowIso ? { nowIso } : {}));
+    }
+
+    if (req.method === 'GET' && pathname === '/api/invocations') {
+      return json(res, 200, {
+        items: manager.listInvocations({
+          recipeId: url.searchParams.get('recipeId'),
+          scheduleId: url.searchParams.get('scheduleId'),
+          status: url.searchParams.get('status'),
+          limit: Number(url.searchParams.get('limit')) || 50
+        })
+      });
+    }
+    const invocationRoute = pathname.match(/^\/api\/invocations\/([^/]+)$/);
+    if (req.method === 'GET' && invocationRoute) {
+      return json(res, 200, manager.getInvocation(decodeURIComponent(invocationRoute[1])));
+    }
+
+    const workItemRoute = pathname.match(/^\/api\/work-items\/([^/]+)$/);
+    if (workItemRoute) {
+      const id = decodeURIComponent(workItemRoute[1]);
+      // The item itself carries its sessions: one call is what the screen needs,
+      // and a client cannot show a work item without them anyway.
+      if (req.method === 'GET') return json(res, 200, manager.workItemDetail(id));
+      if (req.method === 'PATCH') return json(res, 200, manager.updateWorkItem(id, await readJson(req).catch(() => ({}))));
+      if (req.method === 'DELETE') return json(res, 200, { ok: true, removed: manager.deleteWorkItem(id) });
+    }
+
+    const projectSessionsRoute = pathname.match(/^\/api\/projects\/([^/]+)\/sessions$/);
+    if (req.method === 'GET' && projectSessionsRoute) {
+      const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50;
+      const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0;
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+        throw Object.assign(new Error('limit — целое от 1 до 500.'), { code: 'INPUT_INVALID' });
+      }
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw Object.assign(new Error('offset — целое не меньше нуля.'), { code: 'INPUT_INVALID' });
+      }
+      return json(res, 200, manager.projectSessions(decodeURIComponent(projectSessionsRoute[1]), {
+        query: url.searchParams.get('q'),
+        status: url.searchParams.get('status'),
+        sort: url.searchParams.get('sort'),
+        limit,
+        offset
+      }));
+    }
+
+    const projectPreferencesRoute = pathname.match(/^\/api\/projects\/([^/]+)\/preferences$/);
+    if (req.method === 'PATCH' && projectPreferencesRoute) {
+      const body = await readJson(req).catch(() => ({}));
+      // Only booleans are accepted, and an absent field keeps its stored value: a
+      // PATCH of `pinned` must not silently clear `archived`.
+      const patch = {};
+      for (const key of ['pinned', 'archived']) {
+        const value = body?.[key];
+        if (value === undefined) continue;
+        if (typeof value !== 'boolean') {
+          throw Object.assign(new Error('pinned и archived — логические значения.'), { code: 'INPUT_INVALID' });
+        }
+        patch[key] = value;
+      }
+      return json(res, 200, manager.setProjectPreferences(decodeURIComponent(projectPreferencesRoute[1]), patch));
+    }
+
     if (req.method === 'GET' && pathname === '/api/quick-actions') {
       const taskId = url.searchParams.get('taskId');
       const runtime = taskId ? manager.runtimes.get(taskId) : null;
@@ -1227,6 +1491,25 @@ async function handleRequest(req, res) {
       const { commandId, clientId, ...input } = body;
       const task = await manager.createTask(input, { commandId, clientId, deviceId: access.device(req)?.deviceId });
       return json(res, 202, task);
+    }
+
+    const sessionWorkItemsRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/work-items$/);
+    if (req.method === 'GET' && sessionWorkItemsRoute) {
+      return json(res, 200, { items: manager.workItemsOfSession(decodeURIComponent(sessionWorkItemsRoute[1])) });
+    }
+
+    // MR-04, «Session Recap»: what a new session reads instead of the transcript.
+    // `recapRoute`, not `match`: `let match` is declared further down this function,
+    // and assigning to it here hit its temporal dead zone (500 on every recap call).
+    const recapRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/recap$/);
+    if (recapRoute) {
+      const id = decodeURIComponent(recapRoute[1]);
+      if (req.method === 'GET') return json(res, 200, await manager.sessionRecap(id));
+      if (req.method === 'PUT' || req.method === 'POST') {
+        const body = await readJson(req);
+        return json(res, 200, await manager.saveRecap(id, body.recap ?? body));
+      }
+      if (req.method === 'DELETE') return json(res, 200, await manager.forgetRecap(id));
     }
 
     let match = pathname.match(/^\/api\/tasks\/([^/]+)$/);
@@ -1413,6 +1696,19 @@ async function handleRequest(req, res) {
       return json(res, 200, await manager.regenerateLastTurn(match[1], body.turnId));
     }
 
+    // Повторить с параметрами (MR-07): модель и уровень мышления применяются к
+    // сессии, затем тот же вопрос уходит заново — как regenerate, но с выбором
+    // «чем отвечать» в одном вызове.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/rerun$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req);
+      return json(res, 200, await manager.rerunLastTurn(match[1], {
+        turnId: body.turnId,
+        model: body.model || null,
+        thinkingLevel: body.thinkingLevel || null,
+      }));
+    }
+
     // Switching between the answers of one exchange: a reading preference, so
     // nothing is rewritten and no model is asked.
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/variant$/);
@@ -1422,11 +1718,12 @@ async function handleRequest(req, res) {
     }
 
     // Fork: a new session in the same project whose conversation is a copy of
-    // this one through the chosen message; the source is left untouched.
+    // this one. `direction: 'from'` copies the chosen message and everything
+    // after it instead of the history up to it; the source is left untouched.
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/fork$/);
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
-      return json(res, 201, await manager.forkTask(match[1], body.turnId));
+      return json(res, 201, await manager.forkTask(match[1], body.turnId, body.direction));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/pending\/send$/);
@@ -1460,6 +1757,15 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && match) {
       const body = await readJson(req);
       return json(res, 200, { result: await manager.compact(match[1], body.instructions || '') });
+    }
+
+    // Persist Pi's project trust decision. This changes which project-local
+    // resources Pi may load, so it is explicit and retires the current Pi.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace\/trust$/);
+    if (req.method === 'POST' && match) {
+      const body = await readJson(req).catch(() => ({}));
+      if (body?.confirm !== true) throw Object.assign(new Error('Доверие к папке требует подтверждения (confirm: true).'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await manager.trustWorkspace(match[1]));
     }
 
     // «Перезапустить сессию»: kill the session's Pi, the next message restarts
@@ -1714,11 +2020,13 @@ async function handleRequest(req, res) {
       // They are answers about that command, not server faults: a 5xx would make
       // a retrying client treat them as an outage. ACCEPTED (still in flight) is
       // the one worth repeating later — the repeat returns the saved result.
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED'].includes(error.code) ? 409
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429
-      : ['NOT_FOUND', 'ENOENT'].includes(error.code) ? 404
+      // PROJECT_NOT_FOUND is a 404, not a 400: the request is well-formed, the
+      // thing it names is not there (a work item must belong to a known project).
+      : ['NOT_FOUND', 'ENOENT', 'PROJECT_NOT_FOUND', 'SESSION_NOT_FOUND'].includes(error.code) ? 404
       : 500;
     errorJson(res, status, error);
   }

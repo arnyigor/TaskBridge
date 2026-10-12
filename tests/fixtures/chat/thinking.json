@@ -1,0 +1,534 @@
+{
+  "task": {
+    "id": "6545b2ba723a",
+    "createdAt": "2026-10-11T19:52:16.016Z",
+    "updatedAt": "2026-10-11T19:52:16.305Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "think — подумай и ответь коротко",
+    "title": null,
+    "workspacePath": "C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\taskbridge-http-test-yDWIKO",
+    "sourcePath": "C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\taskbridge-http-test-yDWIKO",
+    "worktree": false,
+    "current": "Done",
+    "assistantText": "Ответ 1",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": [],
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": {
+      "input": 1000,
+      "output": 100,
+      "totalTokens": 1100
+    },
+    "metrics": {
+      "pp": 12658.227848101265,
+      "tg": 1538.4615384615383,
+      "inputTokens": 1000,
+      "outputTokens": 100,
+      "promptMs": 79,
+      "ms": 65,
+      "source": "mixed",
+      "ppSource": "ttft-estimate",
+      "tgSource": "usage",
+      "ppApproximate": true
+    },
+    "speeds": {
+      "turns": 1,
+      "ppMax": 12658.227848101265,
+      "ppAvg": 12658.227848101265,
+      "ppTurns": 1,
+      "tgAvg": 1538.4615384615383,
+      "tgTurns": 1
+    },
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "_runtimeFacts": {
+      "state": "IDLE",
+      "activity": null
+    },
+    "statusChangedAt": "2026-10-11T19:52:16.266Z",
+    "baseCommit": null,
+    "piPid": 24720,
+    "piStartedAt": "2026-10-11T19:52:16.031Z",
+    "thinkingLevelActual": "off",
+    "inFlightPrompt": null,
+    "verificationStatus": "NOT_CONFIGURED",
+    "retryable": null,
+    "retryAfterMs": null,
+    "runtime": {
+      "state": "IDLE",
+      "activity": null
+    },
+    "providerWait": null,
+    "sessionAvailable": true
+  },
+  "events": [
+    {
+      "at": "2026-10-11T19:52:16.016Z",
+      "taskId": "6545b2ba723a",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-10-11T19:52:16.017Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_STATE",
+      "message": "— → WORKING",
+      "data": {
+        "from": null,
+        "to": "WORKING",
+        "fromActivity": null,
+        "toActivity": "waiting_model",
+        "compactingSince": null,
+        "reason": "TASK_QUEUED"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-10-11T19:52:16.018Z",
+      "taskId": "6545b2ba723a",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 3
+    },
+    {
+      "at": "2026-10-11T19:52:16.019Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → STARTING",
+      "data": {
+        "from": "WORKING",
+        "to": "STARTING",
+        "fromActivity": "waiting_model",
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "STATUS"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-10-11T19:52:16.020Z",
+      "taskId": "6545b2ba723a",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\taskbridge-http-test-yDWIKO",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-10-11T19:52:16.020Z",
+      "taskId": "6545b2ba723a",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-10-11T19:52:16.021Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 7
+    },
+    {
+      "at": "2026-10-11T19:52:16.106Z",
+      "taskId": "6545b2ba723a",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-10-11T19:52:16.107Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_STATE",
+      "message": "STARTING → WORKING",
+      "data": {
+        "from": "STARTING",
+        "to": "WORKING",
+        "fromActivity": null,
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "STATUS"
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-10-11T19:52:16.108Z",
+      "taskId": "6545b2ba723a",
+      "type": "PROMPT_ACCEPTED",
+      "message": "Первый запрос принят Pi",
+      "data": {
+        "initial": true
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-10-11T19:52:16.109Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-10-11T19:52:16.110Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "think — подумай и ответь коротко\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-10-11T19:52:16.113Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "think — подумай и ответь коротко\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 13
+    },
+    {
+      "at": "2026-10-11T19:52:16.114Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 14
+    },
+    {
+      "at": "2026-10-11T19:52:16.115Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 15
+    },
+    {
+      "at": "2026-10-11T19:52:16.115Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "streaming",
+        "toActivity": "tool",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 16
+    },
+    {
+      "at": "2026-10-11T19:52:16.116Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "tool_execution_update",
+      "data": {
+        "pi": {
+          "type": "tool_execution_update",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          },
+          "partialResult": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 17
+    },
+    {
+      "at": "2026-10-11T19:52:16.117Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 18
+    },
+    {
+      "at": "2026-10-11T19:52:16.117Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "tool",
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 19
+    },
+    {
+      "at": "2026-10-11T19:52:16.196Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 20
+    },
+    {
+      "at": "2026-10-11T19:52:16.228Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 21
+    },
+    {
+      "at": "2026-10-11T19:52:16.260Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 1"
+          }
+        }
+      },
+      "seq": 22
+    },
+    {
+      "at": "2026-10-11T19:52:16.263Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "thinking",
+                "thinking": "Сначала взвешу варианты, потом отвечу."
+              },
+              {
+                "type": "text",
+                "text": "Ответ 1"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 23
+    },
+    {
+      "at": "2026-10-11T19:52:16.264Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 24
+    },
+    {
+      "at": "2026-10-11T19:52:16.265Z",
+      "taskId": "6545b2ba723a",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 25
+    },
+    {
+      "at": "2026-10-11T19:52:16.266Z",
+      "taskId": "6545b2ba723a",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 26
+    },
+    {
+      "at": "2026-10-11T19:52:16.305Z",
+      "taskId": "6545b2ba723a",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → IDLE",
+      "data": {
+        "from": "WORKING",
+        "to": "IDLE",
+        "fromActivity": "streaming",
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "TASK_SUCCEEDED"
+      },
+      "seq": 27
+    },
+    {
+      "at": "2026-10-11T19:52:16.305Z",
+      "taskId": "6545b2ba723a",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 28
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "think — подумай и ответь коротко",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-initial",
+      "role": "assistant",
+      "text": "Ответ 1",
+      "thinking": "Сначала взвешу варианты, потом отвечу.",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": [
+        {
+          "id": "call-1",
+          "name": "read",
+          "state": "done"
+        }
+      ]
+    }
+  ]
+}

@@ -129,6 +129,49 @@ export function generationWindowMs(firstDeltaAt, endAt) {
   return end - first;
 }
 
+/**
+ * Скорости одной сессии: максимальный и средний PP и средняя TG за все её ходы.
+ *
+ * Живёт рядом с generationMetrics, потому что считает ровно те числа, которые тот
+ * отдал по ходу. Средние считаются только по ходам, где число было: PP у
+ * кеш-попадания Strata не публикует (`ppUnavailable: conversation-cache`), и такой
+ * ход не должен тянуть среднюю вниз. Средние — скользящие (среднее + счётчик),
+ * поэтому состояние остаётся тремя числами, а не суммой всех замеров.
+ *
+ * Чистая: вызывающий держит результат на задаче.
+ */
+export function accumulateSessionSpeeds(previous, metrics) {
+  const before = previous && typeof previous === 'object' ? previous : {};
+  const state = {
+    turns: Math.max(0, Math.trunc(Number(before.turns) || 0)),
+    ppMax: positive(before.ppMax),
+    ppAvg: positive(before.ppAvg),
+    ppTurns: Math.max(0, Math.trunc(Number(before.ppTurns) || 0)),
+    tgAvg: positive(before.tgAvg),
+    tgTurns: Math.max(0, Math.trunc(Number(before.tgTurns) || 0))
+  };
+  state.turns += 1;
+  const pp = positive(metrics?.pp);
+  if (pp !== null) {
+    state.ppMax = state.ppMax === null ? pp : Math.max(state.ppMax, pp);
+    state.ppTurns += 1;
+    state.ppAvg = state.ppAvg === null ? pp : state.ppAvg + (pp - state.ppAvg) / state.ppTurns;
+  }
+  const tg = positive(metrics?.tg);
+  if (tg !== null) {
+    state.tgTurns += 1;
+    state.tgAvg = state.tgAvg === null ? tg : state.tgAvg + (tg - state.tgAvg) / state.tgTurns;
+  }
+  return state;
+}
+
+// Число скорости из предыдущего состояния/метрик: ноль и мусор — это «неизвестно»,
+// иначе средняя посчиталась бы по несуществующему замеру.
+function positive(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 // Output tokens over the time the model actually spent streaming them.
 export function computeTokensPerSecond(outputTokens, ms) {
   const tokens = Number(outputTokens);

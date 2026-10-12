@@ -522,6 +522,34 @@ body {
   padding: 6px 10px;
 }
 .projectRow .projectRowDelete:hover { background: rgba(251, 113, 133, 0.14); }
+.projectRow .projectRowAction {
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.projectRow .projectRowAction:hover { background: rgba(129, 140, 248, 0.14); }
+.projectSection {
+  margin: 10px 0 4px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.projectSectionToggle {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  padding: 6px 0;
+}
 
 /* ---------- layout ---------- */
 .main {
@@ -545,6 +573,17 @@ body {
   border-radius: var(--radius-l);
   overflow: hidden;
 }
+/* Выбор нескольких сообщений (MR: «как в ChatGPT»): полоса над лентой и отметка на
+   самом сообщении. Курсор и подсветку получают только сообщения, у которых есть что
+   копировать, — системные строки в режим выбора не попадают. */
+.selectBar { display: flex; align-items: center; gap: 8px; margin: 8px 16px 0; padding: 6px 12px; border-radius: 10px; background: var(--accent-soft); font-size: 0.8125rem; }
+.selectBar span { flex: 1; }
+.selectBar button { font-size: 0.8125rem; padding: 4px 10px; }
+.selectBar.hidden { display: none; }
+body.selectingMessages .turn.selectable { cursor: pointer; }
+body.selectingMessages .turn.selected .msg { outline: 2px solid var(--accent); outline-offset: 2px; }
+body.selectingMessages .turn.selected .body::before { content: '✓'; order: -1; align-self: flex-start; color: var(--accent); font-weight: 700; }
+
 .msgs { position: relative; flex: 1; overflow-y: auto; padding: 18px 16px 8px; }
 /* Shown while a session's history loads: a blank chat looked like a hang. */
 .sessionLoader {
@@ -692,6 +731,9 @@ body {
 }
 .reasoning summary {
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   font-size: 0.75rem;
   color: var(--cyan);
   padding: 8px 12px;
@@ -701,6 +743,8 @@ body {
 .reasoning summary::-webkit-details-marker { display: none; }
 .reasoning summary::before { content: '▸ '; color: var(--muted); }
 .reasoning[open] summary::before { content: '▾ '; }
+.reasoning .r-label { flex: 1; min-width: 0; }
+.reasoning .copyBtn { margin-left: auto; }
 .reasoning .r-text {
   font-family: var(--mono);
   font-size: 0.71875rem;

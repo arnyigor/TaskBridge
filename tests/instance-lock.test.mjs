@@ -23,6 +23,20 @@ test('лок с мёртвым PID перехватывается', () => {
   lock.release();
 });
 
+test('старый процесс не удаляет лок нового владельца при выходе', () => {
+  const dir = temp('tb-lock-owner-');
+  const lock = acquireInstanceLock(dir, { mode: 'lan', internalPort: 50123, publicPort: 8787 });
+  const file = path.join(dir, 'taskbridge.lock');
+  const first = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(first.mode, 'lan');
+  assert.equal(first.internalPort, 50123);
+
+  const replacement = { pid: 424242, owner: 'replacement', mode: 'lan', internalPort: 50456, publicPort: 8787 };
+  fs.writeFileSync(file, JSON.stringify(replacement));
+  lock.release();
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, 'utf8')), replacement);
+});
+
 test('чужой node-процесс с переиспользованным PID не считается нашим сервером', (t) => {
   const dir = temp('tb-lock-foreign-');
   // Живой node, который НЕ является сервером TaskBridge: ровно та ловушка, из-за

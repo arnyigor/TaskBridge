@@ -35,6 +35,53 @@ fun timeRange(platform: PlatformServices, startIso: String?, endIso: String?): S
     return first + duration
 }
 
+/** Абсолютный момент в местном времени: «9 окт., 06:12». */
+fun formatMoment(platform: PlatformServices, millis: Long): String =
+    "${platform.formatDate(millis)}, ${platform.formatClock(millis)}"
+
+private const val SECOND_MS = 1_000L
+private const val MINUTE_MS = 60 * SECOND_MS
+private const val HOUR_MS = 60 * MINUTE_MS
+private const val DAY_MS = 24 * HOUR_MS
+
+/**
+ * Возраст события: «только что», «12 с назад», «5 мин назад», «2 ч назад», а
+ * старше суток — через [absolute] («9 окт., 06:12»). null — даты нет или она не разобралась.
+ *
+ * В диагностике нужны именно секунды: «только что» одинаково и для 0,2 с, и для
+ * 55 с тишины, а по ним как раз и видно, что поток встал. Это не [relativeTime]:
+ * там у сообщений в ленте своя шкала («14:03», «вчера»).
+ */
+fun sinceLabel(iso: String?, nowMillis: Long, absolute: (Long) -> String): String? {
+    val millis = parseIsoMillis(iso) ?: return null
+    val diff = (nowMillis - millis).coerceAtLeast(0)
+    return when {
+        diff < 3 * SECOND_MS -> "только что"
+        diff < MINUTE_MS -> "${diff / SECOND_MS} с назад"
+        diff < HOUR_MS -> "${diff / MINUTE_MS} мин назад"
+        diff < DAY_MS -> "${diff / HOUR_MS} ч назад"
+        else -> absolute(millis)
+    }
+}
+
+/**
+ * Длительность человеческими единицами: «34 с», «12 мин 5 с», «4 ч 12 мин», «3 дн. 5 ч».
+ * У дней и часов минуты опускаются: «3 дн. 5 ч» точнее не нужно.
+ */
+fun humanDuration(millis: Long): String {
+    val total = millis.coerceAtLeast(0) / 1000
+    val days = total / 86_400
+    val hours = (total % 86_400) / 3_600
+    val minutes = (total % 3_600) / 60
+    val seconds = total % 60
+    return when {
+        days > 0 -> "$days дн. $hours ч"
+        hours > 0 -> "$hours ч $minutes мин"
+        minutes > 0 -> if (seconds > 0) "$minutes мин $seconds с" else "$minutes мин"
+        else -> "$seconds с"
+    }
+}
+
 fun formatBytes(bytes: Long?): String = when {
     bytes == null -> ""
     bytes < 1024 -> "$bytes Б"

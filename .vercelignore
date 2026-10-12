@@ -8,5 +8,10 @@ config.json.bak-*
 data/
 artifacts/
 cloud/data/
+# Scratch space of agents and humans: it is in .gitignore, so it can never be a
+# tracked file — but the upload set is built from the working tree, and a browser
+# profile or a copy of a source file dropped in here must not reach a deployment
+# (2026-10-12: two Chromium .db files in .local/ failed the audit).
+.local/
 .vercel/
 .idea/

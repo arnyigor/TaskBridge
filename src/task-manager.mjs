@@ -25,17 +25,79 @@ import { quantFromFilename } from './huggingface.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
 import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail, stripMcpAdapterNoise } from './text-tail.mjs';
 import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
-import { generationWindowMs, generationMetrics } from './system-metrics.mjs';
+import { generationWindowMs, generationMetrics, accumulateSessionSpeeds } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
 import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs';
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 import { piAgentDir } from './pi-settings.mjs';
+import { deriveRecap, readSavedRecap, writeRecap, removeRecap, reconcileVerification, RECAP_MD } from './resume/recap.mjs';
+import { buildResumeContext, sessionSummary, WORKSPACE_STRATEGIES, MEMORY_MODES } from './resume/resume-builder.mjs';
+import { buildResumePreview } from './resume/resume-preview.mjs';
+import { renderResumePrompt } from './resume/resume-renderer.mjs';
+import { contextFingerprint, validateResume, describeChanges } from './resume/resume-validator.mjs';
+import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions } from './memory/project-memory-provider.mjs';
+import { validateRecipe, renderRecipe } from './recipes/recipe.mjs';
+import { normalizeSchedule, nextRunAfter, resolveMisfire, describeSchedule } from './scheduler/schedule.mjs';
+import { trustProjectDirectory } from './project-trust.mjs';
 import {
   assertContextLimit, buildContextReport, collectContextSources, estimateTokens, readCompactionSettings,
 } from './context-report.mjs';
 
 function now() { return new Date().toISOString(); }
+
+// Work Items (MR-02, ROADMAP_NEXT_1110.md): six statuses, deliberately not a
+// project tracker. The vocabulary and the validation live in one place, so POST,
+// PATCH and the store cannot disagree about what is a legal value — an unknown
+// status is refused instead of being silently replaced by a default.
+const WORK_ITEM_STATUSES = Object.freeze(['BACKLOG', 'READY', 'IN_PROGRESS', 'BLOCKED', 'DONE', 'CANCELLED']);
+
+// How a session relates to its work item (MR-03). Growth here is cheap; the
+// point is that a review or a verification run is not the same as the work.
+const WORK_ITEM_RELATIONS = Object.freeze(['implementation', 'investigation', 'review', 'verification', 'resume']);
+
+/** Одна формулировка для предпросмотра и для инспектора: почему памяти нет. */
+export function ambiguousMemoryWarning(collisions = []) {
+  const roots = collisions.flatMap(entry => entry.projects.map(project => project.root)).filter(Boolean);
+  return `память проекта делится с другим репозиторием (${roots.join(', ')}) — знания могут быть чужими, долговременная память для этой сессии не читается`;
+}
+
+const WorkItem = {
+  statuses: WORK_ITEM_STATUSES,
+  relations: WORK_ITEM_RELATIONS,
+  parseRelation(value) {
+    const relation = String(value ?? '').trim().toLowerCase() || 'implementation';
+    if (!WORK_ITEM_RELATIONS.includes(relation)) {
+      throw Object.assign(new Error(`Связь сессии с задачей — одна из: ${WORK_ITEM_RELATIONS.join(', ')}.`), { code: 'INPUT_INVALID' });
+    }
+    return relation;
+  },
+  parseStatus(value) {
+    const status = String(value ?? '').trim().toUpperCase();
+    if (!WORK_ITEM_STATUSES.includes(status)) {
+      throw Object.assign(new Error(`Статус задачи — один из: ${WORK_ITEM_STATUSES.join(', ')}.`), { code: 'INPUT_INVALID' });
+    }
+    return status;
+  },
+  priority(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const number = Number(value);
+    if (!Number.isInteger(number) || number < 0 || number > 9) {
+      throw Object.assign(new Error('Приоритет — целое от 0 до 9.'), { code: 'INPUT_INVALID' });
+    }
+    return number;
+  },
+  /** Criteria and tags: lists of short strings, trimmed and bounded. */
+  stringList(value, maxItems, maxLength) {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value)) throw Object.assign(new Error('Ожидается список строк.'), { code: 'INPUT_INVALID' });
+    return value
+      .map(item => String(item ?? '').trim())
+      .filter(Boolean)
+      .slice(0, maxItems)
+      .map(item => item.slice(0, maxLength));
+  },
+};
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
 // The command that produced a prompt, as recorded on its queue entry and its
 // USER_MESSAGE. Absent fields are left out rather than stored as null.
@@ -61,6 +123,189 @@ const uiText = (value, max = 4000) => (typeof value === 'string' ? value.slice(0
 // note is dropped; the raw frame stays in pi-events.jsonl, and a real failure
 // still arrives as the message's own error / TASK_FAILED.
 const RETRY_IN_PROGRESS_NOTICE = /retrying after error|before the next retry|then retrying/iu;
+// «… failed and pi-limits-wait is not retrying: Connection error.» — противоположный
+// случай: повтора НЕ будет (2026-10-12, расширение 0.6.4). Такое объявление — отказ, а не
+// ожидание, и в чат оно уходит нашими словами, как и само ожидание: сырая английская
+// строка в ленте читается как чужая ошибка без модели и причины.
+const GIVE_UP_NOTICE = /failed and pi-limits-wait is not retrying/iu;
+// «Ждём провайдера» — не ошибка и не событие чата, а состояние сессии: столько
+// тишины оператор иначе не отличит от сломанного моста. Обещанный повтор бывает
+// долгим (2026-10-09: HTTP 429 «user reached the limit», `retry-after-ms 5452000`),
+// а объявление приходит каждые 15 с — поэтому разбираем его в `task.providerWait`
+// и публикуем один раз на раунд ожидания (PROVIDER_WAIT), тики только уточняют
+// остаток. Момент повтора держим абсолютным (`retryAt`), чтобы клиент считал
+// обратный отсчёт сам, а не перерисовывал чужие секунды.
+const PROVIDER_WAIT_CURRENT = 'Ждём провайдера:';
+// Одну и ту же модель Pi называет двумя оборотами: сам — «<модель> retrying after
+// error in 0m 05s», расширение pi-limits-wait — «retrying after error on <модель>»
+// и «network/timeout error on <модель>». Оборот «in …» совпадал с прежним
+// шаблоном с необязательным «on», и моделью становилось слово «in»: 2026-10-12 в
+// чат уходило «Провайдер in не принял запрос: HTTP 507 «HTTP 507»».
+const WAIT_NOTICE_MODEL = {
+  leading: /^\s*([\w.@/:-]+)\s+(?:rate limited|retrying after error|network\/timeout error)\b/iu,
+  rateLimitedOn: /rate limited on\s+([\w.@/:-]+)/iu,
+  networkErrorOn: /network\/timeout error on\s+([\w.@/:-]+)/iu,
+  afterErrorOn: /retrying after error on\s+([\w.@/:-]+)/iu,
+};
+const WAIT_NOTICE_DURATION = [
+  // «… network/timeout error for 0m 15s; waiting, then retrying» — срок называет
+  // сам Pi; расширение говорит «waiting … before the next retry».
+  /(?:error|limited) for\s+(.+?)[;.]/iu,
+  /waiting\s+(.+?)\s+before the next retry/iu,
+  /retrying after error in\s+(.+?)[.;]/iu,
+];
+const WAIT_NOTICE_CLOCK = /(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(\d+)\s*s\b/u;
+
+/** Причина одной строкой: без HTTP-обвязки и без точки на конце. */
+function trimCause(text) {
+  return String(text || '')
+    .replace(/^HTTP\s+\d{3}[^;]*;\s*(?:Error:\s*)?/iu, '')
+    .trim().replace(/\.+$/, '').slice(0, 200) || null;
+}
+
+/** Своими словами провайдера: JSON, который он прислал, иначе названная причина. */
+function providerWaitReason(text) {
+  const quoted = /"message"\s*:\s*"([^"]{1,200})"/u.exec(text)?.[1]?.trim();
+  if (quoted) return quoted;
+  // Причину называют двумя оборотами: Pi — «… Error: fetch failed», расширение —
+  // «… before the next retry. Why: fetch failed». Без хвоста причины нет:
+  // повторять целую строку уведомления оператору было бы шумом, а не причиной.
+  const cause = /Why:\s*(.+)$/isu.exec(text)?.[1] || /Error:\s*(.+)$/isu.exec(text)?.[1] || '';
+  return trimCause(cause);
+}
+
+/** Момент времени из поля кадра: число — уже эпоха, строка — ISO. */
+function waitInstant(value) {
+  const millis = typeof value === 'number' ? value : Date.parse(String(value || ''));
+  return Number.isFinite(millis) ? new Date(millis).toISOString() : null;
+}
+
+/**
+ * Разбирает уведомление Pi о повторе: какой провайдер, сколько ждать и почему.
+ * null — уведомление не про ожидание (тогда показывать нечего).
+ */
+function parseProviderWait(message) {
+  const text = String(message || '');
+  const model = WAIT_NOTICE_MODEL.rateLimitedOn.exec(text)?.[1]
+    || WAIT_NOTICE_MODEL.networkErrorOn.exec(text)?.[1]
+    || WAIT_NOTICE_MODEL.afterErrorOn.exec(text)?.[1]
+    || WAIT_NOTICE_MODEL.leading.exec(text)?.[1]
+    || null;
+  const clock = WAIT_NOTICE_DURATION.map(re => re.exec(text)).find(Boolean)?.[1];
+  const parts = clock ? WAIT_NOTICE_CLOCK.exec(clock) : null;
+  const clockMs = parts
+    ? ((Number(parts[1]) || 0) * 3600 + (Number(parts[2]) || 0) * 60 + (Number(parts[3]) || 0)) * 1000
+    : null;
+  const http = /HTTP\s+(\d{3})/iu.exec(text)?.[1];
+  const retryAfter = /retry-after-ms\s+(\d+)/iu.exec(text)?.[1];
+  const httpStatus = http ? Number(http) : null;
+  // Ждать можно и без числа (тогда `retry-after-ms` — единственная оценка).
+  const waitMs = clockMs ?? (retryAfter ? Number(retryAfter) : null);
+  return {
+    kind: httpStatus === 429 || /rate limited/iu.test(text) ? 'rate-limit' : 'retry',
+    model,
+    provider: model ? model.split('/')[0] : null,
+    httpStatus,
+    reason: providerWaitReason(text),
+    waitMs: Number.isFinite(waitMs) && waitMs > 0 ? waitMs : null,
+  };
+}
+
+/**
+ * То же самое, но из машинного кадра `setStatus` с ключом `…pi-limits-wait.json`:
+ * `pi-limits-wait` отдаёт `reason`, модель и абсолютный `plannedDeadline` полями,
+ * без разбора прозы. Это и предпочтительный источник — текст уведомления меняется
+ * от версии к версии, а поля — нет.
+ *
+ * null — кадр не про ожидание или не разобрался (тогда остаётся текстовая ветка,
+ * а не молчание).
+ */
+function parseProviderWaitStatus(statusText) {
+  let data;
+  try { data = JSON.parse(String(statusText || '')); } catch { return null; }
+  if (!data || typeof data !== 'object') return null;
+  // `give_up` — конец ожидания без повтора: расширение сказало, что повторять не будет.
+  // Полей `model`/`periodId` в этом кадре нет — модель и причину оно называет текстом.
+  if (data.event === 'give_up') {
+    const parsed = parseProviderGiveUp(String(data.message || ''));
+    return { ...parsed, giveUp: true, kind: 'retry', httpStatus: null, periodId: null, waitMs: null, retryAt: null };
+  }
+  if (data.event !== 'wait') return null;
+  const error = String(data.error || '');
+  const notice = String(data.message || '');
+  const http = /HTTP\s+(\d{3})/iu.exec(error)?.[1] || /HTTP\s+(\d{3})/iu.exec(notice)?.[1];
+  const provider = data.model?.provider ? String(data.model.provider) : null;
+  const id = data.model?.id ? String(data.model.id) : null;
+  const model = provider && id ? `${provider}/${id}` : (id || provider);
+  const remaining = Number(data.remainingMs);
+  const deadline = waitInstant(data.plannedDeadline);
+  return {
+    kind: String(data.reason || '').includes('rate-limit') || http === '429' ? 'rate-limit' : 'retry',
+    model,
+    provider,
+    httpStatus: http ? Number(http) : null,
+    // `periodId` — эпизод ожидания: внутри него расширение успевает сменить и
+    // `waitId`, и причину (retry ↔ network), и объявленный срок (5 с → 15 с).
+    periodId: data.periodId ? String(data.periodId) : null,
+    // Здесь причина — само поле `error` («fetch failed», «Connection error.»):
+    // прозы с «Error:»/«Why:» в машинном кадре нет.
+    reason: providerWaitReason(error || notice) || trimCause(error) || trimCause(notice),
+    // Остаток берём готовым, а не из часов: сервер и клиент расходятся на секунды,
+    // а мс до дедлайна — одно и то же число.
+    waitMs: remaining > 0 ? remaining : null,
+    retryAt: deadline,
+    since: waitInstant(data.startedAt),
+  };
+}
+
+/** «1 ч 31 мин», «30 с» — теми же единицами, что в объявлении Pi. */
+function humanWait(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const total = Math.round(ms / 1000);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours} ч ${minutes} мин`;
+  if (minutes) return `${minutes} мин ${seconds} с`;
+  return `${seconds} с`;
+}
+
+/** Строка ожидания для «Активность» в диагностике: причина и остаток. */
+function providerWaitCurrent(wait) {
+  const cause = wait.httpStatus ? `HTTP ${wait.httpStatus}` : (wait.reason || 'нет ответа').slice(0, 120);
+  // Остаток — от момента повтора, а не от объявления: одна и та же строка
+  // живёт весь раунд, а секунды идут.
+  const left = humanWait(wait.retryAt ? Date.parse(wait.retryAt) - Date.now() : wait.waitMs);
+  return `${PROVIDER_WAIT_CURRENT} ${cause}${left ? ` — повтор через ${left}` : ''}`.slice(0, 300);
+}
+
+/** Строка для чата: что именно отказал провайдер и когда Pi повторит. */
+function providerWaitMessage(wait) {
+  const who = wait.model ? ` ${wait.model}` : '';
+  // Причина, повторяющая код («HTTP 507 «HTTP 507»»), — шум: код уже назван.
+  const repeated = Boolean(wait.reason) && Number.isFinite(wait.httpStatus)
+    && new RegExp(`^HTTP\\s+${wait.httpStatus}$`, 'iu').test(String(wait.reason).trim());
+  const cause = wait.httpStatus
+    ? `HTTP ${wait.httpStatus}${wait.reason && !repeated ? ` «${wait.reason}»` : ''}`
+    : (wait.reason || 'провайдер не отвечает');
+  const left = humanWait(wait.waitMs);
+  return `Провайдер${who} не принял запрос: ${cause}. Pi жив и повторит${left ? ` через ${left}` : ' позже'} — сессия не зависла.`;
+}
+
+/** Модель и причина из «<модель> failed and pi-limits-wait is not retrying: <причина>». */
+function parseProviderGiveUp(text) {
+  const raw = String(text || '');
+  const model = /^\s*([\w.@/:-]+)\s+failed and pi-limits-wait is not retrying/iu.exec(raw)?.[1] || null;
+  const cause = /is not retrying:\s*(.+)$/isu.exec(raw)?.[1] || '';
+  return { model, provider: model ? model.split('/')[0] : null, reason: trimCause(cause) };
+}
+
+/** Строка для чата: повтор не состоится — это уже не «ждём провайдера». */
+function providerGiveUpMessage(giveUp) {
+  const who = giveUp.model ? ` ${giveUp.model}` : '';
+  const why = giveUp.reason ? `: ${giveUp.reason}` : '';
+  return `Провайдер${who} не принял запрос и повторять не будет${why}.`;
+}
 // Kill a whole process tree by pid (an orphan from a previous TaskBridge run).
 async function killTreeByPid(pid) {
   const { execFile } = await import('node:child_process');
@@ -141,6 +386,7 @@ export class TaskManager extends EventEmitter {
     this.dataRoot = dataRoot;
     this.store = store;
     this.projects = new Map((config.projects || []).map((p) => [p.id, p]));
+    this.memoryProvider = new PiMemoryMdProvider({ root: config.memory?.projectMemoryRoot });
     this.tasks = new Map();
     this.runtimes = new Map();
     this.queue = [];
@@ -473,6 +719,10 @@ export class TaskManager extends EventEmitter {
         if (entry?.eventChain) await entry.eventChain;
         const pi = entry?.pi;
         if (!pi || pi.closed) continue;
+        // EOF is an intentional server shutdown, not a Pi crash. Raise the
+        // guard before closeStdin(): Pi may emit close(code=0) immediately.
+        entry.retired = true;
+        entry.cancelRequested = true;
         const proc = pi.proc;
         pi.closeStdin();
         if (proc) {
@@ -587,6 +837,1047 @@ export class TaskManager extends EventEmitter {
     return Array.from(this.tasks.values())
       .map(t => ({ ...this.#publicTask(t), events: counts.get(t.id) || 0, sizeBytes: sizes.get(t.id) ?? null }))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  // --- project dashboard (MR-01) ----------------------------------------------
+  //
+  // Everything the dashboard needs is computed from the two things that already
+  // exist — the project registry and the sessions — so there is no second source
+  // of truth: only the view preferences (pinned/archived) are stored, and they
+  // live in SQLite so they survive a restart of the server.
+
+  /** A session is "working" while its status is not terminal — the same rule the clients use. */
+  static #isWorking(status) {
+    return !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(status);
+  }
+
+  /**
+   * The dashboard's «needs attention»: sessions that will not move without the
+   * operator — a session that failed, and one waiting for an answer of its own
+   * (a dialog or an approval). A running session is not attention, it is «working».
+   */
+  static #needsAttention(status) {
+    return status === 'FAILED' || status === 'WAITING_USER';
+  }
+
+  /** Read-only view of pi-memory-md for the Knowledge Inspector and resume preview. */
+  async projectMemory(projectId, { query = null } = {}) {
+    const project = this.projects.get(projectId);
+    if (!project) throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    const overview = await this.memoryProvider.inspect(project);
+    const collisions = await this.#memoryCollisions(project.id);
+    const ambiguous = collisions.length > 0;
+    const found = {
+      ...overview,
+      collisions,
+      // The inspector is the same read path the resume uses: what is not safe to
+      // hand to an agent is not shown here as «the project's knowledge» either.
+      ...(ambiguous ? { status: 'ambiguous', warnings: [ambiguousMemoryWarning(collisions)] } : {}),
+    };
+    // No `q` at all is the overview — the inspector asks for a search explicitly.
+    // An EMPTY `q` is still a search (the input field the operator just cleared),
+    // and answers with the first entries rather than with a different shape.
+    if (query === null || query === undefined) return found;
+    if (ambiguous) return { ...found, query: String(query), hits: [] };
+    const hits = await this.memoryProvider.search(project, query, { limit: 20 });
+    return { ...found, query: String(query), hits };
+  }
+
+  /**
+   * Projects of this machine whose canonical roots share one memory directory.
+   * Only two DIFFERENT repositories count — a project registered twice under the
+   * same root is not a collision, it is the same project.
+   */
+  async #memoryCollisions(projectId) {
+    const resolved = await this.memoryProvider.resolveProjects([...this.projects.values()]).catch(() => []);
+    return memoryCollisions(resolved).filter(entry => entry.projects.some(project => project.projectId === projectId));
+  }
+
+  /**
+   * One row per registered project plus the sessions of projects that are not in
+   * the registry any more. Removing a registration never deletes its sessions
+   * (see `removeProject`), so those sessions are counted instead of hidden:
+   * `unassignedSessions` is what the operator would otherwise think they lost.
+   */
+  projectOverview() {
+    const preferences = this.store.projectViewPreferences();
+    const workItems = this.store.workItemCounts();
+    const sessions = new Map();
+    let unassigned = 0;
+    for (const task of this.tasks.values()) {
+      const id = task.projectId || null;
+      if (!id) { unassigned += 1; continue; }
+      const row = sessions.get(id) || { sessions: 0, working: 0, needsAttention: 0, lastActivityAt: null };
+      row.sessions += 1;
+      if (TaskManager.#isWorking(task.status)) row.working += 1;
+      if (TaskManager.#needsAttention(task.status)) row.needsAttention += 1;
+      const at = task.updatedAt || task.createdAt || null;
+      if (at && (row.lastActivityAt === null || at > row.lastActivityAt)) row.lastActivityAt = at;
+      sessions.set(id, row);
+    }
+    const projects = Array.from(this.projects.values()).map(project => {
+      const row = sessions.get(project.id) || { sessions: 0, working: 0, needsAttention: 0, lastActivityAt: null };
+      sessions.delete(project.id);
+      const preference = preferences.get(project.id);
+      const work = workItems.get(project.id) || { total: 0, open: 0 };
+      return {
+        id: project.id,
+        name: project.name,
+        path: project.path,
+        useWorktree: project.useWorktree !== false,
+        pinned: preference?.pinned === true,
+        archived: preference?.archived === true,
+        sessions: row.sessions,
+        working: row.working,
+        needsAttention: row.needsAttention,
+        // MR-02: what the roadmap calls «Active work» — the work items still open.
+        workItems: work.total,
+        activeWork: work.open,
+        lastActivityAt: row.lastActivityAt,
+      };
+    });
+    // What is left over belongs to projects removed from the registry.
+    for (const row of sessions.values()) unassigned += row.sessions;
+    projects.sort((a, b) => Number(b.pinned) - Number(a.pinned)
+      || String(b.lastActivityAt || '').localeCompare(String(a.lastActivityAt || ''))
+      || a.name.localeCompare(b.name));
+    const openWork = Array.from(workItems.values()).reduce((sum, counts) => sum + counts.open, 0);
+    return {
+      projects,
+      unassignedSessions: unassigned,
+      totals: {
+        projects: projects.length,
+        pinned: projects.filter(project => project.pinned).length,
+        archived: projects.filter(project => project.archived).length,
+        sessions: Array.from(this.tasks.values()).length,
+        working: Array.from(this.tasks.values()).filter(task => TaskManager.#isWorking(task.status)).length,
+        needsAttention: Array.from(this.tasks.values()).filter(task => TaskManager.#needsAttention(task.status)).length,
+        workItems: Array.from(workItems.values()).reduce((sum, counts) => sum + counts.total, 0),
+        activeWork: openWork,
+      },
+    };
+  }
+
+  /**
+   * The sessions of one project, filtered, sorted and paged server-side so a phone
+   * does not pull every conversation of a big project to show a list.
+   *
+   * An id the registry does not know is NOT a 404: sessions of a removed project
+   * must stay reachable, and the answer says so with `registered: false`.
+   */
+  projectSessions(projectId, { query = null, status = null, sort = null, limit = 50, offset = 0 } = {}) {
+    const id = String(projectId);
+    const needle = String(query || '').trim().toLowerCase();
+    const wanted = String(status || '').trim().toUpperCase();
+    let rows = this.listTasks().filter(task => (task.projectId || '') === id);
+    if (wanted) rows = rows.filter(task => String(task.status || '').toUpperCase() === wanted);
+    if (needle) {
+      rows = rows.filter(task => `${task.title || ''}\n${task.prompt || ''}`.toLowerCase().includes(needle));
+    }
+    if (sort === 'created') rows.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+    else if (sort === 'title') rows.sort((a, b) => String(a.title || a.prompt || '').localeCompare(String(b.title || b.prompt || '')));
+    else if (sort === 'size') rows.sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0));
+    else rows.sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
+    const total = rows.length;
+    const items = rows.slice(offset, offset + limit);
+    return {
+      projectId: id,
+      registered: this.projects.has(id),
+      items,
+      total,
+      offset,
+      limit,
+      endReached: offset + items.length >= total,
+    };
+  }
+
+  /** Pinned/archived of one project. Refuses an id the registry does not know. */
+  setProjectPreferences(projectId, patch = {}) {
+    const id = String(projectId);
+    if (!this.projects.has(id)) throw Object.assign(new Error('Проект не найден.'), { code: 'NOT_FOUND' });
+    return this.store.setProjectViewPreferences(id, patch);
+  }
+
+  // --- work items (MR-02) -----------------------------------------------------
+  //
+  // A Work Item is the semantic state of the work: what we are trying to do, the
+  // criteria of done, and where it stands. It is deliberately NOT a container:
+  // no prompt, no chat history, no diff, no tool output, no resumeContext (see
+  // docs/api-contract.md). The sessions that did the work are linked separately
+  // (MR-03).
+
+  /** The statuses that mean «still to do» — what the dashboard counts as open work. */
+  static #isOpenWork(status) {
+    return status !== 'DONE' && status !== 'CANCELLED';
+  }
+
+  listWorkItems({ projectId = null, status = null, includeClosed = true } = {}) {
+    const wanted = status ? WorkItem.parseStatus(status) : null;
+    return this.store.listWorkItems(projectId)
+      .filter(item => (wanted === null || item.status === wanted))
+      .filter(item => includeClosed || TaskManager.#isOpenWork(item.status));
+  }
+
+  getWorkItem(id) {
+    const item = this.store.getWorkItem(id);
+    if (!item) throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    return item;
+  }
+
+  /**
+   * Creates a Work Item. [projectId] must be a registered project — a work item
+   * nobody can open is worse than a refusal — but the item outlives the
+   * registration, exactly like a session does.
+   */
+  createWorkItem(input = {}) {
+    const projectId = String(input.projectId || '').trim();
+    if (!projectId) throw Object.assign(new Error('Укажите проект.'), { code: 'INPUT_INVALID' });
+    if (!this.projects.has(projectId)) throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    const title = String(input.title || '').trim();
+    if (!title) throw Object.assign(new Error('У задачи должен быть заголовок.'), { code: 'INPUT_INVALID' });
+    const at = now();
+    const status = input.status === undefined ? 'BACKLOG' : WorkItem.parseStatus(input.status);
+    return this.store.createWorkItem({
+      id: `wi-${shortId()}`,
+      projectId,
+      title: title.slice(0, 300),
+      goal: input.goal === undefined || input.goal === null ? null : String(input.goal).slice(0, 4000),
+      status,
+      priority: WorkItem.priority(input.priority),
+      acceptanceCriteria: WorkItem.stringList(input.acceptanceCriteria, 50, 500),
+      tags: WorkItem.stringList(input.tags, 20, 60),
+      createdAt: at,
+      updatedAt: at,
+      completedAt: status === 'DONE' ? at : null,
+    });
+  }
+
+  /** A partial update: an absent field keeps its value, `null` clears a nullable one. */
+  updateWorkItem(id, patch = {}) {
+    const current = this.store.getWorkItem(id);
+    if (!current) throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    const fields = {};
+    if (patch.title !== undefined) {
+      const title = String(patch.title || '').trim();
+      if (!title) throw Object.assign(new Error('У задачи должен быть заголовок.'), { code: 'INPUT_INVALID' });
+      fields.title = title.slice(0, 300);
+    }
+    if (patch.goal !== undefined) fields.goal = patch.goal === null ? null : String(patch.goal).slice(0, 4000);
+    if (patch.status !== undefined) fields.status = WorkItem.parseStatus(patch.status);
+    if (patch.priority !== undefined) fields.priority = WorkItem.priority(patch.priority);
+    if (patch.acceptanceCriteria !== undefined) fields.acceptanceCriteria = WorkItem.stringList(patch.acceptanceCriteria, 50, 500);
+    if (patch.tags !== undefined) fields.tags = WorkItem.stringList(patch.tags, 20, 60);
+    const updated = this.store.updateWorkItem(id, fields);
+    if (!updated) throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    return updated;
+  }
+
+  deleteWorkItem(id) {
+    const removed = this.store.deleteWorkItem(id);
+    if (!removed) throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    this.store.removeWorkItemLinks(id);
+    return removed;
+  }
+
+  // --- work item ↔ sessions (MR-03) -------------------------------------------
+  //
+  // One work item outlives several independent sessions, and this is NOT the
+  // `runs` table: runs belong to one session (a session has many runs), while a
+  // work item groups sessions. Keeping them apart is what makes «continue this
+  // work in a clean session» possible later (MR-04).
+
+  /**
+   * Links a session to a work item. Both sides must exist: a link to a session
+   * nobody can open is a broken promise for the whole work item.
+   */
+  linkWorkItemSession(workItemId, sessionId, relation = null) {
+    const item = this.store.getWorkItem(workItemId);
+    if (!item) throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    const id = String(sessionId || '').trim();
+    if (!id) throw Object.assign(new Error('Укажите сессию.'), { code: 'INPUT_INVALID' });
+    if (!this.tasks.has(id)) throw Object.assign(new Error('Сессия не найдена.'), { code: 'SESSION_NOT_FOUND' });
+    return this.store.linkWorkItemSession(item.id, id, WorkItem.parseRelation(relation));
+  }
+
+  /** Removes one link. A link that is not there is not an error — the outcome asked for. */
+  unlinkWorkItemSession(workItemId, sessionId) {
+    if (!this.store.getWorkItem(workItemId)) throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    const removed = this.store.unlinkWorkItemSession(workItemId, String(sessionId || ''));
+    return { removed: removed !== null };
+  }
+
+  /**
+   * A work item with the sessions that did the work: the shape the UI and the
+   * resume preview need. Session facts stay facts — status, title, when it last
+   * moved — and nothing is copied into the work item.
+   */
+  workItemDetail(id) {
+    const item = this.getWorkItem(id);
+    return { ...item, sessions: this.#workItemSessionViews(item.id) };
+  }
+
+  #workItemSessionViews(workItemId) {
+    return this.store.workItemSessions(workItemId).map(link => {
+      const task = this.tasks.get(link.sessionId);
+      const events = task ? this.store.eventCounts().get(task.id) : null;
+      return {
+        ...link,
+        // A session deleted behind our back (another device, a wiped data dir)
+        // must be visible as such instead of silently vanishing from the list.
+        available: Boolean(task),
+        status: task?.status ?? null,
+        title: task?.title ?? null,
+        prompt: task ? (task.prompt || '').slice(0, 200) : null,
+        projectId: task?.projectId ?? null,
+        updatedAt: task?.updatedAt ?? null,
+        events: events ?? 0,
+      };
+    });
+  }
+
+  // --- resume engine (MR-04) --------------------------------------------------
+  //
+  // «Continue this work in a clean session»: build the context from the work item,
+  // its sessions and their recaps, show it, then start a NEW short session from a
+  // rendered brief. The context is computed every time and never stored — the only
+  // durable trace is the new session's own `resumeFrom`.
+
+  /** Reads every input a resume context is built from. No model, no invention. */
+  async resumeInputs(workItemId, { strategy = 'fresh-worktree', memoryMode = 'native', sessionIds = null } = {}) {
+    const item = this.getWorkItem(workItemId);
+    const wanted = Array.isArray(sessionIds) && sessionIds.length ? new Set(sessionIds.map(String)) : null;
+    const links = this.store.workItemSessions(item.id).filter(link => !wanted || wanted.has(link.sessionId));
+    const sessions = [];
+    const artifacts = [];
+    const missingWorkspaces = [];
+    let chosen = null;
+
+    for (const link of links) {
+      const task = this.tasks.get(link.sessionId);
+      if (!task) {
+        // A session deleted elsewhere: the link stays visible and says so, and it is
+        // NOT replaced by the project's main checkout — that would hide the loss.
+        sessions.push(sessionSummary({ sessionId: link.sessionId, relation: link.relation, available: false }));
+        continue;
+      }
+      const saved = readSavedRecap(this.store.taskDir(task.id));
+      const derived = deriveRecap(task, { recap: saved });
+      const recap = { ...derived.recap, source: derived.source, updatedAt: saved?.updatedAt ?? null };
+      const files = await this.#artifactIndex(task.id);
+      const diff = files.find(entry => entry.name === 'diff.patch');
+      const workspacePath = task.workspacePath && fsSync.existsSync(task.workspacePath) ? task.workspacePath : null;
+      if (task.workspacePath && !workspacePath) missingWorkspaces.push(task.id);
+      // The newest session that still has a workspace is what «current state» means:
+      // its worktree is where the unfinished work actually is.
+      if (workspacePath && !chosen) chosen = { path: workspacePath, task };
+      sessions.push(sessionSummary({
+        sessionId: link.sessionId,
+        relation: link.relation,
+        available: true,
+        title: task.title,
+        prompt: task.prompt,
+        status: task.status,
+        updatedAt: task.updatedAt,
+        changedFiles: task.git?.changedFiles,
+        verification: (task.verification || []).map(entry => `${entry.ok ? 'PASS' : 'FAIL'}: ${entry.command}`),
+      }, { recap, diffBytes: diff?.bytes ?? null }));
+      for (const entry of files) artifacts.push({ sessionId: task.id, name: entry.name, bytes: entry.bytes });
+    }
+
+    // Git facts come from the chosen workspace, and only from it. When there is
+    // none, the context says so instead of showing an empty «current state».
+    let workspace = { path: null, head: null, worktree: false, changedFiles: [], truncated: false };
+    if (chosen) {
+      const state = await collectGitState(chosen.path);
+      workspace = {
+        path: chosen.path,
+        head: await this.#headOf(chosen.path),
+        worktree: chosen.task.worktree === true,
+        sourcePath: chosen.task.sourcePath ?? null,
+        changedFiles: state.changedFiles || [],
+        truncated: state.truncated === true,
+      };
+    }
+
+    const newest = sessions.find(session => session.available) ?? null;
+    const commands = (newest?.verification ?? []).map(text => {
+      const [mark, ...rest] = String(text).split(':');
+      return { ok: mark === 'PASS', command: rest.join(':').trim() };
+    });
+    const project = this.projects.get(item.projectId) || { id: item.projectId };
+    // Two different repositories sharing one memory directory is not a curiosity to
+    // mention in passing: whichever hits came out of it may belong to the OTHER
+    // project. So the retrieval is skipped rather than filtered — an empty memory
+    // with an honest reason is worth more than knowledge of unknown ownership.
+    const collisions = memoryMode === 'native' ? await this.#memoryCollisions(item.projectId) : [];
+    const memoryFacts = memoryMode !== 'native' ? null
+      : collisions.length ? {
+        overview: {
+          provider: 'pi-memory-md',
+          status: 'ambiguous',
+          write: 'SAVE_DISABLED',
+          problems: ['project memory directory is shared with another repository'],
+          collisions,
+        },
+        hits: [],
+        estimatedTokens: 0,
+        warnings: [ambiguousMemoryWarning(collisions)],
+      } : await this.memoryProvider.relevant(project, {
+        queries: resumeMemoryQueries(item, sessions, workspace),
+        budgetTokens: 2000,
+        limit: 8,
+      }).catch(error => ({
+        overview: { provider: 'pi-memory-md', status: 'error', write: 'SAVE_DISABLED', problems: [error.message] },
+        hits: [],
+        warnings: [error.message],
+      }));
+    const context = buildResumeContext({
+      workItem: item,
+      sessions,
+      workspace: { ...workspace, strategy },
+      verification: {
+        // The outcome belongs to the session the workspace came from, which is the
+        // one whose work the new session continues.
+        status: commands.length ? (chosen?.task?.verificationStatus ?? null) : null,
+        commands,
+      },
+      artifacts,
+      memory: memoryFacts ? { mode: memoryMode, ...memoryFacts } : { mode: memoryMode },
+      strategy,
+    });
+    return {
+      item,
+      context,
+      missingWorkspaces,
+      sessionsWithoutRecap: sessions.filter(session => session.recap?.source !== 'saved').map(session => session.sessionId),
+    };
+  }
+
+
+  /** `provider/id` or a bare id, as a recipe stores it. */
+  #parseModelSelection(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return null;
+    const slash = text.indexOf('/');
+    if (slash <= 0) return { provider: null, id: text };
+    return { provider: text.slice(0, slash), id: text.slice(slash + 1) };
+  }
+
+  async #headOf(dir) {
+    try {
+      const { stdout } = await git(['rev-parse', '--verify', 'HEAD'], dir);
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Artifacts of one session with their sizes; a missing directory is not an error. */
+  async #artifactIndex(id) {
+    const dir = path.join(this.store.taskDir(id), 'artifacts');
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+    const files = [];
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const stat = await fs.stat(path.join(dir, entry.name)).catch(() => null);
+      files.push({ name: entry.name, bytes: stat ? stat.size : null });
+    }
+    return files.slice(0, 50);
+  }
+
+  /**
+   * The preview: what the operator sees before Start. Built from the same context
+   * the launch sends, so the screen cannot promise one thing and the session
+   * receive another.
+   */
+  async resumePreview(workItemId, { strategy = null, memoryMode = null } = {}) {
+    const chosenStrategy = WORKSPACE_STRATEGIES.includes(strategy) ? strategy : 'fresh-worktree';
+    const chosenMemory = MEMORY_MODES.includes(memoryMode) ? memoryMode : 'native';
+    const { context, missingWorkspaces, sessionsWithoutRecap } = await this.resumeInputs(workItemId, {
+      strategy: chosenStrategy, memoryMode: chosenMemory,
+    });
+    const preview = buildResumePreview(context, {
+      strategies: WORKSPACE_STRATEGIES,
+      memoryModes: MEMORY_MODES,
+      defaultStrategy: chosenStrategy,
+    });
+    preview.fingerprint = contextFingerprint(context);
+    // A missing workspace is the one warning the operator must not miss: it means
+    // the unfinished work is not on this machine any more.
+    preview.warnings.push(...missingWorkspaces.map(id => `рабочая папка сессии ${id} удалена — состояние работы взять неоткуда`));
+    preview.sessionsWithoutRecap = sessionsWithoutRecap;
+    preview.promptChars = renderResumePrompt(context).length;
+    return preview;
+  }
+
+  /**
+   * Start: re-read the facts, compare them with what the operator saw, and only
+   * then create the session. A mismatch is a refusal with the list of changes.
+   */
+  async startResume(workItemId, { strategy = null, memoryMode = null, preview = null, sessionIds = null, clientId = null, deviceId = null } = {}) {
+    const chosenStrategy = WORKSPACE_STRATEGIES.includes(strategy) ? strategy : (strategy ? null : 'fresh-worktree');
+    if (chosenStrategy === null) {
+      throw Object.assign(new Error(`Стратегия рабочей папки — одна из: ${WORKSPACE_STRATEGIES.join(', ')}.`), { code: 'INPUT_INVALID' });
+    }
+    const chosenMemory = memoryMode === null || memoryMode === undefined ? 'native' : memoryMode;
+    if (!MEMORY_MODES.includes(chosenMemory)) {
+      throw Object.assign(new Error(`Режим памяти — один из: ${MEMORY_MODES.join(', ')}.`), { code: 'INPUT_INVALID' });
+    }
+    if (chosenStrategy === 'reuse' && !preview) {
+      // Reuse is a choice about someone else's working copy: it needs the preview
+      // the operator confirmed, not a guess made here.
+      throw Object.assign(new Error('Переиспользование рабочей папки требует предпросмотра.'), { code: 'INPUT_INVALID' });
+    }
+    const { item, context, missingWorkspaces } = await this.resumeInputs(workItemId, {
+      strategy: chosenStrategy, memoryMode: chosenMemory, sessionIds,
+    });
+    const current = contextFingerprint(context);
+    if (preview) {
+      const verdict = validateResume({ preview, current, requested: { strategy: chosenStrategy, memory: chosenMemory } });
+      if (!verdict.ok) {
+        throw Object.assign(new Error(`Контекст изменился с момента предпросмотра: ${describeChanges(verdict.changes)}`), {
+          code: 'CONTEXT_CHANGED',
+          changes: verdict.changes,
+        });
+      }
+    }
+    if (chosenStrategy === 'reuse' && !(context.workspace.path && this.#isReusableWorkspace(context.workspace.path))) {
+      throw Object.assign(new Error('Нечего переиспользовать: рабочей папки предыдущей сессии нет.'), { code: 'INPUT_INVALID' });
+    }
+
+    const prompt = renderResumePrompt(context);
+    const task = await this.createTask({
+      projectId: item.projectId,
+      prompt,
+      title: `${item.title} (продолжение)`,
+    }, { clientId, deviceId });
+    const stored = this.tasks.get(task.id);
+    if (stored) {
+      // Where the session came from is the session's own metadata: the context is
+      // not stored anywhere, and this is the only durable trace of the decision.
+      stored.resumeFrom = {
+        workItemId: item.id,
+        sessionIds: (context.previousSessions || []).map(session => session.sessionId),
+        sourceCommit: context.workspace.head ?? null,
+        workspaceStrategy: chosenStrategy,
+        memoryMode: chosenMemory,
+      };
+      if (chosenStrategy === 'reuse' && context.workspace.path) stored.resumeWorkspacePath = context.workspace.path;
+      stored.updatedAt = now();
+      await this.store.save(this.#publicTask(stored)).catch(() => {});
+      try {
+        await this.#event(stored, 'RESUME_STARTED', `Продолжение задачи «${item.title}» в новой сессии`, {
+          workItemId: item.id,
+          strategy: chosenStrategy,
+          missingWorkspaces,
+        });
+      } catch { /* the session is what matters; a failed note must not lose it */ }
+    }
+    // The new session belongs to the same work item, and that link is a `resume`.
+    // A work item deleted between the two steps must not take the session with it.
+    try {
+      this.linkWorkItemSession(item.id, task.id, 'resume');
+    } catch { /* see above */ }
+    return { task: stored ? this.#publicTask(stored) : task, context };
+  }
+
+  /** Only a TaskBridge-managed worktree may be reused — never an arbitrary path. */
+  #isReusableWorkspace(target) {
+    const root = path.resolve(this.dataRoot, 'worktrees');
+    const resolved = path.resolve(target);
+    const relative = path.relative(root, resolved);
+    return Boolean(relative) && !relative.startsWith('..') && !path.isAbsolute(relative) && fsSync.existsSync(resolved);
+  }
+
+  /** Saves a recap written by an agent or the operator (MR-08, «Session Recap»; в ROADMAP_FULL.md — отдельный от Resume Engine пункт). */
+  async saveRecap(id, recap) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const saved = await writeRecap(this.store.taskDir(id), recap, { source: 'saved' });
+    task.recap = { source: 'saved', updatedAt: saved.updatedAt };
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task)).catch(() => {});
+    return saved;
+  }
+
+  /**
+   * The recap of one session: the saved one, else what TaskBridge can derive.
+   *
+   * The recap of a saved session is the SESSION's word; what TaskBridge observed —
+   * the commit, the files Git saw, the verification it ran — is attached next to it
+   * as `observed`, and every claim that names an observed command carries the
+   * observation's status instead of «verified» it never got.
+   */
+  async sessionRecap(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const saved = readSavedRecap(this.store.taskDir(id));
+    const observed = await this.#observedState(task);
+    if (saved) {
+      return {
+        ...saved.recap,
+        verification: reconcileVerification(saved.recap.verification, task.verification),
+        source: 'saved',
+        updatedAt: saved.updatedAt,
+        sessionId: id,
+        observed,
+      };
+    }
+    const derived = deriveRecap(task);
+    return { ...derived.recap, source: 'derived', updatedAt: null, sessionId: id, observed };
+  }
+
+  /** The part of a session's state TaskBridge checked itself — never a summary. */
+  async #observedState(task) {
+    const state = task.workspacePath ? await collectGitState(task.workspacePath).catch(() => null) : null;
+    return {
+      head: task.workspacePath ? await this.#headOf(task.workspacePath).catch(() => null) : null,
+      changedFiles: Array.isArray(task.git?.changedFiles) ? task.git.changedFiles : (state?.changedFiles ?? []),
+      verification: (task.verification || []).map(entry => ({ command: entry.command, ok: entry.ok === true })),
+    };
+  }
+
+  /** Drops a saved recap, so the derived one is used again. */
+  async forgetRecap(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    await removeRecap(this.store.taskDir(id));
+    delete task.recap;
+    return { ok: true };
+  }
+
+  // --- run recipes (MR-05) ----------------------------------------------------
+  //
+  // A recipe is HOW to do a recurring piece of work: its parameters, the agent and
+  // model, the context profile, the workspace strategy and the verification. WHEN
+  // it runs is a schedule (MR-06); the fact that it ran is the session it created.
+
+  listRecipes({ projectId = null } = {}) {
+    return this.store.listRecipes(projectId);
+  }
+
+  getRecipe(id) {
+    const recipe = this.store.getRecipe(id);
+    if (!recipe) throw Object.assign(new Error('Рецепт не найден.'), { code: 'NOT_FOUND' });
+    return recipe;
+  }
+
+  createRecipe(input = {}) {
+    const validated = validateRecipe(input);
+    if (!validated.projectId) throw Object.assign(new Error('Укажите проект.'), { code: 'INPUT_INVALID' });
+    if (!this.projects.has(validated.projectId)) {
+      throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    }
+    // A recipe that names a work item must name a real one: a run has to be
+    // attachable to something the operator can open.
+    if (validated.workItemId && !this.store.getWorkItem(validated.workItemId)) {
+      throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    }
+    const at = now();
+    return this.store.createRecipe({ id: `rc-${shortId()}`, ...validated, createdAt: at, updatedAt: at });
+  }
+
+  updateRecipe(id, patch = {}) {
+    const current = this.getRecipe(id);
+    const validated = validateRecipe({
+      ...current,
+      ...patch,
+      parameters: patch.parameters === undefined ? current.parameters : patch.parameters,
+      runtime: { ...current.runtime, ...(patch.runtime ?? {}) },
+      context: { ...current.context, ...(patch.context ?? {}) },
+      workspace: { ...current.workspace, ...(patch.workspace ?? {}) },
+      verification: { ...current.verification, ...(patch.verification ?? {}) },
+      limits: { ...current.limits, ...(patch.limits ?? {}) },
+    });
+    if (!this.projects.has(validated.projectId)) {
+      throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    }
+    if (validated.workItemId && !this.store.getWorkItem(validated.workItemId)) {
+      throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
+    }
+    return this.store.updateRecipe(id, { ...validated, updatedAt: now() });
+  }
+
+  deleteRecipe(id) {
+    const removed = this.store.deleteRecipe(id);
+    if (!removed) throw Object.assign(new Error('Рецепт не найден.'), { code: 'NOT_FOUND' });
+    return removed;
+  }
+
+  /**
+   * The recipe as it would run right now: parameters resolved, substitutable
+   * fields rendered. The preview and the run use the same function, so a phone
+   * cannot show one thing and the machine run another.
+   */
+  previewRecipe(id, { parameters = {} } = {}) {
+    return renderRecipe(this.getRecipe(id), parameters);
+  }
+
+  /**
+   * Runs a recipe: creates a session from the rendered prompt. The invocation IS
+   * that session — the roadmap is explicit that a separate `scheduled_runs` table
+   * would be a second source of truth about the same thing.
+   */
+  async runRecipe(id, { parameters = {}, clientId = null, deviceId = null, trigger = 'manual', invocationId = null } = {}) {
+    const recipe = this.getRecipe(id);
+    const rendered = renderRecipe(recipe, parameters);
+    if (recipe.workItemId && !this.store.getWorkItem(recipe.workItemId)) {
+      throw Object.assign(new Error('Задача рецепта не найдена.'), { code: 'NOT_FOUND' });
+    }
+    const model = rendered.runtime?.model
+      ? this.#parseModelSelection(rendered.runtime.model)
+      : null;
+    const task = await this.createTask({
+      projectId: rendered.projectId,
+      prompt: rendered.prompt,
+      title: `${rendered.name}`,
+      model,
+      thinkingLevel: rendered.runtime?.thinking ?? null,
+    }, { clientId, deviceId });
+    const stored = this.tasks.get(task.id);
+    if (stored) {
+      // Which recipe produced this session, with which parameters: the only durable
+      // trace of the invocation, and what «run again with parameters» reads back.
+      stored.recipeRun = {
+        recipeId: recipe.id,
+        recipeName: recipe.name,
+        trigger,
+        invocationId,
+        parameters: rendered.parameters,
+        at: now(),
+      };
+      // A verification profile is a NAME the project owns, so the prompt never
+      // carries shell commands (ROADMAP_FULL.md, «Verification profiles»).
+      const profile = rendered.verification?.command ? String(rendered.verification.command) : null;
+      if (profile && this.config.verificationProfiles?.[profile]) {
+        stored.verificationCommands = [...this.config.verificationProfiles[profile]];
+      } else if (profile) {
+        stored.verificationCommands = [profile];
+      }
+      stored.updatedAt = now();
+      await this.store.save(this.#publicTask(stored)).catch(() => {});
+      try {
+        await this.#event(stored, 'RECIPE_RUN', `Запуск рецепта «${recipe.name}»`, {
+          recipeId: recipe.id,
+          trigger,
+          parameters: rendered.parameters,
+        });
+      } catch { /* the session is what matters */ }
+    }
+    // A recipe tied to a work item makes its run part of that work.
+    if (recipe.workItemId) {
+      try {
+        this.linkWorkItemSession(recipe.workItemId, task.id, 'implementation');
+      } catch { /* see above */ }
+    }
+    return { task: stored ? this.#publicTask(stored) : task, invocation: stored?.recipeRun ?? null, rendered };
+  }
+
+  // --- schedules and the scheduler tick (MR-06) --------------------------------
+  //
+  // The scheduler lives on the PC, not on the phone and not in the relay: a phone
+  // that is off changes nothing about whether 09:00 happens. Every tick is one
+  // decision per due schedule, and each decision is recorded as an invocation —
+  // including the ones that were skipped, because «no run» is information too.
+
+  listSchedules({ recipeId = null } = {}) {
+    return this.store.listSchedules(recipeId);
+  }
+
+  getSchedule(id) {
+    const schedule = this.store.getSchedule(id);
+    if (!schedule) throw Object.assign(new Error('Расписание не найдено.'), { code: 'NOT_FOUND' });
+    return schedule;
+  }
+
+  createSchedule(input = {}) {
+    const recipeId = String(input.recipeId ?? '').trim();
+    if (!recipeId) throw Object.assign(new Error('Укажите рецепт.'), { code: 'INPUT_INVALID' });
+    const recipe = this.getRecipe(recipeId);
+    const normalized = normalizeSchedule(input, { recipe });
+    const at = now();
+    // The first moment is computed from the spec, not from the client: two clients
+    // computing «09:00» differently is how a job runs twice.
+    const anchor = normalized.spec.kind === 'interval' ? at : null;
+    return this.store.createSchedule({
+      id: `sc-${shortId()}`,
+      ...normalized,
+      nextRunAt: nextRunAfter(normalized.spec, at, { anchor }),
+      lastRunAt: null,
+      createdAt: at,
+      updatedAt: at,
+    });
+  }
+
+  updateSchedule(id, patch = {}) {
+    const current = this.getSchedule(id);
+    const merged = normalizeSchedule({
+      ...current,
+      ...patch,
+      spec: patch.spec === undefined ? current.spec : patch.spec,
+      parameters: patch.parameters === undefined ? current.parameters : patch.parameters,
+    }, { recipe: this.getRecipe(current.recipeId) });
+    // A changed schedule gets its next moment recomputed; a pause keeps it, so
+    // resuming does not silently skip to tomorrow.
+    const specChanged = JSON.stringify(merged.spec) !== JSON.stringify(current.spec);
+    const resumed = merged.enabled && !current.enabled;
+    const at = now();
+    // One anchor for the whole life of a schedule: an interval must stay on ITS grid,
+    // or `nextRunAt` stops being one of its own occurrences and the tick sees a due
+    // moment that no occurrence matches (the missed run then silently disappears).
+    const nextRunAt = (specChanged || resumed)
+      ? nextRunAfter(merged.spec, at, { anchor: merged.spec.kind === 'interval' ? current.createdAt : null })
+      : current.nextRunAt;
+    return this.store.updateSchedule(id, { ...merged, nextRunAt, updatedAt: at });
+  }
+
+  deleteSchedule(id) {
+    const removed = this.store.deleteSchedule(id);
+    if (!removed) throw Object.assign(new Error('Расписание не найдено.'), { code: 'NOT_FOUND' });
+    return removed;
+  }
+
+  /** «Запустить сейчас»: тот же путь, что у расписания, только повод — оператор. */
+  async runScheduleNow(id, { clientId = null, deviceId = null } = {}) {
+    const schedule = this.getSchedule(id);
+    const recipe = this.getRecipe(schedule.recipeId);
+    const invocation = await this.#invoke(recipe, {
+      schedule,
+      scheduledAt: now(),
+      trigger: 'manual',
+      misfire: false,
+      parameters: schedule.parameters,
+      clientId,
+      deviceId,
+    });
+    // Running by hand does not move the schedule's own clock.
+    await this.store.updateSchedule(id, { ...schedule, lastRunAt: invocation.startedAt, updatedAt: now() });
+    return invocation;
+  }
+
+  listInvocations(options = {}) {
+    return this.store.listInvocations(options);
+  }
+
+  getInvocation(id) {
+    const invocation = this.store.getInvocation(id);
+    if (!invocation) throw Object.assign(new Error('Запуск не найден.'), { code: 'NOT_FOUND' });
+    return invocation;
+  }
+
+  /**
+   * One scheduler tick. [opts.dryRun] answers what WOULD happen without creating
+   * anything — the same decision code, so a test can ask instead of waiting.
+   */
+  async schedulerTick({ nowIso = now(), dryRun = false } = {}) {
+    const decisions = [];
+    for (const schedule of this.store.dueSchedules(nowIso)) {
+      const recipe = this.store.getRecipe(schedule.recipeId);
+      if (!recipe) {
+        decisions.push({ scheduleId: schedule.id, action: 'recipe-gone' });
+        if (!dryRun) {
+          await this.store.updateSchedule(schedule.id, {
+            ...schedule,
+            enabled: false,
+            nextRunAt: null,
+            updatedAt: nowIso,
+          });
+        }
+        continue;
+      }
+      const misfire = resolveMisfire(schedule, nowIso, {
+        anchor: schedule.spec?.kind === 'interval' ? schedule.createdAt : null,
+      });
+      // `lastRunAt` moves with the runs this tick created, so it is kept here and
+      // not read back from the schedule object captured before the loop — that
+      // object is stale by the second write and would erase the mark.
+      let lastRunAt = schedule.lastRunAt;
+      const advance = async () => {
+        if (dryRun) return;
+        await this.store.updateSchedule(schedule.id, { ...schedule, nextRunAt: misfire.nextRunAt, lastRunAt, updatedAt: nowIso });
+      };
+
+      if (!misfire.runs.length) {
+        // SKIP (or nothing actually missed): the moment is consumed and recorded, so
+        // the operator sees «пропущено», not a silent gap.
+        decisions.push({ scheduleId: schedule.id, action: 'skipped', missed: misfire.missed, reason: misfire.policy });
+        if (!dryRun && misfire.missed > 0) {
+          await this.store.createInvocation({
+            id: `inv-${shortId()}`,
+            recipeId: recipe.id,
+            scheduleId: schedule.id,
+            trigger: 'schedule',
+            scheduledAt: schedule.nextRunAt,
+            startedAt: nowIso,
+            finishedAt: nowIso,
+            status: 'SKIPPED',
+            reason: `пропущено по политике ${misfire.policy}`,
+            misfire: true,
+            parameters: schedule.parameters,
+          });
+        }
+        await advance();
+        continue;
+      }
+
+      for (const moment of misfire.runs) {
+        const running = this.store.runningInvocations(schedule.id);
+        if (running.length && schedule.concurrencyPolicy === 'SKIP_IF_RUNNING') {
+          decisions.push({ scheduleId: schedule.id, action: 'busy', reason: schedule.concurrencyPolicy });
+          if (!dryRun) {
+            await this.store.createInvocation({
+              id: `inv-${shortId()}`,
+              recipeId: recipe.id,
+              scheduleId: schedule.id,
+              trigger: 'schedule',
+              scheduledAt: moment,
+              startedAt: nowIso,
+              finishedAt: nowIso,
+              status: 'SKIPPED',
+              reason: 'предыдущий запуск ещё идёт (SKIP_IF_RUNNING)',
+              misfire: moment !== schedule.nextRunAt,
+              parameters: schedule.parameters,
+            });
+          }
+          continue;
+        }
+        if (running.length && schedule.concurrencyPolicy === 'REPLACE') {
+          decisions.push({ scheduleId: schedule.id, action: 'replace', replaced: running.map(item => item.id) });
+          if (!dryRun) {
+            for (const previous of running) {
+              if (previous.sessionId && this.tasks.has(previous.sessionId)) {
+                await this.cancel(previous.sessionId, {}).catch(() => {});
+              }
+              await this.store.updateInvocation(previous.id, {
+                status: 'FAILED',
+                reason: 'заменён новым запуском (REPLACE)',
+                finishedAt: nowIso,
+              });
+            }
+          }
+        }
+        // QUEUE and PARALLEL both create the session: TaskBridge's own queue
+        // serialises what the machine cannot run at once, and PARALLEL is only safe
+        // with independent worktrees (the workspace strategy decides that).
+        if (dryRun) {
+          decisions.push({ scheduleId: schedule.id, action: 'run', scheduledAt: moment, policy: schedule.concurrencyPolicy });
+          continue;
+        }
+        const invocation = await this.#invoke(recipe, {
+          schedule,
+          scheduledAt: moment,
+          trigger: 'schedule',
+          misfire: moment !== schedule.nextRunAt || misfire.missed > 0,
+          parameters: schedule.parameters,
+        });
+        decisions.push({ scheduleId: schedule.id, action: 'run', invocationId: invocation.id, sessionId: invocation.sessionId, scheduledAt: moment });
+        lastRunAt = invocation.startedAt;
+      }
+      await advance();
+    }
+    // Sessions that finished while an invocation was still marked RUNNING: the
+    // invocation follows its session, even across a restart of the server.
+    const reconciled = dryRun ? [] : await this.#reconcileInvocations(nowIso);
+    return { at: nowIso, decisions, reconciled };
+  }
+
+  /** Creates the invocation and the session it describes. */
+  async #invoke(recipe, { schedule = null, scheduledAt = null, trigger = 'manual', misfire = false, parameters = {}, clientId = null, deviceId = null } = {}) {
+    const at = now();
+    const draft = {
+      id: `inv-${shortId()}`,
+      recipeId: recipe.id,
+      scheduleId: schedule?.id ?? null,
+      trigger,
+      scheduledAt,
+      startedAt: at,
+      finishedAt: null,
+      status: 'RUNNING',
+      reason: null,
+      misfire: misfire === true,
+      parameters,
+      sessionId: null,
+      verification: null,
+      workspaceRef: null,
+      resultArtifact: null,
+    };
+    await this.store.createInvocation(draft);
+    try {
+      const started = await this.runRecipe(recipe.id, { parameters, clientId, deviceId, trigger, invocationId: draft.id });
+      const session = started.task;
+      await this.store.updateInvocation(draft.id, { sessionId: session.id });
+      const stored = this.tasks.get(session.id);
+      // The notification policy of the SCHEDULE decides whether this run is worth
+      // waking anyone up for: the session carries the answer into the push path, and
+      // it is saved so a restart does not lose the policy mid-run.
+      if (stored && schedule) {
+        stored.scheduleNotify = schedule.notify;
+        await this.store.save(this.#publicTask(stored)).catch(() => {});
+      }
+      return this.store.getInvocation(draft.id);
+    } catch (failure) {
+      // A recipe that cannot start (unknown project, bad parameters) is a finished
+      // invocation with a reason, not a missing one.
+      return this.store.updateInvocation(draft.id, {
+        status: 'FAILED',
+        reason: String(failure?.message ?? failure).slice(0, 500),
+        finishedAt: now(),
+      });
+    }
+  }
+
+  /**
+   * Copies the outcome of finished sessions into their invocations: the status,
+   * the verification result and the artifact a human would open. `verification
+   * required` turns a session that ran but did not pass into a failed invocation —
+   * otherwise «запустилось» would read as «получилось».
+   */
+  async #reconcileInvocations(nowIso = now()) {
+    const finished = [];
+    for (const invocation of this.store.runningInvocations()) {
+      const session = invocation.sessionId ? this.tasks.get(invocation.sessionId) : null;
+      if (!session) {
+        if (invocation.sessionId) {
+          // The session is gone (deleted by hand, wiped data dir): say so instead of
+          // leaving a run that is «in progress» forever.
+          await this.store.updateInvocation(invocation.id, {
+            status: 'FAILED',
+            reason: 'сессия запуска больше не существует',
+            finishedAt: nowIso,
+          });
+          finished.push(invocation.id);
+        }
+        continue;
+      }
+      if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(session.status)) continue;
+      const recipe = this.store.getRecipe(invocation.recipeId);
+      const verification = session.verificationStatus ?? null;
+      const failedVerification = recipe?.verification?.required === true && verification !== 'PASSED';
+      const status = failedVerification ? 'FAILED' : session.status;
+      const reason = failedVerification
+        ? `проверка не пройдена (${verification ?? 'не запускалась'}), хотя рецепт её требует`
+        : (session.error ? String(session.error).slice(0, 300) : null);
+      await this.store.updateInvocation(invocation.id, {
+        status,
+        reason,
+        verification,
+        finishedAt: session.updatedAt ?? nowIso,
+        // Where the work happened is only known once the session actually ran.
+        workspaceRef: session.workspacePath ?? invocation.workspaceRef,
+        resultArtifact: session.status === 'SUCCEEDED' ? 'result.md' : null,
+      });
+      finished.push(invocation.id);
+    }
+    return finished;
+  }
+
+  /** Work items a session belongs to — the chat screen shows this. */
+  workItemsOfSession(sessionId) {
+    const links = this.store.workItemsOfSession(String(sessionId));
+    return links
+      .map(link => ({ ...link, item: this.store.getWorkItem(link.workItemId) }))
+      .filter(entry => entry.item !== null)
+      .map(entry => ({ ...entry.item, relation: entry.relation }));
   }
 
   // On-disk footprint per session, recomputed at most every 30 seconds. Only
@@ -847,6 +2138,10 @@ export class TaskManager extends EventEmitter {
       queueReason: waitingReason,
       projectId,
       prompt,
+      // A session may be named when it is created (a resumed one is «<задача>
+      // (продолжение)»); an empty name stays empty and the client falls back to
+      // the first line of the prompt.
+      title: String(input.title || '').trim().slice(0, 300) || null,
       workspacePath: null,
       sourcePath: null,
       worktree: false,
@@ -864,6 +2159,7 @@ export class TaskManager extends EventEmitter {
       compaction: { count: 0, last: null },
       lastUsage: null,
       metrics: null,
+      speeds: null,
       model: null,
       autoCompactionEnabled: null,
       files: incomingFiles.map(metadata),
@@ -905,6 +2201,9 @@ export class TaskManager extends EventEmitter {
     return {
       ...safe,
       runtime: this.#runtimeFacts(task),
+      // Ожидание провайдера существует только пока живёт процесс, который его
+      // объявил: после падения TaskBridge сохранённое значение — уже история.
+      providerWait: runtime && !runtime.pi.closed ? safe.providerWait || null : null,
       assistantText: tailText(safe.assistantText, TEXT_TAIL),
       thinkingText: tailText(safe.thinkingText, THINKING_TAIL),
       sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed))
@@ -1245,7 +2544,12 @@ export class TaskManager extends EventEmitter {
 
   async #prepareWorkspace(task) {
     let prepared;
-    if (task.projectId === '__scratch__') {
+    // A resumed session may be told to reuse the working copy the previous one
+    // left behind (MR-04). Only a TaskBridge-managed worktree qualifies: anything
+    // else would let a request name an arbitrary directory as a workspace.
+    if (task.resumeWorkspacePath && this.#isReusableWorkspace(task.resumeWorkspacePath)) {
+      prepared = { workspacePath: task.resumeWorkspacePath, sourcePath: task.sourcePath ?? null, worktree: true, baseCommit: null };
+    } else if (task.projectId === '__scratch__') {
       prepared = await createScratchWorkspace(task.id, this.dataRoot);
     } else {
       const project = this.projects.get(task.projectId);
@@ -1268,7 +2572,7 @@ export class TaskManager extends EventEmitter {
   async #createPi(task, sessionFile) {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
     const args = [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...await this.#mcpArgs(task)];
-    let env = null;
+    const env = { ...(this.#piEnv() || {}) };
     if (this.approvalsConfig.enabled && this.approvalBaseUrl && this.approvalExtensionPath) {
       // A missing extension file must not break every task: log it and continue
       // without the gate rather than spawning Pi with a broken --extension.
@@ -1279,27 +2583,28 @@ export class TaskManager extends EventEmitter {
         const token = crypto.randomBytes(24).toString('hex');
         this.approvalTokens.set(task.id, token);
         args.push('-e', this.approvalExtensionPath);
-        env = {
+        Object.assign(env, {
           TASKBRIDGE_APPROVAL_URL: this.approvalBaseUrl,
           TASKBRIDGE_TASK_ID: task.id,
           TASKBRIDGE_APPROVAL_TOKEN: token,
           TASKBRIDGE_APPROVAL_FAILSAFE: this.approvalsConfig.failsafe,
           TASKBRIDGE_APPROVAL_WAIT_MS: String(Math.max(1000, this.approvalsConfig.timeoutMinutes * 60000)),
           TASKBRIDGE_APPROVAL_POLL_MS: '1000'
-        };
+        });
       }
     }
     const pi = new PiRpcSession({
       command: this.config.pi?.command || 'pi',
       args,
       cwd: task.workspacePath,
-      env: this.#piEnv(),
       sessionDir,
       sessionName: `task-${task.id}`,
       sessionFile,
       persistSessions: this.config.pi?.persistSessions !== false,
-      projectTrust: this.config.pi?.projectTrust || 'approve',
-      env
+      // A persisted per-workspace decision must be allowed to reach Pi's trust
+      // store; --approve/--no-approve would override it for this launch.
+      projectTrust: task.workspaceTrusted ? 'saved' : (this.config.pi?.projectTrust || 'approve'),
+      env: Object.keys(env).length ? env : undefined
     });
 
     const runtime = {
@@ -1337,6 +2642,8 @@ export class TaskManager extends EventEmitter {
       task._toolsRunning = 0;
       task._compacting = false;
       task._compactingSince = 0;
+      // Ожидание провайдера живёт в retired процессе вместе с его повтором.
+      task.providerWait = null;
       if (task.pendingUiRequest) this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'pi_closed' }).catch(() => {});
       this.#syncRuntime(task, 'pi_closed');
       if (this.deleted.has(task.id) || runtime.cancelRequested) { this.#resolveSettle(task.id); return; }
@@ -2197,6 +3504,12 @@ export class TaskManager extends EventEmitter {
       return;
     }
     if (frame.type === 'extension_ui_request') return this.#onUiRequest(task, frame);
+    // Провайдер ответил — объявленный повтор кончился. Доказательство только
+    // одно: кадр от Pi. Heartbeat подтверждает связь с TaskBridge, а не ответ
+    // модели, и ожидание с него не снимается.
+    if (task.providerWait && (frame.type === 'message_start' || frame.type === 'message_update' || frame.type === 'agent_settled')) {
+      await this.#clearProviderWait(task, frame.type);
+    }
     if (frame.type === 'tool_execution_start') task._toolsRunning = (task._toolsRunning || 0) + 1;
     if (frame.type === 'tool_execution_end') {
       task._toolsRunning = Math.max(0, (task._toolsRunning || 0) - 1);
@@ -2401,6 +3714,9 @@ export class TaskManager extends EventEmitter {
     });
     if (!metrics) return;
     task.metrics = metrics;
+    // Скорости сессии, а не одного хода: PP у кеш-попаданий отсутствует, поэтому
+    // копятся только те ходы, где число было (см. accumulateSessionSpeeds).
+    task.speeds = accumulateSessionSpeeds(task.speeds, metrics);
   }
 
   #waitForSettle(taskId, timeoutMs) {
@@ -2469,7 +3785,12 @@ export class TaskManager extends EventEmitter {
     // Re-checked after the awaits: a newer turn may have started meanwhile.
     if (turn != null && task._turn !== turn) return;
 
-    const commands = (this.projects.get(task.projectId)?.verification) || [];
+    // A recipe may name a verification profile; the project owns its commands, so a
+    // scheduled run never has to carry a shell line in its prompt (MR-06). The
+    // recipe's choice wins over the project's default list.
+    const commands = (Array.isArray(task.verificationCommands) && task.verificationCommands.length
+      ? task.verificationCommands
+      : (this.projects.get(task.projectId)?.verification)) || [];
     // Turn's context is final here, so the limit is applied before the terminal
     // status is published: the next message from the queue must not reach the
     // model with an over-limit context, and the slot is still ours until
@@ -2764,6 +4085,8 @@ export class TaskManager extends EventEmitter {
     }
     await this.#removeInside(path.join(this.dataRoot, 'pi-sessions'), path.join(this.dataRoot, 'pi-sessions', task.id));
     await this.#removeInside(path.join(this.dataRoot, 'workspaces'), path.join(this.dataRoot, 'workspaces', task.id));
+    // The session is gone: no work item may keep pointing at it.
+    this.store.removeSessionLinks(id);
     await this.store.remove(id);
     // The rows are gone, but the file on disk keeps its old size until VACUUM.
     // Truncating the WAL here is cheap; a full rewrite only happens when the
@@ -3077,6 +4400,30 @@ export class TaskManager extends EventEmitter {
     return this.#message(id, text, 'auto', [], null, { immediate: true, announce: false });
   }
 
+  /**
+   * MR-07: «повторить с параметрами» — тот же вопрос задаётся заново, но с другой
+   * моделью и/или уровнем мышления.
+   *
+   * Параметры применяются к СЕССИИ (теми же методами, что строки модели и уровня в
+   * панели), а не только к этому запросу: у Pi нет переопределения на один запрос —
+   * есть `prompt(message)` и отдельные `set_model`/`set_thinking_level` (проверено по
+   * src/pi-rpc.mjs). Обещать «только для повтора» было бы неправдой, поэтому
+   * применённое видно в самой сессии, а событие смены модели/уровня остаётся в логе.
+   *
+   * Ничего не отправляется «наугад»: и смена модели (BUSY во время ответа), и сам
+   * повтор (NOT_ALLOWED для не-последнего хода) отвечают теми же ошибками, что и без
+   * параметров.
+   */
+  async rerunLastTurn(id, { turnId, model = null, thinkingLevel = null } = {}) {
+    return this.#admit(async () => {
+      if (model && (model.id || model.modelId)) await this.setModel(id, model.provider, model.id || model.modelId);
+      if (thinkingLevel) await this.setThinkingLevel(id, thinkingLevel);
+      // Приватный метод: публичный #regenerateLastTurn снова вошёл бы в #admit,
+      // который одноразовый по замыслу.
+      return this.#regenerateLastTurn(id, turnId);
+    }, id);
+  }
+
   // The exchange regenerate/select may touch: the one behind the last
   // USER_MESSAGE, or the session's own first prompt when there is none.
   #newestExchange(events) {
@@ -3130,6 +4477,23 @@ export class TaskManager extends EventEmitter {
   // which is the emergency exit that hits every session.
   async restartSession(id) {
     return this.#admit(() => this.#restartSession(id), id);
+  }
+
+  // Persist Pi's exact-folder trust decision, then retire this Pi so the next
+  // message reloads project-local instructions/extensions under that decision.
+  async trustWorkspace(id) {
+    return this.#admit(async () => {
+      const task = this.tasks.get(id);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      if (!task.workspacePath) throw Object.assign(new Error('Папка сессии ещё не подготовлена.'), { code: 'NOT_ALLOWED' });
+      const env = { ...process.env, ...(this.config.pi?.env || {}) };
+      const trusted = await trustProjectDirectory(task.workspacePath, piAgentDir(env));
+      task.workspaceTrusted = true;
+      task.updatedAt = now();
+      await this.store.save(this.#publicTask(task));
+      await this.#event(task, 'PROJECT_TRUSTED', `Папка добавлена в доверенные: ${trusted.path}`, trusted);
+      return this.#restartSession(id);
+    }, id);
   }
 
   async #restartSession(id) {
@@ -3209,20 +4573,53 @@ export class TaskManager extends EventEmitter {
     return output;
   }
 
-  // "Fork": a new session in the same project whose conversation is copied from
-  // the beginning through the chosen message. Nothing runs and no model is asked
-  // — the prefix is replayed by the client at once, and the fork's first message
-  // rebuilds Pi's session file from those events (session-history.mjs). The
-  // source is left untouched.
-  async forkTask(id, turnId) {
-    return this.#admit(() => this.#forkTask(id, turnId), id);
+  // "Fork": a new session in the same project whose conversation is copied out
+  // of this one. `through` (the default) copies the history from the beginning
+  // through the chosen message; `from` copies the chosen message and everything
+  // after it, so the fork continues the conversation from that point instead of
+  // from the session start. Nothing runs and no model is asked — the copied
+  // events are replayed by the client at once, and the fork's first message
+  // rebuilds Pi's session file from them (session-history.mjs). The source is
+  // left untouched.
+  async forkTask(id, turnId, direction = 'through') {
+    // A client that serialises an unset field as null names the default.
+    return this.#admit(() => this.#forkTask(id, turnId, direction ?? 'through'), id);
   }
 
-  async #forkTask(id, turnId) {
+  async #forkTask(id, turnId, direction) {
+    if (direction !== 'through' && direction !== 'from') {
+      throw Object.assign(new Error('Ветка бывает «до» или «от» сообщения.'), { code: 'INPUT_INVALID' });
+    }
     const source = this.#mutableTask(id);
     const events = await this.store.readEvents(id, 0);
-    const fork = this.#forkRange(events, turnId);
-    const kept = events.filter(event => event.seq <= fork.boundary);
+    const fork = this.#forkRange(events, turnId, direction);
+    const kept = events.filter(event => event.seq >= fork.from && event.seq <= fork.through);
+    // A copy that opens mid-conversation owns its first prompt: the clicked
+    // message becomes the new session's own prompt — the client synthesizes
+    // that first turn from the task record, exactly like a session created with
+    // it — and its USER_MESSAGE event stays out of the copy. Keeping both would
+    // show the operator's line twice.
+    const opening = fork.fold
+      ? kept.find(event => event.type === 'USER_MESSAGE' && event.seq === fork.from)
+      : null;
+    const copied = opening ? kept.filter(event => event !== opening) : kept;
+    // The dropped line is the copy's own first prompt: the clients know it as
+    // `user-initial` / `assistant-initial`, and the exchange it opens has the
+    // key 0 (`#variantsOf`). Events naming it by its old seq must follow, or a
+    // variant marker would plant a second, empty answer at the end and an
+    // in-place edit would miss the turn it belongs to.
+    const rewired = (data) => {
+      if (!opening || !data || typeof data !== 'object') return data;
+      const patched = { ...data };
+      const seq = String(opening.seq);
+      if (patched.turnSeq === opening.seq) {
+        patched.turnSeq = 0;
+        if (patched.variantId === seq) patched.variantId = 'initial';
+      }
+      if (patched.id === `assistant-${seq}`) patched.id = 'assistant-initial';
+      if (patched.id === `user-${seq}`) patched.id = 'user-initial';
+      return patched;
+    };
     const task = {
       id: shortId(),
       createdAt: now(),
@@ -3230,7 +4627,7 @@ export class TaskManager extends EventEmitter {
       status: 'SUCCEEDED',
       queueReason: null,
       projectId: source.projectId,
-      prompt: source.prompt,
+      prompt: opening ? (opening.data?.text ?? opening.message ?? '') : source.prompt,
       title: source.title ? `${source.title} (ветка)` : null,
       // The workspace is prepared when the first message of the fork runs, so a
       // worktree project gets its own checkout instead of sharing one.
@@ -3251,29 +4648,65 @@ export class TaskManager extends EventEmitter {
       compaction: { count: 0, last: null },
       lastUsage: null,
       metrics: null,
+      speeds: null,
       model: source.model,
       autoCompactionEnabled: null,
-      files: Array.isArray(source.files) ? source.files : [],
+      // The copy's first turn is the clicked message, so its own attachments
+      // belong to it — the source's whole list would carry files of other turns.
+      files: opening
+        ? (Array.isArray(opening.data?.files) ? opening.data.files : [])
+        : (Array.isArray(source.files) ? source.files : []),
       attachments: [],
       outputFiles: [],
       forkedFrom: id
     };
     await this.store.create(task);
     this.tasks.set(task.id, task);
-    for (const event of kept) await this.store.appendEvent(task.id, { ...event, taskId: task.id });
-    await this.#event(task, 'TASK_FORKED', `Ветка сессии ${id}: перенесено событий — ${kept.length}.`, { from: id, fromSeq: fork.fromSeq, throughSeq: fork.boundary });
+    for (const event of copied) {
+      const copy = { ...event, taskId: task.id };
+      if (opening && event.data) copy.data = rewired(event.data);
+      // A copy that opens mid-conversation keeps the source cursors: the events
+      // refer to each other by seq (a variant names the exchange it belongs to,
+      // TURN_TRUNCATED names the cut), so renumbering the copy from 1 would
+      // leave those references pointing at whatever lands under the old number.
+      // A copy of the prefix is numbered from the session start anyway, so it
+      // is appended as usual.
+      if (opening) await this.store.appendEventAt(task.id, event.seq, copy);
+      else await this.store.appendEvent(task.id, copy);
+    }
+    await this.#event(task, 'TASK_FORKED', `Ветка сессии ${id}: перенесено событий — ${copied.length}.`, {
+      from: id,
+      fromSeq: fork.at,
+      // null = the copy runs to the end of the source log.
+      throughSeq: fork.through === Number.MAX_SAFE_INTEGER ? null : fork.through
+    });
     return this.#publicTask(task);
   }
 
-  // Where a fork stops. A click on an operator message keeps history from the
-  // session start through that message. A click on an answer keeps history
-  // through that answer, which ends just before the next operator message.
-  #forkRange(events, turnId) {
+  // Which slice of the log a fork copies, and where the slice is cut. `through`
+  // (the default) keeps history from the session start through the chosen
+  // message: a click on an operator message keeps history through that message,
+  // a click on an answer keeps through that answer, which ends just before the
+  // next operator message. `from` keeps the chosen message and everything after
+  // it. Both directions name an exchange the same way — the client's
+  // `assistant-N` is the answer to `user-N` — so a click on either end of an
+  // exchange starts or ends the copy at the same place. The session's own first
+  // prompt has no event of its own, so `user-initial`/`assistant-initial` are
+  // read from the record instead: "through" the first answer is the first
+  // exchange, "from" the first prompt is the whole log. `fold` marks a `from`
+  // copy that opens on someone else's message, which becomes its own prompt.
+  #forkRange(events, turnId, direction = 'through') {
     const value = String(turnId || '');
-    if (value === 'user-initial') return { fromSeq: 0, boundary: 0 };
+    const forward = direction === 'from';
+    const all = Number.MAX_SAFE_INTEGER;
+    // `through` the own first prompt copies nothing of it — the prompt travels
+    // with the task record; `from` it copies the whole log.
+    if (value === 'user-initial') return { from: 1, through: forward ? all : 0, at: 0, fold: false };
     if (value === 'assistant-initial') {
-      const first = events.find(event => event.type === 'USER_MESSAGE');
-      return { fromSeq: 0, boundary: first ? first.seq - 1 : Number.MAX_SAFE_INTEGER };
+      // "Up to the first answer" ends just before the next operator message; a
+      // session without follow-ups has none, so it is copied whole.
+      const next = events.find(event => event.type === 'USER_MESSAGE');
+      return { from: 1, through: forward ? all : (next ? next.seq - 1 : all), at: 0, fold: false };
     }
     const match = /^(user|assistant)-(\d+)$/.exec(value);
     if (!match) throw Object.assign(new Error('Ответвить можно только от сообщения или ответа.'), { code: 'INPUT_INVALID' });
@@ -3282,9 +4715,10 @@ export class TaskManager extends EventEmitter {
     if (!events.some(event => event.type === 'USER_MESSAGE' && event.seq === fromSeq)) {
       throw Object.assign(new Error('Ход не найден в истории.'), { code: 'NOT_FOUND' });
     }
-    if (role === 'user') return { fromSeq, boundary: fromSeq };
+    if (forward) return { from: fromSeq, through: all, at: fromSeq, fold: true };
+    if (role === 'user') return { from: 1, through: fromSeq, at: fromSeq };
     const next = events.find(event => event.type === 'USER_MESSAGE' && event.seq > fromSeq);
-    return { fromSeq, boundary: next ? next.seq - 1 : Number.MAX_SAFE_INTEGER };
+    return { from: 1, through: next ? next.seq - 1 : all, at: fromSeq };
   }
 
   // Shared guard for history mutations: the session must exist and must not be
@@ -3747,7 +5181,22 @@ export class TaskManager extends EventEmitter {
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
     // The queued text already carries the note about its files.
     const message = userText + (attached.length && !staged.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
-    const effectiveMode = mode === 'auto' ? (streaming ? 'steer' : 'prompt') : mode;
+    // Расширенческую команду Pi нельзя ставить в очередь: отправленная как
+    // steer/follow-up, пока агент работает, она отвечает «Extension command "/nudge"
+    // cannot be queued. Use prompt() or execute the command when not streaming.»
+    // (agent-session `_throwIfExtensionCommand`) и теряется — именно так «/nudge не
+    // работает». Pi's prompt() выполняет такие команды сразу, даже во время стрима,
+    // поэтому команда всегда идёт promt'ом. Список берётся живой у Pi: «/skill:…»,
+    // «/prompt:…» и любой неизвестный «/text» — не команды расширения и остаются
+    // steer'ом (их Pi сам разворачивает в текст, и очередь для них законна).
+    // Считается и для явного steer/follow_up: Pi отказывается ставить команду в
+    // очередь при ЛЮБОМ состоянии сессии, поэтому «вклиниться» командой не бывает —
+    // бывает только выполнить её.
+    const requestedMode = mode === 'auto' ? (streaming ? 'steer' : 'prompt') : mode;
+    const extendableCommand = requestedMode !== 'prompt' && userText.startsWith('/')
+      ? await this.#isPiExtensionCommand(runtime, userText)
+      : false;
+    const effectiveMode = extendableCommand ? 'prompt' : requestedMode;
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
     // are persisted. A rejected RPC must not create a phantom user turn.
     await runtime.eventChain.catch(() => {});
@@ -3980,6 +5429,13 @@ export class TaskManager extends EventEmitter {
   async #setStatus(task, status, current) {
     if (this.closing) return;
     if (this.deleted.has(task.id)) return;
+    // Терминальный статус закрывает и ожидание: следующий ход начнёт его заново,
+    // а до тех пор «ждём провайдера» — уже неправда. Событие здесь не нужно:
+    // за статусом всегда идёт TASK_*.
+    if (RUN_TERMINAL.has(status)) {
+      task.providerWait = null;
+      if (String(task.current || '').startsWith(PROVIDER_WAIT_CURRENT)) task.current = '';
+    }
     // The UI shows "работает 12 с", so the moment of the transition matters.
     if (task.status !== status) task.statusChangedAt = now();
     // Best-effort run ledger (stage 2): one run per RUNNING stint. Never lets
@@ -4142,6 +5598,7 @@ export class TaskManager extends EventEmitter {
       compacting: Boolean(task._compacting),
       compactingSince: task._compactingSince || 0,
       toolsRunning: task._toolsRunning || 0,
+      waitingModel: Boolean(task.providerWait),
     });
   }
 
@@ -4200,12 +5657,113 @@ export class TaskManager extends EventEmitter {
     }
   }
 
+  // --- provider wait (a retry Pi announces while the agent is still alive) ----
+  /**
+   * Запоминает, что Pi сказал о запланированном повторе, и сообщает об этом один
+   * раз на раунд ожидания.
+   *
+   * Тишина провайдера выглядит точно так же, как сломанный мост: события идут с
+   * последнего ответа модели, статус RUNNING, активность streaming. Единственный
+   * признак жизни — это самое объявление, и оно меняется каждые 15 с только числом
+   * оставшихся секунд. Поэтому событие публикуется на смену раунда (другой вид
+   * отказа, модель или дедлайн), а тики внутри раунда только уточняют остаток.
+   */
+  async #noteProviderWait(task, wait) {
+    if (!wait) return;
+    const at = now();
+    const retryAt = wait.retryAt || (wait.waitMs ? new Date(Date.parse(at) + wait.waitMs).toISOString() : null);
+    // Раундом ожидания был дедлайн, и на живом отказе это не работало: внутри
+    // одного эпизода Pi объявляет то 5 с, то 15 с, а модель и причину называют
+    // два источника одного ожидания — проза Pi и машинный кадр pi-limits-wait.
+    // Ключ менялся на каждом тике, и на один отказ 2026-10-12 в чат уходило три
+    // заметки («Провайдер не принял запрос: fetch failed», «… через 15 с»,
+    // «Провайдер openai-codex/gpt-5.6-sol …») — оператор видел ошибку там, где
+    // субагент ещё работал. Эпизод называет сам машинный кадр (`periodId`), а
+    // прозу того же эпизода привязываем по виду отказа и модели.
+    if (this.#sameProviderWait(task.providerWait, wait)) {
+      // Тик не перезаписывает объявленное: остаток до повтора клиент считает от
+      // `retryAt`, а `waitMs` и текст сообщения — снимок начала раунда.
+      task.providerWait = { ...task.providerWait, at, periodId: task.providerWait.periodId || wait.periodId || null };
+      task.current = providerWaitCurrent(task.providerWait);
+      return;
+    }
+    const next = { ...wait, retryAt, at, since: wait.since || task.providerWait?.since || at };
+    task.providerWait = next;
+    task.current = providerWaitCurrent(next);
+    await this.#event(task, 'PROVIDER_WAIT', providerWaitMessage(next), { ...next, waiting: true });
+  }
+
+  /**
+   * То же самое ожидание, а не новый отказ?
+   *
+   * Машинный кадр называет эпизод сам (`periodId`); проза его не несёт, и её
+   * привязывают по виду отказа и модели. Разные эпизоды при этом не сливаются:
+   * как только эпизод сменился, новый `periodId` перестаёт совпадать.
+   */
+  #sameProviderWait(current, wait) {
+    if (!current) return false;
+    if (wait.periodId && current.periodId) return wait.periodId === current.periodId;
+    return current.kind === wait.kind && current.model === wait.model;
+  }
+
+  /**
+   * Ожидание кончилось: провайдер ответил, Pi ушёл или ход закончился. Состояние
+   * не должно пережить своё событие — иначе в диагностике через сутки всё ещё
+   * написано «ждём провайдера».
+   */
+  async #clearProviderWait(task, reason, { announce = true } = {}) {
+    const had = Boolean(task.providerWait);
+    task.providerWait = null;
+    if (String(task.current || '').startsWith(PROVIDER_WAIT_CURRENT)) task.current = '';
+    if (had && announce) await this.#event(task, 'PROVIDER_WAIT_END', 'Провайдер снова отвечает', { reason });
+  }
+
+  /**
+   * Названа ли команда расширения Pi в тексте вида `/nudge help`.
+   *
+   * Разбор имени — тот же, что у Pi в `_tryExecuteExtensionCommand`: до первого
+   * пробела, без ведущего слэша. Список команд спрашивается у живого Pi только когда
+   * это вообще может изменить доставку (слэш при работающем агенте), поэтому кэш и его
+   * протухание не нужны: ошибка чтения списка не ломает отправку — команда просто
+   * уедет прежним путём и Pi скажет своё.
+   */
+  async #isPiExtensionCommand(runtime, text) {
+    const name = String(text || '').trim().slice(1).split(/\s/, 1)[0];
+    if (!name) return false;
+    const commands = await runtime.pi.getCommands().catch(() => []);
+    return commands.some(command => String(command?.name || '').replace(/^\//, '') === name);
+  }
+
   // --- extension UI requests (Pi RPC) ------------------------------------------
   async #onUiRequest(task, frame) {
     if (frame.method === 'notify') {
       const message = uiText(frame.message, 2000) || '';
-      if (RETRY_IN_PROGRESS_NOTICE.test(message)) return;
+      if (GIVE_UP_NOTICE.test(message)) {
+        // Отказ без повтора: состояние ожидания снимет машинный кадр `give_up`, а в чат
+        // об этом скажет эта строка — без модели и причины сырое объявление бесполезно.
+        await this.#event(task, 'UI_NOTIFY', providerGiveUpMessage(parseProviderGiveUp(message)), { notifyType: 'error', giveUp: true });
+        return;
+      }
+      if (RETRY_IN_PROGRESS_NOTICE.test(message)) {
+        // В чат — не строкой уведомления (выше): она читается как ошибка агента,
+        // которой нет. Но само ожидание — состояние сессии, и его видно.
+        await this.#noteProviderWait(task, parseProviderWait(message));
+        return;
+      }
       await this.#event(task, 'UI_NOTIFY', message, { notifyType: ['info', 'warning', 'error'].includes(frame.notifyType) ? frame.notifyType : 'info' });
+      return;
+    }
+    // pi-limits-wait отдаёт то же ожидание машинным кадром (statusKey
+    // `…pi-limits-wait.json`): провайдер, модель, `reason` и абсолютный
+    // `plannedDeadline`. Предпочитаем его тексту: там поля, а не проза, которую
+    // приходится разбирать догадками.
+    if (frame.method === 'setStatus' && String(frame.statusKey || '').endsWith('pi-limits-wait.json')) {
+      const wait = parseProviderWaitStatus(frame.statusText);
+      // `give_up` — не ожидание, а его конец: держать «ждём провайдера» после него
+      // значит обещать повтор, которого не будет. Молча: сама ошибка уже идёт в чат
+      // своим сообщением Pi (и строкой выше — прозой того же отказа).
+      if (wait?.giveUp) await this.#clearProviderWait(task, 'give_up', { announce: false });
+      else await this.#noteProviderWait(task, wait);
       return;
     }
     // Extension progress ticks (smart-compaction) arrive as setStatus frames

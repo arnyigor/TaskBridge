@@ -143,6 +143,14 @@ class ChatSession(
     private var started = false
     private val cachedEvents = mutableListOf<TaskEvent>()
 
+    /**
+     * Set when the byte budget dropped older events: the cached copy must not
+     * claim the session start was reached, or the chat would show a truncated
+     * history with no way to load the rest (the «load older» affordance is
+     * hidden once [ChatSessionState.reachedStart] is true).
+     */
+    private var cacheTruncated = false
+
     fun start() {
         if (started) return
         started = true
@@ -193,6 +201,10 @@ class ChatSession(
                 _state.update { it.copy(task = task, chat = chat.snapshot(), loading = false, reachedStart = window.reachedStart) }
                 cachedEvents.clear()
                 cachedEvents.addAll(window.events.map(::lightenEvent))
+                // The first window can be large by itself (a page cut by the server's
+                // byte cap): the budget applies to it as well, not only to pages added
+                // later.
+                trimCachedEvents()
             }
             persistCache()
             fillEmptyWindow()
@@ -211,27 +223,59 @@ class ChatSession(
     fun loadOlder() {
         val state = _state.value
         if (state.reachedStart || state.loadingOlder) return
-        val before = oldestSeq ?: return
+        if (oldestSeq == null) return
         _state.update { it.copy(loadingOlder = true) }
         scope.launch {
             try {
-                val window = api.eventWindow(taskId, pageTurns, before = before)
-                mutex.withLock {
-                    val chat = reducer ?: return@withLock
-                    val task = _state.value.task ?: return@withLock
-                    if (window.events.isNotEmpty() || window.reachedStart) chat.prependOlder(task, window.events, window.reachedStart)
-                    if (window.events.isNotEmpty()) {
+                // One action loads SEVERAL pages. A page is [pageTurns] turns, which is
+                // less than a screen on a phone: pulling one page per tap left the
+                // operator tapping «Показать более раннюю историю» dozens of times on a
+                // long session and never seeing progress. The action now keeps going
+                // until the history start is reached, a page brings nothing, or the
+                // ceilings below are hit — the operator can always ask for more (the
+                // button stays while `reachedStart` is false).
+                var pages = 0
+                var events = 0
+                var startReached = false
+                while (pages < OLDER_PAGE_LIMIT && events < OLDER_EVENT_LIMIT) {
+                    val before = oldestSeq ?: break
+                    val window = api.eventWindow(taskId, pageTurns, before = before)
+                    val nextOldest = window.events.firstOrNull()?.seq
+                    // The cursor must move strictly down. A page that repeats the
+                    // loaded window would be replayed into the same reducer, and a
+                    // turn's id is its seq (`user-12`, `assistant-12`) — the copy would
+                    // render two LazyColumn items with the same key (Android throws on
+                    // that) and show the messages twice. So a server that answers the
+                    // same window twice ends the paging here.
+                    if (nextOldest == null) { startReached = true; break }
+                    if (nextOldest >= before) { startReached = true; break }
+                    mutex.withLock {
+                        val chat = reducer ?: return@withLock
+                        val task = _state.value.task ?: return@withLock
+                        chat.prependOlder(task, window.events, window.reachedStart)
                         cachedEvents.addAll(0, window.events.map(::lightenEvent))
                         trimCachedEvents()
+                        oldestSeq = nextOldest
+                        _state.update { it.copy(chat = chat.snapshot()) }
                     }
-                    oldestSeq = window.events.firstOrNull()?.seq ?: oldestSeq
-                    _state.update { it.copy(chat = chat.snapshot(), reachedStart = window.reachedStart || window.events.isEmpty(), loadingOlder = false) }
+                    pages += 1
+                    events += window.events.size
+                    if (window.reachedStart) { startReached = true; break }
                 }
+                _state.update { it.copy(reachedStart = it.reachedStart || startReached, loadingOlder = false) }
                 persistCache()
                 fillEmptyWindow()
+            } catch (cancel: CancellationException) {
+                throw cancel
             } catch (error: ApiException) {
                 _state.update { it.copy(loadingOlder = false) }
                 notice(error.error)
+            } catch (failure: Throwable) {
+                // Anything else (a decoder failing on an unexpected page) used to
+                // escape into the session's supervisor scope and left
+                // loadingOlder set forever, so the history never loaded again.
+                _state.update { it.copy(loadingOlder = false) }
+                _effects.tryEmit(ChatEffect.Notice(failure.message ?: "Не удалось загрузить историю"))
             }
         }
     }
@@ -545,6 +589,10 @@ class ChatSession(
             reducer = chat
             oldestSeq = cached.events.firstOrNull()?.seq
             cachedEvents.clear(); cachedEvents.addAll(cached.events)
+            // A cache written before the byte budget (or by a version without
+            // it) can be tens of megabytes; it must not be carried forward into
+            // the next write as it is.
+            trimCachedEvents()
             _state.update { it.copy(task = cached.task, chat = chat.snapshot(), loading = false, reachedStart = cached.reachedStart) }
         }
         return true
@@ -579,13 +627,17 @@ class ChatSession(
     private suspend fun persistCache() {
         val snapshot = mutex.withLock {
             val task = _state.value.task ?: return
-            CachedChat(task, cachedEvents.toList(), _state.value.reachedStart)
+            CachedChat(task, cachedEvents.toList(), _state.value.reachedStart && !cacheTruncated)
         }
-        persistence.saveChat(taskId, snapshot)
+        // The file is a convenience for the next cold start, never a reason for
+        // the process to die. This runs from `close()` (NonCancellable) and from
+        // timer/supervisor coroutines, where an escaping throwable takes the app
+        // down instead of just losing the cache.
+        runCatching { persistence.saveChat(taskId, snapshot) }
     }
 
     private fun trimCachedEvents() {
-        if (cachedEvents.size > 500) cachedEvents.subList(0, cachedEvents.size - 500).clear()
+        if (trimCacheToBudget(cachedEvents)) cacheTruncated = true
     }
 
     private suspend fun dropOptimistic(commandId: String) {
@@ -630,6 +682,12 @@ class ChatSession(
         mutex.withLock { reducer?.syncTask(updated) }
     }
 
+    fun trustWorkspace() = act("workspace-trust") {
+        val updated = api.trustWorkspace(taskId)
+        mutex.withLock { reducer?.syncTask(updated) }
+        _effects.tryEmit(ChatEffect.Notice("Папка добавлена в доверенные Pi"))
+    }
+
     fun setModel(model: ModelRef) = act("model") {
         val updated = api.setModel(taskId, model)
         mutex.withLock {
@@ -665,12 +723,21 @@ class ChatSession(
 
     fun regenerate(answerId: String) = act("regenerate") { api.regenerate(taskId, answerId) }
 
+    /**
+     * MR-07: ответ заново с параметрами. Параметры уходят на сервер одним запросом
+     * с повтором, поэтому ответ приходит уже выбранной моделью — а не так, что сначала
+     * меняется модель, потом что-то происходит отдельно.
+     */
+    fun rerun(answerId: String, model: ModelRef? = null, thinkingLevel: String? = null) =
+        act("rerun") { api.rerun(taskId, answerId, model, thinkingLevel) }
+
     fun continueAnswer(answerId: String) = act("continue") { api.continueTurn(taskId, answerId) }
 
     fun selectVariant(turnSeq: Long, variantId: String) = act("variant") { api.selectVariant(taskId, turnSeq, variantId) }
 
-    fun fork(turnId: String) = act("fork") {
-        val forked = api.fork(taskId, turnId)
+    /** A branch of this session: everything up to [turnId], or — with [from] — [turnId] and all that follows it. */
+    fun fork(turnId: String, from: Boolean = false) = act("fork") {
+        val forked = api.fork(taskId, turnId, from)
         _effects.tryEmit(ChatEffect.OpenSession(forked.id))
     }
 
@@ -740,6 +807,74 @@ fun describe(error: ApiError): String = when (error) {
     else -> error.message
 }
 
+/** How many events the on-disk chat cache keeps, at most. */
+internal const val CACHE_MAX_EVENTS = 500
+
+/**
+ * How many pages one «load older» action may pull. A page is [ChatSession.pageTurns]
+ * turns — less than a screen — so one page per action made the operator tap the
+ * button dozens of times on a long session.
+ */
+internal const val OLDER_PAGE_LIMIT = 12
+
+/**
+ * …and how many events they may bring in total. The turns are kept in memory for the
+ * whole session, so one gesture must not pull a multi-megabyte history into the heap
+ * (the phone has a 256 MB limit): past this the action stops and the button stays.
+ */
+internal const val OLDER_EVENT_LIMIT = 2_000
+
+/**
+ * Byte budget of the cached events, in JSON characters.
+ *
+ * A whole [ru.arny.taskbridge.core.client.session.CachedChat] is written as ONE
+ * string (`Json.encodeToString`), so the encoder allocates a buffer of that size
+ * and grows it by doubling. A session with large tool output reached tens of
+ * millions of characters, the growth asked for a single 108 MB array, and
+ * Android's 256 MB heap refused it: `OutOfMemoryError` inside
+ * `JsonToStringWriter.ensureTotalCapacity`, thrown from `persistCache` on a
+ * worker thread, which killed the whole process (measured on the phone
+ * 2026-10-11: three crashes in one morning, every one of them right after
+ * `loadOlder` — i.e. when the operator scrolled the history up).
+ *
+ * The budget keeps the newest events only; the full history lives on the
+ * server, and a trimmed cache is stored with `reachedStart = false` so the
+ * client pages back instead of pretending the history is complete.
+ */
+internal const val CACHE_BUDGET_CHARS = 2_000_000
+
+/** What one cached event adds to the file, measured the way the encoder sees it. */
+internal fun cacheWeight(event: TaskEvent): Int = event.data.toString().length
+
+/**
+ * Drops the oldest cached events until the rest fit [budgetChars] and
+ * [maxEvents]. Returns true when something was dropped — the caller then marks
+ * the cache as not reaching the session start.
+ */
+internal fun trimCacheToBudget(
+    events: MutableList<TaskEvent>,
+    budgetChars: Int = CACHE_BUDGET_CHARS,
+    maxEvents: Int = CACHE_MAX_EVENTS,
+): Boolean {
+    var dropped = false
+    if (events.size > maxEvents) {
+        events.subList(0, events.size - maxEvents).clear()
+        dropped = true
+    }
+    var chars = 0
+    var keepFrom = events.size
+    for (index in events.indices.reversed()) {
+        chars += cacheWeight(events[index])
+        if (chars > budgetChars) break
+        keepFrom = index
+    }
+    if (keepFrom > 0) {
+        events.subList(0, keepFrom).clear()
+        dropped = true
+    }
+    return dropped
+}
+
 /**
  * A saved event a client actually reads is a fraction of what Pi sends. A frame
  * carries tool arguments and results — file contents, whole command output,
@@ -756,8 +891,11 @@ internal fun lightenEvent(event: TaskEvent): TaskEvent {
     val light: JsonObject = when (type) {
         // The whole turn again, message by message: the reducer ignores agent_end.
         "agent_end" -> JsonObject(frame - "messages")
-        // Only a trigger to close the previous answer's delivery line.
-        "turn_end" -> JsonObject(frame - "message")
+        // Only a trigger to close the previous answer's delivery line. The tool
+        // results arrive again as tool_execution_end frames (their own `result` is
+        // dropped below), so the copy kept here was the single largest thing in
+        // the cache: one bash run of a few hundred kilobytes was stored twice.
+        "turn_end" -> JsonObject(frame - "message" - "toolResults")
         // A tool result is echoed as a message of its own, content and all.
         "message_start", "message_end" ->
             if (frame.obj("message")?.str("role") == "toolResult") JsonObject(frame - "message") else return event

@@ -179,7 +179,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             noteTexts += turn.text
             true
         }
-        turns.addAll(0, visibleOlder)
+        // The history is one ordered log, so a turn id already present means
+        // this page overlaps what is loaded: applying it again renders two
+        // LazyColumn items with the same key (Android throws on a duplicate
+        // key) and shows the message twice. The overlap itself is a server/page
+        // bug and is stopped in ChatSession.loadOlder; this is the last place
+        // where it cannot become visible.
+        val known = turns.mapTo(mutableSetOf()) { it.id }
+        val fresh = visibleOlder.filter { known.add(it.id) }
+        turns.addAll(0, fresh)
         if (mcpNotice == null) mcpNotice = scratch.mcpNotice
         for ((id, tool) in scratch.tools) tools.getOrPut(id) { tool }
         for ((key, entry) in scratch.variants) variants.getOrPut(key) { entry }
@@ -419,6 +427,12 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             // locally and delivers the answer as a notify UI request — shown as a
             // note row, otherwise the command would execute silently.
             "UI_NOTIFY" -> onUiNotify(event)
+            // Провайдер не принял запрос, Pi ждёт повтора. Заметка нужна в самой
+            // ленте: без неё ход, простоявший час, выглядит обычно, а его итог не
+            // объясняет, откуда взялась пауза. Одна на эпизод ожидания — сервер
+            // публикует смену эпизода (`periodId` машинного кадра), а тики каждые
+            // 15 с не приходят (#noteProviderWait).
+            "PROVIDER_WAIT" -> event.message?.takeIf { it.isNotBlank() }?.let { addNote(event, it) }
         }
         val frame = event.piFrame ?: return true
         applyFrame(event, frame)

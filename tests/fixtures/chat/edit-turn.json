@@ -1,0 +1,878 @@
+{
+  "task": {
+    "id": "6bf8eaeb77ba",
+    "createdAt": "2026-10-11T19:52:16.736Z",
+    "updatedAt": "2026-10-11T19:52:17.265Z",
+    "status": "SUCCEEDED",
+    "queueReason": null,
+    "projectId": "fixture",
+    "prompt": "переписанный вопрос",
+    "title": null,
+    "workspacePath": "C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\taskbridge-http-test-yDWIKO",
+    "sourcePath": "C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\taskbridge-http-test-yDWIKO",
+    "worktree": false,
+    "current": "Done",
+    "assistantText": "Ответ 1Ответ 2",
+    "thinkingText": "",
+    "error": null,
+    "errorCode": null,
+    "engine": {
+      "profileId": null,
+      "auto": false,
+      "reason": null
+    },
+    "requestedModel": null,
+    "thinkingLevel": null,
+    "mcp": null,
+    "verification": [],
+    "git": {
+      "isGit": false,
+      "status": "",
+      "changedFiles": []
+    },
+    "compaction": {
+      "count": 0,
+      "last": null
+    },
+    "lastUsage": {
+      "input": 1000,
+      "output": 100,
+      "totalTokens": 1100
+    },
+    "metrics": {
+      "pp": 11363.636363636364,
+      "tg": 1587.3015873015872,
+      "inputTokens": 1000,
+      "outputTokens": 100,
+      "promptMs": 88,
+      "ms": 63,
+      "source": "mixed",
+      "ppSource": "ttft-estimate",
+      "tgSource": "usage",
+      "ppApproximate": true
+    },
+    "speeds": {
+      "turns": 2,
+      "ppMax": 12048.192771084337,
+      "ppAvg": 11705.91456736035,
+      "ppTurns": 2,
+      "tgAvg": 1574.9007936507937,
+      "tgTurns": 2
+    },
+    "model": {
+      "id": "fixture",
+      "provider": null,
+      "contextWindow": 65536,
+      "maxTokens": 1024
+    },
+    "autoCompactionEnabled": true,
+    "files": [],
+    "attachments": [],
+    "outputFiles": [],
+    "_runtimeFacts": {
+      "state": "IDLE",
+      "activity": null
+    },
+    "statusChangedAt": "2026-10-11T19:52:17.225Z",
+    "baseCommit": null,
+    "piPid": 25036,
+    "piStartedAt": "2026-10-11T19:52:16.751Z",
+    "thinkingLevelActual": "off",
+    "inFlightPrompt": null,
+    "verificationStatus": "NOT_CONFIGURED",
+    "retryable": null,
+    "retryAfterMs": null,
+    "runtime": {
+      "state": "IDLE",
+      "activity": null
+    },
+    "providerWait": null,
+    "sessionAvailable": true
+  },
+  "events": [
+    {
+      "at": "2026-10-11T19:52:16.736Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "TASK_QUEUED",
+      "message": "Task queued",
+      "data": {},
+      "seq": 1
+    },
+    {
+      "at": "2026-10-11T19:52:16.737Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "— → WORKING",
+      "data": {
+        "from": null,
+        "to": "WORKING",
+        "fromActivity": null,
+        "toActivity": "waiting_model",
+        "compactingSince": null,
+        "reason": "TASK_QUEUED"
+      },
+      "seq": 2
+    },
+    {
+      "at": "2026-10-11T19:52:16.738Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "STATUS",
+      "message": "Preparing workspace",
+      "data": {
+        "status": "PREPARING"
+      },
+      "seq": 3
+    },
+    {
+      "at": "2026-10-11T19:52:16.739Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → STARTING",
+      "data": {
+        "from": "WORKING",
+        "to": "STARTING",
+        "fromActivity": "waiting_model",
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "STATUS"
+      },
+      "seq": 4
+    },
+    {
+      "at": "2026-10-11T19:52:16.740Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "WORKSPACE_READY",
+      "message": "Workspace: C:\\Users\\ArnyPC\\AppData\\Local\\Temp\\taskbridge-http-test-yDWIKO",
+      "data": {},
+      "seq": 5
+    },
+    {
+      "at": "2026-10-11T19:52:16.740Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "STATUS",
+      "message": "Checking local model runtime",
+      "data": {
+        "status": "PREFLIGHT"
+      },
+      "seq": 6
+    },
+    {
+      "at": "2026-10-11T19:52:16.740Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_READY",
+      "message": "Local runtime: EXTERNAL_RUNNING",
+      "data": {},
+      "seq": 7
+    },
+    {
+      "at": "2026-10-11T19:52:16.828Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "STATUS",
+      "message": "Pi starting",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 8
+    },
+    {
+      "at": "2026-10-11T19:52:16.829Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "STARTING → WORKING",
+      "data": {
+        "from": "STARTING",
+        "to": "WORKING",
+        "fromActivity": null,
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "STATUS"
+      },
+      "seq": 9
+    },
+    {
+      "at": "2026-10-11T19:52:16.830Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PROMPT_ACCEPTED",
+      "message": "Первый запрос принят Pi",
+      "data": {
+        "initial": true
+      },
+      "seq": 10
+    },
+    {
+      "at": "2026-10-11T19:52:16.831Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 11
+    },
+    {
+      "at": "2026-10-11T19:52:16.832Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "вопрос, который перепишут\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 12
+    },
+    {
+      "at": "2026-10-11T19:52:16.833Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "вопрос, который перепишут\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf)."
+              }
+            ]
+          }
+        }
+      },
+      "seq": 13
+    },
+    {
+      "at": "2026-10-11T19:52:16.834Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 14
+    },
+    {
+      "at": "2026-10-11T19:52:16.834Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 15
+    },
+    {
+      "at": "2026-10-11T19:52:16.835Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "streaming",
+        "toActivity": "tool",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 16
+    },
+    {
+      "at": "2026-10-11T19:52:16.835Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "tool_execution_update",
+      "data": {
+        "pi": {
+          "type": "tool_execution_update",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          },
+          "partialResult": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 17
+    },
+    {
+      "at": "2026-10-11T19:52:16.836Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-1",
+          "toolName": "read",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 18
+    },
+    {
+      "at": "2026-10-11T19:52:16.836Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "tool",
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 19
+    },
+    {
+      "at": "2026-10-11T19:52:16.919Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 20
+    },
+    {
+      "at": "2026-10-11T19:52:16.950Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 21
+    },
+    {
+      "at": "2026-10-11T19:52:16.982Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 1"
+          }
+        }
+      },
+      "seq": 22
+    },
+    {
+      "at": "2026-10-11T19:52:16.985Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 1"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 23
+    },
+    {
+      "at": "2026-10-11T19:52:16.986Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 24
+    },
+    {
+      "at": "2026-10-11T19:52:16.987Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 25
+    },
+    {
+      "at": "2026-10-11T19:52:16.988Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 26
+    },
+    {
+      "at": "2026-10-11T19:52:17.027Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → IDLE",
+      "data": {
+        "from": "WORKING",
+        "to": "IDLE",
+        "fromActivity": "streaming",
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "TASK_SUCCEEDED"
+      },
+      "seq": 27
+    },
+    {
+      "at": "2026-10-11T19:52:17.027Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 28
+    },
+    {
+      "at": "2026-10-11T19:52:17.047Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "TURN_TRUNCATED",
+      "message": "Сообщение изменено: отправлено заново.",
+      "data": {
+        "fromSeq": 1,
+        "dropInitial": true,
+        "keepUser": true,
+        "reason": "edit",
+        "text": "переписанный вопрос"
+      },
+      "seq": 29
+    },
+    {
+      "at": "2026-10-11T19:52:17.049Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "TURN_EDITED",
+      "message": "Сообщение отредактировано и отправлено заново.",
+      "data": {
+        "id": "user-initial",
+        "text": "переписанный вопрос",
+        "role": "user"
+      },
+      "seq": 30
+    },
+    {
+      "at": "2026-10-11T19:52:17.062Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "STATUS",
+      "message": "Follow-up sent to Pi",
+      "data": {
+        "status": "RUNNING"
+      },
+      "seq": 31
+    },
+    {
+      "at": "2026-10-11T19:52:17.062Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "IDLE → WORKING",
+      "data": {
+        "from": "IDLE",
+        "to": "WORKING",
+        "fromActivity": null,
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "STATUS"
+      },
+      "seq": 32
+    },
+    {
+      "at": "2026-10-11T19:52:17.063Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "Pi started processing",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      },
+      "seq": 33
+    },
+    {
+      "at": "2026-10-11T19:52:17.064Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "переписанный вопрос"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 34
+    },
+    {
+      "at": "2026-10-11T19:52:17.065Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "переписанный вопрос"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 35
+    },
+    {
+      "at": "2026-10-11T19:52:17.066Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_start",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant",
+            "content": []
+          }
+        }
+      },
+      "seq": 36
+    },
+    {
+      "at": "2026-10-11T19:52:17.067Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "tool: read — example.txt",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          }
+        }
+      },
+      "seq": 37
+    },
+    {
+      "at": "2026-10-11T19:52:17.067Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "streaming",
+        "toActivity": "tool",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 38
+    },
+    {
+      "at": "2026-10-11T19:52:17.068Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "tool_execution_update",
+      "data": {
+        "pi": {
+          "type": "tool_execution_update",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "args": {
+            "path": "example.txt"
+          },
+          "partialResult": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 39
+    },
+    {
+      "at": "2026-10-11T19:52:17.069Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "tool done: read",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "call-2",
+          "toolName": "read",
+          "isError": false,
+          "result": {
+            "content": [
+              {
+                "type": "text",
+                "text": "hello from example.txt"
+              }
+            ]
+          }
+        }
+      },
+      "seq": 40
+    },
+    {
+      "at": "2026-10-11T19:52:17.069Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → WORKING",
+      "data": {
+        "from": "WORKING",
+        "to": "WORKING",
+        "fromActivity": "tool",
+        "toActivity": "streaming",
+        "compactingSince": null,
+        "reason": "PI_EVENT"
+      },
+      "seq": 41
+    },
+    {
+      "at": "2026-10-11T19:52:17.157Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "О"
+          }
+        }
+      },
+      "seq": 42
+    },
+    {
+      "at": "2026-10-11T19:52:17.188Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "т"
+          }
+        }
+      },
+      "seq": 43
+    },
+    {
+      "at": "2026-10-11T19:52:17.219Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_update",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "вет 2"
+          }
+        }
+      },
+      "seq": 44
+    },
+    {
+      "at": "2026-10-11T19:52:17.222Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "message_end",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "Ответ 2"
+              }
+            ],
+            "usage": {
+              "input": 1000,
+              "output": 100,
+              "totalTokens": 1100
+            },
+            "stopReason": "stop"
+          }
+        }
+      },
+      "seq": 45
+    },
+    {
+      "at": "2026-10-11T19:52:17.223Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "agent_end",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      },
+      "seq": 46
+    },
+    {
+      "at": "2026-10-11T19:52:17.224Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "PI_EVENT",
+      "message": "Pi settled",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      },
+      "seq": 47
+    },
+    {
+      "at": "2026-10-11T19:52:17.225Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "STATUS",
+      "message": "Collecting diff and changed files",
+      "data": {
+        "status": "VERIFYING"
+      },
+      "seq": 48
+    },
+    {
+      "at": "2026-10-11T19:52:17.265Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "RUNTIME_STATE",
+      "message": "WORKING → IDLE",
+      "data": {
+        "from": "WORKING",
+        "to": "IDLE",
+        "fromActivity": "streaming",
+        "toActivity": null,
+        "compactingSince": null,
+        "reason": "TASK_SUCCEEDED"
+      },
+      "seq": 49
+    },
+    {
+      "at": "2026-10-11T19:52:17.265Z",
+      "taskId": "6bf8eaeb77ba",
+      "type": "TASK_SUCCEEDED",
+      "message": "Done",
+      "data": {},
+      "seq": 50
+    }
+  ],
+  "expected": [
+    {
+      "id": "user-initial",
+      "role": "user",
+      "text": "переписанный вопрос",
+      "thinking": "",
+      "status": "",
+      "active": false,
+      "final": false,
+      "error": null,
+      "tools": []
+    },
+    {
+      "id": "assistant-initial",
+      "role": "assistant",
+      "text": "Ответ 2",
+      "thinking": "",
+      "status": "SUCCEEDED",
+      "active": false,
+      "final": true,
+      "error": null,
+      "tools": [
+        {
+          "id": "call-2",
+          "name": "read",
+          "state": "done"
+        }
+      ]
+    }
+  ]
+}

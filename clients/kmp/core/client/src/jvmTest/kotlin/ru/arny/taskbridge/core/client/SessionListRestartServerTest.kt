@@ -30,17 +30,22 @@ class SessionListRestartServerTest {
     private var boot = "boot-1"
     private var restartCalled = 0
     private var launched = 0
+    private var unchangedInfoResponsesAfterRestart = 0
 
     /** /api/info отвечает bootId только после launch() — до этого сервер «потушен». */
     private fun api() = TaskBridgeApi(
         HttpClient(MockEngine { request ->
             val json = headersOf(HttpHeaders.ContentType, "application/json")
             when {
-                request.url.encodedPath == "/api/info" && boot.isNotEmpty() ->
+                request.url.encodedPath == "/api/info" && boot.isNotEmpty() -> {
+                    if (restartCalled > 0 && boot == "boot-1") {
+                        if (unchangedInfoResponsesAfterRestart > 0) unchangedInfoResponsesAfterRestart -= 1
+                        else boot = "boot-2"
+                    }
                     respond("""{"bootId":"$boot"}""", HttpStatusCode.OK, json)
+                }
                 request.method == HttpMethod.Post && request.url.encodedPath == "/api/server/restart" -> {
                     restartCalled += 1
-                    boot = "boot-2"
                     respond("""{"restarting":true}""", HttpStatusCode.Accepted, json)
                 }
                 request.url.encodedPath == "/api/tasks" -> respond("[]", HttpStatusCode.OK, json)
@@ -89,6 +94,17 @@ class SessionListRestartServerTest {
         assertTrue(result.isSuccess, "${result.exceptionOrNull()}")
         assertEquals(1, restartCalled, "живой сервер перезапускается по HTTP, как раньше")
         assertEquals(0, launched, "лаунчер не нужен, пока сервер отвечает")
+        scope.cancel()
+    }
+
+    @Test
+    fun restartWaitsWhileTheOldProcessStillAnswers() = runBlocking {
+        unchangedInfoResponsesAfterRestart = 3
+        val sessionList = sessions({ launched += 1 })
+        val result = sessionList.restartServer(timeoutMillis = 5_000, stepMillis = 10)
+        assertTrue(result.isSuccess, "${result.exceptionOrNull()}")
+        assertEquals("boot-2", boot, "успех возможен только после появления нового процесса")
+        assertEquals(0, unchangedInfoResponsesAfterRestart, "старый bootId нельзя принять за завершённый перезапуск")
         scope.cancel()
     }
 

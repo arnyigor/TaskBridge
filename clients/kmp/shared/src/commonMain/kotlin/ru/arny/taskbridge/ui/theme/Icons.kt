@@ -42,6 +42,9 @@ object AppIcons {
     val Edit = lineIcon("edit", "M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z")
     val Delete = lineIcon("delete", "M3 6h18", "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6", "M10 11v6", "M14 11v6", "M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2")
     val Fork = lineIcon("fork", "M6 3v12", "M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 9a9 9 0 0 1-9 9")
+    // The same mark mirrored: a branch taken backwards in the log — the history
+    // from a message on, not the history up to it.
+    val ForkFrom = lineIcon("forkFrom", "M18 3v12", "M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 9a9 9 0 0 0 9 9")
     val ChevronDown = lineIcon("chevronDown", "M6 9l6 6 6-6")
     val ChevronUp = lineIcon("chevronUp", "M18 15l-6-6-6 6")
     val ChevronLeft = lineIcon("chevronLeft", "M15 18l-6-6 6-6")

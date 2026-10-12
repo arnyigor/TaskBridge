@@ -3,6 +3,7 @@ package ru.arny.taskbridge.ui.chat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.hoverable
@@ -25,6 +26,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
@@ -81,11 +83,47 @@ import ru.arny.taskbridge.ui.theme.MonoStyle
 class MessageActions(
     val copy: () -> Unit,
     val edit: (() -> Unit)? = null,
+    /** Branch of the session with the history up to this message. */
     val fork: (() -> Unit)? = null,
+    /** Branch of the session with this message and everything after it. */
+    val forkFrom: (() -> Unit)? = null,
     val deleteFrom: (() -> Unit)? = null,
     val regenerate: (() -> Unit)? = null,
     val continueAnswer: (() -> Unit)? = null,
+    /**
+     * MR-07: тот же вопрос заново, но с другими параметрами — выбором модели (и уровня
+     * мышления у клиентов, которые его показывают). Отличие от «Ответить заново» — не
+     * в отправке, а в том, что сначала выбирается, чем отвечать.
+     */
+    val rerunWith: (() -> Unit)? = null,
+    /**
+     * Выбор нескольких сообщений (как «Select messages» в ChatGPT): пока не null, у
+     * сообщения видна отметка выбора, а тап по нему переключает выбор вместо
+     * обычного нажатия (у пузыря его и не было — только долгое).
+     */
+    val onToggleSelect: (() -> Unit)? = null,
+    val selected: Boolean = false,
 )
+
+/**
+ * Отметка выбора у сообщения: тап по ней делает то же, что тап по сообщению.
+ */
+@Composable
+private fun SelectMark(selected: Boolean, onToggle: () -> Unit) {
+    val accent = MaterialTheme.colorScheme.primary
+    Box(
+        Modifier
+            .padding(end = 8.dp)
+            .size(22.dp)
+            .clip(CircleShape)
+            .background(if (selected) accent else Color.Transparent)
+            .border(1.5.dp, if (selected) accent else MaterialTheme.colorScheme.outline, CircleShape)
+            .clickable(onClick = onToggle),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (selected) Icon(AppIcons.Check, "Выбрано", Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onPrimary)
+    }
+}
 
 @Composable
 fun UserBubble(
@@ -108,29 +146,33 @@ fun UserBubble(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     Column(Modifier.fillMaxWidth().padding(start = 48.dp).hoverable(interaction), horizontalAlignment = Alignment.End) {
-        Box {
-            Surface(
-                color = colors.userBubble,
-                contentColor = colors.onUserBubble,
-                shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
-                modifier = Modifier.menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = {}, onLongClick = { menu.open = true }),
-            ) {
-                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                    if (item.mode == "steer") {
-                        Text("инструкция по ходу работы", style = MaterialTheme.typography.labelSmall, color = colors.onUserBubble.copy(alpha = 0.7f))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            actions.onToggleSelect?.let { SelectMark(actions.selected, it) }
+            Box {
+                Surface(
+                    color = colors.userBubble,
+                    contentColor = colors.onUserBubble,
+                    shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
+                    modifier = Modifier.menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = { menu.open = true }),
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                        if (item.mode == "steer") {
+                            Text("инструкция по ходу работы", style = MaterialTheme.typography.labelSmall, color = colors.onUserBubble.copy(alpha = 0.7f))
+                        }
+                        SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyLarge) }
+                        if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
                     }
-                    SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyLarge) }
-                    if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
                 }
+                AnchoredMenu(menu, actions, isUser = true)
             }
-            AnchoredMenu(menu, actions, isUser = true)
         }
         Row(Modifier.padding(top = 2.dp).heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
             // Same order as the web's msgActions: copy, time, then edit / fork / delete.
             Row(Modifier.alpha(if (!hoverActions || hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
                 SmallAction(AppIcons.Copy, "Копировать", actions.copy)
                 actions.edit?.let { SmallAction(AppIcons.Edit, "Изменить и отправить заново", it) }
-                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка отсюда", it) }
+                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка: история до этого сообщения", it) }
+                actions.forkFrom?.let { SmallAction(AppIcons.ForkFrom, "Новая ветка: это сообщение и всё, что ниже", it) }
                 actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить отсюда и ниже", it) }
             }
             Spacer(Modifier.width(4.dp))
@@ -162,7 +204,7 @@ fun AssistantMessage(
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     Column(Modifier.fillMaxWidth().padding(end = 8.dp).hoverable(interaction).let { if (item.active) it else it.animateContentSize() }) {
-        if (item.thinking.isNotBlank()) ThinkingBlock(item.thinking, streaming = item.active && item.text.isBlank())
+        if (item.thinking.isNotBlank()) ThinkingBlock(item.thinking, streaming = item.active && item.text.isBlank(), onCopy = onCopyText)
         if (item.tools.isNotEmpty()) ToolList(item.tools, loadToolOutput, onCopyText, onOpenPath)
         // A picture a tool wrote shows at once, while the answer runs; once the run
         // ends the same file arrives as an output file and is shown from there.
@@ -170,49 +212,52 @@ fun AssistantMessage(
         for (path in item.tools.mapNotNull { it.path }.distinct().filter { isImageName(it) && it !in saved }) {
             ChatImage("ws:$path", path, { loadWorkspaceFile(path) }, onClick = { onOpenPath(path) }, Modifier.padding(vertical = 4.dp))
         }
-        Box {
-            Column(Modifier.fillMaxWidth().menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = {}, onLongClick = { menu.open = true })) {
-                when {
-                    item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
-                        SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
+        Row(verticalAlignment = Alignment.Top) {
+            actions.onToggleSelect?.let { SelectMark(actions.selected, it) }
+            Box(Modifier.weight(1f)) {
+                Column(Modifier.fillMaxWidth().menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = { menu.open = true })) {
+                    when {
+                        item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
+                            SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
+                        }
+                        item.active -> Column {
+                            TypingIndicator()
+                            Muted(when {
+                                item.id.startsWith("assistant-pending-") -> "Ожидается подтверждение отправки"
+                                item.tools.any { it.state == ToolState.RUNNING } -> "Агент выполняет команды"
+                                item.thinking.isNotBlank() || item.tools.isNotEmpty() -> "Агент работает · итоговый ответ ещё не получен"
+                                else -> "Агент принял сообщение · ожидается начало работы"
+                            })
+                        }
+                        item.cutOff -> Muted("Запрос прерван")
+                        item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null) Muted("Без текста")
+                        item.final && item.error == null -> Muted("Ответ не был получен.")
                     }
-                    item.active -> Column {
-                        TypingIndicator()
-                        Muted(when {
-                            item.id.startsWith("assistant-pending-") -> "Ожидается подтверждение отправки"
-                            item.tools.any { it.state == ToolState.RUNNING } -> "Агент выполняет команды"
-                            item.thinking.isNotBlank() || item.tools.isNotEmpty() -> "Агент работает · итоговый ответ ещё не получен"
-                            else -> "Агент принял сообщение · ожидается начало работы"
-                        })
-                    }
-                    item.cutOff -> Muted("Запрос прерван")
-                    item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null) Muted("Без текста")
-                    item.final && item.error == null -> Muted("Ответ не был получен.")
-                }
-                if (item.active && item.text.isNotBlank()) TypingIndicator()
-                // Turn output files (created and merely viewed by tools) stay in the
-                // data and the web's «Файлы агента» panel, but the chat does not
-                // display them: every file a tool touches otherwise floods the chat
-                // with chips.
-                item.error?.let { error ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                        shape = MaterialTheme.shapes.small,
-                        modifier = Modifier.padding(top = 8.dp),
-                    ) {
-                        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
-                            Icon(AppIcons.Alert, null, Modifier.size(16.dp).padding(top = 2.dp))
-                            Spacer(Modifier.width(8.dp))
-                            SelectionContainer(Modifier.weight(1f, fill = false)) { Text(error, style = MaterialTheme.typography.bodySmall) }
-                            IconButton(onClick = { onCopyText(error) }, modifier = Modifier.padding(start = 4.dp).size(24.dp)) {
-                                Icon(AppIcons.Copy, "Копировать ошибку", Modifier.size(14.dp))
+                    if (item.active && item.text.isNotBlank()) TypingIndicator()
+                    // Turn output files (created and merely viewed by tools) stay in the
+                    // data and the web's «Файлы агента» panel, but the chat does not
+                    // display them: every file a tool touches otherwise floods the chat
+                    // with chips.
+                    item.error?.let { error ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.padding(top = 8.dp),
+                        ) {
+                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
+                                Icon(AppIcons.Alert, null, Modifier.size(16.dp).padding(top = 2.dp))
+                                Spacer(Modifier.width(8.dp))
+                                SelectionContainer(Modifier.weight(1f, fill = false)) { Text(error, style = MaterialTheme.typography.bodySmall) }
+                                IconButton(onClick = { onCopyText(error) }, modifier = Modifier.padding(start = 4.dp).size(24.dp)) {
+                                    Icon(AppIcons.Copy, "Копировать ошибку", Modifier.size(14.dp))
+                                }
                             }
                         }
                     }
                 }
+                AnchoredMenu(menu, actions, isUser = false)
             }
-            AnchoredMenu(menu, actions, isUser = false)
         }
         val showActions = !hoverActions || hovered || menu.open || buttonMenu || actions.regenerate != null
         if (item.final || !item.active) {
@@ -243,7 +288,9 @@ fun AssistantMessage(
                 Spacer(Modifier.weight(1f))
                 if (item.text.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать", actions.copy)
                 actions.regenerate?.let { SmallAction(AppIcons.Refresh, "Ответить заново", it) }
-                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка отсюда", it) }
+                actions.rerunWith?.let { SmallAction(AppIcons.Settings, "Повторить с параметрами", it) }
+                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка: история до этого ответа", it) }
+                actions.forkFrom?.let { SmallAction(AppIcons.ForkFrom, "Новая ветка: этот ответ и всё, что ниже", it) }
                 actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить ответ и всё ниже", it) }
                 actions.continueAnswer?.let { SmallAction(AppIcons.Play, "Продолжить ответ", it) }
                 if (actions.edit != null) Box {
@@ -300,8 +347,10 @@ private fun MessageMenu(open: Boolean, onDismiss: () -> Unit, actions: MessageAc
             )
         }
         actions.regenerate?.let { DropdownMenuItem(text = { Text("Ответить заново") }, leadingIcon = { Icon(AppIcons.Refresh, null) }, onClick = { onDismiss(); it() }) }
+        actions.rerunWith?.let { DropdownMenuItem(text = { Text("Повторить с параметрами") }, leadingIcon = { Icon(AppIcons.Settings, null) }, onClick = { onDismiss(); it() }) }
         actions.continueAnswer?.let { DropdownMenuItem(text = { Text("Продолжить ответ") }, leadingIcon = { Icon(AppIcons.Play, null) }, onClick = { onDismiss(); it() }) }
-        actions.fork?.let { DropdownMenuItem(text = { Text("Новая ветка отсюда") }, leadingIcon = { Icon(AppIcons.Fork, null) }, onClick = { onDismiss(); it() }) }
+        actions.fork?.let { DropdownMenuItem(text = { Text("Новая ветка: до этого сообщения") }, leadingIcon = { Icon(AppIcons.Fork, null) }, onClick = { onDismiss(); it() }) }
+        actions.forkFrom?.let { DropdownMenuItem(text = { Text("Новая ветка: отсюда и ниже") }, leadingIcon = { Icon(AppIcons.ForkFrom, null) }, onClick = { onDismiss(); it() }) }
         actions.deleteFrom?.let {
             DropdownMenuItem(
                 text = { Text(if (isUser) "Удалить отсюда и ниже" else "Удалить вопрос с ответом и ниже", color = MaterialTheme.colorScheme.error) },
@@ -319,7 +368,7 @@ private fun Muted(text: String) {
 
 /** The model's reasoning: one quiet line, folded; the last line peeks through while it streams. */
 @Composable
-private fun ThinkingBlock(thinking: String, streaming: Boolean) {
+private fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val pinned = rememberPinned()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -333,7 +382,8 @@ private fun ThinkingBlock(thinking: String, streaming: Boolean) {
             Spacer(Modifier.width(4.dp))
             // The character count shows that the model received the message and is
             // producing output, the way the web's «Рассуждение · N симв.» does.
-            Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted)
+            Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted, modifier = Modifier.weight(1f))
+            if (open && trimmed.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления") { onCopy(trimmed) }
         }
         AnimatedVisibility(open) {
             Column {
@@ -699,10 +749,11 @@ fun FileChip(name: String, size: String, onClick: (() -> Unit)?) {
 }
 
 @Composable
-fun NoteRow(item: ChatItem.Note, onCopy: () -> Unit) {
+fun NoteRow(item: ChatItem.Note, onCopy: () -> Unit, selected: Boolean = false, onToggleSelect: (() -> Unit)? = null) {
     val multiline = item.text.contains('\n')
     var expanded by remember(item.id) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
+        onToggleSelect?.let { SelectMark(selected, it) }
         if (!multiline) {
             Text(
                 item.text,

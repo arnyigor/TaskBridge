@@ -349,6 +349,83 @@ function copyButton(text = '', label = 'Скопировать сообщени�
   return btn;
 }
 
+// Выбор нескольких сообщений — как «Select messages» в ChatGPT: отмечаются сами
+// сообщения ленты, а в буфер уходит ровно то, что дала бы кнопка «Копировать» у
+// каждого из них: текст, между сообщениями пустая строка, в порядке ленты
+// (сверху вниз), а не в порядке нажатий.
+let selectingMessages = false;
+
+// Заголовки кнопок копирования САМОГО сообщения. Блок рассуждения внутри ответа
+// несёт собственную кнопку «Скопировать рассуждение», и она в DOM идёт первой —
+// брать первую попавшуюся нельзя, иначе в буфер уехали бы размышления.
+const MESSAGE_COPY_TITLES = ['Скопировать сообщение', 'Скопировать ответ'];
+
+// Пустые тексты (ход из одних вызовов инструментов) выбрасываются здесь же: иначе в
+// буфере остались бы пустые абзацы, а счётчик считал бы то, чего в буфере нет.
+function selectedMessages(texts) {
+  return texts.map(text => String(text ?? '').trim()).filter(Boolean);
+}
+
+function selectedMessagesText(texts) {
+  return selectedMessages(texts).join('\n\n');
+}
+
+function messageCopyButton(turn) {
+  return [...turn.querySelectorAll('.copyBtn')].find(btn => MESSAGE_COPY_TITLES.includes(btn.title)) || null;
+}
+
+function selectableTurns() {
+  return [...$('msgsInner').querySelectorAll('.turn')].filter(turn => messageCopyButton(turn));
+}
+
+function selectedTurns() {
+  return selectableTurns().filter(turn => turn.classList.contains('selected'));
+}
+
+function selectedTurnTexts() {
+  return selectedTurns().map(turn => messageCopyButton(turn)._text || '');
+}
+
+/** Тап по сообщению в режиме выбора: отметить или снять отметку. */
+function toggleTurnSelection(turn) {
+  if (!selectingMessages || !messageCopyButton(turn)) return;
+  turn.classList.toggle('selected');
+  updateSelectBar();
+}
+
+function updateSelectBar() {
+  const count = selectedTurns().length;
+  $('selectCount').textContent = count > 0 ? `Выбрано: ${count}` : 'Отметьте сообщения';
+  $('selectCopy').disabled = count === 0;
+}
+
+function startSelectingMessages() {
+  selectingMessages = true;
+  $('selectBar').classList.remove('hidden');
+  for (const turn of selectableTurns()) {
+    turn.classList.add('selectable');
+    turn.classList.remove('selected');
+  }
+  updateSelectBar();
+}
+
+function stopSelectingMessages() {
+  selectingMessages = false;
+  $('selectBar').classList.add('hidden');
+  for (const turn of $('msgsInner').querySelectorAll('.turn')) turn.classList.remove('selected', 'selectable');
+  updateSelectBar();
+}
+
+async function copySelectedMessages() {
+  const texts = selectedMessages(selectedTurnTexts());
+  if (!texts.length) return;
+  const ok = await copyText(texts.join('\n\n'));
+  stopSelectingMessages();
+  showNotice(ok
+    ? (texts.length === 1 ? 'Сообщение скопировано' : `Скопировано сообщений: ${texts.length}`)
+    : 'Не удалось скопировать');
+}
+
 // Message times: HH:MM locally, with the full stamp in the tooltip. Nothing is
 // invented — a turn without a recorded time shows nothing.
 function timeLabel(value) {
@@ -444,15 +521,34 @@ function appendUserTurn(text, files = [], before = null, at = null) {
   return turn;
 }
 
+function setReasoningText(details, text) {
+  const pre = details.querySelector('.r-text');
+  const label = details.querySelector('.r-label');
+  const copy = details.querySelector('.copyBtn');
+  if (pre) pre.textContent = text;
+  if (label) label.textContent = `Рассуждение · ${text.length} симв.`;
+  if (copy) copy._text = text;
+}
+
 function reasoningEl(text) {
   const details = document.createElement('details');
   details.className = 'reasoning';
   const summary = document.createElement('summary');
-  summary.textContent = `Рассуждение · ${text.length} симв.`;
+  const label = document.createElement('span');
+  label.className = 'r-label';
+  const copy = copyButton(text, 'Скопировать рассуждение');
+  copy.onclick = async event => {
+    event?.stopPropagation?.();
+    const ok = await copyText(copy._text || '');
+    copy.textContent = '';
+    copy.append(messageIcon(ok ? 'check' : 'cross'));
+    setTimeout(() => { copy.textContent = ''; copy.append(messageIcon('copy')); }, 1200);
+  };
+  summary.append(label, copy);
   const pre = document.createElement('pre');
   pre.className = 'r-text';
-  pre.textContent = text;
   details.append(summary, pre);
+  setReasoningText(details, text);
   return details;
 }
 
@@ -492,8 +588,7 @@ function updateThinking() {
   if (!el) {
     liveTurn.body.insertBefore(reasoningEl(liveThinking), liveTurn.body.firstChild);
   } else {
-    el.querySelector('.r-text').textContent = liveThinking;
-    el.querySelector('summary').textContent = `Рассуждение · ${liveThinking.length} симв.`;
+    setReasoningText(el, liveThinking);
   }
   scrollBottom();
 }
@@ -1172,6 +1267,26 @@ function contextUsagePercent(t) {
   return Math.round((used / windowSize) * 100);
 }
 
+// Отправляет ли провайдер лимит вывода полем запроса. Лимит есть у всех адаптеров
+// Pi, кроме Codex: `openai-codex-responses` собирает тело запроса из model/store/
+// stream/instructions/input/text/include/prompt_cache_key/tool_choice/
+// parallel_tool_calls — поля лимита вывода там нет ни одного (проверено по
+// установленному пакету 2026-10-12).
+function providerSendsOutputLimit(provider) {
+  return provider !== 'openai-codex';
+}
+
+// Резерв ответа — сколько токенов провайдер держит под ответ в том же запросе.
+// Число в каталоге модели — это её потолок вывода, а не обязательство провайдера:
+// у Codex его не отправляют, и вычитать 128000 из окна 272000 нельзя. Живая сессия
+// 8855fa011534 (openai-codex/gpt-5.5, окно 272000) прошла с промптом 217571 токен,
+// а сравнение с резервом объявляло её «не влезает» и советовало окно 345775.
+function answerReserveTokens(t) {
+  const model = (t && (t.model || t.requestedModel)) || {};
+  if (!providerSendsOutputLimit(model.provider)) return 0;
+  return model.maxTokens || 0;
+}
+
 function renderContext(t) {
   const used = sessionContextUsed(t);
   const windowSize = modelContextWindow(t);
@@ -1198,13 +1313,16 @@ function renderContext(t) {
   // провайдера: движок не режет промпт, он отвечает 400 «prompt + max tokens
   // exceeds the context», и Pi повторяет запрос без ответа (в логе сессии это
   // limits-wait с retries_total). Один процент не виден: 99.4K + 32.8K при окне
-  // 131072 — это 76% полосы и всё равно отказ.
-  const maxTokens = ((t.model || t.requestedModel) || {}).maxTokens || 0;
+  // 131072 — это 76% полосы и всё равно отказ. Резерв при этом берётся только у
+  // тех, кто его отправляет (answerReserveTokens).
+  const maxTokens = answerReserveTokens(t);
   const overflow = pct != null && windowSize != null && used != null && used + maxTokens > windowSize;
   state.textContent = compacting
     ? 'Сейчас сжимается контекст…'
     : pct == null ? 'Нет данных о размере'
-      : overflow ? `История + резерв ответа (${used.toLocaleString('ru-RU')} + ${maxTokens.toLocaleString('ru-RU')}) больше окна (${windowSize.toLocaleString('ru-RU')}) — провайдер ответит 400 (промпт не обрезается): поднимите контекст модели или начните новую сессию`
+      : overflow ? (maxTokens > 0
+        ? `История + резерв ответа (${used.toLocaleString('ru-RU')} + ${maxTokens.toLocaleString('ru-RU')}) больше окна (${windowSize.toLocaleString('ru-RU')}) — провайдер ответит 400 (промпт не обрезается): поднимите контекст модели или начните новую сессию`
+        : `История больше окна (${used.toLocaleString('ru-RU')} из ${windowSize.toLocaleString('ru-RU')}) — запрос уйдёт целиком (промпт не обрезается), и ответа не будет: начните новую сессию или сожмите контекст`)
         : pct >= 85 ? 'Почти заполнен — скоро нужно сжатие'
           : pct >= 60 ? 'Заполнен больше половины'
             : 'Запас контекста нормальный';
@@ -1387,7 +1505,10 @@ function resetSelection(id) {
   $('stopButton').disabled = true;
   $('compact').disabled = true;
   $('autoCompaction').disabled = true;
+  $('trustWorkspace').disabled = true;
   $('sessionDetailsButton').classList.toggle('hidden', !id);
+  $('selectMessagesButton').classList.toggle('hidden', !id);
+  stopSelectingMessages();
   $('detail').classList.toggle('hidden', !id);
   $('msgsInner').innerHTML = '';
   for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'contextState', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
@@ -1561,19 +1682,22 @@ function updateTurnActions(node, turn, isNewest) {
       // the model is asked again — so this action lives on the operator's own
       // line only (an answer is re-run, never edited in place).
       node.buttons.edit = turnAction('edit', messageIcon('edit'), 'Изменить и отправить заново', () => beginEditTurn(node, turn));
-      node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Ответвить новую сессию от этого сообщения', () => forkTurn(turn));
+      node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Новая ветка: история до этого сообщения', () => forkTurn(turn));
+      node.buttons.forkFrom = turnAction('forkFrom', messageIcon('forkFrom'), 'Новая ветка: это сообщение и всё, что ниже', () => forkTurn(turn, 'from'));
       node.buttons.drop = turnAction('drop', messageIcon('drop'), 'Удалить это сообщение и всё после него', () => deleteTurn(turn));
-      bar.append(node.buttons.edit, node.buttons.fork, node.buttons.drop);
+      bar.append(node.buttons.edit, node.buttons.fork, node.buttons.forkFrom, node.buttons.drop);
     } else {
       // An answer is a branch point too — "continue differently from here" —
       // and both ends of an exchange name the same fork. It can also be edited
       // (in place, or as another variant of the exchange) and continued: what
       // the model writes next is appended to this very message.
       node.buttons.edit = turnAction('edit', messageIcon('edit'), 'Изменить ответ (можно сохранить как вариант)', () => beginEditAnswer(node, turn));
-      node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Ответвить новую сессию от этого ответа', () => forkTurn(turn));
+      node.buttons.fork = turnAction('fork', messageIcon('fork'), 'Новая ветка: история до этого ответа', () => forkTurn(turn));
+      node.buttons.forkFrom = turnAction('forkFrom', messageIcon('forkFrom'), 'Новая ветка: этот ответ и всё, что ниже', () => forkTurn(turn, 'from'));
+      node.buttons.rerun = turnAction('rerun', messageIcon('tune'), 'Повторить с параметрами', () => startRerunTurn(turn));
       node.buttons.regen = turnAction('regen', messageIcon('regen'), 'Перегенерировать ответ', () => regenerateTurn(turn));
       node.buttons.more = turnAction('continue', messageIcon('continue'), 'Продолжить этот ответ', () => continueTurn(turn));
-      bar.append(node.buttons.edit, node.buttons.fork, node.buttons.regen, node.buttons.more);
+      bar.append(node.buttons.edit, node.buttons.fork, node.buttons.forkFrom, node.buttons.regen, node.buttons.more);
     }
     host.append(bar);
     node.actionBar = bar;
@@ -1583,6 +1707,7 @@ function updateTurnActions(node, turn, isNewest) {
   const busy = turn.active === true;
   node.actionBar.classList.toggle('hidden', busy);
   node.buttons.fork?.classList.toggle('hidden', busy);
+  node.buttons.forkFrom?.classList.toggle('hidden', busy);
   node.buttons.drop?.classList.toggle('hidden', busy);
   // Regenerating, continuing and editing only ever touch the newest answer.
   node.buttons.regen?.classList.toggle('hidden', busy || isNewest !== true);
@@ -1747,6 +1872,9 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 const MESSAGE_ICONS = {
   edit: [['path', { d: 'M12 20h9' }], ['path', { d: 'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z' }]],
   fork: [['path', { d: 'M6 3v12' }], ['circle', { cx: '18', cy: '6', r: '3' }], ['circle', { cx: '6', cy: '18', r: '3' }], ['path', { d: 'M18 9a9 9 0 0 1-9 9' }]],
+  // The same mark mirrored: a branch taken backwards in the log — the history
+  // from a message on, not the history up to it (same paths as the KMP client).
+  forkFrom: [['path', { d: 'M18 3v12' }], ['circle', { cx: '6', cy: '6', r: '3' }], ['circle', { cx: '18', cy: '18', r: '3' }], ['path', { d: 'M6 9a9 9 0 0 0 9 9' }]],
   drop: [['polyline', { points: '3 6 5 6 21 6' }], ['path', { d: 'M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2' }], ['line', { x1: '10', y1: '11', x2: '10', y2: '17' }], ['line', { x1: '14', y1: '11', x2: '14', y2: '17' }]],
   regen: [['polyline', { points: '23 4 23 10 17 10' }], ['polyline', { points: '1 20 1 14 7 14' }], ['path', { d: 'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15' }]],
   continue: [['path', { d: 'M5 12h14' }], ['polyline', { points: '13 6 19 12 13 18' }]],
@@ -1756,6 +1884,9 @@ const MESSAGE_ICONS = {
   download: [['polyline', { points: '21 15 21 19 21 19 3 19 3 15' }], ['line', { x1: '7', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '17', y1: '10', x2: '12', y2: '15' }], ['line', { x1: '12', y1: '15', x2: '12', y2: '3' }]],
   folder: [['path', { d: 'M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z' }]],
   run: [['polygon', { points: '6 3 20 12 6 21 6 3' }]],
+  // «Повторить с параметрами»: ползунки на линиях — параметры запроса (модель,
+  // уровень мышления), а не ещё один повтор (для него есть regen).
+  tune: [['line', { x1: '4', y1: '6', x2: '20', y2: '6' }], ['line', { x1: '4', y1: '12', x2: '20', y2: '12' }], ['line', { x1: '4', y1: '18', x2: '20', y2: '18' }], ['circle', { cx: '9', cy: '6', r: '2' }], ['circle', { cx: '15', cy: '12', r: '2' }], ['circle', { cx: '8', cy: '18', r: '2' }]],
   external: [['path', { d: 'M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6' }], ['polyline', { points: '15 3 21 3 21 9' }], ['line', { x1: '10', y1: '14', x2: '21', y2: '3' }]]
 };
 function messageIcon(name) {
@@ -1792,7 +1923,9 @@ function turnAction(action, icon, label, onclick) {
 
 async function regenerateTurn(turn) {
   if (!selectedTaskId) return;
-  if (!confirm('Перегенерировать ответ? Текущий ответ и всё, что после него, будут удалены.')) return;
+  // Прежний ответ НЕ удаляется: сервер оставляет его соседним вариантом того же
+  // хода (‹ 1/2 ›), и в логе это TURN_VARIANT_START без TURN_TRUNCATED.
+  if (!confirm('Перегенерировать ответ? Прежний останется вариантом этого же хода.')) return;
   try {
     await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/regenerate`, {
       method: 'POST', body: JSON.stringify({ turnId: turn.id })
@@ -1804,13 +1937,46 @@ async function regenerateTurn(turn) {
   }
 }
 
-// A fork is a session of its own: the server copies history through this
-// message, then we open it so the operator can continue differently.
-async function forkTurn(turn) {
+// MR-07: «повторить с параметрами» — тот же вопрос, но другой моделью или уровнем
+// мышления. Параметры выбираются там же, где выбирается модель сессии (пикер):
+// отдельного диалога с копией списка моделей не заводим. Уровень мышления при этом
+// применяется своим полем в пикере, до самого повтора, и повтор берёт уже его.
+let rerunTurnId = null;
+
+function startRerunTurn(turn) {
+  if (!selectedTaskId) return;
+  rerunTurnId = turn.id;
+  openModelPicker();
+}
+
+async function rerunTurnWith(model) {
+  if (!selectedTaskId || !rerunTurnId) return;
+  const turnId = rerunTurnId;
+  rerunTurnId = null;
+  $('modelPickerOverlay').classList.add('hidden');
+  try {
+    const updated = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/rerun`, {
+      method: 'POST', body: JSON.stringify({ turnId, model: { provider: model.provider, id: model.id } })
+    });
+    if (updated) renderTaskDetails(updated);
+    updateModelChip();
+    await refreshTask();
+  } catch (error) {
+    $('createError').textContent = error.message;
+    $('createError').classList.add('error');
+  }
+}
+
+// A fork is a session of its own: the server copies the conversation out of
+// this one — through this message, or (direction 'from') this message and
+// everything after it — then we open it so the operator can continue on its own.
+async function forkTurn(turn, direction = 'through') {
   if (!selectedTaskId) return;
   try {
+    // 'through' is the server's default, so only the other direction is named.
+    const body = direction === 'from' ? { turnId: turn.id, direction } : { turnId: turn.id };
     const created = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/fork`, {
-      method: 'POST', body: JSON.stringify({ turnId: turn.id })
+      method: 'POST', body: JSON.stringify(body)
     });
     await loadTasks();
     await selectTask(created.id);
@@ -1990,6 +2156,15 @@ async function resolveApproval(approvalId, decision, button) {
 // duplicates a little of renderChat()'s per-turn construction rather than
 // reusing it through shared globals.
 function renderSettledTurn(turn, before) {
+  // History pages may contain a partial/legacy record. Keep rendering defensive:
+  // one malformed turn must not tear down the whole chat while scrolling.
+  const safeTurn = {
+    ...turn,
+    text: typeof turn?.text === 'string' ? turn.text : '',
+    thinking: typeof turn?.thinking === 'string' ? turn.thinking : '',
+    tools: Array.isArray(turn?.tools) ? turn.tools : [],
+  };
+  turn = safeTurn;
   const wrap = document.createElement('div');
   wrap.className = 'turn';
   const body = document.createElement('div');
@@ -2078,7 +2253,7 @@ function renderPrependedTurns(turns) {
   for (const turn of turns) {
     if (turnNodes.has(turn.id)) continue;
     if (turn.role === 'user') {
-      const userNode = { wrap: appendUserTurn(turn.text, turn.files, reference, turn.at), text: turn.text };
+      const userNode = { wrap: appendUserTurn(turn.text, turn.files || [], reference, turn.at), text: turn.text };
       turnNodes.set(turn.id, userNode);
       updateTurnActions(userNode, turn, false);
       continue;
@@ -2122,13 +2297,25 @@ async function loadOlderHistory() {
     let prepended = [];
     let reachedStart = false;
     for (let attempt = 0; attempt < PAGE_ATTEMPTS; attempt++) {
-      const { events, reachedStart: pageReachedStart } = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}&before=${oldestLoadedSeq}`);
+      const before = Number.isSafeInteger(oldestLoadedSeq) ? `&before=${oldestLoadedSeq}` : '';
+      const { events, reachedStart: pageReachedStart } = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}${before}`);
       if (version !== selectionVersion) return;
       reachedStart = pageReachedStart;
-      if (!events.length) break; // nothing below: history ends here
-      prepended = chatState.prependOlder(currentTask, events, pageReachedStart);
-      oldestLoadedSeq = events[0].seq;
-      if (prepended.length || pageReachedStart) break;
+      if (!events.length) { reachedStart = true; break; } // nothing below: history ends here
+      const nextOldest = events[0].seq;
+      // A broken/lagging transport must not make the client repeatedly render the
+      // same page until the browser runs out of DOM/memory.
+      if (Number.isSafeInteger(oldestLoadedSeq) && nextOldest >= oldestLoadedSeq) {
+        reachedStart = true;
+        break;
+      }
+      const pageTurns = chatState.prependOlder(currentTask, events, pageReachedStart);
+      prepended.push(...pageTurns);
+      oldestLoadedSeq = nextOldest;
+      if (pageReachedStart) break;
+      // Keep fetching older pages in this single user action. The bounded
+      // attempt count avoids the old "one click per page" behaviour without
+      // recursively loading the entire chat from a scroll event.
     }
     if (version !== selectionVersion) return;
     const msgsEl = $('msgs');
@@ -2228,6 +2415,16 @@ const TASK_STATUS_LABELS = {
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || status || '—'; }
 let activityTimer = null;
 
+/** Ожидание провайдера: причина отказа и остаток до повтора (task.providerWait). */
+function providerWaitText(wait) {
+  const cause = wait.httpStatus ? `HTTP ${wait.httpStatus}` : (wait.reason || 'нет ответа');
+  const left = Date.parse(wait.retryAt || '') - Date.now();
+  const minutes = left > 0
+    ? `, повтор через ${left >= 3600000 ? `${Math.floor(left / 3600000)} ч ${Math.round((left % 3600000) / 60000)} мин` : `${Math.max(1, Math.round(left / 60000))} мин`}`
+    : '';
+  return `провайдер не принял запрос (${cause})${minutes}`;
+}
+
 function renderActivity(task = currentTask) {
   const host = $('activity');
   const status = task?.status;
@@ -2243,12 +2440,15 @@ function renderActivity(task = currentTask) {
     const seconds = since === null ? null : Math.max(0, Math.round((Date.now() - since) / 1000));
     const wait = status === 'QUEUED' ? ` — ${queueText(task.queueReason)}` : '';
     const runtime = task.runtime?.activity === 'compacting' ? ' — сжимается контекст' : '';
+    // Провайдер держит ход (429 или повтор): без этой причины «Works 5 мин» читается
+    // как обычная работа модели — 2026-10-09 так прошло 1 ч 31 мин тишины.
+    const provider = task.providerWait ? ` — ${providerWaitText(task.providerWait)}` : '';
     // Чтение промпта читается из info.local.models, а она обновляется каждые 2 с
     // (loadStatus) — краска раз в секунду этого достаточна.
     const reading = readingPrompt(task);
     const elapsed = seconds === null ? '' : ` · ${seconds} с`;
     const model = task.model?.id ? ` · ${task.model.id}` : '';
-    host.textContent = `${label}${wait}${runtime}${reading}${elapsed}${model}`;
+    host.textContent = `${label}${wait}${runtime}${provider}${reading}${elapsed}${model}`;
   };
   paint();
   // Elapsed time keeps ticking while a session works or waits.
@@ -2286,6 +2486,8 @@ function renderTaskDetails(t) {
   updateStopButton();
   renderActivity(t);
   $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;
+  $('trustWorkspace').textContent = t.workspaceTrusted ? 'Папка доверенная' : 'Доверять папке';
+  $('trustWorkspace').disabled = !t.workspacePath || t.workspaceTrusted === true;
   const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(t.status);
   const isWorktree = Boolean(t.worktree);
   $('worktreeActions').classList.toggle('hidden', !isWorktree && !t.worktreeRemovedAt);
@@ -2686,6 +2888,23 @@ if (taskSortSelect) taskSortSelect.addEventListener('change', () => {
 
 // Destructive: erase every message of the current session (the session itself
 // stays). Always asks first, in the in-app dialog.
+const trustWorkspaceButton = $('trustWorkspace');
+if (trustWorkspaceButton) trustWorkspaceButton.onclick = async () => {
+  if (!selectedTaskId || !currentTask?.workspacePath) return;
+  const confirmed = await confirmDialog(
+    `Pi сможет загружать локальные инструкции, навыки и расширения из папки:\n${currentTask.workspacePath}\n\nТекущий Pi будет остановлен; следующее сообщение продолжит сохранённую сессию.`,
+    { title: 'Доверять папке проекта?', ok: 'Доверять' },
+  );
+  if (!confirmed) return;
+  try {
+    const task = await api(`/api/tasks/${encodeURIComponent(selectedTaskId)}/workspace/trust`, { method: 'POST', body: { confirm: true } });
+    renderTaskDetails(task);
+    showNotice('Папка добавлена в доверенные Pi');
+  } catch (error) {
+    showNotice(error.message);
+  }
+};
+
 const clearChatButton = $('clearChat');
 if (clearChatButton) clearChatButton.onclick = async () => {
   if (!selectedTaskId) return;
@@ -3020,11 +3239,14 @@ function isTouchDevice() {
 // wrapped the header onto a second line). On a wide screen every control goes
 // back into the header in its original order.
 // Nothing is hidden: without JS the header is exactly what index.html says.
-const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
+// Both lists are the only registry of header controls: a button that index.html
+// has but these lists do not is never moved on a phone and stays in the header
+// (that is how «Выбрать сообщения» broke the phone layout — 2026-10-12).
+const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
 // Menu order, not header order: the model switcher is what a phone opens this
 // menu for. The status dot stays in the header — 12px of a live indicator costs
 // no row, and the model chip was what pushed the header onto a second line.
-const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
 // The one width the phone layout starts at, shared by the header menu, the
 // session drawer and the CSS (see the media queries in web/app.css).
 const MOBILE_QUERY = '(max-width: 900px)';
@@ -3709,41 +3931,190 @@ $('projectBrowserSelect').onclick = async () => {
   } catch (err) { alert(err.message); }
 };
 
-/* ---------------- manage projects ---------------- */
+/* ---------------- project dashboard (MR-01) ---------------- */
+
+// Числа и разделы считает сервер (`/api/projects/overview`) из реестра проектов и
+// сессий — здесь только раскладка. Закрепление и архив хранятся в SQLite, поэтому
+// переживают перезапуск сервера.
+let projectOverview = null;
+let showArchivedProjects = false;
+let projectsQuery = '';
+
+function projectDisplayName(project) {
+  const name = String(project?.name ?? '').trim();
+  return name || String(project?.id ?? '');
+}
+
+// Архив побеждает закрепление: проект, который и закреплён, и архивирован,
+// показывается один раз — в архиве. Закрепление при этом не теряется: оно вернётся,
+// когда проект вынесут из архива.
+function projectDashboardSections(overview, query = '') {
+  const needle = String(query || '').trim().toLowerCase();
+  const matching = (overview?.projects || []).filter(project => !needle
+    || projectDisplayName(project).toLowerCase().includes(needle)
+    || String(project?.path || '').toLowerCase().includes(needle));
+  return {
+    pinned: matching.filter(project => project.pinned && !project.archived),
+    active: matching.filter(project => !project.pinned && !project.archived),
+    archived: matching.filter(project => project.archived),
+    unassignedSessions: Number(overview?.unassignedSessions) || 0,
+  };
+}
+
+// Нули не печатаем: «работают: 0» на каждой строке — шум, а его отсутствие несёт
+// ту же информацию.
+function projectCountsLine(project) {
+  const parts = [`сессий: ${Number(project?.sessions) || 0}`];
+  // MR-02: открытая работа — «Active work» из роадмапа.
+  if (Number(project?.activeWork) > 0) parts.push(`работа: ${project.activeWork}`);
+  if (Number(project?.working) > 0) parts.push(`работают: ${project.working}`);
+  if (Number(project?.needsAttention) > 0) parts.push(`внимание: ${project.needsAttention}`);
+  if (project?.lastActivityAt) parts.push(`активность: ${relativeTime(project.lastActivityAt)}`);
+  return parts.join(' · ');
+}
+
+async function loadProjectOverview() {
+  try {
+    projectOverview = await api('/api/projects/overview');
+  } catch {
+    // Дашборд — не единственный способ работать: без него окно показывает реестр,
+    // который уже загружен (см. loadProjects).
+    projectOverview = null;
+  }
+  return projectOverview;
+}
+
+async function setProjectPreferences(id, patch) {
+  const updated = await api(`/api/projects/${encodeURIComponent(id)}/preferences`, {
+    method: 'PATCH', body: JSON.stringify(patch)
+  });
+  await loadProjectOverview();
+  renderManageProjectsList();
+  return updated;
+}
+
+function projectRowElement(project) {
+  const row = document.createElement('div');
+  row.className = 'projectRow';
+  const info = document.createElement('div');
+  info.className = 'projectRowInfo';
+  const name = document.createElement('span');
+  name.className = 'name';
+  name.textContent = (project.pinned ? '★ ' : '') + projectDisplayName(project);
+  const meta = document.createElement('span');
+  meta.className = 'meta';
+  meta.textContent = project.path || '';
+  const counts = document.createElement('span');
+  counts.className = 'meta projectCounts';
+  counts.textContent = projectCountsLine(project);
+  info.append(name, meta, counts);
+
+  const pin = document.createElement('button');
+  pin.type = 'button';
+  pin.className = 'projectRowAction';
+  pin.textContent = project.pinned ? '☆' : '★';
+  pin.title = project.pinned ? 'Открепить' : 'Закрепить';
+  pin.setAttribute('aria-label', `${project.pinned ? 'Открепить' : 'Закрепить'} проект ${projectDisplayName(project)}`);
+  pin.onclick = () => setProjectPreferences(project.id, { pinned: !project.pinned }).catch(err => alert(err.message));
+
+  const archive = document.createElement('button');
+  archive.type = 'button';
+  archive.className = 'projectRowAction';
+  archive.textContent = project.archived ? '⤴' : '🗄';
+  archive.title = project.archived ? 'Вернуть из архива' : 'В архив';
+  archive.setAttribute('aria-label', `${project.archived ? 'Вернуть из архива' : 'В архив'} проект ${projectDisplayName(project)}`);
+  archive.onclick = () => setProjectPreferences(project.id, { archived: !project.archived }).catch(err => alert(err.message));
+
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'projectRowDelete';
+  del.textContent = '✕';
+  del.title = 'Удалить проект';
+  del.setAttribute('aria-label', `Удалить проект ${projectDisplayName(project)}`);
+  del.onclick = async () => {
+    if (!confirm(`Удалить проект «${projectDisplayName(project)}» из TaskBridge? Папка на диске не удаляется, старые сессии продолжат работать.`)) return;
+    try {
+      await api(`/api/projects/${encodeURIComponent(project.id)}`, { method: 'DELETE' });
+      await loadProjects();
+      await loadProjectOverview();
+      renderManageProjectsList();
+    } catch (err) { alert(err.message); }
+  };
+  row.append(info, pin, archive, del);
+  return row;
+}
 
 function renderManageProjectsList() {
-  $('manageProjectsList').innerHTML = '';
-  if (!projects.length) { $('manageProjectsList').textContent = 'Проектов нет.'; return; }
-  for (const p of projects) {
-    const row = document.createElement('div');
-    row.className = 'projectRow';
-    const info = document.createElement('div');
-    info.className = 'projectRowInfo';
-    info.innerHTML = `<span class="name">${escapeHtml(p.name)}</span><span class="meta">${escapeHtml(p.path)}</span>`;
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'projectRowDelete';
-    del.textContent = '✕';
-    del.title = 'Удалить проект';
-    del.setAttribute('aria-label', `Удалить проект ${p.name}`);
-    del.onclick = async () => {
-      if (!confirm(`Удалить проект «${p.name}» из TaskBridge? Папка на диске не удаляется, старые сессии продолжат работать.`)) return;
-      try {
-        await api(`/api/projects/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
-        await loadProjects();
-        renderManageProjectsList();
-      } catch (err) { alert(err.message); }
-    };
-    row.append(info, del);
-    $('manageProjectsList').append(row);
+  const host = $('manageProjectsList');
+  host.innerHTML = '';
+  const sections = projectDashboardSections(projectOverview, projectsQuery);
+  const totals = projectOverview?.totals;
+  const summary = $('manageProjectsSummary');
+  if (summary) {
+    summary.textContent = totals
+      ? `проектов: ${totals.projects} · сессий: ${totals.sessions} · работают: ${totals.working} · требуют внимания: ${totals.needsAttention} · работы: ${totals.activeWork}`
+      : '';
+  }
+  const hint = $('manageProjectsUnassigned');
+  if (hint) {
+    const orphans = sections.unassignedSessions;
+    // Удаление проекта из реестра не удаляет его сессии — окно говорит, где они.
+    hint.textContent = orphans ? `Сессий вне реестра: ${orphans} — они остались в списке всех сессий.` : '';
+    hint.classList.toggle('hidden', !orphans);
+  }
+  if (!projectOverview) {
+    // Сервер не ответил на /api/projects/overview: показываем реестр без чисел,
+    // чтобы окно не выглядело пустым.
+    if (!projects.length) { host.textContent = 'Проектов нет.'; return; }
+    for (const p of projects) {
+      const row = document.createElement('div');
+      row.className = 'projectRow';
+      const info = document.createElement('div');
+      info.className = 'projectRowInfo';
+      info.innerHTML = `<span class="name">${escapeHtml(p.name)}</span><span class="meta">${escapeHtml(p.path)}</span>`;
+      row.append(info);
+      host.append(row);
+    }
+    return;
+  }
+  const addSection = (title, list) => {
+    if (!list.length) return;
+    if (title) {
+      const header = document.createElement('div');
+      header.className = 'projectSection';
+      header.textContent = title;
+      host.append(header);
+    }
+    for (const project of list) host.append(projectRowElement(project));
+  };
+  addSection('Закреплённые', sections.pinned);
+  addSection(sections.pinned.length || sections.archived.length ? 'Остальные' : '', sections.active);
+  if (sections.archived.length) {
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'projectSection projectSectionToggle';
+    toggle.textContent = `Архив (${sections.archived.length}) — ${showArchivedProjects ? 'свернуть' : 'показать'}`;
+    toggle.onclick = () => { showArchivedProjects = !showArchivedProjects; renderManageProjectsList(); };
+    host.append(toggle);
+    if (showArchivedProjects) for (const project of sections.archived) host.append(projectRowElement(project));
+  }
+  if (!sections.pinned.length && !sections.active.length && !sections.archived.length) {
+    host.textContent = projectsQuery ? 'Ничего не найдено.' : 'Проектов нет.';
   }
 }
 
-$('manageProjectsButton').onclick = () => {
+$('manageProjectsButton').onclick = async () => {
   $('manageProjectsOverlay').classList.remove('hidden');
+  renderManageProjectsList(); // реестр уже известен: окно не пустует, пока идёт запрос
+  await loadProjectOverview();
   renderManageProjectsList();
 };
 $('manageProjectsClose').onclick = () => $('manageProjectsOverlay').classList.add('hidden');
+const projectsSearchInput = $('manageProjectsSearch');
+if (projectsSearchInput) projectsSearchInput.oninput = () => {
+  projectsQuery = projectsSearchInput.value;
+  renderManageProjectsList();
+};
 
 /* ---------------- native Pi session importer ---------------- */
 
@@ -4284,7 +4655,7 @@ function deepseekStatusText(ds) {
   const paceParts = [];
   if (pace != null) paceParts.push(`¥${pace.toFixed(1)}`);
   if (paceRub != null) paceParts.push(`≈ ${Math.round(paceRub).toLocaleString('ru-RU')} ₽`);
-  const month = ds.pace?.medianMonthlyRub != null ? ` · ~${Math.round(ds.pace.medianMonthlyRub).toLocaleString('ru-RU')} ₽/мес` : '';
+  const month = ds.pace?.monthlyRub != null ? ` · ~${Math.round(ds.pace.monthlyRub).toLocaleString('ru-RU')} ₽/мес` : '';
   const paceLabel = paceParts.length ? ` (расход ~${paceParts.join('/день ')}/день${month})` : (month ? ` (${month.slice(3)})` : '');
   if (days === 0) lines.push(`Средства DeepSeek исчерпаны${paceLabel}`);
   else if (days != null) lines.push(`Хватит примерно на ${days} дн.${paceLabel}`);
@@ -4490,6 +4861,12 @@ function renderModelList() {
 
 async function openModelPicker(refresh = false) {
   $('modelPickerOverlay').classList.remove('hidden');
+  // Заголовок называет, что делает выбор: смена модели сессии или ответ этого хода
+  // заново выбранной моделью (MR-07).
+  $('modelPickerTitle').textContent = rerunTurnId ? 'Повторить с параметрами' : 'Модель Pi';
+  $('modelPickerNote').textContent = rerunTurnId
+    ? 'Выберите модель, которой запросить этот ответ заново. Выбор применяется к сессии: Pi не умеет менять модель на один запрос.'
+    : 'Список берётся напрямую у Pi — те же provider\'ы, ключи и модели, что видны командой /model. Выбор применяется к текущей сессии или к следующей задаче.';
   $('modelList').textContent = 'Загрузка…';
   try {
     modelCatalog = await api(`/api/models${refresh ? '?refresh=1' : ''}`);
@@ -4502,6 +4879,9 @@ async function openModelPicker(refresh = false) {
 
 async function chooseModel(model) {
   const selection = { provider: model.provider, id: model.id };
+  // Повтор с параметрами — тот же выбор модели, но результат другой: ответ этого хода
+  // запрашивается заново выбранной моделью (MR-07).
+  if (selectedTaskId && rerunTurnId) return rerunTurnWith(model);
   if (!selectedTaskId) {
     // The level kept for the previous model may not exist for this one — a local
     // Strata model takes no «minimal»/«max». Sending a level the model would
@@ -4537,10 +4917,24 @@ async function chooseModel(model) {
   }
 }
 
+$('selectMessagesButton').onclick = startSelectingMessages;
+$('selectCopy').onclick = copySelectedMessages;
+$('selectCancel').onclick = stopSelectingMessages;
+// Capture-фаза: в режиме выбора тап по сообщению отмечает его, а не открывает
+// ссылку или файл внутри ответа.
+$('msgsInner').addEventListener('click', event => {
+  if (!selectingMessages) return;
+  const turn = event.target?.closest?.('.turn');
+  if (!turn || !messageCopyButton(turn)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  toggleTurnSelection(turn);
+}, true);
+
 $('modelButton').onclick = () => openModelPicker();
 $('changeModelButton').onclick = () => openModelPicker();
 $('modelRefresh').onclick = () => openModelPicker(true);
-$('modelPickerClose').onclick = () => $('modelPickerOverlay').classList.add('hidden');
+$('modelPickerClose').onclick = () => { rerunTurnId = null; $('modelPickerOverlay').classList.add('hidden'); };
 $('modelSearch').addEventListener('input', () => {
   clearTimeout(modelListSearchTimer);
   modelListSearchTimer = setTimeout(renderModelList, MODEL_LIST_SEARCH_DEBOUNCE_MS);

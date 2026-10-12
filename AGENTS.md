@@ -46,6 +46,19 @@ Why this exists: a memory-snapshot directory reached `origin` in the past. It wa
 deleted and the history rewritten on 2026-09-29; every branch and tag was force-pushed,
 so an existing clone must be re-fetched, not pulled.
 
+### Process rules for agents
+
+- **Never kill by image name** (`taskkill /F /IM node.exe`, `pkill node`, `Stop-Process -Name node`).
+  It takes down the user's TaskBridge server, the LAN proxy and every running Pi session at
+  once: on 2026-10-12 exactly this killed the backend and three live sessions, and the
+  restart button could not help — it asks the server, and the server was gone (the only way
+  back was the user's `.bat`).
+- Stop a long command by its own PID, or by the flag that lets it exit: `node --test` on
+  `tests/chat.test.mjs` does not finish on its own while a fixture timer is alive, that is
+  why `npm test` and `scripts/regression-suite.mjs` pass `--test-force-exit`.
+- Before any broad command, list what it will hit:
+  `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select ProcessId,CommandLine`.
+
 ## Desktop portable update procedure
 
 When the user asks to update the Windows `TaskBridge.exe`:

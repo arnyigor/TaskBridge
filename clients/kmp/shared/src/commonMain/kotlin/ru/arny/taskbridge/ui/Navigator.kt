@@ -7,7 +7,19 @@ import ru.arny.taskbridge.core.api.ModelRef
 
 sealed interface Screen {
     data object Connect : Screen
-    data object Sessions : Screen
+
+    /**
+     * The session list. [projectId] narrows it to one project — that is how the
+     * project dashboard drills into its own sessions (MR-01), and the filter
+     * lives on the stack entry so «back» returns to the dashboard.
+     */
+    data class Sessions(val projectId: String? = null) : Screen
+
+    /** The project dashboard: every project, its sessions, pinned and archived. */
+    data object Projects : Screen
+    /** One project's operational memory: Work Items, sessions and recurring work. */
+    data class Project(val projectId: String) : Screen
+
     data class Chat(val taskId: String) : Screen
     /** A new session not yet on the PC: it is created by its first message. */
     data class Draft(val draft: SessionDraft) : Screen
@@ -44,6 +56,17 @@ class Navigator(start: Screen) {
     fun openChat(taskId: String) {
         val base = stack.filterNot { it is Screen.Chat || it is Screen.Draft || it is Screen.Settings }
         stack = base + Screen.Chat(taskId)
+    }
+
+    /** One project dashboard, replacing another project dashboard. */
+    fun openProject(projectId: String) {
+        val base = stack.filterNot { it is Screen.Project }
+        stack = base + Screen.Project(projectId)
+    }
+
+    /** Sessions are one level below the project dashboard, so Back returns to it. */
+    fun openProjectSessions(projectId: String) {
+        push(Screen.Sessions(projectId))
     }
 
     fun openDraft(draft: SessionDraft) {

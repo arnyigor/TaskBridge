@@ -32,6 +32,7 @@ export const CLOUD_ALLOWED = [
   { method: 'POST', path: '/api/tasks/:id/model' },
   { method: 'POST', path: '/api/tasks/:id/thinking' },
   { method: 'POST', path: '/api/tasks/:id/compact' },
+  { method: 'POST', path: '/api/tasks/:id/workspace/trust' },
   { method: 'POST', path: '/api/tasks/:id/cancel' },
   { method: 'POST', path: '/api/tasks/:id/auto-compaction' },
   { method: 'GET', path: '/api/tasks/:id/state' },
@@ -39,6 +40,47 @@ export const CLOUD_ALLOWED = [
   { method: 'POST', path: '/api/tasks/:id/approvals/:approvalId' },
   { method: 'POST', path: '/api/tasks/:id/pending/send' },
   { method: 'DELETE', path: '/api/tasks/:id/pending' },
+  // Projects and the dashboard (MR-01): a phone must be able to see the same
+  // project list the desktop does, without a second code path.
+  { method: 'GET', path: '/api/projects' },
+  { method: 'GET', path: '/api/projects/overview' },
+  { method: 'GET', path: '/api/projects/:id/memory' },
+  { method: 'GET', path: '/api/projects/:id/sessions' },
+  { method: 'PATCH', path: '/api/projects/:id/preferences' },
+  // Work items (MR-02/MR-03) and the resume engine (MR-04/MR-05): the same rule —
+  // if it works on the machine, it works from the phone through the relay.
+  { method: 'GET', path: '/api/work-items' },
+  { method: 'POST', path: '/api/work-items' },
+  { method: 'GET', path: '/api/work-items/:id' },
+  { method: 'PATCH', path: '/api/work-items/:id' },
+  { method: 'DELETE', path: '/api/work-items/:id' },
+  { method: 'GET', path: '/api/work-items/:id/sessions' },
+  { method: 'POST', path: '/api/work-items/:id/sessions' },
+  { method: 'DELETE', path: '/api/work-items/:id/sessions/:sessionId' },
+  { method: 'GET', path: '/api/work-items/:id/resume' },
+  { method: 'POST', path: '/api/work-items/:id/resume' },
+  { method: 'GET', path: '/api/tasks/:id/work-items' },
+  { method: 'GET', path: '/api/tasks/:id/recap' },
+  { method: 'PUT', path: '/api/tasks/:id/recap' },
+  { method: 'DELETE', path: '/api/tasks/:id/recap' },
+  // Recipes (MR-05): a recurring job is configured and started from wherever the
+  // operator happens to be, which is the point of the relay.
+  { method: 'GET', path: '/api/recipes' },
+  { method: 'POST', path: '/api/recipes' },
+  { method: 'GET', path: '/api/recipes/:id' },
+  { method: 'PATCH', path: '/api/recipes/:id' },
+  { method: 'DELETE', path: '/api/recipes/:id' },
+  { method: 'POST', path: '/api/recipes/:id/run' },
+  // Schedules and invocations (MR-06): configured and watched from the phone, but
+  // always EXECUTED on the machine.
+  { method: 'GET', path: '/api/schedules' },
+  { method: 'POST', path: '/api/schedules' },
+  { method: 'GET', path: '/api/schedules/:id' },
+  { method: 'PATCH', path: '/api/schedules/:id' },
+  { method: 'DELETE', path: '/api/schedules/:id' },
+  { method: 'POST', path: '/api/schedules/:id/run' },
+  { method: 'GET', path: '/api/invocations' },
+  { method: 'GET', path: '/api/invocations/:id' },
   { method: 'GET', path: '/api/models' },
   { method: 'GET', path: '/api/local' }
 ];

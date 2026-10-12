@@ -205,6 +205,106 @@ test('forkTask branches the conversation through the chosen message and leaves t
   );
 });
 
+test('forkTask from a message copies it and everything after it', async t => {
+  const { manager, store } = await fixture(t, 'SUCCEEDED');
+  await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', message: 'второе', data: { text: 'второе' } });
+  await store.appendEvent('a', { ...at(), type: 'STATUS', message: 'Running', data: { status: 'RUNNING' } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Ответ 2' } } } });
+  await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', message: 'третье', data: { text: 'третье' } });
+  await store.appendEvent('a', { ...at(), type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+
+  const source = await store.readEvents('a', 0);
+  const third = source.find(e => e.type === 'USER_MESSAGE' && e.data.text === 'третье');
+
+  const forked = await manager.forkTask('a', `user-${third.seq}`, 'from');
+  assert.equal(forked.forkedFrom, 'a');
+  assert.equal(forked.status, 'SUCCEEDED');
+  assert.notEqual(forked.id, 'a');
+  // The clicked message becomes the new session's own prompt: the client
+  // synthesizes that first turn from the task record, so the line is not stored
+  // a second time as an event of its own.
+  assert.equal(forked.prompt, 'третье');
+
+  const copy = (await store.readEvents(forked.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.equal(copy.at(-1).type, 'TASK_FORKED');
+  const body = copy.slice(0, -1);
+  const expected = source.filter(e => e.seq >= third.seq).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.deepEqual(
+    body.map(e => `${e.type}|${JSON.stringify(e.data)}`),
+    expected.slice(1).map(e => `${e.type}|${JSON.stringify(e.data)}`),
+    'the copy carries the chosen message and what came after it, and nothing before it'
+  );
+  // The events refer to each other by seq (a variant names its exchange), so a
+  // copy that opens mid-conversation keeps the source cursors.
+  assert.deepEqual(body.map(e => e.seq), expected.slice(1).map(e => e.seq));
+  assert.ok(body.every(e => e.taskId === forked.id), 'the copy belongs to the new session');
+  assert.deepEqual((await store.readEvents('a', 0)).map(e => e.seq), source.map(e => e.seq), 'the source is untouched');
+
+  // Both ends of an exchange name the same exchange, so an answer starts the
+  // copy at the operator line it answers.
+  const fromAnswer = await manager.forkTask('a', `assistant-${third.seq}`, 'from');
+  assert.equal(fromAnswer.prompt, 'третье');
+  assert.deepEqual(
+    (await store.readEvents(fromAnswer.id, 0)).map(e => e.type),
+    (await store.readEvents(forked.id, 0)).map(e => e.type)
+  );
+
+  // "From the very first message" is the whole conversation, prompt and all.
+  const whole = await manager.forkTask('a', 'user-initial', 'from');
+  assert.equal(whole.prompt, 'original');
+  assert.equal((await store.readEvents(whole.id, 0)).filter(e => e.type === 'USER_MESSAGE').length, 2, 'every message of the source is there');
+
+  await assert.rejects(() => manager.forkTask('a', `user-${third.seq}`, 'sideways'), err => err.code === 'INPUT_INVALID');
+  await assert.rejects(() => manager.forkTask('a', 'user-999', 'from'), err => err.code === 'NOT_FOUND');
+});
+
+test('a fork through the first answer keeps the first exchange', async t => {
+  const { manager, store } = await fixture(t, 'SUCCEEDED');
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Ответ 1' } } } });
+  await store.appendEvent('a', { ...at(), type: 'TASK_SUCCEEDED', message: 'Done', data: {} });
+  await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', message: 'второе', data: { text: 'второе' } });
+
+  const source = await store.readEvents('a', 0);
+  const first = source.find(e => e.type === 'USER_MESSAGE');
+  const head = source.filter(e => e.seq < first.seq).filter(e => e.type !== 'RUNTIME_STATE');
+
+  // The session's own first prompt lives in task.prompt, so the branch of the
+  // first ANSWER carries that prompt plus the events up to the next message.
+  const through = await manager.forkTask('a', 'assistant-initial');
+  assert.equal(through.prompt, 'original');
+  assert.deepEqual(
+    (await store.readEvents(through.id, 0)).filter(e => e.type !== 'RUNTIME_STATE').slice(0, head.length).map(e => e.type),
+    head.map(e => e.type)
+  );
+
+  // The other direction on the same answer is the whole conversation.
+  const whole = await manager.forkTask('a', 'assistant-initial', 'from');
+  assert.equal(whole.prompt, 'original');
+  assert.equal((await store.readEvents(whole.id, 0)).filter(e => e.type === 'USER_MESSAGE').length, 1);
+});
+
+test('a fork from an exchange keeps its variants on the copy\'s own first exchange', async t => {
+  const { manager, store } = await fixture(t, 'SUCCEEDED');
+  await store.appendEvent('a', { ...at(), type: 'USER_MESSAGE', message: 'второе', data: { text: 'второе' } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Ответ 1' } } } });
+  const second = (await store.readEvents('a', 0)).find(e => e.type === 'USER_MESSAGE');
+  await store.appendEvent('a', { ...at(), type: 'TURN_VARIANT_START', message: 'Новый вариант', data: { turnSeq: second.seq, variantId: 'v2' } });
+  await store.appendEvent('a', { ...at(), type: 'PI_EVENT', message: '', data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Ответ 2' } } } });
+
+  const forked = await manager.forkTask('a', `user-${second.seq}`, 'from');
+  const copy = (await store.readEvents(forked.id, 0)).filter(e => e.type !== 'RUNTIME_STATE');
+  const marker = copy.find(e => e.type === 'TURN_VARIANT_START');
+  assert.ok(marker, 'the variant marker travels with the copy');
+  // The dropped line is the copy's own first prompt and its exchange is the
+  // client's key 0 (`assistant-initial`) — not the seq it had in the source.
+  assert.equal(marker.data.turnSeq, 0);
+  assert.equal(marker.data.variantId, 'v2');
+  // Both answers of the exchange are still switchable on the copy.
+  const switched = await manager.selectVariant(forked.id, { turnSeq: 0, variantId: 'v2' });
+  assert.deepEqual({ ok: switched.ok, total: switched.total }, { ok: true, total: 2 });
+  assert.deepEqual(await manager.forkTask('a', `assistant-${second.seq}`, 'sideways').catch(e => e.code), 'INPUT_INVALID');
+});
+
 test('the operator message frame is not mistaken for the model answer', async t => {
   const { manager, store } = await fixture(t, 'CANCELLED');
   // Pi persists the user's own message as a frame too; only role=assistant

@@ -851,7 +851,11 @@ test('close() shuts the Pi and the router down gracefully', async t => {
     getState: async () => ({ isStreaming: false }),
     prompt: async () => {}, sendFollowUp: async () => {},
     abort: async () => {}, killTree: async () => { killed++; },
-    closeStdin: () => { stdinClosed++; }
+    closeStdin: () => {
+      assert.equal(f.runtime.retired, true, 'shutdown is classified as intentional before Pi can emit close');
+      assert.equal(f.runtime.cancelRequested, true);
+      stdinClosed++;
+    }
   };
   f.runtime.pi = pi;
   f.manager.localModels = { enabled: true, stop: async () => { routerStopped++; } };
@@ -861,8 +865,25 @@ test('close() shuts the Pi and the router down gracefully', async t => {
   assert.equal(stdinClosed, 1, 'close stdin is requested first');
   assert.equal(killed, 0, 'an already-exited process is not force-killed');
   assert.equal(routerStopped, 1, 'the always-on router is stopped');
+  assert.equal(f.runtime.retired, true);
+  assert.equal(f.runtime.cancelRequested, true);
   assert.equal(f.manager.runtimes.size, 0, 'no live runtime is left behind');
   assert.equal(f.manager.closing, true, 'closing is latched');
+});
+
+test('trustWorkspace saves Pi trust for the task folder without touching another agent directory', async t => {
+  const f = await fixture(t);
+  const agentDir = path.join(f.root, 'pi-agent');
+  f.manager.config.pi = { env: { PI_AGENT_DIR: agentDir } };
+
+  const updated = await f.manager.trustWorkspace('a');
+  const trust = JSON.parse(await fs.readFile(path.join(agentDir, 'trust.json'), 'utf8'));
+  const canonical = await fs.realpath(f.root);
+
+  assert.equal(trust[canonical], true);
+  assert.equal(updated.id, 'a');
+  assert.equal(updated.workspaceTrusted, true, 'the next Pi launch defers to the persisted trust decision');
+  assert.ok((await f.store.readEvents('a', 0)).some(event => event.type === 'PROJECT_TRUSTED'));
 });
 
 test('close() force-kills a Pi that refuses to exit in time', async t => {

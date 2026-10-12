@@ -58,6 +58,23 @@ class ChatReducerGoldenTest {
     // JS keeps `final` undefined on user turns and notes; compare what matters there.
     private fun normalize(turns: List<GoldenTurn>) = turns.map { if (it.role == "assistant") it else it.copy(final = false, active = false, status = "") }
 
+    /**
+     * TESTING_PLAN.md §4: the corpus is canonical, so the scenarios it names must be
+     * there. A fixture that quietly disappears takes its guarantee with it — the loop
+     * below would simply check one less file and stay green.
+     */
+    @Test
+    fun theCanonicalCorpusIsPresent() {
+        val required = listOf(
+            "basic", "follow-up", "queued", "steer", "cancel", "send-now",
+            "regenerate", "edit-answer", "edit-turn", "delete-turn", "thinking",
+            "model-error", "fork-from",
+        )
+        val present = dir.listFiles { file -> file.name.endsWith(".json") }.orEmpty().map { it.nameWithoutExtension }.toSet()
+        val missing = required.filterNot { it in present }
+        assertTrue(missing.isEmpty(), "сценариев нет в tests/fixtures/chat: $missing (есть: ${present.sorted()})")
+    }
+
     @Test
     fun everyScenarioMatchesTheWebReducer() {
         val files = dir.listFiles { file -> file.name.endsWith(".json") }.orEmpty().sortedBy { it.name }

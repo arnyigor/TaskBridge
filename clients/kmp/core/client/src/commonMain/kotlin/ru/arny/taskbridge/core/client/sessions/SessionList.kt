@@ -19,6 +19,9 @@ import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ModelSelection
 import ru.arny.taskbridge.core.api.Project
+import ru.arny.taskbridge.core.api.ProjectOverview
+import ru.arny.taskbridge.core.api.ProjectPreferences
+import ru.arny.taskbridge.core.api.ProjectSummary
 import ru.arny.taskbridge.core.api.SCRATCH_PROJECT_ID
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeApi
@@ -30,6 +33,8 @@ data class SessionListState(
     val loading: Boolean = true,
     val tasks: List<Task> = emptyList(),
     val projects: List<Project> = emptyList(),
+    /** The project dashboard (MR-01): counts, pinned and archived, from one GET. */
+    val overview: ProjectOverview? = null,
     val info: ApiInfo? = null,
     val error: ApiError? = null,
     val refreshing: Boolean = false,
@@ -43,10 +48,14 @@ data class SessionListState(
     val waitingCount: Int get() = tasks.count { displayStateOf(it) == DisplayState.WAITING_USER }
     val workingCount: Int get() = tasks.count { displayStateOf(it) == DisplayState.WORKING }
 
-    fun groups(query: String = ""): List<SessionGroup> {
+    /** The dashboard's order: the server already pinned-first, archived in place. */
+    val dashboardProjects: List<ProjectSummary> get() = overview?.projects.orEmpty()
+
+    fun groups(query: String = "", projectId: String? = null): List<SessionGroup> {
         val needle = query.trim().lowercase()
         val names = projects.associate { it.id to it.displayName }
         return sorted
+            .filter { projectId == null || (it.projectId ?: SCRATCH_PROJECT_ID) == projectId }
             .filter { needle.isEmpty() || it.displayTitle.lowercase().contains(needle) || it.prompt.orEmpty().lowercase().contains(needle) }
             .groupBy { it.projectId ?: SCRATCH_PROJECT_ID }
             .map { (id, list) -> SessionGroup(id, if (id == SCRATCH_PROJECT_ID) "Без проекта" else names[id] ?: id, list) }
@@ -134,15 +143,46 @@ class SessionList(
             hidden.update { ids -> ids.filterTo(mutableSetOf()) { id -> listed.any { it.id == id } } }
             val tasks = listed.filterNot { it.id in hidden.value }
             val projects = if (_state.value.projects.isEmpty() || infoTick % 10 == 0) api.projects() else _state.value.projects
+            // The dashboard is read on the same cadence as the project registry (and
+            // right after a preference change, see [setProjectPreferences]): an extra
+            // request per tick would buy nothing while nothing can change it.
+            val overview = if (_state.value.overview == null || infoTick % 10 == 0) api.projectOverview() else _state.value.overview
             val active = tasks.any { displayStateOf(it).active }
             val info = if (_state.value.info == null || active || infoTick % 5 == 0) api.info() else _state.value.info
             infoTick += 1
-            _state.update { it.copy(loading = false, refreshing = false, tasks = tasks, projects = projects, info = info, error = null, updatedAtMillis = clockMillis()) }
+            _state.update {
+                it.copy(
+                    loading = false, refreshing = false, tasks = tasks, projects = projects,
+                    overview = overview, info = info, error = null, updatedAtMillis = clockMillis(),
+                )
+            }
         } catch (cancel: CancellationException) {
             throw cancel
         } catch (failure: ApiException) {
             _state.update { it.copy(loading = false, refreshing = false, error = failure.error) }
         }
+    }
+
+    /**
+     * Pin or archive a project (MR-01). The server is the one that decides the
+     * merged result (an omitted flag keeps its stored value), so its answer is
+     * what lands in the state — not an optimistic guess that could disagree.
+     */
+    suspend fun setProjectPreferences(projectId: String, pinned: Boolean? = null, archived: Boolean? = null): Result<ProjectPreferences> = runCatching {
+        val preferences = api.setProjectPreferences(projectId, pinned, archived)
+        _state.update { current ->
+            val overview = current.overview ?: return@update current
+            current.copy(
+                overview = overview.copy(
+                    projects = overview.projects.map { project ->
+                        if (project.id != projectId) project
+                        else project.copy(pinned = preferences.pinned, archived = preferences.archived)
+                    },
+                ),
+            )
+        }
+        wake.trySend(Unit)
+        preferences
     }
 
     /** Поднимет ли приложение сервер само: лаунчер есть и каталог TaskBridge найден. */
@@ -167,14 +207,15 @@ class SessionList(
         } else {
             api.restartServer()
         }
-        var sawDown = before != null
         val back = withTimeoutOrNull(timeoutMillis) {
             while (true) {
                 delay(stepMillis)
                 val now = runCatching { api.info().bootId }.getOrNull()
-                if (now == null) sawDown = true
-                // before == null (сервер запускали с нуля): первое же «жив» — успех.
-                else if (sawDown || before == null || now != before) break
+                // A 202 response only means the detached worker was scheduled.
+                // The old process can keep answering during its grace delay, so
+                // success requires the new bootId (or the first live boot after
+                // starting from a fully stopped server).
+                if (now != null && (before == null || now != before)) break
             }
         }
         if (back == null) throw IllegalStateException("Сервер не вернулся за ${timeoutMillis / 1000} с — проверьте логи TaskBridge на компьютере")

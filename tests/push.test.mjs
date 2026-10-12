@@ -93,6 +93,33 @@ test('only the events an operator waits for become a notification', () => {
   assert.equal(notificationFor({ type: 'TASK_FAILED', taskId: 't2', message: 'Pi упал' }).body, 'Pi упал');
 });
 
+test('a scheduled run notifies by its own policy, and a manual one as before', () => {
+  const scheduled = { id: 't1', title: 'Daily audit', scheduleNotify: 'action-required', git: { changedFiles: [] } };
+  // A clean, empty, successful run is the one nobody needs to hear about.
+  assert.equal(notificationFor({ type: 'TASK_SUCCEEDED', taskId: 't1' }, scheduled), null);
+  // But changes, a failed verification or a failure itself are exactly «action required».
+  assert.equal(
+    notificationFor({ type: 'TASK_SUCCEEDED', taskId: 't1' }, { ...scheduled, git: { changedFiles: ['a.mjs'] } }).body,
+    'Daily audit · есть изменения',
+  );
+  assert.equal(
+    notificationFor({ type: 'TASK_SUCCEEDED', taskId: 't1' }, { ...scheduled, verificationStatus: 'FAILED' }).body,
+    'Daily audit · проверка не прошла',
+  );
+  assert.equal(notificationFor({ type: 'TASK_FAILED', taskId: 't1' }, scheduled).title, 'TaskBridge: Ошибка');
+  assert.equal(notificationFor({ type: 'APPROVAL_REQUIRED', taskId: 't1' }, scheduled).title, 'TaskBridge: Нужно подтверждение');
+  assert.equal(notificationFor({ type: 'TASK_SUCCEEDED', taskId: 't1' }, { ...scheduled, scheduleNotify: 'errors-only' }), null);
+  assert.equal(notificationFor({ type: 'TASK_FAILED', taskId: 't1' }, { ...scheduled, scheduleNotify: 'errors-only' }).title, 'TaskBridge: Ошибка');
+  assert.equal(notificationFor({ type: 'TASK_FAILED', taskId: 't1' }, { ...scheduled, scheduleNotify: 'never' }), null);
+  assert.equal(
+    notificationFor({ type: 'TASK_SUCCEEDED', taskId: 't1' }, { ...scheduled, scheduleNotify: 'always', git: { changedFiles: [] } }).title,
+    'TaskBridge: Готово',
+    'always — как раньше',
+  );
+  // A manual session has no policy and behaves exactly as before.
+  assert.equal(notificationFor({ type: 'TASK_SUCCEEDED', taskId: 't1' }, { id: 't1', title: 'x' }).body, 'x');
+});
+
 test('the push center keeps one key pair, one record per browser, and drops dead endpoints', async t => {
   const root = await tempRoot(t);
   const calls = [];

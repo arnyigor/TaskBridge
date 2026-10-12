@@ -1245,6 +1245,28 @@ test('DOM: commands sit above the answer and below the reasoning block', async (
   assert.match(body.querySelector('.md').textContent, /Первый ответ|Второй ответ/);
 });
 
+test('DOM: reasoning block can copy the full current text', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+
+  const thinking = 'Первая часть рассуждения.\n'.repeat(20) + 'Последняя часть рассуждения.';
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (!pathname.endsWith('/events')) return null;
+    return { ok: true, json: async () => [...history('a'), { taskId: 'a', seq: 99, type: 'PI_EVENT',
+      data: { pi: { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: thinking } } } }] };
+  });
+  await app.refreshTask();
+
+  const reasoning = app.document.querySelector('.reasoning');
+  assert.ok(reasoning, 'no reasoning block rendered');
+  assert.equal(reasoning.querySelector('.r-text').textContent, thinking);
+  assert.match(reasoning.querySelector('.r-label').textContent, new RegExp(`${thinking.length} симв\\.`));
+
+  await reasoning.querySelector('.copyBtn').onclick({ stopPropagation() {} });
+  assert.equal(app.copied.at(-1), thinking);
+});
+
 test('DOM: a long tool run folds into one collapsed line', async () => {
   const app = await ui();
   await app.selectTask('a');
@@ -1502,7 +1524,7 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
 
   assert.deepEqual([...menuBody.children].map(node => node.id), [
     'modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton',
-    'sessionDetailsButton', 'helpButton', 'uiSettingsButton',
+    'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton',
   ]);
   // What is left in the header is the status dot: 12px of a live indicator costs
   // no row, while the model chip (158px of 332 available at 360px) did.
@@ -1519,14 +1541,14 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
   assert.equal(desktop.document.getElementById('headerMenu').hasAttribute('data-ready'), false, 'no empty ⋮ on a wide screen');
   assert.deepEqual([...desktop.document.querySelector('.headerActions').children].map(node => node.id), [
     'runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton',
-    'pcState', 'sessionDetailsButton', 'helpButton', 'uiSettingsButton', 'headerMenu',
+    'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton', 'headerMenu',
   ]);
 
   // The two sides of the breakpoint: 900 is a phone, 901 is not. This is the
   // boundary the CSS and this query have to agree on (web-css.test.mjs checks
   // the stylesheet's half of it).
   const edge = await ui({ viewportWidth: 900 });
-  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 10, '900px is the phone layout');
+  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 11, '900px is the phone layout');
   const past = await ui({ viewportWidth: 901 });
   assert.equal(past.document.querySelectorAll('#headerMenuBody > *').length, 0, '901px is not');
   assert.equal(past.document.getElementById('headerMenu').hasAttribute('data-ready'), false);
@@ -1917,6 +1939,18 @@ test('DOM: a running session is obvious, and both stop and send stay reachable',
   assert.match(activity.textContent, /ждёт модель/);
   assert.equal(activity.classList.contains('waiting'), true);
 
+  // Провайдер не принял запрос: полоска называет причину и момент повтора, а не
+  // только считает секунды (2026-10-09 — 1 ч 31 мин тишины без объяснения).
+  app.renderActivity({
+    status: 'RUNNING',
+    statusChangedAt: new Date().toISOString(),
+    model: { id: 'claude-opus-5.5' },
+    runtime: { state: 'WORKING', activity: 'waiting_model' },
+    providerWait: { kind: 'rate-limit', httpStatus: 429, reason: 'user reached the limit', retryAt: new Date(Date.now() + 5_472_000).toISOString() },
+  });
+  assert.match(activity.textContent, /провайдер не принял запрос \(HTTP 429\)/);
+  assert.match(activity.textContent, /повтор через 1 ч 31 мин/);
+
   // Idle: nothing is shown, and no timer is left behind.
   app.renderActivity({ status: 'SUCCEEDED' });
   assert.equal(activity.classList.contains('hidden'), true);
@@ -2224,7 +2258,7 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   const botBar = app.document.querySelector('.turn:not(.me) .turnActionBar');
   assert.ok(userBar && botBar, 'both directions carry the action bar');
   const visible = bar => [...bar.querySelectorAll('.actionBtn')].filter(b => !b.classList.contains('hidden')).map(b => b.dataset.action);
-  assert.deepEqual(visible(userBar), ['edit', 'fork', 'drop'], 'the operator line can be fixed, branched or dropped');
+  assert.deepEqual(visible(userBar), ['edit', 'fork', 'forkFrom', 'drop'], 'the operator line can be fixed, branched up or down, or dropped');
   // Every action is an inline SVG mark, not an emoji: an emoji ignores the theme
   // colour and changes size with the font, and 🌿 read as “herb”, not “fork”.
   const iconMark = button => {
@@ -2237,9 +2271,9 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   for (const button of userBar.querySelectorAll('.actionBtn')) iconMark(button);
   // An answer is a branch point too. Older answers only fork/regen-ish nothing:
   // re-run, continue and edit live on the newest answer alone.
-  assert.deepEqual(visible(botBar), ['fork']);
+  assert.deepEqual(visible(botBar), ['fork', 'forkFrom']);
   const lastBotBar = [...app.document.querySelectorAll('.turn:not(.me) .turnActionBar')].at(-1);
-  assert.deepEqual(visible(lastBotBar), ['edit', 'fork', 'regen', 'continue']);
+  assert.deepEqual(visible(lastBotBar), ['edit', 'fork', 'forkFrom', 'regen', 'continue']);
   for (const button of lastBotBar.querySelectorAll('.actionBtn')) iconMark(button);
 
   // ✎ opens the editor; Save re-sends the corrected text (the server wipes
@@ -2258,21 +2292,21 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   assert.ok(!app.document.querySelector('.editArea'), 'the editor closes on success');
 
   // 🔄 asks again and re-runs the model in the same session.
-  lastBotBar.querySelectorAll('.actionBtn')[2].dispatchEvent(new app.window.Event('click'));
+  lastBotBar.querySelectorAll('.actionBtn')[3].dispatchEvent(new app.window.Event('click'));
   for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
   const regenerated = calls.find(c => c.pathname.endsWith('/regenerate'));
   assert.ok(regenerated, 'the regenerate endpoint was called');
   assert.equal(regenerated.body, JSON.stringify({ turnId: 'assistant-5' }), 'the newest answer names itself');
 
   // → continues the answer in place: nothing is dropped, the model appends.
-  lastBotBar.querySelectorAll('.actionBtn')[3].dispatchEvent(new app.window.Event('click'));
+  lastBotBar.querySelectorAll('.actionBtn')[4].dispatchEvent(new app.window.Event('click'));
   for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
   const continued = calls.find(c => c.pathname.endsWith('/continue'));
   assert.ok(continued, 'the continue endpoint was called');
   assert.equal(continued.body, JSON.stringify({ turnId: 'assistant-5' }));
 
   // 🗑 asks first (the harness answers yes), then drops the message and after.
-  userBar.querySelectorAll('.actionBtn')[2].dispatchEvent(new app.window.Event('click'));
+  userBar.querySelectorAll('.actionBtn')[3].dispatchEvent(new app.window.Event('click'));
   for (let i = 0; i < 6; i++) await new Promise(resolve => setImmediate(resolve));
   assert.ok(calls.some(c => c.pathname.endsWith('/delete')), 'the delete endpoint was called');
 
@@ -2283,6 +2317,16 @@ test('DOM: every message carries edit/fork/drop actions, and the newest answer o
   assert.ok(forked, 'the fork endpoint was called');
   assert.equal(forked.body, JSON.stringify({ turnId: 'user-5' }));
   assert.equal(app.urls.at(-1)?.url, '/session/forked', 'the new branch is opened');
+
+  // The mirrored mark branches the other way: the same call with direction
+  // 'from', so the copy starts at this message and keeps everything after it.
+  await app.selectTask('a');
+  const fromBar = [...app.document.querySelectorAll('.turn.me .turnActionBar')].at(-1);
+  fromBar.querySelectorAll('.actionBtn')[2].dispatchEvent(new app.window.Event('click'));
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve));
+  const fromCall = calls.filter(c => c.pathname.endsWith('/fork')).at(-1);
+  assert.equal(fromCall.pathname, '/api/tasks/a/fork');
+  assert.equal(fromCall.body, JSON.stringify({ turnId: 'user-5', direction: 'from' }));
 });
 
 test('a regenerated answer becomes a sibling variant, not a replacement', () => {

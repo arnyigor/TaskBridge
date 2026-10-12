@@ -101,13 +101,30 @@ test('parseStrataMetrics carries the phase and the prompt progress', () => {
 });
 
 test('parseStrataMetrics prefers the live generation rate over the last request', () => {
+  // Промпт должен быть выше порога FRESH_TOKENS_FOR_PP (4096): с сотней новых
+  // токенов «новые / prompt_ms» — разгон движка, а не prefill, и PP там не
+  // публикуется (см. следующий тест).
+  const m = parseStrataMetrics({
+    engine: { model: 'x' },
+    live: { state: 'busy', phase: 'thinking', tok_s: 47.3 },
+    requests: [{ prompt_tokens: 8192, reused: 0, prompt_ms: 4096, decode_tok_s: 20 }]
+  });
+  assert.equal(m.tg, 47.3);
+  assert.equal(m.pp, 2000);
+});
+
+test('parseStrataMetrics does not invent PP for a short fresh prompt', () => {
+  // Замер 2026-10-08: 387 новых токенов за 1896 мс давали в панели «204 tok/s»,
+  // 33 за 756 мс — «43.7»: это разгон, а не скорость чтения промпта. Числа нет —
+  // и не выдумываем (как у кеш-попадания), но называем причину.
   const m = parseStrataMetrics({
     engine: { model: 'x' },
     live: { state: 'busy', phase: 'thinking', tok_s: 47.3 },
     requests: [{ prompt_tokens: 100, reused: 0, prompt_ms: 50, decode_tok_s: 20 }]
   });
-  assert.equal(m.tg, 47.3);
-  assert.equal(m.pp, 2000);
+  assert.equal(m.pp, null);
+  assert.equal(m.ppUnavailable, 'few-fresh-tokens');
+  assert.equal(m.tg, 47.3, 'живая скорость генерации от порога не зависит');
 });
 
 test('parseStrataMetrics keeps a payload that only has the engine block', () => {

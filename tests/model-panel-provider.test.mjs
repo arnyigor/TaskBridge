@@ -45,7 +45,7 @@ function makeRenderer() {
 const deepseek = {
   provider: 'deepseek', label: 'DeepSeek', kind: 'balance', available: true,
   balance: { cny: -1.45, usd: 21.52 }, rub: { total: 1788.5 },
-  runway: { historyDays: 11 }, pace: { historyPerDay: 13.278994, historyPerDayRub: 166.6 },
+  runway: { historyDays: 11 }, pace: { historyPerDay: 13.278994, historyPerDayRub: 166.6, monthlyRub: 5000 },
 };
 const wormsoft = {
   provider: 'wormsoft', label: 'WormSoft', kind: 'subscription', available: true,
@@ -64,6 +64,8 @@ test('DeepSeek balance keeps its currency and runway details', () => {
   renderProviderStatus(statuses, { provider: 'deepseek', id: 'deepseek-flash' });
   const el = document.getElementById('pcStateProvider');
   assert.match(el.textContent, /^DeepSeek: ¥-1\.45 · \$21\.52 · \(≈ 1\u00a0789 ₽\)\nХватит примерно на 11 дн\./u);
+  // «₽/мес» берётся из темпа, по которому посчитаны дни, — иначе строка противоречит себе.
+  assert.match(el.textContent, /~5\u00a0000 ₽\/мес/u);
   assert.equal(el.classList.contains('hidden'), false);
 });
 

@@ -179,6 +179,242 @@ class TaskBridgeApi(
     suspend fun registerLocalProject(path: String): Project =
         call(HttpMethod.Post, "/api/projects/local-register", Project.serializer(), buildJsonObject { put("path", path) })
 
+    // --- project dashboard (MR-01) ------------------------------------------
+
+    /** Every registered project with its session counts and pinned/archived. */
+    suspend fun projectOverview(): ProjectOverview =
+        get("/api/projects/overview", ProjectOverview.serializer())
+
+    /**
+     * Sessions of one project, filtered and paged by the server: a phone must not
+     * pull every conversation of a big project to show a list.
+     */
+    suspend fun projectSessions(
+        projectId: String,
+        query: String? = null,
+        status: String? = null,
+        sort: String? = null,
+        limit: Int? = null,
+        offset: Int? = null,
+    ): ProjectSessionsPage {
+        val params = listOfNotNull(
+            query?.takeIf { it.isNotBlank() }?.let { "q=${it.encodeURLParameter()}" },
+            status?.takeIf { it.isNotBlank() }?.let { "status=${it.encodeURLParameter()}" },
+            sort?.takeIf { it.isNotBlank() }?.let { "sort=${it.encodeURLParameter()}" },
+            limit?.let { "limit=$it" },
+            offset?.let { "offset=$it" },
+        ).joinToString("&")
+        return get(
+            "/api/projects/${projectId.encodeURLPathPart()}/sessions" + if (params.isEmpty()) "" else "?$params",
+            ProjectSessionsPage.serializer(),
+        )
+    }
+
+    // --- work items (MR-02) --------------------------------------------------
+
+    /** Work items, newest first; [projectId] narrows to one project. */
+    suspend fun workItems(projectId: String? = null, status: String? = null, includeClosed: Boolean = true): List<WorkItem> {
+        val params = listOfNotNull(
+            projectId?.takeIf { it.isNotBlank() }?.let { "projectId=${it.encodeURLParameter()}" },
+            status?.takeIf { it.isNotBlank() }?.let { "status=${it.encodeURLParameter()}" },
+            if (includeClosed) null else "includeClosed=0",
+        ).joinToString("&")
+        val body = get("/api/work-items" + if (params.isEmpty()) "" else "?$params", WorkItemList.serializer())
+        return body.items
+    }
+
+    suspend fun workItem(id: String): WorkItem = get("/api/work-items/${id.encodeURLPathPart()}", WorkItem.serializer())
+
+    suspend fun createWorkItem(request: WorkItemRequest): WorkItem =
+        call(HttpMethod.Post, "/api/work-items", WorkItem.serializer(), request.toJson())
+
+    /** A partial update: a field left null keeps its stored value on the server. */
+    suspend fun updateWorkItem(id: String, request: WorkItemRequest): WorkItem =
+        call(HttpMethod.Patch, "/api/work-items/${id.encodeURLPathPart()}", WorkItem.serializer(), request.toJson())
+
+    suspend fun deleteWorkItem(id: String): WorkItem =
+        call(HttpMethod.Delete, "/api/work-items/${id.encodeURLPathPart()}", WorkItemDeleted.serializer()).removed
+
+    // --- run recipes (MR-05) -------------------------------------------------
+
+    suspend fun recipes(projectId: String? = null): List<RunRecipe> {
+        val query = projectId?.takeIf { it.isNotBlank() }?.let { "?projectId=${it.encodeURLParameter()}" } ?: ""
+        return get("/api/recipes$query", RecipeList.serializer()).items
+    }
+
+    suspend fun recipe(id: String): RunRecipe = get("/api/recipes/${id.encodeURLPathPart()}", RunRecipe.serializer())
+
+    suspend fun createRecipe(request: RecipeRequest): RunRecipe =
+        call(HttpMethod.Post, "/api/recipes", RunRecipe.serializer(), RecipeJson.request(request))
+
+    suspend fun updateRecipe(id: String, request: RecipeRequest): RunRecipe =
+        call(HttpMethod.Patch, "/api/recipes/${id.encodeURLPathPart()}", RunRecipe.serializer(), RecipeJson.request(request))
+
+    suspend fun deleteRecipe(id: String): RunRecipe =
+        call(HttpMethod.Delete, "/api/recipes/${id.encodeURLPathPart()}", RecipeDeleted.serializer()).removed
+
+    /**
+     * Runs the recipe now. [parameters] are the values the operator chose; the ones
+     * left out take their declared defaults on the server.
+     */
+    suspend fun runRecipe(id: String, parameters: Map<String, String> = emptyMap(), trigger: String? = null): RecipeRunResult =
+        call(
+            HttpMethod.Post,
+            "/api/recipes/${id.encodeURLPathPart()}/run",
+            RecipeRunResult.serializer(),
+            buildJsonObject {
+                if (parameters.isNotEmpty()) {
+                    put("parameters", buildJsonObject { parameters.forEach { (key, value) -> put(key, value) } })
+                }
+                trigger?.let { put("trigger", it) }
+            },
+        )
+
+    /**
+     * Encodes a recipe request. Null fields are dropped instead of being sent as
+     * `null`: on the wire an absent field means «keep the stored value», and only an
+     * explicit null clears one.
+     */
+    private object RecipeJson {
+        fun request(request: RecipeRequest): kotlinx.serialization.json.JsonObject {
+            val element = TaskBridgeJson.encodeToJsonElement(RecipeRequest.serializer(), request)
+            return kotlinx.serialization.json.JsonObject(
+                (element as kotlinx.serialization.json.JsonObject).filterValues { it !is kotlinx.serialization.json.JsonNull },
+            )
+        }
+    }
+
+    // --- schedules and invocations (MR-06) ------------------------------------
+
+    suspend fun schedules(recipeId: String? = null): List<Schedule> {
+        val query = recipeId?.takeIf { it.isNotBlank() }?.let { "?recipeId=${it.encodeURLParameter()}" } ?: ""
+        return get("/api/schedules$query", ScheduleList.serializer()).items
+    }
+
+    suspend fun schedule(id: String): Schedule = get("/api/schedules/${id.encodeURLPathPart()}", Schedule.serializer())
+
+    suspend fun createSchedule(request: ScheduleRequest): Schedule =
+        call(HttpMethod.Post, "/api/schedules", Schedule.serializer(), ScheduleJson.request(request))
+
+    suspend fun updateSchedule(id: String, request: ScheduleRequest): Schedule =
+        call(HttpMethod.Patch, "/api/schedules/${id.encodeURLPathPart()}", Schedule.serializer(), ScheduleJson.request(request))
+
+    suspend fun deleteSchedule(id: String): Schedule =
+        call(HttpMethod.Delete, "/api/schedules/${id.encodeURLPathPart()}", ScheduleDeleted.serializer()).removed
+
+    /** Run it now: the same path a schedule takes, with the operator as the reason. */
+    suspend fun runScheduleNow(id: String): Invocation =
+        call(HttpMethod.Post, "/api/schedules/${id.encodeURLPathPart()}/run", Invocation.serializer(), buildJsonObject {})
+
+    suspend fun invocations(
+        recipeId: String? = null,
+        scheduleId: String? = null,
+        status: String? = null,
+        limit: Int? = null,
+    ): List<Invocation> {
+        val params = listOfNotNull(
+            recipeId?.takeIf { it.isNotBlank() }?.let { "recipeId=${it.encodeURLParameter()}" },
+            scheduleId?.takeIf { it.isNotBlank() }?.let { "scheduleId=${it.encodeURLParameter()}" },
+            status?.takeIf { it.isNotBlank() }?.let { "status=${it.encodeURLParameter()}" },
+            limit?.let { "limit=$it" },
+        ).joinToString("&")
+        return get("/api/invocations" + if (params.isEmpty()) "" else "?$params", InvocationList.serializer()).items
+    }
+
+    suspend fun invocation(id: String): Invocation = get("/api/invocations/${id.encodeURLPathPart()}", Invocation.serializer())
+
+    /** One tick of the machine's scheduler — diagnostics, and what the misfire policies are checked with. */
+    suspend fun schedulerTick(now: String? = null): SchedulerTickResult =
+        call(
+            HttpMethod.Post, "/api/scheduler/tick", SchedulerTickResult.serializer(),
+            buildJsonObject { now?.let { put("now", it) } },
+        )
+
+    /**
+     * Encodes a schedule request: null fields are dropped, because on the wire an
+     * absent field means «keep the stored value» and only an explicit one changes it
+     * (a default-filled `spec` would silently rewrite the schedule).
+     */
+    private object ScheduleJson {
+        fun request(request: ScheduleRequest): kotlinx.serialization.json.JsonObject {
+            val element = TaskBridgeJson.encodeToJsonElement(ScheduleRequest.serializer(), request)
+            val body = kotlinx.serialization.json.JsonObject(
+                (element as kotlinx.serialization.json.JsonObject).filterValues { it !is kotlinx.serialization.json.JsonNull },
+            )
+            val spec = request.spec
+            if (spec == null) return body
+            // `kind` is written EXPLICITLY: it has a default value, and kotlinx omits a
+            // field equal to its default, so `spec: {"at": "09:00"}` would reach the
+            // server with no kind at all and be refused. Nulls inside the spec are
+            // dropped for the same reason (absent = keep).
+            val withSpec: Map<String, kotlinx.serialization.json.JsonElement> = body + (
+                "spec" to buildJsonObject {
+                    put("kind", spec.kind)
+                    spec.at?.let { put("at", it) }
+                    spec.weekday?.let { put("weekday", it) }
+                    spec.everyMinutes?.let { put("everyMinutes", it) }
+                }
+                )
+            return kotlinx.serialization.json.JsonObject(withSpec)
+        }
+    }
+
+    /** The work item WITH its sessions: one call is what the screen needs (MR-03). */
+    suspend fun workItemDetail(id: String): WorkItemDetail =
+        get("/api/work-items/${id.encodeURLPathPart()}", WorkItemDetail.serializer())
+
+    /** Sessions linked to a work item. */
+    suspend fun workItemSessions(workItemId: String): List<WorkItemSession> =
+        get("/api/work-items/${workItemId.encodeURLPathPart()}/sessions", WorkItemSessionList.serializer()).items
+
+    /** Links a session to a work item; linking twice updates the relation. */
+    suspend fun linkWorkItemSession(workItemId: String, sessionId: String, relation: String? = null): WorkItemSession =
+        call(
+            HttpMethod.Post,
+            "/api/work-items/${workItemId.encodeURLPathPart()}/sessions",
+            WorkItemSession.serializer(),
+            buildJsonObject {
+                put("sessionId", sessionId)
+                relation?.let { put("relation", it) }
+            },
+        )
+
+    /** Unlinks one session; the session itself is untouched. */
+    suspend fun unlinkWorkItemSession(workItemId: String, sessionId: String): Boolean =
+        call(
+            HttpMethod.Delete,
+            "/api/work-items/${workItemId.encodeURLPathPart()}/sessions/${sessionId.encodeURLPathPart()}",
+            WorkItemUnlink.serializer(),
+        ).removed
+
+    /** The work items a session belongs to. */
+    suspend fun workItemsOfSession(sessionId: String): List<WorkItemRef> =
+        get("/api/tasks/${sessionId.encodeURLPathPart()}/work-items", WorkItemRefList.serializer()).items
+
+    private fun WorkItemRequest.toJson(): kotlinx.serialization.json.JsonObject = buildJsonObject {
+        projectId?.let { put("projectId", it) }
+        title?.let { put("title", it) }
+        // The server clears a nullable field only on an explicit null, and a null in
+        // this request means «do not change it» — hence [WorkItemRequest.clearGoal].
+        if (clearGoal) put("goal", kotlinx.serialization.json.JsonNull) else goal?.let { put("goal", it) }
+        status?.let { put("status", it) }
+        priority?.let { put("priority", it) }
+        acceptanceCriteria?.let { list -> put("acceptanceCriteria", kotlinx.serialization.json.buildJsonArray { list.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }) }
+        tags?.let { list -> put("tags", kotlinx.serialization.json.buildJsonArray { list.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }) }
+    }
+
+    /** Pin or archive a project; an omitted flag keeps its stored value. */
+    suspend fun setProjectPreferences(projectId: String, pinned: Boolean? = null, archived: Boolean? = null): ProjectPreferences =
+        call(
+            HttpMethod.Patch,
+            "/api/projects/${projectId.encodeURLPathPart()}/preferences",
+            ProjectPreferences.serializer(),
+            buildJsonObject {
+                pinned?.let { put("pinned", it) }
+                archived?.let { put("archived", it) }
+            },
+        )
+
     suspend fun models(refresh: Boolean = false): ModelCatalog =
         get("/api/models" + if (refresh) "?refresh=1" else "", ModelCatalog.serializer())
 
@@ -444,6 +680,9 @@ class TaskBridgeApi(
     suspend fun restartSession(id: String): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/session/restart", Task.serializer(), buildJsonObject { })
 
+    suspend fun trustWorkspace(id: String): Task =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/workspace/trust", Task.serializer(), buildJsonObject { put("confirm", true) })
+
     suspend fun setModel(id: String, model: ModelRef): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/model", Task.serializer(), buildJsonObject {
             model.provider?.let { put("provider", it) }
@@ -476,6 +715,26 @@ class TaskBridgeApi(
         send(HttpMethod.Post, "/api/tasks/${id.path()}/regenerate", buildJsonObject { turnId?.let { put("turnId", it) } })
     }
 
+    /**
+     * MR-07: тот же вопрос заново, но с параметрами — моделью и/или уровнем мышления.
+     *
+     * Параметры применяются к СЕССИИ, а не только к этому запросу: у Pi нет
+     * переопределения на один запрос (`prompt(message)` плюс отдельные `set_model` и
+     * `set_thinking_level`), и применённое видно в самой сессии. Отсутствующее поле не
+     * отправляется — так один запрос служит и «только модель», и «только уровень».
+     */
+    suspend fun rerun(id: String, turnId: String?, model: ModelRef? = null, thinkingLevel: String? = null): Task =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/rerun", Task.serializer(), buildJsonObject {
+            turnId?.let { put("turnId", it) }
+            model?.let { selection ->
+                put("model", buildJsonObject {
+                    selection.provider?.let { put("provider", it) }
+                    put("id", selection.id.orEmpty())
+                })
+            }
+            thinkingLevel?.let { put("thinkingLevel", it) }
+        })
+
     suspend fun continueTurn(id: String, turnId: String?) {
         send(HttpMethod.Post, "/api/tasks/${id.path()}/continue", buildJsonObject { turnId?.let { put("turnId", it) } })
     }
@@ -487,9 +746,16 @@ class TaskBridgeApi(
         })
     }
 
-    /** A new session with the conversation copied through [turnId]. */
-    suspend fun fork(id: String, turnId: String): Task =
-        call(HttpMethod.Post, "/api/tasks/${id.path()}/fork", Task.serializer(), buildJsonObject { put("turnId", turnId) })
+    /**
+     * A new session with the conversation copied out of this one: through
+     * [turnId] by default, or — with [from] — the chosen message and everything
+     * after it.
+     */
+    suspend fun fork(id: String, turnId: String, from: Boolean = false): Task =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/fork", Task.serializer(), buildJsonObject {
+            put("turnId", turnId)
+            if (from) put("direction", "from")
+        })
 
     suspend fun clear(id: String) {
         send(HttpMethod.Post, "/api/tasks/${id.path()}/clear", buildJsonObject { put("confirm", true) })

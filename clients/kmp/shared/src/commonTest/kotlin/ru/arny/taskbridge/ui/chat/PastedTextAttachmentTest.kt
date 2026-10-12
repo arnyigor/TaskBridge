@@ -35,4 +35,28 @@ class PastedTextAttachmentTest {
     fun sanitizesIsoTimestampForFilename() {
         assertEquals("pasted-2026-09-28T01-02-03-456Z.txt", pastedTextFileName("2026-09-28T01:02:03.456Z"))
     }
+
+    // 2026-10-12: большой текст, вставленный первым сообщением, оставался стеной в
+    // поле — черновик нового сообщения разбирал вставку иначе, чем чат, и порога
+    // в нём не было вовсе.
+    @Test
+    fun movesLargeTextPastedAsTheFirstMessageToAttachment() {
+        val pasted = "x".repeat(PASTED_TEXT_FILE_THRESHOLD + 1)
+        val draft = pastedTextDraft(previousText = "", nextText = pasted, nowIso = "2026-10-12T03:26:01.000Z")
+
+        assertEquals("", draft.text, "поле остаётся пустым: весь текст уехал вложением")
+        assertEquals(0, draft.caret)
+        assertEquals("pasted-2026-10-12T03-26-01-000Z.txt", draft.attached?.name)
+        assertEquals(pasted, draft.attached?.bytes?.decodeToString())
+        assertEquals("text/plain", draft.attached?.mimeType)
+    }
+
+    @Test
+    fun keepsASmallPasteInTheFieldWithItsOwnCaret() {
+        val draft = pastedTextDraft(previousText = "", nextText = "x".repeat(PASTED_TEXT_FILE_THRESHOLD), nowIso = "2026-10-12T03:26:01.000Z")
+
+        assertNull(draft.attached)
+        assertNull(draft.caret, "значение и каретка остаются у самого поля")
+        assertEquals("x".repeat(PASTED_TEXT_FILE_THRESHOLD), draft.text)
+    }
 }

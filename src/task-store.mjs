@@ -53,6 +53,100 @@ CREATE TABLE IF NOT EXISTS runs (
   data TEXT
 );
 CREATE INDEX IF NOT EXISTS runs_task ON runs (task_id, started_at DESC);
+CREATE TABLE IF NOT EXISTS project_view_preferences (
+  project_id TEXT PRIMARY KEY,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  archived INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+-- Work Items (MR-02): the semantic state of the work, not a container for
+-- everything else. A prompt, a chat history, a diff, tool output or a
+-- resumeContext do NOT belong here (see docs/api-contract.md); the session that
+-- did the work is linked in work_item_sessions (MR-03).
+CREATE TABLE IF NOT EXISTS work_items (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  goal TEXT,
+  status TEXT NOT NULL,
+  priority INTEGER,
+  acceptance_json TEXT,
+  tags_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS work_items_project ON work_items (project_id, status);
+-- One work item is done over several INDEPENDENT sessions (MR-03). This is a
+-- different hierarchy from runs, which belong to a single session: a work item
+-- groups sessions, a session groups runs. Rows disappear with either side.
+CREATE TABLE IF NOT EXISTS work_item_sessions (
+  work_item_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  relation TEXT NOT NULL DEFAULT 'implementation',
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (work_item_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS work_item_sessions_session ON work_item_sessions (session_id);
+-- Run recipes (MR-05): HOW to do a recurring piece of work — parameters, runtime,
+-- context, workspace, verification. WHEN it runs is a schedule (MR-06) and the fact
+-- that it ran is an invocation, so nothing about a concrete run lives here.
+CREATE TABLE IF NOT EXISTS run_recipes (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  work_item_id TEXT,
+  name TEXT NOT NULL,
+  prompt_template TEXT NOT NULL,
+  parameters_json TEXT,
+  runtime_json TEXT,
+  context_json TEXT,
+  workspace_json TEXT,
+  verification_json TEXT,
+  limits_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS run_recipes_project ON run_recipes (project_id, updated_at DESC);
+-- Schedules (MR-06): WHEN a recipe runs. The fact that it ran is an INVOCATION, and
+-- an invocation creates a session — which in turn has its own runs. The hierarchy is
+-- Schedule → Invocation → Session → Run(s); mixing them would be two truths about
+-- the same thing (see ROADMAP_FULL.md, «Отдельный scheduled_runs не нужен»).
+CREATE TABLE IF NOT EXISTS schedules (
+  id TEXT PRIMARY KEY,
+  recipe_id TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  spec_json TEXT NOT NULL,
+  misfire_policy TEXT NOT NULL,
+  concurrency_policy TEXT NOT NULL,
+  notify TEXT NOT NULL,
+  approval_mode TEXT NOT NULL,
+  parameters_json TEXT,
+  next_run_at TEXT,
+  last_run_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules (enabled, next_run_at);
+CREATE TABLE IF NOT EXISTS invocations (
+  id TEXT PRIMARY KEY,
+  recipe_id TEXT NOT NULL,
+  schedule_id TEXT,
+  trigger TEXT NOT NULL,
+  scheduled_at TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  status TEXT NOT NULL,
+  reason TEXT,
+  misfire INTEGER NOT NULL DEFAULT 0,
+  parameters_json TEXT,
+  session_id TEXT,
+  verification TEXT,
+  workspace_ref TEXT,
+  result_artifact TEXT
+);
+CREATE INDEX IF NOT EXISTS invocations_recipe ON invocations (recipe_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS invocations_schedule ON invocations (schedule_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS invocations_running ON invocations (status, schedule_id);
 `;
 
 function readJsonSync(file) {
@@ -452,6 +546,410 @@ export class TaskStore {
   eventCounts() {
     const rows = this.db.prepare('SELECT task_id, COUNT(*) AS n FROM events GROUP BY task_id').all();
     return new Map(rows.map(row => [String(row.task_id), Number(row.n)]));
+  }
+
+  // --- project view preferences (MR-01) --------------------------------------
+  // Only what the operator changed about the view: the project registry in
+  // config.json stays the source of truth for names, paths and worktrees, so
+  // nothing is duplicated here. A row outlives a removed registration: bringing
+  // the project back must not silently drop its pin.
+
+  /** `projectId -> { pinned, archived, updatedAt }` for every project ever pinned or archived. */
+  projectViewPreferences() {
+    const rows = this.db.prepare('SELECT project_id, pinned, archived, updated_at FROM project_view_preferences').all();
+    return new Map(rows.map(row => [String(row.project_id), {
+      pinned: Number(row.pinned) === 1,
+      archived: Number(row.archived) === 1,
+      updatedAt: row.updated_at,
+    }]));
+  }
+
+  /**
+   * Merges a patch (a field left out keeps its stored value) and returns the
+   * result, so a PATCH of one flag cannot clear the other.
+   */
+  setProjectViewPreferences(projectId, patch = {}) {
+    const id = String(projectId);
+    const current = this.projectViewPreferences().get(id);
+    const next = {
+      pinned: patch.pinned === undefined ? current?.pinned === true : patch.pinned === true,
+      archived: patch.archived === undefined ? current?.archived === true : patch.archived === true,
+    };
+    const updatedAt = new Date().toISOString();
+    this.db.prepare(`INSERT INTO project_view_preferences (project_id, pinned, archived, updated_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(project_id) DO UPDATE SET
+        pinned=excluded.pinned, archived=excluded.archived, updated_at=excluded.updated_at`)
+      .run(id, next.pinned ? 1 : 0, next.archived ? 1 : 0, updatedAt);
+    return { ...next, updatedAt };
+  }
+
+  // --- work items (MR-02) ---------------------------------------------------
+
+  /** One work item, as it is stored (arrays live in JSON columns). */
+  #workItemRow(row) {
+    if (!row) return null;
+    const list = (json) => {
+      if (!json) return [];
+      try {
+        const parsed = JSON.parse(json);
+        return Array.isArray(parsed) ? parsed.filter(value => typeof value === 'string') : [];
+      } catch { return []; }
+    };
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      title: row.title,
+      goal: row.goal ?? null,
+      status: row.status,
+      priority: row.priority === null || row.priority === undefined ? null : Number(row.priority),
+      acceptanceCriteria: list(row.acceptance_json),
+      tags: list(row.tags_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      completedAt: row.completed_at ?? null,
+    };
+  }
+
+  /** Newest first; `projectId` narrows to one project. */
+  listWorkItems(projectId = null) {
+    const rows = projectId
+      ? this.db.prepare('SELECT * FROM work_items WHERE project_id = ? ORDER BY updated_at DESC').all(String(projectId))
+      : this.db.prepare('SELECT * FROM work_items ORDER BY updated_at DESC').all();
+    return rows.map(row => this.#workItemRow(row));
+  }
+
+  getWorkItem(id) {
+    return this.#workItemRow(this.db.prepare('SELECT * FROM work_items WHERE id = ?').get(String(id)));
+  }
+
+  createWorkItem(item) {
+    this.db.prepare(`INSERT INTO work_items
+      (id, project_id, title, goal, status, priority, acceptance_json, tags_json, created_at, updated_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      item.id, item.projectId, item.title, item.goal ?? null, item.status, item.priority ?? null,
+      JSON.stringify(item.acceptanceCriteria ?? []), JSON.stringify(item.tags ?? []),
+      item.createdAt, item.updatedAt, item.completedAt ?? null,
+    );
+    return this.getWorkItem(item.id);
+  }
+
+  /** Writes the given fields; `undefined` leaves the stored value alone. */
+  updateWorkItem(id, fields = {}) {
+    const current = this.getWorkItem(id);
+    if (!current) return null;
+    const next = {
+      title: fields.title === undefined ? current.title : fields.title,
+      goal: fields.goal === undefined ? current.goal : fields.goal,
+      status: fields.status === undefined ? current.status : fields.status,
+      priority: fields.priority === undefined ? current.priority : fields.priority,
+      acceptanceCriteria: fields.acceptanceCriteria === undefined ? current.acceptanceCriteria : fields.acceptanceCriteria,
+      tags: fields.tags === undefined ? current.tags : fields.tags,
+      updatedAt: fields.updatedAt ?? new Date().toISOString(),
+      // DONE stamps the moment once; leaving DONE clears it again.
+      completedAt: fields.completedAt === undefined
+        ? (fields.status === undefined ? current.completedAt : (fields.status === 'DONE' ? (current.completedAt ?? fields.updatedAt ?? new Date().toISOString()) : null))
+        : fields.completedAt,
+    };
+    this.db.prepare(`UPDATE work_items SET title=?, goal=?, status=?, priority=?, acceptance_json=?, tags_json=?, updated_at=?, completed_at=? WHERE id=?`).run(
+      next.title, next.goal ?? null, next.status, next.priority ?? null,
+      JSON.stringify(next.acceptanceCriteria ?? []), JSON.stringify(next.tags ?? []),
+      next.updatedAt, next.completedAt ?? null, String(id),
+    );
+    return this.getWorkItem(id);
+  }
+
+  deleteWorkItem(id) {
+    const current = this.getWorkItem(id);
+    if (!current) return null;
+    this.db.prepare('DELETE FROM work_items WHERE id = ?').run(String(id));
+    return current;
+  }
+
+  // --- run recipes (MR-05) ---------------------------------------------------
+
+  #recipeRow(row) {
+    if (!row) return null;
+    const parse = (json) => {
+      if (!json) return null;
+      try { return JSON.parse(json); } catch { return null; }
+    };
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      workItemId: row.work_item_id ?? null,
+      name: row.name,
+      promptTemplate: row.prompt_template,
+      parameters: parse(row.parameters_json) ?? {},
+      runtime: parse(row.runtime_json) ?? {},
+      context: parse(row.context_json) ?? {},
+      workspace: parse(row.workspace_json) ?? {},
+      verification: parse(row.verification_json) ?? {},
+      limits: parse(row.limits_json) ?? {},
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listRecipes(projectId = null) {
+    const rows = projectId
+      ? this.db.prepare('SELECT * FROM run_recipes WHERE project_id = ? ORDER BY updated_at DESC').all(String(projectId))
+      : this.db.prepare('SELECT * FROM run_recipes ORDER BY updated_at DESC').all();
+    return rows.map(row => this.#recipeRow(row));
+  }
+
+  getRecipe(id) {
+    return this.#recipeRow(this.db.prepare('SELECT * FROM run_recipes WHERE id = ?').get(String(id)));
+  }
+
+  createRecipe(recipe) {
+    this.db.prepare(`INSERT INTO run_recipes
+      (id, project_id, work_item_id, name, prompt_template, parameters_json, runtime_json, context_json, workspace_json, verification_json, limits_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      recipe.id, recipe.projectId, recipe.workItemId ?? null, recipe.name, recipe.promptTemplate,
+      JSON.stringify(recipe.parameters ?? {}), JSON.stringify(recipe.runtime ?? {}), JSON.stringify(recipe.context ?? {}),
+      JSON.stringify(recipe.workspace ?? {}), JSON.stringify(recipe.verification ?? {}), JSON.stringify(recipe.limits ?? {}),
+      recipe.createdAt, recipe.updatedAt,
+    );
+    return this.getRecipe(recipe.id);
+  }
+
+  updateRecipe(id, recipe) {
+    const current = this.getRecipe(id);
+    if (!current) return null;
+    const next = { ...current, ...recipe, id: current.id, createdAt: current.createdAt };
+    this.db.prepare(`UPDATE run_recipes SET project_id=?, work_item_id=?, name=?, prompt_template=?,
+      parameters_json=?, runtime_json=?, context_json=?, workspace_json=?, verification_json=?, limits_json=?, updated_at=?
+      WHERE id=?`).run(
+      next.projectId, next.workItemId ?? null, next.name, next.promptTemplate,
+      JSON.stringify(next.parameters ?? {}), JSON.stringify(next.runtime ?? {}), JSON.stringify(next.context ?? {}),
+      JSON.stringify(next.workspace ?? {}), JSON.stringify(next.verification ?? {}), JSON.stringify(next.limits ?? {}),
+      next.updatedAt, String(id),
+    );
+    return this.getRecipe(id);
+  }
+
+  deleteRecipe(id) {
+    const current = this.getRecipe(id);
+    if (!current) return null;
+    this.db.prepare('DELETE FROM run_recipes WHERE id = ?').run(String(id));
+    return current;
+  }
+
+  // --- schedules and invocations (MR-06) -------------------------------------
+
+  #scheduleRow(row) {
+    if (!row) return null;
+    const parse = (json, fallback) => {
+      if (!json) return fallback;
+      try { return JSON.parse(json); } catch { return fallback; }
+    };
+    return {
+      id: row.id,
+      recipeId: row.recipe_id,
+      enabled: Number(row.enabled) === 1,
+      spec: parse(row.spec_json, {}),
+      misfirePolicy: row.misfire_policy,
+      concurrencyPolicy: row.concurrency_policy,
+      notify: row.notify,
+      approvalMode: row.approval_mode,
+      parameters: parse(row.parameters_json, {}),
+      nextRunAt: row.next_run_at ?? null,
+      lastRunAt: row.last_run_at ?? null,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  listSchedules(recipeId = null) {
+    const rows = recipeId
+      ? this.db.prepare('SELECT * FROM schedules WHERE recipe_id = ? ORDER BY created_at DESC').all(String(recipeId))
+      : this.db.prepare('SELECT * FROM schedules ORDER BY created_at DESC').all();
+    return rows.map(row => this.#scheduleRow(row));
+  }
+
+  /** Enabled schedules whose moment has come — what the tick asks for. */
+  dueSchedules(nowIso) {
+    return this.db.prepare('SELECT * FROM schedules WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at')
+      .all(String(nowIso)).map(row => this.#scheduleRow(row));
+  }
+
+  getSchedule(id) {
+    return this.#scheduleRow(this.db.prepare('SELECT * FROM schedules WHERE id = ?').get(String(id)));
+  }
+
+  createSchedule(schedule) {
+    this.db.prepare(`INSERT INTO schedules
+      (id, recipe_id, enabled, spec_json, misfire_policy, concurrency_policy, notify, approval_mode, parameters_json, next_run_at, last_run_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      schedule.id, schedule.recipeId, schedule.enabled ? 1 : 0, JSON.stringify(schedule.spec ?? {}),
+      schedule.misfirePolicy, schedule.concurrencyPolicy, schedule.notify, schedule.approvalMode,
+      JSON.stringify(schedule.parameters ?? {}), schedule.nextRunAt ?? null, schedule.lastRunAt ?? null,
+      schedule.createdAt, schedule.updatedAt,
+    );
+    return this.getSchedule(schedule.id);
+  }
+
+  updateSchedule(id, schedule) {
+    const current = this.getSchedule(id);
+    if (!current) return null;
+    const next = { ...current, ...schedule, id: current.id, createdAt: current.createdAt };
+    this.db.prepare(`UPDATE schedules SET recipe_id=?, enabled=?, spec_json=?, misfire_policy=?, concurrency_policy=?,
+      notify=?, approval_mode=?, parameters_json=?, next_run_at=?, last_run_at=?, updated_at=? WHERE id=?`).run(
+      next.recipeId, next.enabled ? 1 : 0, JSON.stringify(next.spec ?? {}), next.misfirePolicy, next.concurrencyPolicy,
+      next.notify, next.approvalMode, JSON.stringify(next.parameters ?? {}), next.nextRunAt ?? null, next.lastRunAt ?? null,
+      next.updatedAt, String(id),
+    );
+    return this.getSchedule(id);
+  }
+
+  deleteSchedule(id) {
+    const current = this.getSchedule(id);
+    if (!current) return null;
+    this.db.prepare('DELETE FROM schedules WHERE id = ?').run(String(id));
+    return current;
+  }
+
+  #invocationRow(row) {
+    if (!row) return null;
+    const parse = (json) => {
+      if (!json) return {};
+      try { return JSON.parse(json); } catch { return {}; }
+    };
+    return {
+      id: row.id,
+      recipeId: row.recipe_id,
+      scheduleId: row.schedule_id ?? null,
+      trigger: row.trigger,
+      scheduledAt: row.scheduled_at ?? null,
+      startedAt: row.started_at,
+      finishedAt: row.finished_at ?? null,
+      status: row.status,
+      reason: row.reason ?? null,
+      misfire: Number(row.misfire) === 1,
+      parameters: parse(row.parameters_json),
+      sessionId: row.session_id ?? null,
+      verification: row.verification ?? null,
+      workspaceRef: row.workspace_ref ?? null,
+      resultArtifact: row.result_artifact ?? null,
+    };
+  }
+
+  createInvocation(invocation) {
+    this.db.prepare(`INSERT INTO invocations
+      (id, recipe_id, schedule_id, trigger, scheduled_at, started_at, finished_at, status, reason, misfire, parameters_json, session_id, verification, workspace_ref, result_artifact)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      invocation.id, invocation.recipeId, invocation.scheduleId ?? null, invocation.trigger,
+      invocation.scheduledAt ?? null, invocation.startedAt, invocation.finishedAt ?? null, invocation.status,
+      invocation.reason ?? null, invocation.misfire ? 1 : 0, JSON.stringify(invocation.parameters ?? {}),
+      invocation.sessionId ?? null, invocation.verification ?? null, invocation.workspaceRef ?? null, invocation.resultArtifact ?? null,
+    );
+    return this.getInvocation(invocation.id);
+  }
+
+  /** Writes the given fields; `undefined` leaves the stored value alone. */
+  updateInvocation(id, fields = {}) {
+    const current = this.getInvocation(id);
+    if (!current) return null;
+    const next = {
+      finishedAt: fields.finishedAt === undefined ? current.finishedAt : fields.finishedAt,
+      status: fields.status === undefined ? current.status : fields.status,
+      reason: fields.reason === undefined ? current.reason : fields.reason,
+      sessionId: fields.sessionId === undefined ? current.sessionId : fields.sessionId,
+      verification: fields.verification === undefined ? current.verification : fields.verification,
+      workspaceRef: fields.workspaceRef === undefined ? current.workspaceRef : fields.workspaceRef,
+      resultArtifact: fields.resultArtifact === undefined ? current.resultArtifact : fields.resultArtifact,
+    };
+    this.db.prepare(`UPDATE invocations SET finished_at=?, status=?, reason=?, session_id=?, verification=?, workspace_ref=?, result_artifact=? WHERE id=?`).run(
+      next.finishedAt ?? null, next.status, next.reason ?? null, next.sessionId ?? null,
+      next.verification ?? null, next.workspaceRef ?? null, next.resultArtifact ?? null, String(id),
+    );
+    return this.getInvocation(id);
+  }
+
+  getInvocation(id) {
+    return this.#invocationRow(this.db.prepare('SELECT * FROM invocations WHERE id = ?').get(String(id)));
+  }
+
+  listInvocations({ recipeId = null, scheduleId = null, status = null, limit = 50 } = {}) {
+    const clauses = [];
+    const values = [];
+    if (recipeId) { clauses.push('recipe_id = ?'); values.push(String(recipeId)); }
+    if (scheduleId) { clauses.push('schedule_id = ?'); values.push(String(scheduleId)); }
+    if (status) { clauses.push('status = ?'); values.push(String(status).toUpperCase()); }
+    const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
+    const rows = this.db.prepare(`SELECT * FROM invocations${where} ORDER BY started_at DESC LIMIT ?`)
+      .all(...values, Math.min(Math.max(Number(limit) || 50, 1), 500));
+    return rows.map(row => this.#invocationRow(row));
+  }
+
+  /** Invocations still marked RUNNING for a schedule — what «уже идёт» means. */
+  runningInvocations(scheduleId = null) {
+    const rows = scheduleId
+      ? this.db.prepare("SELECT * FROM invocations WHERE status = 'RUNNING' AND schedule_id = ?").all(String(scheduleId))
+      : this.db.prepare("SELECT * FROM invocations WHERE status = 'RUNNING'").all();
+    return rows.map(row => this.#invocationRow(row));
+  }
+
+  // --- work item ↔ sessions (MR-03) -----------------------------------------
+
+  /** Links a session to a work item. Linking twice is not an error: it updates the relation. */
+  linkWorkItemSession(workItemId, sessionId, relation) {
+    this.db.prepare(`INSERT INTO work_item_sessions (work_item_id, session_id, relation, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(work_item_id, session_id) DO UPDATE SET relation=excluded.relation`).run(
+      String(workItemId), String(sessionId), String(relation), new Date().toISOString(),
+    );
+    return this.#sessionLinkRow(
+      this.db.prepare('SELECT * FROM work_item_sessions WHERE work_item_id = ? AND session_id = ?')
+        .get(String(workItemId), String(sessionId)),
+    );
+  }
+
+  #sessionLinkRow(row) {
+    if (!row) return null;
+    return { workItemId: row.work_item_id, sessionId: row.session_id, relation: row.relation, createdAt: row.created_at };
+  }
+
+  /** Sessions of one work item, newest link first. */
+  workItemSessions(workItemId) {
+    return this.db.prepare('SELECT * FROM work_item_sessions WHERE work_item_id = ? ORDER BY created_at DESC')
+      .all(String(workItemId)).map(row => this.#sessionLinkRow(row));
+  }
+
+  /** Work items a session belongs to (a session may serve more than one). */
+  workItemsOfSession(sessionId) {
+    return this.db.prepare('SELECT * FROM work_item_sessions WHERE session_id = ? ORDER BY created_at DESC')
+      .all(String(sessionId)).map(row => this.#sessionLinkRow(row));
+  }
+
+  unlinkWorkItemSession(workItemId, sessionId) {
+    const existing = this.db.prepare('SELECT * FROM work_item_sessions WHERE work_item_id = ? AND session_id = ?').get(String(workItemId), String(sessionId));
+    if (!existing) return null;
+    this.db.prepare('DELETE FROM work_item_sessions WHERE work_item_id = ? AND session_id = ?').run(String(workItemId), String(sessionId));
+    return this.#sessionLinkRow(existing);
+  }
+
+  /** Drops every link of a work item — used when the work item itself goes. */
+  removeWorkItemLinks(workItemId) {
+    return this.db.prepare('DELETE FROM work_item_sessions WHERE work_item_id = ?').run(String(workItemId)).changes;
+  }
+
+  /**
+   * Drops every link of a session — used when the session is deleted, so no work
+   * item points at a session nobody can open.
+   */
+  removeSessionLinks(sessionId) {
+    return this.db.prepare('DELETE FROM work_item_sessions WHERE session_id = ?').run(String(sessionId)).changes;
+  }
+
+  /**
+   * How much work each project has open, for the dashboard: the whole count and
+   * the items that still need doing (everything except DONE and CANCELLED).
+   */
+  workItemCounts() {
+    const rows = this.db.prepare("SELECT project_id, COUNT(*) AS n, SUM(CASE WHEN status NOT IN ('DONE','CANCELLED') THEN 1 ELSE 0 END) AS open FROM work_items GROUP BY project_id").all();
+    return new Map(rows.map(row => [String(row.project_id), { total: Number(row.n), open: Number(row.open) }]));
   }
 
   // `before` bounds the read from above (seq < before): paginated history walks
