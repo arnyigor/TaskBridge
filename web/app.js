@@ -3524,6 +3524,9 @@ function isExternalUrl(value) {
   return /^[a-z][a-z0-9+.-]*:/i.test(value) || value.startsWith('//');
 }
 
+// Локальные абсолютные пути: «G:\папка\файл», «\\сервер\шара\файл».
+const LOCAL_ABSOLUTE_PATH_RE = /^(?:[a-zA-Z]:[\\/]|\\\\[^\\/])/;
+
 function workspaceFileUrl(relativePath, download) {
   if (!selectedTaskId) return null;
   return `/api/tasks/${encodeURIComponent(selectedTaskId)}/workspace-file?path=${encodeURIComponent(relativePath)}${download ? '&download=1' : ''}`;
@@ -3536,6 +3539,18 @@ function rewriteMarkdownLinks(container) {
   for (const a of container.querySelectorAll('a[href]')) {
     const href = a.getAttribute('href');
     if (!href || href.startsWith('#')) continue;
+    // Абсолютный локальный путь («G:\…» или «\\server\share») — это файл на этой
+    // машине, а не внешний URL: браузер по такому значению никуда не уйдёт, а сервер
+    // отдаёт открытый сессией файл вне рабочей папки. Проверка до isExternalUrl: «G:…»
+    // для него выглядит как схема URL (2026-10-12).
+    if (LOCAL_ABSOLUTE_PATH_RE.test(href)) {
+      const url = workspaceFileUrl(href, false);
+      if (url) {
+        a.setAttribute('href', url);
+        a.removeAttribute('target');
+        continue;
+      }
+    }
     if (isExternalUrl(href)) { a.target = '_blank'; a.rel = 'noopener noreferrer'; continue; }
     if (href.startsWith('/')) { a.removeAttribute('href'); continue; }
     // A relative link to a picture is an image the model is showing, not a file

@@ -54,6 +54,14 @@ function insertMessageToolPath(fixture, taskId, absolutePath) {
   });
 }
 
+/** Путь, названный в самом тексте ответа: в чате он виден, значит его жмут. */
+function insertPiAnswerText(fixture, taskId, text) {
+  insertEvent(fixture, taskId, {
+    type: 'PI_EVENT',
+    data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } } },
+  });
+}
+
 test('open-on-machine routes refuse a missing confirmation and a remote caller', { timeout: 60000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
@@ -154,6 +162,64 @@ test('workspace-file may read an absolute file only after a tool event named it'
   const afterMessage = await fetch(`${fixture.base}${secondRoute}`);
   assert.equal(afterMessage.status, 200);
   assert.equal(await afterMessage.text(), 'from message tool call');
+});
+
+// 2026-10-12: файл вне рабочей папки открывался ТОЛЬКО если агент передал путь
+// аргументом инструмента. Путь из ответа, из карточки команды или из вывода поиска —
+// то есть ровно то, что оператор видит в чате и по чему жмёт — отвечал «путь выходит за
+// пределы рабочей папки», хотя файл существует и его назвала сама сессия.
+test('workspace-file may read an absolute file the session mentioned in an answer', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-mentioned-file-'));
+  t.after(async () => { await fs.rm(externalDir, { recursive: true, force: true }); await fixture.close(); });
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'mentioned file probe' });
+  for (let i = 0; i < 200 && !(await fixture.api(`/api/tasks/${task.id}`)).workspacePath; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+
+  const mentioned = path.join(externalDir, 'mentioned.txt');
+  await fs.writeFile(mentioned, 'mentioned in an answer');
+  const route = `/api/tasks/${task.id}/workspace-file?path=${encodeURIComponent(mentioned)}`;
+
+  const before = await fetch(`${fixture.base}${route}`);
+  assert.equal(before.status, 400, 'никто его не называл — отказ остаётся');
+
+  insertPiAnswerText(fixture, task.id, `Файл лежит в ${mentioned} — его можно открыть.`);
+  const after = await fetch(`${fixture.base}${route}`);
+  assert.equal(after.status, 200);
+  assert.equal(await after.text(), 'mentioned in an answer');
+
+  // Секреты остаются закрытыми, даже когда о них написали в ответе.
+  const secret = path.join(externalDir, 'config.json');
+  await fs.writeFile(secret, '{"token":"x"}');
+  insertPiAnswerText(fixture, task.id, `Конфиг: ${secret}`);
+  const refused = await fetch(`${fixture.base}/api/tasks/${task.id}/workspace-file?path=${encodeURIComponent(secret)}`);
+  assert.equal(refused.status, 403, 'config.json выдаче не подлежит ни при каком упоминании');
+});
+
+// Относительный путь агент называет от рабочей папки задачи, поэтому и искать его надо
+// там же — а не от каталога сервера: тогда «../file.md» из ответа агента совпадёт с
+// абсолютным путём, который оператор видит в чате (раньше не совпадал — относительные
+// имена инструмента не совпадали ни с чем, и такой файл не открывался вовсе).
+test('a relative tool path is matched against the task workspace', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'relative mention probe' });
+  let workspace = null;
+  for (let i = 0; i < 200 && !workspace; i++) {
+    workspace = (await fixture.api(`/api/tasks/${task.id}`)).workspacePath;
+    if (!workspace) await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(workspace, 'рабочая папка задачи');
+
+  // Файл в соседнем каталоге: вне рабочей папки, но агент назвал его относительно неё.
+  const outside = path.join(path.dirname(workspace), `sibling-${Date.now()}.md`);
+  await fs.writeFile(outside, 'relative outside');
+  t.after(() => fs.rm(outside, { force: true }));
+  insertPiToolPath(fixture, task.id, path.relative(workspace, outside));
+  const response = await fetch(`${fixture.base}/api/tasks/${task.id}/workspace-file?path=${encodeURIComponent(outside)}`);
+  assert.equal(response.status, 200);
+  assert.equal(await response.text(), 'relative outside');
 });
 
 test('run-on-machine routes keep the same guard and never run without it', { timeout: 60000 }, async t => {

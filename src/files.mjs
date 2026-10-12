@@ -6,7 +6,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const invalid = message => Object.assign(new Error(message), { code: 'INPUT_INVALID' });
-const forbidden = () => Object.assign(new Error('Этот файл недоступен для выдачи.'), { code: 'FILE_FORBIDDEN' });
+/** Отказ выдать файл, который существует: приватные имена и пути. */
+export const forbiddenFile = () => Object.assign(new Error('Этот файл недоступен для выдачи.'), { code: 'FILE_FORBIDDEN' });
 const missingFile = () => Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
 export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, uploadFileBytes: 64 * 1024 * 1024, uploadBytes: 128 * 1024 * 1024, outputBytes: 256 * 1024 * 1024, outputTotalBytes: 512 * 1024 * 1024 };
 const skippedDirs = new Set(['.git', '.pi', '.taskbridge-input', 'node_modules', 'data', '.gradle', '.idea']);
@@ -61,7 +62,7 @@ function containedChecker(root, { allowPrivate = false } = {}) {
   return target => {
     const rel = path.relative(root, target);
     if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) throw invalid('Путь выходит за пределы рабочей папки.');
-    if (!allowPrivate && isPrivatePath(rel)) throw forbidden();
+    if (!allowPrivate && isPrivatePath(rel)) throw forbiddenFile();
     return target;
   };
 }

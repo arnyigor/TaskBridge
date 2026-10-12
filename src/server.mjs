@@ -12,7 +12,7 @@ import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorks
 import { TaskStore } from './task-store.mjs';
 import { TaskManager } from './task-manager.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
-import { contentType, containedExistingAncestor, containedFile, isPrivatePath, serveFile, FILE_LIMITS } from './files.mjs';
+import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
 import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
@@ -489,6 +489,8 @@ function workspacePathQuery(url, body) {
 
 const observedPathFields = ['path', 'file_path', 'filePath'];
 const comparablePath = value => path.resolve(String(value)).replaceAll('\\', '/').toLowerCase();
+/** Текст кадра — не путь: сравнивать его со путём можно только вхождением. */
+const comparableText = value => String(value).replaceAll('\\', '/').toLowerCase();
 
 function* observedToolPathValues(value) {
   if (!value || typeof value !== 'object') return;
@@ -507,26 +509,66 @@ function* observedToolPathValues(value) {
   for (const item of Object.values(value)) yield* observedToolPathValues(item);
 }
 
-async function observedToolFile(taskId, requestedPath) {
-  if (!path.isAbsolute(requestedPath) || isPrivatePath(requestedPath)) throw Object.assign(new Error('Путь выходит за пределы рабочей папки.'), { code: 'INPUT_INVALID' });
+/**
+ * Все строки кадра: текст ответа агента, команда, вывод инструмента.
+ *
+ * Зачем: чат показывает эти пути оператору — в ответе, в карточке команды, в выводе
+ * поиска. Нажатие по такому пути должно открывать файл, а не отвечать «выходит за
+ * пределы рабочей папки»: до 2026-10-12 открыть вне рабочей папки можно было только
+ * файл, который агент передал *аргументом* инструмента, и половина путей из ответов
+ * оставалась недоступной.
+ */
+function* observedTextValues(value) {
+  if (typeof value === 'string') {
+    yield value;
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (const item of value) yield* observedTextValues(item);
+    return;
+  }
+  for (const item of Object.values(value)) yield* observedTextValues(item);
+}
+
+const outsideWorkspace = () => Object.assign(new Error('Путь выходит за пределы рабочей папки.'), { code: 'INPUT_INVALID' });
+
+/** Файл существует и он файл; иначе — честная ошибка вместо «выходит за пределы». */
+async function observedFilePath(requestedPath) {
+  const resolved = await fs.realpath(requestedPath).catch(error => {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
+      throw Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
+    }
+    throw error;
+  });
+  const stat = await fs.stat(resolved);
+  if (!stat.isFile()) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
+  return resolved;
+}
+
+async function observedToolFile(taskId, requestedPath, workspacePath = null) {
+  // Секрет остаётся секретом и когда сессия его назвала: причина отказа называется
+  // точно, а не «путь вне рабочей папки» — это разные вещи для оператора.
+  if (isPrivatePath(requestedPath)) throw forbiddenFile();
+  if (!path.isAbsolute(requestedPath)) throw outsideWorkspace();
   const requested = comparablePath(requestedPath);
   const events = await store.readEvents(taskId, 0);
   for (const event of events) {
+    // Путь, названный аргументом инструмента. Относительный считается от рабочей папки
+    // задачи, а не от каталога сервера: агент называет файлы относительно неё.
     for (const value of observedToolPathValues(event)) {
-      if (!path.isAbsolute(value) || isPrivatePath(value)) continue;
-      if (comparablePath(value) !== requested) continue;
-      const resolved = await fs.realpath(value).catch(error => {
-        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-          throw Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
-        }
-        throw error;
-      });
-      const stat = await fs.stat(resolved);
-      if (!stat.isFile()) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
-      return resolved;
+      if (!value || isPrivatePath(value)) continue;
+      const absolute = path.isAbsolute(value) ? value : (workspacePath ? path.resolve(workspacePath, value) : null);
+      if (!absolute || comparablePath(absolute) !== requested) continue;
+      return observedFilePath(requestedPath);
+    }
+    // Путь, названный в самом кадре — в ответе, команде или выводе инструмента.
+    for (const text of observedTextValues(event)) {
+      if (!comparableText(text).includes(requested)) continue;
+      return observedFilePath(requestedPath);
     }
   }
-  throw Object.assign(new Error('Путь выходит за пределы рабочей папки.'), { code: 'INPUT_INVALID' });
+  throw outsideWorkspace();
 }
 
 const SHELL_PREVIEW_BYTES = 16 * 1024;
@@ -1862,7 +1904,7 @@ async function handleRequest(req, res) {
         target = await containedFile(task.workspacePath, requestedPath);
       } catch (error) {
         if (error.code !== 'INPUT_INVALID') throw error;
-        target = await observedToolFile(task.id, requestedPath);
+        target = await observedToolFile(task.id, requestedPath, task.workspacePath);
       }
       await serveFile(req, res, target, path.basename(target), url.searchParams.get('download') === '1');
       return;

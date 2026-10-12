@@ -419,6 +419,27 @@ test('DOM: a model link to a picture renders inline instead of a download link',
   assert.equal(typeof pdf.onclick, 'function', 'a plain click is intercepted');
 });
 
+// 2026-10-12: путь вне рабочей папки, написанный в ответе агентом («G:\…»), браузер
+// принимал за внешний URL (у него вид схемы «G:») и уходил по нему в никуда; сервер
+// такой файл открыть может, если сессия его называла. Теперь он ведёт в вьюер файла.
+test('DOM: an absolute local path from an answer opens as a file, not as a URL', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const box = app.document.createElement('div');
+  box.innerHTML = '<p><a href="G:\\AIModels\\notes\\plan.md">G:\\AIModels\\notes\\plan.md</a></p>';
+  app.rewriteMarkdownLinks(box);
+  const link = box.querySelector('a');
+  const href = link.getAttribute('href');
+  assert.match(href, /^\/api\/tasks\/a\/workspace-file\?path=G%3A%5CAIModels%5Cnotes%5Cplan\.md$/, href);
+  assert.equal(link.getAttribute('target'), null, 'не внешняя ссылка: новая вкладка не нужна');
+
+  // Всё остальное остаётся как было: http(s) — внешняя ссылка.
+  const external = app.document.createElement('div');
+  external.innerHTML = '<p><a href="https://example.com/x">ссылка</a></p>';
+  app.rewriteMarkdownLinks(external);
+  assert.equal(external.querySelector('a').getAttribute('target'), '_blank');
+});
+
 test('DOM: a text file opens in the built-in viewer instead of downloading', async () => {
   const app = await ui();
   await app.selectTask('a');
