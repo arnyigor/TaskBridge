@@ -2538,6 +2538,44 @@ test('a refused send keeps the text one click away', async () => {
   assert.ok(calls >= 2, 'the prompt retry was fired');
 });
 
+// 2026-10-12: сообщение, отправленное «в очередь» при работающем агенте, сначала рисовалось
+// пузырём в чате, и только после ответа сервера «переезжало» в очередь (жалоба оператора:
+// «сначала визуально попадают в чат, а потом через некоторое время в очередь»).
+test('DOM: a message to a busy agent waits in the queue at once, not in the chat', async () => {
+  const app = await ui();
+  app.tasks.a.status = 'RUNNING';
+  await app.selectTask('a');
+  const running = { ...app.tasks.a, status: 'RUNNING', pendingPrompts: [] };
+  let release = null;
+  app.setFetchHook(async (url) => {
+    const { pathname } = new URL(url, 'http://localhost');
+    if (pathname === '/api/tasks/a') return { ok: true, json: async () => running };
+    if (pathname.endsWith('/message')) {
+      return await new Promise(resolve => {
+        release = () => resolve({ ok: true, json: async () => ({ ...running, pendingPrompts: [{ id: 'p1', text: 'в очередь' }] }) });
+      });
+    }
+    return null;
+  });
+  const form = app.document.getElementById('form');
+  form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
+  const prompt = app.document.getElementById('prompt');
+  const before = app.document.querySelectorAll('.turn.me').length;
+  prompt.value = 'в очередь';
+  form.requestSubmit();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+
+  const badge = app.document.getElementById('queuedPrompt');
+  assert.ok(!badge.classList.contains('hidden'), 'очередь видна сразу, не дожидаясь ответа сервера');
+  assert.ok(badge.textContent.includes('в очередь'), `в очереди показан текст: ${badge.textContent}`);
+  // Пузырь остаётся (0 мс отклика), но очередь уже показывает сообщение — раньше её не было до ответа сервера.
+
+  release();
+  for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+  assert.ok(badge.textContent.includes('в очередь'), 'после ответа сервера сообщение остаётся в очереди');
+  assert.equal(app.document.querySelectorAll('.turn.me').length, before, 'и всё ещё не дублируется в ленте');
+});
+
 test('DOM: a parked message waits in the queue instead of showing up twice', async () => {
   const app = await ui();
   await app.selectTask('a');

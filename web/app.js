@@ -2643,9 +2643,20 @@ async function sendContinueMessage(taskId, text, opts = {}) {
 let composerSendNow = false;
 
 // The queued prompt is visible with its own actions: send it early, or drop it.
+// Сообщение, отправленное «в очередь» при работающем агенте, ещё НЕ в беседе: до ответа
+// сервера оно живёт здесь — в очереди, а не пузырём в ленте. 2026-10-12: раньше оно
+// сначала рисовалось в чате, и только через некоторое время переезжало в очередь.
+const locallyQueuedPrompts = [];
+function dropLocallyQueued(text) {
+  const index = locallyQueuedPrompts.findIndex(entry => entry.text === text);
+  if (index < 0) return false;
+  locallyQueuedPrompts.splice(index, 1);
+  return true;
+}
+
 function renderQueuedPrompt() {
   const host = $('queuedPrompt');
-  const queue = currentTask?.pendingPrompts || [];
+  const queue = [...(currentTask?.pendingPrompts || []), ...locallyQueuedPrompts];
   if (!queue.length) { host.classList.add('hidden'); host.innerHTML = ''; return; }
   host.classList.remove('hidden');
   host.innerHTML = '';
@@ -2656,6 +2667,17 @@ function renderQueuedPrompt() {
   // «машина занята» afterwards.
   const busy = lastTasks.find(task => task.status === 'RUNNING' && task.id !== selectedTaskId) || null;
   for (const [index, pending] of queue.entries()) {
+  // Локальная строка: сервер её ещё не подтвердил, действий у неё нет — только текст.
+  if (pending.local) {
+    const row = document.createElement('div');
+    row.className = 'queuedRow';
+    const text = document.createElement('div');
+    text.className = 'queuedText';
+    text.textContent = `В очереди: ${String(pending.text || '').split('\n')[0]} — отправляется…`;
+    row.append(text);
+    host.append(row);
+    continue;
+  }
   const row = document.createElement('div');
   row.className = 'queuedRow';
   const text = document.createElement('div');
@@ -3334,6 +3356,14 @@ $('form').addEventListener('submit', async (e) => {
         }
         renderChat();
       };
+      // «В очередь»: сообщение попадает в очередь сразу (локальная строка), а не только
+      // после ответа сервера — раньше очередь появлялась через некоторое время после
+      // того, как текст уже нарисовался в ленте (2026-10-12). Пузырь при этом остаётся:
+      // 0 мс отклика на нажатие, а если сервер отдал сообщение агенту — он и есть беседа.
+      if (!sendNow && ACTIVE_STATUSES.has(currentTask?.status) && prompt) {
+        locallyQueuedPrompts.push({ local: true, text: prompt });
+        renderQueuedPrompt();
+      }
       if (chatState && prompt) {
         chatState.addUser(prompt, files, pendingId, null, true);
         chatState.current.active = true;
@@ -3350,11 +3380,13 @@ $('form').addEventListener('submit', async (e) => {
         // is told what to do instead of losing text.
         if (error.ambiguous) {
           showNotice(error.message);
+          if (dropLocallyQueued(prompt)) renderQueuedPrompt();
           lastPrompt = { id: taskId, text: prompt, failedSend: false };
           return;
         }
         // Remove the optimistic turn if the send failed
         dropOptimistic();
+        if (dropLocallyQueued(prompt)) renderQueuedPrompt();
         // The machine runs one generation at a time. If it refused only because
         // the model is busy, the text goes to the queue instead of being lost
         // (the wording check keeps genuine failures visible).
@@ -3366,7 +3398,14 @@ $('form').addEventListener('submit', async (e) => {
       // as the same message appearing twice. When the queue delivers it, the
       // USER_MESSAGE event draws its bubble as usual.
       const parked = (sent?.pendingPrompts || []).some(entry => String(entry?.text || '').startsWith(prompt));
-      if (parked) dropOptimistic();
+      if (parked) {
+        dropOptimistic();
+        // Сервер подтвердил очередь — показываем его список сразу: иначе между локальной
+        // строкой и следующим опросом был бы провал, когда очереди не видно вообще.
+        if (currentTask) currentTask.pendingPrompts = sent.pendingPrompts;
+      }
+      // Локальная строка больше не нужна: место в очереди заняла запись сервера.
+      if (dropLocallyQueued(prompt)) renderQueuedPrompt();
       lastPrompt = { id: taskId, text: prompt, failedSend: false };
       renderQueuedPrompt();
       if (sent?.queueReason) showNotice(queueNotice(sent.queueReason));

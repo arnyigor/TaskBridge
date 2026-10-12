@@ -1060,15 +1060,33 @@ private fun DeliveryDiagnostics(
     }
 }
 
+/**
+ * Подпись строки отправки над полем ввода. `null` — строки нет.
+ *
+ * Сообщение, которое едет «в очередь», называется сразу: до 2026-10-12 на этом этапе
+ * строки не было вообще, и очередь становилась видна только после ответа сервера —
+ * оператор видел «сначала визуально попадают в чат, а потом через некоторое время в
+ * очередь». «Вклиниться» и steer тоже идут в беседу (пузырь), но в очередь не встают:
+ * их ждут в ленте, а не над полем ввода.
+ */
+internal fun outboxLabel(message: OutgoingMessage): String? = when (val status = message.status) {
+    OutgoingMessage.Status.Uploading -> "Загружаю файлы…"
+    OutgoingMessage.Status.Sending -> if (message.mode == SendMode.QUEUE) "Отправляю… если агент занят — встанет в очередь" else null
+    is OutgoingMessage.Status.Retrying -> "Нет связи, повтор ${status.attempt}…"
+    is OutgoingMessage.Status.Failed -> "Не отправлено: ${status.message}"
+    OutgoingMessage.Status.Unknown -> "Неизвестно, дошло ли сообщение (сервер перезапускался)"
+}
+
 @Composable
 private fun OutboxRow(message: OutgoingMessage, onRetry: () -> Unit, onEdit: () -> Unit, onDismiss: () -> Unit) {
     val status = message.status
-    val (text, color) = when (status) {
-        OutgoingMessage.Status.Uploading -> "Загружаю файлы…" to MaterialTheme.colorScheme.onSurfaceVariant
-        OutgoingMessage.Status.Sending -> return
-        is OutgoingMessage.Status.Retrying -> "Нет связи, повтор ${status.attempt}…" to LocalStatusColors.current.waiting
-        is OutgoingMessage.Status.Failed -> "Не отправлено: ${status.message}" to MaterialTheme.colorScheme.error
-        OutgoingMessage.Status.Unknown -> "Неизвестно, дошло ли сообщение (сервер перезапускался)" to LocalStatusColors.current.waiting
+    val text = outboxLabel(message) ?: return
+    val color = when (status) {
+        OutgoingMessage.Status.Uploading -> MaterialTheme.colorScheme.onSurfaceVariant
+        OutgoingMessage.Status.Sending -> MaterialTheme.colorScheme.onSurfaceVariant
+        is OutgoingMessage.Status.Retrying -> LocalStatusColors.current.waiting
+        is OutgoingMessage.Status.Failed -> MaterialTheme.colorScheme.error
+        OutgoingMessage.Status.Unknown -> LocalStatusColors.current.waiting
     }
     Surface(color = color.copy(alpha = 0.08f), modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.padding(horizontal = 14.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
