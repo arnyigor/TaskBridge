@@ -24,6 +24,8 @@ export function buildResumePreview(context, { strategies = [], memoryModes = [],
   const checklist = [
     check(Boolean(item.goal), 'Цель'),
     check(item.acceptanceCriteria.length > 0, 'Критерии готовности', item.acceptanceCriteria.length ? `${item.acceptanceCriteria.length}` : null),
+    // Незавершённая попытка — не «плохо»: важно, что она видна, а не забыта.
+    check(true, 'Прерванные попытки', (context.interrupted ?? []).length ? `${(context.interrupted ?? []).length}` : 'нет'),
   ];
   for (const session of sessions) {
     const recap = session.recap;
@@ -43,6 +45,7 @@ export function buildResumePreview(context, { strategies = [], memoryModes = [],
     // What is missing is as important as what is present: a session without a
     // recap means the new one will know less about it.
     warnings: [
+      ...(context.interrupted ?? []).map(attempt => `сессия ${attempt.sessionId} остановилась (${attempt.status}): работа могла остаться недоделанной — проверь её рабочую папку, прежде чем начинать заново`),
       ...sessions.filter(session => !session.recap?.accomplished?.length).map(session => `у сессии ${session.sessionId} нет recap — новый агент не узнает, что в ней решено`),
       ...(context.workspace.truncated ? ['список изменённых файлов неполный (Git обрезал снимок)'] : []),
       ...(context.workspace.changedFiles.length === 0 && context.workspace.head ? [] : []),
@@ -71,6 +74,18 @@ export function buildResumePreview(context, { strategies = [], memoryModes = [],
       title: session.title,
       status: session.status,
       recapSource: session.recap?.source ?? null,
+    })),
+    interrupted: (context.interrupted ?? []).map(attempt => ({
+      sessionId: attempt.sessionId,
+      status: attempt.status,
+      error: attempt.error,
+      startedAt: attempt.startedAt ?? null,
+      startHead: attempt.startHead ?? null,
+      head: attempt.head ?? null,
+      lastEventAt: attempt.lastEvent?.at ?? null,
+      commitsSince: (attempt.commitsSince ?? []).length,
+      changedFiles: (attempt.changedFiles ?? []).length,
+      workspaceMissing: attempt.workspaceMissing === true,
     })),
     estimatedTokens: estimateContextTokens(context),
     promptChars: null,

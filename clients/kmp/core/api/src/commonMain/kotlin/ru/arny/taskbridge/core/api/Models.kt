@@ -843,6 +843,41 @@ data class ProjectSessionsPage(
 @Serializable
 data class ProjectFolder(val name: String, val path: String)
 
+/**
+ * Инспектор памяти проекта (MR-10): что проект отдаёт агенту прямо сейчас.
+ *
+ * Только чтение: [write] — всегда `SAVE_DISABLED`, автозапись невозможна. [status]
+ * бывает `available`, `unavailable` (нет каталога памяти) и `ambiguous` — тогда в
+ * [warnings] сказано, какие проекты делят один каталог памяти, а поиск не делается.
+ */
+@Serializable
+data class ProjectMemoryOverview(
+    val provider: String? = null,
+    val status: String? = null,
+    val write: String? = null,
+    val projectName: String? = null,
+    val projectRoot: String? = null,
+    val injectedAutomatically: Boolean = false,
+    val entries: Int? = null,
+    val approxTokens: Long? = null,
+    /** Категории записей как их называет сама память (`constraint`, `architecture`, …). */
+    val categories: Map<String, Int> = emptyMap(),
+    val problems: List<String> = emptyList(),
+    val warnings: List<String> = emptyList(),
+    /** Заполняется только у поиска: null — обзор, "" — только что очищенное поле поиска. */
+    val query: String? = null,
+    /** Список записей приходит только с поиском: без `q` целиком его не отдают. */
+    val hits: List<ProjectMemoryHit>? = null,
+)
+
+/** Одна найденная запись. [source] — путь относительно папки проекта в памяти. */
+@Serializable
+data class ProjectMemoryHit(
+    val source: String,
+    val category: String? = null,
+    val text: String = "",
+)
+
 @Serializable
 data class ProjectFolderListing(
     val path: String? = null,
@@ -1403,6 +1438,8 @@ data class LibraryDeletion(
 data class ProcessEntry(
     val pid: Long,
     val name: String? = null,
+    /** PID родителя из снапшота; null — ОС не сообщила (нужно для группировки по дереву). */
+    val parentPid: Long? = null,
     /** Резидентная память в байтах; null — ОС её не сообщила (POSIX-список). */
     val memoryBytes: Long? = null,
     /** Момент старта процесса, ms epoch; null — ОС не сообщила. */
@@ -1426,6 +1463,38 @@ data class GpuProcessEntry(
 @Serializable
 data class GpuProcessList(
     val processes: List<GpuProcessEntry>? = null,
+)
+
+/** Агрегированный снимок ресурсов из GET /api/system/resources (PROC-01). */
+@Serializable
+data class ResourceSnapshot(
+    val ram: RamSnapshot? = null,
+    /** null — nvidia-smi недоступен; null-поля карточки — «неизвестно», никогда не 0. */
+    val gpu: GpuSummary? = null,
+)
+
+@Serializable
+data class RamSnapshot(
+    val totalBytes: Long? = null,
+    val freeBytes: Long? = null,
+    val usedBytes: Long? = null,
+    val sampledAt: String? = null,
+)
+
+@Serializable
+data class GpuSummary(
+    val source: String? = null,
+    val sampledAt: String? = null,
+    val gpus: List<GpuCard> = emptyList(),
+)
+
+@Serializable
+data class GpuCard(
+    val name: String? = null,
+    val vramTotalMb: Long? = null,
+    val vramUsedMb: Long? = null,
+    val vramFreeMb: Long? = null,
+    val utilizationPercent: Long? = null,
 )
 
 /**

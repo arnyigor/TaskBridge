@@ -984,6 +984,102 @@ test('a page cut by size is delivered and the walk still reaches the start', { t
   assert.ok(!(seen.has(201) && seen.has(302)), 'sanity: nothing above the newest exchange leaks in');
 });
 
+// The byte cap in the tail branch always keeps the NEWEST event, however large it
+// is — a page has to hold something. One such frame is enough to make the whole
+// session unopenable: an `agent_end` frame carries the conversation so far again
+// (messages, base64 images and all) and reached 16.3 MB in data/taskbridge.db,
+// and the KMP client refuses any JSON body over 16 MB with «Ответ сервера
+// слишком большой (16 МБ)» — the session then never opens (2026-10-13). Those
+// payloads are read by no client, so an over-budget window is lightened before it
+// is served. The ceiling below is the client's own constant
+// (TaskBridgeApi.MAX_BODY_BYTES = 16 MB): a test that only measured against the
+// server's own budget would not catch the client turning the page down.
+test('an over-budget agent_end frame cannot push a page past the client ceiling', { timeout: 30000 }, async t => {
+  const CLIENT_MAX_BODY_BYTES = 16 * 1024 * 1024;
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, root, base } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  // A turn whose closing `agent_end` repeats the thread with image data, the way
+  // the real one did — and the way a session that already ran before this fix
+  // still carries it in its stored events.
+  const image = 'iVBORw0KGgoAAAANSUhEUg'.repeat(160 * 1024);
+  const thread = Array.from({ length: 6 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: [{ type: 'text', text: `шаг ${i}` }, { type: 'image', data: image }] }));
+  const store = new TaskStore(path.join(root, 'data'));
+  await store.appendEventAt(id, 1000, { taskId: id, seq: 1000, type: 'USER_MESSAGE', message: 'вопрос с картинками', data: { text: 'вопрос с картинками' } });
+  await store.appendEventAt(id, 1001, { taskId: id, seq: 1001, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  await store.appendEventAt(id, 1002, { taskId: id, seq: 1002, type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'ответ с картинками' }] } } } });
+  await store.appendEventAt(id, 1003, { taskId: id, seq: 1003, type: 'PI_EVENT', data: { pi: { type: 'agent_end', messages: thread } } });
+  store.close();
+
+  const response = await fetch(`${base}/api/tasks/${id}/events?tail=1`);
+  const text = await response.text();
+  assert.equal(response.status, 200);
+  assert.ok(Buffer.byteLength(text, 'utf8') <= CLIENT_MAX_BODY_BYTES, `page is ${(Buffer.byteLength(text, 'utf8') / 1048576).toFixed(1)} MB, over the client's ${CLIENT_MAX_BODY_BYTES / 1048576} MB`);
+
+  // The turn is served whole: lightening is what makes it fit, so the page must
+  // not be cut down to the one frame that could not be capped either.
+  const page = JSON.parse(text);
+  assert.deepEqual(page.events.slice(-4).map(e => e.seq), [1000, 1001, 1002, 1003], 'the whole turn is served, not just its oversized frame');
+  const agentEnd = page.events.find(e => e.seq === 1003).data.pi;
+  assert.equal('messages' in agentEnd, false, 'the repeated thread is not shipped');
+  // And what the transcript is built from survived.
+  assert.equal(page.events.find(e => e.seq === 1002).data.pi.message.content[0].text, 'ответ с картинками');
+});
+
+// The session LIST is the first call the phone makes, and it ships every session
+// at once. Unbounded per-session text made that body 16.96 MB in the real
+// database (2026-10-13) — over the client's own 16 MB ceiling — and the sessions
+// screen did not open at all («Ответ сервера слишком большой (16 МБ)»). The list
+// is trimmed to previews; the session itself, read one at a time, is not.
+test('the session list ships previews, the session itself stays whole', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const long = 'первая строка вопроса\n' + 'я'.repeat(200_000);
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: long });
+  assert.equal((await terminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+
+  const listed = (await api('/api/tasks')).find(task => task.id === created.id);
+  assert.ok(listed, 'the session is in the list');
+  assert.ok(listed.prompt.startsWith('первая строка вопроса\n'), 'the title line survives the trim');
+  assert.ok(listed.prompt.length <= 1024, `the list carries a preview, got ${listed.prompt.length} chars`);
+  assert.equal(listed.title, null, 'the rest of the session record is untouched');
+
+  const whole = await api(`/api/tasks/${created.id}`);
+  assert.equal(whole.prompt.length, long.length, 'the chat screen still gets the prompt in full');
+
+  // The same rule on the project dashboard, which pages sessions to a phone.
+  const page = await api('/api/projects/fixture/sessions?limit=50');
+  const onPage = page.items.find(task => task.id === created.id);
+  assert.ok(onPage && onPage.prompt.length <= 1024, 'the dashboard pages previews too');
+});
+
+// The other half of the same fix: `agent_end` must not put the repeated thread
+// into the event store in the first place (307 MB of such copies in the real
+// database, none of them read by anything).
+test('a live turn stores agent_end without the repeated thread and streams it light', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'вопрос' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  // The fixture's Pi sends `agent_end` with a copy of the message, as real Pi does.
+  const store = new TaskStore(path.join(root, 'data'));
+  const events = await store.readEvents(id, 500);
+  store.close();
+  const ends = events.filter(e => e.data?.pi?.type === 'agent_end');
+  assert.ok(ends.length >= 1, 'the fixture turn produced an agent_end event');
+  for (const event of ends) assert.equal('messages' in event.data.pi, false, 'the stored frame carries no repeated thread');
+  const answer = events.find(e => e.data?.pi?.type === 'message_end' && e.data.pi.message?.role === 'assistant');
+  assert.ok(answer, 'the answer itself is stored as its message_end frame');
+});
+
 // Уровни размышлений сопоставляются с картой модели, а не с общим списком Pi:
 // у модели без reasoning доступен только «off», и попытка выставить «high»
 // должна получить внятный отказ со списком доступных уровней, а не молча

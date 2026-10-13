@@ -5,12 +5,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { projectFileIndex, anyPathExists } from './path-patterns.mjs';
 
 const exec = promisify(execFile);
 
 const DEFAULT_MEMORY_ROOT = path.join(os.homedir(), '.pi', 'memory-md');
 const MAX_FILE_BYTES = 256 * 1024;
 const MAX_HITS = 12;
+// Категории памяти: и то, чем помечается найденная заметка, и то, что можно
+// предложить. Один словарь — чтобы предложение не могло «изобрести» категорию.
+export const MEMORY_CATEGORIES = Object.freeze(['architecture', 'decision', 'constraint', 'pattern', 'known-issue', 'other']);
 const CATEGORY_BY_TEXT = [
   ['architecture', /\barchitecture\b|архитектур/iu],
   ['decision', /\bdecision\b|решени[ея]/iu],
@@ -52,7 +56,7 @@ function parseFrontmatter(raw) {
 function categoryOf(file, data, text) {
   const haystack = `${file}\n${data.category || ''}\n${data.tags || ''}\n${data.description || ''}\n${text}`;
   const explicit = String(data.category || '').trim();
-  if (['architecture', 'decision', 'constraint', 'pattern', 'known-issue', 'other'].includes(explicit)) return explicit;
+  if (MEMORY_CATEGORIES.includes(explicit)) return explicit;
   return CATEGORY_BY_TEXT.find(([, re]) => re.test(haystack))?.[0] ?? 'other';
 }
 
@@ -94,7 +98,7 @@ async function listMarkdown(dir) {
   return out.sort();
 }
 
-async function readMemoryFile(file, memoryDir) {
+async function readMemoryFile(file, memoryDir, { projectPath = null, fileIndex = null } = {}) {
   const stat = await fs.stat(file).catch(() => null);
   if (!stat || !stat.isFile()) return null;
   const raw = await fs.readFile(file, 'utf8').catch(() => null);
@@ -103,6 +107,7 @@ async function readMemoryFile(file, memoryDir) {
   const { data, body } = parseFrontmatter(limited);
   const relative = path.relative(memoryDir, file).replaceAll(path.sep, '/');
   const text = (body || data.description || '').trim();
+  const declaredPaths = declaredPathsOf(data.paths);
   return {
     id: hashText(`${relative}\n${text}`),
     text,
@@ -111,10 +116,28 @@ async function readMemoryFile(file, memoryDir) {
     updatedAt: stat.mtime.toISOString(),
     description: data.description || null,
     tags: data.tags || null,
+    paths: declaredPaths,
+    // A note that names files, none of which exist any more, describes a project
+    // that is not there. TaskBridge does NOT delete it and does not guess that it
+    // is «probably» still true: it stops handing it to an agent and says why.
+    // Шаблоны сверяются со списком файлов проекта, поэтому переезд папки на уровень
+    // глубже не убивает живую заметку.
+    stale: !anyPathExists(declaredPaths, { projectPath, index: fileIndex }),
     provenance: { file: relative },
     estimatedTokens: estimateTokens(text),
   };
 }
+
+/** `paths: a.mjs, b/` — the only form of invalidation TaskBridge can prove. */
+function declaredPathsOf(value) {
+  if (!value) return [];
+  return String(value)
+    .split(/[,\s]+/u)
+    .map(item => item.trim().replace(/^["']|["']$/gu, ''))
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
 
 function queryTerms(query) {
   return normalizeText(query).split(/[^\p{L}\p{N}_-]+/u).filter(term => term.length >= 3).slice(0, 20);
@@ -204,11 +227,14 @@ export class PiMemoryMdProvider {
     const resolved = await this.resolveProject(project);
     const gateOpen = fsSync.existsSync(resolved.coreDir);
     const files = gateOpen ? await listMarkdown(resolved.coreDir) : [];
+    const fileIndex = gateOpen ? await projectFileIndex(resolved.projectPath) : null;
     const entries = [];
     for (const file of files) {
-      const entry = await readMemoryFile(file, resolved.memoryDir);
+      const entry = await readMemoryFile(file, resolved.memoryDir, { projectPath: resolved.projectPath, fileIndex });
       if (entry) entries.push(entry);
     }
+    const stale = entries.filter(entry => entry.stale);
+    const live = entries.filter(entry => !entry.stale);
     const indexChars = entries.reduce((sum, entry) => sum + (entry.description || entry.source).length + 80, 260);
     return {
       provider: 'pi-memory-md',
@@ -222,6 +248,10 @@ export class PiMemoryMdProvider {
       entries: entries.length,
       approxTokens: Math.ceil(indexChars / 4),
       categories: entries.reduce((acc, entry) => { acc[entry.category] = (acc[entry.category] || 0) + 1; return acc; }, {}),
+      // Не удалено и не переписано — просто больше не отдаётся агенту, пока в
+      // заметке не появятся существующие пути. Инспектор показывает их список.
+      stale: { count: stale.length, sources: stale.map(entry => ({ source: entry.source, paths: entry.paths })) },
+      liveEntries: live.length,
       problems: gateOpen ? [] : ['pi-memory-md core directory is missing; project memory will not be injected'],
     };
   }
@@ -240,15 +270,21 @@ export class PiMemoryMdProvider {
     };
   }
 
-  async search(project = {}, query = '', { limit = MAX_HITS, maxChars = 700 } = {}) {
+  async search(project = {}, query = '', { limit = MAX_HITS, maxChars = 700, includeStale = false, fileIndex = null } = {}) {
     const resolved = await this.resolveProject(project);
     if (!fsSync.existsSync(resolved.coreDir)) return [];
     const terms = queryTerms(query);
     const files = await listMarkdown(resolved.coreDir);
     const hits = [];
+    // The file list is built once by the caller when several queries are asked
+    // (`relevant`): a git call per query would be work for nothing.
+    const index = fileIndex ?? await projectFileIndex(resolved.projectPath);
     for (const file of files) {
-      const entry = await readMemoryFile(file, resolved.memoryDir);
+      const entry = await readMemoryFile(file, resolved.memoryDir, { projectPath: resolved.projectPath, fileIndex: index });
       if (!entry) continue;
+      // A note whose declared files are gone is not knowledge about this project
+      // any more: it is not «maybe still true», it is unverifiable.
+      if (entry.stale && !includeStale) continue;
       const score = scoreEntry(entry, terms);
       if (terms.length && score <= 0) continue;
       const text = excerpt(entry.text || entry.description || '', terms, maxChars);
@@ -269,14 +305,32 @@ export class PiMemoryMdProvider {
       .slice(0, Math.max(0, Math.min(50, Number(limit) || MAX_HITS)));
   }
 
+  /**
+   * Все живые записи целиком — для проверки «такое знание уже есть» при
+   * принятии предложения. Полный текст, без вырезок: сравнение должно быть точным.
+   */
+  async allEntries(project = {}, { limit = 500 } = {}) {
+    const resolved = await this.resolveProject(project);
+    if (!fsSync.existsSync(resolved.coreDir)) return [];
+    const files = await listMarkdown(resolved.coreDir);
+    const fileIndex = await projectFileIndex(resolved.projectPath);
+    const entries = [];
+    for (const file of files) {
+      const entry = await readMemoryFile(file, resolved.memoryDir, { projectPath: resolved.projectPath, fileIndex });
+      if (entry && !entry.stale) entries.push(entry);
+    }
+    return entries.sort((a, b) => a.source.localeCompare(b.source)).slice(0, limit);
+  }
+
   async relevant(project = {}, { queries = [], budgetTokens = 2000, limit = MAX_HITS } = {}) {
     const overview = await this.inspect(project).catch(error => ({
       provider: 'pi-memory-md', status: 'error', write: 'SAVE_DISABLED', entries: 0, approxTokens: 0, problems: [error.message],
     }));
     if (overview.status !== 'available') return { overview, hits: [], warnings: overview.problems || [] };
     const seen = new Map();
+    const fileIndex = await projectFileIndex(project.path ?? null);
     for (const query of queries.filter(Boolean).slice(0, 8)) {
-      for (const hit of await this.search(project, query, { limit })) {
+      for (const hit of await this.search(project, query, { limit, fileIndex })) {
         const key = hashText(hit.text);
         const previous = seen.get(key);
         if (!previous || (hit.score ?? 0) > (previous.score ?? 0)) seen.set(key, { ...hit, reason: `matched: ${String(query).slice(0, 120)}` });

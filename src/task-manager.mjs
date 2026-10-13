@@ -23,7 +23,7 @@ import { ModelLibrary, idForEntry } from './model-library.mjs';
 import { modelsPresetPath, registerLibraryPreset, patchPresetContext, patchPresetVision, parsePresets, removePreset } from './router-presets.mjs';
 import { quantFromFilename } from './huggingface.mjs';
 import { McpManager, MCP_MODES } from './mcp-manager.mjs';
-import { TEXT_TAIL, THINKING_TAIL, tailText, appendTail, stripMcpAdapterNoise } from './text-tail.mjs';
+import { TEXT_TAIL, THINKING_TAIL, tailText, headText, appendTail, stripMcpAdapterNoise } from './text-tail.mjs';
 import { toolResultText, isBrokenToolLog, tailBytes } from './tool-output.mjs';
 import { generationWindowMs, generationMetrics, accumulateSessionSpeeds } from './system-metrics.mjs';
 import { ApprovalManager } from './cloud/approval-manager.mjs';
@@ -37,6 +37,8 @@ import { buildResumePreview } from './resume/resume-preview.mjs';
 import { renderResumePrompt } from './resume/resume-renderer.mjs';
 import { contextFingerprint, validateResume, describeChanges } from './resume/resume-validator.mjs';
 import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions } from './memory/project-memory-provider.mjs';
+import { listProposals, createProposal, acceptProposal, rejectProposal, validateProposal, proposalCounts } from './memory/memory-proposals.mjs';
+import { projectFileIndex } from './memory/path-patterns.mjs';
 import { validateRecipe, renderRecipe } from './recipes/recipe.mjs';
 import { normalizeSchedule, nextRunAfter, resolveMisfire, describeSchedule } from './scheduler/schedule.mjs';
 import { trustProjectDirectory } from './project-trust.mjs';
@@ -55,6 +57,11 @@ const WORK_ITEM_STATUSES = Object.freeze(['BACKLOG', 'READY', 'IN_PROGRESS', 'BL
 // How a session relates to its work item (MR-03). Growth here is cheap; the
 // point is that a review or a verification run is not the same as the work.
 const WORK_ITEM_RELATIONS = Object.freeze(['implementation', 'investigation', 'review', 'verification', 'resume']);
+
+// Сессия, которая остановилась НЕ успешно: её работа где-то оборвалась, и Resume
+// обязан сказать, где именно. Живые сессии (QUEUED/RUNNING/WAITING_USER) сюда не
+// входят: они ещё идут, а не оборвались.
+const INTERRUPTED_STATUSES = Object.freeze(['FAILED', 'CANCELLED']);
 
 /** Одна формулировка для предпросмотра и для инспектора: почему памяти нет. */
 export function ambiguousMemoryWarning(collisions = []) {
@@ -321,6 +328,56 @@ function pendingOrigin(pending) {
 function safeFileName(name) {
   const base = path.basename(String(name || 'file.bin'));
   return base.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 180) || 'file.bin';
+}
+
+// Pi's `agent_end` repeats the WHOLE conversation (messages, base64 images and
+// all) after every turn: 16.3 MB for a 42-message thread, 307 MB of such copies
+// in the real database. Nothing reads them — the clients drop exactly this field
+// before rendering (ChatEventLighteningTest in the KMP client pins that) — so the
+// copy is not worth storing, nor worth pushing to every attached client over SSE
+// once per turn. Everything else in the frame is kept as it came.
+function storedPiFrame(frame) {
+  if (frame?.type !== 'agent_end' || !frame.messages) return frame;
+  const rest = { ...frame };
+  delete rest.messages;
+  return rest;
+}
+
+// Budgets for ONE session inside a LIST response (GET /api/tasks, the project
+// dashboard). Those endpoints ship every session at once, so a field that is
+// unbounded per session makes a body no client can read: 168 sessions reached
+// 16.96 MB on 2026-10-13 — of that, verification stdout 6.0, assistantText 3.3,
+// thinkingText 2.0, prompt 1.8, git.status 0.6, compaction summary 0.3 MB —
+// and the phone refuses a JSON body over 16 MB (TaskBridgeApi.MAX_BODY_BYTES) —
+// the session LIST, the first thing the app loads, did not open at all:
+// «Ответ сервера слишком большой (16 МБ)». Nothing on screen needs the copies:
+// the list shows a title line, the last line of the answer for a notification,
+// and counts; the chat screen reads the session itself from /api/tasks/:id.
+const LIST_PROMPT_CHARS = 1024;
+const LIST_ANSWER_CHARS = 1024;
+const LIST_VERIFICATION_CHARS = 512;
+const LIST_GIT_CHARS = 1024;
+const LIST_SUMMARY_CHARS = 1024;
+
+/** One session as the list endpoints ship it: the same task, with the per-session megabytes cut to previews. */
+export function briefTask(task) {
+  return {
+    ...task,
+    prompt: headText(task.prompt, LIST_PROMPT_CHARS),
+    // The notification preview takes the LAST non-blank line (SessionAlerts).
+    assistantText: tailText(task.assistantText, LIST_ANSWER_CHARS),
+    // Only the chat screen shows reasoning, and it reads the session itself.
+    thinkingText: null,
+    verification: Array.isArray(task.verification)
+      ? task.verification.map(entry => entry && typeof entry === 'object'
+        ? { ...entry, stdout: tailText(entry.stdout, LIST_VERIFICATION_CHARS), stderr: tailText(entry.stderr, LIST_VERIFICATION_CHARS) }
+        : entry)
+      : task.verification,
+    git: task.git && typeof task.git === 'object' ? { ...task.git, status: headText(task.git.status, LIST_GIT_CHARS) } : task.git,
+    compaction: task.compaction?.last
+      ? { ...task.compaction, last: { ...task.compaction.last, summary: headText(task.compaction.last.summary, LIST_SUMMARY_CHARS) } }
+      : task.compaction,
+  };
 }
 
 function summarizePiEvent(frame) {
@@ -867,9 +924,11 @@ export class TaskManager extends EventEmitter {
     const overview = await this.memoryProvider.inspect(project);
     const collisions = await this.#memoryCollisions(project.id);
     const ambiguous = collisions.length > 0;
+    const proposals = proposalCounts(await listProposals(overview.memoryDir));
     const found = {
       ...overview,
       collisions,
+      proposals,
       // The inspector is the same read path the resume uses: what is not safe to
       // hand to an agent is not shown here as «the project's knowledge» either.
       ...(ambiguous ? { status: 'ambiguous', warnings: [ambiguousMemoryWarning(collisions)] } : {}),
@@ -881,6 +940,65 @@ export class TaskManager extends EventEmitter {
     if (ambiguous) return { ...found, query: String(query), hits: [] };
     const hits = await this.memoryProvider.search(project, query, { limit: 20 });
     return { ...found, query: String(query), hits };
+  }
+
+  // --- memory suggestions (MEM-08) --------------------------------------------
+  //
+  // Один путь записи — и он не агентский: предложение падает в изолированный буфер
+  // (`.memory-proposals/`, вне `core`), в `pi-memory-md` его заносит только явное
+  // принятие человеком, и только если детерминированные проверки чисты.
+
+  async #memoryProject(projectId) {
+    const project = this.projects.get(projectId);
+    if (!project) throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    const resolved = await this.memoryProvider.resolveProject(project);
+    return { project, resolved };
+  }
+
+  async listMemoryProposals(projectId) {
+    const { resolved } = await this.#memoryProject(projectId);
+    const proposals = await listProposals(resolved.memoryDir);
+    return { proposals, counts: proposalCounts(proposals) };
+  }
+
+  async createMemoryProposal(projectId, input = {}) {
+    const { resolved } = await this.#memoryProject(projectId);
+    const proposal = await createProposal(resolved.memoryDir, input);
+    // Что не пройдёт проверку при принятии — видно сразу, но ничего не отменяет:
+    // предложение уже лежит в буфере и ждёт человека.
+    const { existingText } = await this.#memoryTexts(resolved);
+    const fileIndex = await projectFileIndex(resolved.projectPath);
+    return { proposal, problems: validateProposal(proposal, { existingText, projectPath: resolved.projectPath, fileIndex }).problems };
+  }
+
+  async acceptMemoryProposal(projectId, proposalId) {
+    const { resolved } = await this.#memoryProject(projectId);
+    const { existingText } = await this.#memoryTexts(resolved);
+    const fileIndex = await projectFileIndex(resolved.projectPath);
+    const result = await acceptProposal(resolved.memoryDir, proposalId, { existingText, projectPath: resolved.projectPath, fileIndex });
+    if (!result.ok) {
+      const code = result.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'INPUT_INVALID';
+      throw Object.assign(new Error(result.problems.map(problem => problem.message).join('; ')), {
+        code,
+        problems: result.problems,
+      });
+    }
+    return result;
+  }
+
+  async rejectMemoryProposal(projectId, proposalId, { reason = null } = {}) {
+    const { resolved } = await this.#memoryProject(projectId);
+    const result = await rejectProposal(resolved.memoryDir, proposalId, { reason });
+    if (!result.ok) {
+      throw Object.assign(new Error(result.problems.map(problem => problem.message).join('; ')), { code: 'INPUT_INVALID' });
+    }
+    return result;
+  }
+
+  /** Нормализованные тексты того, что проект уже знает: только для проверки дублей. */
+  async #memoryTexts(resolved) {
+    const entries = await this.memoryProvider.allEntries({ path: resolved.projectPath }).catch(() => []);
+    return { existingText: entries.map(entry => String(entry.text || '').toLowerCase().replace(/\s+/gu, ' ').trim()) };
   }
 
   /**
@@ -979,7 +1097,7 @@ export class TaskManager extends EventEmitter {
     else if (sort === 'size') rows.sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0));
     else rows.sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
     const total = rows.length;
-    const items = rows.slice(offset, offset + limit);
+    const items = rows.slice(offset, offset + limit).map(briefTask);
     return {
       projectId: id,
       registered: this.projects.has(id),
@@ -1150,6 +1268,7 @@ export class TaskManager extends EventEmitter {
     const sessions = [];
     const artifacts = [];
     const missingWorkspaces = [];
+    const interrupted = [];
     let chosen = null;
 
     for (const link of links) {
@@ -1162,7 +1281,14 @@ export class TaskManager extends EventEmitter {
       }
       const saved = readSavedRecap(this.store.taskDir(task.id));
       const derived = deriveRecap(task, { recap: saved });
-      const recap = { ...derived.recap, source: derived.source, updatedAt: saved?.updatedAt ?? null };
+      // The same marking as in the recap view: what the session claims stays a claim
+      // unless TaskBridge observed that very command itself.
+      const recap = {
+        ...derived.recap,
+        verification: reconcileVerification(derived.recap.verification, task.verification),
+        source: derived.source,
+        updatedAt: saved?.updatedAt ?? null,
+      };
       const files = await this.#artifactIndex(task.id);
       const diff = files.find(entry => entry.name === 'diff.patch');
       const workspacePath = task.workspacePath && fsSync.existsSync(task.workspacePath) ? task.workspacePath : null;
@@ -1182,6 +1308,13 @@ export class TaskManager extends EventEmitter {
         verification: (task.verification || []).map(entry => `${entry.ok ? 'PASS' : 'FAIL'}: ${entry.command}`),
       }, { recap, diffBytes: diff?.bytes ?? null }));
       for (const entry of files) artifacts.push({ sessionId: task.id, name: entry.name, bytes: entry.bytes });
+      // A session that stopped WITHOUT success is where the work was left half-done.
+      // Nothing extra is written for this: the facts are the session's own record
+      // plus the state of the folder it worked in — an «crash journal» that cannot
+      // go stale because it is not a copy.
+      if (INTERRUPTED_STATUSES.includes(task.status)) {
+        interrupted.push(await this.#interruptedAttempt(task, { workspacePath }));
+      }
     }
 
     // Git facts come from the chosen workspace, and only from it. When there is
@@ -1242,6 +1375,7 @@ export class TaskManager extends EventEmitter {
         commands,
       },
       artifacts,
+      interrupted,
       memory: memoryFacts ? { mode: memoryMode, ...memoryFacts } : { mode: memoryMode },
       strategy,
     });
@@ -1249,10 +1383,72 @@ export class TaskManager extends EventEmitter {
       item,
       context,
       missingWorkspaces,
+      interrupted,
       sessionsWithoutRecap: sessions.filter(session => session.recap?.source !== 'saved').map(session => session.sessionId),
     };
   }
 
+
+  /**
+   * Where a stopped session left the work: its own last event, its error and the
+   * current state of the folder it was working in. Read, not stored — a copy would
+   * be one more thing that can disagree with reality.
+   */
+  async #interruptedAttempt(task, { workspacePath = null } = {}) {
+    const last = await this.store.readEvents(task.id, 1).catch(() => []);
+    const event = last.at(-1) ?? null;
+    const state = workspacePath ? await collectGitState(workspacePath).catch(() => null) : null;
+    const startHead = task.checkpoint?.head ?? null;
+    const head = workspacePath ? await this.#headOf(workspacePath).catch(() => null) : null;
+    return {
+      sessionId: task.id,
+      title: task.title ?? null,
+      status: task.status,
+      error: task.error ?? null,
+      errorCode: task.errorCode ?? null,
+      startedAt: task.checkpoint?.at ?? null,
+      updatedAt: task.updatedAt ?? null,
+      lastEvent: event ? { type: event.type ?? null, message: typeof event.message === 'string' ? event.message.slice(0, 300) : null, at: event.at ?? null } : null,
+      workspacePath,
+      workspaceMissing: Boolean(task.workspacePath) && !workspacePath,
+      startHead,
+      head,
+      // Что появилось, пока шла (и оборвалась) эта попытка — только факты Git.
+      commitsSince: await this.#commitsBetween(workspacePath, startHead, head),
+      changedFiles: state?.changedFiles ?? (task.git?.changedFiles ?? []),
+      truncated: state?.truncated === true,
+    };
+  }
+
+  /** Коммиты между базой чекпоинта и текущим состоянием: `base..head`, не больше двадцати. */
+  async #commitsBetween(workspacePath, from, to) {
+    if (!workspacePath || !from || !to || from === to) return [];
+    try {
+      const { stdout } = await git(['log', '--oneline', '--max-count=20', `${from}..${to}`], workspacePath);
+      return stdout.split('\n').map(line => line.trim()).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Где началась работа: commit, время, рабочая папка. Записывается один раз —
+   * первый старт и есть база сравнения. Дальше чекпоинт НЕ переписывается шагами
+   * модели: журнал — это события TaskBridge (WORKSPACE_READY, TOOL_*, TASK_*) плюс
+   * живое состояние Git, а не поток текста от модели.
+   */
+  async #checkpointStart(task) {
+    if (task.checkpoint) return task.checkpoint;
+    if (!task.workspacePath) return null;
+    task.checkpoint = {
+      at: task.startedAt ?? now(),
+      head: await this.#headOf(task.workspacePath).catch(() => null),
+      workspacePath: task.workspacePath,
+      worktree: task.worktree === true,
+      baseCommit: task.baseCommit ?? null,
+    };
+    return task.checkpoint;
+  }
 
   /** `provider/id` or a bare id, as a recipe stores it. */
   #parseModelSelection(value) {
@@ -2457,6 +2653,10 @@ export class TaskManager extends EventEmitter {
       const prepared = await this.#prepareWorkspace(task);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
       Object.assign(task, prepared);
+      // Аварийный чекпоинт ставит инфраструктура, а не модель: она в этот момент
+      // ничего не генерирует, и спрашивать её о состоянии бессмысленно. Здесь есть
+      // только факты: commit, время, рабочая папка.
+      await this.#checkpointStart(task);
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'WORKSPACE_READY', `Workspace: ${task.workspacePath}`);
 
@@ -3630,7 +3830,7 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
     }
 
-    await this.#event(task, 'PI_EVENT', summarizePiEvent(frame), { pi: frame }, false);
+    await this.#event(task, 'PI_EVENT', summarizePiEvent(frame), { pi: storedPiFrame(frame) }, false);
 
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       await this.store.pruneStreamingDeltas(task.id).catch(() => {});
@@ -5392,6 +5592,7 @@ export class TaskManager extends EventEmitter {
     if (!task.workspacePath) {
       Object.assign(task, await this.#prepareWorkspace(task));
     }
+    await this.#checkpointStart(task);
     await fs.access(task.workspacePath);
     if (task.nativeSession && !task._nativeLease) task._nativeLease = await acquireNativeLease(task);
     const sessionFile = await restoreSessionFile(task, this.store, this.dataRoot);

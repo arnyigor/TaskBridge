@@ -71,7 +71,6 @@ import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
-import ru.arny.taskbridge.core.api.PiInfo
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
@@ -231,13 +230,6 @@ fun SessionsScreen(
                     color = MaterialTheme.colorScheme.error,
                     action = "Повторить",
                     onAction = { connection.sessions.refresh() },
-                )
-            }
-            piVersionBanner(state.info?.pi)?.let { text ->
-                Banner(
-                    text = text,
-                    icon = AppIcons.Alert,
-                    color = LocalStatusColors.current.waiting,
                 )
             }
             RefreshContainer(pull = graph.platform.kind != "desktop", refreshing = state.refreshing, onRefresh = { connection.sessions.refresh() }) {
@@ -460,20 +452,6 @@ private fun olderThanDays(task: Task, days: Long, nowMillis: Long): Boolean {
 }
 
 internal fun messageOf(error: Throwable): String = (error as? ApiException)?.let { describe(it.error) } ?: (error.message ?: "Ошибка")
-
-/**
- * Текст предупреждения о версии Pi, или null если предупреждать не о чем.
- *
- * Неизвестная версия — не ошибка версии: "/api/info" не смог получить
- * `pi --version` (например, проба совпала с загруженной сборкой). Раньше строка
- * `pi.version ?: "не найден"` рисовала баннер «Pi не найден: версия не
- * проверялась», то есть выдуманную проблему вместо отсутствия данных.
- */
-internal fun piVersionBanner(pi: PiInfo?): String? {
-    val version = pi?.version ?: return null
-    if (pi.supported) return null
-    return "Pi $version: версия не проверялась с TaskBridge (${pi.supportedRange.orEmpty()})"
-}
 
 /**
  * Открыта ли папка сессий.

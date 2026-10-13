@@ -53,6 +53,7 @@ export function buildResumeContext({
   workspace = {},
   verification = {},
   artifacts = [],
+  interrupted = [],
   memory = {},
   strategy = 'fresh-worktree',
 } = {}) {
@@ -68,6 +69,30 @@ export function buildResumeContext({
       acceptanceCriteria: Array.isArray(workItem.acceptanceCriteria) ? workItem.acceptanceCriteria.slice(0, CRITERIA_LIMIT) : [],
     },
     previousSessions: sessions.slice(0, SESSION_LIMIT),
+    // Где оборвалась предыдущая попытка: последнее событие сессии, её ошибка и
+    // текущее состояние рабочей папки. Это НЕ копия лога — это чтение фактов,
+    // которые и так есть у сессии, поэтому они не могут разойтись с реальностью.
+    interrupted: interrupted.slice(0, 5).map(attempt => ({
+      sessionId: attempt.sessionId,
+      title: trim(attempt.title, 200),
+      status: attempt.status ?? null,
+      error: trim(attempt.error, 300),
+      errorCode: attempt.errorCode ?? null,
+      startedAt: attempt.startedAt ?? null,
+      updatedAt: attempt.updatedAt ?? null,
+      lastEvent: attempt.lastEvent ? {
+        type: attempt.lastEvent.type ?? null,
+        message: trim(attempt.lastEvent.message, 300),
+        at: attempt.lastEvent.at ?? null,
+      } : null,
+      workspacePath: attempt.workspacePath ?? null,
+      workspaceMissing: attempt.workspaceMissing === true,
+      startHead: attempt.startHead ?? null,
+      head: attempt.head ?? null,
+      commitsSince: Array.isArray(attempt.commitsSince) ? attempt.commitsSince.slice(0, 20).map(line => trim(line, 200)) : [],
+      changedFiles: Array.isArray(attempt.changedFiles) ? attempt.changedFiles.slice(0, FILE_LIMIT) : [],
+      truncated: attempt.truncated === true,
+    })),
     workspace: {
       strategy,
       path: workspace.path ?? null,

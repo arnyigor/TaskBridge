@@ -34,25 +34,57 @@ async function removeDir(dir) {
 // последовательность, что новая сессия получает состояние работы БЕЗ транскрипта,
 // и что слова сессии не выдают себя за наблюдения TaskBridge.
 
-/** A real repository: the Git facts of the brief (HEAD, changed files) come from one. */
-async function gitRepo(t, name = 'memory-e2e-repo') {
+/**
+ * A real repository: the Git facts of the brief (HEAD, changed files) come from one.
+ *
+ * Cleanup is NOT registered here on purpose. `t.after` hooks run in registration
+ * order, so a removal registered before `startFixture()` deletes the folder while
+ * the server and the agent process working in it are still alive: EBUSY, and the
+ * skipped `close()` hook leaves a live server that keeps the test run alive. The
+ * test registers the removal after the fixture — right after the close hook.
+ */
+async function gitRepo(name = 'memory-e2e-repo') {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-e2e-'));
   const dir = path.join(parent, name);
   await fs.mkdir(dir, { recursive: true });
-  t.after(() => removeDir(parent));
   const who = ['-c', 'user.email=t@t', '-c', 'user.name=t'];
   await exec('git', ['init', '-q'], { cwd: dir });
   await exec('git', [...who, 'commit', '-q', '--allow-empty', '-m', 'init'], { cwd: dir });
   await fs.writeFile(path.join(dir, 'app.mjs'), 'export const app = 1;\n', 'utf8');
   await exec('git', ['add', 'app.mjs'], { cwd: dir });
   await exec('git', [...who, 'commit', '-q', '-m', 'app'], { cwd: dir });
-  return dir;
+  return { dir, parent };
 }
 
-async function memoryRoot(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-e2e-memory-'));
-  t.after(() => removeDir(root));
-  return root;
+async function memoryRoot() {
+  return fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-e2e-memory-'));
+}
+
+/**
+ * Ждёт, пока сессия получит рабочую папку. Предпросмотр, снятый до этого, знает
+ * `HEAD: null`, а запуск — настоящий commit: сверка честно откажет в 409. Ждать
+ * нужно не потому, что отказ плох, а потому что оператор снимает предпросмотр уже
+ * у работающей сессии.
+ */
+async function waitForWorkspace(api, sessionId, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const task = await api(`/api/tasks/${sessionId}`);
+    if (task.workspacePath) return task.workspacePath;
+    if (Date.now() > deadline) throw new Error(`сессия ${sessionId} так и не получила рабочую папку`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+}
+
+/** Ждёт терминального статуса сессии (падение тоже бывает «результатом»). */
+async function waitForStatus(api, sessionId, statuses, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const task = await api(`/api/tasks/${sessionId}`);
+    if (statuses.includes(task.status)) return task;
+    if (Date.now() > deadline) throw new Error(`сессия ${sessionId} осталась в статусе ${task.status}`);
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
 }
 
 async function writeNote(root, repoName, file, body) {
@@ -65,8 +97,10 @@ test('MEM-E2E: Work Item → Session A → Recap → Resume → Session B, acros
   const { dir: repo, parent: repoParent } = await gitRepo();
   const root = await memoryRoot();
   const projectName = path.basename(repo);
-  await writeNote(root, projectName, 'cursor.md', '---\ndescription: "Event cursor policy"\ntags: [constraint]\n---\nEvent cursor must remain monotonic across restarts.\n');
-  await writeNote(root, projectName, 'worktree.md', '---\ndescription: "Worktree policy"\n---\nMissing worktree must never fall back to the main checkout.\n');
+  // Знания, которые проект уже накопил по этой самой теме: именно они должны
+  // попасть в контекст новой сессии (без них проверка была бы пустой).
+  await writeNote(root, projectName, 'transcript.md', '---\ndescription: "Политика транскрипта"\ntags: [constraint]\n---\nНовая сессия получает бриф, а не транскрипт: знания проекта идут через бриф.\n');
+  await writeNote(root, projectName, 'inspector.md', '---\ndescription: "Inspector UI"\n---\nInspector UI читает память проекта и записи в неё не делает.\n');
 
   const fixture = await startFixture(undefined, { root: { memory: { projectMemoryRoot: root } } });
   t.after(() => fixture.close());
@@ -94,14 +128,16 @@ test('MEM-E2E: Work Item → Session A → Recap → Resume → Session B, acros
   assert.deepEqual(stored.acceptanceCriteria, ['знания проекта доступны', 'новая сессия не тянет транскрипт', 'Inspector UI']);
 
   // --- Session A: работа, которую потом продолжат ---------------------------
-  // Метка, которой нет ни в брифе, ни где-либо ещё: если она всплывёт в Session B,
-  // значит новая сессия получила кусок старого разговора.
+  // Метка живёт в САМОМ РАЗГОВОРЕ сессии: если она всплывёт в Session B, значит
+  // новая сессия получила кусок старого диалога, а не бриф.
   const TRANSCRIPT_MARKER = 'ЗАДАЧА-МЕТКА-77f1e4-ПОЛНЫЙ-ТРАНСКРИПТ';
   // 202: сессия ставится в очередь, а не создаётся синхронно.
   const sessionA = await post('/api/tasks', {
     projectId: project.id,
-    prompt: `${TRANSCRIPT_MARKER}: разбираю загрузку истории, правлю ChatReducer`,
+    prompt: 'разбираю загрузку истории, правлю ChatReducer',
   }, 202);
+  // 200: сообщение принято в уже идущую сессию (202 — это когда оно встало в очередь).
+  await post(`/api/tasks/${sessionA.id}/message`, { text: `${TRANSCRIPT_MARKER}: вот подробности разбора истории` }, 200);
   await post(`/api/work-items/${item.id}/sessions`, { sessionId: sessionA.id, relation: 'implementation' });
 
   // A real change Session A left uncommitted: «текущее состояние» — это Git.
@@ -143,9 +179,11 @@ test('MEM-E2E: Work Item → Session A → Recap → Resume → Session B, acros
   assert.equal(preview.memory.provider, 'pi-memory-md');
   assert.equal(preview.memory.status, 'available');
   assert.ok(preview.memory.selected >= 1, `релевантная память попала в контекст: ${JSON.stringify(preview.memory)}`);
-  assert.ok(preview.memory.estimatedTokens > 0);
-  const labels = preview.checklist.map(entry => entry.label);
-  assert.ok(labels.includes('Улучшение памяти TaskBridge'), `recap сессии — в чек-листе: ${labels}`);
+  assert.ok(preview.memory.estimatedTokens > 0);  const labels = preview.checklist.map(entry => entry.label);
+  const recapEntry = preview.checklist.find(entry => entry.detail === 'recap сессии');
+  assert.ok(recapEntry, `сессия с recap — в чек-листе: ${labels}`);
+  assert.equal(recapEntry.present, true);
+  assert.ok(labels.some(label => /ChatReducer/.test(label)), `сессия узнаваема по названию: ${labels}`);
 
   // --- MEM-E2E-05: бюджет не превышен ---------------------------------------
   assert.ok(preview.memory.estimatedTokens <= 2000, `память в бюджете: ${preview.memory.estimatedTokens}`);
@@ -173,11 +211,17 @@ test('MEM-E2E: Work Item → Session A → Recap → Resume → Session B, acros
   assert.match(brief, /HEAD: [0-9a-f]{7,}/);
   assert.match(brief, /Осталось|Сделано/);
   assert.ok(!brief.includes(TRANSCRIPT_MARKER), 'в брифе нет ни куска старого транскрипта');
+  // При этом первое сообщение сессии в брифе ЕСТЬ — это заголовок её блока
+  // (200 символов), а не пересказ разговора. Метка выше специально положена в
+  // середину диалога: середина и хвост в бриф не попадают.
+  assert.match(brief, /разбираю загрузку истории/, 'сессия названа своим же промптом');
   const events = await api(`/api/tasks/${sessionB.id}/events`);
   const eventsText = JSON.stringify(events);
   assert.ok(!eventsText.includes(TRANSCRIPT_MARKER), 'и в истории новой сессии его тоже нет');
   assert.ok(brief.length < 8000, `бриф короткий: ${brief.length}`);
-  // Relevantly: the two policies note what the memory holds is part of the brief.
+  // Слова сессии попали в бриф словами: TaskBridge этих проверок не запускал, и
+  // новая сессия видит это, а не «VERIFIED».
+  assert.match(brief, /\[со слов сессии\] PASS: emulator run/, `утверждение сессии помечено: ${brief.slice(0, 0)}`);
   assert.match(brief, /Память проекта/);
 
   // --- MEM-E2E-08: рестарт сохраняет связи, recap и обе сессии --------------
@@ -222,6 +266,7 @@ test('MEM-E2E-10: недоступная память не мешает Resume',
   const item = await post('/api/work-items', { projectId: project.id, title: 'Без памяти', goal: 'Продолжить', acceptanceCriteria: ['работает'] });
   const session = await post('/api/tasks', { projectId: project.id, prompt: 'начало' }, 202);
   await post(`/api/work-items/${item.id}/sessions`, { sessionId: session.id, relation: 'implementation' });
+  await waitForWorkspace(api, session.id);
 
   const preview = await api(`/api/work-items/${item.id}/resume`);
   assert.equal(preview.memory.status, 'unavailable');
@@ -343,4 +388,61 @@ test('recap: слово сессии остаётся reported, наблюден
   const derived = deriveRecap(task);
   assert.deepEqual(derived.recap.verification.map(entry => entry.status), ['passed', 'failed']);
   await manager.close();
+});
+
+test('MEM-E2E-11: оборвавшаяся сессия видна в Resume, а не забыта', { timeout: 120000 }, async t => {
+  const { dir: repo, parent } = await gitRepo('memory-e2e-crash');
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  t.after(async () => { await removeDir(parent); });
+  const api = fixture.api;
+  const headers = { 'content-type': 'application/json' };
+  const post = async (route, body, expect = 201) => {
+    const response = await fetch(fixture.base + route, { method: 'POST', headers, body: JSON.stringify(body) });
+    const text = await response.text();
+    assert.equal(response.status, expect, `POST ${route} → ${response.status}: ${text}`);
+    return JSON.parse(text);
+  };
+  const project = await api('/api/projects/local-register', { path: repo, name: 'Crash E2E' });
+  const item = await post('/api/work-items', { projectId: project.id, title: 'Оборвавшаяся работа', goal: 'Довести до конца' });
+  // `fault-crash`: стенд-ин Pi падает в середине turn'а — ровно тот случай, ради
+  // которого чекпоинт и нужен.
+  const session = await post('/api/tasks', { projectId: project.id, prompt: 'fault-crash: начали править историю' }, 202);
+  await post(`/api/work-items/${item.id}/sessions`, { sessionId: session.id, relation: 'implementation' });
+  const failed = await waitForStatus(api, session.id, ['FAILED', 'CANCELLED']);
+  assert.equal(failed.status, 'FAILED', `сессия должна была упасть: ${failed.status}`);
+
+  const preview = await api(`/api/work-items/${item.id}/resume`);
+  assert.equal(preview.interrupted.length, 1, `оборвавшаяся попытка видна: ${JSON.stringify(preview.interrupted)}`);
+  assert.equal(preview.interrupted[0].sessionId, session.id);
+  assert.equal(preview.interrupted[0].status, 'FAILED');
+  assert.ok(preview.warnings.some(text => text.includes('остановилась')), `предупреждение есть: ${JSON.stringify(preview.warnings)}`);
+  assert.equal(preview.checklist.find(entry => entry.label === 'Прерванные попытки').detail, '1');
+  // База чекпоинта записана инфраструктурой при старте сессии, до первого запроса
+  // к модели: по ней видно, с какого commit'а началась оборвавшаяся попытка.
+  assert.match(String(preview.interrupted[0].startHead), /^[0-9a-f]{7,40}$/, `чекпоинт старта есть: ${JSON.stringify(preview.interrupted[0])}`);
+  assert.match(String(preview.interrupted[0].startedAt), /^\d{4}-/, 'время старта записано');
+
+  const started = await post(`/api/work-items/${item.id}/resume`, {
+    strategy: 'fresh-worktree', memory: 'native', preview: preview.fingerprint,
+  });
+  const brief = started.task.prompt;
+  assert.match(brief, /## Прерванная попытка/);
+  assert.match(brief, /остановилась: FAILED/);
+  assert.match(brief, /Последнее событие:/);
+  assert.match(brief, /Работа началась: \d{4}-.* с HEAD [0-9a-f]{7,}/, 'бриф называет базу, с которой начала оборвавшаяся попытка');
+  assert.match(brief, /не считай её завершённой/);
+  // Живая сессия в этот блок не попадает: она ещё идёт, а не оборвалась.
+  const livePreview = await api(`/api/work-items/${item.id}/resume`);
+  assert.equal(livePreview.interrupted.length, 1, 'новая живая сессия не считается оборвавшейся');
+
+  // Чекпоинт — часть записи сессии, а не память процесса: он переживает рестарт.
+  await fixture.restart();
+  const afterRestart = await api(`/api/work-items/${item.id}/resume`);
+  // Сессий в блоке может стать больше: рестарт сервера обрывает и ту, что шла в
+  // этот момент. Ищем именно упавшую — у неё чекпоинт обязан уцелеть.
+  const restored = afterRestart.interrupted.find(attempt => attempt.sessionId === session.id);
+  assert.ok(restored, `упавшая сессия осталась в блоке: ${JSON.stringify(afterRestart.interrupted)}`);
+  assert.equal(restored.startHead, preview.interrupted[0].startHead, 'база чекпоинта пережила рестарт');
+  assert.equal(restored.status, 'FAILED');
 });

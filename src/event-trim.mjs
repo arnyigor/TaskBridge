@@ -1,3 +1,47 @@
+// Pi repeats whole turns inside its own frames: `agent_end` carries the
+// conversation so far (42 messages with base64 images weighed 16.3 MB in
+// data/taskbridge.db), `turn_end` repeats the answer, and a tool result comes
+// back as a `toolResult` message of its own. No client reads those copies: the
+// KMP client deletes exactly these fields in `lightenEvent` (pinned by
+// ChatEventLighteningTest) and the browser reducer never looks at them. They are
+// what makes a page unreadable, though: the byte budget in server.mjs always
+// keeps the NEWEST event, so one such frame goes out whole and a phone refuses a
+// body over 16 MB with «Ответ сервера слишком большой (16 МБ)» — the session then
+// never opens (2026-10-13). What clients DO read is kept: assistant text, tool
+// names and arguments, and a subagent's own result, which the progress line
+// shows.
+export function lightenEvent(event) {
+  const frame = event?.data?.pi;
+  if (!frame || typeof frame !== 'object') return event;
+  const without = (...keys) => {
+    const copy = { ...frame };
+    for (const key of keys) delete copy[key];
+    return copy;
+  };
+  let light;
+  switch (frame.type) {
+    // The whole turn again, message by message.
+    case 'agent_end': light = frame.messages ? without('messages') : frame; break;
+    case 'turn_end': light = (frame.message || frame.toolResults) ? without('message', 'toolResults') : frame; break;
+    // A tool result is echoed as a message of its own, content and all.
+    case 'message_start':
+    case 'message_end': light = frame.message?.role === 'toolResult' ? without('message') : frame; break;
+    // Read only for the subagent progress line; other results are megabytes.
+    case 'tool_execution_end': light = frame.toolName === 'subagent' || !('result' in frame) ? frame : without('result'); break;
+    case 'tool_execution_update': light = frame.toolName === 'subagent' || !('partialResult' in frame) ? frame : without('partialResult'); break;
+    // `write` puts the whole file into args.content; only the label is used.
+    case 'tool_execution_start': {
+      if (!frame.args || !('content' in frame.args)) { light = frame; break; }
+      const args = { ...frame.args };
+      delete args.content;
+      light = { ...frame, args };
+      break;
+    }
+    default: light = frame;
+  }
+  return light === frame ? event : { ...event, data: { ...event.data, pi: light } };
+}
+
 // message_end carries a message's full final content, so every
 // message_update (streaming delta) between a message_start and its closing
 // message_end is fully superseded once that pair is complete — replaying

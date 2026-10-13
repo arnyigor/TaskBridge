@@ -1,27 +1,29 @@
 package ru.arny.taskbridge.ui.processes
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.FlowRowScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -39,35 +41,55 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.GpuProcessEntry
 import ru.arny.taskbridge.core.api.ProcessEntry
+import ru.arny.taskbridge.core.api.ResourceSnapshot
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.theme.AppIcons
 import kotlin.math.roundToLong
 import kotlin.time.Clock
 import kotlin.time.ExperimentalTime
 
+private val NODE_NAMES = setOf("node", "nodejs")
+private val PYTHON_NAMES = setOf("python", "python3", "py")
+private val JAVA_NAMES = setOf("java", "javaw", "javac", "jshell")
+
+/** Фильтры списка: все, только GPU-процессы или одна runtime-группа. */
+private enum class ProcessFilter(val label: String) {
+    ALL("Все"), GPU("GPU"), NODE("Node"), PYTHON("Python"), JAVA("Java"),
+}
+
+private fun processBaseName(entry: ProcessEntry): String =
+    (entry.name ?: entry.commandLine?.trim()?.split("\\s+".toRegex())?.firstOrNull()?.substringAfterLast('/') ?: "")
+        .lowercase().removeSuffix(".exe")
+
+private fun matchesRuntime(entry: ProcessEntry, names: Set<String>): Boolean = processBaseName(entry) in names
+
 /**
- * Экран «Процессы»: кто на машине с сервером ест память, и кого можно прибить.
- * Ручной вход из «Настроек», как и «Локальные модели» — это действие оператора,
- * а не настройка. Бэкенд сам отказывается убивать системные процессы и дерево
- * TaskBridge; его refusal приходит готовым сообщением и показывается как есть.
- *
- * Список опрашивается сам, пока экран открыт: не для анимации, а потому что
- * после «Остановить» (и вообще со временем) он быстро устаревает.
+ * Экран «Ресурсы и очистка» (бывший «Процессы машины»): RAM/GPU-агрегат из
+ * /api/system/resources, компактный виртуализированный список процессов
+ * (LazyColumn — обязательно при 300–500+ процессах), поиск, фильтры,
+ * мультивыбор и групповые действия. Сервер сам отказывается убивать защищённые
+ * процессы и дерево TaskBridge; его refusal показывается как есть.
  */
 @Composable
 fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
     var processes by remember { mutableStateOf<List<ProcessEntry>?>(null) }
+    var resources by remember { mutableStateOf<ResourceSnapshot?>(null) }
+    var gpuProcesses by remember { mutableStateOf<List<GpuProcessEntry>?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
+    var resultNote by remember { mutableStateOf<String?>(null) }
     var refreshing by remember { mutableStateOf(false) }
     var pendingKill by remember { mutableStateOf<ProcessEntry?>(null) }
-    var killingPid by remember { mutableStateOf<Long?>(null) }
-    var gpuProcesses by remember { mutableStateOf<List<GpuProcessEntry>?>(null) }
     var pendingGroup by remember { mutableStateOf<String?>(null) }
+    var pendingBatch by remember { mutableStateOf<Boolean>(false) }
+    var killingPid by remember { mutableStateOf<Long?>(null) }
+    var query by remember { mutableStateOf("") }
+    var filter by remember { mutableStateOf(ProcessFilter.ALL) }
+    var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var expandedPid by remember { mutableStateOf<Long?>(null) }
     val scope = rememberCoroutineScope()
 
     fun refresh(fresh: Boolean) {
@@ -76,27 +98,48 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
             runCatching { connection.api.processes(fresh) }
                 .onSuccess { processes = it; error = null }
                 .onFailure { error = it.message ?: "Не удалось получить список процессов" }
+            runCatching { connection.api.systemResources() }.onSuccess { resources = it }
+            runCatching { connection.api.gpuProcesses() }.onSuccess { gpuProcesses = it }
             refreshing = false
         }
     }
 
-    LaunchedEffect(Unit) {
-        refresh(false)
-        runCatching { connection.api.gpuProcesses() }.onSuccess { gpuProcesses = it }
-    }
+    LaunchedEffect(Unit) { refresh(false) }
     // Живой список: без опроса после kill пришлось бы жать «Обновить» руками.
     LaunchedEffect(Unit) {
         while (true) {
-            delay(10_000)
+            kotlinx.coroutines.delay(10_000)
             runCatching { connection.api.processes() }.onSuccess { processes = it }
         }
     }
+
+    val gpuPids = gpuProcesses?.map { it.pid }?.toSet()
+    val list = processes
+    val visible = remember(list, query, filter, gpuPids) {
+        val base = list.orEmpty()
+            .filter { entry ->
+                when (filter) {
+                    ProcessFilter.ALL -> true
+                    ProcessFilter.GPU -> gpuPids?.contains(entry.pid) == true
+                    ProcessFilter.NODE -> matchesRuntime(entry, NODE_NAMES)
+                    ProcessFilter.PYTHON -> matchesRuntime(entry, PYTHON_NAMES)
+                    ProcessFilter.JAVA -> matchesRuntime(entry, JAVA_NAMES)
+                }
+            }
+            .let { if (query.isBlank()) it else it.filter { entry ->
+                (entry.name ?: "").contains(query, ignoreCase = true) ||
+                    (entry.commandLine ?: "").contains(query, ignoreCase = true) ||
+                    entry.pid.toString() == query.trim()
+            } }
+        sortedProcesses(base)
+    }
+    val selectedEntries = visible.filter { it.pid in selected }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") } },
-                title = { Text("Процессы машины") },
+                title = { Text("Ресурсы и очистка") },
                 actions = {
                     IconButton(onClick = { refresh(true) }, enabled = !refreshing) {
                         if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
@@ -106,45 +149,67 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
             )
         },
     ) { padding ->
-        Column(
-            Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(bottom = 24.dp),
-        ) {
-            Column(Modifier.widthIn(max = 720.dp).padding(horizontal = 16.dp)) {
+        Column(Modifier.padding(padding).fillMaxSize()) {
+            Column(Modifier.widthIn(max = 720.dp).fillMaxSize().padding(horizontal = 16.dp)) {
                 error?.let { Banner(it, AppIcons.Alert, MaterialTheme.colorScheme.error) }
-                val list = processes
+                resultNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                ResourceOverview(resources)
+                FlowRow2 {
+                    OutlinedButton(onClick = { pendingGroup = "node" }) { Text("Завершить все Node") }
+                    OutlinedButton(onClick = { pendingGroup = "python" }) { Text("Завершить все Python") }
+                    OutlinedButton(onClick = { pendingGroup = "java" }) { Text("Завершить все Java") }
+                }
+                if (selected.isNotEmpty()) {
+                    Text(
+                        "Выбрано: ${selected.size}" + if (selectedEntries.size < selected.size) " (в фильтре видно ${selectedEntries.size})" else "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                }
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    singleLine = true,
+                    placeholder = { Text("Поиск по имени, команде, pid…") },
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                )
+                FlowRow2(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (candidate in ProcessFilter.entries) {
+                        FilterChip(
+                            selected = filter == candidate,
+                            onClick = { filter = candidate },
+                            label = { Text(candidate.label) },
+                        )
+                    }
+                }
                 when {
-                    list == null && error == null -> Text("Загрузка…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    list != null && list.isEmpty() -> Text("ОС не вернула ни одного процесса.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    list != null -> {
-                        val known = list.count { it.memoryBytes != null }
-                        val total = list.sumOf { it.memoryBytes ?: 0L }
-                        Text(
-                            "Процессов: ${list.size} · память учтённых: ${processMemoryLabel(total)}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 8.dp),
-                        )
-                        Text(
-                            gpuProcesses?.let { if (it.isEmpty()) "GPU-память: свободна" else "GPU-процессов: ${it.size} · ${it.sumOf { p -> p.memoryMb ?: 0L }} МБ" }
-                                ?: "GPU: nvidia-smi недоступен",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(bottom = 8.dp),
-                        )
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { pendingGroup = "node" }) { Text("Завершить все Node") }
-                            OutlinedButton(onClick = { pendingGroup = "python" }) { Text("Завершить все Python") }
-                            OutlinedButton(onClick = { pendingGroup = "java" }) { Text("Завершить все Java") }
+                    list == null && error == null -> Text("Загрузка…", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(8.dp))
+                    list != null && list.isEmpty() -> Text("ОС не вернула ни одного процесса.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(8.dp))
+                    list != null -> LazyColumn(Modifier.fillMaxSize().padding(top = 4.dp)) {
+                        item(key = "selection-actions") {
+                            if (selectedEntries.isNotEmpty()) {
+                                Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.End) {
+                                    OutlinedButton(onClick = { pendingBatch = true }, enabled = killingPid == null) {
+                                        Text("Остановить выбранные (${selectedEntries.size})", color = MaterialTheme.colorScheme.error)
+                                    }
+                                    TextButton(onClick = { selected = emptySet() }) { Text("Снять") }
+                                }
+                            }
                         }
-                        for (entry in sortedProcesses(list)) ProcessCard(
-                            entry, killingPid,
-                            onKill = { pendingKill = entry },
-                        )
-                        if (known == 0) Text(
-                            "Память процессов ОС не сообщила — убийство по-прежнему работает.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        items(visible, key = { it.pid }) { entry ->
+                            ProcessRow(
+                                entry = entry,
+                                expanded = expandedPid == entry.pid,
+                                selected = entry.pid in selected,
+                                killing = killingPid == entry.pid,
+                                onClick = { expandedPid = if (expandedPid == entry.pid) null else entry.pid },
+                                onToggleSelect = {
+                                    selected = if (entry.pid in selected) selected - entry.pid else selected + entry.pid
+                                },
+                                onKill = { pendingKill = entry },
+                            )
+                        }
                     }
                 }
             }
@@ -156,12 +221,40 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { pendingGroup = null },
             title = { Text("Освободить ресурсы: $runtimeLabel?") },
-            text = { Text("Будут принудительно завершены все видимые процессы $runtimeLabel, кроме защищённых процессов TaskBridge и системы.") },
+            text = { Text("Будут принудительно завершены все видимые процессы $runtimeLabel, кроме защищённых процессов TaskBridge и системы (включая их потомков).") },
             confirmButton = { TextButton(onClick = {
                 pendingGroup = null
-                scope.launch { runCatching { connection.api.killProcessGroup(runtime) }.onFailure { error = it.message }; refresh(true); gpuProcesses = runCatching { connection.api.gpuProcesses() }.getOrNull() }
+                scope.launch { runCatching { connection.api.killProcessGroup(runtime) }.onFailure { error = it.message }; refresh(true) }
             }) { Text("Завершить", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { pendingGroup = null }) { Text("Отмена") } },
+        )
+    }
+
+    if (pendingBatch) {
+        AlertDialog(
+            onDismissRequest = { pendingBatch = false },
+            title = { Text("Остановить ${selectedEntries.size} процессов?") },
+            text = { Text("Каждый выбранный процесс будет завершён принудительно вместе с потомками. Сервер пропустит защищённые и сообщит об отказах по каждому процессу.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingBatch = false
+                    val targets = selectedEntries.toList()
+                    scope.launch {
+                        var stopped = 0
+                        val failures = mutableListOf<String>()
+                        for (target in targets) {
+                            killingPid = target.pid
+                            runCatching { connection.api.killProcess(target.pid, target.name ?: "") }
+                                .onSuccess { stopped++; selected = selected - target.pid }
+                                .onFailure { failures.add("${target.name ?: target.pid}: ${it.message}") }
+                        }
+                        killingPid = null
+                        resultNote = "Остановлено: $stopped" + if (failures.isEmpty()) "" else " · отказов: ${failures.size} — ${failures.take(3).joinToString("; ")}"
+                        refresh(true)
+                    }
+                }) { Text("Остановить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { pendingBatch = false }) { Text("Отмена") } },
         )
     }
 
@@ -172,7 +265,7 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
             text = {
                 Text(
                     "Процесс и его дочерние будут завершены принудительно (taskkill /T /F). " +
-                        "Несохранённая работа в нём будет потеряна.",
+                        "Несохранённая работа в них будет потеряна.",
                 )
             },
             confirmButton = {
@@ -194,49 +287,110 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
     }
 }
 
+/** Верхний блок: RAM из ОС и GPU-агрегат nvidia-smi; null-поля — «неизвестно», не 0. */
 @Composable
-private fun ProcessCard(entry: ProcessEntry, killingPid: Long?, onKill: () -> Unit) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .clip(RoundedCornerShape(14.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Row {
+private fun ResourceOverview(snapshot: ResourceSnapshot?) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+        val ram = snapshot?.ram
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("RAM", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             Text(
-                entry.name ?: "(без имени)",
-                style = MaterialTheme.typography.bodyLarge,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                processMemoryLabel(entry.memoryBytes),
-                style = MaterialTheme.typography.bodyMedium,
+                ram?.let {
+                    val used = it.usedBytes; val total = it.totalBytes; val free = it.freeBytes
+                    "${processMemoryLabel(used)} / ${processMemoryLabel(total)} · доступно ${processMemoryLabel(free)}"
+                } ?: "неизвестно",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Text(
-            processSubLabel(entry),
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-        FlowRow(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-        ) {
-            OutlinedButton(onClick = onKill, enabled = killingPid == null || killingPid == entry.pid) {
-                if (killingPid == entry.pid) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                } else {
-                    Text("Остановить")
+        val gpu = snapshot?.gpu
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("GPU", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text(
+                when {
+                    gpu == null -> "nvidia-smi недоступен"
+                    gpu.gpus.isEmpty() -> "GPU не найдены"
+                    else -> gpu.gpus.joinToString(" · ") { card ->
+                        "${card.name ?: "GPU"}: ${processMemoryLabel(card.vramUsedMb?.times(1024 * 1024))} / " +
+                            "${processMemoryLabel(card.vramTotalMb?.times(1024 * 1024))}" +
+                            (card.utilizationPercent?.let { " · $it%" } ?: "")
+                    }
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FlowRow2(horizontalArrangement: Arrangement.Horizontal = Arrangement.spacedBy(8.dp), content: @Composable () -> Unit) {
+    androidx.compose.foundation.layout.FlowRow(horizontalArrangement = horizontalArrangement) { content() }
+}
+
+/**
+ * Компактная строка процесса: чекбокс выбора, имя, память, pid; по нажатию —
+ * раскрываются подробности (командная строка, родитель, время старта).
+ */
+@Composable
+private fun ProcessRow(
+    entry: ProcessEntry,
+    expanded: Boolean,
+    selected: Boolean,
+    killing: Boolean,
+    onClick: () -> Unit,
+    onToggleSelect: () -> Unit,
+    onKill: () -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .padding(bottom = 4.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) MaterialTheme.colorScheme.surfaceContainerHigh else MaterialTheme.colorScheme.surfaceContainerLow)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(checked = selected, onCheckedChange = { onToggleSelect() }, modifier = Modifier.size(32.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    entry.name ?: "(без имени)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (expanded) {
+                    Text(
+                        buildString {
+                            append("pid ${entry.pid}")
+                            entry.parentPid?.let { append(" · родитель $it") }
+                            entry.startedAt?.let { append(" · старт ${processAgeLabel(it)}") }
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    entry.commandLine?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                    }
                 }
+            }
+            Text(
+                processMemoryLabel(entry.memoryBytes),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (killing) {
+                Spacer(Modifier.size(8.dp))
+                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+            }
+        }
+        if (expanded) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                OutlinedButton(onClick = onKill, enabled = !killing) { Text("Остановить", color = MaterialTheme.colorScheme.error) }
             }
         }
     }
@@ -253,7 +407,7 @@ internal fun processMemoryLabel(bytes: Long?): String {
     }
 }
 
-/** Подпись карточки: pid, возраст процесса и командная строка — что известно. */
+/** Подпись: pid, возраст процесса и командная строка — что известно. */
 internal fun processSubLabel(entry: ProcessEntry, nowMs: Long? = null): String {
     val parts = mutableListOf("pid ${entry.pid}")
     entry.startedAt?.let { parts.add("старт ${processAgeLabel(it, nowMs)}") }

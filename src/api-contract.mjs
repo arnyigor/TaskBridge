@@ -38,6 +38,10 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/projects', summary: 'registered projects' },
   { method: 'GET', path: '/api/projects/overview', summary: 'the dashboard: every project with pinned/archived, session counts (sessions, working, needsAttention), last activity, and the count of sessions whose project is no longer registered' },
   { method: 'GET', path: '/api/projects/:id/memory', summary: 'read-only project memory inspector for pi-memory-md (?q searches entries); reports provider status, injected index size, categories and SAVE_DISABLED write mode' },
+  { method: 'GET', path: '/api/projects/:id/memory/proposals', summary: 'memory suggestions waiting for a human, with counts; they live in an isolated .memory-proposals/ buffer and are never injected' },
+  { method: 'POST', path: '/api/projects/:id/memory/proposals', summary: 'propose durable project knowledge: {text, category?, reason?, paths?, sourceSessionId?, sourceWorkItemId?}; nothing is written to core/' },
+  { method: 'POST', path: '/api/projects/:id/memory/proposals/:proposalId/accept', summary: 'the only way into pi-memory-md: runs the deterministic checks (non-empty, known category, no duplicate, declared paths exist, no secret shapes) and refuses with reasons' },
+  { method: 'POST', path: '/api/projects/:id/memory/proposals/:proposalId/reject', summary: 'refuse a suggestion ({reason?}); the file stays as the record of what was refused and why' },
   { method: 'GET', path: '/api/projects/:id/sessions', summary: "one project's sessions, filtered server-side (?q, ?status, ?sort=recent|created|title|size, ?limit, ?offset); an unregistered id answers `registered: false` with its sessions instead of 404" },
   { method: 'PATCH', path: '/api/projects/:id/preferences', summary: 'pin or archive a project ({"pinned": bool, "archived": bool}; an absent field keeps its value). Stored in SQLite, so it survives a restart' },
   { method: 'GET', path: '/api/work-items', summary: 'work items (?projectId, ?status, ?includeClosed=0), newest first' },
@@ -162,6 +166,10 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/processes', summary: 'processes of the server machine (pid, name, memoryBytes, startedAt, commandLine); ?fresh=1 skips the 5 s cache' },
   { method: 'POST', path: '/api/processes/kill', summary: 'force-kill one process by pid + name (name must match the list, system and TaskBridge processes are refused)' },
   { method: 'POST', path: '/api/processes/kill-group', summary: 'force-kill visible node, python or java processes; body {runtime:"node"|"python"|"java"}; protected processes are skipped and failures are reported' },
+  { method: 'GET', path: '/api/system/resources', summary: 'aggregate resource snapshot: system RAM (total/free/used bytes) and GPU summary (name, VRAM total/used/free MB, utilization); null fields mean unknown, never zero' },
+  { method: 'POST', path: '/api/system/cleanup/preview', summary: 'build a cleanup plan (objective "ram"|"gpu", optional pids/limit/targetFreeRamBytes): candidates, protected skipped, warnings, estimatedRamBytes; planId expires in 60 s' },
+  { method: 'POST', path: '/api/system/cleanup/execute', summary: 'execute a confirmed plan: body {planId, commandId, confirm:true}; local-only; per-process statuses (STOPPED/ALREADY_EXITED/PROTECTED/IDENTITY_CHANGED/FAILED), RAM before/after; repeat commandId returns the same result' },
+  { method: 'GET', path: '/api/system/cleanup/history', summary: 'recent cleanup operations (counts only, no command lines)' },
 
   // --- model library / hugging face -----------------------------------------
   { method: 'GET', path: '/api/hf/search?q=', summary: 'search Hugging Face model repositories (GGUF by default)' },

@@ -7,12 +7,28 @@ export const TEXT_TAIL = 64 * 1024;
 export const THINKING_TAIL = 16 * 1024;
 
 const marker = length => `…[первые ${length} символов опущены]…\n`;
+const headMarker = length => `\n…[остальные ${length} символов опущены]…`;
 
 export function tailText(text, max) {
   const value = typeof text === 'string' ? text : '';
   if (value.length <= max) return value;
   const keep = Math.max(0, max - 40);
   return marker(value.length - keep) + value.slice(-keep);
+}
+
+/**
+ * The other end of the same idea: a LIST response ships every session at once
+ * (`GET /api/tasks` — the first call the phone makes), so what a list field holds
+ * has to be a preview of it, not the whole thing. The clients read a list field
+ * for exactly that: a title line out of `prompt`, the last line of the answer for
+ * a notification. The session itself, read one at a time from /api/tasks/:id,
+ * stays whole.
+ */
+export function headText(text, max) {
+  const value = typeof text === 'string' ? text : '';
+  if (value.length <= max) return value;
+  const keep = Math.max(0, max - 40);
+  return value.slice(0, keep) + headMarker(value.length - keep);
 }
 
 export function appendTail(current, delta, max) {

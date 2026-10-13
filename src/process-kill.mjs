@@ -5,7 +5,7 @@
 // antivirus and TaskBridge's own server tree (for that there is /api/server/restart).
 
 import { execFile } from 'node:child_process';
-import { listProcesses } from './process-info.mjs';
+import { listProcesses, descendantsOf } from './process-info.mjs';
 
 const PROTECTED_NAMES = new Set([
   'system', 'registry', 'secure system', 'memcompression', 'idle',
@@ -22,6 +22,23 @@ const PROTECTED_COMMAND_PARTS = ['server.mjs', 'proxy.mjs', 'start-lan.mjs', 're
 
 function baseName(name) {
   return String(name || '').toLowerCase().replace(/\.exe$/, '');
+}
+
+/** Would killing this process hit something TaskBridge must never stop? Exported for tests. */
+export function findProtection(target, selfPid = process.pid) {
+  if (Number(target.pid) === selfPid) {
+    return 'Сервер не может остановить сам себя через эту панель — используйте «Перезагрузить сервер».';
+  }
+  const firstToken = String(target.commandLine || '').trim().split(/\s+/)[0] || '';
+  const actualName = baseName(target.name || firstToken.split(/[\/]/).pop());
+  if (PROTECTED_NAMES.has(actualName)) {
+    return `«${target.name}» — системный процесс, панель его не убивает.`;
+  }
+  const commandLine = String(target.commandLine || '');
+  if (PROTECTED_COMMAND_PARTS.some(part => commandLine.includes(part))) {
+    return 'Это процесс самого TaskBridge — для него есть «Перезагрузить сервер», а не kill.';
+  }
+  return null;
 }
 
 function promisifiedExec(file, args) {
@@ -58,17 +75,20 @@ export async function killProcess({ pid, name } = {}) {
   if (!target) {
     throw Object.assign(new Error(`Процесс ${pidNum} уже не существует (или недоступен списку).`), { code: 'NOT_FOUND' });
   }
+  // taskkill /T kills the whole tree, so EVERY descendant is checked with the
+  // same rules as the target (PROC-02): one protected child refuses the tree kill.
+  const tree = [target, ...descendantsOf(pidNum, list)];
+  for (const item of tree) {
+    const reason = findProtection(item);
+    if (reason) {
+      const scope = item.pid === pidNum ? 'сам процесс' : `его потомок pid ${item.pid}`;
+      throw Object.assign(new Error(`Отказался: ${scope} защищён — ${reason}`), { code: 'PROTECTED', protectedPid: item.pid });
+    }
+  }
   const firstToken = String(target.commandLine || '').trim().split(/\s+/)[0] || '';
   const actualName = baseName(target.name || firstToken.split(/[\/]/).pop());
   if (actualName !== baseName(name)) {
     throw Object.assign(new Error(`pid ${pidNum} теперь принадлежит «${target.name || '?'}», а не «${name}» — отказался убивать.`), { code: 'NAME_MISMATCH' });
-  }
-  if (PROTECTED_NAMES.has(actualName)) {
-    throw Object.assign(new Error(`«${target.name}» — системный процесс, панель его не убивает.`), { code: 'PROTECTED' });
-  }
-  const commandLine = String(target.commandLine || '');
-  if (PROTECTED_COMMAND_PARTS.some(part => commandLine.includes(part))) {
-    throw Object.assign(new Error('Это процесс самого TaskBridge — для него есть «Перезагрузить сервер», а не kill.'), { code: 'PROTECTED' });
   }
   if (process.platform === 'win32') {
     await promisifiedExec('taskkill.exe', ['/PID', String(pidNum), '/T', '/F']);

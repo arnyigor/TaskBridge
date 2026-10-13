@@ -42,6 +42,25 @@ export function renderResumePrompt(context, { memoryNote = null } = {}) {
   lines.push('');
 
   const sessions = context.previousSessions.filter(session => session.available !== false).slice(0, MAX_SESSIONS);
+  lines.push('## Прерванная попытка');
+  const interrupted = context.interrupted ?? [];
+  if (!interrupted.length) {
+    lines.push('— незавершённых попыток по этой задаче нет');
+  } else {
+    for (const attempt of interrupted) {
+      lines.push(`Сессия ${attempt.title || attempt.sessionId} остановилась: ${attempt.status}${attempt.error ? ` — ${attempt.error}` : ''}`);
+      if (attempt.lastEvent?.message) lines.push(`Последнее событие: ${attempt.lastEvent.type || ''} «${attempt.lastEvent.message}»${attempt.lastEvent.at ? ` (${attempt.lastEvent.at})` : ''}`);
+      if (attempt.startedAt) lines.push(`Работа началась: ${attempt.startedAt}${attempt.startHead ? ` с HEAD ${attempt.startHead}` : ''}`);
+      if (attempt.workspaceMissing) lines.push('Рабочая папка этой попытки удалена: её состояние взять неоткуда');
+      else if (attempt.workspacePath) lines.push(`Рабочая папка: ${attempt.workspacePath}${attempt.head ? ` (HEAD сейчас ${attempt.head})` : ''}`);
+      if (attempt.commitsSince?.length) lines.push(`За это время появились коммиты:\n${bulletList(attempt.commitsSince)}`);
+      if (attempt.changedFiles.length) lines.push(`Незакоммиченные изменения там: ${attempt.changedFiles.slice(0, MAX_FILES).join(', ')}${attempt.truncated ? ' (список неполный)' : ''}`);
+    }
+    lines.push('');
+    lines.push('Начни с того, что уже сделано этой попыткой: проверь состояние её рабочей папки, не переделывай её работу и не считай её завершённой.');
+  }
+  lines.push('');
+
   lines.push('## Что уже сделано в предыдущих сессиях');
   if (!sessions.length) {
     lines.push('— предыдущих сессий нет: это начало работы');

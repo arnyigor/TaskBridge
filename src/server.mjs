@@ -10,14 +10,14 @@ import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
 import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
-import { TaskManager } from './task-manager.mjs';
+import { TaskManager, briefTask } from './task-manager.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
 import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
 import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
 import { ensureTlsCert } from './tls.mjs';
-import { trimStreamingDeltas } from './event-trim.mjs';
+import { trimStreamingDeltas, lightenEvent } from './event-trim.mjs';
 import { windowByTurns, capEventsByBytes } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
@@ -32,7 +32,8 @@ import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { listQuickActions } from './pi-quick-actions.mjs';
-import { listProcesses, listGpuProcesses } from './process-info.mjs';
+import { listProcesses, listGpuProcesses, gpuSummary, systemRam } from './process-info.mjs';
+import { createCleanupPreview, executeCleanup, getCleanupResultByCommand, cleanupHistory } from './cleanup.mjs';
 import { killProcess, killProcessesByRuntime } from './process-kill.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
 import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenAiCodexStatus } from './provider-status.mjs';
@@ -234,6 +235,10 @@ const maxEventsPerRequest = Math.min(Math.max(Number(config.server?.maxEventsPer
 // turn can be tens of megabytes; sending that freezes the browser while it
 // parses. Overridable with server.maxHistoryMb.
 const maxHistoryBytes = Math.min(Math.max(Number(config.server?.maxHistoryMb || 6) * 1024 * 1024, 256 * 1024), 64 * 1024 * 1024);
+// What one history page weighs on the wire (+1 per event, the newline the reader
+// splits on): the same arithmetic capEventsByBytes uses, so "the budget could not
+// fit this page" is measured the same way as "the budget fits this page".
+const pageBytes = (events) => events.reduce((sum, event) => sum + Buffer.byteLength(JSON.stringify(event), 'utf8') + 1, 0);
 
 function addSseClient(taskId, res, cursor = 0) {
   const client = { res, cursor, pending: [], replaying: true };
@@ -324,7 +329,12 @@ function errorJson(res, status, error) {
     code: error.code || 'INTERNAL_ERROR',
     // A few refusals are informative: which fields of the preview no longer match
     // (MR-04) — «context changed» alone tells the operator nothing to do.
-    ...(Array.isArray(error.changes) ? { changes: error.changes } : {})
+    ...(Array.isArray(error.changes) ? { changes: error.changes } : {}),
+    // Which deterministic checks refused a memory suggestion (MEM-08): «нельзя»
+    // без перечня причин бесполезно — оператору нужно знать, что именно исправить.
+    ...(Array.isArray(error.problems) ? { problems: error.problems } : {}),
+    // Which process in the tree triggered the refusal (PROC-02).
+    ...(Number.isInteger(error.protectedPid) ? { protectedPid: error.protectedPid } : {})
   });
 }
 
@@ -1062,6 +1072,38 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && pathname === '/api/processes/gpu') {
       return json(res, 200, { processes: await listGpuProcesses() });
     }
+    if (req.method === 'GET' && pathname === '/api/system/resources') {
+      // PROC-01: aggregated resource snapshot. gpus is null when nvidia-smi is
+      // unavailable; null VRAM fields mean "unknown", never zero.
+      return json(res, 200, { ram: systemRam(), gpu: await gpuSummary() });
+    }
+    if (req.method === 'GET' && /^\/api\/system\/cleanup\/history$/.test(pathname)) {
+      return json(res, 200, { history: cleanupHistory() });
+    }
+    if (req.method === 'GET' && /^\/api\/system\/cleanup\/[^/]+$/.test(pathname)) {
+      const id = pathname.split('/').pop();
+      const result = getCleanupResultByCommand(id);
+      if (!result) return errorJson(res, 404, Object.assign(new Error('Результат с таким commandId не найден.'), { code: 'NOT_FOUND' }));
+      return json(res, 200, result);
+    }
+    if (req.method === 'POST' && pathname === '/api/system/cleanup/preview') {
+      const body = await readJson(req).catch(() => ({}));
+      return json(res, 200, await createCleanupPreview({
+        objective: body.objective === 'gpu' ? 'gpu' : 'ram',
+        pids: Array.isArray(body.pids) ? body.pids : null,
+        limit: Number.isInteger(body.limit) ? body.limit : 30,
+        targetFreeRamBytes: Number.isFinite(body.targetFreeRamBytes) ? body.targetFreeRamBytes : null,
+      }));
+    }
+    if (req.method === 'POST' && pathname === '/api/system/cleanup/execute') {
+      // PROC-07: batch killing is forbidden via a public relay by default —
+      // only a device on the server machine itself may execute a plan.
+      if (access.enabled && !access.local(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Массовая остановка процессов доступна только на компьютере сервера.'), { code: 'FORBIDDEN' }));
+      }
+      const body = await readJson(req);
+      return json(res, 200, await executeCleanup(body));
+    }
     if (req.method === 'POST' && pathname === '/api/processes/kill') {
       const body = await readJson(req).catch(() => ({}));
       // Пустое тело от contract-пробы обязано уйти в ошибку ввода, а не в kill:
@@ -1268,6 +1310,29 @@ async function handleRequest(req, res) {
       return json(res, 200, await manager.projectMemory(decodeURIComponent(projectMemoryRoute[1]), {
         query: url.searchParams.get('q'),
       }));
+    }
+
+    // Memory Suggestions (MEM-08): предложение живёт в изолированном буфере и
+    // становится знанием только после явного принятия — методом POST, а не
+    // побочным эффектом чтения.
+    const memoryProposalsRoute = pathname.match(/^\/api\/projects\/([^/]+)\/memory\/proposals(?:\/([^/]+)\/(accept|reject))?$/);
+    if (memoryProposalsRoute) {
+      const projectId = decodeURIComponent(memoryProposalsRoute[1]);
+      const proposalId = memoryProposalsRoute[2] ? decodeURIComponent(memoryProposalsRoute[2]) : null;
+      const action = memoryProposalsRoute[3] ?? null;
+      if (req.method === 'GET' && !proposalId) {
+        return json(res, 200, await manager.listMemoryProposals(projectId));
+      }
+      if (req.method === 'POST' && !proposalId) {
+        return json(res, 201, await manager.createMemoryProposal(projectId, await readJson(req)));
+      }
+      if (req.method === 'POST' && action === 'accept') {
+        return json(res, 200, await manager.acceptMemoryProposal(projectId, proposalId));
+      }
+      if (req.method === 'POST' && action === 'reject') {
+        const body = await readJson(req).catch(() => ({}));
+        return json(res, 200, await manager.rejectMemoryProposal(projectId, proposalId, { reason: body?.reason ?? null }));
+      }
     }
 
     // Work Items (MR-02): the semantic state of the work — what we are trying to
@@ -1525,7 +1590,11 @@ async function handleRequest(req, res) {
     if (req.method === 'POST' && pathname === '/api/tasks/from-session') return json(res, 201, await manager.importSession(await readJson(req)));
 
     if (req.method === 'GET' && pathname === '/api/tasks') {
-      return json(res, 200, manager.listTasks());
+      // The list ships every session at once and is the phone's first call: an
+      // unbounded per-session field made the body 16.96 MB on 2026-10-13, over
+      // the client's 16 MB ceiling, and the sessions screen refused to load
+      // (see briefTask). The session itself stays whole at /api/tasks/:id.
+      return json(res, 200, manager.listTasks().map(briefTask));
     }
 
     if (req.method === 'POST' && pathname === '/api/tasks') {
@@ -1625,7 +1694,17 @@ async function handleRequest(req, res) {
         // the chat when switching to a very long session. A page cut by size can
         // open mid-turn (no USER_MESSAGE of its own); the client renders what it
         // gets as a partial turn instead of dropping it.
-        const bounded = capEventsByBytes(window.events, maxHistoryBytes);
+        // The cap keeps the NEWEST event whatever its size — a page has to hold
+        // something — so one oversized frame made the response unreadable for a
+        // phone: a body over 16 MB is refused with «Ответ сервера слишком большой
+        // (16 МБ)» and the session never opened (an `agent_end` frame repeating
+        // the whole thread with its base64 images reached 16.3 MB in the real
+        // database, 2026-10-13). Every client drops exactly those payloads before
+        // rendering (event-trim.mjs), so a window that the budget cannot fit is
+        // lightened first: the turn then fits the page whole instead of arriving
+        // as the single frame that could not be cut.
+        let bounded = capEventsByBytes(window.events, maxHistoryBytes);
+        if (pageBytes(bounded) > maxHistoryBytes) bounded = capEventsByBytes(window.events.map(lightenEvent), maxHistoryBytes);
         const cut = bounded.length !== window.events.length;
         return json(res, 200, { events: bounded, reachedStart: window.reachedStart && !hasOlder && !cut });
       }

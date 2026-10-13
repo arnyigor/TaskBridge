@@ -45,6 +45,10 @@ export const CLOUD_ALLOWED = [
   { method: 'GET', path: '/api/projects' },
   { method: 'GET', path: '/api/projects/overview' },
   { method: 'GET', path: '/api/projects/:id/memory' },
+  { method: 'GET', path: '/api/projects/:id/memory/proposals' },
+  { method: 'POST', path: '/api/projects/:id/memory/proposals' },
+  { method: 'POST', path: '/api/projects/:id/memory/proposals/:proposalId/accept' },
+  { method: 'POST', path: '/api/projects/:id/memory/proposals/:proposalId/reject' },
   { method: 'GET', path: '/api/projects/:id/sessions' },
   { method: 'PATCH', path: '/api/projects/:id/preferences' },
   // Work items (MR-02/MR-03) and the resume engine (MR-04/MR-05): the same rule —

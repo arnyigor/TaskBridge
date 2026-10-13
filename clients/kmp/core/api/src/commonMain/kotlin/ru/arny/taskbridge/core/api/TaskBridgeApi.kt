@@ -133,6 +133,10 @@ class TaskBridgeApi(
         send(HttpMethod.Post, "/api/processes/kill-group", buildJsonObject { put("runtime", runtime) })
     }
 
+    /** Агрегированные ресурсы машины (RAM ОС + GPU-агрегат nvidia-smi), см. PROC-01. */
+    suspend fun systemResources(): ResourceSnapshot =
+        get("/api/system/resources", ResourceSnapshot.serializer())
+
     /**
      * Exchanges the pairing code shown on the PC for this device's token and
      * keeps it in [connection]. The token lives until the PC revokes the device;
@@ -184,6 +188,18 @@ class TaskBridgeApi(
     /** Every registered project with its session counts and pinned/archived. */
     suspend fun projectOverview(): ProjectOverview =
         get("/api/projects/overview", ProjectOverview.serializer())
+
+    /**
+     * Инспектор памяти проекта (MR-10): что проект отдаёт агенту прямо сейчас.
+     *
+     * [query] == null — обзор (без списка записей), пустая строка — поиск: поле только
+     * что очистили, и сервер отвечает первыми записями, а не другой формой ответа.
+     * Инспектор только читает: `write` в ответе всегда `SAVE_DISABLED`.
+     */
+    suspend fun projectMemory(projectId: String, query: String? = null): ProjectMemoryOverview {
+        val suffix = query?.let { "?q=${it.encodeURLParameter()}" } ?: ""
+        return get("/api/projects/${projectId.encodeURLPathPart()}/memory$suffix", ProjectMemoryOverview.serializer())
+    }
 
     /**
      * Sessions of one project, filtered and paged by the server: a phone must not

@@ -188,6 +188,12 @@ test('the cloud allowlist is a method+path match, and traversal is never allowed
   // быть транспортабельна через Relay»). A path with two ids included.
   assert.equal(isCloudRequestAllowed('GET', '/api/projects/overview'), true);
   assert.equal(isCloudRequestAllowed('GET', '/api/projects/fixture/memory?q=worktree'), true);
+  // Предложения памяти (MEM-08): с телефона видно очередь и можно принять решение.
+  // Записи в саму память как отдельного маршрута нет — только accept предложения.
+  assert.equal(isCloudRequestAllowed('GET', '/api/projects/fixture/memory/proposals'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/projects/fixture/memory/proposals'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/projects/fixture/memory/proposals/mp_1/accept'), true);
+  assert.equal(isCloudRequestAllowed('POST', '/api/projects/fixture/memory/proposals/mp_1/reject'), true);
   assert.equal(isCloudRequestAllowed('GET', '/api/projects/fixture/sessions?limit=20'), true);
   assert.equal(isCloudRequestAllowed('PATCH', '/api/projects/fixture/preferences'), true);
   assert.equal(isCloudRequestAllowed('GET', '/api/work-items?projectId=fixture'), true);
@@ -203,6 +209,9 @@ test('the cloud allowlist is a method+path match, and traversal is never allowed
   assert.equal(isCloudRequestAllowed('POST', '/api/projects/fixture/memory'), false);
   assert.equal(isCloudRequestAllowed('PUT', '/api/projects/fixture/memory'), false);
   assert.equal(isCloudRequestAllowed('DELETE', '/api/projects/fixture/memory'), false);
+  // Предложение неизменяемо после решения: ни удалить, ни переписать его нельзя.
+  assert.equal(isCloudRequestAllowed('DELETE', '/api/projects/fixture/memory/proposals/mp_1'), false);
+  assert.equal(isCloudRequestAllowed('PUT', '/api/projects/fixture/memory/proposals/mp_1/accept'), false);
   // And the search itself cannot be widened into another project's folder.
   assert.equal(isCloudRequestAllowed('GET', '/api/projects/../../memory'), false);
   assert.equal(isCloudRequestAllowed('DELETE', '/api/tasks'), false);

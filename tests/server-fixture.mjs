@@ -47,7 +47,7 @@ export async function startFixture(port, overrides = {}) {
   const api = async (route, body, method) => {
     const response = await fetch(base + route, { method: method || (body ? 'POST' : 'GET'), ...(body ? { body: JSON.stringify(body), headers: { 'content-type': 'application/json' } } : {}) });
     const data = await response.json();
-    if (!response.ok) throw Object.assign(new Error(data.error), { code: data.code, status: response.status });
+    if (!response.ok) throw Object.assign(new Error(data.error), { code: data.code, status: response.status, ...(Number.isInteger(data.protectedPid) ? { protectedPid: data.protectedPid } : {}) });
     return data;
   };
   const waitReady = async () => {

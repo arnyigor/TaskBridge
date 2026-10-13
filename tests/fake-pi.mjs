@@ -74,7 +74,10 @@ function finish(text, fail = false, errorMessage = 'Fixture model error', thinki
     persist(message);
     send({ type: 'message_end', message });
     streaming = false;
-    send({ type: 'agent_end' });
+    // Real Pi repeats the whole conversation in `agent_end` (messages and all);
+    // the fixture does the same, so the code that decides what is worth storing
+    // and shipping is exercised by it rather than by a shape that never happens.
+    send({ type: 'agent_end', messages: [message] });
     send({ type: 'agent_settled' });
   };
   emit();

@@ -288,6 +288,72 @@ test('pi-memory-md provider is unavailable instead of guessing for missing memor
   assert.match(many.hits[0].text, /Курсор событий/u);
 });
 
+test('a memory note whose declared files are gone is not handed to an agent any more', async t => {
+  const repo = await gitRepo(t);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-memory-stale-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dir = path.join(root, path.basename(repo), 'core', 'project');
+  await fs.mkdir(dir, { recursive: true });
+  // Объявленные пути: один есть, другого нет — заметка жива, пока есть хоть один.
+  await fs.writeFile(path.join(dir, 'live.md'), '---\ndescription: "App entry"\npaths: app.mjs\n---\nТочка входа — app.mjs.\n', 'utf8');
+  await fs.writeFile(path.join(dir, 'gone.md'), '---\ndescription: "Legacy module"\npaths: src/legacy-client.mjs\n---\nЛегаси-клиент ходит на старый API.\n', 'utf8');
+
+  const provider = new PiMemoryMdProvider({ root });
+  const overview = await provider.inspect({ path: repo });
+  assert.equal(overview.entries, 2, 'заметка не исчезла: мы её не удаляем');
+  assert.equal(overview.liveEntries, 1);
+  assert.equal(overview.stale.count, 1);
+  assert.deepEqual(overview.stale.sources, [{ source: 'core/project/gone.md', paths: ['src/legacy-client.mjs'] }]);
+
+  const legacy = await provider.search({ path: repo }, 'легаси клиент');
+  assert.deepEqual(legacy, [], 'устаревшая заметка не попадает в выдачу');
+  const withStale = await provider.search({ path: repo }, 'легаси клиент', { includeStale: true });
+  assert.equal(withStale.length, 1, 'но её можно достать осознанно (для разбора в инспекторе)');
+  assert.equal(withStale[0].stale, true);
+
+  const live = await provider.search({ path: repo }, 'app entry');
+  assert.equal(live.length, 1, 'заметка с существующим путём остаётся');
+  assert.equal(live[0].stale, false);
+  // Заметка без объявленных путей не считается устаревшей никогда.
+  await fs.writeFile(path.join(dir, 'plain.md'), '---\ndescription: "No paths"\n---\nПросто знание без путей.\n', 'utf8');
+  const plain = await provider.search({ path: repo }, 'знание без путей');
+  assert.equal(plain.length, 1);
+  assert.equal(plain[0].stale, false);
+});
+
+test('declared paths may be patterns: a moved folder does not kill a live note', async t => {
+  const repo = await gitRepo(t);
+  await fs.mkdir(path.join(repo, 'src', 'deep'), { recursive: true });
+  await fs.writeFile(path.join(repo, 'src', 'deep', 'cursor.mjs'), 'export const cursor = 1;\n', 'utf8');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-memory-glob-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const dir = path.join(root, path.basename(repo), 'core', 'project');
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'pattern.md'), '---\ndescription: "Курсор в модулях"\npaths: src/**/*.mjs\n---\nКурсор событий живёт в src/deep.\n', 'utf8');
+  await fs.writeFile(path.join(dir, 'exact.md'), '---\ndescription: "Точный путь"\npaths: app.mjs\n---\nТочка входа — app.mjs.\n', 'utf8');
+  await fs.writeFile(path.join(dir, 'dead.md'), '---\ndescription: "Переехало и исчезло"\npaths: src/legacy/**/*.mjs\n---\nСтарый клиент в src/legacy.\n', 'utf8');
+
+  const provider = new PiMemoryMdProvider({ root });
+  const overview = await provider.inspect({ path: repo });
+  assert.equal(overview.stale.count, 1, `устарела только заметка с исчезнувшим путём: ${JSON.stringify(overview.stale)}`);
+  assert.equal(overview.stale.sources[0].source, 'core/project/dead.md');
+  assert.equal(overview.liveEntries, 2, 'шаблон и точный путь остаются живыми');
+
+  const hits = await provider.search({ path: repo }, 'курсор модули');
+  assert.deepEqual(hits.map(hit => hit.source), ['core/project/pattern.md'], 'заметка с шаблоном нашлась по тексту');
+  assert.equal(hits[0].stale, false);
+  assert.deepEqual(await provider.search({ path: repo }, 'старый клиент'), [], 'шаблон без файлов не отдаётся');
+
+  // Заметка с шаблоном вне git: списка файлов нет, поэтому шаблон НЕ считается
+  // пропавшим — спрятать живое знание хуже, чем показать старое.
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-not-git-glob-'));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  const outsideDir = path.join(root, path.basename(outside), 'core', 'project');
+  await fs.mkdir(outsideDir, { recursive: true });
+  await fs.writeFile(path.join(outsideDir, 'pattern.md'), '---\ndescription: "Вне git"\npaths: src/**/*.mjs\n---\nЧто-то про src.\n', 'utf8');
+  assert.equal((await provider.inspect({ path: outside })).stale.count, 0, 'вне git шаблон не признаётся мёртвым');
+});
+
 test('the launch refuses when the previewed facts moved', () => {
   const context = buildResumeContext({
     workItem,
