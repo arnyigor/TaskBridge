@@ -62,7 +62,7 @@ export function parseProviderModels(payload) {
 }
 
 // Same rule as Pi's own env-var references ($WORMSOFT_API_KEY in models.json).
-function apiKey(raw, env) {
+export function apiKey(raw, env) {
   const value = String(raw || '');
   return value.startsWith('$') ? env?.[value.slice(1)] || null : value || null;
 }

@@ -7,9 +7,17 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelProbeResult
+import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.humanizeError
+
+data class ModelProbeState(
+    val loading: Boolean = false,
+    val result: ModelProbeResult? = null,
+    val error: String? = null,
+)
 
 data class AgentSettingsState(
     val providerStatuses: Map<String, ProviderStatus> = emptyMap(),
@@ -18,6 +26,7 @@ data class AgentSettingsState(
     val mcpLoading: Boolean = false,
     val models: ModelCatalog? = null,
     val modelsLoading: Boolean = false,
+    val modelProbes: Map<String, ModelProbeState> = emptyMap(),
     val error: String? = null,
 )
 
@@ -51,6 +60,29 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
     }
 
     fun clearError() = _state.update { it.copy(error = null) }
+
+    fun probeModel(model: ModelRef) {
+        val provider = model.provider?.takeIf(String::isNotBlank) ?: return
+        val id = model.id?.takeIf(String::isNotBlank) ?: return
+        val key = model.key
+        if (_state.value.modelProbes[key]?.loading == true) return
+        _state.update {
+            it.copy(modelProbes = it.modelProbes + (key to ModelProbeState(loading = true)))
+        }
+        scope.launch {
+            runCatching { api.probeModel(provider, id) }
+                .onSuccess { result ->
+                    _state.update { state ->
+                        state.copy(modelProbes = state.modelProbes + (key to ModelProbeState(result = result)))
+                    }
+                }
+                .onFailure { failure ->
+                    _state.update { state ->
+                        state.copy(modelProbes = state.modelProbes + (key to ModelProbeState(error = humanizeError(failure.message))))
+                    }
+                }
+        }
+    }
 
     fun loadModels(refresh: Boolean = false) {
         if (_state.value.modelsLoading) return

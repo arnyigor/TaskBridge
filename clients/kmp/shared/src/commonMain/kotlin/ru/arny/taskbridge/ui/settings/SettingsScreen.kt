@@ -68,12 +68,14 @@ import ru.arny.taskbridge.core.api.SystemGpu
 import ru.arny.taskbridge.core.api.SystemRam
 import ru.arny.taskbridge.core.api.McpServer
 import ru.arny.taskbridge.core.api.McpStatus
+import ru.arny.taskbridge.core.api.ModelProbeResult
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.ui.common.SectionTitle
 import ru.arny.taskbridge.ui.common.formatBytes
+import ru.arny.taskbridge.ui.sessions.ModelPicker
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import kotlinx.coroutines.delay
@@ -293,6 +295,56 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                 catalog?.defaultModel?.let { InfoRow("По умолчанию", "${it.provider.orEmpty()}/${it.label}") }
                 providerModelCounts(catalog?.models.orEmpty())
                     .forEach { (provider, count) -> InfoRow(provider, "$count моделей") }
+
+                // Явная диагностика, не скрытая в реальном ходе: оператор выбирает
+                // любую модель и осознанно тратит максимум один токен на TTFT-пробу.
+                var modelToProbeKey by rememberSaveable { mutableStateOf<String?>(null) }
+                val modelToProbe = catalog?.models?.firstOrNull { it.key == modelToProbeKey }
+                    ?: catalog?.defaultModel
+                    ?: catalog?.models?.firstOrNull()
+                if (catalog != null) {
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        Text("Проверка модели", style = MaterialTheme.typography.labelLarge)
+                        Spacer(Modifier.height(8.dp))
+                        ModelPicker(
+                            catalog = catalog,
+                            selected = modelToProbe,
+                            settings = graph.settings,
+                            onPick = { modelToProbeKey = it.key },
+                            info = info,
+                        )
+                        val probe = modelToProbe?.let { agentState.modelProbes[it.key] }
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(
+                            onClick = { modelToProbe?.let(connection.settingsController::probeModel) },
+                            enabled = modelToProbe?.provider?.isNotBlank() == true
+                                && modelToProbe?.id?.isNotBlank() == true
+                                && probe?.loading != true,
+                        ) {
+                            if (probe?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            else Icon(AppIcons.Refresh, "Проверить модель", Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(if (probe?.loading == true) "Проверяю…" else "Проверить (1 токен)")
+                        }
+                        val probeText = probe?.result?.let(::modelProbeResultText) ?: probe?.error
+                        if (probeText != null) {
+                            Text(
+                                probeText,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (probe?.result?.ok == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        } else {
+                            Text(
+                                "Замер до первого ответа; результат не смешивается со статистикой рабочих ходов.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 6.dp),
+                            )
+                        }
+                    }
+                }
+
                 OutlinedButton(
                     onClick = { connection.settingsController.loadModels(refresh = true) },
                     enabled = !agentState.modelsLoading,
@@ -815,6 +867,31 @@ private fun McpServerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
+}
+
+internal fun modelProbeResultText(result: ModelProbeResult): String {
+    if (result.ok) {
+        val cost = if ((result.tokensUsed ?: 0) > 0) "${result.tokensUsed} токен" else "без токенов"
+        return "${result.ms ?: 0} мс · $cost"
+    }
+    return when (result.code) {
+        "COOLDOWN" -> "Повтор через ${maxOf(1, ((result.retryInMs ?: 0) + 999) / 1000)} с"
+        "TIMEOUT" -> "Провайдер не ответил вовремя"
+        "AUTH" -> "Провайдер отклонил ключ (401)"
+        "RATE_LIMITED" -> "Провайдер ограничил запросы (429)"
+        "MODEL_NOT_FOUND" -> "Провайдер не знает такую модель"
+        "MODEL_UNKNOWN" -> result.message ?: "Модель не описана у провайдера"
+        "NO_KEY" -> result.message ?: "Нет ключа провайдера"
+        "NO_ENDPOINT" -> result.message ?: "Нет адреса провайдера"
+        "PROVIDER_ERROR" -> "Провайдер ответил ошибкой: ${result.message ?: "без подробностей"}"
+        "UNREACHABLE" -> "Провайдер недоступен"
+        "NO_STREAM" -> "Провайдер не прислал ни одного токена"
+        "HTTP_ERROR" -> listOfNotNull(
+            "HTTP ${result.httpStatus ?: "ошибка"}",
+            result.message,
+        ).joinToString(": ")
+        else -> result.message ?: result.code ?: "Отказ без объяснения"
+    }
 }
 
 /**

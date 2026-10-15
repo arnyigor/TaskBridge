@@ -171,10 +171,16 @@ fun main() {
 
                     override fun windowLostFocus(e: WindowEvent?) {
                         platform.foreground = false
+                        graph.connection?.appVisibilityChanged()
                     }
                 })
             }
-            LaunchedEffect(visible) { if (!visible) platform.foreground = false }
+            LaunchedEffect(visible) {
+                if (!visible) {
+                    platform.foreground = false
+                    graph.connection?.appVisibilityChanged()
+                }
+            }
             Box(Modifier.fillMaxSize()) {
                 App(graph, openTaskId = startTaskId, navigatorSink = { navigator = it })
                 if (stagedUpdate != null) {

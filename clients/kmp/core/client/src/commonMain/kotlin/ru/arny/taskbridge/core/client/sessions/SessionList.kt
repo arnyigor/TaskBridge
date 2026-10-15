@@ -64,6 +64,38 @@ data class SessionListState(
 }
 
 /**
+ * Как часто опрашивать список сессий (раздел 4.3 плана, «красная» для оператора:
+ * расход батареи).
+ *
+ * Правила простые и проверяемые:
+ *  - экран виден и есть непокрытая потоком работа — короткий опрос (5 с);
+ *  - единственная активная сессия уже покрыта видимым SSE — редкий контрольный
+ *    опрос (30 с), как и при отсутствии работы;
+ *  - приложение в фоне — опрос нужен только ради уведомлений, и только пока работа
+ *    реально идёт; без активной работы фоновый опрос останавливается совсем (0 =
+ *    спать до возврата в foreground). Так телефон не жжёт батарею на пустых запросах.
+ *  - режим экономии энергии удлиняет интервал в фоне: система уже сказала, что
+ *    батарея важнее свежести на секунду.
+ */
+fun sessionPollIntervalMillis(
+    active: Boolean,
+    inForeground: Boolean = true,
+    powerSave: Boolean = false,
+    /** Единственная активная сессия уже обновляется видимым SSE. */
+    activeCoveredByStream: Boolean = false,
+    activeIntervalMillis: Long = 5_000,
+    idleIntervalMillis: Long = 30_000,
+): Long = when {
+    inForeground -> if (active && !activeCoveredByStream) activeIntervalMillis else idleIntervalMillis
+    !active -> 0L
+    powerSave -> idleIntervalMillis
+    else -> activeIntervalMillis
+}
+
+/** 0 — опрос приостановлен: ждём возврата в foreground или пробуждения по сети. */
+fun shouldPoll(intervalMillis: Long): Boolean = intervalMillis > 0L
+
+/**
  * The main screen's data: sessions, projects and host info, polled while the
  * screen is visible (a list stream, `/api/stream`, is backend plan B3; until
  * then a short poll is what keeps states in step with the browser and CLI).
@@ -74,6 +106,12 @@ class SessionList(
     private val clockMillis: () -> Long,
     private val activeIntervalMillis: Long = 5_000,
     private val idleIntervalMillis: Long = 30_000,
+    /** Виден ли экран приложения: в фоне опрос нужен только ради уведомлений (4.3). */
+    private val inForeground: () -> Boolean = { true },
+    /** Режим экономии энергии: интервалы удлиняются. */
+    private val powerSave: () -> Boolean = { false },
+    /** Id сессии, уже покрытой единственным foreground SSE; null — потока нет. */
+    private val streamedTaskId: () -> String? = { null },
     /** Desktop: поднимает потушенный сервер скрытым процессом, без консоли (см. DesktopServerLauncher). */
     private val startLocalServer: (suspend () -> Unit)? = null,
     /**
@@ -100,10 +138,29 @@ class SessionList(
     fun start() {
         if (job?.isActive == true) return
         job = scope.launch {
+            fun intervalForCurrentState(): Long {
+                val activeTasks = _state.value.tasks.filter { displayStateOf(it).active }
+                val streamed = streamedTaskId()
+                return sessionPollIntervalMillis(
+                    active = activeTasks.isNotEmpty(),
+                    inForeground = inForeground(),
+                    powerSave = powerSave(),
+                    activeCoveredByStream = activeTasks.size == 1 && activeTasks.single().id == streamed,
+                    activeIntervalMillis = activeIntervalMillis,
+                    idleIntervalMillis = idleIntervalMillis,
+                )
+            }
+
             while (true) {
-                load()
-                val active = _state.value.tasks.any { displayStateOf(it).active }
-                withTimeoutOrNull(if (active) activeIntervalMillis else idleIntervalMillis) { wake.receive() }
+                var interval = intervalForCurrentState()
+                // В фоне без работы не опрашиваем вообще: будит возврат в foreground,
+                // событие сети или действие оператора. После load пересчитываем интервал
+                // по свежему состоянию: новая active-сессия не должна ждать 30 секунд.
+                if (shouldPoll(interval)) {
+                    load()
+                    interval = intervalForCurrentState()
+                }
+                withTimeoutOrNull(if (shouldPoll(interval)) interval else Long.MAX_VALUE) { wake.receive() }
             }
         }
     }

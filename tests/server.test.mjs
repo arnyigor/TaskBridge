@@ -1080,6 +1080,32 @@ test('a live turn stores agent_end without the repeated thread and streams it li
   assert.ok(answer, 'the answer itself is stored as its message_end frame');
 });
 
+// Цена результата инструмента в ленте: событие целиком уходило по SSE на телефон,
+// где клиент его выбрасывал при разборе. Одна bash-команда с выводом — 222 КБ из
+// 4.6 МБ событий сессии (2026-10-14).
+test('a stored tool result becomes its size instead of shipping to every client', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'инструмент с выводом' });
+  assert.equal((await terminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+
+  const store = new TaskStore(path.join(root, 'data'));
+  const events = await store.readEvents(created.id, 500);
+  store.close();
+  const ends = events.filter(e => e.data?.pi?.type === 'tool_execution_end');
+  assert.ok(ends.length >= 1, 'the fixture turn ran a tool');
+  for (const event of ends) {
+    assert.equal('result' in event.data.pi, false, 'содержимое результата не хранится в событии');
+    assert.ok(event.data.pi.resultDropped?.bytes > 0, 'размер результата для диагностики остался');
+  }
+  // Прогресс субагента клиент читает из partialResult — его не трогаем.
+  for (const event of events.filter(e => e.data?.pi?.type === 'tool_execution_update')) {
+    if (event.data.pi.toolName === 'subagent') continue;
+    assert.equal('partialResult' in event.data.pi, false, 'накопительный вывод не дублируется в каждом кадре');
+  }
+});
+
 // Уровни размышлений сопоставляются с картой модели, а не с общим списком Pi:
 // у модели без reasoning доступен только «off», и попытка выставить «high»
 // должна получить внятный отказ со списком доступных уровней, а не молча

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { startFixture } from './server-fixture.mjs';
+import { git } from '../src/git.mjs';
 
 // The open-on-machine routes launch OS applications, so they must be impossible
 // to trigger by accident (the contract probe) or from off the machine (a phone,
@@ -127,6 +128,22 @@ test('workspace-file open/run read the path from the query, not an empty body', 
   assert.equal(readBody.code, 'NOT_FOUND');
   assert.match(readBody.error, /не найден/i);
   assert.doesNotMatch(readBody.error, /ENOENT|realpath|[A-Za-z]:\\/);
+
+  const fresh = await fixture.api(`/api/tasks/${task.id}`);
+  await fs.writeFile(path.join(fresh.workspacePath, 'lines.txt'), 'one\ntwo\nthree\nfour\n', 'utf8');
+  await git(['init'], fresh.workspacePath);
+  await git(['add', 'lines.txt'], fresh.workspacePath);
+  await git(['commit', '-m', 'baseline'], fresh.workspacePath, 30000, { GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' });
+  await fs.writeFile(path.join(fresh.workspacePath, 'lines.txt'), 'one\ntwo changed\nthree\nfour\n', 'utf8');
+  const changed = await fixture.api(`/api/tasks/${task.id}/changed-files`);
+  assert.equal(changed.isGit, true);
+  assert.ok(changed.changedFiles.includes('lines.txt'), JSON.stringify(changed));
+
+  const ranged = await fetch(`${fixture.base}/api/tasks/${task.id}/workspace-file?path=lines.txt&from=2&to=3`);
+  assert.equal(ranged.status, 200);
+  assert.equal(ranged.headers.get('x-taskbridge-lines-from'), '2');
+  assert.equal(ranged.headers.get('x-taskbridge-lines-to'), '3');
+  assert.equal(await ranged.text(), 'two changed\nthree');
 
   // No path at all is a client error, not "reveal the folder".
   const empty = await post(fixture, route, { body: { confirm: true } });

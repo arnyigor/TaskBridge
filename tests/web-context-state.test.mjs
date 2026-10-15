@@ -151,3 +151,27 @@ test('кто отправляет лимит вывода, а кто нет', ()
     assert.equal(true, panel.providerSendsOutputLimit(provider), provider);
   }
 });
+
+// Инцидент 2026-10-14 (535c91a4e5aa): панель показывала оценку после сжатия,
+// а реальный промпт был 368 547 токенов при окне 204 800 — провайдер отказал.
+// Каждый сигнал по отдельности может сильно занижать; для вопроса «влезет ли»
+// берётся максимум доступных честных значений.
+test('контекст — максимум сигналов, а не первый доступный (инцидент 368547)', () => {
+  const panel = makePanel();
+  const task = {
+    ...codex,
+    model: { provider: 'strata', id: 'qwen3.8-flash-next-iq3_s', contextWindow: 204800, maxTokens: 4096 },
+    requestedModel: { provider: 'strata', id: 'qwen3.8-flash-next-iq3_s' },
+    // KV-кэш после неудачного запроса мал, оценка после старого сжатия тоже,
+    // а последний РЕАЛЬНЫЙ запрос провайдер видел целиком.
+    lastUsage: { input: 170000, output: 896, totalTokens: 170896 },
+    compaction: { count: 1, last: { estimatedTokensAfter: 42000, summary: 'x' } },
+  };
+  panel.withLocal({ models: [{ id: 'qwen3.8-flash-next-iq3_s', provider: 'strata', contextWindow: 204800 }] }, task);
+  const state = plain(panel.$('contextState').textContent);
+  assert.ok(
+    plain(panel.$('usage').textContent).startsWith('170 896 / 204 800'),
+    `должен показываться самый большой честный сигнал (170 896), а не 42 000: ${plain(panel.$('usage').textContent)}`,
+  );
+  assert.ok(state.includes('Заполнен больше половины') || state.includes('Почти'), state);
+});

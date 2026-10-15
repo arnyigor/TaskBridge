@@ -4,10 +4,16 @@ import path from 'node:path';
 import os from 'node:os';
 import fs from 'node:fs/promises';
 import crypto from 'node:crypto';
+import { gzip } from 'node:zlib';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
+import { deliveryMetrics } from './delivery-metrics.mjs';
+import { memoryMetrics } from './memory/memory-metrics.mjs';
+import { SseWriter } from './sse-writer.mjs';
+import { WakeChannel } from './wake-channel.mjs';
+import { autoRestartDecision, autoRestartConfigured, nextRestartAt, normalizeAutoRestart } from './auto-restart.mjs';
 import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager, briefTask } from './task-manager.mjs';
@@ -16,6 +22,7 @@ import { contentType, containedExistingAncestor, containedFile, forbiddenFile, i
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
 import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
+import { collectGitState } from './git.mjs';
 import { ensureTlsCert } from './tls.mjs';
 import { trimStreamingDeltas, lightenEvent } from './event-trim.mjs';
 import { windowByTurns, capEventsByBytes } from './event-window.mjs';
@@ -75,6 +82,14 @@ const providerRefreshes = new Map();
 // no restart flow of its own running) learns the machine was restarted behind
 // its back and refreshes like the tab that pressed the button.
 const bootId = crypto.randomUUID();
+
+// Автоматический перезапуск: решение принимает src/auto-restart.mjs (чистые
+// правила), исполняет — тот же воркер, что и кнопка. Оператору видно план:
+// /api/info.autoRestart.nextAt и причина, по которой перезапуск отложен.
+const serverStartedAt = Date.now();
+const autoRestartConfig = normalizeAutoRestart(config.server?.autoRestart);
+let lastAutoRestartAt = null;
+let autoRestartState = { reason: 'idle', deferred: false };
 
 // Variant B (docs/agent-host-separation.md §12): the app runs *behind* the LAN
 // proxy, and the proxy owns the public face — address, port, TLS. These knobs
@@ -228,6 +243,57 @@ await applyCloudConfig();
 
 const sseClients = new Map();
 
+// Фаза 4: эпизоды DEGRADED у клиентов. Обрыв связи раньше замечает клиент (у него
+// двухуровневый health: сервер отвечает, поток молчит), поэтому сервер не может
+// вычислить это сам — клиент сообщает переходы. Считаем ИМЕННО переходы, а не
+// каждый ретрай: клиент повторяет попытки, и счёт по попыткам мерил бы шум.
+const clientLinks = new Map();
+const CLIENT_LINK_LIMIT = 200;
+let linkEpisodes = { degraded: 0, recovered: 0, lastDegradedAt: null };
+
+function noteClientLink(req, body) {
+  const state = String(body?.state || '');
+  if (!['live', 'degraded', 'reconnecting'].includes(state)) {
+    throw Object.assign(new Error('state — один из: live, degraded, reconnecting.'), { code: 'INPUT_INVALID' });
+  }
+  const clientId = String(body?.clientId || '').trim().slice(0, 64) || req.socket?.remoteAddress || 'unknown';
+  const at = new Date().toISOString();
+  const previous = clientLinks.get(clientId);
+  const wasLive = !previous || previous.state === 'live';
+  if (state !== 'live' && wasLive) {
+    linkEpisodes.degraded += 1;
+    linkEpisodes.lastDegradedAt = at;
+  } else if (state === 'live' && !wasLive) {
+    linkEpisodes.recovered += 1;
+  }
+  clientLinks.set(clientId, {
+    state,
+    // since — начало ТЕКУЩЕГО состояния, а не время последнего сообщения: иначе
+    // долгий обрыв выглядел бы как только что начавшийся.
+    since: previous && previous.state === state ? previous.since : at,
+    at,
+    reason: body?.reason ? String(body.reason).slice(0, 200) : null,
+    attempt: Number.isFinite(body?.attempt) ? Number(body.attempt) : null,
+  });
+  if (clientLinks.size > CLIENT_LINK_LIMIT) {
+    // Ограничение памяти: выкидываем запись с самым старым касанием.
+    const oldest = [...clientLinks.entries()].sort((a, b) => String(a[1].at).localeCompare(String(b[1].at)))[0];
+    if (oldest) clientLinks.delete(oldest[0]);
+  }
+  return { clientId, state, since: clientLinks.get(clientId).since };
+}
+
+function clientLinkHealth() {
+  const entries = [...clientLinks.entries()].map(([clientId, value]) => ({ clientId, ...value }));
+  return {
+    degradedEpisodes: linkEpisodes.degraded,
+    recoveredEpisodes: linkEpisodes.recovered,
+    lastDegradedAt: linkEpisodes.lastDegradedAt,
+    degradedClients: entries.filter(entry => entry.state !== 'live')
+      .map(entry => ({ clientId: entry.clientId, state: entry.state, since: entry.since, reason: entry.reason, attempt: entry.attempt })),
+  };
+}
+
 // A single request must not materialize an unbounded history in memory. Older
 // pages are reached with ?tail/?before; this is the hard ceiling per request.
 const maxEventsPerRequest = Math.min(Math.max(Number(config.server?.maxEventsPerRequest || 20000), 1), 200000);
@@ -241,24 +307,39 @@ const maxHistoryBytes = Math.min(Math.max(Number(config.server?.maxHistoryMb || 
 const pageBytes = (events) => events.reduce((sum, event) => sum + Buffer.byteLength(JSON.stringify(event), 'utf8') + 1, 0);
 
 function addSseClient(taskId, res, cursor = 0) {
-  const client = { res, cursor, pending: [], replaying: true };
+  const client = {
+    taskId, res, cursor, pending: [], replaying: true,
+    // Шаг C-B: запись с учётом backpressure. Медленный клиент ставится на паузу,
+    // а не копит события в памяти без предела; на переполнении стрим обрывается
+    // и клиент переподключается по своему курсору (события есть в store).
+    writer: new SseWriter(res, { onOverflow: () => sseClients.get(taskId)?.delete(client) })
+  };
   if (!sseClients.has(taskId)) sseClients.set(taskId, new Set());
   sseClients.get(taskId).add(client);
   res.on('close', () => sseClients.get(taskId)?.delete(client));
   return client;
 }
 
-function sendSse(res, event) {
-  res.write(`id: ${event.seq}\ndata: ${JSON.stringify(event)}\n\n`);
-}
-
 function deliver(client, event) {
-  if (event.seq <= client.cursor) return;
-  sendSse(client.res, event);
+  if (event.seq <= client.cursor) return true;
+  // Событие принято в сокет или в очередь на 'drain'; при обрыве клиент уже
+  // убран из фан-аута, и его хвост придёт из store при переподключении.
+  if (!client.writer.send(event)) {
+    // Фаза 4: обрыв стрима — заметная метрика, а не тихая строка кода: рост
+    // этого счётчика означает, что клиенты не успевают за сервером.
+    deliveryMetrics.increment('sse_stream_dropped');
+    return false;
+  }
   client.cursor = event.seq;
+  return true;
 }
 
 manager.on('task-event', (event) => {
+  // Шаг C-C: лаг «событие создано → публикация в SSE». Включает запись в store
+  // (#recordEvent пишет в БД до emit) и доходит до фан-аута — рост этой цифры
+  // при живом Pi означает, что отстаёт серверная публикация, а не модель.
+  const createdAt = Date.parse(event.at);
+  if (Number.isFinite(createdAt)) deliveryMetrics.observe('sse_publish_lag_ms', Math.max(0, Date.now() - createdAt));
   for (const client of sseClients.get(event.taskId) || []) {
     if (client.replaying) client.pending.push(event);
     else try { deliver(client, event); } catch {}
@@ -301,6 +382,33 @@ if (schedulerConfig.enabled !== false) {
   process.on('exit', () => clearInterval(schedulerTimer));
 }
 
+// Автоматический перезапуск по таймеру (запрос оператора 2026-10-14). По умолчанию
+// выключен: config.server.autoRestart.enabled = true включает. Решение — в
+// src/auto-restart.mjs, исполнение — triggerRestart, тот же путь, что у кнопки.
+if (autoRestartConfigured(autoRestartConfig)) {
+  const tick = async () => {
+    const decision = autoRestartDecision(autoRestartConfig, {
+      startedAt: serverStartedAt,
+      lastRestartAt: lastAutoRestartAt,
+      // Живая работа: при onlyWhenIdle перезапуск откладывается, а не обрывает ход —
+      // оператор ставит таймер, чтобы сервер поднялся свежим, а не чтобы потерять ответ.
+      active: manager.activeTaskIds.size > 0,
+    });
+    autoRestartState = { reason: decision.reason, deferred: decision.deferred === true };
+    if (!decision.restart) return;
+    lastAutoRestartAt = Date.now();
+    try {
+      await triggerRestart({ reason: 'timer' });
+    } catch (error) {
+      console.error(`[restart] timer restart failed: ${error.message}`);
+      autoRestartState = { reason: 'failed', error: error.message };
+    }
+  };
+  const autoTimer = setInterval(() => { tick().catch(() => {}); }, autoRestartConfig.tickSec * 1000);
+  autoTimer.unref?.();
+  process.on('exit', () => clearInterval(autoTimer));
+}
+
 // R2.5: a client counts the stream dead after 3 silent intervals.
 setInterval(() => {
   for (const clients of sseClients.values()) {
@@ -313,14 +421,41 @@ setInterval(() => {
 // Abandoned uploads are only referenced by a token the client may never use.
 setInterval(() => manager.uploads.cleanup().catch(() => {}), 30 * 60 * 1000).unref();
 
+// Сжатие JSON-ответов. Причина конкретная: список сессий — первое, что грузит
+// телефон, и он тянет его каждые 5 с; без сжатия это было 1.1 МБ по Wi-Fi на
+// ~50 КБ/с, и список «тормозил» десятками секунд (2026-10-14). JSON с
+// повторяющимися ключами сжимается в 5–8 раз, прозрачно для всех клиентов
+// (OkHttp и браузеры распаковывают сами; прокси пробрасывает content-encoding).
+const COMPRESS_MIN_BYTES = 1024;
+
 function json(res, status, body) {
-  const text = JSON.stringify(body, null, 2);
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
-    'content-length': Buffer.byteLength(text)
+  const buffer = Buffer.from(JSON.stringify(body, null, 2), 'utf8');
+  const headers = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' };
+  // res.req — тот же запрос, что привёл сюда; заголовок читается без правок в
+  // сорока вызовах json(...).
+  const accept = String(res.req?.headers?.['accept-encoding'] || '');
+  if (buffer.length < COMPRESS_MIN_BYTES || !accept.includes('gzip')) {
+    res.writeHead(status, { ...headers, 'content-length': buffer.length });
+    res.end(buffer);
+    return;
+  }
+  gzip(buffer, (error, zipped) => {
+    // Ответ не должен теряться из-за сжатия: при любой ошибке уходит как есть.
+    if (error || res.headersSent) {
+      try {
+        res.writeHead(status, { ...headers, 'content-length': buffer.length });
+        res.end(buffer);
+      } catch { /* соединение уже закрыто */ }
+      return;
+    }
+    res.writeHead(status, {
+      ...headers,
+      'content-encoding': 'gzip',
+      'content-length': zipped.length,
+      'vary': 'accept-encoding'
+    });
+    res.end(zipped);
   });
-  res.end(text);
 }
 
 function errorJson(res, status, error) {
@@ -374,6 +509,18 @@ function restartEnv() {
     if (['PI_SESSION_FILE', 'TASKBRIDGE_TASK_ID'].includes(key) || key.startsWith('TASKBRIDGE_APPROVAL_')) delete env[key];
   }
   return env;
+}
+
+// Единственная точка перезапуска: и кнопка, и таймер идут одним путём — иначе
+// поведение двух механизмов разошлось бы (и «перезапуск по таймеру» оказался бы
+// другим перезапуском).
+async function triggerRestart({ reason = 'manual', delayMs = 1500 } = {}) {
+  const mode = await detectServerMode();
+  const script = mode === 'lan' ? 'scripts/restart-lan-now.mjs' : 'scripts/restart-and-verify.mjs';
+  const args = mode === 'lan' ? [script, `--delay-ms=${delayMs}`] : [script, `--delay-ms=${delayMs}`, `--port=${port}`];
+  console.log(`[restart] triggering (${reason}), mode=${mode}`);
+  const pid = await launchRestartWorker(args);
+  return { mode, pid };
 }
 
 // Wait for the intermediate launcher to exit before accepting the restart.
@@ -554,6 +701,42 @@ async function observedFilePath(requestedPath) {
   const stat = await fs.stat(resolved);
   if (!stat.isFile()) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
   return resolved;
+}
+
+const LINE_VIEW_MAX_BYTES = 4 * 1024 * 1024;
+const LINE_VIEW_MAX_LINES = 2000;
+
+function lineRangeParams(url) {
+  const fromRaw = url.searchParams.get('from');
+  const toRaw = url.searchParams.get('to');
+  if (fromRaw === null && toRaw === null) return null;
+  const from = Math.max(1, Number.parseInt(fromRaw || '1', 10) || 1);
+  const requestedTo = Number.parseInt(toRaw || '', 10);
+  const to = Number.isFinite(requestedTo) && requestedTo >= from ? requestedTo : from + LINE_VIEW_MAX_LINES - 1;
+  return { from, to: Math.min(to, from + LINE_VIEW_MAX_LINES - 1) };
+}
+
+async function serveFileLineRange(res, target, name, range) {
+  const stat = await fs.stat(target);
+  if (!stat.isFile()) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
+  if (stat.size > LINE_VIEW_MAX_BYTES) {
+    throw Object.assign(new Error(`Файл слишком большой для просмотра по строкам (${Math.ceil(stat.size / 1048576)} MiB). Скачайте его целиком.`), { code: 'BODY_TOO_LARGE' });
+  }
+  const text = await fs.readFile(target, 'utf8');
+  const lines = text.split(/\r?\n/u);
+  const from = Math.min(Math.max(1, range.from), Math.max(1, lines.length));
+  const to = Math.min(Math.max(from, range.to), lines.length);
+  const body = lines.slice(from - 1, to).join('\n');
+  res.writeHead(200, {
+    'content-type': 'text/plain; charset=utf-8',
+    'content-disposition': `inline; filename="${path.basename(name).replace(/[^\x20-\x7e]|["\\]/g, '_')}"`,
+    'x-taskbridge-lines-from': String(from),
+    'x-taskbridge-lines-to': String(to),
+    'x-taskbridge-lines-total': String(lines.length),
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'private, no-store',
+  });
+  res.end(body);
 }
 
 async function observedToolFile(taskId, requestedPath, workspacePath = null) {
@@ -829,22 +1012,37 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/metrics') {
       // Local metrics (§89). Prometheus text via ?format=prometheus.
+      // delivery — тайминги доставки хода (шаг C-C), независимые от cloud.
+      // server — здоровье процесса (фаза 4): uptime, живые SSE-подписчики,
+      // глубина цепочек записи событий и счётчик обрывов стрима.
       access.require(req);
       const prometheus = url.searchParams.get('format') === 'prometheus';
+      const deliveryText = deliveryMetrics.toPrometheus();
+      const serverHealth = () => ({
+        uptimeSec: Math.round((Date.now() - Date.parse(deliveryMetrics.snapshot().startedAt)) / 1000),
+        sseClients: [...sseClients.values()].reduce((sum, set) => sum + set.size, 0),
+        eventChainDepth: manager.eventWrites.size,
+        droppedStreams: deliveryMetrics.snapshot().counters.sse_stream_dropped || 0,
+        ...clientLinkHealth(),
+      });
       if (!cloudWorker) {
         if (prometheus) {
           res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' });
-          return res.end('# cloud transport disabled\n');
+          return res.end(`# cloud transport disabled\n${deliveryText}`);
         }
-        return json(res, 200, { enabled: false, metrics: null });
+        return json(res, 200, { enabled: false, metrics: null, delivery: deliveryMetrics.snapshot(), memory: memoryMetrics.snapshot(), server: serverHealth() });
       }
       if (prometheus) {
         res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8', 'cache-control': 'no-store' });
-        return res.end(cloudWorker.metrics.toPrometheus());
+        return res.end(cloudWorker.metrics.toPrometheus() + deliveryText);
       }
-      return json(res, 200, { enabled: true, ...cloudWorker.metrics.snapshot() });
+      return json(res, 200, { enabled: true, ...cloudWorker.metrics.snapshot(), delivery: deliveryMetrics.snapshot(), memory: memoryMetrics.snapshot(), server: serverHealth() });
     }
 
+    // Приоритетный fast-path (§4.2 плана улучшений): liveness отвечает до
+    // access.require и до любых readJson — health не должен ждать за длинными
+    // запросами. Очередей в турникете (src/proxy.mjs) нет — проверено; остаточный
+    // риск — перегрузка event loop, и её видно по sse_publish_lag_ms.
     if (req.method === 'GET' && pathname === '/api/health') {
       return json(res, 200, { status: 'ok' });
     }
@@ -911,11 +1109,8 @@ async function handleRequest(req, res) {
       // the only escape hatch that resets them. The UI confirm dialog already
       // warns that active sessions will be interrupted; confirm:true is that
       // warning for API callers.
-      const mode = await detectServerMode();
-      const script = mode === 'lan' ? 'scripts/restart-lan-now.mjs' : 'scripts/restart-and-verify.mjs';
-      const args = mode === 'lan' ? [script, '--delay-ms=1500'] : [script, '--delay-ms=1500', `--port=${port}`];
-      const workerPid = await launchRestartWorker(args);
-      return json(res, 202, { restarting: true, mode, pid: workerPid });
+      const triggered = await triggerRestart({ reason: 'api' });
+      return json(res, 202, { restarting: true, mode: triggered.mode, pid: triggered.pid });
     }
 
     // Power off the machine the server runs on. The same confirm-gate as
@@ -982,6 +1177,38 @@ async function handleRequest(req, res) {
       })();
       providerRefreshes.set(provider, { at: Date.now(), promise });
       return json(res, 200, { [provider]: await promise });
+    }
+
+    // Свой push в локальной сети (4.3): устройство регистрирует свой приёмник.
+    // Адрес берём из соединения, порт — из тела; публичный адрес отклоняется.
+    if (req.method === 'POST' && pathname === '/api/clients/wake') {
+      const body = await readJson(req);
+      const result = manager.wakeChannel.register({
+        address: WakeChannel.normalize(req.socket?.remoteAddress),
+        port: body?.port,
+      });
+      if (!result.ok) throw Object.assign(new Error(result.message), { code: result.code });
+      return json(res, 200, result);
+    }
+
+    // Фаза 4: клиент сообщает переход связи (live / degraded / reconnecting).
+    // Только счётчики и причины — ни содержимого промптов, ни истории; сервер
+    // показывает эпизоды в /api/metrics, чтобы «часто отваливается» стало
+    // числом, а не воспоминанием.
+    if (req.method === 'POST' && pathname === '/api/clients/link') {
+      const body = await readJson(req).catch(() => ({}));
+      return json(res, 200, noteClientLink(req, body));
+    }
+
+    // Короткая проверка модели по кнопке (пункт §3.3 плана): доступность без токенов
+    // и задержка (один токен) по явному нажатию.
+    if (req.method === 'POST' && pathname === '/api/models/probe') {
+      const body = await readJson(req);
+      return json(res, 200, await manager.probeModel({
+        provider: body?.provider ?? null,
+        id: body?.id ?? null,
+        mode: body?.mode ?? 'availability',
+      }));
     }
 
     if (req.method === 'GET' && pathname === '/api/models') {
@@ -1274,6 +1501,17 @@ async function handleRequest(req, res) {
         name: 'TaskBridge MVP',
         build,
         bootId,
+        // План автоматического перезапуска виден оператору: когда следующий и почему
+        // прошлый тик ничего не сделал (deferred = ждём, пока освободятся сессии).
+        autoRestart: {
+          enabled: autoRestartConfig.enabled,
+          everyHours: autoRestartConfig.everyHours || null,
+          at: autoRestartConfig.at,
+          onlyWhenIdle: autoRestartConfig.onlyWhenIdle,
+          lastRestartAt: lastAutoRestartAt ? new Date(lastAutoRestartAt).toISOString() : null,
+          nextAt: nextRestartAt(autoRestartConfig, { startedAt: serverStartedAt })?.toISOString() ?? null,
+          state: autoRestartState,
+        },
         apiVersion: API_VERSION,
         storeId: store.storeId,
         pi,
@@ -1303,6 +1541,43 @@ async function handleRequest(req, res) {
     // Declared before `/api/projects/:id` so "overview" is never read as an id.
     if (req.method === 'GET' && pathname === '/api/projects/overview') {
       return json(res, 200, manager.projectOverview());
+    }
+
+    // Консолидация памяти (этап M3): кандидаты на слияние (только чтение) и
+    // оформление пары предложением — тем же гейтом, что и остальная память.
+    const consolidationRoute = pathname.match(/^\/api\/projects\/([^/]+)\/memory\/consolidation$/);
+    if (consolidationRoute) {
+      const projectId = decodeURIComponent(consolidationRoute[1]);
+      if (req.method === 'GET') {
+        return json(res, 200, await manager.memoryConsolidation(projectId, {
+          threshold: url.searchParams.get('threshold'),
+          limit: Number(url.searchParams.get('limit')) || 10,
+        }));
+      }
+      if (req.method === 'POST') {
+        const body = await readJson(req);
+        return json(res, 201, await manager.proposeMerge(projectId, {
+          first: body.first, second: body.second, reason: body.reason ?? null,
+        }));
+      }
+    }
+
+    // Очередь предложений памяти по всем проектам (этап M2): ?projectId= сужает.
+    if (req.method === 'GET' && pathname === '/api/memory/proposals') {
+      return json(res, 200, await manager.listAllMemoryProposals({
+        projectId: url.searchParams.get('projectId'),
+      }));
+    }
+
+    // Поиск по индексу памяти (этап M2): ?q обязателен, ?scope=project|global|all,
+    // ?projectId= — какой проект считать «своим» для режима all.
+    if (req.method === 'GET' && pathname === '/api/memory/search') {
+      return json(res, 200, await manager.searchMemory({
+        query: url.searchParams.get('q'),
+        scope: url.searchParams.get('scope') || 'project',
+        projectId: url.searchParams.get('projectId'),
+        limit: Number(url.searchParams.get('limit')) || 20,
+      }));
     }
 
     const projectMemoryRoute = pathname.match(/^\/api\/projects\/([^/]+)\/memory$/);
@@ -1729,11 +2004,31 @@ async function handleRequest(req, res) {
       // replay is complete, closing the gap between history and subscription.
       const client = addSseClient(match[1], res, after);
       try {
-        const history = await (typeof store.readEventsForward === 'function'
+        // Реплей ограничен и числом событий, и БАЙТАМИ — как обычная выдача истории.
+        // У большой сессии (20 807 событий / 162 МБ, 2026-10-14) «вся история с
+        // нуля» — это сотни мегабайт на каждое переподключение: очередь
+        // backpressure переполнялась мгновенно, стрим рвался по лимиту, а клиент
+        // переподключался и повторял это бесконечно (телефон показывал «поток
+        // событий оборван»). Обрезанный реплей — это ровно то же, что уже делает
+        // обычная страница истории; клиент узнаёт об обрезке из `: replay-trimmed`
+        // и берёт старое через /events?before=, как делал и раньше.
+        const raw = await (typeof store.readEventsForward === 'function'
           ? store.readEventsForward(match[1], maxEventsPerRequest, after)
           : store.readEvents(match[1], maxEventsPerRequest, after));
-        for (const event of history) deliver(client, event);
-        for (const event of client.pending.sort((a, b) => a.seq - b.seq)) deliver(client, event);
+        const history = capEventsByBytes(raw, maxHistoryBytes);
+        if (history.length !== raw.length) {
+          try { res.write(`: replay-trimmed ${raw.length - history.length}\n\n`); } catch { /* сокет закрыт */ }
+        }
+        for (const event of history) {
+          if (!deliver(client, event)) break;
+          // Отдаём историю медленному клиенту порциями: ждём сокет, а не копим
+          // события в памяти и не рвём соединение.
+          await client.writer.waitForDrain();
+        }
+        for (const event of client.pending.sort((a, b) => a.seq - b.seq)) {
+          if (!deliver(client, event)) break;
+          await client.writer.waitForDrain();
+        }
         client.pending = [];
         client.replaying = false;
       } catch { res.end(); }
@@ -1985,8 +2280,24 @@ async function handleRequest(req, res) {
         if (error.code !== 'INPUT_INVALID') throw error;
         target = await observedToolFile(task.id, requestedPath, task.workspacePath);
       }
-      await serveFile(req, res, target, path.basename(target), url.searchParams.get('download') === '1');
+      const range = lineRangeParams(url);
+      if (range) await serveFileLineRange(res, target, path.basename(target), range);
+      else await serveFile(req, res, target, path.basename(target), url.searchParams.get('download') === '1');
       return;
+    }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/changed-files$/);
+    if (['GET', 'HEAD'].includes(req.method) && match) {
+      const task = manager.getTask(match[1]);
+      if (!task?.workspacePath) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
+      const state = await collectGitState(task.workspacePath);
+      return json(res, 200, {
+        taskId: task.id,
+        isGit: state.isGit,
+        changedFiles: state.changedFiles || [],
+        status: state.status || '',
+        truncated: /omitted/u.test(state.status || ''),
+      });
     }
 
     // --- list the task workspace (relative paths for @-references in a prompt) ---

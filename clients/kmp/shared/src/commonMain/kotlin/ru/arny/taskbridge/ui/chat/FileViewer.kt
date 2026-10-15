@@ -48,7 +48,7 @@ import ru.arny.taskbridge.ui.theme.MonoStyle
 sealed interface FileTarget {
     val name: String
 
-    data class Workspace(val path: String) : FileTarget {
+    data class Workspace(val path: String, val line: Int? = null, val endLine: Int? = null) : FileTarget {
         override val name get() = path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\')
     }
 
@@ -62,7 +62,7 @@ sealed interface FileTarget {
 internal val FileTargetSaver = androidx.compose.runtime.saveable.Saver<FileTarget?, List<String>>(
     save = { target ->
         when (target) {
-            is FileTarget.Workspace -> listOf("workspace", target.path)
+            is FileTarget.Workspace -> listOf("workspace", target.path, target.line?.toString() ?: "", target.endLine?.toString() ?: "")
             is FileTarget.Attachment -> listOf("attachment", target.id, target.name)
             is FileTarget.Artifact -> listOf("artifact", target.name)
             null -> emptyList()
@@ -70,7 +70,7 @@ internal val FileTargetSaver = androidx.compose.runtime.saveable.Saver<FileTarge
     },
     restore = { parts ->
         when (parts.firstOrNull()) {
-            "workspace" -> FileTarget.Workspace(parts[1])
+            "workspace" -> FileTarget.Workspace(parts[1], parts.getOrNull(2)?.toIntOrNull(), parts.getOrNull(3)?.toIntOrNull())
             "attachment" -> FileTarget.Attachment(parts[1], parts[2])
             "artifact" -> FileTarget.Artifact(parts[1])
             else -> null
@@ -125,14 +125,15 @@ fun FileViewer(
     platform: PlatformServices,
     onDismiss: () -> Unit,
     /** Opens a workspace path a rendered Markdown link points at; null keeps such links inert. */
-    onOpenPath: ((String) -> Unit)? = null,
+    /** Открыть другой файл из просмотрщика (ссылка внутри текста), с диапазоном строк. */
+    onOpenPath: ((WorkspaceLink) -> Unit)? = null,
 ) {
     val scope = rememberCoroutineScope()
     var loaded by remember(target) { mutableStateOf<Loaded?>(null) }
     var notice by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(target) {
         val result = when (target) {
-            is FileTarget.Workspace -> session.readWorkspaceFile(target.path)
+            is FileTarget.Workspace -> session.readWorkspaceFile(target.path, target.line, target.endLine)
             is FileTarget.Attachment -> session.readFile(target.id)
             is FileTarget.Artifact -> session.readArtifact(target.name)
         }
@@ -168,7 +169,13 @@ fun FileViewer(
     }
 
     val info = when (val state = loaded) {
-        is Loaded.Text -> formatBytes(state.bytes.toLong()) + if (state.cut) " · показано начало" else ""
+        is Loaded.Text -> formatBytes(state.bytes.toLong()) + if (state.cut) " · показано начало" else "" +
+            // Диапазон из ссылки (`path#L120-L140`): сервер отдал только этот кусок, и без
+            // подписи оператор видел бы текст без номеров строк и без понимания, что это.
+            ((target as? FileTarget.Workspace)?.line?.let { start ->
+                val end = (target as FileTarget.Workspace).endLine ?: start
+                if (end > start) " · строки $start–$end" else " · строка $start"
+            } ?: "")
         is Loaded.Binary -> formatBytes(state.bytes.size.toLong())
         is Loaded.Picture -> "${state.bitmap.width}×${state.bitmap.height} · " + formatBytes(state.original.size.toLong())
         else -> null

@@ -27,13 +27,15 @@ test('metrics registry counts, gauges, observations and exports Prometheus text'
   const snapshot = metrics.snapshot();
   assert.equal(snapshot.counters.cloud_event_retry_count, 3);
   assert.equal(snapshot.gauges.cloud_outbox_size, 7);
-  assert.deepEqual(snapshot.observations.cloud_event_batch_size, { count: 2, sum: 40, avg: 20, min: 10, max: 30 });
+  assert.deepEqual(snapshot.observations.cloud_event_batch_size, { count: 2, sum: 40, avg: 20, min: 10, max: 30, p95: 29 });
   assert.ok(Object.keys(snapshot.observations).some(id => id.includes('cloud_command_latency_ms{type="START_TASK"}')));
 
   const text = metrics.toPrometheus();
   assert.match(text, /cloud_event_retry_count 3/);
   assert.match(text, /cloud_event_batch_size_count 2/);
   assert.match(text, /cloud_event_batch_size_max 30/);
+  // p95 рядом с max: хвост виден числом, а не только пределом.
+  assert.match(text, /cloud_event_batch_size_p95 29/);
 
   // A runaway label value must not grow memory without bound.
   const bounded = new Metrics({ maxSeries: 5 });

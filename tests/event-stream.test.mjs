@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { startFixture } from './server-fixture.mjs';
+import { TaskStore } from '../src/task-store.mjs';
+import path from 'node:path';
 
 // Stage 2 of the roadmap over real HTTP: the task SSE stream resumes without
 // gaps or duplicates (R2.1/R2.2), keeps the connection alive (R2.5), and a
@@ -160,4 +162,57 @@ test('stage 2: the paired device is the source of a session and of its messages'
   // The local PC has no device: no deviceId is invented.
   const local = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'from the pc' });
   assert.equal(local.source, undefined);
+});
+
+// Инцидент 2026-10-14: телефон постоянно показывал «Компьютер отвечает, но поток
+// событий оборван». Причина — реплей истории без ограничения по байтам вместе с
+// backpressure, который ОБРЫВАЛ поток при переполнении очереди: сессия dd33b5ed443d
+// (20 807 событий / 162 МБ) не влезала в очередь 1000, стрим рвался сразу после
+// подключения, и клиент переподключался каждую секунду — бесконечно.
+// Теперь реплей ограничен байтами (как страница истории), а отстающий сокет
+// заставляет отдачу ждать, а не рвать соединение.
+test('replay: a slow client reaches the newest event instead of being cut off (2026-10-14)', { timeout: 120000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'replay probe' });
+  // Объёмная история: заведомо больше и очереди backpressure (1000), и буферов сокета.
+  const store = new TaskStore(path.join(fixture.root, 'data'));
+  const filler = 'x'.repeat(8000);
+  for (let index = 0; index < 1500; index++) {
+    await store.appendEvent(task.id, { type: 'STATUS', message: `filler ${index} ${filler}`, data: {} });
+  }
+  store.close();
+  const stored = await fixture.api(`/api/tasks/${task.id}/events?limit=0`);
+  const newest = stored[stored.length - 1].seq;
+
+  // Клиент, который сначала НЕ читает сокет: телефон в слабой сети. Раньше на
+  // этом сервер доходил до переполнения очереди и завершал поток.
+  const opened = await new Promise((resolve, reject) => {
+    const req = http.get(new URL(`/api/tasks/${task.id}/stream`, fixture.base), res => resolve({ req, res }));
+    req.on('error', reject);
+  });
+  await new Promise(resolve => setTimeout(resolve, 2500));
+
+  // Дальше читаем до самого нового события. Обрыв реплея виден по последнему seq:
+  // он останавливается там, где сервер оборвал поток.
+  const ids = [];
+  const last = await new Promise(resolve => {
+    let buffer = '';
+    const timer = setTimeout(() => resolve(ids[ids.length - 1] ?? 0), 20000);
+    opened.res.on('data', chunk => {
+      buffer += chunk;
+      let cut;
+      while ((cut = buffer.indexOf('\n\n')) >= 0) {
+        const block = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + 2);
+        const id = /^id: (\d+)$/m.exec(block)?.[1];
+        if (id === undefined) continue;
+        ids.push(Number(id));
+        if (Number(id) >= newest) { clearTimeout(timer); resolve(Number(id)); return; }
+      }
+    });
+  });
+  opened.req.destroy();
+  assert.equal(last, newest, `клиент дошёл до новейшего события (получено ${ids.length}, последнее ${last})`);
+  assert.ok(ids.length > 300, `реплей доставлен целиком, а не обрывком: ${ids.length} событий`);
 });

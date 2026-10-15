@@ -41,14 +41,22 @@ test('briefTask cuts the per-session megabytes down to what a list shows', () =>
   assert.ok(brief.verification[0].stdout.length <= 512 && brief.verification[0].stderr.length <= 512, 'tool output keeps a tail');
   assert.equal(brief.verification[0].command, 'npm test', 'the command survives');
   assert.equal(brief.verification[0].exitCode, 0);
-  assert.ok(brief.git.status.length <= 1024, `git status kept ${brief.git.status.length}`);
+  assert.ok(brief.git.status.length <= 300, `git status kept ${brief.git.status.length}`);
   assert.deepEqual(brief.git.changedFiles, ['src/a.mjs'], 'the list counts the changed files');
-  assert.ok(brief.compaction.last.summary.length <= 1024);
+  assert.ok(brief.compaction.last.summary.length <= 300);
 });
 
 test('briefTask leaves everything else as it was', () => {
   const task = { id: 'a1', status: 'RUNNING', projectId: 'p', model: { provider: 'x', id: 'y' }, events: 12, sizeBytes: 4096, metrics: { tokens: 5 } };
-  assert.deepEqual(briefTask(task), { ...task, prompt: '', assistantText: '', thinkingText: null, verification: undefined, git: undefined, compaction: undefined });
+  // Контракт списка (2026-10-14): строка сессии несёт подпись модели и счётчики, а
+  // метрики, скорости, usage и параметры хода убираются — их читает экран сессии
+  // из /api/tasks/:id. Списков файлов и правок в строке нет: только сэмпл и число.
+  assert.deepEqual(briefTask(task), {
+    ...task,
+    prompt: '', assistantText: '', thinkingText: null,
+    metrics: null, speeds: null, lastUsage: null, parameters: null,
+    verification: undefined, git: undefined, compaction: undefined,
+  });
   // A session with nothing heavy to trim is returned with its own values intact.
   const withText = { id: 'b2', prompt: 'вопрос', assistantText: 'ответ' };
   const brief = briefTask(withText);

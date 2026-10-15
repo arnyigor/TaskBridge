@@ -191,7 +191,7 @@ fun AssistantMessage(
     actions: MessageActions,
     onCopyText: (String) -> Unit,
     loadToolOutput: suspend (String) -> Result<ToolOutput>,
-    onOpenPath: (String) -> Unit,
+    onOpenPath: (WorkspaceLink) -> Unit,
     onSelectVariant: (Int) -> Unit,
     onOpenFile: (fileId: String, name: String) -> Unit,
     loadFile: suspend (fileId: String) -> Result<ByteArray>,
@@ -205,12 +205,12 @@ fun AssistantMessage(
     val hovered by interaction.collectIsHoveredAsState()
     Column(Modifier.fillMaxWidth().padding(end = 8.dp).hoverable(interaction).let { if (item.active) it else it.animateContentSize() }) {
         if (item.thinking.isNotBlank()) ThinkingBlock(item.thinking, streaming = item.active && item.text.isBlank(), onCopy = onCopyText)
-        if (item.tools.isNotEmpty()) ToolList(item.tools, loadToolOutput, onCopyText, onOpenPath)
+        if (item.tools.isNotEmpty()) ToolList(item.tools, loadToolOutput, onCopyText) { path -> onOpenPath(WorkspaceLink(path)) }
         // A picture a tool wrote shows at once, while the answer runs; once the run
         // ends the same file arrives as an output file and is shown from there.
         val saved = item.files.mapNotNull { it.path }.toSet()
         for (path in item.tools.mapNotNull { it.path }.distinct().filter { isImageName(it) && it !in saved }) {
-            ChatImage("ws:$path", path, { loadWorkspaceFile(path) }, onClick = { onOpenPath(path) }, Modifier.padding(vertical = 4.dp))
+            ChatImage("ws:$path", path, { loadWorkspaceFile(path) }, onClick = { onOpenPath(WorkspaceLink(path)) }, Modifier.padding(vertical = 4.dp))
         }
         Row(verticalAlignment = Alignment.Top) {
             actions.onToggleSelect?.let { SelectMark(actions.selected, it) }

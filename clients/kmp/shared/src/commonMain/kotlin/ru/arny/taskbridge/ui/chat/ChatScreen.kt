@@ -78,7 +78,9 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
+import ru.arny.taskbridge.core.client.chat.ACTIVE_STATUSES
 import ru.arny.taskbridge.core.client.chat.ToolState
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonElement
@@ -92,6 +94,7 @@ import ru.arny.taskbridge.core.api.LocalModelMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
+import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.ProviderWait
 import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.Task
@@ -140,6 +143,7 @@ private sealed interface ChatDialog {
     /** [withAnswer]: started from an answer — the log is linear, so its question goes too. */
     data class DeleteFrom(val turnId: String, val withAnswer: Boolean = false) : ChatDialog
     data object ConfirmStop : ChatDialog
+    data object ConfirmRestart : ChatDialog
     data object ConfirmClear : ChatDialog
     data object ConfirmDelete : ChatDialog
     data object ConfirmTrustWorkspace : ChatDialog
@@ -170,6 +174,9 @@ fun ChatScreen(
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     var dialog by remember { mutableStateOf<ChatDialog?>(null) }
+    // Ход, для которого оператор нажал «Подождать»: баннер молчания скрыт, пока
+    // идёт этот же ход (turn совпадает); новый ход показывает баннер снова.
+    var silenceWaitTurn by remember { mutableStateOf<Long?>(null) }
     var viewing by androidx.compose.runtime.saveable.rememberSaveable(taskId, stateSaver = FileTargetSaver) { mutableStateOf<FileTarget?>(null) }
     var files by remember(taskId) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var draft by remember(taskId) { mutableStateOf(TextFieldValue(graph.settings.draft(taskId))) }
@@ -184,13 +191,11 @@ fun ChatScreen(
     }
 
     DisposableEffect(taskId) {
-        connection.visibleSession = taskId
+        connection.showChat(taskId)
         connection.clearAttention(taskId)
         graph.settings.lastSessionId = taskId
         platform.clearNotification(taskId)
-        onDispose {
-            if (connection.visibleSession == taskId) connection.visibleSession = null
-        }
+        onDispose { connection.hideChat(taskId) }
     }
     LaunchedEffect(taskId) {
         snapshotFlow { draft.text }.debounce(400).collect { graph.settings.saveDraft(taskId, it) }
@@ -236,25 +241,38 @@ fun ChatScreen(
     var copyingHistory by remember { mutableStateOf(false) }
     LaunchedEffect(copyingHistory) {
         if (!copyingHistory) return@LaunchedEffect
-        // The chat is paged: pull every older page first; a page that brings nothing
-        // (a network error) ends the loop, and the loaded part is copied.
-        while (!session.state.value.reachedStart) {
-            val count = session.state.value.chat.items.size
-            session.loadOlder()
-            session.state.first { !it.loadingOlder }
-            if (session.state.value.chat.items.size == count && !session.state.value.reachedStart) break
+        // Оператор 2026-10-14: «копировать историю не работает». Причина была не в
+        // сборке текста (она чистая и покрыта тестом), а в ожидании страниц: без
+        // ограничения на страницу зависший запрос останавливал весь путь, и копии
+        // не было вообще. Плюс флаг снимался в конце: одна зависшая попытка
+        // оставляла его поднятым, и следующие нажатия ничего не делали.
+        //
+        // Поэтому: ограниченное ожидание на страницу, копируется то, что успело
+        // загрузиться, а флаг снимается всегда.
+        try {
+            while (!session.state.value.reachedStart) {
+                val count = session.state.value.chat.items.size
+                session.loadOlder()
+                // Ждём окончания страницы, но не вечно: сеть может не ответить вовсе.
+                withTimeoutOrNull(PAGE_WAIT_MS) { session.state.first { !it.loadingOlder } }
+                val loaded = session.state.value
+                if (loaded.chat.items.size == count && !loaded.reachedStart) break
+                if (loaded.loadingOlder) break // страница так и не завершилась — копируем что есть
+            }
+            val current = session.state.value
+            platform.copyText(chatTranscript(current.chat.items, current.task?.displayTitle) { start, end -> timeRange(platform, start, end) })
+            snackbar.currentSnackbarData?.dismiss()
+            snackbar.showSnackbar(if (current.reachedStart) "История чата скопирована" else "Скопирована только загруженная часть истории")
+        } finally {
+            copyingHistory = false
         }
-        val current = session.state.value
-        platform.copyText(chatTranscript(current.chat.items, current.task?.displayTitle) { start, end -> timeRange(platform, start, end) })
-        snackbar.currentSnackbarData?.dismiss()
-        snackbar.showSnackbar(if (current.reachedStart) "История чата скопирована" else "Скопирована только загруженная часть истории")
-        copyingHistory = false
     }
 
     Scaffold(
         topBar = {
             ChatTopBar(
                 state = state,
+                projectPath = projectPathFor(state.task, sessionListState.projects),
                 working = working,
                 showBack = showBack,
                 onBack = onBack,
@@ -275,7 +293,7 @@ fun ChatScreen(
                 // preview-фаза доходит сюда раньше текстового поля, а открытый
                 // диалог — отдельное окно и Esc сюда вообще не пускает.
                 if (event.type == KeyEventType.KeyUp && event.key == Key.Escape && dialog == null &&
-                    task?.status in setOf("QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING")
+                    canStop(task?.status, state.outbox.size)
                 ) {
                     dialog = ChatDialog.ConfirmStop
                     true
@@ -284,6 +302,18 @@ fun ChatScreen(
         ) {
             if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
             LinkBanner(state.link, onRetry = { session.reconnectNow() })
+            // Шаг C-A: таймер молчания. Сервер считает silentMs у себя (клиент не
+            // вычитает часы другого устройства); «Подождать» прячет баннер до нового
+            // хода, STOP идёт через уже существующее подтверждение.
+            val silence = silenceState(task)
+            if (silence != null && task?.turnState?.turn != silenceWaitTurn) {
+                SilenceBanner(
+                    silence,
+                    onWait = { silenceWaitTurn = task?.turnState?.turn },
+                    onStop = { dialog = ChatDialog.ConfirmStop },
+                    onRestart = { dialog = ChatDialog.ConfirmRestart },
+                )
+            }
             // Полоса выбора стоит над лентой: счётчик и кнопки должны быть видны там же,
             // где отметки, а не в меню, которое уже закрылось.
             if (selecting) {
@@ -302,6 +332,10 @@ fun ChatScreen(
                 )
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
+                // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
+                // зависят обе стороны поведения — держать низ или не давать ленте
+                // сдвинуть чтение.
+                val following by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 80 } }
                 when {
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                     state.link is LinkState.Failed && state.chat.items.isEmpty() -> EmptyState(
@@ -314,6 +348,7 @@ fun ChatScreen(
                         session = session,
                         state = state,
                         listState = listState,
+                        following = following,
                         historyLocked = historyLocked,
                         onDialog = { dialog = it },
                         onViewFile = { viewing = it },
@@ -328,7 +363,7 @@ fun ChatScreen(
                     )
                 }
                 // Reading older messages: the list stays put; new output only lights up the jump button.
-                val showJump by remember { derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 80 } }
+                val showJump by remember { derivedStateOf { !following } }
                 val newest = state.chat.items.lastOrNull()
                 val newestSignature = newest?.let { it.id + ((it as? ChatItem.Assistant)?.let { a -> a.text.length + a.tools.size } ?: 0) }
                 var seenSignature by remember { mutableStateOf(newestSignature) }
@@ -407,7 +442,7 @@ fun ChatScreen(
                 enterSends = graph.settings.enterSends && platform.kind == "desktop",
                 enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,
                 onSend = { send(it) },
-                onStop = if (task?.status in setOf("QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING")) ({ dialog = ChatDialog.ConfirmStop }) else null,
+                onStop = if (canStop(task?.status, state.outbox.size)) ({ dialog = ChatDialog.ConfirmStop }) else null,
             )
         }
     }
@@ -420,7 +455,7 @@ fun ChatScreen(
             platform,
             onDismiss = { viewing = null },
             // A link inside a rendered Markdown file opens the file it points at.
-            onOpenPath = { path -> viewing = FileTarget.Workspace(path) },
+            onOpenPath = { link -> viewing = FileTarget.Workspace(link.path, link.line, link.endLine) },
         )
     }
 }
@@ -428,6 +463,7 @@ fun ChatScreen(
 @Composable
 private fun ChatTopBar(
     state: ChatSessionState,
+    projectPath: String?,
     working: Boolean,
     showBack: Boolean,
     onBack: () -> Unit,
@@ -440,6 +476,9 @@ private fun ChatTopBar(
     val display = task?.let(::displayStateOf)
     val headerModel = task?.model ?: task?.requestedModel
     TopAppBar(
+        // Чуть выше дефолтных 64 dp: под названием теперь три строки (название,
+        // статус с моделью, путь проекта), и без этого их срезало бы.
+        modifier = Modifier.height(88.dp),
         navigationIcon = {
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
         },
@@ -473,6 +512,17 @@ private fun ChatTopBar(
                             Text(modelTitle, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
                         }
                     }
+                }
+                // Путь проекта рядом с названием: видно, какой папке принадлежит
+                // чат. Только когда он реально известен — «—» в шапке не нужен.
+                projectPath?.let { path ->
+                    Text(
+                        path,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         },
@@ -517,6 +567,16 @@ private fun SelectionBar(count: Int, onCopy: () -> Unit, onCancel: () -> Unit) {
         }
     }
 }
+
+/**
+ * Путь проекта сессии для шапки чата (запрос оператора: рядом с названием видеть
+ * папку). Проект ищется по projectId задачи; пустой/отсутствующий путь не
+ * показывается. Чистая функция — проверяется в ProjectPathTest без устройства.
+ */
+internal fun projectPathFor(task: Task?, projects: List<Project>): String? =
+    task?.projectId?.takeIf { it.isNotBlank() }
+        ?.let { id -> projects.firstOrNull { it.id == id } }
+        ?.path?.takeIf { it.isNotBlank() }
 
 /**
  * The conversation as plain text: who, when, what. Tools stay one line each
@@ -590,6 +650,15 @@ private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
             action = "Сейчас",
             onAction = onRetry,
         )
+        // Сервер отвечает, поток оборван: это другая поломка, чем «нет связи», и
+        // лечится ожиданием, а не проверкой сети на компьютере (план 4.2).
+        is LinkState.Degraded -> Banner(
+            text = "Компьютер отвечает, но поток событий оборван — переподключаюсь через ${(link.inMillis / 1000).coerceAtLeast(1)} с",
+            icon = AppIcons.Alert,
+            color = LocalStatusColors.current.waiting,
+            action = "Сейчас",
+            onAction = onRetry,
+        )
         is LinkState.Failed -> Banner(
             text = when (link.error) {
                 is ApiError.NotFound -> "Сессия удалена на компьютере."
@@ -602,12 +671,98 @@ private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
     }
 }
 
+/**
+ * Состояние связи словами для панели «Диагностика» (и любого другого места).
+ *
+ * Раньше сюда подставлялся сам объект состояния: после появления DEGRADED
+ * (двухуровневый health, план 4.2) оператор увидел бы
+ * «Degraded(attempt=2, inMillis=2000, reason=…)» — то, по чему нельзя решать.
+ */
+internal fun linkLabel(link: LinkState): String = when (link) {
+    LinkState.Connecting -> "подключаюсь"
+    LinkState.Live -> "поток подключён"
+    is LinkState.Degraded ->
+        "компьютер отвечает, поток событий оборван (попытка ${link.attempt}, через ${link.inMillis / 1000} с)"
+    is LinkState.Reconnecting ->
+        "нет связи с компьютером (попытка ${link.attempt}, через ${link.inMillis / 1000} с)"
+    is LinkState.Failed -> describe(link.error)
+}
+
+/**
+ * Нужно ли вернуть ленте позицию чтения после прихода контента.
+ *
+ * Отдельная функция, потому что именно охрана здесь и ошибается: вернуть ленту в
+ * момент, когда палец ею двигает, — это лишний скролл поверх жеста (а на
+ * desktop это уже приводило к аварийному завершению), а возврат к тому же месту,
+ * где пользователь и стоит, — бессмысленная работа на каждый дельта-чанк.
+ */
+/**
+ * Якорь чтения: элемент, на котором стоит оператор, вместе со смещением внутри него.
+ *
+ * Почему отдельным объектом, а не двумя `remember` в композабле: инвариант здесь
+ * ровно один и его нужно уметь проверять — «пришёл контент, а позиция чтения та же».
+ * Элемент адресуется КЛЮЧОМ, а не индексом: при новой дельте или при догрузке
+ * старой страницы индексы сдвигаются, а ключ — нет (2026-10-14).
+ */
+internal class ReadingAnchor {
+    var key: String? = null
+        private set
+    var offset: Int = 0
+        private set
+
+    /** Палец двигает ленту: запоминаем, где оператор остановился. */
+    fun record(scrolling: Boolean, index: Int, offset: Int, keyOf: (Int) -> String?) {
+        if (!scrolling) return
+        keyOf(index)?.let { key = it }
+        this.offset = offset
+    }
+
+    /**
+     * Куда вернуть ленту, если она уехала от якоря; null — возвращать нечего
+     * (нет якоря, элемент исчез из ленты, оператор внизу или двигает ленту сам).
+     */
+    fun target(
+        following: Boolean,
+        scrolling: Boolean,
+        currentIndex: Int,
+        currentOffset: Int,
+        indexOf: (String) -> Int,
+    ): Pair<Int, Int>? {
+        val anchorKey = key ?: return null
+        val index = indexOf(anchorKey)
+        if (!needsReadingRestore(following, scrolling, currentIndex, currentOffset, index, offset)) return null
+        return index to offset
+    }
+}
+
+internal fun needsReadingRestore(
+    following: Boolean,
+    scrolling: Boolean,
+    currentIndex: Int,
+    currentOffset: Int,
+    targetIndex: Int,
+    targetOffset: Int,
+): Boolean {
+    if (following || scrolling) return false
+    if (targetIndex < 0) return false
+    return currentIndex != targetIndex || currentOffset != targetOffset
+}
+
 @Composable
 private fun MessageList(
     graph: AppGraph,
     session: ChatSession,
     state: ChatSessionState,
     listState: androidx.compose.foundation.lazy.LazyListState,
+    /**
+     * Пользователь у низа ленты и хочет видеть новое.
+     *
+     * Ложь — он читает выше низа, и тогда приходящий контент не имеет права
+     * сдвинуть вид. Это и был баг 2026-10-14: при `reverseLayout` растущий
+     * ответ (он же нижний элемент, он же якорь) толкал ленту, и чтение уезжало
+     * само — «при получении контента всё равно скроллится».
+     */
+    following: Boolean,
     historyLocked: Boolean,
     onDialog: (ChatDialog) -> Unit,
     onViewFile: (FileTarget) -> Unit,
@@ -621,6 +776,37 @@ private fun MessageList(
     val ownClient = graph.settings.clientId
     val items = state.chat.items
     val reversed = remember(items) { items.asReversed() }
+
+    // Якорь чтения: элемент, на котором стоит пользователь, и смещение внутри
+    // него. Обновляется, пока палец двигает список, и восстанавливается, когда
+    // контент пришёл, а пользователь читает выше низа.
+    //
+    // Почему так, а не через dispatchRawDelta: тот вариант уже один раз оставил
+    // LazyList с незавершённым скроллом и уронил десктоп («entered drag with
+    // non-zero pending scroll»), поэтому компенсация роста через raw-дельты здесь
+    // запрещена сознательно (см. ChatItems.Pinned). Здесь только публичные
+    // чтение состояния и scrollToItem, и то лишь когда состояние разошлось.
+    val readingAnchor = remember(state.taskId) { ReadingAnchor() }
+    // Сигнатура приходящего контента: длина растущего ответа и число сообщений.
+    val newest = items.lastOrNull()
+    val contentSignature = items.size to ((newest as? ChatItem.Assistant)?.let { it.text.length + it.tools.size } ?: 0)
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            listState.isScrollInProgress to (listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset)
+        }.collect { (scrolling, position) ->
+            readingAnchor.record(scrolling, position.first, position.second) { index -> reversed.getOrNull(index)?.id }
+        }
+    }
+    LaunchedEffect(contentSignature, following) {
+        val target = readingAnchor.target(
+            following = following,
+            scrolling = listState.isScrollInProgress,
+            currentIndex = listState.firstVisibleItemIndex,
+            currentOffset = listState.firstVisibleItemScrollOffset,
+            indexOf = { id -> reversed.indexOfFirst { it.id == id } },
+        ) ?: return@LaunchedEffect
+        listState.scrollToItem(target.first, target.second)
+    }
     // Older history loads when the top of the chat comes into view.
     val nearTop by remember { derivedStateOf { listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index?.let { it >= listState.layoutInfo.totalItemsCount - 10 } == true } }
     // The effect must restart when a page ARRIVES, not only when `nearTop` flips:
@@ -702,7 +888,7 @@ private fun MessageList(
                                 ),
                                 onCopyText = { platform.copyText(it) },
                                 loadToolOutput = { session.toolOutput(it) },
-                                onOpenPath = { onViewFile(FileTarget.Workspace(it)) },
+                                onOpenPath = { link -> onViewFile(FileTarget.Workspace(link.path, link.line, link.endLine)) },
                                 onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
                                 loadFile = { session.readFile(it) },
                                 loadWorkspaceFile = { session.readWorkspaceFile(it) },
@@ -1142,14 +1328,32 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             onConfirm = { session.deleteFrom(dialog.turnId); onClose() },
             onDismiss = onClose,
         )
+        ChatDialog.ConfirmRestart -> ConfirmDialog(
+            title = "Перезапустить сессию?",
+            text = "Процесс Pi будет остановлен и поднят заново. История сессии сохранится, " +
+                "последний промпт автоматически не переотправится — отправьте его сами после перезапуска.",
+            confirm = "Перезапустить",
+            destructive = true,
+            onConfirm = { session.restartSession(); onClose() },
+            onDismiss = onClose,
+        )
         ChatDialog.ConfirmStop -> ConfirmDialog(
             title = "Остановить агента?",
             text = "Грокнут все процессы сессии (Pi и его дочерние) — даже если модель читает промпт. " +
                 "Текущий ответ и запущенные команды прервутся" + (state.task?.pendingPrompts?.size?.takeIf { it > 0 }
-                ?.let { ", а также уберутся из очереди $it сообщ." } ?: "."),
+                ?.let { ", а также уберутся из очереди $it сообщ." } ?: ".") +
+                // Оператор 2026-10-14: «сообщение не отправляется, и я не могу никак
+                // перезапустить». Поэтому STOP снимает и незавершённые отправки —
+                // текст возвращается в поле ввода, ничего не теряется молча.
+                (if (state.outbox.isNotEmpty()) " Незавершённые отправки (${state.outbox.size}) будут отменены, их текст вернётся в поле ввода." else ""),
             confirm = "Остановить",
             destructive = true,
-            onConfirm = { session.cancel(hard = true); onClose() },
+            onConfirm = {
+                session.cancel(hard = true)
+                // Отменённые отправки вернутся в поле ввода эффектом RestoreComposer.
+                session.releaseStuckSends()
+                onClose()
+            },
             onDismiss = onClose,
         )
         ChatDialog.ConfirmClear -> ConfirmDialog(
@@ -1596,7 +1800,7 @@ internal fun buildDiagnosticsDetails(
         "Сессия: ${state.taskId}" + sessionTitle?.let { " · «$it»" }.orEmpty(),
         "Начало сессии: " + (sessionStart?.let(moment) ?: "неизвестно") +
             sessionDuration?.let { if (sessionActive) " · идёт $it" else " · длительность $it" }.orEmpty(),
-        "Связь: ${if (state.link is LinkState.Live) "поток подключён" else state.link}",
+        "Связь: ${linkLabel(state.link)}",
         "Последний контакт: ${sinceLabel(state.lastContactAt, now, moment) ?: "ещё нет"}",
         "Последнее событие: ${lastEventLabel(state.lastEventType) ?: "ещё нет"} · ${sinceLabel(state.lastEventAt, now, moment) ?: "—"}",
         "Pi: ${task?.let { if (displayStateOf(it).active) stageLabel(it.status) else displayStateOf(it).label } ?: "—"}",
@@ -1922,4 +2126,63 @@ private fun ConfirmDialog(title: String, text: String, confirm: String, destruct
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
     )
+}
+
+/**
+ * Есть ли что останавливать. CANCELLING здесь намеренно: если остановка залипла,
+ * именно повторное нажатие — единственный выход, а кнопка, исчезающая при
+ * «Останавливаю…», запирает оператора в зависшем чате (2026-10-14).
+ *
+ * [pendingSends] — незавершённые отправки клиента. Оператор 2026-10-14: «сообщение
+ * не отправляется, и я не могу никак перезапустить». Такое состояние видно в
+ * статусе НЕ всегда (сессия уже SUCCEEDED/FAILED, а отправка висит), поэтому
+ * очередь отправок — второй, независимый повод для STOP.
+ */
+/** Сколько ждать одну страницу истории при «Копировать историю» (см. эффект копирования). */
+internal const val PAGE_WAIT_MS = 5_000L
+
+internal fun canStop(status: String?, pendingSends: Int = 0): Boolean =
+    pendingSends > 0 || status in setOf(
+        "QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING",
+    )
+
+/**
+ * Шаг C-A: состояние молчания хода для баннера.
+ *
+ * silentMs считает сервер (клиент не вычитает часы другого устройства),
+ * порог по умолчанию — 120 с (как в web). Молчание сообщается только для
+ * живого хода: терминальная сессия молчать не может.
+ */
+data class SilenceState(val totalMs: Long, val stage: String?) {
+    val label: String
+        get() = "Модель молчит ${totalMs / 60000}:${(totalMs % 60000 / 1000).toString().padStart(2, '0')}"
+}
+
+internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceState? {
+    val silent = task?.turnState?.silentMs?.takeIf { it >= thresholdMs } ?: return null
+    if (task.status !in ACTIVE_STATUSES) return null
+    return SilenceState(silent, task.turnState?.stage?.takeIf { it.isNotBlank() })
+}
+
+@Composable
+private fun SilenceBanner(silence: SilenceState, onWait: () -> Unit, onStop: () -> Unit, onRestart: () -> Unit) {
+    val colors = LocalStatusColors.current
+    Surface(Modifier.fillMaxWidth(), color = colors.waiting.copy(alpha = 0.12f)) {
+        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(AppIcons.Alert, null, tint = colors.waiting, modifier = Modifier.size(18.dp))
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(silence.label, style = MaterialTheme.typography.labelLarge, color = colors.waiting)
+                Text(
+                    "Последний прогресс: ${silence.stage ?: "стадия неизвестна"}. Ход может быть просто долгим.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            TextButton(onClick = onWait) { Text("Подождать") }
+            // Перезапуск — не «повторить»: промпт сам не переотправится (план 4.2/C-A).
+            TextButton(onClick = onRestart) { Text("Перезапустить") }
+            TextButton(onClick = onStop) { Text("STOP", color = MaterialTheme.colorScheme.error) }
+        }
+    }
 }

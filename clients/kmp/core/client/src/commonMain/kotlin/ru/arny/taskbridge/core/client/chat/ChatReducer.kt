@@ -427,6 +427,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             // locally and delivers the answer as a notify UI request — shown as a
             // note row, otherwise the command would execute silently.
             "UI_NOTIFY" -> onUiNotify(event)
+            // Этап M2: факт инъекции памяти виден в ленте — «работает ли память»
+            // перестаёт быть гаданием. Одна заметка на событие, с числами.
+            "MEMORY_INJECTED" -> event.message?.takeIf { it.isNotBlank() }?.let { addNote(event, it) }
             // Провайдер не принял запрос, Pi ждёт повтора. Заметка нужна в самой
             // ленте: без неё ход, простоявший час, выглядит обычно, а его итог не
             // объясняет, откуда взялась пауза. Одна на эпизод ожидания — сервер

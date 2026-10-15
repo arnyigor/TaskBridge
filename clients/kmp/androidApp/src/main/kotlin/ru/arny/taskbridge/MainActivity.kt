@@ -50,7 +50,11 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        (application as TaskBridgeApplication).platform.foreground = false
+        val app = application as TaskBridgeApplication
+        app.platform.foreground = false
+        // The process may stay alive for notifications, but no hidden chat keeps
+        // an SSE socket or decodes heartbeat-triggered snapshots in the background.
+        app.graph.connection?.appVisibilityChanged()
         super.onStop()
     }
 

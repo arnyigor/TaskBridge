@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { TaskStore } from '../src/task-store.mjs';
-import { TaskManager } from '../src/task-manager.mjs';
+import { TaskManager, piBelongsToDataRoot } from '../src/task-manager.mjs';
 import { prepareProjectWorkspace, collectGitState, git } from '../src/git.mjs';
 
 async function fixture(t, streaming = false) {
@@ -213,7 +213,11 @@ test('RPC failure leaves no phantom message, active reservation, or settle timer
   const f = await fixture(t);
   f.pi.prompt = async () => { throw new Error('RPC rejected'); };
   await assert.rejects(f.manager.message('a', 'retry me'), /RPC rejected/);
-  assert.deepEqual(await f.store.readEvents('a', 0), []);
+  const events = await f.store.readEvents('a', 0);
+  assert.equal(events.filter(x => x.type === 'USER_MESSAGE').length, 0, 'no phantom user message');
+  // Шаг C-A: сама попытка доставки — диагностический факт (TURN_STATE
+  // DISPATCHING→FAILED), а вот пользовательского сообщения в истории нет.
+  assert.deepEqual(events.filter(x => x.type === 'TURN_STATE').map(x => x.data.phase), ['DISPATCHING', 'FAILED']);
   assert.equal(f.manager.activeTaskId, null);
   assert.equal(f.runtime.settleResolvers.length, 0);
   assert.equal(f.task.assistantText, 'saved');
@@ -257,6 +261,32 @@ test('repeated cancellation produces one terminal event', async t => {
   await Promise.all([f.manager.cancel('a'), f.manager.cancel('a')]);
   assert.equal(f.task.status, 'CANCELLED');
   assert.equal((await f.store.readEvents('a', 0)).filter(x => x.type === 'TASK_CANCELLED').length, 1);
+});
+
+// STOP — это «останови всё сразу»: процессы сессии убиваются ДО записей в store.
+// Иначе под нагрузкой (поток кадров инструмента, занятая БД) запись статуса и
+// разбор очереди отодвигали убийство на секунды, и STOP выглядел как зависание
+// (2026-10-14: blender-команда, телефон и десктоп).
+test('hard stop kills the session processes before it writes anything', async t => {
+  const f = await fixture(t, true);
+  const order = [];
+  f.pi.killTree = async () => { order.push('killTree'); };
+  f.pi.abort = async () => { order.push('abort'); };
+  const save = f.store.save.bind(f.store);
+  f.store.save = async task => { order.push('save'); return save(task); };
+  const event = f.store.appendEvent.bind(f.store);
+  f.store.appendEvent = async (id, ev) => { order.push('event'); return event(id, ev); };
+  f.task.pendingPrompts = [{ id: 'p1', text: 'потом', mode: 'auto', files: [] }];
+  f.manager.pendingFiles.set('p1', { files: [], uploadToken: null });
+
+  f.manager.activeTaskIds.add('a');
+  await f.manager.cancel('a', { hard: true });
+
+  assert.equal(order[0], 'killTree', `убийство первое: ${order.join(' → ')}`);
+  assert.equal(order.includes('abort'), false, 'жёсткий стоп не ждёт вежливого abort');
+  assert.equal(f.task.status, 'CANCELLED');
+  assert.ok(order.indexOf('killTree') < order.indexOf('save'), `killTree раньше первой записи: ${order.join(' → ')}`);
+  assert.equal(f.task.pendingPrompts, null, 'очередь снимается — но уже после остановки');
 });
 
 test('deleting a task removes its scratch workspace, pi-sessions and workspace input copy', async t => {
@@ -1419,4 +1449,23 @@ test('changing model also retires an unresponsive session instead of hiding the 
   assert.equal(killed, 1);
   assert.equal(f.manager.runtimes.has('a'), false);
   assert.equal(f.manager.getTask('a').status, 'FAILED');
+});
+
+// Предохранитель к сборщику осиротевших Pi. 2026-10-14: замер производительности
+// списка запустили на КОПИИ рабочей базы — копия несла pids живых Pi, сборщик счёл
+// их осиротевшими и оборвал две живые сессии (в том числе мою собственную). Теперь
+// запись, чей файл сессии лежит вне этого каталога данных, не даёт права убивать
+// чужой процесс.
+test('a Pi from another data directory is recognised and left alone', () => {
+  const dataRoot = path.join(os.tmpdir(), 'taskbridge-data-here');
+  const inside = { id: 'a', piSessionFile: path.join(dataRoot, 'pi-sessions', 'a', 'session.jsonl') };
+  const outside = { id: 'b', piSessionFile: path.join(os.tmpdir(), 'другой-стенд', 'data', 'pi-sessions', 'b', 'session.jsonl') };
+  assert.equal(piBelongsToDataRoot(inside, dataRoot), true, 'свой Pi — можно убирать');
+  assert.equal(piBelongsToDataRoot(outside, dataRoot), false, 'чужой Pi трогать нельзя');
+  // Записи без файла сессии остаются «нашими»: доказать обратное нечем, а исходная
+  // задача сборщика — убрать Pi, оставшийся от нашего же падения.
+  assert.equal(piBelongsToDataRoot({ id: 'c' }, dataRoot), true);
+  assert.equal(piBelongsToDataRoot({ id: 'd', piSessionFile: '   ' }, dataRoot), true);
+  // Тот же путь с другим разделителем — это тот же каталог, а не чужой.
+  assert.equal(piBelongsToDataRoot({ piSessionFile: path.join(dataRoot, 'pi-sessions', 'a', 's.jsonl') }, dataRoot + path.sep), true);
 });

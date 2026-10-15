@@ -4,6 +4,7 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
+import { deliveryMetrics } from './delivery-metrics.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile, sessionContainsUserMessage } from './session-history.mjs';
@@ -36,7 +37,12 @@ import { buildResumeContext, sessionSummary, WORKSPACE_STRATEGIES, MEMORY_MODES 
 import { buildResumePreview } from './resume/resume-preview.mjs';
 import { renderResumePrompt } from './resume/resume-renderer.mjs';
 import { contextFingerprint, validateResume, describeChanges } from './resume/resume-validator.mjs';
-import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions } from './memory/project-memory-provider.mjs';
+import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions, INDEX_BUDGET_TOKENS, GLOBAL_BUDGET_TOKENS } from './memory/project-memory-provider.mjs';
+import { memoryMetrics } from './memory/memory-metrics.mjs';
+import { MERGE_THRESHOLD_DEFAULT, findMergeCandidates, mergeProposalText } from './memory/memory-consolidator.mjs';
+import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency } from './model-probe.mjs';
+import { WakeChannel } from './wake-channel.mjs';
+import { apiKey as providerApiKey } from './provider-models.mjs';
 import { listProposals, createProposal, acceptProposal, rejectProposal, validateProposal, proposalCounts } from './memory/memory-proposals.mjs';
 import { projectFileIndex } from './memory/path-patterns.mjs';
 import { validateRecipe, renderRecipe } from './recipes/recipe.mjs';
@@ -314,6 +320,27 @@ function providerGiveUpMessage(giveUp) {
   return `Провайдер${who} не принял запрос и повторять не будет${why}.`;
 }
 // Kill a whole process tree by pid (an orphan from a previous TaskBridge run).
+/**
+ * Принадлежит ли записанный Pi ЭТОМУ каталогу данных.
+ *
+ * Сборщик осиротевших Pi убивает процессы, оставшиеся от упавшего TaskBridge. Копия
+ * базы данных (бэкап, второй стенд, замер) несёт pids ЖИВЫХ Pi другого каталога — их
+ * убийство обрывает чужие сессии. Признак принадлежности: файл сессии Pi, записанный
+ * в задаче, лежит внутри нашего каталога данных; он всегда абсолютный и всегда внутри
+ * него (data/pi-sessions/<taskId>/…).
+ *
+ * Записи без файла сессии считаются «нашими»: доказать обратное нечем, а исходная
+ * задача сборщика — убрать Pi, оставшийся от нашего же падения.
+ */
+export function piBelongsToDataRoot(task, dataRoot) {
+  const sessionFile = typeof task?.piSessionFile === 'string' && task.piSessionFile.trim() ? task.piSessionFile : null;
+  if (!sessionFile) return true;
+  const resolvedRoot = path.resolve(String(dataRoot || ''));
+  const resolvedFile = path.resolve(sessionFile);
+  const relative = path.relative(resolvedRoot, resolvedFile);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
 async function killTreeByPid(pid) {
   const { execFile } = await import('node:child_process');
   await new Promise(resolve => {
@@ -337,10 +364,33 @@ function safeFileName(name) {
 // copy is not worth storing, nor worth pushing to every attached client over SSE
 // once per turn. Everything else in the frame is kept as it came.
 function storedPiFrame(frame) {
-  if (frame?.type !== 'agent_end' || !frame.messages) return frame;
-  const rest = { ...frame };
-  delete rest.messages;
-  return rest;
+  if (!frame || typeof frame !== 'object') return frame;
+  if (frame.type === 'agent_end' && frame.messages) {
+    const rest = { ...frame };
+    delete rest.messages;
+    return rest;
+  }
+  // Шаг C-B (нагрузка): результат инструмента не читает НИ ОДИН клиент — web и KMP
+  // выбрасывают его при разборе (ChatEventLighteningTest это фиксирует), а в событии
+  // он стоил больше всего: одна bash-команда с выводом — 222 КБ из 4.6 МБ событий
+  // сессии, и всё это уходило по SSE на телефон, где UI захлёбывался аллокациями
+  // (GC каждые 2 с, heap 90–110 МБ, 2026-10-14). Остаётся признак размера — он
+  // нужен диагностике, а содержимое нет: полный вывод лежит в tool-*.log.
+  if (frame.type === 'tool_execution_end' && frame.result != null) {
+    const text = typeof frame.result === 'string' ? frame.result : JSON.stringify(frame.result);
+    const rest = { ...frame, resultDropped: { bytes: text.length } };
+    delete rest.result;
+    return rest;
+  }
+  // Накопительный partialResult нужен только прогрессу субагента (KMP,
+  // subagentProgress); у остальных инструментов это копия всего вывода на каждом
+  // кадре — ровно то, что делает поток кадров тяжёлым.
+  if (frame.type === 'tool_execution_update' && frame.partialResult != null && frame.toolName !== 'subagent') {
+    const rest = { ...frame };
+    delete rest.partialResult;
+    return rest;
+  }
+  return frame;
 }
 
 // Budgets for ONE session inside a LIST response (GET /api/tasks, the project
@@ -353,27 +403,73 @@ function storedPiFrame(frame) {
 // «Ответ сервера слишком большой (16 МБ)». Nothing on screen needs the copies:
 // the list shows a title line, the last line of the answer for a notification,
 // and counts; the chat screen reads the session itself from /api/tasks/:id.
-const LIST_PROMPT_CHARS = 1024;
-const LIST_ANSWER_CHARS = 1024;
+const LIST_PROMPT_CHARS = 300;
+const LIST_ANSWER_CHARS = 300;
 const LIST_VERIFICATION_CHARS = 512;
-const LIST_GIT_CHARS = 1024;
-const LIST_SUMMARY_CHARS = 1024;
+const LIST_GIT_CHARS = 300;
+const LIST_SUMMARY_CHARS = 300;
+// Списки файлов и правок — это тоже мегабайты на ровном месте: у одной сессии
+// (сборка Unreal) 433 записи outputFiles = 122 КБ, а git.changedFiles давал ещё
+// 23 КБ на сессию. Телефон качает список на 50 КБ/с и открывал его десятки секунд
+// (2026-10-14: 1098 КБ на 70 сессий — «список папок тормозит»). Экрану списка нужны
+// счётчики, а сам список файлов читается из /api/tasks/:id.
+const LIST_OUTPUT_FILES = 3;
+const LIST_CHANGED_FILE_SAMPLE = 3;
+const LIST_ATTACHMENTS = 2;
 
 /** One session as the list endpoints ship it: the same task, with the per-session megabytes cut to previews. */
+// Подпись модели для строки списка: provider/id/name. Всё остальное описание
+// (окно контекста, стоимость, уровни размышлений) нужно экрану сессии.
+function briefModel(model) {
+  return Object.fromEntries(['provider', 'id', 'name']
+    .filter(key => model[key] !== undefined)
+    .map(key => [key, model[key]]));
+}
+
 export function briefTask(task) {
   return {
     ...task,
+    // Строка сессии: заголовок, статус, проект, модель, время, счётчики. Всё, что
+    // нужно только экрану сессии (метрики, скорости, usage, параметры хода), из списка
+    // убирается: список — первое, что грузит телефон, и он тянет его каждые 5 с.
     prompt: headText(task.prompt, LIST_PROMPT_CHARS),
     // The notification preview takes the LAST non-blank line (SessionAlerts).
     assistantText: tailText(task.assistantText, LIST_ANSWER_CHARS),
     // Only the chat screen shows reasoning, and it reads the session itself.
     thinkingText: null,
+    metrics: null,
+    speeds: null,
+    lastUsage: null,
+    parameters: null,
     verification: Array.isArray(task.verification)
-      ? task.verification.map(entry => entry && typeof entry === 'object'
-        ? { ...entry, stdout: tailText(entry.stdout, LIST_VERIFICATION_CHARS), stderr: tailText(entry.stderr, LIST_VERIFICATION_CHARS) }
+      ? task.verification.slice(0, 5).map(entry => entry && typeof entry === 'object'
+        ? {
+          ...entry,
+          stdout: tailText(entry.stdout, LIST_VERIFICATION_CHARS),
+          stderr: tailText(entry.stderr, LIST_VERIFICATION_CHARS),
+        }
         : entry)
       : task.verification,
-    git: task.git && typeof task.git === 'object' ? { ...task.git, status: headText(task.git.status, LIST_GIT_CHARS) } : task.git,
+    // Модель строки — это её подпись: provider/id/name (KMP показывает model.label,
+    // он вычисляется из этих полей). Остальное описание модели (contextWindow, cost,
+    // уровни размышлений) нужно экрану сессии, а не списку.
+    ...(task.model ? { model: briefModel(task.model) } : {}),
+    ...(task.requestedModel ? { requestedModel: briefModel(task.requestedModel) } : {}),
+    // Длинные списки заменяются счётчиком: «256 изменённых файлов» вместо 256 строк.
+    git: task.git && typeof task.git === 'object'
+      ? {
+        ...task.git,
+        status: headText(task.git.status, LIST_GIT_CHARS),
+        changedFiles: Array.isArray(task.git.changedFiles) ? task.git.changedFiles.slice(0, LIST_CHANGED_FILE_SAMPLE) : task.git.changedFiles,
+        changedFileCount: Array.isArray(task.git.changedFiles) ? task.git.changedFiles.length : null,
+        changedFilesTruncated: Array.isArray(task.git.changedFiles) && task.git.changedFiles.length > LIST_CHANGED_FILE_SAMPLE,
+      }
+      : task.git,
+    // Файлы сессии: строка списка показывает число, а сами записи читает экран
+    // сессии. Нет списка — нет и счётчика: форма снимка остаётся чистой.
+    ...(Array.isArray(task.outputFiles) ? { outputFiles: task.outputFiles.slice(0, LIST_OUTPUT_FILES), outputFileCount: task.outputFiles.length } : {}),
+    ...(Array.isArray(task.attachments) ? { attachments: task.attachments.slice(0, LIST_ATTACHMENTS), attachmentCount: task.attachments.length } : {}),
+    ...(Array.isArray(task.files) ? { files: task.files.slice(0, LIST_ATTACHMENTS), fileCount: task.files.length } : {}),
     compaction: task.compaction?.last
       ? { ...task.compaction, last: { ...task.compaction.last, summary: headText(task.compaction.last.summary, LIST_SUMMARY_CHARS) } }
       : task.compaction,
@@ -443,7 +539,15 @@ export class TaskManager extends EventEmitter {
     this.dataRoot = dataRoot;
     this.store = store;
     this.projects = new Map((config.projects || []).map((p) => [p.id, p]));
-    this.memoryProvider = new PiMemoryMdProvider({ root: config.memory?.projectMemoryRoot });
+    this.memoryProvider = new PiMemoryMdProvider({
+      root: config.memory?.projectMemoryRoot,
+      // Этап M1: индекс памяти — кэш поиска, рядом с остальными данными TaskBridge.
+      // Файлы .md остаются источником правды: удаление этого файла ничего не теряет.
+      indexPath: path.join(dataRoot, 'memory-index.db'),
+    });
+    this.memoryConsolidationTimer = null;
+    this.memoryConsolidationRunning = false;
+    this.#startMemoryConsolidationScheduler();
     this.tasks = new Map();
     this.runtimes = new Map();
     this.queue = [];
@@ -506,6 +610,15 @@ export class TaskManager extends EventEmitter {
     // Per-model TTFT history (local + cloud): the UI shows "this model usually
     // answers in ~N s" before the prompt is even sent.
     this.modelLatency = new ModelLatency(dataRoot);
+    // Кулдаун проб модели: кнопку жмут повторно, но бить по провайдеру часто нельзя,
+    // а проба с токенами ещё и стоит денег (пункт §3.3 плана).
+    this.probeCooldown = new ProbeCooldown({ cooldownMs: Number(config.modelProbe?.cooldownMs) || PROBE_DEFAULTS.cooldownMs });
+    // Одновременные пробы одной модели: второй запрос получает COOLDOWN, а не
+    // свою платную попытку (см. probeModel).
+    this.probeInFlight = new Set();
+    // Свой push в локальной сети (4.3): завершение хода будит телефон, вместо
+    // того чтобы тот опрашивал список каждые N секунд.
+    this.wakeChannel = new WakeChannel();
     this.nativeSessions = new NativeSessionService(this);
     this.runtimeChanging = false;
     // Tool output bounding (§38): the full log stays in the task artifacts; only
@@ -728,12 +841,74 @@ export class TaskManager extends EventEmitter {
       if (task.pendingUiRequest) { task.pendingUiRequest = null; await this.store.save(task).catch(() => {}); }
       this.tasks.set(task.id, task);
       task._runtimeState = this.#runtimeFacts(task).state;
+      // Шаг C-B: после рестарта даём снимку версию последнего события на диске,
+      // иначе первый GET вернёт seq=0 и клиент сочтёт его древним.
+      task._snapshotSeq = await this.store.maxSeq(task.id).catch(() => 0);
     }
     if (trimmed) await this.store.vacuum().catch(() => {});
     else await this.#maybeVacuum();
     await this.#sweepOrphans();
     await this.#killOrphanPis(previous);
     if (this.queue.length) this.#schedulePump();
+  }
+
+  #memoryConsolidationSettings() {
+    const cfg = this.config.memory?.consolidation || {};
+    return {
+      enabled: cfg.enabled === true,
+      everyMs: Math.max(60_000, Math.min(7 * 86400_000, (Number(cfg.everyHours) || 24) * 3600_000)),
+      maxProposalsPerRun: Math.max(1, Math.min(50, Number(cfg.maxProposalsPerRun) || 10)),
+      maxProposalsPerProject: Math.max(1, Math.min(10, Number(cfg.maxProposalsPerProject) || 3)),
+    };
+  }
+
+  #startMemoryConsolidationScheduler() {
+    const cfg = this.#memoryConsolidationSettings();
+    if (!cfg.enabled) return;
+    this.memoryConsolidationTimer = setInterval(() => {
+      this.runMemoryConsolidationSchedule().catch(error => console.warn('[TaskBridge] memory consolidation scheduler failed:', error?.message || error));
+    }, cfg.everyMs);
+    this.memoryConsolidationTimer.unref?.();
+  }
+
+  /**
+   * Scheduled M3 consolidator: only creates pending proposals, never edits core memory.
+   * It is exposed as a method for tests and future admin UI; the timer calls the same path.
+   */
+  async runMemoryConsolidationSchedule() {
+    if (this.memoryConsolidationRunning) return { skipped: 'running', projects: 0, proposals: 0 };
+    this.memoryConsolidationRunning = true;
+    const cfg = this.#memoryConsolidationSettings();
+    const stats = { projects: 0, candidates: 0, proposals: 0, existing: 0, errors: 0 };
+    try {
+      for (const projectId of this.projects.keys()) {
+        if (stats.proposals >= cfg.maxProposalsPerRun) break;
+        stats.projects += 1;
+        let view;
+        try {
+          view = await this.memoryConsolidation(projectId, { limit: cfg.maxProposalsPerProject });
+        } catch {
+          stats.errors += 1;
+          continue;
+        }
+        for (const candidate of view.candidates || []) {
+          if (stats.proposals >= cfg.maxProposalsPerRun) break;
+          const sources = (candidate.notes || []).map(note => note.source).filter(Boolean);
+          if (sources.length < 2) continue;
+          stats.candidates += 1;
+          try {
+            const result = await this.proposeMerge(projectId, { first: sources[0], second: sources[1], reason: 'консолидация: scheduler' });
+            if (result.existing) stats.existing += 1;
+            else stats.proposals += 1;
+          } catch {
+            stats.errors += 1;
+          }
+        }
+      }
+      return stats;
+    } finally {
+      this.memoryConsolidationRunning = false;
+    }
   }
 
   // R3.6: a Pi left running by a previous TaskBridge (crash, taskkill of the
@@ -745,10 +920,20 @@ export class TaskManager extends EventEmitter {
     if (!recorded.length) return;
     const list = await listProcesses({ fresh: true });
     for (const task of recorded) {
-      const alive = await sameProcess(task.piPid, task.piStartedAt, { list });
-      if (alive) {
-        console.warn(`[TaskBridge] killing orphan Pi of task ${task.id}: pid ${task.piPid}`);
-        await killTreeByPid(task.piPid);
+      // Запись может прийти из ЧУЖОГО каталога данных: копия базы (бэкап, замер,
+      // второй стенд) несёт pids Pi, которые живы и принадлежат работающему
+      // TaskBridge. Убить их — значит оборвать живые сессии в другом каталоге.
+      // Признак принадлежности: файл сессии Pi лежит внутри НАШЕГО dataRoot.
+      // 2026-10-14 это стоило двух оборванных сессий при замере на копии базы.
+      const foreign = !piBelongsToDataRoot(task, this.dataRoot);
+      if (foreign) {
+        console.warn(`[TaskBridge] не убиваю Pi задачи ${task.id} (pid ${task.piPid}): её файл сессии лежит вне этого каталога данных (${sessionFile})`);
+      } else {
+        const alive = await sameProcess(task.piPid, task.piStartedAt, { list });
+        if (alive) {
+          console.warn(`[TaskBridge] killing orphan Pi of task ${task.id}: pid ${task.piPid}`);
+          await killTreeByPid(task.piPid);
+        }
       }
       task.piPid = null;
       task.piStartedAt = null;
@@ -765,6 +950,8 @@ export class TaskManager extends EventEmitter {
   // are owned by the caller (the server / future host) and are closed separately.
   async close() {
     this.closing = true;
+    try { this.memoryProvider?.closeIndex(); } catch { /* индекс — кэш, его потеря не важна */ }
+    if (this.memoryConsolidationTimer) { clearInterval(this.memoryConsolidationTimer); this.memoryConsolidationTimer = null; }
     if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null; }
     await this.#drainPump(2000);
     // A queued #event write that is still pending here would fire after the
@@ -925,10 +1112,37 @@ export class TaskManager extends EventEmitter {
     const collisions = await this.#memoryCollisions(project.id);
     const ambiguous = collisions.length > 0;
     const proposals = proposalCounts(await listProposals(overview.memoryDir));
+    // Этап M2: инспектору нужны не только имена файлов, но и то, чем живёт
+    // инъекция — сколько раз запись использовалась, когда в последний раз, и в
+    // какой бюджет она обязана влезть. Это метаданные индекса, не содержимое.
+    const started = Date.now();
+    const notes = await this.memoryProvider.indexedNotes(project).catch(() => []);
+    const global = await this.memoryProvider.globalEntries({ limit: 200 }).catch(() => []);
+    // M3: метрики памяти — «сколько заметок» и «сколько предложений ждёт человека»
+    // видны в /api/metrics, а не только на экране.
+    memoryMetrics.recordSearch(Date.now() - started);
+    memoryMetrics.setGauge('notes_total', notes.length + global.length);
+    memoryMetrics.setGauge('proposals_pending', proposals.pending ?? 0);
     const found = {
       ...overview,
       collisions,
       proposals,
+      notes,
+      index: await this.memoryProvider.indexStatus(project).catch(error => ({ available: false, error: error.message })),
+      budget: {
+        indexTokens: Number(this.config.memory?.indexBudgetTokens) > 0
+          ? Number(this.config.memory.indexBudgetTokens)
+          : INDEX_BUDGET_TOKENS,
+        globalTokens: Number(this.config.memory?.globalBudgetTokens) > 0
+          ? Number(this.config.memory.globalBudgetTokens)
+          : GLOBAL_BUDGET_TOKENS,
+        approxTokens: overview.approxTokens,
+        // Предупреждение о бюджете: индекс проекта больше того, что уйдёт в контекст.
+        overBudget: Number(overview.approxTokens || 0) > (Number(this.config.memory?.indexBudgetTokens) > 0
+          ? Number(this.config.memory.indexBudgetTokens)
+          : INDEX_BUDGET_TOKENS),
+      },
+      global: { entries: global.length, approxTokens: global.reduce((sum, entry) => sum + (entry.estimatedTokens || 0), 0) },
       // The inspector is the same read path the resume uses: what is not safe to
       // hand to an agent is not shown here as «the project's knowledge» either.
       ...(ambiguous ? { status: 'ambiguous', warnings: [ambiguousMemoryWarning(collisions)] } : {}),
@@ -940,6 +1154,142 @@ export class TaskManager extends EventEmitter {
     if (ambiguous) return { ...found, query: String(query), hits: [] };
     const hits = await this.memoryProvider.search(project, query, { limit: 20 });
     return { ...found, query: String(query), hits };
+  }
+
+  /**
+   * Кандидаты на слияние заметок (этап M3). Только чтение: файлы памяти не меняются,
+   * решение принимает человек через гейт предложений.
+   */
+  async memoryConsolidation(projectId, { threshold = null, limit = 10 } = {}) {
+    const { project } = await this.#memoryProject(projectId);
+    const entries = await this.memoryProvider.searchableEntries(project).catch(() => []);
+    // Пустой параметр — это «порог по умолчанию», а не ноль: `Number(null)` равен 0, и
+    // без этой проверки в кандидаты попадало всё подряд (поймано проверкой API).
+    const requested = threshold === null || threshold === undefined || String(threshold).trim() === ''
+      ? null
+      : Number(threshold);
+    const effective = requested !== null && Number.isFinite(requested) ? requested : MERGE_THRESHOLD_DEFAULT;
+    const started = Date.now();
+    const candidates = findMergeCandidates(entries, { threshold: effective, limit });
+    memoryMetrics.recordSearch(Date.now() - started);
+    return {
+      projectId,
+      notes: entries.length,
+      threshold: effective,
+      candidates,
+      // План прямо говорит: консолидатор создаёт ПРЕДЛОЖЕНИЕ, а не правку. Поэтому в
+      // ответе нет ни одного признака «уже изменено».
+      action: 'propose',
+    };
+  }
+
+  /**
+   * Оформляет пару кандидатов предложением на слияние — тем же гейтом, что и всё
+   * остальное в памяти. Ничего не пишется в core/ до явного «Принять».
+   */
+  async proposeMerge(projectId, { first, second, reason = null } = {}) {
+    const sources = [first, second].map(value => String(value || '').trim()).filter(Boolean);
+    if (sources.length !== 2) {
+      throw Object.assign(new Error('Нужны две заметки: first и second.'), { code: 'INPUT_INVALID' });
+    }
+    const { project } = await this.#memoryProject(projectId);
+    const entries = await this.memoryProvider.searchableEntries(project).catch(() => []);
+    // Пару ищем без порога (нужна её оценка), а порог проверяем здесь: иначе «слить»
+    // можно было бы любые две заметки, и предложение стало бы шумом.
+    const pair = findMergeCandidates(entries, { threshold: 0, limit: 200 })
+      .find(candidate => sources.every(source => candidate.notes.some(note => note.source === source)));
+    if (!pair) {
+      throw Object.assign(new Error('Одна из заметок не найдена в памяти проекта.'), { code: 'NOT_FOUND' });
+    }
+    if (pair.score < MERGE_THRESHOLD_DEFAULT) {
+      throw Object.assign(
+        new Error(`Заметки не похожи (сходство ${pair.score} < ${MERGE_THRESHOLD_DEFAULT}) — слияние не предлагается.`),
+        { code: 'NOT_SIMILAR', score: pair.score },
+      );
+    }
+    const existing = await this.#pendingMergeProposal(projectId, sources);
+    if (existing) return { proposal: existing, existing: true, problems: [] };
+    return this.createMemoryProposal(projectId, {
+      text: mergeProposalText(pair),
+      category: pair.notes[0].category,
+      paths: [],
+      reason: reason ? String(reason) : `консолидация: ${sources[0]} + ${sources[1]}`,
+    });
+  }
+
+  async #pendingMergeProposal(projectId, sources) {
+    const normalized = sources.map(source => String(source || '').trim()).filter(Boolean).sort();
+    if (normalized.length !== 2) return null;
+    const { proposals } = await this.listMemoryProposals(projectId);
+    return proposals.find(proposal => proposal.status === 'proposed'
+      && String(proposal.reason || '').startsWith('консолидация:')
+      && normalized.every(source => String(proposal.text || '').includes(source))) || null;
+  }
+
+  /**
+   * Очередь предложений по всем проектам (этап M2): человеку нужен один список  /**
+   * Очередь предложений по всем проектам (этап M2): человеку нужен один список
+   * «что ждёт решения», а не обход проектов по одному. `projectId` сужает выборку.
+   */
+  async listAllMemoryProposals({ projectId = null } = {}) {
+    const projects = projectId
+      ? [[projectId, this.projects.get(projectId)]]
+      : [...this.projects.entries()];
+    if (projectId && !this.projects.has(projectId)) {
+      throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    }
+    const items = [];
+    const totals = { pending: 0, accepted: 0, rejected: 0, projects: 0 };
+    for (const [id, project] of projects) {
+      if (!project) continue;
+      const resolved = await this.memoryProvider.resolveProject(project).catch(() => null);
+      if (!resolved || !fsSync.existsSync(resolved.memoryDir)) continue;
+      const proposals = await listProposals(resolved.memoryDir).catch(() => []);
+      if (!proposals.length) continue;
+      totals.projects += 1;
+      const counts = proposalCounts(proposals);
+      totals.pending += counts.pending || 0;
+      totals.accepted += counts.accepted || 0;
+      totals.rejected += counts.rejected || 0;
+      for (const proposal of proposals) items.push({ ...proposal, projectId: id });
+    }
+    return { proposals: items, counts: totals };
+  }
+
+  /**
+   * Поиск по индексу памяти (этап M2): `scope=project|global|all`.
+   *
+   * `all` — это режим cross-project: он не инжектится в контекст сам по себе
+   * (риск загрязнения), но человеку и тулзе виден — с пометкой происхождения.
+   */
+  async searchMemory({ query = '', scope = 'project', projectId = null, limit = 20 } = {}) {
+    const text = String(query || '').trim();
+    if (!text) throw Object.assign(new Error('Нужен запрос: ?q='), { code: 'INPUT_INVALID' });
+    if (!['project', 'global', 'all'].includes(scope)) {
+      throw Object.assign(new Error('Скоуп — project, global или all.'), { code: 'INPUT_INVALID' });
+    }
+    const project = projectId ? this.projects.get(projectId) : null;
+    if (projectId && !project) throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
+    const searchStarted = Date.now();
+    const hits = await this.memoryProvider.searchScope(text, { scope, project, limit });
+    memoryMetrics.recordSearch(Date.now() - searchStarted);
+    const global = scope === 'project'
+      ? await this.memoryProvider.globalEntries({ limit: 0 }).catch(() => [])
+      : [];
+    return {
+      query: text,
+      scope,
+      projectId: project?.id ?? null,
+      hits,
+      // Происхождение пометок видно вызывающему: это не «всё подряд», а выбор
+      // оператора (этап M2 — индикатор «в этом чате использовано N заметок»).
+      counts: {
+        hits: hits.length,
+        project: hits.filter(hit => hit.scope !== 'global').length,
+        global: hits.filter(hit => hit.scope === 'global').length,
+        globalAvailable: global.length,
+      },
+    };
   }
 
   // --- memory suggestions (MEM-08) --------------------------------------------
@@ -1357,13 +1707,35 @@ export class TaskManager extends EventEmitter {
         warnings: [ambiguousMemoryWarning(collisions)],
       } : await this.memoryProvider.relevant(project, {
         queries: resumeMemoryQueries(item, sessions, workspace),
-        budgetTokens: 2000,
+        // Этап M1: бюджет инъекции из конфига (memory.indexBudgetTokens, дефолт 2000).
+        // Не влезшие заметки не теряются — они доступны поиском, а причина видна
+        // в warnings и в overflow.
+        budgetTokens: Number(this.config.memory?.indexBudgetTokens) > 0
+          ? Number(this.config.memory.indexBudgetTokens)
+          : INDEX_BUDGET_TOKENS,
+        // Глобальные знания идут своим мини-бюджетом (план §1.5): они не вытесняют
+        // знание проекта и не теряются за ним.
+        globalBudgetTokens: Number(this.config.memory?.globalBudgetTokens) > 0
+          ? Number(this.config.memory.globalBudgetTokens)
+          : GLOBAL_BUDGET_TOKENS,
         limit: 8,
       }).catch(error => ({
         overview: { provider: 'pi-memory-md', status: 'error', write: 'SAVE_DISABLED', problems: [error.message] },
         hits: [],
         warnings: [error.message],
       }));
+    // Метрики памяти: «работает ли память» и «упирается ли в бюджет» перестают быть
+    // гаданием (план §1.5). Счётчики видны в /api/metrics → memory. Записываются
+    // только когда память действительно опрашивалась (native-режим).
+    if (memoryFacts) {
+      memoryMetrics.recordInjection({
+        notes: (memoryFacts.hits || []).filter(hit => hit.scope !== 'global').length,
+        tokens: memoryFacts.estimatedTokens || 0,
+        globalNotes: (memoryFacts.hits || []).filter(hit => hit.scope === 'global').length,
+        globalTokens: memoryFacts.globalTokens || 0,
+      });
+      if (memoryFacts.overflow) memoryMetrics.recordOverflow(memoryFacts.overflow);
+    }
     const context = buildResumeContext({
       workItem: item,
       sessions,
@@ -1568,6 +1940,23 @@ export class TaskManager extends EventEmitter {
           missingWorkspaces,
         });
       } catch { /* the session is what matters; a failed note must not lose it */ }
+      // Этап M2: факт инъекции памяти виден в ленте самой сессии: «работает ли
+      // память» перестаёт быть гаданием, а числа (заметки и токены) лежат рядом
+      // с ходом, к которому они относились.
+      const memoryHits = Array.isArray(context.memory?.hits) ? context.memory.hits : [];
+      const globalHits = memoryHits.filter(hit => hit.scope === 'global');
+      if (memoryHits.length) {
+        try {
+          await this.#event(stored, 'MEMORY_INJECTED',
+            `Память: ${memoryHits.length} заметок (~${context.memory.estimatedTokens || 0} токенов)`, {
+              notes: memoryHits.length,
+              tokens: context.memory.estimatedTokens || 0,
+              globalNotes: globalHits.length,
+              globalTokens: context.memory.globalTokens || 0,
+              sources: memoryHits.slice(0, 20).map(hit => hit.source),
+            });
+        } catch { /* a failed note must not lose the session */ }
+      }
     }
     // The new session belongs to the same work item, and that link is a `resume`.
     // A work item deleted between the two steps must not take the session with it.
@@ -2358,6 +2747,7 @@ export class TaskManager extends EventEmitter {
       speeds: null,
       model: null,
       autoCompactionEnabled: null,
+      pendingPrompts: [],
       files: incomingFiles.map(metadata),
       attachments: [],
       outputFiles: []
@@ -2391,18 +2781,43 @@ export class TaskManager extends EventEmitter {
 
   #publicTask(task) {
     const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken,
-      _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt,
-      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, ...safe } = task;
+      _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
+      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
+      // Шаг C-B: версия снимка — seq последнего событие-факта этой сессии. Клиент
+      // сравнивает её со своим курсором и не даёт старому GET откатить «лицо» хода
+      // (фазу, стадию, статус), которую уже принесло SSE.
+      snapshotSeq: Number(_snapshotSeq || 0),
       runtime: this.#runtimeFacts(task),
+      turnState: this.#turnState(task),
       // Ожидание провайдера существует только пока живёт процесс, который его
       // объявил: после падения TaskBridge сохранённое значение — уже история.
       providerWait: runtime && !runtime.pi.closed ? safe.providerWait || null : null,
       assistantText: tailText(safe.assistantText, TEXT_TAIL),
       thinkingText: tailText(safe.thinkingText, THINKING_TAIL),
       sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed))
+    };
+  }
+
+  // Шаг C-A: точка последнего прогресса хода для клиентского таймера молчания.
+  // Аддитивное поле снимка: heartbeat SSE ≠ прогресс модели — мерцать должно
+  // именно «живое» движение (кадр Pi/стадия/инструмент), а не транспорт.
+  #turnState(task) {
+    const lastProgressAt = task._lastProgressAt
+      ? new Date(task._lastProgressAt).toISOString()
+      : null;
+    return {
+      phase: task._turnPhase || null,
+      turn: task._turn ?? null,
+      stage: task.current || null,
+      lastProgressAt,
+      // Считается на сервере в момент снимка: клиент опрашивает метаданные
+      // раз в 2 с и не должен вычитать часы другого устройства.
+      silentMs: task._lastProgressAt && !RUN_TERMINAL.has(task.status)
+        ? Math.max(0, Date.now() - task._lastProgressAt)
+        : null
     };
   }
 
@@ -2647,6 +3062,7 @@ export class TaskManager extends EventEmitter {
 
   async #executeInitial(task) {
     if (this.closing) return;
+    const deliveryStartedAt = Date.now();
     let ownedTurn = null;
     try {
       await this.#setStatus(task, 'PREPARING', 'Preparing workspace');
@@ -2704,17 +3120,34 @@ export class TaskManager extends EventEmitter {
       settled.catch(() => {});
       try {
         await this.#setStatus(task, 'RUNNING', 'Pi starting');
+        await this.#turnStateEvent(task, 'DISPATCHING');
         if (task.status === 'CANCELLED' || this.runtimes.get(task.id)?.cancelRequested) { this.#resolveSettle(task.id); return; }
         // The in-flight marker (see #deliverMessage): persisted before the RPC so
         // a restart between here and the turn's end finishes the command instead
         // of reporting a failure. Cleared when the turn reaches a terminal state.
         task.inFlightPrompt = { text: this.#buildPrompt(task), initial: true, at: now() };
         await this.store.save(this.#publicTask(task)).catch(() => {});
-        await pi.prompt(this.#buildPrompt(task));
+        const dispatchedAt = Date.now();
+        let ackError = null;
+        try {
+          await pi.prompt(this.#buildPrompt(task));
+        } catch (error) {
+          ackError = error?.code || 'RPC_FAILED';
+          throw error;
+        } finally {
+          // Шаг C-C: факт «prompt ушёл в Pi» и «ACK получен/не получен» с
+          // временными отметками остаётся в raw-журнале даже при сбое.
+          const ackedAt = Date.now();
+          this.#recordTurnTiming(task, {
+            phase: 'initial', dispatchMs: dispatchedAt - deliveryStartedAt,
+            ackMs: ackError ? null : Math.max(0, ackedAt - dispatchedAt), ackError
+          });
+        }
         // The initial prompt has no USER_MESSAGE frame (it is stored on the task).
         // Publish the RPC acknowledgement so clients can distinguish "created on
         // the server" from "Pi accepted the prompt".
         await this.#event(task, 'PROMPT_ACCEPTED', 'Первый запрос принят Pi', { initial: true });
+        await this.#turnStateEvent(task, 'ACKED');
         await settled;
       } catch (error) {
         this.#resolveSettle(task.id);
@@ -2818,8 +3251,15 @@ export class TaskManager extends EventEmitter {
 
     pi.on('event', (frame) => {
       if (this.deleted.has(task.id) || runtime.retired) return;
+      // C-C: сколько кадр ждал в очереди eventChain до обработки — сюда попадает
+      // и удержание ACK-барьером (#deliverMessage), и медленные соседние кадры.
+      const receivedAt = Date.now();
       runtime.eventChain = runtime.eventChain
-        .then(() => runtime.retired ? undefined : this.#handlePiEvent(task, frame, runtime))
+        .then(() => {
+          if (runtime.retired) return undefined;
+          deliveryMetrics.observe('eventchain_wait_ms', Math.max(0, Date.now() - receivedAt));
+          return this.#handlePiEvent(task, frame, runtime);
+        })
         .catch(async (error) => { await this.#fail(task, error); this.#resolveSettle(task.id); });
     });
     pi.on('stderr', (text) => {
@@ -2879,6 +3319,97 @@ export class TaskManager extends EventEmitter {
   }
 
   // Lists the models Pi currently considers usable (all providers, not just the
+  /**
+   * Короткая проверка модели по кнопке (пункт §3.3 плана).
+   *
+   * Два уровня, и токены тратит только второй:
+   *   `mode: 'availability'` (по умолчанию) — бесплатный round-trip к списку моделей;
+   *   `mode: 'latency'` — по явному нажатию: один запрос с `max_tokens: 1` и стримом,
+   *   замер до первого чанка, соединение обрывается сразу после него.
+   *
+   * Результат НЕ пишется в ModelLatency: там статистика настоящих ходов, и подмешивать
+   * к ней пробу на «ping» значило бы врать в оценке «модель обычно отвечает за N с».
+   */
+  async probeModel({ provider = null, id = null, mode = 'availability' } = {}) {
+    const providerId = String(provider || '').trim();
+    const modelId = String(id || '').trim();
+    if (!providerId || !modelId) {
+      throw Object.assign(new Error('Нужны provider и id модели.'), { code: 'INPUT_INVALID' });
+    }
+    if (!['availability', 'latency'].includes(mode)) {
+      throw Object.assign(new Error('Режим проверки — availability или latency.'), { code: 'INPUT_INVALID' });
+    }
+    const key = `${providerId}/${modelId}`;
+    const retryInMs = this.probeCooldown.remaining(key);
+    if (retryInMs > 0) {
+      return { provider: providerId, id: modelId, mode, ok: false, code: 'COOLDOWN', retryInMs };
+    }
+    // Резерв до первого await: два одновременных нажатия не должны оба пройти
+    // remaining() и дважды списать токены. Снимается при отказе цели; успех
+    // дальше mark() ставит обычный кулдаун.
+    if (this.probeInFlight.has(key)) {
+      return { provider: providerId, id: modelId, mode, ok: false, code: 'COOLDOWN', retryInMs: this.probeCooldown.cooldownMs };
+    }
+    this.probeInFlight.add(key);
+    try {
+      const target = await this.#probeTarget(providerId, modelId);
+      if (!target.ok) return { provider: providerId, id: modelId, mode, ok: false, code: target.code, message: target.message };
+
+      this.probeCooldown.mark(key);
+      const result = mode === 'latency'
+        ? await probeLatency({ baseUrl: target.baseUrl, id: modelId, apiKey: target.apiKey })
+        : await probeAvailability({ baseUrl: target.baseUrl, apiKey: target.apiKey });
+      return { provider: providerId, id: modelId, mode, ...result, cooldownMs: this.probeCooldown.cooldownMs };
+    } finally {
+      this.probeInFlight.delete(key);
+    }
+  }
+
+  /**
+   * Где искать модель: внешний локальный сервер (его собственный адрес), локальный
+   * llama.cpp-роутер (с его ключом) или провайдер из Pi-каталога. Отказ вместо
+   * догадки: нет адреса или ключа — код NO_ENDPOINT/NO_KEY.
+   */
+  async #probeTarget(providerId, modelId) {
+    // Strata и другие externalServers — НЕ llama.cpp router: у каждого свой port.
+    // Ищем и по provider, и по model, как в телеметрии рабочего хода.
+    // Пара обязана совпасть атомарно: совпадение только по модели уводило бы
+    // облачную модель с тем же id на чужой локальный сервер.
+    const byProvider = this.localServers.find(providerId);
+    const external = (byProvider && byProvider.model === modelId ? byProvider : null)
+      || this.localServers.find(modelId);
+    if (external) {
+      // Обнаруженные серверы несут исходный apiBaseUrl из Pi models.json (/v1);
+      // сконфигурированные — baseUrl как есть.
+      const baseUrl = external.apiBaseUrl || external.baseUrl;
+      if (!baseUrl) return { ok: false, code: 'NO_ENDPOINT', message: `у локального сервера ${providerId} нет адреса` };
+      return { ok: true, baseUrl, apiKey: providerApiKey(external.apiKey, process.env) };
+    }
+    const localIds = localProviderIds(this.config.localRuntime || {}, this.localServers.servers);
+    if (localIds.has(providerId)) {
+      const baseUrl = this.localModels.baseUrl;
+      if (!baseUrl) return { ok: false, code: 'NO_ENDPOINT', message: 'локальный роутер не найден: укажите адрес в настройках' };
+      return { ok: true, baseUrl, apiKey: this.localModels.apiKey };
+    }
+    let doc;
+    try {
+      doc = JSON.parse(await fs.readFile(path.join(piAgentDir(process.env), 'models.json'), 'utf8'));
+    } catch {
+      return { ok: false, code: 'NO_ENDPOINT', message: 'каталог моделей Pi не читается (models.json)' };
+    }
+    const entry = doc?.providers?.[providerId];
+    if (!entry?.baseUrl) return { ok: false, code: 'NO_ENDPOINT', message: `у провайдера ${providerId} нет адреса в models.json` };
+    const catalog = Array.isArray(entry.models) ? entry.models : [];
+    if (catalog.length && !catalog.some(model => model?.id === modelId)) {
+      return { ok: false, code: 'MODEL_UNKNOWN', message: `модель ${modelId} не описана у провайдера ${providerId}` };
+    }
+    const key = providerApiKey(entry.apiKey, process.env);
+    if (!key && !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(String(entry.baseUrl))) {
+      return { ok: false, code: 'NO_KEY', message: `нет ключа провайдера ${providerId} в окружении` };
+    }
+    return { ok: true, baseUrl: entry.baseUrl, apiKey: key };
+  }
+
   // local llama.cpp profiles). Refresh forces a fresh Pi probe. The rolling
   // per-model TTFT history is merged in so the picker can show real response
   // latency for every model, cloud ones included.
@@ -3690,6 +4221,11 @@ export class TaskManager extends EventEmitter {
 
   async #handlePiEvent(task, frame, runtime = null) {
     if (this.deleted.has(task.id)) return;
+    // Шаг C-A: любой кадр от Pi — это прогресс хода. Ставится до фильтров
+    // (в т.ч. до отбрасывания хвоста после STOP): клиентский таймер молчания
+    // считает от последнего признака жизни модели, а не от последнего
+    // отрисованного сообщения.
+    task._lastProgressAt = Date.now();
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
     // STOP must stick. Pi keeps sending the frames it had already queued when the
     // abort arrived — the tail of the half-finished message, or an `agent_start`
@@ -3703,6 +4239,9 @@ export class TaskManager extends EventEmitter {
       if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
       return;
     }
+    // Живой кадр = фаза PROGRESS. Публикуется один раз на ход (дальше только
+    // обновление _lastProgressAt в снимке), чтобы не дублировать кадры в ленту.
+    if (task._turnPhase !== 'PROGRESS') await this.#turnStateEvent(task, 'PROGRESS');
     if (frame.type === 'extension_ui_request') return this.#onUiRequest(task, frame);
     // Провайдер ответил — объявленный повтор кончился. Доказательство только
     // одно: кадр от Pi. Heartbeat подтверждает связь с TaskBridge, а не ответ
@@ -3948,7 +4487,48 @@ export class TaskManager extends EventEmitter {
     const turn = (runtime?.turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
+    // Шаг C-A: фаза хода начинается с диспетчеризации. Поле сбрасывается, а не
+    // ставится в DISPATCHING: публикацию делает #turnStateEvent в точке отправки
+    // (иначе дедупликация съела бы первое событие хода).
+    task._turnPhase = null;
+    // Silence starts with this dispatch, not the previous turn's last frame.
+    task._lastProgressAt = Date.now();
     return turn;
+  }
+
+  // Шаг C-A: фаза хода не откатывается. Кадр Pi может опередить запись ACK
+  // (prompt() резолвится позже первого кадра), и без этого лента показывала бы
+  // «ждём первый кадр» после того, как модель уже ответила. Новый ход начинает
+  // с DISPATCHING (#beginTurn), так что откат возможен только внутри хода.
+  #turnPhaseRank(phase) {
+    return { DISPATCHING: 1, ACKED: 2, PROGRESS: 3, SETTLED: 4, FAILED: 4, CANCELLED: 4 }[phase] || 0;
+  }
+
+  // Шаг C-A: публикация фазы хода. Лёгкое аддитивное событие TURN_STATE идёт
+  // в общей ленте событий (попадает в replay/историю); клиенты, не знающие
+  // тип, его игнорируют. persistTask=false: фаза меняется часто, снимок задачи
+  // и так уходит в сохранение на следующем статусе/кадре.
+  async #turnStateEvent(task, phase) {
+    const rank = this.#turnPhaseRank(phase);
+    const rankNow = this.#turnPhaseRank(task._turnPhase);
+    if (phase === task._turnPhase || rank < rankNow) return;
+    task._turnPhase = phase;
+    await this.#event(task, 'TURN_STATE', `Ход: ${phase}`, {
+      phase,
+      turn: task._turn ?? null,
+      stage: task.current || null,
+      lastProgressAt: task._lastProgressAt ? new Date(task._lastProgressAt).toISOString() : null,
+    }, false).catch(() => {});
+  }
+
+  // Шаг C-C: тайминги доставки хода. Числа уходят в реестр deliveryMetrics
+  // (видны в /api/metrics) и одной строкой в pi-events.jsonl — raw-журнал
+  // остаётся на диске, даже когда ход уже потерян чатом.
+  #recordTurnTiming(task, timing) {
+    if (this.deleted.has(task.id)) return;
+    if (Number.isFinite(timing.dispatchMs)) deliveryMetrics.observe('turn_dispatch_ms', Math.max(0, timing.dispatchMs));
+    if (Number.isFinite(timing.ackMs)) deliveryMetrics.observe('ack_latency_ms', Math.max(0, timing.ackMs));
+    this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify({ type: 'taskbridge_turn_timing', at: now(), ...timing }) + '\n').catch(() => {});
   }
 
   async #verifyAndFinalize(task, run = {}) {
@@ -4013,6 +4593,7 @@ export class TaskManager extends EventEmitter {
     // Publish the terminal event BEFORE the terminal status becomes readable: a
     // client that polls the status must never receive TASK_SUCCEEDED as a late
     // event (that ordering race flaked tests/server.test.mjs).
+    await this.#turnStateEvent(task, 'SETTLED');
     await this.#event(task, 'TASK_SUCCEEDED', task.current);
     await this.store.save(this.#publicTask(task));
     this.#finishRun(task, task.status);
@@ -4252,7 +4833,7 @@ export class TaskManager extends EventEmitter {
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
     task.updatedAt = now();
-    // Event before the terminal status, same ordering rule as #verifyAndFinalize.
+    await this.#turnStateEvent(task, 'CANCELLED');
     await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task);
@@ -4942,9 +5523,50 @@ export class TaskManager extends EventEmitter {
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
+    // Retire the runtime before touching Pi.  The abort response is not an
+    // ownership boundary: Pi may acknowledge it while already queued frames
+    // are still in flight.  Retiring here makes both the event handler and
+    // #ensureSession reject that old runtime immediately.
+    if (runtime) {
+      runtime.cancelRequested = true;
+      runtime.retired = true;
+    }
+    this.approvals.cancelTask(id);
+    // STOP — это «останови всё сразу». Процессы сессии умирают ПЕРВЫМИ, до
+    // любой записи в store: под нагрузкой (поток кадров инструмента, занятая
+    // БД) статус и разбор очереди отодвигали убийство на секунды, и STOP
+    // выглядел как зависание (2026-10-14, blender-команда, телефон и десктоп).
+    if (runtime && hard) {
+      try {
+        await runtime.pi.killTree();
+      } catch {
+        // The process may already be gone. Ownership still has to be released.
+      }
+      await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
+      await this.#event(task, 'HARD_STOP', 'Жёсткий стоп: процессы сессии убиты.');
+    } else if (runtime) {
+      await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
+      try {
+        await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
+      } catch (error) {
+        await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`);
+        try {
+          await runtime.pi.killTree();
+        } catch {
+          // The process may already be gone. Ownership still has to be released.
+        }
+      }
+    }
+    // Открытый диалог расширения закрывается сам: Pi уже убит, но состояние
+    // задачи обязано быть очищено (иначе кнопки подтверждения останутся на экране).
+    if (runtime && task.pendingUiRequest) {
+      try { runtime.pi.send({ type: 'extension_ui_response', id: task.pendingUiRequest.id, cancelled: true }); } catch {}
+      await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'stopped' });
+    }
     // A queued prompt is dropped with the task, on either cancel path — unless
     // the cancel is only interrupting a generation (Ctrl+Enter / «Отправить
-    // сейчас»), where the operator's queue must survive.
+    // сейчас»), where the operator's queue must survive. Делается после остановки:
+    // освобождение файлов — это I/O и ждать его на пути убийства нельзя.
     if (keepPending) {
       if ((task.pendingPrompts || []).length) this.#enqueue(id);
     } else {
@@ -4959,42 +5581,6 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
       await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
       return this.#publicTask(task);
-    }
-    // Retire the runtime before touching Pi.  The abort response is not an
-    // ownership boundary: Pi may acknowledge it while already queued frames
-    // are still in flight.  Retiring here makes both the event handler and
-    // #ensureSession reject that old runtime immediately.
-    runtime.cancelRequested = true;
-    runtime.retired = true;
-    this.approvals.cancelTask(id);
-    // STOP answers an open dialog with «cancelled» first: the extension is
-    // blocked on it and would otherwise hold the abort up.
-    if (task.pendingUiRequest) {
-      try { runtime.pi.send({ type: 'extension_ui_response', id: task.pendingUiRequest.id, cancelled: true }); } catch {}
-      await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'stopped' });
-    }
-    await this.#setStatus(task, 'CANCELLING', 'Stopping Pi');
-    if (hard) {
-      // Жёсткий стоп (Esc в чате): грохнуть процессы сессии сразу — модель может
-      // читать промпт, и RPC abort на это не отвечает до 10 с (тот самый «стой и
-      // жди»). Дочерние процессы умирают вместе с Pi (process tree).
-      await this.#event(task, 'HARD_STOP', 'Жёсткий стоп: убиваю процессы сессии.');
-      try {
-        await runtime.pi.killTree();
-      } catch {
-        // The process may already be gone. Ownership still has to be released.
-      }
-    } else {
-      try {
-        await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
-      } catch (error) {
-        await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`);
-        try {
-          await runtime.pi.killTree();
-        } catch {
-          // The process may already be gone. Ownership still has to be released.
-        }
-      }
     }
     await runtime.eventChain.catch(() => {});
     this.#resolveSettle(id);
@@ -5272,6 +5858,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #deliverMessage(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
+    const deliveryStartedAt = Date.now();
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
     // A task that already reached a terminal state may start a new turn even if
@@ -5422,6 +6009,9 @@ export class TaskManager extends EventEmitter {
     // not lose the command either.
     task.inFlightPrompt = { text: message, at: now() };
     await this.store.save(this.#publicTask(task)).catch(() => {});
+    if (!streaming) await this.#turnStateEvent(task, 'DISPATCHING');
+    const dispatchedAt = Date.now();
+    let ackError = null;
     try {
       if (effectiveMode === 'prompt') await runtime.pi.prompt(message);
       else await runtime.pi.sendFollowUp(message, effectiveMode);
@@ -5440,17 +6030,33 @@ export class TaskManager extends EventEmitter {
       }
       if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
       else await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
+      if (!streaming) await this.#turnStateEvent(task, 'ACKED');
+      // Вклинивание не начинает новый ход: фаза остаётся за живыми кадрами Pi.
+      // Сброс нужен только чтобы снятый ранее терминальный ранг (Стоп → CANCELLED)
+      // не блокировал PROGRESS, если Pi ещё стримит.
+      else task._turnPhase = null;
       // Release gate immediately after USER_MESSAGE is safely persisted so the
       // HTTP response returns to client without waiting for subsequent background ticks.
       release();
     } catch (error) {
+      ackError = error?.code || 'RPC_FAILED';
+      // Шаг C-A: попытка доставки и её провал — диагностические факты в ленте;
+      // фантомного USER_MESSAGE при этом нет (см. тест ниже).
+      if (!streaming) await this.#turnStateEvent(task, 'FAILED');
       if (!accepted && !staged.length) await rollbackFiles(task, this.store.taskDir(id), attached);
       if (!streaming) {
         this.#resolveSettle(id);
         this.#releaseSlot(id);
       }
       throw error;
-    } finally { release(); }
+    } finally {
+      release();
+      this.#recordTurnTiming(task, {
+        phase: 'follow_up', mode: effectiveMode,
+        dispatchMs: dispatchedAt - deliveryStartedAt,
+        ackMs: ackError ? null : Math.max(0, Date.now() - dispatchedAt), ackError
+      });
+    }
     if (!streaming) {
       (async () => {
         try {
@@ -5748,6 +6354,7 @@ export class TaskManager extends EventEmitter {
     // Publish the event before the failed status is observable (see
     // #verifyAndFinalize): a late TASK_FAILED broke the "no events after a
     // terminal status" contract the client relies on.
+    await this.#turnStateEvent(task, 'FAILED');
     await this.#event(task, 'TASK_FAILED', task.error, { errorCode: task.errorCode });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
@@ -5771,8 +6378,17 @@ export class TaskManager extends EventEmitter {
       if (change) await this.#recordEvent(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason: type }, false);
     }
     const event = { at: now(), taskId: task.id, type, message, data };
+    // Ход закончился — будим устройства (телефон в локальной сети): уведомление
+    // придёт за секунды, а не с ближайшим фоновым опросом. Fire-and-forget:
+    // промах — штатный сон устройства, запасной канал остаётся.
+    if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) {
+      this.wakeChannel.sendAll({ taskId: task.id, type, at: event.at }).catch(() => {});
+    }
     if (seq === null) await this.store.appendEvent(task.id, event);
     else await this.store.appendEventAt(task.id, seq, event);
+    // Шаг C-B: снимок задачи теперь версионирован последним событием (appendEvent
+    // проставляет event.seq). Старшинство сравнивается на клиенте.
+    if (Number.isFinite(event.seq)) task._snapshotSeq = event.seq;
     if (persistTask) {
       task.updatedAt = event.at;
       await this.store.save(this.#publicTask(task)).catch(() => {});

@@ -166,6 +166,29 @@ class ChatSessionIntegrationTest {
     }
 
     @Test
+    fun aServerThatDisappearsAndComesBackIsReportedHonestly() = runBlocking<Unit> {
+        if (!nodeAvailable) return@runBlocking
+        val api = api()
+        val task = api.createTask(CreateTaskRequest(projectId = "fixture", prompt = "Прочитай example.txt"))
+        val chat = session(task.id)
+        chat.start()
+        chat.await("the stream is live") { it.link == LinkState.Live }
+
+        // Сервер уходит на несколько секунд: поток рвётся и /api/health тоже молчит —
+        // это «нет связи», а не DEGRADED (двухуровневый health, план 4.2).
+        input.write("down 4000\n")
+        input.flush()
+        val whileDown = chat.await("the link stops claiming to be live", 30_000) { it.link !is LinkState.Live }
+        assertTrue(whileDown.link is LinkState.Reconnecting, "пока сервер молчит — «нет связи»: ${whileDown.link}")
+
+        // Сервер вернулся на тот же порт: поток поднимается сам, без действий оператора.
+        withTimeout(30_000) { while (output.readLine() != "up") Unit }
+        val back = chat.await("live again after the outage", 40_000) { it.link == LinkState.Live }
+        assertTrue(back.chat.items.isNotEmpty(), "история на месте после обрыва")
+        chat.close()
+    }
+
+    @Test
     fun attachmentsAndARejectedMessage() = runBlocking<Unit> {
         if (!nodeAvailable) return@runBlocking
         val api = api()

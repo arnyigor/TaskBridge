@@ -1,5 +1,6 @@
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
+import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
 import qrcode from './vendor/qrcode.mjs';
@@ -30,7 +31,6 @@ let refreshTimer = null;
 let liveTurn = null;        // { body, md, meta } of the current bot turn
 let liveThinking = '';
 let liveText = '';
-let nearBottom = true;
 let textUpdateTimer = null;
 let chatState = null;
 let selectionVersion = 0;
@@ -47,6 +47,10 @@ let liveAwaiting = false;
 let liveHasWork = false;
 let liveCutOff = false;
 let modelBusy = null;  // true/false/null(unknown) — from /api/info, refreshed every 4s
+// Последний ответ /api/info целиком: бандл диагностики берёт из него build/engine.
+let lastInfo = null;
+// Последние ошибки отправки (тексты без текстов промптов): попадают в бандл диагностики.
+const recentSendErrors = [];
 // Последний ответ /api/info про аккаунты провайдеров: смена модели в сессии
 // не требует нового опроса, а строка под моделью меняется сразу.
 let lastProviderStatuses = {};
@@ -630,7 +634,9 @@ function updateText() {
   else if (liveCutOff) liveTurn.md.innerHTML = '<span class="muted">Запрос прерван</span>';
   else if (liveHasWork) liveTurn.md.innerHTML = '<span class="muted">Без текста</span>';
   else liveTurn.md.innerHTML = '<span class="muted">Ответ не был получен.</span>';
-  scrollBottom();
+  // Рост ответа: если были у низа — следуем за текстом, иначе не трогаем позицию, но
+  // говорим, что ниже появилось новое.
+  if (!scrollBottom()) renderNewBelow('продолжение ответа');
 }
 
 // Whether an empty assistant turn is still waiting for its answer. Both signals
@@ -1120,7 +1126,68 @@ function showRunResult(title, result) {
   overlay.classList.remove('hidden');
 }
 
-function openFileViewer({ url, name = '', downloadUrl = null } = {}) {
+/**
+ * Путь с диапазоном строк, как его пишут в отчётах: `src/app.js#L10-L25`,
+ * `src/app.js#L10`, `src/app.js:10-25`, `src/app.js:10`. Без диапазона возвращает
+ * сам путь — тогда поведение как раньше.
+ *
+ * Чистая функция: её проверяет тест, а не глаз. Диапазон нужен просмотрщику, чтобы
+ * открыть файл на нужном месте, а не заставлять оператора искать строки вручную.
+ */
+function parsePathWithLines(label) {
+  const text = String(label || '').trim();
+  if (!text) return null;
+  const hash = /^(.*?)#L(\d+)(?:-L?(\d+))?$/i.exec(text);
+  if (hash) {
+    const from = Number(hash[2]);
+    const to = hash[3] ? Number(hash[3]) : from;
+    return { path: hash[1], from, to: Math.max(from, to) };
+  }
+  const colon = /^(.*?):(\d+)(?:-(\d+))?$/.exec(text);
+  if (colon) {
+    const from = Number(colon[2]);
+    const to = colon[3] ? Number(colon[3]) : from;
+    return { path: colon[1], from, to: Math.max(from, to) };
+  }
+  // Голый диапазон без пути («L10-L25» из вывода инструмента) — пути нет, не гадаем.
+  if (/^L?\d+(?:-L?\d+)?$/i.test(text)) return null;
+  return { path: text, from: null, to: null };
+}
+
+/** URL просмотрщика с диапазоном строк, если он задан. */
+function fileViewerUrl(path, from, to) {
+  const base = workspaceFileUrl(path, false);
+  if (!base) return null;
+  return from ? `${base}&from=${from}&to=${to || from}` : base;
+}
+
+/**
+ * Разбивает отрендеренный код на строки со сквозной нумерацией и подсвечивает
+ * запрошенный диапазон. Нужно из-за того, что markdown-рендер отдаёт один блок
+ * текста: без разметки строк ни номеров, ни подсветки диапазона не сделать.
+ *
+ * [from] — номер ПЕРВОЙ строки блока: при `?from=&to=` сервер отдаёт только
+ * запрошенный кусок, и нумерация обязана продолжаться с from, а не с единицы.
+ */
+function numberCodeLines(block, from = null, to = null) {
+  if (!block) return;
+  const lines = String(block.textContent ?? '').split('\n');
+  const last = to ?? from;
+  const highlighted = new Set();
+  if (from) for (let line = from; line <= last; line++) highlighted.add(line);
+  block.textContent = '';
+  block.style.counterReset = `viewerLine ${(from ?? 1) - 1}`;
+  lines.forEach((text, index) => {
+    const number = (from ?? 1) + index;
+    const span = document.createElement('span');
+    span.className = highlighted.has(number) ? 'line rangeHit' : 'line';
+    span.textContent = index === lines.length - 1 ? text : `${text}` + '\n';
+    block.append(span);
+  });
+  block.classList.add('codeLines');
+}
+
+function openFileViewer({ url, name = '', downloadUrl = null, from = null, to = null } = {}) {
   if (!url) return;
   const kind = viewerKind(name);
   const overlay = $('fileViewerOverlay');
@@ -1201,7 +1268,10 @@ function openFileViewer({ url, name = '', downloadUrl = null } = {}) {
     // The block is read-only here, and the clipboard must hold the original file
     // — not the fence and not the pretty-printed JSON. `data-copy` says so.
     const block = md.querySelector('code');
-    if (block) block.setAttribute('data-copy', text);
+    if (block) {
+      block.setAttribute('data-copy', text);
+      numberCodeLines(block, from, to);
+    }
     for (const run of md.querySelectorAll('.codeRunBtn')) run.remove();
   }).catch(error => {
     if (request === fileViewerRequest) message.textContent = `Не удалось показать файл: ${error.message}`;
@@ -1218,11 +1288,24 @@ if (fileViewerOverlayEl) fileViewerOverlayEl.onclick = (event) => { if (event.ta
 document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeFileViewer(); });
 
 
-function appendSystemNote(text, before = null) {
+function appendSystemNote(text, before = null, memory = null) {
   hideEmptyState();
   const note = document.createElement('div');
   note.className = 'systemNote';
-  note.textContent = text;
+  const sources = Array.isArray(memory?.sources) ? memory.sources.filter(Boolean) : [];
+  if (sources.length) {
+    // Свернуто: строка «Память: N заметок (~T токенов)», под ней — список
+    // источников. Список нужен не всегда, но должен быть под рукой.
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = text;
+    const list = document.createElement('div');
+    list.className = 'muted small';
+    list.style.whiteSpace = 'pre-wrap';
+    list.textContent = sources.join('\n');
+    details.append(summary, list);
+    note.appendChild(details);
+  } else note.textContent = text;
   $('msgsInner').insertBefore(note, before);
   if (!before) scrollBottom();
   return note;
@@ -1255,7 +1338,16 @@ function liveEnginePrompt(t) {
 // Сколько токенов занимает контекст сессии: живое число движка важнее usage
 // прошлого хода, а оценка Pi остаётся фолбэком (для облачных моделей — единственная).
 function sessionContextUsed(t) {
-  return liveEnginePrompt(t) || t.compaction?.last?.estimatedTokensAfter || t.lastUsage?.totalTokens || null;
+  // Максимум честных сигналов, а не первый доступный: инцидент 2026-10-14
+  // (535c91a4e5aa) — панель показывала оценку после сжатия, а реальный промпт
+  // был 368 547 токенов при окне 204 800, и провайдер отказал. Каждый сигнал
+  // по отдельности может сильно занижать: KV-кэш — это последний удачный
+  // префикс (при промахе/aborted-сжатии он вообще не растёт), оценка после
+  // сжатия устаревает с первым же ходом, lastUsage — прошлый запрос. Для
+  // вопроса «влезет ли» безопасно пугать большим, чем успокаивать меньшим.
+  const candidates = [liveEnginePrompt(t), t.compaction?.last?.estimatedTokensAfter, t.lastUsage?.totalTokens]
+    .filter(value => Number.isFinite(value) && value > 0);
+  return candidates.length ? Math.max(...candidates) : null;
 }
 
 function contextUsagePercent(t) {
@@ -1404,14 +1496,52 @@ async function saveContextLimit(value) {
   } catch (e) { alert(e.message); }
 }
 
-function scrollBottom() {
-  const box = $('msgs');
-  if (box && nearBottom) box.scrollTop = box.scrollHeight;
+// Прилипание к низу. Правило оператора (2026-10-14): лента следует за новым текстом,
+// ТОЛЬКО пока пользователь сам у низа; если он читает выше — не двигать её вообще.
+//
+// Почему не по флагу из события scroll: флаг отражает момент последней прокрутки, а
+// высота ленты меняется в потоке (дельты ответа, инструменты, заметки). Устаревший
+// «мы внизу» и давал рывки: лента дёргалась, когда оператор уже читал выше.
+// Позиция проверяется В МОМЕНТ изменения, а прокрутка — прямая (без smooth-анимаций,
+// которые конкурируют между собой на каждом кадре стрима).
+const BOTTOM_SLACK_PX = 80;
+
+function isPinnedToBottom(box = $('msgs')) {
+  if (!box) return true;
+  return box.scrollHeight - box.scrollTop - box.clientHeight < BOTTOM_SLACK_PX;
 }
 
-$('msgs').addEventListener('scroll', () => {
+/** Прокрутить вниз, если пользователь был у низа. Возвращает, прилипли ли. */
+function scrollBottom() {
+  const box = $('msgs');
+  // Никакого запомненного «мы внизу»: позиция проверяется здесь и сейчас. Флаг из
+  // события scroll отставал от роста ленты — это и давало рывки при чтении выше.
+  if (!box || !isPinnedToBottom(box)) return false;
+  box.scrollTop = box.scrollHeight;
+  $('newBelow')?.classList.add('hidden');
+  return true;
+}
+
+// Новое ниже: когда оператор читает выше, лента не двигается — вместо этого видно,
+// что появилось новое, и один клик возвращает к низу и снова включает следование.
+function renderNewBelow(hint = 'новое ниже') {
+  const box = $('newBelow');
+  if (!box) return;
+  const away = !isPinnedToBottom();
+  box.classList.toggle('hidden', !away);
+  if (away) box.textContent = `↓ ${hint}`;
+}
+
+$('newBelow')?.addEventListener('click', () => {
   const m = $('msgs');
-  nearBottom = m.scrollHeight - m.scrollTop - m.clientHeight < 80;
+  if (!m) return;
+  m.scrollTop = m.scrollHeight;
+  $('newBelow')?.classList.add('hidden');
+});
+
+$('msgs').addEventListener('scroll', () => {
+  // Прокрутили к низу — подсказка «новое ниже» больше не нужна.
+  if (isPinnedToBottom()) $('newBelow')?.classList.add('hidden');
 });
 
 /* ---------------- task selection / stream ---------------- */
@@ -1497,8 +1627,8 @@ function resetSelection(id) {
   turnNodes = new Map();
   liveTurn = null;
   liveThinking = liveText = '';
-  nearBottom = true;
   currentTask = null;
+  renderActivity(null);
   reachedHistoryStart = true;
   oldestLoadedSeq = null;
   loadingOlder = false;
@@ -1507,6 +1637,7 @@ function resetSelection(id) {
   $('autoCompaction').disabled = true;
   $('trustWorkspace').disabled = true;
   $('sessionDetailsButton').classList.toggle('hidden', !id);
+  $('copyDiagnostics').classList.toggle('hidden', !id);
   $('selectMessagesButton').classList.toggle('hidden', !id);
   stopSelectingMessages();
   $('detail').classList.toggle('hidden', !id);
@@ -1557,7 +1688,7 @@ function renderChat() {
         node = { wrap: appendUserTurn(turn.text, turn.files, null, turn.at), text: turn.text };
         turnNodes.set(turn.id, node);
       } else if (turn.role === 'note') {
-        turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text) });
+        turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, null, turn.memory) });
         continue;
       } else {
         liveText = liveThinking = '';
@@ -2258,7 +2389,7 @@ function renderPrependedTurns(turns) {
       updateTurnActions(userNode, turn, false);
       continue;
     }
-    if (turn.role === 'note') { turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, reference) }); continue; }
+    if (turn.role === 'note') { turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, reference, turn.memory) }); continue; }
     const settled = renderSettledTurn(turn, reference);
     turnNodes.set(turn.id, settled);
     // A partial turn is not a turn the server knows by id: edit/fork/drop would
@@ -2356,14 +2487,32 @@ function maybeNotify(t) {
 function stopTarget() {
   const isWorking = (task) => {
     if (!task) return false;
-    if (task.status === 'CANCELLING') return false;
+    // CANCELLING — тоже рабочее состояние: если остановка залипла, повторное
+    // нажатие — единственный выход, а исчезающая кнопка запирает оператора
+    // в зависшем чате (2026-10-14).
+    if (task.status === 'CANCELLING') return true;
     if (ACTIVE_STATUSES.has(task.status)) return true;
     if (task.id === selectedTaskId && chatState?.current?.active) return true;
     return false;
   };
   const selected = lastTasks.find(task => task.id === selectedTaskId) || currentTask;
   if (isWorking(selected)) return selected;
+  // Зависшая отправка — независимый повод, как в KMP: сообщение не уходит, сессия
+  // уже терминальна, и без этого оператору нечем разблокироваться (2026-10-14).
+  if (stuckSendTarget()) return stuckSendTarget();
   return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(isWorking) || null;
+}
+
+/**
+ * Сессия, у которой висит незавершённая отправка: локальная очередь или текст,
+ * оставшийся от неудачной отправки. Возвращает ту же форму, что [stopTarget].
+ */
+function stuckSendTarget() {
+  const hasLocal = locallyQueuedPrompts.length > 0;
+  const failed = lastPrompt?.failedSend === true && lastPrompt?.text;
+  if (!hasLocal && !failed) return null;
+  const id = (hasLocal ? currentTask?.id : lastPrompt?.id) || selectedTaskId;
+  return lastTasks.find(task => task.id === id) || currentTask || { id, title: id };
 }
 
 // Модель читает промпт — фаза и прогресс чтения у внешнего локального сервера
@@ -2413,7 +2562,45 @@ const TASK_STATUS_LABELS = {
   SUCCEEDED: 'Готово', FAILED: 'Ошибка', CANCELLED: 'Остановлено'
 };
 function taskStatusLabel(status) { return TASK_STATUS_LABELS[status] || status || '—'; }
+// Шаг C-A: фаза хода словами. «Pi работает» не отличает «запрос ушёл, ответа ещё
+// нет» от «модель уже отвечает» — именно эту разницу оператор и не видел.
+const TURN_PHASE_LABELS = {
+  DISPATCHING: ' — запрос отправлен, Pi ещё не подтвердил',
+  ACKED: ' — Pi принял запрос, ждём первый кадр',
+  PROGRESS: ' — модель отвечает'
+};
 let activityTimer = null;
+let activityTask = null;
+let activityReceivedAt = 0;
+let silenceWaitKey = null;
+const SILENCE_THRESHOLD_KEY = 'taskbridge.silenceThresholdSeconds';
+
+function silenceThresholdMs() {
+  let seconds;
+  try { seconds = Number(localStorage.getItem(SILENCE_THRESHOLD_KEY)); } catch { /* private mode */ }
+  return Number.isFinite(seconds) && seconds >= 1 && seconds <= 86400 ? seconds * 1000 : 120000;
+}
+
+function silenceKey(task) {
+  return `${task?.id || ''}:${task?.turnState?.lastProgressAt || ''}`;
+}
+
+function activitySilenceMs(task) {
+  const baseline = task?.turnState?.silentMs;
+  // Use the server's duration, not the difference between two devices' clocks.
+  return Number.isFinite(baseline) && baseline >= 0
+    ? baseline + Math.max(0, Date.now() - activityReceivedAt) : null;
+}
+
+function renderSilenceBanner(task, silentMs) {
+  const active = task && ['RUNNING', 'STARTING', 'PREPARING'].includes(task.status);
+  const visible = active && silentMs !== null && silentMs >= silenceThresholdMs()
+    && silenceWaitKey !== silenceKey(task);
+  $('silenceBanner').classList.toggle('hidden', !visible);
+  if (!visible) return;
+  const duration = `${Math.floor(silentMs / 60000)}:${String(Math.floor((silentMs % 60000) / 1000)).padStart(2, '0')}`;
+  $('silenceText').textContent = `Модель молчит ${duration} — последний прогресс: ${task.turnState?.stage || 'стадия неизвестна'}. Это не означает, что ход завершён.`;
+}
 
 /** Ожидание провайдера: причина отказа и остаток до повтора (task.providerWait). */
 function providerWaitText(wait) {
@@ -2426,6 +2613,11 @@ function providerWaitText(wait) {
 }
 
 function renderActivity(task = currentTask) {
+  activityTask = task;
+  activityReceivedAt = Date.now();
+  if (silenceWaitKey !== silenceKey(task)) silenceWaitKey = null;
+  // Replace the callback as well as the text: the old callback captured an old snapshot.
+  if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
   const host = $('activity');
   const status = task?.status;
   const label = ACTIVITY_LABELS[status];
@@ -2433,6 +2625,7 @@ function renderActivity(task = currentTask) {
     if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
     host.classList.add('hidden');
     host.textContent = '';
+    renderSilenceBanner(null, null);
     return;
   }
   const since = Date.parse(task.statusChangedAt || task.updatedAt || task.createdAt || '') || null;
@@ -2447,8 +2640,14 @@ function renderActivity(task = currentTask) {
     // (loadStatus) — краска раз в секунду этого достаточна.
     const reading = readingPrompt(task);
     const elapsed = seconds === null ? '' : ` · ${seconds} с`;
+    const silentMs = activitySilenceMs(task);
+    renderSilenceBanner(task, silentMs);
+    const silent = silentMs !== null && silentMs >= silenceThresholdMs()
+      ? ` — модель молчит ${Math.floor(silentMs / 60000)}:${String(Math.floor((silentMs % 60000) / 1000)).padStart(2, '0')}`
+      : '';
     const model = task.model?.id ? ` · ${task.model.id}` : '';
-    host.textContent = `${label}${wait}${runtime}${provider}${reading}${elapsed}${model}`;
+    const phase = TURN_PHASE_LABELS[task.turnState?.phase] || '';
+    host.textContent = `${label}${phase}${wait}${runtime}${provider}${reading}${silent}${elapsed}${model}`;
   };
   paint();
   // Elapsed time keeps ticking while a session works or waits.
@@ -2556,6 +2755,8 @@ async function selectTask(id) {
   const spoiler = $('controlsSpoiler');
   if (spoiler && window.matchMedia(MOBILE_QUERY).matches) spoiler.open = false;
   const version = resetSelection(id);
+  // Один запрос метрик на выбор сессии: аномалии связи видны сразу (фаза 4).
+  loadServerHealth();
   showSessionLoader();
   try {
     const initial = await api(`/api/tasks/${encodeURIComponent(id)}/events?tail=${HISTORY_PAGE_TURNS}`);
@@ -2586,7 +2787,7 @@ async function selectTask(id) {
         if (version !== selectionVersion) return;
         if (chatState.apply(event)) {
           if (!textUpdateTimer) textUpdateTimer = setTimeout(() => { textUpdateTimer = null; if (version === selectionVersion) renderChat(); }, 80);
-          if (event.type === 'STATUS' || event.type.startsWith('TASK_')) refreshTask();
+          if (event.type === 'STATUS' || event.type.startsWith('TASK_') || event.type === 'TURN_STATE') refreshTask();
         }
       },
       onStatus: value => { if (value === 'reconnecting' && version === selectionVersion) refreshTask(); }
@@ -2618,10 +2819,14 @@ async function refreshTask() {
     const events = await api(`/api/tasks/${encodeURIComponent(id)}/events?limit=0&after=${chatState.cursor}`, { timeoutMs: REFRESH_TIMEOUT_MS });
     if (version !== selectionVersion) return;
     applyEvents(events);
+    // Шаг C-B: снимок задачи версионирован (snapshotSeq = seq последнего события).
+    // Метаданные, прочитанные до свежего события, не должны откатывать «лицо»
+    // хода (фазу, стадию, статус, runtime) — их уже принесло SSE.
+    const fresh = mergeSnapshot(currentTask, t);
     // A stale metadata response must not stop a newer streaming event.
-    if (chatState.cursor === initialCursor) chatState.snapshot(t);
+    if (chatState.cursor === initialCursor) chatState.snapshot(fresh);
     renderChat();
-    renderTaskDetails(t); // also refreshes the stop button and the activity strip
+    renderTaskDetails(fresh); // also refreshes the stop button and the activity strip
     await loadArtifacts(REFRESH_TIMEOUT_MS);
     await loadTasks(REFRESH_TIMEOUT_MS);
   } catch (error) {
@@ -2630,6 +2835,285 @@ async function refreshTask() {
     if (refreshingVersion === version) refreshingVersion = null;
   }
 }
+
+// --- Память проекта (этап M2) -------------------------------------------------
+//
+// Панель показывает ровно тот путь, которым память попадает в промпт: записи с
+// использованием и давностью, бюджет и предупреждение о переполнении, глобальные
+// знания. Запись — только через гейт предложений: у панели нет кнопки «сохранить».
+
+let memoryLoadedFor = null;
+
+function memoryAge(iso) {
+  const at = Date.parse(iso || '');
+  if (!Number.isFinite(at)) return null;
+  const days = Math.floor((Date.now() - at) / 86400000);
+  if (days <= 0) return 'сегодня';
+  if (days === 1) return 'вчера';
+  if (days < 30) return `${days} дн.`;
+  return `${Math.floor(days / 30)} мес.`;
+}
+
+function renderMemoryPanel(memory, proposals, consolidation = null) {
+  const summary = $('memorySummary');
+  const notes = $('memoryNotes');
+  const global = $('memoryGlobal');
+  const consolidationBox = $('memoryConsolidation');
+  const box = $('memoryProposals');
+  if (!summary || !notes || !global || !box) return;
+  notes.textContent = '';
+  box.textContent = '';
+  global.textContent = '';
+  if (consolidationBox) consolidationBox.textContent = '';
+
+  if (!memory || memory.status !== 'available') {
+    summary.textContent = memory?.problems?.join('; ') || 'Память проекта недоступна.';
+    return;
+  }
+  const budget = memory.budget || {};
+  const index = memory.index || {};
+  summary.textContent = `Записей: ${memory.entries ?? (memory.notes || []).length}`
+    + ` · в контекст до ${budget.indexTokens ?? '—'} токенов`
+    + ` · использовано ${index.uses ?? 0} раз`
+    + (budget.overBudget ? ' · индекс больше бюджета, часть записей в контекст не попадёт' : '');
+  if (budget.overBudget) summary.classList.add('memoryOverBudget');
+  else summary.classList.remove('memoryOverBudget');
+
+  for (const note of memory.notes || []) {
+    const row = document.createElement('div');
+    row.className = 'memoryNote';
+    const src = document.createElement('div');
+    src.className = 'src';
+    src.textContent = note.source;
+    const meta = document.createElement('div');
+    meta.className = 'muted small';
+    const age = memoryAge(note.updatedAt);
+    meta.textContent = [
+      note.category || 'other',
+      note.description || null,
+      note.useCount ? `использовано ${note.useCount} раз` : 'ни разу не использовалась',
+      age ? `изменено ${age}` : null,
+    ].filter(Boolean).join(' · ');
+    row.append(src, meta);
+    notes.appendChild(row);
+  }
+
+  const globalInfo = memory.global || {};
+  global.textContent = globalInfo.entries
+    ? `Общие знания (_global): ${globalInfo.entries} записей (~${globalInfo.approxTokens} токенов, свой бюджет ${budget.globalTokens ?? '—'})`
+    : `Общие знания (_global): пусто (бюджет ${budget.globalTokens ?? '—'} токенов)`;
+
+  if (consolidationBox) {
+    const candidates = Array.isArray(consolidation?.candidates) ? consolidation.candidates : [];
+    if (candidates.length) {
+      const title = document.createElement('div');
+      title.className = 'muted small';
+      title.textContent = `Кандидаты на слияние (${candidates.length}) — сами файлы не меняются, создаётся только предложение:`;
+      consolidationBox.appendChild(title);
+      for (const candidate of candidates) {
+        const card = document.createElement('div');
+        card.className = 'memoryConsolidationCandidate';
+        const sources = (candidate.notes || []).map(note => note.source).filter(Boolean);
+        const heading = document.createElement('div');
+        heading.textContent = sources.join(' ↔ ') || 'Похожие заметки';
+        const meta = document.createElement('div');
+        meta.className = 'muted small';
+        meta.textContent = [
+          Number.isFinite(candidate.score) ? `сходство ${Math.round(candidate.score * 100)}%` : null,
+          candidate.reason || null,
+        ].filter(Boolean).join(' · ');
+        const action = document.createElement('button');
+        action.type = 'button';
+        action.textContent = 'Оформить предложением';
+        action.disabled = sources.length < 2;
+        action.onclick = () => memoryConsolidationAction(sources[0], sources[1], action);
+        card.append(heading, meta, action);
+        consolidationBox.appendChild(card);
+      }
+    } else {
+      consolidationBox.textContent = consolidation ? 'Кандидатов на слияние нет.' : '';
+    }
+  }
+
+  const pending = proposals?.proposals || [];
+  if (!pending.length) {
+    box.textContent = 'Предложений нет.';
+    return;
+  }
+  const title = document.createElement('div');
+  title.className = 'muted small';
+  title.textContent = `Предложения (${pending.length}) — в память попадут только после вашего решения:`;
+  box.appendChild(title);
+  for (const proposal of pending) {
+    const card = document.createElement('div');
+    card.className = 'memoryProposal';
+    const text = document.createElement('div');
+    text.textContent = proposal.text || '(без текста)';
+    const meta = document.createElement('div');
+    meta.className = 'muted small';
+    meta.textContent = [proposal.category || 'other', proposal.reason || null, memoryAge(proposal.createdAt)].filter(Boolean).join(' · ');
+    const actions = document.createElement('div');
+    actions.className = 'inline';
+    const accept = document.createElement('button');
+    accept.type = 'button';
+    accept.textContent = 'Принять';
+    accept.onclick = () => memoryProposalAction('accept', proposal.id, accept);
+    const reject = document.createElement('button');
+    reject.type = 'button';
+    reject.textContent = 'Отклонить';
+    reject.onclick = () => memoryProposalAction('reject', proposal.id, reject);
+    actions.append(accept, reject);
+    card.append(text, meta, actions);
+    box.appendChild(card);
+  }
+}
+
+async function loadMemoryPanel() {
+  const projectId = currentTask?.projectId;
+  if (!projectId) {
+    renderMemoryPanel(null, null);
+    return;
+  }
+  try {
+    const memory = await api(`/api/projects/${encodeURIComponent(projectId)}/memory`);
+    const proposals = await api(`/api/projects/${encodeURIComponent(projectId)}/memory/proposals`).catch(() => ({ proposals: [] }));
+    const consolidation = await api(`/api/projects/${encodeURIComponent(projectId)}/memory/consolidation`).catch(() => null);
+    memoryLoadedFor = projectId;
+    renderMemoryPanel(memory, proposals, consolidation);
+  } catch (e) {
+    $('memorySummary').textContent = `Не удалось прочитать память: ${e.message}`;
+  }
+}
+
+async function memoryConsolidationAction(first, second, button) {
+  const projectId = currentTask?.projectId;
+  if (!projectId || !first || !second) return;
+  button.disabled = true;
+  try {
+    await commandApi(`/api/projects/${encodeURIComponent(projectId)}/memory/consolidation`, { first, second });
+    showNotice('Предложение на слияние заметок создано. Примите или отклоните его ниже.');
+  } catch (e) {
+    showNotice(`Не удалось оформить слияние: ${e.message}`);
+  }
+  await loadMemoryPanel();
+}
+
+async function memoryProposalAction(action, proposalId, button) {
+  const projectId = currentTask?.projectId;
+  if (!projectId) return;
+  button.disabled = true;
+  try {
+    await commandApi(`/api/projects/${encodeURIComponent(projectId)}/memory/proposals/${encodeURIComponent(proposalId)}/${action}`, {});
+  } catch (e) {
+    showNotice(`Не удалось ${action === 'accept' ? 'принять' : 'отклонить'} предложение: ${e.message}`);
+  }
+  await loadMemoryPanel();
+}
+
+const memoryPanel = $('memoryPanel');
+if (memoryPanel) memoryPanel.addEventListener('toggle', () => { if (memoryPanel.open) loadMemoryPanel(); });
+
+let workspaceFilesLoadedFor = null;
+
+// Строки `git status --porcelain` (« M file.txt», «?? new.js») — то, что оператор
+// читает как «что изменил агент», без отдельного дерева и без второго запроса diff.
+function parseGitStatusLines(status) {
+  const rows = [];
+  for (const line of String(status || '').split('\n')) {
+    const match = /^(..) (.+)$/u.exec(line);
+    if (!match) continue;
+    const code = match[1].trim() || ' ';
+    const target = match[2];
+    const arrow = target.lastIndexOf(' -> ');
+    // Переименование: путь ПОСЛЕ стрелки — тот, что существует сейчас.
+    const current = arrow === -1 ? target : target.slice(arrow + 4);
+    const path = current.replace(/^"|"$/gu, '');
+    rows.push({ code, previous: arrow === -1 ? null : target.slice(0, arrow).replace(/^"|"$/gu, ''), path });
+  }
+  return rows;
+}
+
+function renderChangedFiles(report) {
+  const summary = $('changedFilesSummary');
+  const box = $('changedFiles');
+  if (!summary || !box) return;
+  box.textContent = '';
+  if (!report) { summary.textContent = ''; return; }
+  if (report.isGit === false) {
+    summary.textContent = 'Рабочая папка не под git — сравнить изменения не с чем.';
+    return;
+  }
+  const rows = parseGitStatusLines(report.status);
+  summary.textContent = rows.length
+    ? `Изменено: ${rows.length}${report.truncated ? ' (список обрезан)' : ''}`
+    : 'Изменений нет.';
+  for (const row of rows) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'workspaceFile workspaceFileOpen changedFile';
+    item.textContent = `${row.code === '??' ? 'новый' : row.code} · ${row.path}${row.previous ? ` (было ${row.previous})` : ''}`;
+    item.onclick = () => {
+      const taskId = selectedTaskId || currentTask?.id;
+      if (!taskId) return;
+      const url = `/api/tasks/${encodeURIComponent(taskId)}/workspace-file?path=${encodeURIComponent(row.path)}`;
+      openFileViewer({ url, name: row.path, downloadUrl: `${url}&download=1` });
+    };
+    box.appendChild(item);
+  }
+}
+
+async function loadChangedFiles() {
+  const taskId = selectedTaskId || currentTask?.id;
+  if (!taskId) { renderChangedFiles(null); return; }
+  try {
+    renderChangedFiles(await api(`/api/tasks/${encodeURIComponent(taskId)}/changed-files`));
+  } catch (e) {
+    renderChangedFiles({ isGit: true, status: '', changedFiles: [] });
+    const summary = $('changedFilesSummary');
+    if (summary) summary.textContent = `Не удалось прочитать изменения: ${e.message}`;
+  }
+}
+
+function renderWorkspaceFiles(list) {
+  const summary = $('workspaceFilesSummary');
+  const box = $('workspaceFiles');
+  if (!summary || !box) return;
+  box.textContent = '';
+  const entries = Array.isArray(list?.entries) ? list.entries : [];
+  summary.textContent = entries.length ? `Файлов и папок: ${entries.length}` : 'Файлов не найдено или рабочая папка ещё не готова.';
+  for (const entry of entries) {
+    const row = document.createElement(entry.isFile ? 'button' : 'div');
+    row.className = entry.isFile ? 'workspaceFile workspaceFileOpen' : 'workspaceFile workspaceDir';
+    if (entry.isFile) row.type = 'button';
+    row.textContent = `${entry.isFile ? '📄' : '📁'} ${entry.path}`;
+    if (entry.isFile) {
+      row.onclick = () => {
+        const taskId = selectedTaskId || currentTask?.id;
+        if (!taskId) return;
+        const url = `/api/tasks/${encodeURIComponent(taskId)}/workspace-file?path=${encodeURIComponent(entry.path)}`;
+        openFileViewer({ url, name: entry.path, downloadUrl: `${url}&download=1` });
+      };
+    }
+    box.appendChild(row);
+  }
+}
+
+async function loadWorkspaceFiles() {
+  const taskId = selectedTaskId || currentTask?.id;
+  if (!taskId) { renderWorkspaceFiles(null); return; }
+  try {
+    const list = await api(`/api/tasks/${encodeURIComponent(taskId)}/workspace-files`);
+    workspaceFilesLoadedFor = taskId;
+    renderWorkspaceFiles(list);
+    await loadChangedFiles();
+  } catch (e) {
+    const summary = $('workspaceFilesSummary');
+    if (summary) summary.textContent = `Не удалось прочитать файлы: ${e.message}`;
+  }
+}
+
+const workspaceFilesPanel = $('workspaceFilesPanel');
+if (workspaceFilesPanel) workspaceFilesPanel.addEventListener('toggle', () => { if (workspaceFilesPanel.open) loadWorkspaceFiles(); });
 
 async function sendContinueMessage(taskId, text, opts = {}) {
   const version = selectionVersion;
@@ -3105,6 +3589,29 @@ const UI_WIDTHS = {
 };
 let uiSettings = { scale: 1, width: 'normal' };
 
+/**
+ * Шаг C-B: снимок задачи версионирован (snapshotSeq = seq последнего события
+ * сессии). Ответ с меньшей версией не откатывает «лицо» хода — фазу, стадию,
+ * статус и runtime: их уже принесло SSE. Остальные поля (файлы, метрики, очередь)
+ * берутся из ответа: они не описывают живое состояние хода.
+ * Старшинство сохраняется по максимуму, иначе следующий такой ответ прошёл бы.
+ */
+function mergeSnapshot(prev, next) {
+  if (!prev || !next) return next;
+  const prevSeq = Number(prev.snapshotSeq) || 0;
+  const nextSeq = Number(next.snapshotSeq) || 0;
+  // Сервер без версии (старый сбор) — прежнее поведение.
+  if (!prevSeq || !nextSeq || nextSeq >= prevSeq) return next;
+  return {
+    ...next,
+    snapshotSeq: prevSeq,
+    status: prev.status,
+    current: prev.current,
+    turnState: prev.turnState ?? next.turnState,
+    runtime: prev.runtime ?? next.runtime
+  };
+}
+
 // Never-saved defaults follow the screen: a desktop has the room for larger text
 // and a wider column, a phone does not. A saved choice always wins.
 function isWideScreen() {
@@ -3239,6 +3746,96 @@ $('retryPrompt').onclick = () => {
   $('retryPrompt').classList.add('hidden');
   $('form').requestSubmit();
 };
+
+// The same privacy-filtered bundle is available from the composer and silence banner.
+/**
+ * Здоровье сервера строкой: аномалии связи и доставки видны при открытии сессии,
+ * а не только в бандле диагностики. Пусто — «всё обычно», без шума на экране.
+ *
+ * Запрос один на выбор сессии (а не на каждый опрос списка): метрика нужна
+ * оператору в момент, когда он смотрит на чат, а не как второй фон нагрузки.
+ */
+function renderServerHealth(metrics) {
+  const box = $('serverHealth');
+  if (!box) return;
+  const server = metrics?.server;
+  if (!server) { box.textContent = ''; return; }
+  const parts = [];
+  const degraded = Array.isArray(server.degradedClients) ? server.degradedClients : [];
+  if (degraded.length) {
+    const reasons = [...new Set(degraded.map(entry => entry.reason).filter(Boolean))].slice(0, 2).join('; ');
+    parts.push(`связь теряют ${degraded.length} клиент(ов)${reasons ? ` (${reasons})` : ''}`);
+  }
+  if (Number(server.droppedStreams) > 0) parts.push(`обрывов потока: ${server.droppedStreams}`);
+  if (Number(server.degradedEpisodes) > 0) parts.push(`эпизодов без связи: ${server.degradedEpisodes}`);
+  const ackP95 = metrics?.delivery?.observations?.['ack_latency_ms']?.p95;
+  if (Number.isFinite(ackP95) && ackP95 > 5000) parts.push(`p95 подтверждения Pi: ${Math.round(ackP95)} мс`);
+  box.textContent = parts.length ? `Связь и доставка: ${parts.join(' · ')}` : '';
+  box.classList.toggle('error', parts.length > 0);
+}
+
+async function loadServerHealth() {
+  const metrics = await api('/api/metrics').catch(() => null);
+  renderServerHealth(metrics);
+}
+
+async function copyDiagnostics(task = currentTask) {
+  // Здоровье сервера — запрос в момент копирования, а не постоянный опрос:
+  // диагностика нужна точечно, и стоить она должна один запрос.
+  const metrics = await api('/api/metrics').catch(() => null);
+  const bundle = buildDiagnosticsBundle({
+    now: Date.now(),
+    client: {
+      kind: 'web',
+      transport: transport?.kind ?? null,
+      origin: `${location.protocol}//${location.host}`,
+      online: typeof navigator !== 'undefined' ? navigator.onLine : null,
+      build: lastInfo?.build ?? null
+    },
+    task,
+    chat: chatState ? { cursor: chatState.cursor } : null,
+    model: {
+      busy: modelBusy,
+      ready: lastInfo?.modelReady ?? null,
+      engine: lastInfo?.engine ?? null
+    },
+    queuedLocal: locallyQueuedPrompts.length,
+    lastPromptFailed: Boolean(lastPrompt?.failedSend),
+    sendErrors: [...recentSendErrors],
+    server: metrics,
+  });
+  const ok = await copyText(JSON.stringify(bundle, null, 2));
+  showNotice(ok ? 'Диагностика скопирована в буфер обмена.' : 'Не удалось скопировать — буфер обмена недоступен.');
+}
+$('copyDiagnostics').onclick = () => copyDiagnostics();
+$('silenceDiagnostics').onclick = () => copyDiagnostics(activityTask);
+$('silenceWait').onclick = () => {
+  silenceWaitKey = silenceKey(activityTask);
+  $('silenceBanner').classList.add('hidden');
+};
+$('silenceThreshold').value = String(silenceThresholdMs() / 1000);
+$('silenceThreshold').onchange = () => {
+  const seconds = Number($('silenceThreshold').value);
+  if (!Number.isFinite(seconds) || seconds < 1 || seconds > 86400) return;
+  try { localStorage.setItem(SILENCE_THRESHOLD_KEY, String(seconds)); } catch { /* private mode */ }
+  renderSilenceBanner(activityTask, activitySilenceMs(activityTask));
+};
+async function silenceCommand(action) {
+  const target = activityTask;
+  if (!target?.id || $('silenceBanner').classList.contains('hidden')) return;
+  const message = action === 'cancel' ? 'Остановить текущую работу Pi' : 'Перезапустить сессию Pi (без повторной отправки промпта)';
+  if (!confirm(`${message} в сессии «${target.title || target.id}»?`)) return;
+  const button = $(action === 'cancel' ? 'silenceStop' : 'silenceRestart');
+  button.disabled = true;
+  try {
+    await commandApi(`/api/tasks/${encodeURIComponent(target.id)}/${action}`, {});
+    await loadTasks();
+    if (selectedTaskId === target.id) await refreshTask();
+  } catch (e) { showNotice(`Не удалось выполнить действие: ${e.message}`); }
+  finally { button.disabled = false; }
+}
+$('silenceStop').onclick = () => silenceCommand('cancel');
+$('silenceRestart').onclick = () => silenceCommand('session/restart');
 
 function setBusy(busy) {
   $('sendButton').disabled = busy;
@@ -3424,6 +4021,9 @@ $('form').addEventListener('submit', async (e) => {
   } catch (err) {
     $('createError').textContent = err.message;
     $('createError').classList.add('error');
+    // Без текста промпта: бандл диагностики несёт только факт и время ошибки.
+    recentSendErrors.push(`${new Date().toISOString()} ${err.message}`);
+    if (recentSendErrors.length > 10) recentSendErrors.shift();
     // The text may already be gone from the composer: keep it for one click.
     lastPrompt = { id: selectedTaskId, text: prompt, failedSend: true };
   } finally {
@@ -3445,14 +4045,41 @@ $('newTaskButton').onclick = () => {
 $('stopButton').onclick = async () => {
   const target = stopTarget();
   if (!target) return;
-  if (!confirm(`Остановить текущую работу Pi в сессии «${target.title || target.id}»?`)) return;
+  // Локальная очередь и неподтверждённый текст — часть «действий», которые STOP
+  // обязан отменять: иначе оператор видит вечное «Отправляется…» и не может ничего.
+  const localOnly = !hasRemoteWork(target);
+  const returned = [...locallyQueuedPrompts.map(entry => entry.text), lastPrompt?.failedSend ? lastPrompt.text : null].filter(Boolean);
+  const question = localOnly
+    ? `Отменить незавершённые отправки (${returned.length})? Текст вернётся в поле ввода.`
+    : `Остановить текущую работу Pi в сессии «${target.title || target.id}»?`;
+  if (!confirm(question)) return;
   $('stopButton').disabled = true;
   try {
-    await commandApi(`/api/tasks/${encodeURIComponent(target.id)}/cancel`, {});
+    // hard: STOP убивает процессы сессии сразу (Pi и его детей), а не ждёт до 10 с,
+    // пока Pi отзовётся на вежливый abort: кнопка нужна как гарантия «останови всё».
+    // Повторное нажатие работает: сервер на терминальном статусе отвечает сразу,
+    // на живом — повторяет остановку.
+    if (!localOnly) await commandApi(`/api/tasks/${encodeURIComponent(target.id)}/cancel`, { hard: true });
+    locallyQueuedPrompts.length = 0;
+    renderQueuedPrompt();
+    if (returned.length) {
+      // Текст не теряем молча: он возвращается в поле ввода (та же политика, что у KMP).
+      $('prompt').value = returned.join('\n\n');
+      showNotice('Отправки отменены, текст вернулся в поле ввода');
+    }
+    if (lastPrompt?.failedSend) lastPrompt = { ...lastPrompt, failedSend: false };
+    updateRetryButton();
   } catch (e) { alert(e.message); }
   await loadTasks();
   if (target.id === selectedTaskId) await refreshTask();
+  updateStopButton();
 };
+
+/** Есть ли у сессии серверная работа (то, что снимается запросом cancel). */
+function hasRemoteWork(task) {
+  if (!task) return false;
+  return task.status === 'CANCELLING' || ACTIVE_STATUSES.has(task.status);
+}
 
 $('refresh').onclick = () => loadTasks();
 
@@ -3615,7 +4242,8 @@ function rewriteMarkdownLinks(container) {
     // points at the inline URL, and a plain click opens the file natively on the
     // machine or in the built-in viewer elsewhere. A modifier click still opens
     // a new tab.
-    const url = workspaceFileUrl(href, false);
+    const parsed = parsePathWithLines(href);
+    const url = parsed ? fileViewerUrl(parsed.path, parsed.from, parsed.to) : workspaceFileUrl(href, false);
     if (url) {
       a.href = url;
       a.target = '_blank';
@@ -3623,7 +4251,7 @@ function rewriteMarkdownLinks(container) {
       a.onclick = (event) => {
         if (event.ctrlKey || event.metaKey || event.shiftKey) return;
         event.preventDefault();
-        openFileViewer({ url, name: a.textContent || href });
+        openFileViewer({ url, name: parsed?.path || a.textContent || href, from: parsed?.from ?? null, to: parsed?.to ?? null });
       };
     } else a.removeAttribute('href');
   }
@@ -4886,12 +5514,66 @@ function renderModelListBatch() {
     ].filter(Boolean).join(' · ');
     item.append(id, meta);
     item.onclick = () => chooseModel(m);
-    list.append(item);
+    // Кнопка проверки — отдельный элемент строки, а не внутри кнопки выбора: вложенная
+    // кнопка и всплытие клика выбирали бы модель вместо проверки (пункт §3.3 плана).
+    const row = document.createElement('div');
+    row.className = 'modelRow';
+    const probe = document.createElement('button');
+    probe.type = 'button';
+    probe.className = 'modelProbe';
+    probe.title = 'Проверить модель: один короткий запрос (1 токен) и задержка до первого ответа';
+    probe.textContent = '⏱';
+    probe.onclick = event => { event.stopPropagation(); return probeModelRow(m, probe, row); };
+    row.append(item, probe);
+    list.append(row);
   }
   modelListWindow.rendered = to;
   modelListSentinel.textContent = `Показать ещё (${to} из ${filtered.length})`;
   modelListSentinel.hidden = to >= filtered.length;
   list.append(modelListSentinel);
+}
+
+// Проверка модели по кнопке (пункт §3.3 плана): короткий запрос с одним токеном и
+// задержка до первого ответа. Ничего не выбирает и не меняет — только измеряет.
+async function probeModelRow(model, button, row) {
+  button.disabled = true;
+  row.querySelector('.modelProbeResult')?.remove();
+  const note = document.createElement('span');
+  note.className = 'modelProbeResult muted small';
+  note.textContent = 'проверяю…';
+  row.append(note);
+  try {
+    const result = await commandApi('/api/models/probe', { provider: model.provider, id: model.id, mode: 'latency' });
+    note.textContent = probeResultText(result);
+    note.classList.toggle('err', result.ok !== true);
+  } catch (error) {
+    note.textContent = `не удалось проверить: ${error.message}`;
+    note.classList.add('err');
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/** Ответ проверки словами: без кодов, но и без вранья «всё хорошо». */
+function probeResultText(result) {
+  if (!result) return 'нет ответа';
+  if (result.ok === true) {
+    const tokens = Number(result.tokensUsed) > 0 ? ` · ${result.tokensUsed} токен` : ' · без токенов';
+    return `${result.ms} мс${tokens}`;
+  }
+  switch (result.code) {
+    case 'COOLDOWN': return `повтор через ${Math.max(1, Math.ceil((result.retryInMs || 0) / 1000))} с`;
+    case 'TIMEOUT': return 'провайдер не ответил вовремя';
+    case 'AUTH': return 'провайдер отклонил ключ (401)';
+    case 'RATE_LIMITED': return 'провайдер ограничил запросы (429)';
+    case 'MODEL_NOT_FOUND': return 'провайдер не знает такую модель';
+    case 'MODEL_UNKNOWN': return result.message || 'модель не описана у провайдера';
+    case 'NO_KEY': return result.message || 'нет ключа провайдера';
+    case 'NO_ENDPOINT': return result.message || 'нет адреса провайдера';
+    case 'PROVIDER_ERROR': return `провайдер ответил ошибкой: ${result.message || 'без подробностей'}`;
+    case 'UNREACHABLE': return 'провайдер недоступен';
+    default: return result.message || result.code || 'отказ без объяснения';
+  }
 }
 
 function renderModelList() {
@@ -5992,6 +6674,7 @@ async function checkPcState() {
     ].filter(Boolean).join(', ');
     $('buildInfo').title = buildDetails;
     modelBusy = info.modelBusy;
+    lastInfo = info;
     let label;
     let state;
     if (info.modelReady === false) {
@@ -5999,6 +6682,11 @@ async function checkPcState() {
       state = 'err';
     } else if (modelBusy === true) {
       label = 'Модель занята';
+      state = 'run';
+    } else if (modelBusy === null && info.engine?.configured) {
+      // C6: локальный рантайм есть, но его занятость прочитать не удалось
+      // (getBusyStatus → unknown) — нельзя показывать «свободна».
+      label = 'Состояние модели неизвестно';
       state = 'run';
     } else {
       label = 'Модель онлайн';

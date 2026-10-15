@@ -409,6 +409,27 @@ export class ChatState {
       this.#startVariant(event.data);
     } else if (event.type === 'TURN_VARIANT_SELECTED') {
       this.#selectVariant(Number(event.data?.turnSeq) || 0, `assistant-${event.data?.variantId}`);
+    } else if (event.type === 'MEMORY_INJECTED') {
+      // Этап M2: факт инъекции памяти виден в самой ленте. «Работает ли память»
+      // перестаёт быть гаданием, а числа (заметки, токены, источники) лежат
+      // рядом с ходом, к которому относились. Сворачивается: список источников
+      // нужен не всегда, но должен быть под рукой.
+      if (!this.notes.has(event.seq)) {
+        this.notes.add(event.seq);
+        const data = event.data || {};
+        this.turns.push({
+          id: `note-${event.seq}`,
+          role: 'note',
+          text: event.message || `Память: ${data.notes || 0} заметок`,
+          memory: {
+            notes: data.notes ?? null,
+            tokens: data.tokens ?? null,
+            globalNotes: data.globalNotes ?? 0,
+            globalTokens: data.globalTokens ?? 0,
+            sources: Array.isArray(data.sources) ? data.sources : []
+          }
+        });
+      }
     } else if (event.type === 'STATUS') {
       if (ACTIVE_STATUSES.has(event.data?.status)) {
         this.current.active = true;

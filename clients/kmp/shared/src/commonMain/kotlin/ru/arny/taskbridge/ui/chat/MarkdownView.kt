@@ -308,8 +308,10 @@ fun inlineText(runs: List<MdRun>): AnnotatedString {
                 val displayText = softBreakLongText(run.text)
                 if (run.link != null) {
                     val linkStyle = TextLinkStyles(SpanStyle(color = colors.primary, textDecoration = TextDecoration.Underline))
-                    val file = workspaceLinkPath(run.link!!)
-                    val annotation = if (file != null && openFile != null) LinkAnnotation.Clickable(file, linkStyle) { openFile(file) } else LinkAnnotation.Url(run.link!!, linkStyle)
+                    val target = workspaceLinkTarget(run.link!!)
+                    // Диапазон строк едет вместе с путём: клик по `src/a.kt#L120-L140`
+                    // открывает файл на этих строках, а не с начала (пункт 162).
+                    val annotation = if (target != null && openFile != null) LinkAnnotation.Clickable(target.path, linkStyle) { openFile(target) } else LinkAnnotation.Url(run.link!!, linkStyle)
                     withLink(annotation) {
                         withStyle(style) { append(displayText) }
                     }
@@ -321,8 +323,42 @@ fun inlineText(runs: List<MdRun>): AnnotatedString {
     }
 }
 
-/** Opens a workspace file from a link in an answer; null where there is no viewer (plain Markdown). */
-val LocalOpenFile = staticCompositionLocalOf<((String) -> Unit)?> { null }
+/** Opens a workspace file (with an optional line range) from a link in an answer; null where there is no viewer (plain Markdown). */
+val LocalOpenFile = staticCompositionLocalOf<((WorkspaceLink) -> Unit)?> { null }
+
+/**
+ * Куда ведёт ссылка на файл: путь и необязательный диапазон строк.
+ *
+ * Модели пишут ссылки как `src/a.kt#L120` и `src/a.kt#L120-L140` — так же, как
+ * их принимает GitHub. Раньше фрагмент просто отрезался, поэтому клик открывал
+ * файл, но терял строку и заставлял искать её глазами (2026-10-14).
+ */
+data class WorkspaceLink(val path: String, val line: Int? = null, val endLine: Int? = null)
+
+/**
+ * Путь и диапазон строк из ссылки. `null` — это не файл рабочей папки (обычная
+ * веб-ссылка, якорь в текущем документе и т.п.).
+ */
+internal fun workspaceLinkTarget(link: String): WorkspaceLink? {
+    val raw = link.trim()
+    if (raw.isEmpty() || raw.startsWith("#")) return null
+    val fragment = raw.substringAfter('#', "")
+    val path = workspaceLinkPath(raw) ?: return null
+    return WorkspaceLink(path, line = rangeStart(fragment), endLine = rangeEnd(fragment))
+}
+
+/** `L120` → 120, `L120-140`/`L120-L140` → 120. Не диапазон — null. */
+private fun rangeStart(fragment: String): Int? =
+    Regex("^L(\\d+)(?:-L?\\d+)?$").find(fragment)?.groupValues?.get(1)?.toIntOrNull()
+
+/** `L120-L140` → 140; одиночная строка — её же номер (диапазон из одной строки). */
+private fun rangeEnd(fragment: String): Int? {
+    val match = Regex("^L(\\d+)(?:-L?(\\d+))?$").find(fragment) ?: return null
+    val start = match.groupValues[1].toIntOrNull() ?: return null
+    val end = match.groupValues.getOrNull(2)?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: start
+    // Перевёрнутый диапазон приводится к порядку: `#L140-L120` — это 120..140.
+    return maxOf(start, end)
+}
 
 /**
  * The workspace path a Markdown link points at, or null for a real web link.

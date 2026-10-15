@@ -24,7 +24,7 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/health', summary: 'liveness, no auth' },
   { method: 'GET', path: '/api/info', summary: 'name, build, apiVersion, addresses, engine, system, limits, last known provider balances/subscriptions (no provider requests on the poll)' },
   { method: 'POST', path: '/api/providers/refresh', summary: 'fresh provider balances/subscriptions now (operator action, cooldown-guarded)' },
-  { method: 'GET', path: '/api/metrics', summary: 'counters as JSON, or Prometheus with ?format=prometheus' },
+  { method: 'GET', path: '/api/metrics', summary: 'counters as JSON, or Prometheus with ?format=prometheus; includes `delivery` — turn-delivery timings (turn_dispatch_ms, ack_latency_ms, eventchain_wait_ms, sse_publish_lag_ms)' },
   { method: 'GET', path: '/debug/cloud', summary: 'cloud transport diagnostics' },
 
   // --- auth -----------------------------------------------------------------
@@ -37,11 +37,15 @@ export const API_ROUTES = [
   // --- projects / files -----------------------------------------------------
   { method: 'GET', path: '/api/projects', summary: 'registered projects' },
   { method: 'GET', path: '/api/projects/overview', summary: 'the dashboard: every project with pinned/archived, session counts (sessions, working, needsAttention), last activity, and the count of sessions whose project is no longer registered' },
-  { method: 'GET', path: '/api/projects/:id/memory', summary: 'read-only project memory inspector for pi-memory-md (?q searches entries); reports provider status, injected index size, categories and SAVE_DISABLED write mode' },
+  { method: 'GET', path: '/api/projects/:id/memory', summary: 'read-only project memory inspector for pi-memory-md (?q searches entries); reports provider status, injected index size, categories, indexed usage (useCount/lastUsedAt), бюджеты и SAVE_DISABLED write mode' },
   { method: 'GET', path: '/api/projects/:id/memory/proposals', summary: 'memory suggestions waiting for a human, with counts; they live in an isolated .memory-proposals/ buffer and are never injected' },
   { method: 'POST', path: '/api/projects/:id/memory/proposals', summary: 'propose durable project knowledge: {text, category?, reason?, paths?, sourceSessionId?, sourceWorkItemId?}; nothing is written to core/' },
   { method: 'POST', path: '/api/projects/:id/memory/proposals/:proposalId/accept', summary: 'the only way into pi-memory-md: runs the deterministic checks (non-empty, known category, no duplicate, declared paths exist, no secret shapes) and refuses with reasons' },
   { method: 'POST', path: '/api/projects/:id/memory/proposals/:proposalId/reject', summary: 'refuse a suggestion ({reason?}); the file stays as the record of what was refused and why' },
+  { method: 'GET', path: '/api/projects/:id/memory/consolidation', summary: 'notes that look like the same knowledge (?threshold=, ?limit=); read-only — the consolidator proposes, the human decides' },
+  { method: 'POST', path: '/api/projects/:id/memory/consolidation', summary: 'turn a {first, second} pair into a merge PROPOSAL through the usual gate; nothing is written to core/ until it is accepted' },
+  { method: 'GET', path: '/api/memory/proposals', summary: 'memory suggestions waiting for a human across ALL projects (?projectId= narrows it), with per-state counts; each item carries its projectId' },
+  { method: 'GET', path: '/api/memory/search', summary: 'memory search over the FTS5 index: ?q= (required), ?scope=project|global|all, ?projectId=; returns hits with provenance and usage; read-only' },
   { method: 'GET', path: '/api/projects/:id/sessions', summary: "one project's sessions, filtered server-side (?q, ?status, ?sort=recent|created|title|size, ?limit, ?offset); an unregistered id answers `registered: false` with its sessions instead of 404" },
   { method: 'PATCH', path: '/api/projects/:id/preferences', summary: 'pin or archive a project ({"pinned": bool, "archived": bool}; an absent field keeps its value). Stored in SQLite, so it survives a restart' },
   { method: 'GET', path: '/api/work-items', summary: 'work items (?projectId, ?status, ?includeClosed=0), newest first' },
@@ -84,7 +88,12 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/scheduler/tick', summary: 'run one scheduler tick now, optionally with {now}; the machine itself only — diagnostics and the misfire policies' },
   { method: 'GET', path: '/api/invocations', summary: 'invocation history (?recipeId, ?scheduleId, ?status, ?limit): scheduledAt, startedAt, finishedAt, status, verification, sessionId, workspaceRef' },
   { method: 'GET', path: '/api/invocations/:id', summary: 'one invocation' },
+  { method: 'POST', path: '/api/models/probe', summary: 'short model check by button: {provider, id, mode: availability|latency}. availability is a free /models round-trip (no tokens); latency is one max_tokens=1 streamed request measured to the first chunk and aborted (tokensUsed: 1). Failures are data with their own codes (UNREACHABLE, TIMEOUT, AUTH, RATE_LIMITED, MODEL_NOT_FOUND, MODEL_UNKNOWN, NO_KEY, NO_ENDPOINT, PROVIDER_ERROR, COOLDOWN)' },
   { method: 'GET', path: '/api/models', summary: "Pi's model catalogue (?refresh=1 to re-ask and sync modelSync.providers' model lists first)" },
+
+  // --- clients --------------------------------------------------------------
+  { method: 'POST', path: '/api/clients/wake', summary: 'свой push в локальной сети (4.3): {port} приёмника на этом же адресе; сервер шлёт wake при завершении хода. Адрес берётся из сокета, публичные адреса отклоняются' },
+  { method: 'POST', path: '/api/clients/link', summary: 'переход связи у клиента: {state: live|degraded|reconnecting, reason?, attempt?, clientId?}. Считаются ЭПИЗОДЫ (переходы), а не попытки; видны в /api/metrics → server.degradedEpisodes/degradedClients' },
 
   // --- tasks ----------------------------------------------------------------
   { method: 'GET', path: '/api/tasks', summary: 'all sessions' },
@@ -187,6 +196,7 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/library/delete', summary: 'delete a downloaded library model: removes its preset from models.ini and its files EXCEPT ones referenced by other library entries (a shared vision projector stays); refuses while the model is loaded; answers {removed, kept, freedBytes, presetRemoved}' },
 
   // --- server administration ------------------------------------------------
+  { method: 'GET', path: '/api/info', summary: 'server identity and plan: build, bootId, apiVersion, storeId, pi version/support, addresses, and autoRestart (enabled, at, nextAt, lastRestartAt, state.reason) when config.server.autoRestart is set' },
   { method: 'POST', path: '/api/server/restart', summary: 'restart the TaskBridge process (body {confirm:true}); answers 202, the relaunch is detached — works even while a session is running, it is the escape hatch for a stuck state' },
   { method: 'POST', path: '/api/system/shutdown', summary: 'power off the machine the server runs on (body {confirm:true}); answers 200 {shuttingDown:true} right before the OS command runs — the cancel countdown is the client\'s job, not the server\'s' },
   { method: 'POST', path: '/api/system/reboot', summary: 'reboot the machine the server runs on (body {confirm:true}); same cancel-countdown contract as shutdown' },

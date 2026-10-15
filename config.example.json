@@ -2,6 +2,14 @@
   "server": {
     "host": "0.0.0.0",
     "port": 8787,
+    "autoRestart": {
+      "enabled": false,
+      "everyHours": 0,
+      "at": null,
+      "minUptimeMinutes": 10,
+      "onlyWhenIdle": true,
+      "tickSec": 60
+    },
     "maxBodyMb": 25,
     "maxUploadMb": 64,
     "maxEventsPerRequest": 20000,
@@ -34,7 +42,15 @@
     }
   },
   "memory": {
-    "projectMemoryRoot": null
+    "projectMemoryRoot": null,
+    "indexBudgetTokens": 2000,
+    "globalBudgetTokens": 400,
+    "consolidation": {
+      "enabled": false,
+      "everyHours": 24,
+      "maxProposalsPerRun": 10,
+      "maxProposalsPerProject": 3
+    }
   },
   "queue": {
     "maxConcurrentSessions": 4,

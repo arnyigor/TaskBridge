@@ -2,6 +2,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { readPiSession } from './pi-session-index.mjs';
+import { estimateTokens } from './context-report.mjs';
+
+// Доля окна модели, под которую вписывается восстановленная сессия: не 100%, а с
+// запасом под системный промпт и ответ (реконструкция знает только историю).
+const RECOVERY_CONTEXT_SHARE = 0.8;
 
 // Whether Pi already recorded the exact user text in its v3 session file. The
 // in-flight marker needs this after a restart: Pi writes the user message as
@@ -69,8 +74,12 @@ export async function restoreSessionFile(task, store, dataRoot) {
   const userMessage = (text, timestamp) => ({ role: 'user', content: [{ type: 'text', text }], timestamp: Date.parse(timestamp) || Date.now() });
   if (!hasPiUsers) messages.push(userMessage(task.prompt, task.createdAt));
   let pendingUser = null;
+  let lastCompactionAt = null;
   for await (const event of store.iterateEvents(task.id)) {
     const frame = event.data?.pi;
+    // Последнее сжатие: всё до него при нехватке окна выбрасывается первым —
+    // сводка в хранилище не хранится, но и тащить заменённую ею историю нельзя.
+    if (frame?.type === 'compaction_end' && !frame.aborted) lastCompactionAt = Date.parse(event.at) || lastCompactionAt;
     if (!hasPiUsers && event.type === 'USER_MESSAGE') messages.push(userMessage(event.message, event.at));
     if (frame?.type === 'message_start' && frame.message?.role === 'user') pendingUser = frame.message;
     if (frame?.type === 'message_end' && ['user', 'assistant', 'toolResult'].includes(frame.message?.role)) {
@@ -82,6 +91,38 @@ export async function restoreSessionFile(task, store, dataRoot) {
   if (pendingUser) messages.push(pendingUser);
   if (!messages.some(x => x.role === 'assistant') && task.assistantText) {
     messages.push({ role: 'assistant', content: [{ type: 'text', text: task.assistantText }], api: 'openai-completions', provider: task.model?.provider || 'llama.cpp', model: task.model?.id || '', usage: task.lastUsage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: 'stop', timestamp: Date.parse(task.updatedAt) || Date.now() });
+  }
+
+  // Восстановленная сессия обязана влезать в окно модели: 2026-10-14 реконструкция
+  // собрала 368 547 токенов при окне 204 800, и первый же ход провайдер отклонил
+  // («requests are never truncated») — сессия не отвечала никогда. Порядок потерь:
+  // сначала всё до последнего сжатия (его сводка не восстановить, но она и не нужна
+  // вместе с заменённым содержимым), затем самые старые сообщения. О потере —
+  // синтетическое user-сообщение: Pi видит его и оператор видит в истории.
+  const windowTokens = Number(task.model?.contextWindow);
+  if (Number.isFinite(windowTokens) && windowTokens > 0 && messages.length > 1) {
+    const budget = Math.floor(windowTokens * RECOVERY_CONTEXT_SHARE);
+    const weight = message => estimateTokens(JSON.stringify(message.content ?? message).length);
+    let total = messages.reduce((sum, message) => sum + weight(message), 0);
+    let dropped = 0;
+    let dropIndex = 0;
+    // Держим как минимум одно реальное сообщение: восстановление обязано оставить
+    // сессии о чём-то говорить, иначе вместо лечения делаем пустую сессию.
+    const keepAtLeastOne = () => messages.length - dropIndex > 1;
+    const dropWhile = condition => {
+      while (keepAtLeastOne() && dropIndex < messages.length && condition()) {
+        total -= weight(messages[dropIndex]);
+        dropped += 1;
+        dropIndex += 1;
+      }
+    };
+    if (lastCompactionAt) dropWhile(() => total > budget || (Date.parse(messages[dropIndex]?.timestamp) || 0) < lastCompactionAt);
+    dropWhile(() => total > budget);
+    if (dropIndex > 0) {
+      const kept = messages.slice(dropIndex);
+      const notice = `История восстановлена после сбоя не полностью: ${dropped} старых сообщений потеряно (сессия не влезала в окно модели ${windowTokens} токенов, восстановлено ≈${total}). Самое старое — под сжатие.`;
+      messages.splice(0, messages.length, userMessage(notice, kept[0]?.timestamp || Date.now()), ...kept);
+    }
   }
   const header = { type: 'session', version: 3, id: crypto.randomUUID(), timestamp: task.createdAt || new Date().toISOString(), cwd: task.workspacePath };
   const entries = [header];

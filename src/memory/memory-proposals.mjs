@@ -85,7 +85,7 @@ function stringList(value, limit, itemLimit) {
  * @param fileIndex   the project's file list (`projectFileIndex`), so declared
  *                    PATTERNS are checked the same way staleness is
  */
-export function validateProposal(input = {}, { existingText = [], projectPath = null, fileIndex = null } = {}) {
+export function validateProposal(input = {}, { existingText = [], projectPath = null, fileIndex = null, memoryDir = null } = {}) {
   const problems = [];
   const text = String(input.text ?? '').trim();
   if (!text) problems.push({ code: 'EMPTY_TEXT', message: 'предложение без текста' });
@@ -103,6 +103,16 @@ export function validateProposal(input = {}, { existingText = [], projectPath = 
   }
   const hit = SECRET_SHAPES.find(shape => shape.test(text));
   if (hit) problems.push({ code: 'SECRET_SHAPE', message: 'текст похож на секрет или ключ' });
+  // Замена должна указывать на существующую заметку: иначе «supersedes» ничего не
+  // заменяет, и оператор думает, что старое знание выведено из контекста.
+  const supersedes = typeof input.supersedes === 'string' ? input.supersedes.trim() : '';
+  if (memoryDir && supersedes) {
+    const target = path.join(memoryDir, supersedes);
+    const insideCore = target.startsWith(path.join(memoryDir, 'core'));
+    if (!insideCore || !fsSync.existsSync(target)) {
+      problems.push({ code: 'SUPERSEDES_UNKNOWN', message: `заменяемая заметка не найдена: ${supersedes}` });
+    }
+  }
   return { ok: problems.length === 0, problems };
 }
 
@@ -118,6 +128,7 @@ export function renderProposal(proposal) {
     proposal.sourceWorkItemId ? `sourceWorkItemId: ${proposal.sourceWorkItemId}` : null,
     proposal.reason ? `reason: ${proposal.reason.replace(/\s+/gu, ' ')}` : null,
     proposal.paths?.length ? `paths: ${proposal.paths.join(', ')}` : null,
+    proposal.supersedes ? `supersedes: ${proposal.supersedes}` : null,
     proposal.decidedAt ? `decidedAt: ${proposal.decidedAt}` : null,
     proposal.target ? `target: ${proposal.target}` : null,
     proposal.decisionReason ? `decisionReason: ${proposal.decisionReason.replace(/\s+/gu, ' ')}` : null,
@@ -155,6 +166,7 @@ export function parseProposal(raw, file) {
     text,
     reason: data.reason ?? null,
     paths: data.paths ? data.paths.split(/[,\s]+/u).filter(Boolean) : [],
+    supersedes: data.supersedes ? String(data.supersedes) : null,
     sourceSessionId: data.sourceSessionId ?? null,
     sourceWorkItemId: data.sourceWorkItemId ?? null,
     target: data.target ?? null,
@@ -197,6 +209,8 @@ export async function createProposal(memoryDir, input = {}, { now = new Date().t
     text,
     reason: input.reason ? String(input.reason).trim().slice(0, REASON_LIMIT) : null,
     paths: stringList(input.paths, MAX_PATHS, 300),
+    // M3: предложение может заменять существующее знание — адресуется путём заметки.
+    supersedes: input.supersedes ? String(input.supersedes).trim().split('\\').join('/').slice(0, 300) : null,
     sourceSessionId: input.sourceSessionId ? String(input.sourceSessionId) : null,
     sourceWorkItemId: input.sourceWorkItemId ? String(input.sourceWorkItemId) : null,
     target: null,
@@ -222,7 +236,7 @@ export async function acceptProposal(memoryDir, id, { existingText = [], project
   if (proposal.status !== 'proposed') {
     return { ok: false, code: 'ALREADY_DECIDED', problems: [{ code: 'ALREADY_DECIDED', message: `предложение уже ${proposal.status}` }] };
   }
-  const verdict = validateProposal(proposal, { existingText, projectPath, fileIndex });
+  const verdict = validateProposal(proposal, { existingText, projectPath, fileIndex, memoryDir });
   if (!verdict.ok) {
     // Отказ не закрывает предложение, но записывается: по кодам видно, какие гейты
     // срабатывают часто. Это телеметрия качества памяти, а не наказание заявки.
@@ -254,6 +268,10 @@ export async function acceptProposal(memoryDir, id, { existingText = [], project
     `category: ${proposal.category}`,
     `tags: [suggested]`,
     `createdAt: ${now}`,
+    // M3: `modified` — когда знание менялось по существу (свежее mtime двигает любой
+    // редактор); `supersedes` — какую заметку эта заменяет.
+    `modified: ${now}`,
+    proposal.supersedes ? `supersedes: ${proposal.supersedes}` : null,
     proposal.sourceSessionId ? `sourceSessionId: ${proposal.sourceSessionId}` : null,
     proposal.sourceWorkItemId ? `sourceWorkItemId: ${proposal.sourceWorkItemId}` : null,
     proposal.paths.length ? `paths: ${proposal.paths.join(', ')}` : null,

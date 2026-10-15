@@ -13,11 +13,16 @@ function key(name, labels) {
 }
 
 export class Metrics {
-  constructor({ maxSeries = 2000 } = {}) {
+  constructor({ maxSeries = 2000, observationWindow = 512 } = {}) {
     this.maxSeries = maxSeries;
+    // Последние значения каждой серии — для перцентилей (p95 и т.п.): агрегаты
+    // (count/sum/min/max) перцентиль не дают, а хранить всё — путь к
+    // неограниченной памяти. Окно ограничено жёстко.
+    this.observationWindow = observationWindow;
     this.counters = new Map();
     this.gauges = new Map();
     this.observations = new Map();
+    this.recent = new Map();
     this.startedAt = new Date().toISOString();
   }
 
@@ -51,7 +56,11 @@ export class Metrics {
     current.min = Math.min(current.min, number);
     current.max = Math.max(current.max, number);
     this.observations.set(id, current);
-    this.#guard(this.observations);
+    let recent = this.recent.get(id);
+    if (!recent) { recent = []; this.recent.set(id, recent); }
+    recent.push(number);
+    if (recent.length > this.observationWindow) recent.splice(0, recent.length - this.observationWindow);
+    this.#guard(this.recent);
     return this;
   }
 
@@ -59,6 +68,7 @@ export class Metrics {
     this.counters.clear();
     this.gauges.clear();
     this.observations.clear();
+    this.recent.clear();
     return this;
   }
 
@@ -66,6 +76,9 @@ export class Metrics {
     const observations = {};
     for (const [id, value] of this.observations) {
       observations[id] = { count: value.count, sum: value.sum, avg: value.count ? value.sum / value.count : 0, min: value.min === Infinity ? 0 : value.min, max: value.max === -Infinity ? 0 : value.max };
+    }
+    for (const [id, recent] of this.recent) {
+      observations[id].p95 = percentile(recent, 0.95);
     }
     return {
       startedAt: this.startedAt,
@@ -83,7 +96,20 @@ export class Metrics {
       lines.push(`${id}_count ${value.count}`);
       lines.push(`${id}_sum ${value.sum}`);
       lines.push(`${id}_max ${value.max === -Infinity ? 0 : value.max}`);
+      const recent = this.recent.get(id);
+      if (recent?.length) lines.push(`${id}_p95 ${percentile(recent, 0.95)}`);
     }
     return `${lines.join('\n')}\n`;
   }
+}
+
+/** Перцентиль по окну последних значений: линейная интерполяция, как у Prometheus histogram_quantile на глаз, но детерминированно. */
+export function percentile(sortedSource, quantile) {
+  const values = [...(sortedSource || [])].sort((a, b) => a - b);
+  if (!values.length) return 0;
+  const position = (values.length - 1) * Math.min(1, Math.max(0, Number(quantile) || 0));
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return values[lower];
+  return values[lower] + (values[upper] - values[lower]) * (position - lower);
 }

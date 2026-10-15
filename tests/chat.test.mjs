@@ -282,6 +282,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
   const imported = resolveImports(appSource, {
     './chat-state.mjs': chatStateModule,
     './transport.mjs': transportModule,
+    './diagnostics.mjs': await import('../web/diagnostics.mjs'),
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
     './vendor/purify.mjs': { default: { sanitize: html => html } },
@@ -321,8 +322,8 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
-  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, probeResultText, renderModelList, openModelPicker, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
+  return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, intervals, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
@@ -1940,6 +1941,334 @@ test('DOM: the details panel shows a readable status, not the raw enum', async (
   assert.equal(el.textContent, 'SOMETHING_NEW');
 });
 
+test('DOM: silence uses server duration, configurable threshold and wait until new progress', async () => {
+  const app = await ui();
+  const el = id => app.document.getElementById(id);
+  const running = {
+    ...task('a'), status: 'RUNNING',
+    turnState: { lastProgressAt: '2099-01-01T00:00:00Z', stage: 'reading prompt', silentMs: 119000 }
+  };
+  app.renderActivity(running);
+  assert.equal(el('silenceBanner').classList.contains('hidden'), true);
+  app.renderActivity({ ...running, turnState: { ...running.turnState, silentMs: 192000 } });
+  assert.equal(el('silenceBanner').classList.contains('hidden'), false);
+  assert.match(el('silenceText').textContent, /3:12.*reading prompt/);
+  // Future server timestamp must not prevent silence detection (device clock skew).
+  await el('silenceDiagnostics').onclick();
+  assert.equal(JSON.parse(app.copied.at(-1)).task.id, 'a');
+  el('silenceWait').onclick();
+  app.renderActivity({ ...running, turnState: { ...running.turnState, silentMs: 200000 } });
+  assert.equal(el('silenceBanner').classList.contains('hidden'), true, 'polling must not undo wait');
+  const progressed = { ...running, turnState: { ...running.turnState, lastProgressAt: '2099-01-01T00:00:01Z', silentMs: 130000 } };
+  app.renderActivity(progressed);
+  assert.equal(el('silenceBanner').classList.contains('hidden'), false, 'new progress resets wait suppression');
+  el('silenceThreshold').value = '300';
+  app.intervals.at(-1)();
+  assert.equal(el('silenceThreshold').value, '300', 'timer must not overwrite an uncommitted edit');
+  el('silenceThreshold').onchange();
+  assert.equal(el('silenceBanner').classList.contains('hidden'), true);
+  assert.equal(app.localStorage.getItem('taskbridge.silenceThresholdSeconds'), '300');
+  app.renderActivity({ ...progressed, turnState: { ...progressed.turnState, silentMs: 301000 } });
+  assert.equal(el('silenceBanner').classList.contains('hidden'), false);
+  app.renderActivity({ ...progressed, status: 'SUCCEEDED' });
+  assert.equal(el('silenceBanner').classList.contains('hidden'), true);
+});
+
+test('DOM: activity timer paints newest snapshot and silence actions target the displayed session', async () => {
+  const app = await ui();
+  const el = id => app.document.getElementById(id);
+  const running = id => ({ ...task(id), status: 'RUNNING', turnState: { stage: id, lastProgressAt: '2026-01-01T00:00:00Z', silentMs: 180000 } });
+  app.renderActivity(running('a'));
+  app.renderActivity(running('b'));
+  app.intervals.at(-1)();
+  assert.match(el('silenceText').textContent, /последний прогресс: b/);
+  const commands = [];
+  app.setFetchHook((url, options) => {
+    if (options?.method === 'POST') commands.push(String(url));
+    return null;
+  });
+  app.setConfirmAnswer(false);
+  await el('silenceRestart').onclick();
+  assert.equal(commands.length, 0);
+  app.setConfirmAnswer(true);
+  await el('silenceStop').onclick();
+  await el('silenceRestart').onclick();
+  assert.deepEqual(commands, ['/api/tasks/b/cancel', '/api/tasks/b/session/restart']);
+  assert.match(app.confirms.at(-1), /без повторной отправки промпта/);
+  assert.equal(el('silenceRestart').disabled, false);
+});
+
+test('DOM: an older metadata snapshot cannot roll the turn face back (C-B)', async () => {
+  const app = await ui();
+  const merged = app.mergeSnapshot(
+    { id: 'a', status: 'RUNNING', current: 'модель отвечает', snapshotSeq: 12, turnState: { phase: 'PROGRESS', turn: 2 }, runtime: { activity: 'working' } },
+    { id: 'a', status: 'RUNNING', current: 'Pi starting', snapshotSeq: 5, turnState: { phase: 'DISPATCHING', turn: 2 }, runtime: { activity: 'idle' }, workspace: 'G:\\p' }
+  );
+  assert.equal(merged.turnState.phase, 'PROGRESS', 'фаза хода не откатывается старым ответом');
+  assert.equal(merged.current, 'модель отвечает');
+  assert.equal(merged.snapshotSeq, 12, 'старшинство остаётся по максимуму');
+  assert.equal(merged.workspace, 'G:\\p', 'остальные поля берутся из ответа');
+  // Свежий ответ применяется целиком; старый сервер без версии — как раньше.
+  assert.equal(app.mergeSnapshot({ snapshotSeq: 5 }, { snapshotSeq: 9, current: 'x' }).current, 'x');
+  assert.equal(app.mergeSnapshot({ snapshotSeq: 9, current: 'x' }, { current: 'y' }).current, 'y');
+  assert.equal(app.mergeSnapshot(null, { current: 'y' }).current, 'y');
+});
+
+test('DOM: the memory panel lists notes with usage, budget and the proposal gate', async () => {
+  const app = await ui();
+  const doc = app.document;
+  const calls = [];
+  app.setFetchHook((url, options) => {
+    const path = new URL(url, 'http://localhost').pathname;
+    if (path === '/api/projects/p/memory') {
+      calls.push('memory');
+      return {
+        ok: true,
+        json: async () => ({
+          status: 'available', entries: 2, approxTokens: 2600,
+          notes: [
+            { source: 'core/project/queue.md', category: 'decision', description: 'Очередь', updatedAt: new Date(Date.now() - 86400000).toISOString(), useCount: 3, lastUsedAt: new Date().toISOString() },
+            { source: 'core/project/ui.md', category: 'other', description: 'Кнопка', updatedAt: new Date().toISOString(), useCount: 0, lastUsedAt: null }
+          ],
+          budget: { indexTokens: 2000, globalTokens: 400, approxTokens: 2600, overBudget: true },
+          index: { available: true, notes: 2, uses: 3 },
+          global: { entries: 1, approxTokens: 40 }
+        })
+      };
+    }
+    if (path === '/api/projects/p/memory/proposals') {
+      calls.push('proposals');
+      return { ok: true, json: async () => ({ proposals: [{ id: 'proposal-1', text: 'Всегда проверяй очередь', category: 'pattern', createdAt: new Date().toISOString() }] }) };
+    }
+    if (path === '/api/projects/p/memory/consolidation') {
+      calls.push(options?.method === 'POST' ? 'consolidation-post' : 'consolidation');
+      return {
+        ok: true,
+        json: async () => options?.method === 'POST'
+          ? ({ id: 'merge-proposal' })
+          : ({ action: 'propose', candidates: [{ score: 0.82, reason: 'похожие заметки', notes: [{ source: 'core/project/queue.md' }, { source: 'core/project/queue-2.md' }] }] }),
+      };
+    }
+    if (path === '/api/tasks/a/workspace-files') {
+      calls.push('workspace-files');
+      return { ok: true, json: async () => ({ path: '', entries: [{ name: 'src', path: 'src', isFile: false }, { name: 'app.js', path: 'src/app.js', isFile: true }] }) };
+    }
+    if (path === '/api/tasks/a/changed-files') {
+      calls.push('changed-files');
+      return { ok: true, json: async () => ({ taskId: 'a', isGit: true, changedFiles: ['src/app.js'], status: ' M src/app.js\n?? new.txt\n', truncated: false }) };
+    }
+    if (path === '/api/tasks/a/workspace-file') {
+      calls.push('workspace-file');
+      return { ok: true, text: async () => 'console.log("viewer")' };
+    }
+    return null;
+  });
+  app.renderTaskDetails({ ...task('a'), projectId: 'p' });
+  const panel = doc.getElementById('memoryPanel');
+  panel.open = true;
+  panel.dispatchEvent(new doc.defaultView.Event('toggle'));
+  await new Promise(resolve => setTimeout(resolve, 30));
+
+  const summary = doc.getElementById('memorySummary');
+  assert.match(summary.textContent, /Записей: 2/);
+  assert.match(summary.textContent, /использовано 3 раз/);
+  // Индекс больше бюджета — это видно словами, а не «всё хорошо».
+  assert.match(summary.textContent, /больше бюджета/);
+  assert.ok(summary.classList.contains('memoryOverBudget'));
+
+  const notes = doc.getElementById('memoryNotes').textContent;
+  assert.match(notes, /core\/project\/queue\.md/);
+  assert.match(notes, /использовано 3 раз/);
+  assert.match(notes, /ни разу не использовалась/);
+  assert.match(notes, /вчера/);
+  assert.match(doc.getElementById('memoryGlobal').textContent, /_global.*1 записей/);
+
+  // Консолидация оформляется только предложением: кнопка POST-ит пару, а затем
+  // панель перечитывает очередь предложений.
+  const consolidation = doc.getElementById('memoryConsolidation');
+  assert.match(consolidation.textContent, /Кандидаты на слияние/);
+  assert.match(consolidation.textContent, /core\/project\/queue\.md/);
+  const merge = [...consolidation.querySelectorAll('button')].find(button => button.textContent === 'Оформить предложением');
+  assert.ok(merge, 'кнопка оформления слияния есть');
+  await merge.onclick();
+  assert.ok(calls.includes('consolidation-post'), `слияние оформлено предложением: ${calls.join(',')}`);
+
+  // Гейт предложений: без решения человека ничего не принимается.
+  const proposal = doc.getElementById('memoryProposals');
+  assert.match(proposal.textContent, /Всегда проверяй очередь/);
+  const accept = [...proposal.querySelectorAll('button')].find(button => button.textContent === 'Принять');
+  assert.ok(accept, 'кнопка «Принять» есть');
+  await accept.onclick();
+  assert.ok(calls.includes('memory'), `панель перечитала память: ${calls.join(',')}`);
+
+  const filesPanel = doc.getElementById('workspaceFilesPanel');
+  filesPanel.open = true;
+  filesPanel.dispatchEvent(new doc.defaultView.Event('toggle'));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.match(doc.getElementById('workspaceFilesSummary').textContent, /2/);
+  assert.match(doc.getElementById('changedFilesSummary').textContent, /Изменено: 2/);
+  const changedRows = doc.getElementById('changedFiles').textContent;
+  assert.match(changedRows, /src\/app\.js/);
+  assert.match(changedRows, /новый/);
+  const fileButton = [...doc.getElementById('workspaceFiles').querySelectorAll('button')]
+    .find(button => button.textContent.includes('src/app.js'));
+  assert.ok(fileButton, 'файл workspace показан кнопкой');
+  fileButton.click();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(doc.getElementById('fileViewerName').textContent, 'src/app.js');
+  assert.match(doc.getElementById('fileViewerBody').textContent, /viewer/);
+});
+
+test('DOM: every model row has a check button that measures instead of selecting', async () => {
+  const app = await ui();
+  const doc = app.document;
+  const calls = [];
+  // Список моделей рисуется из каталога: подкладываем одну модель с провайдером.
+  app.setFetchHook((url, options) => {
+    const path = new URL(url, 'http://localhost').pathname;
+    calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
+    if (path === '/api/models/probe') {
+      return { ok: true, json: async () => ({ provider: 'stub', id: 'stub-model', mode: 'latency', ok: true, ms: 137, tokensUsed: 1 }) };
+    }
+    if (path === '/api/models') return { ok: true, json: async () => ({ models: [{ provider: 'stub', id: 'stub-model', name: 'Stub' }] }) };
+    return null;
+  });
+  // Список наполняется тем же путём, что у оператора: открытие пикера.
+  await app.openModelPicker();
+
+  const list = doc.getElementById('modelList');
+  const row = list.querySelector('.modelRow');
+  assert.ok(row, `строка модели с кнопкой: ${list.innerHTML.slice(0, 200)}`);
+  const probe = row.querySelector('.modelProbe');
+  assert.ok(probe, 'кнопка проверки есть у модели');
+
+  const before = calls.length;
+  await probe.onclick({ stopPropagation() {} });
+  const probes = calls.slice(before).filter(call => call.path === '/api/models/probe');
+  assert.equal(probes.length, 1, `один запрос проверки: ${JSON.stringify(calls.map(c => c.path))}`);
+  assert.equal(probes[0].body.provider, 'stub');
+  assert.equal(probes[0].body.id, 'stub-model');
+  assert.equal(probes[0].body.mode, 'latency', 'проверка задержки, а не доступности');
+  // Результат — рядом со строкой и честный про токены.
+  assert.equal(row.querySelector('.modelProbeResult').textContent, '137 мс · 1 токен');
+  // И главное: проверка НЕ выбирает модель — запроса на смену модели не было.
+  assert.equal(
+    calls.slice(before).filter(call => call.path.endsWith('/model')).length,
+    0,
+    `проверка не должна выбирать модель: ${JSON.stringify(calls.slice(before).map(c => c.path))}`,
+  );
+});
+
+test('DOM: a refused check explains itself instead of showing a number', async () => {
+  const app = await ui();
+  const doc = app.document;
+  app.setFetchHook((url, options) => {
+    const path = new URL(url, 'http://localhost').pathname;
+    void options;
+    if (path === '/api/models/probe') return { ok: true, json: async () => ({ provider: 'stub', id: 'stub-model', mode: 'latency', ok: false, code: 'NO_KEY', message: 'нет ключа провайдера stub в окружении' }) };
+    if (path === '/api/models') return { ok: true, json: async () => ({ models: [{ provider: 'stub', id: 'stub-model' }] }) };
+    return null;
+  });
+  await app.openModelPicker();
+  const row = doc.getElementById('modelList').querySelector('.modelRow');
+  await row.querySelector('.modelProbe').onclick({ stopPropagation() {} });
+  const note = row.querySelector('.modelProbeResult');
+  assert.match(note.textContent, /нет ключа провайдера/, note.textContent);
+  assert.ok(note.classList.contains('err'), 'отказ видно цветом');
+  // Тексты отказов — словами, а не кодами (проверяется и как чистая функция).
+  assert.equal(app.probeResultText({ ok: false, code: 'RATE_LIMITED' }), 'провайдер ограничил запросы (429)');
+  assert.equal(app.probeResultText({ ok: false, code: 'COOLDOWN', retryInMs: 4200 }), 'повтор через 5 с');
+  assert.equal(app.probeResultText({ ok: true, ms: 90, tokensUsed: 0 }), '90 мс · без токенов');
+});
+
+test('DOM: the feed never pulls itself down while the operator reads above', async () => {
+  const app = await ui();
+  const doc = app.document;
+  const msgs = doc.getElementById('msgs');
+  // Фальшивый скроллер: 1000 пикселей контента в окне 300.
+  const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 700 };
+  Object.defineProperty(msgs, 'scrollHeight', { get: () => metrics.scrollHeight, configurable: true });
+  Object.defineProperty(msgs, 'clientHeight', { get: () => metrics.clientHeight, configurable: true });
+  Object.defineProperty(msgs, 'scrollTop', {
+    get: () => metrics.scrollTop,
+    set: value => { metrics.scrollTop = value; },
+    configurable: true,
+  });
+
+  // У низа — лента следует за новым текстом.
+  assert.equal(app.isPinnedToBottom(msgs), true, 'внизу считаемся прилипшими');
+  assert.equal(app.scrollBottom(), true);
+  assert.equal(metrics.scrollTop, 1000, 'у низа прокрутка идёт за контентом');
+
+  // Оператор ушёл читать выше: рост ленты НЕ двигает позицию.
+  metrics.scrollTop = 200;
+  metrics.scrollHeight = 1400; // пришло новое сообщение и подросло содержимое
+  assert.equal(app.isPinnedToBottom(msgs), false);
+  assert.equal(app.scrollBottom(), false, 'вверху прокрутка не выполняется');
+  assert.equal(metrics.scrollTop, 200, 'позиция чтения не изменилась');
+
+  // Вместо прокрутки — подсказка «новое ниже».
+  app.renderNewBelow('продолжение ответа');
+  const hint = doc.getElementById('newBelow');
+  assert.equal(hint.classList.contains('hidden'), false, 'видно, что ниже есть новое');
+  assert.match(hint.textContent, /продолжение ответа/);
+
+  // Один клик возвращает к низу и снова включает следование.
+  hint.dispatchEvent(new doc.defaultView.Event('click'));
+  // Клик ведёт к низу ТЕКУЩЕГО содержимого (лента успела подрасти до 1400).
+  assert.equal(metrics.scrollTop, metrics.scrollHeight, 'клик по подсказке ведёт к низу');
+  assert.equal(hint.classList.contains('hidden'), true, 'подсказка убрана');
+  metrics.scrollHeight = 1600;
+  assert.equal(app.scrollBottom(), true, 'после клика лента снова следует за низом');
+  assert.equal(metrics.scrollTop, 1600);
+});
+
+test('DOM: a small step away from the bottom still counts as pinned', async () => {
+  const app = await ui();
+  const msgs = app.document.getElementById('msgs');
+  const metrics = { scrollHeight: 1000, clientHeight: 300, scrollTop: 660 };
+  Object.defineProperty(msgs, 'scrollHeight', { get: () => metrics.scrollHeight, configurable: true });
+  Object.defineProperty(msgs, 'clientHeight', { get: () => metrics.clientHeight, configurable: true });
+  Object.defineProperty(msgs, 'scrollTop', { get: () => metrics.scrollTop, set: v => { metrics.scrollTop = v; }, configurable: true });
+  // Порог 80 px: 1000-660-300 = 40 — «почти внизу», это ещё следование.
+  assert.equal(app.isPinnedToBottom(msgs), true);
+  assert.equal(app.scrollBottom(), true);
+  assert.equal(metrics.scrollTop, 1000);
+});
+
+test('DOM: STOP asks the server for a hard stop, not a polite abort', async () => {
+  const app = await ui();
+  const stop = app.document.getElementById('stopButton');
+  const calls = [];
+  app.setFetchHook((url, options) => {
+    if (String(url).includes('/cancel')) calls.push({ url: String(url), body: options?.body });
+    return null;
+  });
+  app.setConfirmAnswer(true);
+  app.setLastTasks?.([{ id: 'a', title: 'Работает', status: 'RUNNING', projectId: 'p' }]);
+  app.updateStopButton();
+  await stop.onclick();
+  assert.equal(calls.length, 1, `один запрос отмены: ${JSON.stringify(calls)}`);
+  assert.match(calls[0].url, /\/api\/tasks\/a\/cancel$/);
+  // hard — иначе STOP ждёт до 10 с вежливого abort и выглядит зависшим.
+  assert.equal(JSON.parse(calls[0].body).hard, true);
+});
+
+test('DOM: the activity line names the turn phase, not just "Pi works"', async () => {
+  const app = await ui();
+  const activity = app.document.getElementById('activity');
+  // «Pi работает» не отличает «запрос ушёл, ответа нет» от «модель отвечает».
+  app.renderActivity({ status: 'RUNNING', statusChangedAt: new Date().toISOString(), turnState: { phase: 'ACKED' } });
+  assert.match(activity.textContent, /Pi принял запрос, ждём первый кадр/);
+  app.renderActivity({ status: 'RUNNING', statusChangedAt: new Date().toISOString(), turnState: { phase: 'DISPATCHING' } });
+  assert.match(activity.textContent, /запрос отправлен, Pi ещё не подтвердил/);
+  app.renderActivity({ status: 'RUNNING', statusChangedAt: new Date().toISOString(), turnState: { phase: 'PROGRESS' } });
+  assert.match(activity.textContent, /модель отвечает/);
+  // Старый сервер без фаз: та же строка, без добавки.
+  app.renderActivity({ status: 'RUNNING', statusChangedAt: new Date().toISOString() });
+  assert.match(activity.textContent, /^Pi работает · /);
+});
+
 test('DOM: a running session is obvious, and both stop and send stay reachable', async () => {
   const app = await ui();
   const doc = app.document;
@@ -1992,6 +2321,12 @@ test('DOM: a running session is obvious, and both stop and send stay reachable',
   app.updateStopButton();
   assert.equal(stop.disabled, false, 'stop must be clickable while a run is active');
   assert.equal(send.disabled, false, 'send must stay clickable so a prompt can queue');
+
+  // Остановка залипла (CANCELLING): кнопка обязана остаться. Иначе из зависшего
+  // чата нет выхода — повторное нажатие и есть способ добить отмену (2026-10-14).
+  app.setLastTasks?.([{ id: 'a', title: 'Останавливаю', status: 'CANCELLING', projectId: 'p' }]);
+  app.updateStopButton();
+  assert.equal(stop.disabled, false, 'stop must stay clickable while the stop itself hangs');
 });
 
 test('DOM: a failed send can be repeated without retyping it', async () => {

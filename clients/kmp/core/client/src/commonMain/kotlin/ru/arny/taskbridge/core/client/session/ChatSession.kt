@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,6 +20,9 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
@@ -33,6 +37,7 @@ import ru.arny.taskbridge.core.api.StreamItem
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.api.TaskEvent
+import ru.arny.taskbridge.core.api.mergeTaskSnapshot
 import ru.arny.taskbridge.core.api.ToolOutput
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.api.WorkspaceFileListing
@@ -57,8 +62,35 @@ sealed interface LinkState {
     data object Live : LinkState
     data class Reconnecting(val attempt: Int, val inMillis: Long, val reason: String) : LinkState
 
+    /**
+     * Поток SSE оборван, но сам сервер отвечает (`/api/health`).
+     *
+     * Это разные поломки, и оператору нужна разница между ними: «сервер жив,
+     * переподключаю поток» — лечится ожиданием, а «сервера нет» — проверкой
+     * сети на компьютере. Без второго уровня клиент называл оба случая одним
+     * «Переподключение», и в 2026-10-13 так выглядела мёртвая сеть на телефоне.
+     */
+    data class Degraded(val attempt: Int, val inMillis: Long, val reason: String) : LinkState
+
     /** Nothing more to do automatically (session gone, auth lost, API mismatch). */
     data class Failed(val error: ApiError) : LinkState
+}
+
+/**
+ * Куда переходит связь после оборванного потока (план 4.2).
+ *
+ * [serverAlive] — ответ на `/api/health`: null — проверить не удалось.
+ */
+internal fun linkAfterStreamFailure(
+    error: ApiError?,
+    serverAlive: Boolean?,
+    attempt: Int,
+    inMillis: Long,
+    reason: String,
+): LinkState = when {
+    error != null && !error.transient && error !is ApiError.Other -> LinkState.Failed(error)
+    serverAlive == true -> LinkState.Degraded(attempt, inMillis, reason)
+    else -> LinkState.Reconnecting(attempt, inMillis, reason)
 }
 
 /** A message on its way out; it leaves the list once the server has it. */
@@ -122,6 +154,8 @@ class ChatSession(
     private val pageTurns: Int = 8,
     private val random: Random = Random.Default,
     private val persistence: ChatPersistence = NoopChatPersistence,
+    /** Hidden/background chats keep their reducer and cursor, but do not hold a socket. */
+    initialStreamingEnabled: Boolean = true,
 ) {
     private val _state = MutableStateFlow(ChatSessionState(taskId))
     val state: StateFlow<ChatSessionState> = _state.asStateFlow()
@@ -130,17 +164,22 @@ class ChatSession(
     val effects: SharedFlow<ChatEffect> = _effects.asSharedFlow()
 
     private val mutex = Mutex()
+    /** Serial owner for the socket: cancel-and-join always finishes before a replacement starts. */
+    private val streamLifecycleMutex = Mutex()
     private val persistenceMutex = Mutex()
     private val deliveryMutex = Mutex()
     private val delivering = mutableSetOf<String>()
     private var reducer: ChatReducer? = null
     private var oldestSeq: Long? = null
+    private var startupJob: Job? = null
     private var streamJob: Job? = null
     private var refreshJob: Job? = null
     private var cachePersistJob: Job? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
     private var started = false
+    private var closed = false
+    private var streamingEnabled = initialStreamingEnabled
     private val cachedEvents = mutableListOf<TaskEvent>()
 
     /**
@@ -152,12 +191,12 @@ class ChatSession(
     private var cacheTruncated = false
 
     fun start() {
-        if (started) return
+        if (started || closed) return
         started = true
-        scope.launch {
+        startupJob = scope.launch {
             val pending = restoreOutbox()
             loadInitial()
-            resumeOutbox(pending)
+            if (!closed) resumeOutbox(pending)
         }
         refreshJob = scope.launch {
             for (request in refreshRequests) {
@@ -168,6 +207,14 @@ class ChatSession(
     }
 
     fun close() {
+        if (closed) return
+        // Terminal before cancellation: startup/actor races can no longer reopen SSE.
+        closed = true
+        streamingEnabled = false
+        startupJob?.cancel()
+        // Keep the reference after cancel: the stream actor calls
+        // setStreamingEnabled(false) and cancelAndJoin()s this exact job before
+        // another chat may open a socket.
         streamJob?.cancel()
         refreshJob?.cancel()
         cachePersistJob?.cancel()
@@ -178,11 +225,48 @@ class ChatSession(
         }
     }
 
+    /**
+     * Keeps at most the chat which the operator can see connected to SSE.
+     * Disabling only closes the socket: reducer, cursor, cache and outbox survive,
+     * so enabling catches up through `/stream?after=<cursor>` without duplicates.
+     */
+    suspend fun setStreamingEnabled(enabled: Boolean) {
+        streamLifecycleMutex.withLock {
+            streamingEnabled = enabled && !closed
+            if (!streamingEnabled) {
+                val previous = streamJob
+                streamJob = null
+                previous?.cancelAndJoin()
+                return@withLock
+            }
+            startStreamIfReadyLocked()
+        }
+    }
+
+    private suspend fun startStreamIfReady() {
+        streamLifecycleMutex.withLock { startStreamIfReadyLocked() }
+    }
+
+    private fun startStreamIfReadyLocked() {
+        if (closed || !started || !streamingEnabled || reducer == null || streamJob?.isActive == true) return
+        streamJob = scope.launch { streamLoop() }
+    }
+
     /** The network came back or the app returned to the foreground: skip the backoff wait. */
     fun reconnectNow() {
-        wake.trySend(Unit)
-        refreshRequests.trySend(Unit)
-        scope.launch { resumeOutbox(_state.value.outbox) }
+        if (closed) return
+        scope.launch {
+            streamLifecycleMutex.withLock {
+                if (!closed && streamingEnabled) {
+                    startStreamIfReadyLocked()
+                    wake.trySend(Unit)
+                    refreshRequests.trySend(Unit)
+                }
+            }
+            // Delivery is independent of visibility: a message sent before the user
+            // left this chat must resume when the network returns.
+            if (!closed) resumeOutbox(_state.value.outbox)
+        }
     }
 
     // --- loading ----------------------------------------------------------------
@@ -209,12 +293,12 @@ class ChatSession(
             persistCache()
             fillEmptyWindow()
             loadApprovals()
-            streamJob = scope.launch { streamLoop() }
+            startStreamIfReady()
         } catch (error: ApiException) {
             val restored = if (reducer == null) hydrateCache() else false
             _state.update { it.copy(loading = false, link = if (error.error.transient) LinkState.Reconnecting(1, 2000, error.message.orEmpty()) else LinkState.Failed(error.error)) }
             if (error.error.transient) {
-                if (restored) streamJob = scope.launch { streamLoop() }
+                if (restored) startStreamIfReady()
                 else { delay(2000); loadInitial() }
             }
         }
@@ -324,15 +408,20 @@ class ChatSession(
                 attempt = 0
                 refreshRequests.trySend(Unit)
             }
+            // Двухуровневый health (план 4.2): поток мог умереть при живом сервере.
+            // Проба короткая: она идёт на пути переподключения и не должна его тормозить.
+            val serverAlive = if (error != null && !error.transient && error !is ApiError.Other) null
+                else api.health(timeoutMs = HEALTH_PROBE_TIMEOUT_MS)
             attempt += 1
             val wait = backoff(attempt, serverRetry)
-            _state.update { it.copy(link = LinkState.Reconnecting(attempt, wait, error?.message ?: "Соединение закрыто")) }
+            _state.update {
+                it.copy(link = linkAfterStreamFailure(error, serverAlive, attempt, wait, error?.message ?: "Соединение закрыто"))
+            }
             kotlinx.coroutines.withTimeoutOrNull(wait) { wake.receive() }
         }
     }
 
-    private fun backoff(attempt: Int, floor: Long): Long {
-        if (attempt <= 1) return floor.coerceAtMost(1500)
+    private fun backoff(attempt: Int, floor: Long): Long {        if (attempt <= 1) return floor.coerceAtMost(1500)
         val base = (500L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(5_000)
         val jitter = (base * 0.2 * (random.nextDouble() * 2 - 1)).toLong()
         return (base + jitter).coerceIn(500, 5_000)
@@ -378,12 +467,15 @@ class ChatSession(
 
     private suspend fun refreshTask() {
         try {
-            val cursor = mutex.withLock { reducer?.cursor }
-            val task = api.task(taskId)
+            val cursor = mutex.withLock { reducer?.cursor ?: 0L }
+            val fetched = api.task(taskId)
             mutex.withLock {
                 val chat = reducer
                 // A response started before a new SSE event cannot settle that newer turn.
-                if (chat?.cursor != cursor) return@withLock
+                if (chat != null && chat.cursor != cursor) return@withLock
+                // Шаг C-B: снимок версионирован (snapshotSeq); ответ с меньшей версией
+                // не откатывает «лицо» хода — фазу, стадию, статус и runtime.
+                val task = mergeTaskSnapshot(_state.value.task, fetched, chat?.cursor ?: cursor)
                 if (chat != null) chat.syncTask(task)
                 _state.update { it.copy(task = task, chat = chat?.snapshot() ?: it.chat) }
             }
@@ -427,6 +519,35 @@ class ChatSession(
         val message = _state.value.outbox.firstOrNull { it.commandId == commandId } ?: return
         dismiss(commandId)
         send(message.text, emptyList(), message.mode)
+    }
+
+    /**
+     * Отменяет незавершённые отправки и возвращает их тексты оператору.
+     *
+     * Нужно кнопке STOP: она обязана разблокировать ЛЮБОЕ состояние, включая
+     * «сообщение не уходит, а сессия уже не активна» — иначе у оператора не
+     * остаётся выхода, кроме перезапуска приложения (2026-10-14). Поэтому
+     * отменяется и активная отправка (`Sending`/`Uploading`), а не только
+     * залипшая: «стоп» означает «не отправляй», а не «подожди ещё».
+     *
+     * Тексты возвращаются вызывающему, а не теряются: отправка в состоянии
+     * Unknown МОГЛА дойти, поэтому текст получает человек, а не тихий ретрай
+     * (повтор мог бы создать второй ход у того же агента).
+     */
+    fun releaseStuckSends(): List<String> {
+        val pending = _state.value.outbox
+        if (pending.isEmpty()) return emptyList()
+        val ids = pending.map { it.commandId }.toSet()
+        _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId in ids }) }
+        scope.launch {
+            saveOutbox()
+            for (id in ids) dropOptimistic(id)
+        }
+        val texts = pending.map { it.text }
+        // Текст возвращается оператору существующим каналом эффектов: UI не должен
+        // сам знать, как отменённая отправка возвращается в поле ввода.
+        _effects.tryEmit(ChatEffect.RestoreComposer(texts.joinToString("\n\n")))
+        return texts
     }
 
     fun dismiss(commandId: String) {
@@ -658,7 +779,15 @@ class ChatSession(
      *  (process tree), без ожидания RPC abort — модель может читать промпт, а
      *  abort на это не отвечает до 10 с.
      */
-    fun cancel(hard: Boolean = false) = act("cancel") { api.cancel(taskId, ids(), hard = hard) }
+    /**
+     * STOP.
+     *
+     * Ключ busy у отмены не блокирует повторное нажатие: запрос может висеть до
+     * таймаута (меняется на короткий ниже), а единственный выход из зависшего
+     * чата — нажать ещё раз. Сервер к повторной отмене терпим: на терминальном
+     * статусе он отвечает сразу, а на живом — повторяет остановку.
+     */
+    fun cancel(hard: Boolean = false) = act("cancel", concurrent = true) { api.cancel(taskId, ids(), hard = hard) }
 
     fun sendPendingNow(pendingId: String) = act("pending:$pendingId") { api.sendPendingNow(taskId, pendingId) }
 
@@ -750,7 +879,12 @@ class ChatSession(
 
     fun workspaceFileUrl(path: String): String = api.workspaceFileUrl(taskId, path)
 
-    suspend fun readWorkspaceFile(path: String): Result<ByteArray> = runCatching { api.download(api.workspaceFileUrl(taskId, path)) }
+    /**
+     * Файл рабочей папки; [from]/[to] ограничивают ответ диапазоном строк —
+     * так работает переход по ссылке `path#L120-L140` в ответе агента.
+     */
+    suspend fun readWorkspaceFile(path: String, from: Int? = null, to: Int? = null): Result<ByteArray> =
+        runCatching { api.download(api.workspaceFileUrl(taskId, path, from, to)) }
 
     suspend fun readFile(fileId: String): Result<ByteArray> = runCatching { api.download(api.fileUrl(taskId, fileId)) }
 
@@ -776,8 +910,10 @@ class ChatSession(
 
     suspend fun openFileOnComputer(fileId: String, reveal: Boolean): Result<Unit> = runCatching { api.openFile(taskId, fileId, reveal) }
 
-    private fun act(key: String, startNotice: String? = null, block: suspend () -> Unit) {
-        if (key in _state.value.busy) return
+    private fun act(key: String, startNotice: String? = null, concurrent: Boolean = false, block: suspend () -> Unit) {
+        // concurrent=true — действие, которое обязано быть доступным всегда (STOP):
+        // предыдущая попытка могла не ответить, и повтор должен уйти на сервер.
+        if (!concurrent && key in _state.value.busy) return
         _state.update { it.copy(busy = it.busy + key) }
         startNotice?.let { _effects.tryEmit(ChatEffect.Notice(it)) }
         scope.launch {
@@ -809,6 +945,12 @@ fun describe(error: ApiError): String = when (error) {
 
 /** How many events the on-disk chat cache keeps, at most. */
 internal const val CACHE_MAX_EVENTS = 500
+
+/**
+ * Бюджет пробы `/api/health` при оборванном потоке: она идёт на пути
+ * переподключения и не должна задерживать следующую попытку (план 4.2).
+ */
+internal const val HEALTH_PROBE_TIMEOUT_MS = 3_000L
 
 /**
  * How many pages one «load older» action may pull. A page is [ChatSession.pageTurns]
@@ -843,8 +985,31 @@ internal const val OLDER_EVENT_LIMIT = 2_000
  */
 internal const val CACHE_BUDGET_CHARS = 2_000_000
 
+/**
+ * Сколько места событие занимает в файле — БЕЗ построения строки.
+ *
+ * Раньше вес считался как `event.data.toString().length`, и это же роняло
+ * приложение: у большого кадра один только замер просил аллокацию в 108 МБ
+ * (`java.lang.OutOfMemoryError` при `JsonToStringWriter.ensureTotalCapacity`,
+ * dropbox OnePlus 6T, 2026-10-11). Оценка идёт обходом дерева JsonElement:
+ * длины строк-значений, имена полей, по символу на структуру. Это на единицы
+ * процентов отличается от сериализации и не выделяет память под копию данных.
+ */
+internal fun jsonWeight(element: JsonElement, depth: Int = 0): Int {
+    // Глубина ограничена: у Pi кадры вложены неглубоко, а патологическую вложенность
+    // лучше посчитать приблизительно, чем упасть на переполнении стека.
+    if (depth > 24) return 16
+    return when (element) {
+        is JsonPrimitive -> element.content.length + 2
+        is JsonObject -> element.entries.sumOf { (key, value) -> key.length + 3 + jsonWeight(value, depth + 1) }
+        is JsonArray -> element.sumOf { jsonWeight(it, depth + 1) } + element.size
+        JsonNull -> 4
+        else -> 8
+    }
+}
+
 /** What one cached event adds to the file, measured the way the encoder sees it. */
-internal fun cacheWeight(event: TaskEvent): Int = event.data.toString().length
+internal fun cacheWeight(event: TaskEvent): Int = jsonWeight(event.data) + 16
 
 /**
  * Drops the oldest cached events until the rest fit [budgetChars] and
@@ -864,8 +1029,9 @@ internal fun trimCacheToBudget(
     var chars = 0
     var keepFrom = events.size
     for (index in events.indices.reversed()) {
-        chars += cacheWeight(events[index])
-        if (chars > budgetChars) break
+        val weight = cacheWeight(events[index])
+        if (chars + weight > budgetChars) break
+        chars += weight
         keepFrom = index
     }
     if (keepFrom > 0) {

@@ -1,0 +1,76 @@
+# CI gate (фаза 4, план улучшений §5.2): npm test + npm run check + KMP jvmTest.
+#
+# Действия запинены на полные SHA, как в security.yml (движущийся тег не может
+# изменить то, что исполняется). Комментарий называет версию каждого SHA.
+#
+# Этот файл не самотестируется: как и security.yml, он проверяется чтением
+# реального запуска после изменения — первый прогон обязан быть прочитан.
+# Node-шаги уже выполняются локально на каждой машине (`npm test`,
+# `npm run check`); KMP-шаг выполнялся локально (`./gradlew :shared:jvmTest`).
+#
+# Действия зарепинены:
+#   actions/checkout  v7.0.1  = 3d3c42e5aac5ba805825da76410c181273ba90b1 (как в security.yml)
+#   actions/setup-node v7.0.0 = 820762786026740c76f36085b0efc47a31fe5020 (как в security.yml)
+#   actions/setup-java v6.0.1 = de7274f081f381c8f8158605e0321c36c376e2e6 (проверено GitHub API, 2026-10-14)
+#   gradle/actions/setup-gradle v5 = ??? — не используется: нет проверенного SHA,
+#     кэш Gradle остаётся на совести раннера; если добавлять — сначала проверить SHA.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # Тесты читают историю только через repo-policy (--history), но полный
+          # клон не мешает и оставляет поведение одинаковым с security.yml.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22'
+
+      # Пакет не публикуется и lockfile держится в репо: ci экономит время на
+      # воспроизводимой установке. Если lockfile отстанет, job честно упадёт.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Unit tests
+        run: npm test
+
+  kmp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # JDK 17: минимум для Compose/KMP-сборки этого репо (AGP 8.x требует 17).
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      # JVM-тесты ядра и shared: то, что выполняется локально на каждой правке.
+      # core — ОТДЕЛЬНЫЙ Gradle-билд (свой settings.gradle.kts): без второго шага
+      # `:client:jvmTest` тихо не выполнится. Android-сборка (assembleDebug) в CI
+      # не ставится: SDK-лицензии и объём — отдельное решение, не гейт на каждый push.
+      - name: KMP JVM tests (shared)
+        working-directory: clients/kmp
+        run: ./gradlew :shared:jvmTest --console=plain
+
+      - name: KMP JVM tests (core:api + core:client)
+        working-directory: clients/kmp/core
+        run: ../gradlew :api:jvmTest :client:jvmTest --console=plain

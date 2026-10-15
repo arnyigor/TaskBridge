@@ -656,6 +656,25 @@ data class RecipeInvocation(
     val at: String? = null,
 )
 
+/**
+ * Шаг C-B: снимок версионирован ([Task.snapshotSeq]); старый ответ не откатывает
+ * «лицо» хода (статус, стадию, фазу, runtime) — см. комментарий у модели.
+ */
+@Suppress("unused")
+fun mergeTaskSnapshot(previous: Task?, next: Task, appliedCursor: Long): Task {
+    if (previous == null) return next
+    val nextSeq = next.snapshotSeq
+    // Сервер без версии (старая сборка) — прежнее поведение.
+    if (nextSeq <= 0 || nextSeq >= appliedCursor) return next
+    return next.copy(
+        snapshotSeq = maxOf(previous.snapshotSeq, nextSeq),
+        status = previous.status,
+        current = previous.current,
+        turnState = previous.turnState ?: next.turnState,
+        runtime = previous.runtime ?: next.runtime,
+    )
+}
+
 @Serializable
 data class RecipeRunResult(
     val task: Task,
@@ -868,6 +887,55 @@ data class ProjectMemoryOverview(
     val query: String? = null,
     /** Список записей приходит только с поиском: без `q` целиком его не отдают. */
     val hits: List<ProjectMemoryHit>? = null,
+    /**
+     * Этап M2: записи с метаданными использования (`useCount`/`lastUsedAt` из
+     * индекса) — их видно без поиска, в самом обзоре.
+     */
+    val notes: List<ProjectMemoryNote> = emptyList(),
+    /** Бюджет инъекции (`memory.indexBudgetTokens`/`globalBudgetTokens`) и признак переполнения. */
+    val budget: ProjectMemoryBudget? = null,
+    /** Состояние индекса памяти и сколько раз память использовалась. */
+    val index: ProjectMemoryIndex? = null,
+    /** Глобальные знания (`_global/`): сколько и на сколько токенов. */
+    val global: ProjectMemoryGlobal? = null,
+)
+
+/** Одна запись памяти в обзоре: где лежит, что это и как часто помогала. */
+@Serializable
+data class ProjectMemoryNote(
+    val source: String,
+    val category: String? = null,
+    val description: String? = null,
+    val updatedAt: String? = null,
+    val estimatedTokens: Int? = null,
+    val useCount: Int = 0,
+    val lastUsedAt: String? = null,
+)
+
+/** Бюджет памяти: сколько токенов разрешено проекту и глобальному скоупу. */
+@Serializable
+data class ProjectMemoryBudget(
+    val indexTokens: Int? = null,
+    val globalTokens: Int? = null,
+    val approxTokens: Long? = null,
+    /** Индекс проекта больше бюджета: в контекст уйдёт не всё. */
+    val overBudget: Boolean = false,
+)
+
+/** Индекс памяти: кэш поиска, его состояние видно оператору. */
+@Serializable
+data class ProjectMemoryIndex(
+    val available: Boolean = false,
+    val notes: Int = 0,
+    val uses: Int = 0,
+    val lastUsedAt: String? = null,
+)
+
+/** Глобальные знания: общие для всех проектов, со своим мини-бюджетом. */
+@Serializable
+data class ProjectMemoryGlobal(
+    val entries: Int = 0,
+    val approxTokens: Int = 0,
 )
 
 /** Одна найденная запись. [source] — путь относительно папки проекта в памяти. */
@@ -945,6 +1013,20 @@ data class ModelCatalog(
     val defaultThinkingLevel: String? = null,
     // Rolling TTFT history keyed by ModelRef.key ("provider/id"), local and cloud models alike.
     val latency: Map<String, ModelLatency> = emptyMap(),
+)
+
+/** Explicit one-token model probe; unlike [ModelLatency], it is never mixed into real-turn history. */
+@Serializable
+data class ModelProbeResult(
+    val mode: String? = null,
+    val ok: Boolean = false,
+    val ms: Long? = null,
+    val httpStatus: Int? = null,
+    val models: Int? = null,
+    val tokensUsed: Int? = null,
+    val code: String? = null,
+    val message: String? = null,
+    val retryInMs: Long? = null,
 )
 
 @Serializable
@@ -1154,12 +1236,25 @@ data class ContextLimit(
     val exceeded: Boolean = false,
 )
 
+/** Шаг C-A: фаза и точка прогресса текущего хода (аддитивное поле снимка). */
+@Serializable
+data class TurnState(
+    val phase: String? = null,
+    val turn: Long? = null,
+    val stage: String? = null,
+    val lastProgressAt: String? = null,
+    val silentMs: Long? = null,
+)
+
 @Serializable
 data class Task(
     val id: String,
     val title: String? = null,
     val prompt: String? = null,
     val projectId: String? = null,
+    val turnState: TurnState? = null,
+    /** Шаг C-B: seq последнего события сессии на момент снимка (0 — старый сервер). */
+    val snapshotSeq: Long = 0,
     val status: String = "QUEUED",
     val createdAt: String? = null,
     val updatedAt: String? = null,

@@ -338,6 +338,9 @@
         <button id="selectCopy" type="button" disabled>Копировать</button>
         <button id="selectCancel" type="button">Отмена</button>
       </div>
+      <!-- «Новое ниже»: лента не утягивает вниз, пока пользователь читает выше
+           (правило оператора 2026-10-14). Появляется только когда он не у низа. -->
+      <button id="newBelow" class="newBelow hidden" type="button">↓ новое ниже</button>
       <div class="msgs" id="msgs">
         <div id="sessionLoader" class="sessionLoader hidden" role="status" aria-live="polite">
           <div class="runSpinner" aria-hidden="true"></div>
@@ -358,6 +361,16 @@
         <div id="liveMetrics" class="liveMetrics hidden" role="status" aria-live="off"></div>
         <!-- What the machine is doing right now: a run must be visible at a glance. -->
         <div id="activity" class="activity hidden" role="status" aria-live="polite"></div>
+        <div id="silenceBanner" class="silenceBanner hidden">
+          <div id="silenceText" role="status" aria-live="polite"></div>
+          <div class="silenceActions">
+            <button id="silenceWait" type="button">Подождать</button>
+            <button id="silenceDiagnostics" type="button">Диагностика</button>
+            <button id="silenceStop" type="button">STOP</button>
+            <button id="silenceRestart" type="button">Перезапустить сессию</button>
+            <label>Порог (с): <input id="silenceThreshold" type="number" min="1" max="86400" value="120" /></label>
+          </div>
+        </div>
         <span id="fileList" class="muted small"></span>
         <form class="composer" id="form">
           <div class="promptWrap">
@@ -384,6 +397,9 @@
         <!-- The last prompt is kept in memory, so a failed send is repeated with
              one click instead of being retyped. -->
         <button id="retryPrompt" class="small hidden" type="button">Повторить последнее</button>
+        <!-- Шаг C-C: одним кликом собрать диагностику доставки одним JSON
+             (чек-лист §5 docs/message-delivery-analysis.md). -->
+        <button id="copyDiagnostics" class="small hidden" type="button" title="Скопировать диагностику доставки одним JSON">Скопировать диагностику</button>
       </div>
     </section>
 
@@ -414,6 +430,9 @@
           <div class="r"><span>Context</span><b id="usage">—</b></div>
           <div class="r"><span>Состояние контекста</span><b id="contextState">—</b></div>
           <div class="r"><span>Compaction</span><b id="compaction">—</b></div>
+          <!-- Фаза 4: аномалии связи и доставки сервера видны сразу при открытии
+               сессии, а не только в копируемом бандле диагностики. -->
+          <div id="serverHealth" class="muted small"></div>
         </div>
         <div id="contextBar" class="contextBar hidden"><div id="contextBarFill" class="contextBarFill"></div></div>
 
@@ -425,6 +444,26 @@
             <button id="saveContextLimit" type="button">SAVE</button>
             <button id="clearContextLimit" type="button">СНЯТЬ</button>
           </div>
+        </details>
+
+        <!-- Память проекта (этап M2): что лежит, что помогало, во что упирается
+             бюджет и какие предложения ждут решения человека. Только чтение и
+             гейт предложений — записи в память у панели нет. -->
+        <details id="memoryPanel">
+          <summary>Память проекта</summary>
+          <div id="memorySummary" class="muted small">Откройте, чтобы увидеть записи, бюджет и предложения.</div>
+          <div id="memoryNotes" class="memoryNotes"></div>
+          <div id="memoryGlobal" class="muted small"></div>
+          <div id="memoryConsolidation" class="memoryConsolidation"></div>
+          <div id="memoryProposals" class="memoryProposals"></div>
+        </details>
+
+        <details id="workspaceFilesPanel">
+          <summary>Файлы сессии</summary>
+          <div id="workspaceFilesSummary" class="muted small">Откройте, чтобы увидеть файлы рабочей папки.</div>
+          <div id="workspaceFiles" class="workspaceFiles"></div>
+          <div id="changedFilesSummary" class="muted small"></div>
+          <div id="changedFiles" class="workspaceFiles"></div>
         </details>
 
         <label class="fieldLabel" for="followup">Инструкция во время/после работы</label>

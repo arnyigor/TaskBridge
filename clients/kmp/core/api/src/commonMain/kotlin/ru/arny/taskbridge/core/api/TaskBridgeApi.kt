@@ -87,7 +87,13 @@ class TaskBridgeApi(
 
     // --- host and auth -------------------------------------------------------
 
-    suspend fun health(): Boolean = runCatching { send(HttpMethod.Get, "/api/health").status.isSuccess() }.getOrDefault(false)
+    /**
+     * Жив ли сервер. Короткий таймаут нужен вызывающим, которые спрашивают это
+     * на пути переподключения (двухуровневый health, план 4.2): проба не должна
+     * задерживать следующую попытку потока.
+     */
+    suspend fun health(timeoutMs: Long = 30_000L): Boolean =
+        runCatching { send(HttpMethod.Get, "/api/health", timeoutMs = timeoutMs).status.isSuccess() }.getOrDefault(false)
 
     suspend fun info(): ApiInfo = get("/api/info", ApiInfo.serializer())
 
@@ -434,6 +440,48 @@ class TaskBridgeApi(
     suspend fun models(refresh: Boolean = false): ModelCatalog =
         get("/api/models" + if (refresh) "?refresh=1" else "", ModelCatalog.serializer())
 
+    /** Explicit probe: latency mode spends at most one token and is not model history. */
+    suspend fun probeModel(provider: String, id: String, mode: String = "latency"): ModelProbeResult =
+        call(
+            HttpMethod.Post,
+            "/api/models/probe",
+            ModelProbeResult.serializer(),
+            buildJsonObject {
+                put("provider", provider)
+                put("id", id)
+                put("mode", mode)
+            },
+        )
+
+    /** Регистрирует приёмник wake-канала своего push (адрес сервер видит из соединения). */
+    suspend fun registerWakeChannel(port: Int): JsonObject? =
+        call(
+            HttpMethod.Post,
+            "/api/clients/wake",
+            JsonObject.serializer(),
+            buildJsonObject { put("port", port) },
+        )
+
+    /**
+     * Переход связи для серверной наблюдаемости (фаза 4): live / degraded / reconnecting.
+     *
+     * Отправляется только состояние, причина и номер попытки — ни промпта, ни
+     * истории, ни состояния чата: это метрика, а не канал данных. Сбои отправки
+     * глушит вызывающий: наблюдение не может мешать работе.
+     */
+    suspend fun reportLinkState(state: String, reason: String? = null, attempt: Int? = null): JsonObject? =
+        call(
+            HttpMethod.Post,
+            "/api/clients/link",
+            JsonObject.serializer(),
+            buildJsonObject {
+                put("state", state)
+                put("clientId", connection.clientId)
+                if (reason != null) put("reason", reason.take(200))
+                if (attempt != null) put("attempt", attempt)
+            },
+        )
+
     // --- локальные модели (роутер llama.cpp + внешние серверы вроде Strata) ---
 
     suspend fun local(): LocalRuntimeInfo = get("/api/local", LocalRuntimeInfo.serializer())
@@ -676,12 +724,21 @@ class TaskBridgeApi(
         call(HttpMethod.Post, "/api/tasks/${id.path()}/message", Task.serializer(),
             TaskBridgeJson.encodeToJsonElement(MessageRequest.serializer(), request.copy(clientId = request.clientId ?: connection.clientId)))
 
+    /**
+     * STOP.
+     *
+     * Таймаут короче остальных команд (20 с вместо 3 мин): отмена — это кнопка
+     * «выйти из зависшего». Долгий таймаут держал бы её заблокированной, и до
+     * истечения оператор не смог бы ни отменить, ни повторить попытку. Сервер
+     * отвечает на отмену быстро: жёсткий стоп убивает процессы сразу, обычный
+     * ждёт ответа RPC не дольше 10 с (pi.abortTimeoutMs).
+     */
     suspend fun cancel(id: String, commandId: String? = null, hard: Boolean = false): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/cancel", Task.serializer(), buildJsonObject {
             commandId?.let { put("commandId", it) }
             put("clientId", connection.clientId)
             if (hard) put("hard", true)
-        })
+        }, timeoutMs = 20_000L)
 
     suspend fun sendPendingNow(id: String, pendingId: String?): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/pending/send", Task.serializer(), buildJsonObject { pendingId?.let { put("pendingId", it) } })
@@ -819,7 +876,14 @@ class TaskBridgeApi(
 
     fun artifactUrl(id: String, name: String): String = "$base/api/tasks/${id.path()}/artifacts/${name.path()}"
 
-    fun workspaceFileUrl(id: String, path: String): String = "$base/api/tasks/${id.path()}/workspace-file?path=${path.encodeURLParameter()}"
+    /**
+     * URL файла рабочей папки. [from]/[to] — диапазон строк: сервер умеет отдавать
+     * только запрошенный кусок, и тогда просмотрщик открывается на нужном месте
+     * (клик по ссылке вида `src/a.kt#L120-L140` из чата).
+     */
+    fun workspaceFileUrl(id: String, path: String, from: Int? = null, to: Int? = null): String =
+        "$base/api/tasks/${id.path()}/workspace-file?path=${path.encodeURLParameter()}" +
+            (from?.let { "&from=$it&to=${to ?: it}" } ?: "")
 
     /**
      * The bytes behind [fileUrl] / [workspaceFileUrl], read with this client's
@@ -933,12 +997,12 @@ class TaskBridgeApi(
 
     private suspend fun <T> get(path: String, serializer: KSerializer<T>): T = call(HttpMethod.Get, path, serializer)
 
-    private suspend fun <T> call(method: HttpMethod, path: String, serializer: KSerializer<T>, body: kotlinx.serialization.json.JsonElement? = null): T =
-        decode(send(method, path, body), serializer)
+    private suspend fun <T> call(method: HttpMethod, path: String, serializer: KSerializer<T>, body: kotlinx.serialization.json.JsonElement? = null, timeoutMs: Long? = null): T =
+        decode(send(method, path, body, timeoutMs), serializer)
 
-    private suspend fun send(method: HttpMethod, path: String, body: kotlinx.serialization.json.JsonElement? = null): HttpResponse {
+    private suspend fun send(method: HttpMethod, path: String, body: kotlinx.serialization.json.JsonElement? = null, timeoutMs: Long? = null): HttpResponse {
         val response = guard {
-            withTimeout(if (method == HttpMethod.Get) 30_000L else 180_000L) { http.request {
+            withTimeout(timeoutMs ?: if (method == HttpMethod.Get) 30_000L else 180_000L) { http.request {
                 this.method = method
                 url(base + path)
                 authorize()

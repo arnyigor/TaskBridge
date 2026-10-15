@@ -167,7 +167,15 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
       provider,
       model: first.id || provider,
       name: first.name || first.id || provider,
+      // baseUrl — адрес сервера как такового (health, запуск); apiBaseUrl — исходный
+      // адрес из Pi models.json, как его видит провайдер API. Различие реально:
+      // OpenAI-совместимый Strata отвечает на /v1/chat/completions, и проба модели,
+      // отправленная без /v1, проверила бы чужой маршрут.
       baseUrl: baseUrl.replace(/\/v1\/?$/u, ''),
+      apiBaseUrl: baseUrl,
+      // Реквизиты из Pi models.json: ключ может быть и '$ENV_VAR', и литералом;
+      // разворачивает окружение вызывающая сторона.
+      apiKey: block.apiKey ?? null,
       loadTimeoutMs: 600000,
       discovered: true,
       start: [

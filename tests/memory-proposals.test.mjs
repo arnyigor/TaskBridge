@@ -26,6 +26,12 @@ async function removeDir(dir) {
   }
 }
 
+async function tmpMemory(t) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-proposals-supersede-'));
+  t.after(() => removeDir(root));
+  return root;
+}
+
 async function memoryFixture() {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-proposals-repo-'));
   const repo = path.join(parent, 'proposals-repo');
@@ -244,4 +250,39 @@ test('a suggestion can be accepted by the module directly, and never overwrites 
     await removeDir(root);
     await removeDir(parent);
   }
+});
+
+// M3: принятое предложение помечает себя `modified`, а предложение-замена адресует
+// существующую заметку через `supersedes`. Замена — единственный способ вывести
+// знание из контекста: в память его пишет человек, а не агент.
+test('an accepted proposal is marked modified and can supersede an existing note', async t => {
+  const memoryDir = await tmpMemory(t);
+  const coreDir = path.join(memoryDir, 'core', 'project');
+  await fs.mkdir(coreDir, { recursive: true });
+  await fs.writeFile(path.join(coreDir, 'old.md'), '---\ndescription: Старое решение\n---\nОчередь через файл.\n', 'utf8');
+
+  const proposal = await createProposal(memoryDir, {
+    text: 'Очередь через брокер',
+    category: 'decision',
+    supersedes: 'core/project/old.md',
+  }, { now: '2026-10-14T00:00:00.000Z' });
+  assert.equal(proposal.supersedes, 'core/project/old.md', 'замена сохранена в предложении');
+
+  const accepted = await acceptProposal(memoryDir, proposal.id, { now: '2026-10-14T01:00:00.000Z' });
+  assert.equal(accepted.ok, true, JSON.stringify(accepted.problems));
+  const note = await fs.readFile(path.join(memoryDir, accepted.target), 'utf8');
+  assert.match(note, /^modified: 2026-10-14T01:00:00\.000Z$/m, 'заметка помечена временем изменения');
+  assert.match(note, /^supersedes: core\/project\/old\.md$/m, 'заметка знает, что заменяет');
+});
+
+test('a proposal that supersedes an unknown note is refused with the reason', async t => {
+  const memoryDir = await tmpMemory(t);
+  await fs.mkdir(path.join(memoryDir, 'core', 'project'), { recursive: true });
+  const proposal = await createProposal(memoryDir, { text: 'Замена несуществующего', supersedes: 'core/project/нет.md' });
+  const verdict = validateProposal(proposal, { memoryDir });
+  assert.equal(verdict.ok, false);
+  assert.ok(verdict.problems.some(problem => problem.code === 'SUPERSEDES_UNKNOWN'), JSON.stringify(verdict.problems));
+  // Замена вне core/ тоже не проходит: память инжектится только из core.
+  const outside = validateProposal({ text: 'x', supersedes: '../секрет.md' }, { memoryDir });
+  assert.ok(outside.problems.some(problem => problem.code === 'SUPERSEDES_UNKNOWN'), JSON.stringify(outside.problems));
 });

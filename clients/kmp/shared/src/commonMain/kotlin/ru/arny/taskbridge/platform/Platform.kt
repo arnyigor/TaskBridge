@@ -55,6 +55,23 @@ interface PlatformServices {
     val inForeground: Boolean
 
     /**
+     * Режим экономии энергии устройства (Android: `PowerManager.isPowerSaveMode`).
+     * Нужен, чтобы удлинять фоновый опрос, когда система уже сказала, что батарея
+     * важнее свежести (раздел 4.3 плана). По умолчанию — выключен.
+     */
+    val powerSaveMode: Boolean get() = false
+
+    /**
+     * Свой push в локальной сети (4.3): порт приёмника, которому сервер шлёт wake
+     * при завершении хода; null — платформа приёмник не держит (desktop не нужен:
+     * его окно и так живёт, опрос останется запасным каналом).
+     */
+    fun wakeListenerPort(): Int? = null
+
+    /** Сервер постучался в приёмник: клиент делает обычный refresh и уведомляет. */
+    var onWake: (() -> Unit)? get() = null; set(value) {}
+
+    /**
      * Android: keep watching sessions while the app is in the background
      * (foreground service); desktop: nothing, the process keeps running.
      */

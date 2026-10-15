@@ -16,6 +16,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
+import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.security.keystore.KeyGenParameterSpec
@@ -169,6 +170,35 @@ class AndroidPlatformServices(
     @Volatile
     var foreground: Boolean = false
     override val inForeground: Boolean get() = foreground
+
+    /** Экономия энергии: система уже просит не будить телефон без нужды (раздел 4.3). */
+    override val powerSaveMode: Boolean
+        get() = runCatching {
+            (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isPowerSaveMode
+        }.getOrDefault(false)
+
+    // Свой push в локальной сети (4.3): приёмник wake-событий сервера. Лениво:
+    // порт нужен только после первого подключения.
+    private val wakeListener by lazy { WakeListener(requestedPort = 0) { onWakeCallback?.invoke() } }
+
+    @Volatile
+    private var wakeStarted: Boolean = false
+
+    @Volatile
+    private var onWakeCallback: (() -> Unit)? = null
+
+    override var onWake: (() -> Unit)?
+        get() = onWakeCallback
+        set(value) {
+            onWakeCallback = value
+        }
+
+    override fun wakeListenerPort(): Int? {
+        if (wakeStarted) return wakeListener.boundPort
+        val port = runCatching { wakeListener.start() }.getOrNull() ?: return null
+        wakeStarted = true
+        return port
+    }
 
     /** The visible activity, kept so [exitApp] can close the app from the shared UI. */
     @Volatile
