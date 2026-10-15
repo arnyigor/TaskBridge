@@ -48,7 +48,7 @@ import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
  * shortcuts, deep links).
  */
 @Composable
-fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) -> Unit = {}) {
+fun App(graph: AppGraph, openTaskId: String? = null, openRequestId: Long = 0L, navigatorSink: (Navigator) -> Unit = {}) {
     TaskBridgeTheme(graph.theme) {
         val connection = graph.connection
         val startScreen = if (connection == null) Screen.Connect else Screen.Sessions()
@@ -59,7 +59,7 @@ fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) 
         // A saved address is trusted until the server says it needs a code: without this
         // the session list looks alive and every write fails with an auth error.
         LaunchedEffect(graph, connection) { graph.verifySavedConnection() }
-        LaunchedEffect(openTaskId, connection) {
+        LaunchedEffect(openTaskId, openRequestId, connection) {
             if (connection != null && openTaskId != null) navigator.openChat(openTaskId)
         }
         val scope = rememberCoroutineScope()

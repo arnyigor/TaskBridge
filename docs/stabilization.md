@@ -169,6 +169,17 @@ the same classification. Regression tests retain the warning for a genuinely
 quiet streaming/model response. STOP remains available through the normal chat
 controls, without interpreting elapsed silence as proof of a failed run.
 
+Android acceptance after the extractions: leaving immediately after typing and
+reopening retained the full draft; another chat had an empty independent composer.
+A repeated notification for the same session failed before the fix because its
+taskId was unchanged and Compose did not restart the navigation effect. Android
+now increments a delivery identity; App keys the effect by that identity as well
+as the target. On Activity recreation the launch intent remains consumed, so
+rotation retains the user's selected chat rather than reopening the older target.
+These cases were exercised on the rebuilt APK, including switching through the
+session list after a notification and rotating with another notification target
+still present in the Activity intent.
+
 ## Reproducible latency baseline
 
 `node scripts/quality-baseline.mjs --samples 20 --output <ignored-local-file>` creates its own server, fake runtime and SQLite database, measures warm HTTP, verifies exactly one USER_MESSAGE effect per command ID and cleans up only its fixture. It never connects to the operator's server. The report identifies its base commit, dirty-tree state, environment, source sizes and SQLite plan.

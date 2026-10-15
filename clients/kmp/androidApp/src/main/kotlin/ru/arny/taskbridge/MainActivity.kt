@@ -17,6 +17,7 @@ import androidx.compose.runtime.setValue
 
 class MainActivity : ComponentActivity() {
     private var openTaskId by mutableStateOf<String?>(null)
+    private var openRequestId by mutableStateOf(0L)
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -34,7 +35,7 @@ class MainActivity : ComponentActivity() {
         openTaskId = if (savedInstanceState == null) intent?.getStringExtra(EXTRA_TASK_ID) else null
         askForNotifications()
         setContent {
-            App(app.graph, openTaskId = openTaskId)
+            App(app.graph, openTaskId = openTaskId, openRequestId = openRequestId)
         }
     }
 
@@ -42,7 +43,12 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         // A tapped notification while the app is open: go to that session.
-        intent.getStringExtra(EXTRA_TASK_ID)?.let { openTaskId = it }
+        intent.getStringExtra(EXTRA_TASK_ID)?.let {
+            openTaskId = it
+            // A second tap may name the same session after Back returned to the list.
+            // Its delivery is new even though the target string has not changed.
+            openRequestId++
+        }
     }
 
     override fun onStart() {
