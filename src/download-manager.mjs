@@ -45,6 +45,7 @@ function speedOf(job) {
 }
 
 export class DownloadManager extends EventEmitter {
+  #finalizing = new Set();
   constructor(dataRoot, options = {}) {
     super();
     this.dataRoot = dataRoot;
@@ -101,7 +102,7 @@ export class DownloadManager extends EventEmitter {
   clearFinished() {
     let removed = 0;
     for (const [id, job] of [...this.jobs]) {
-      if (!['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(job.state)) {
+      if (this.#finalizing.has(id) || !['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(job.state)) {
         this.jobs.delete(id);
         removed += 1;
       }
@@ -230,15 +231,18 @@ export class DownloadManager extends EventEmitter {
           }
         }
       }
+      if (job.cancelRequested) throw Object.assign(new Error('Download cancelled'), { name: 'AbortError' });
+      this.#finalizing.add(job.id);
+      // Keep the public job VERIFYING until cleanup and registration settle.
+      // Observers of INSTALLED may immediately query the model library.
+      await fsp.rm(path.join(job.dir, PART_DIR), { recursive: true, force: true });
+      if (this.onInstalled) {
+        try { await this.onInstalled({ ...job, state: 'INSTALLED', abort: undefined }); }
+        catch (error) { job.installError = String(error.message || error); }
+      }
       job.state = 'INSTALLED';
       job.finishedAt = Date.now();
       this.#touch(job);
-      // Остатки частичных файлов больше не нужны.
-      await fsp.rm(path.join(job.dir, PART_DIR), { recursive: true, force: true });
-      if (this.onInstalled) {
-        try { await this.onInstalled({ ...job, abort: undefined }); }
-        catch (error) { job.installError = String(error.message || error); this.#persist(); }
-      }
     } catch (error) {
       if (job.cancelRequested || error.name === 'AbortError') {
         job.state = 'CANCELLED';
@@ -249,6 +253,7 @@ export class DownloadManager extends EventEmitter {
       }
       this.#touch(job);
     } finally {
+      this.#finalizing.delete(job.id);
       delete job.abort;
       delete job.cancelRequested;
     }
@@ -386,7 +391,7 @@ export class DownloadManager extends EventEmitter {
   cancel(id) {
     const job = this.jobs.get(id);
     if (!job) throw Object.assign(new Error('Задание не найдено.'), { code: 'NOT_FOUND' });
-    if (!['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(job.state)) {
+    if (this.#finalizing.has(id) || !['QUEUED', 'DOWNLOADING', 'VERIFYING'].includes(job.state)) {
       throw Object.assign(new Error(`Задание уже завершено (${job.state}).`), { code: 'INPUT_INVALID' });
     }
     job.cancelRequested = true;

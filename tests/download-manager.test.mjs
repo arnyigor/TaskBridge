@@ -80,6 +80,49 @@ test('DownloadManager downloads files, verifies sizes and reports INSTALLED', as
   }
 });
 
+test('INSTALLED is published only after model registration completes', async () => {
+  const { base, close } = await startServer({ 'model.gguf': Buffer.alloc(10, 1) });
+  const root = await tempRoot('dl-registration');
+  let release;
+  const registrationGate = new Promise(resolve => { release = resolve; });
+  let entered;
+  const registering = new Promise(resolve => { entered = resolve; });
+  const updates = [];
+  const manager = new DownloadManager(root, { onInstalled: async () => { entered(); await registrationGate; } });
+  manager.on('update', job => updates.push(job.state));
+  try {
+    const job = await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: 10 }], dir: path.join(root, 'model'), resolveBase: base });
+    await registering;
+    assert.equal(manager.list({ id: job.id }).state, 'VERIFYING');
+    assert.equal(updates.includes('INSTALLED'), false, 'registration is still pending');
+    assert.throws(() => manager.cancel(job.id), { code: 'INPUT_INVALID' }, 'registration cannot be interrupted after verified files are committed');
+    const installed = waitFor(manager, 'INSTALLED');
+    release();
+    await installed;
+    assert.equal(manager.list({ id: job.id }).state, 'INSTALLED');
+  } finally {
+    release();
+    await close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('registration failure is attached before publishing INSTALLED', async () => {
+  const { base, close } = await startServer({ 'model.gguf': Buffer.alloc(10, 1) });
+  const root = await tempRoot('dl-registration-error');
+  try {
+    const manager = new DownloadManager(root, { onInstalled: async () => { throw new Error('registration unavailable'); } });
+    const installed = waitFor(manager, 'INSTALLED');
+    await manager.start({ repo: 'org/model', files: [{ path: 'model.gguf', size: 10 }], dir: path.join(root, 'model'), resolveBase: base });
+    const event = await installed;
+    assert.equal(event.installError, 'registration unavailable');
+    assert.equal(manager.list({ id: event.id }).installError, event.installError);
+  } finally {
+    await close();
+    fsSync.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('DownloadManager cancels a job and retry skips complete files', async () => {
   const big = Buffer.alloc(2_000_000, 9);
   const { base, close } = await startServer({ 'big.gguf': big, 'small.gguf': Buffer.alloc(10, 1) });
