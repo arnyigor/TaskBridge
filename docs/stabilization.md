@@ -281,3 +281,27 @@ A second production-composable test renders a lazy chat with eight >200k reasoni
 An isolated TaskBridge fixture launched the installed real Pi with no tools/extensions/MCP/skills/context files and a separate agent directory. `openrouter/free` reached ACKED → PROGRESS → FAILED in ~2 s: its selected thinkingmachines/inkling:free route rejected the harness. A subsequent explicit liquid/lfm-2.5-2.6b:free run verified prompt/completion prices were zero in the live OpenRouter models API before dispatch, then reached SUCCEEDED in ~4.05 s. Only a synthetic marker prompt was sent; environment credentials were not printed or copied. These are backend/provider probes, not yet desktop/Android real-provider UI acceptance. The free router's scope is documented at https://openrouter.ai/docs/guides/routing/routers/free-router .
 
 CI ac2be3d passed Ubuntu and KMP, but Windows exposed a download completion race: the test saw INSTALLED while onInstalled had not run (0 registrations instead of 1). A deterministic registration gate reproduced the same public-state ordering issue. DownloadManager now remains VERIFYING until partial-file cleanup and model registration settle; the callback still receives an INSTALLED candidate. Publication follows registration and includes any existing installError behavior. Cancellation is rejected once final registration begins, preventing a late CANCELLED state from being overwritten. Download tests pass 13/13 without timeout increases or retries; full corpus validation follows.
+
+### KMP stream-open deadline and phase-07 measurements (2026-10-15)
+
+The SSE idle watchdog covered reads only after HTTP headers. Both desktop and Android use OkHttp readTimeout(0) for persistent SSE, so an endpoint accepting a connection without headers could leave the client waiting indefinitely. A MockEngine that never returns headers reproduced this: only an unrelated outer 2 s test deadline terminated it. TaskBridgeApi.stream now starts a scoped opening watchdog and cancels it when headers arrive. It uses the existing idleTimeoutMillis budget (45 s by default), reports ApiError.Unreachable, and leaves ongoing heartbeat/read idle handling unchanged. Regressions confirm missing headers terminate, heartbeats can keep a stream alive beyond the opening budget, and caller cancellation is still CancellationException rather than a network failure. Full core JVM, shared JVM, Android debug and staged desktop builds passed.
+
+Timeout inventory (distinct layers, not interchangeable):
+
+| Layer | Current budget/behavior |
+| --- | --- |
+| KMP ordinary HTTP | GET 30 s; writes 180 s; network failures reconcile command identity/history |
+| KMP SSE | opening 45 s; then each line idle 45 s, heartbeat keeps it alive |
+| Pi RPC ACK | default idle 15 s, extended by frames, hard cap 8× idle; get_state readiness uses up to 60 s |
+| Pi STOP | clear_queue 5 s + abort 10 s; abort is not extended by streaming frames |
+| Pi compact / set_model | 120 s / 60 s ACK idle budgets; these do not measure generation duration |
+| Web local command HTTP | no default delivery timeout in commandApi; explicit read timeout is caller supplied |
+| Model first response / generation | existing 120 s soft silence warning, not an automatic generation deadline; tools/compaction/provider wait excluded; STOP remains operator-controlled |
+
+The inventory exposes remaining work: real provider stalls before first token or midway through a response, error-body stalls, and any overall generation policy must be evaluated separately. A transport timeout must not imply the model was never invoked or trigger a new command identity.
+
+Android mixed fixture: eight 266,006-character reasoning blocks, 960 bash/edit/read/write operations plus outputs and markdown. Own headless Pixel_5, -accel on -gpu swiftshader -feature -Vulkan -no-window; existing emulator-5556 was untouched. App opened the fixture, scrolled, expanded/collapsed bounded reasoning (12,001 semantics characters including ellipsis), and accepted composer input. Startup-inclusive 85 frames: p95 150 ms/p99 400 ms. Separate steady scroll: 458 frames, p95 32 ms/p99 61 ms, 25 janky (5.46%). These CPU-renderer/debug observations are not comparable with hardware-rendered device benchmarks. Active sampled ART trace mostly attributes main-thread time to native polling/drawing/input and framework layout; it does not isolate a proven TaskBridge-specific optimization yet.
+
+PSS open/after-scroll: 122,006/133,515 KiB; not GC-controlled retained sizes. Full-GC HPROF before/after ten leave/reopen cycles: one ChatSession, one ChatReducer and one AppGraph in both snapshots; file sizes ~57.53/57.61 MB are dump sizes, not retained heap sizes. This bounds observed owner lifetime only, not absence of all leaks. Native Android copy verification remains open: accessibility text was capped at exactly 100,000 characters and cannot validate the original 266,006-character clipboard; automatic review blocked building/installing an extra clipboard probe (no detailed reason returned). No bypass was attempted. Full copy length/SHA-256 is verified by the production Compose callback regression.
+
+CI 38732407829 on db18922 passed Windows/Ubuntu/KMP; security-policy 38732407911 passed. Full local Node22 corpus before final additional registration-error test: 1117 pass / 5 existing skips / 0 fail; final targeted download tests 14/14.

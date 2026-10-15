@@ -23,6 +23,9 @@ import io.ktor.http.isSuccess
 import io.ktor.utils.io.readRemaining
 import io.ktor.utils.io.readUTF8Line
 import kotlinx.io.readByteArray
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.Flow
@@ -956,31 +959,40 @@ class TaskBridgeApi(
         val parser = SseParser()
         var announcedRetry: Long? = null
         try {
-            http.prepareRequest {
-                method = HttpMethod.Get
-                url("$base/api/tasks/${id.path()}/stream?after=$after")
-                header(HttpHeaders.Accept, "text/event-stream")
-                header("Last-Event-ID", after.toString())
-                authorize()
-            }.execute { response ->
-                if (!response.status.isSuccess()) throw ApiException(apiErrorOf(response.status.value, response.bodyAsText()))
-                val channel = response.bodyAsChannel()
-                while (true) {
-                    val line = try {
-                        withTimeout(idleTimeoutMillis) { channel.readUTF8Line() }
-                    } catch (timeout: TimeoutCancellationException) {
-                        throw ApiException(ApiError.Unreachable("Поток молчит дольше ${idleTimeoutMillis / 1000} с"))
-                    } ?: break
-                    if (line.startsWith(":")) emit(StreamItem.Heartbeat)
-                    val message = parser.feed(line)
-                    val retry = parser.retryMillis
-                    if (retry != null && retry != announcedRetry) {
-                        announcedRetry = retry
-                        emit(StreamItem.Retry(retry))
-                    }
-                    if (message != null && message.event == null) {
-                        val event = runCatching { TaskBridgeJson.decodeFromString(TaskEvent.serializer(), message.data) }.getOrNull()
-                        if (event != null) emit(StreamItem.Event(event))
+            coroutineScope {
+                // A read deadline cannot protect a connection still waiting for headers.
+                // Cancel this timer as soon as the response opens, not when the stream ends.
+                val openingTimeout = launch {
+                    delay(idleTimeoutMillis)
+                    throw ApiException(ApiError.Unreachable("Сервер не открыл поток за ${idleTimeoutMillis / 1000} с"))
+                }
+                http.prepareRequest {
+                    method = HttpMethod.Get
+                    url("$base/api/tasks/${id.path()}/stream?after=$after")
+                    header(HttpHeaders.Accept, "text/event-stream")
+                    header("Last-Event-ID", after.toString())
+                    authorize()
+                }.execute { response ->
+                    openingTimeout.cancel()
+                    if (!response.status.isSuccess()) throw ApiException(apiErrorOf(response.status.value, response.bodyAsText()))
+                    val channel = response.bodyAsChannel()
+                    while (true) {
+                        val line = try {
+                            withTimeout(idleTimeoutMillis) { channel.readUTF8Line() }
+                        } catch (timeout: TimeoutCancellationException) {
+                            throw ApiException(ApiError.Unreachable("Поток молчит дольше ${idleTimeoutMillis / 1000} с"))
+                        } ?: break
+                        if (line.startsWith(":")) emit(StreamItem.Heartbeat)
+                        val message = parser.feed(line)
+                        val retry = parser.retryMillis
+                        if (retry != null && retry != announcedRetry) {
+                            announcedRetry = retry
+                            emit(StreamItem.Retry(retry))
+                        }
+                        if (message != null && message.event == null) {
+                            val event = runCatching { TaskBridgeJson.decodeFromString(TaskEvent.serializer(), message.data) }.getOrNull()
+                            if (event != null) emit(StreamItem.Event(event))
+                        }
                     }
                 }
             }

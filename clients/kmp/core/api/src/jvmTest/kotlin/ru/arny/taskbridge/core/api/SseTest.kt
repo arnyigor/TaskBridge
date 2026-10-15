@@ -11,6 +11,9 @@ import io.ktor.utils.io.writer
 import io.ktor.utils.io.writeFully
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.toList
@@ -100,6 +103,47 @@ class SseTest {
         val api = TaskBridgeApi(HttpClient(engine), SimpleConnection("http://pc:8787"))
         val error = assertFailsWith<ApiException> { api.stream("t", 0, idleTimeoutMillis = 200).toList() }
         assertIs<ApiError.Unreachable>(error.error)
+    }
+
+    @Test
+    fun missingResponseHeadersHaveABoundedWait() = runBlocking<Unit> {
+        val http = HttpClient(MockEngine { awaitCancellation() })
+        try {
+            val api = TaskBridgeApi(http, SimpleConnection("http://pc:8787"))
+            val error = withTimeout(2_000) {
+                assertFailsWith<ApiException> { api.stream("t", 0, idleTimeoutMillis = 100).toList() }
+            }
+            assertIs<ApiError.Unreachable>(error.error)
+        } finally { http.close() }
+    }
+
+    @Test
+    fun callerCancellationWhileOpeningIsNotReportedAsANetworkError() = runBlocking<Unit> {
+        val http = HttpClient(MockEngine { awaitCancellation() })
+        try {
+            val api = TaskBridgeApi(http, SimpleConnection("http://pc:8787"))
+            assertFailsWith<TimeoutCancellationException> {
+                withTimeout(100) { api.stream("t", 0, idleTimeoutMillis = 5_000).toList() }
+            }
+        } finally { http.close() }
+    }
+
+    @Test
+    fun heartbeatStreamCanOutliveTheOpeningBudget() = runBlocking<Unit> {
+        val http = HttpClient(MockEngine {
+            val channel = GlobalScope.writer(Dispatchers.IO) {
+                repeat(6) {
+                    channel.writeFully(": heartbeat\n\n".toByteArray())
+                    channel.flush()
+                    delay(60)
+                }
+            }.channel
+            respond(channel, HttpStatusCode.OK)
+        })
+        try {
+            val api = TaskBridgeApi(http, SimpleConnection("http://pc:8787"))
+            assertEquals(6, api.stream("t", 0, idleTimeoutMillis = 200).toList().size)
+        } finally { http.close() }
     }
 
     @Test
