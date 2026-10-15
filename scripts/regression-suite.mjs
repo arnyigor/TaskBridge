@@ -46,6 +46,7 @@ export const SECTIONS = {
       'tests/context-report.test.mjs',
       'tests/api-contract.test.mjs',
       'tests/rpc-pipe-recovery.test.mjs',
+      'tests/session-startup-recovery.test.mjs',
       'tests/process-protection.test.mjs',
       'tests/instance-lock.test.mjs',
       'tests/turn-state.test.mjs',

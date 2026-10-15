@@ -152,6 +152,23 @@ the stored draft immediately and cancels the older scheduled write. Virtual-time
 tests cover rapid typing, two independent chats, immediate departure and send
 without draft resurrection.
 
+`application/session-recovery.mjs` owns startup reconciliation of saved sessions:
+queued prompts, interrupted in-flight markers, session-file checks, bounded text
+and restored snapshot cursors. TaskManager retains boot/shutdown ordering and
+runtime ownership, providing queue/file/register callbacks. During this extraction,
+a regression reproduced a startup crash in the foreign-Pi safety warning
+(`sessionFile` was undefined). The warning now uses the saved task field. The
+test starts a disposable child, loads its copied foreign session record, verifies
+startup and process survival, and clears only that record's PID identity.
+
+The model-silence warning now excludes known tool execution, compaction and
+provider wait, and only applies while the session is RUNNING. A long bash command
+can emit no Pi frames for minutes; that duration does not mean the model is
+unresponsive. Web suppresses both the banner and activity-line warning; KMP uses
+the same classification. Regression tests retain the warning for a genuinely
+quiet streaming/model response. STOP remains available through the normal chat
+controls, without interpreting elapsed silence as proof of a failed run.
+
 ## Reproducible latency baseline
 
 `node scripts/quality-baseline.mjs --samples 20 --output <ignored-local-file>` creates its own server, fake runtime and SQLite database, measures warm HTTP, verifies exactly one USER_MESSAGE effect per command ID and cleans up only its fixture. It never connects to the operator's server. The report identifies its base commit, dirty-tree state, environment, source sizes and SQLite plan.
