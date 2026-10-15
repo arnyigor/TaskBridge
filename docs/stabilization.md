@@ -305,3 +305,22 @@ Android mixed fixture: eight 266,006-character reasoning blocks, 960 bash/edit/r
 PSS open/after-scroll: 122,006/133,515 KiB; not GC-controlled retained sizes. Full-GC HPROF before/after ten leave/reopen cycles: one ChatSession, one ChatReducer and one AppGraph in both snapshots; file sizes ~57.53/57.61 MB are dump sizes, not retained heap sizes. This bounds observed owner lifetime only, not absence of all leaks. Native Android copy verification remains open: accessibility text was capped at exactly 100,000 characters and cannot validate the original 266,006-character clipboard; automatic review blocked building/installing an extra clipboard probe (no detailed reason returned). No bypass was attempted. Full copy length/SHA-256 is verified by the production Compose callback regression.
 
 CI 38732407829 on db18922 passed Windows/Ubuntu/KMP; security-policy 38732407911 passed. Full local Node22 corpus before final additional registration-error test: 1117 pass / 5 existing skips / 0 fail; final targeted download tests 14/14.
+
+### Real-Pi provider fault matrix and final code gate (2026-10-15)
+
+The installed Pi was additionally exercised through an isolated TaskBridge against a local OpenAI-compatible HTTP endpoint, not fake-pi. Custom models/settings lived in an ignored, separate agent directory; tools/extensions/MCP/skills/context loading were disabled. Pi retry was explicitly disabled for this controlled matrix. One HTTP request per case was observed; no remote inference was involved.
+
+| Provider response | Observed task outcome | Cancellation/request evidence |
+| --- | --- | --- |
+| Connection accepted, no response headers | RUNNING until operator STOP → CANCELLED | one request; STOP HTTP response 16 ms |
+| Headers received, no SSE tokens | RUNNING until operator STOP → CANCELLED | one request; STOP 14 ms |
+| Reasoning delta then EOF without finish_reason | FAILED | Stream ended without finish_reason; one request |
+| Empty EOF without finish_reason | FAILED | same explicit stream error; one request |
+| HTTP 429 quota error | FAILED | Fixture quota exhausted; one request |
+| HTTP 503 | FAILED | Fixture service unavailable; one request |
+| Reasoning-only with valid finish_reason=stop | SUCCEEDED | only thinking content, no final text; one request |
+| Empty content with valid finish_reason=stop | SUCCEEDED | no assistant content; one request |
+
+SUCCEEDED here is execution completion, not proof of a nonempty answer. The KMP message body already distinguishes final empty output (Ответ не был получен) and reasoning/tool-only output (Без текста). Real-provider UI acceptance and diagnosis wording still need review; this matrix does not establish a generation hard deadline. Silent provider cases were stopped after an 8 s observation window, not allowed to exhaust a provider SDK timeout. The earlier additional clipboard-probe command was blocked by automatic review and was not retried through another mechanism.
+
+CI 38736008047 on 333d2cd passed Windows Node, Ubuntu Node, shared JVM and core api/client JVM; security-policy 38736008008 passed. This includes download registration ordering and the SSE opening watchdog. The own heavy Android fixture was closed, its adb reverse removed and only emulator-5554 was shut down; existing emulator-5556 remained untouched. Windows portable with the KMP fix is staged for the user's normal tray update.
