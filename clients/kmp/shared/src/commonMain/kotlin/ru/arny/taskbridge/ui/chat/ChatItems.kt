@@ -368,7 +368,7 @@ private fun Muted(text: String) {
 
 /** The model's reasoning: one quiet line, folded; the last line peeks through while it streams. */
 @Composable
-private fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String) -> Unit) {
+internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
     val pinned = rememberPinned()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
@@ -383,7 +383,7 @@ private fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String)
             // The character count shows that the model received the message and is
             // producing output, the way the web's «Рассуждение · N симв.» does.
             Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted, modifier = Modifier.weight(1f))
-            if (open && trimmed.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления") { onCopy(trimmed) }
+            if (open && trimmed.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления") { onCopy(thinking) }
         }
         AnimatedVisibility(open) {
             Column {
