@@ -344,3 +344,24 @@ test('local model speeds: no invented PP, and TG over the real generation window
   assert.equal(done.speeds.tgTurns, 1);
   assert.equal(done.speeds.tgAvg, metrics.tg);
 });
+
+for (const shape of ['notice', 'structured']) {
+  test(`incompatible model/auth stops Pi retries (${shape}) and allows a corrected follow-up`, { timeout: 60000 }, async t => {
+    const fixture = await startFixture();
+    t.after(() => fixture.close());
+    const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: `fault-provider-incompatible ${shape}` });
+    const failed = await settle(fixture.api, task.id);
+    assert.equal(failed.status, 'FAILED');
+    assert.equal(failed.errorCode, 'MODEL_AUTH_INCOMPATIBLE');
+    assert.equal(failed.retryable, false);
+    assert.equal(failed.providerWait, null);
+    assert.equal(failed.piPid, null);
+    assert.match(failed.error, /openai-codex/);
+    const events = await fixture.api(`/api/tasks/${task.id}/events?limit=0`);
+    assert.equal(events.filter(e => e.type === 'TASK_FAILED').length, 1);
+    assert.equal(events.filter(e => e.type === 'PROVIDER_WAIT').length, 0);
+    await fixture.api(`/api/tasks/${task.id}/message`, { text: 'corrected follow-up' });
+    const resumed = await settle(fixture.api, task.id);
+    assert.equal(resumed.status, 'SUCCEEDED', resumed.error || '');
+  });
+}

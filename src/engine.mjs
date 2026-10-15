@@ -6,6 +6,11 @@
 // Order matters: the first matching rule wins.
 const RULES = [
   {
+    code: 'MODEL_AUTH_INCOMPATIBLE',
+    retryable: false,
+    patterns: [/model[^\n]*not supported when using Codex with a ChatGPT account/i]
+  },
+  {
     // RPC-layer failures: a slow acknowledgement is worth another try, a hung
     // process must be stopped rather than retried, and an exited process is
     // retryable because a fresh session will be spawned.

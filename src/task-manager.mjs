@@ -6089,6 +6089,28 @@ export class TaskManager extends EventEmitter {
   // --- provider wait (a retry Pi announces while the agent is still alive) ----
   // Логика — в provider-wait.mjs; здесь только привязка публикации событий задачи.
   async #noteProviderWait(task, wait) {
+    if (classifyEngineError(wait?.reason)?.code === 'MODEL_AUTH_INCOMPATIBLE') {
+      // The retry belongs to Pi/its extension. Retire that owned process before
+      // publishing failure; merely hiding PROVIDER_WAIT would still send again.
+      const runtime = this.runtimes.get(task.id);
+      if (runtime) {
+        runtime.retired = true;
+        await runtime.pi.killTree();
+      }
+      task.piPid = null;
+      task.piStartedAt = null;
+      task._lastPiExitAt = Date.now();
+      task._toolsRunning = 0;
+      task._compacting = false;
+      task._compactingSince = 0;
+      await this.#clearProviderWait(task, 'non_retryable', { announce: false });
+      const error = Object.assign(new Error(
+        `Модель несовместима с авторизацией ChatGPT. Выберите доступную модель провайдера openai-codex или измените способ авторизации. ${wait.reason}`
+      ), { code: 'MODEL_AUTH_INCOMPATIBLE' });
+      try { await this.#fail(task, error); }
+      finally { this.#resolveSettle(task.id); }
+      return;
+    }
     await noteProviderWait(task, wait, (type, message, data) => this.#event(task, type, message, data));
   }
   #sameProviderWait(current, wait) {

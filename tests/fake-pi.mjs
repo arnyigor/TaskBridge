@@ -119,7 +119,7 @@ function finish(text, fail = false, errorMessage = 'Fixture model error', thinki
 let deaf = false;
 let tailAfterAbort = false;
 function faultOf(message) {
-  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|provider-wait|provider-flap|provider-give-up|slow-stream)/);
+  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
@@ -216,6 +216,17 @@ async function runFault(fault, command, respond) {
   }
   // deaf and child combine: `fault-deaf fault-child` is a hung tool that
   // ignores abort and holds a child process.
+  if (fault === 'provider-incompatible') {
+    const error = `OpenAI API error (400): 400 {"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}`;
+    const notice = `openai/gpt-5.5 retrying after error in 0m 05s. Error: ${error}`;
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    if (String(command.message).includes('structured')) {
+      send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'test.pi-limits-wait.json', statusText: JSON.stringify({ event: 'wait', error, model: { provider: 'openai', id: 'gpt-5.5' }, remainingMs: 5000, plannedDeadline: Date.now() + 5000 }) });
+    } else send({ type: 'extension_ui_request', method: 'notify', notifyType: 'info', message: notice });
+    // A retry tail must never reopen a terminal failure.
+    setTimeout(() => { send({ type: 'agent_start' }); send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'unexpected retry' } }); }, 150);
+    return;
+  }
   if (fault === 'provider-wait') {
     // Verbatim from a live session (2026-10-09): wormsoft answered HTTP 429
     // «user reached the limit» with `retry-after-ms 5452000`, and the extension

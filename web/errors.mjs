@@ -86,6 +86,9 @@ export function humanizeError(value) {
     : value == null ? '' : (value.message || value.error || String(value));
   const text = String(raw).replace(/\s+/g, ' ').trim();
   if (!text) return '';
+  if (/model[^\n]*not supported when using Codex with a ChatGPT account/i.test(text)) {
+    return 'Модель несовместима с авторизацией ChatGPT. Выберите доступную модель провайдера openai-codex или измените способ авторизации. Автоматический повтор не выполняется.';
+  }
 
   const body = parseEnvelope(text);
   if (!body) return clip(text);

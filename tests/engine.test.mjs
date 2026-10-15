@@ -120,3 +120,11 @@ test('router model resolution picks the AUTO preset or the default preset', () =
   assert.equal(resolveRouterModel({ auto: false, profileId: null }, {}, 'llama.cpp'), null);
   assert.equal(resolveRouterModel({ auto: true, profileId: 'x' }, localRuntime, null), null);
 });
+
+test('Codex model/auth incompatibility is permanent, not a transient model outage', () => {
+  const error = `OpenAI API error (400): 400 {"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}`;
+  assert.deepEqual(classifyEngineError(error), { code: 'MODEL_AUTH_INCOMPATIBLE', retryable: false, retryAfterMs: null });
+  assert.equal(classifyEngineError('HTTP 429 Too Many Requests').retryable, true);
+  assert.equal(classifyEngineError('HTTP 503 service unavailable').retryable, true);
+  assert.equal(classifyEngineError('HTTP 400 some other bad request'), null);
+});
