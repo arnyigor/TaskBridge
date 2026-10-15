@@ -60,7 +60,7 @@ export function createLocalTransport({ base = '', fetchImpl = globalThis.fetch, 
       source.onerror = () => onStatus('reconnecting');
       const handle = {
         synced: false,
-        cursor,
+        get cursor() { return cursor; },
         close() { subscriptions.delete(handle); source.close(); }
       };
       subscriptions.add(handle);
@@ -117,7 +117,7 @@ export function createCloudTransport({
   });
 
   function send(envelope, { queue = false } = {}) {
-    if (socket?.readyState === 1) { socket.send(JSON.stringify(envelope)); return true; }
+    if (status === 'online' && socket?.readyState === 1) { socket.send(JSON.stringify(envelope)); return true; }
     if (queue) logger('warn', { event: 'frame_dropped_offline', type: envelope.type });
     return false;
   }
@@ -140,8 +140,16 @@ export function createCloudTransport({
     if (Number.isSafeInteger(seq)) {
       if (session.seen.has(seq)) return;
       session.seen.add(seq);
+      session.cursor = Math.max(session.cursor, seq);
+      // Reconnect replays from cursor, so only recent overlap needs retaining.
+      if (session.seen.size > 4096) session.seen.delete(session.seen.values().next().value);
     }
-    if (session.awaitingSync) { session.awaitingSync = false; session.handle.synced = true; }
+    if (session.awaitingSync) {
+      session.awaitingSync = false;
+      session.handle.synced = true;
+      clearTimer(session.syncTimer);
+      session.syncTimer = null;
+    }
     session.onEvent(event);
     for (const handler of handlers.event) handler(event, frame);
   }
@@ -150,7 +158,13 @@ export function createCloudTransport({
     let frame;
     try { frame = JSON.parse(data); } catch { return; }
     if (frame.v !== protocol.version) { logger('warn', { event: 'protocol_version', version: frame.v }); return; }
-    if (frame.type === 'AUTH_OK') { attempts = 0; emitStatus('online'); return; }
+    if (frame.type === 'AUTH_OK') {
+      attempts = 0;
+      status = 'online';
+      for (const [sessionId, session] of sessions) subscribe(sessionId, session);
+      emitStatus('online');
+      return;
+    }
     if (frame.type === 'AUTH_FAIL') { emitStatus('unauthorized'); logger('error', { event: 'relay_auth_failed', payload: frame.payload }); return; }
     if (frame.type === 'MACHINE_STATUS') {
       for (const handler of handlers.machine) handler(frame.payload);
@@ -201,10 +215,18 @@ export function createCloudTransport({
     const ws = new WebSocketImpl(url);
     socket = ws;
     ws.addEventListener?.('open', () => {
+      if (stopped || socket !== ws) return;
       ws.send(JSON.stringify(newEnvelope({ type: 'HELLO', payload: { role: 'client', deviceId: null, auth: { deviceToken } } })));
     });
-    ws.addEventListener?.('message', event => onMessage(event.data));
+    ws.addEventListener?.('message', event => { if (!stopped && socket === ws) onMessage(event.data); });
     ws.addEventListener?.('close', () => {
+      if (socket !== ws) return;
+      for (const session of sessions.values()) {
+        clearTimer(session.syncTimer);
+        session.syncTimer = null;
+        session.awaitingSync = true;
+        session.handle.synced = false;
+      }
       for (const [commandId, entry] of pending) { clearTimer(entry.timer); entry.reject(failure('RELAY_OFFLINE', 'The relay connection closed')); pending.delete(commandId); }
       if (status !== 'stopped' && status !== 'unauthorized') emitStatus('offline');
       scheduleReconnect();
@@ -218,12 +240,23 @@ export function createCloudTransport({
     reconnectTimer = setTimer(() => {
       reconnectTimer = null;
       connect();
-      // Re-attach and re-sync everything that was open before the break.
-      for (const [sessionId, session] of sessions) {
-        send(newEnvelope({ type: 'ATTACH', sessionId }));
-        send(newEnvelope({ type: 'SYNC', sessionId, payload: { afterSeq: session.lastSeq() } }));
-      }
+      // AUTH_OK owns reattachment: a newly created socket is not writable yet.
     }, delay);
+  }
+
+  function subscribe(sessionId, session) {
+    clearTimer(session.syncTimer);
+    session.awaitingSync = true;
+    session.handle.synced = false;
+    send(newEnvelope({ type: 'ATTACH', sessionId }));
+    send(newEnvelope({ type: 'SYNC', sessionId, payload: { afterSeq: session.cursor } }));
+    session.syncTimer = setTimer(() => {
+      session.syncTimer = null;
+      if (sessions.get(sessionId) !== session || !session.awaitingSync) return;
+      session.awaitingSync = false;
+      session.handle.synced = true;
+      session.onStatus('synced-empty');
+    }, syncTimeoutMs);
   }
 
   async function requestLocalApi(method, path, body, timeoutMs = 30_000) {
@@ -250,14 +283,6 @@ export function createCloudTransport({
 
     on(event, handler) { if (handlers[event]) handlers[event].push(handler); },
 
-    close() {
-      stopped = true;
-      if (reconnectTimer) { clearTimer(reconnectTimer); reconnectTimer = null; }
-      try { socket?.close?.(); } catch { /* the socket is already gone */ }
-      socket = null;
-      emitStatus('stopped');
-    },
-
     async ready(timeoutMs = 10_000) {
       stopped = false;
       if (status === 'idle' || status === 'offline' || status === 'stopped') connect();
@@ -271,26 +296,23 @@ export function createCloudTransport({
     },
 
     open(sessionId, { after = 0, onEvent = () => {}, onStatus = () => {} } = {}) {
+      sessions.get(sessionId)?.handle.close();
       const seen = new Set();
       const session = {
-        onEvent, onStatus, seen, awaitingSync: true,
-        lastSeq: () => (seen.size ? Math.max(...seen) : after)
+        onEvent, onStatus, seen, awaitingSync: true, cursor: after, syncTimer: null
       };
       const handle = {
         synced: false,
         close() {
+          if (sessions.get(sessionId) !== session) return;
+          clearTimer(session.syncTimer);
           sessions.delete(sessionId);
           if (status === 'online') send(newEnvelope({ type: 'DETACH', sessionId }));
         }
       };
       session.handle = handle;
       sessions.set(sessionId, session);
-      const last = handle.synced ? session.lastSeq() : after;
-      if (status === 'online') {
-        send(newEnvelope({ type: 'ATTACH', sessionId }));
-        send(newEnvelope({ type: 'SYNC', sessionId, payload: { afterSeq: last } }));
-      }
-      setTimer(() => { if (session.awaitingSync) { session.awaitingSync = false; handle.synced = true; onStatus('synced-empty'); } }, syncTimeoutMs);
+      if (status === 'online') subscribe(sessionId, session);
       return handle;
     },
 
@@ -312,6 +334,7 @@ export function createCloudTransport({
       if (reconnectTimer) { clearTimer(reconnectTimer); reconnectTimer = null; }
       for (const entry of pending.values()) { clearTimer(entry.timer); entry.reject(failure('RELAY_OFFLINE', 'Transport closed')); }
       pending.clear();
+      for (const session of sessions.values()) clearTimer(session.syncTimer);
       sessions.clear();
       try { socket?.close(1000, 'client closing'); } catch { /* already closed */ }
       socket = null;

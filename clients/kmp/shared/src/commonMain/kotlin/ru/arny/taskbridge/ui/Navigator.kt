@@ -3,9 +3,15 @@ package ru.arny.taskbridge.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.Saver
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import ru.arny.taskbridge.core.api.ModelRef
 
+@Serializable
 sealed interface Screen {
+    @Serializable
     data object Connect : Screen
 
     /**
@@ -13,25 +19,46 @@ sealed interface Screen {
      * project dashboard drills into its own sessions (MR-01), and the filter
      * lives on the stack entry so «back» returns to the dashboard.
      */
+    @Serializable
     data class Sessions(val projectId: String? = null) : Screen
 
     /** The project dashboard: every project, its sessions, pinned and archived. */
+    @Serializable
     data object Projects : Screen
     /** One project's operational memory: Work Items, sessions and recurring work. */
+    @Serializable
     data class Project(val projectId: String) : Screen
 
+    @Serializable
     data class Chat(val taskId: String) : Screen
     /** A new session not yet on the PC: it is created by its first message. */
+    @Serializable
     data class Draft(val draft: SessionDraft) : Screen
+    @Serializable
     data object Settings : Screen
     /** Управление локальными моделями: рабочий экран, а не настройка. */
+    @Serializable
     data object LocalModels : Screen
     /** Процессы машины с сервером: список, память и kill. */
+    @Serializable
     data object Processes : Screen
 }
 
 /** A plain back stack: the app has four screens, a library would add more than it saves. */
 class Navigator(start: Screen) {
+    companion object {
+        /** Save route IDs, never a connection, loaded history or runtime state. */
+        fun saver(connectionKey: String?, start: Screen): Saver<Navigator, List<String>> = Saver(
+            save = { listOf(connectionKey.orEmpty(), Json.encodeToString(it.stack)) },
+            restore = { saved ->
+                val screens = if (saved.firstOrNull() == connectionKey.orEmpty()) {
+                    runCatching { Json.decodeFromString<List<Screen>>(saved[1]) }.getOrNull()
+                } else null
+                Navigator(start).apply { if (!screens.isNullOrEmpty()) stack = screens }
+            },
+        )
+    }
+
     var stack: List<Screen> by mutableStateOf(listOf(start))
         private set
 
@@ -80,6 +107,7 @@ class Navigator(start: Screen) {
  * starts Pi as it creates a session, so an empty session cannot exist there;
  * the draft waits in the app until the first message.
  */
+@Serializable
 data class SessionDraft(
     val projectId: String,
     val projectName: String,

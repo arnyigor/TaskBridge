@@ -15,7 +15,7 @@ async function settle(api, id, { tries = 200, delay = 50 } = {}) {
   for (let i = 0; i < tries; i++) {
     task = await api(`/api/tasks/${id}`);
     if (!ACTIVE.includes(task.status)) return task;
-    await new Promise(resolve => setTimeout(resolve, delay));
+    if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
   }
   throw new Error(`task stayed ${task.status}`);
 }
@@ -85,7 +85,8 @@ test('snapshotSeq versions the task snapshot by its last event (C-B)', { timeout
   const { api } = fixture;
 
   const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'snapshot-seq' });
-  const done = await settle(api, task.id);
+  // Tight polling catches a terminal status exposed before its final event.
+  const done = await settle(api, task.id, { tries: 2000, delay: 0 });
   assert.equal(done.status, 'SUCCEEDED', done.error || '');
 
   const events = await api(`/api/tasks/${task.id}/events?limit=0`);
@@ -109,12 +110,26 @@ test('STOP publishes CANCELLED for the stopped turn', { timeout: 60000 }, async 
 
   const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-hang turn-state-stop' });
   await new Promise(resolve => setTimeout(resolve, 1500));
-  await api(`/api/tasks/${task.id}/cancel`, {});
-  const done = await settle(api, task.id);
+  const stopping = api(`/api/tasks/${task.id}/cancel`, {});
+  const done = await settle(api, task.id, { tries: 2000, delay: 0 });
+  await stopping;
   assert.equal(done.status, 'CANCELLED', done.error || fixture.logs());
 
   const events = await api(`/api/tasks/${task.id}/events?limit=0`);
   const cancelIdx = events.findIndex(event => event.type === 'TASK_CANCELLED');
   const cancelledIdx = events.findIndex(event => event.type === 'TURN_STATE' && event.data?.phase === 'CANCELLED');
   assert.ok(cancelledIdx !== -1 && cancelledIdx < cancelIdx, 'CANCELLED must precede TASK_CANCELLED');
+  assert.ok(done.snapshotSeq >= events[cancelIdx].seq, 'a cancelled snapshot includes its durable terminal event');
+});
+
+test('a failed snapshot never precedes its durable TASK_FAILED event', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'fault-crash terminal-snapshot' });
+  const done = await settle(fixture.api, task.id, { tries: 2000, delay: 0 });
+  assert.equal(done.status, 'FAILED');
+  const events = await fixture.api(`/api/tasks/${task.id}/events?limit=0`);
+  const terminal = events.find(event => event.type === 'TASK_FAILED');
+  assert.ok(terminal);
+  assert.ok(done.snapshotSeq >= terminal.seq);
 });

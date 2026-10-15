@@ -25,7 +25,10 @@ test('machine() accepts loopback and this host, rejects everybody else', () => {
   assert.equal(a.machine(req('198.51.100.7')), false, 'an address this host does not own');
 });
 
-test('machine() trusts only the last X-Forwarded-For entry from a loopback proxy', () => {
+test('machine() trusts only the last X-Forwarded-For entry from a loopback proxy', t => {
+  t.mock.method(os, 'networkInterfaces', () => ({
+    ethernet: [{ address: '192.168.1.212', family: 'IPv4', internal: false }]
+  }));
   const a = access();
   // Browser on the PC using the machine's LAN address: the proxy forwards it.
   assert.equal(a.machine(req('127.0.0.1', { 'x-forwarded-for': '192.168.1.212' })), true);
@@ -35,6 +38,7 @@ test('machine() trusts only the last X-Forwarded-For entry from a loopback proxy
   // is the one we trust, so a spoofed "I am the PC" cannot get in.
   assert.equal(a.machine(req('127.0.0.1', { 'x-forwarded-for': '192.168.1.212, 192.168.1.50' })), false);
   assert.equal(a.machine(req('127.0.0.1', { 'x-forwarded-for': '192.168.1.50, 127.0.0.1' })), true);
+  assert.equal(a.machine(req('198.51.100.7', { 'x-forwarded-for': '127.0.0.1' })), false, 'a remote peer cannot spoof the proxy header');
 });
 
 test('the Host-based local() rule is unchanged (the pairing code still needs it)', () => {

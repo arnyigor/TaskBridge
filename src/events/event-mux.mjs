@@ -125,7 +125,14 @@ export class EventMux extends EventEmitter {
 
     if (out.length) {
       for (const transport of this.transports) {
-        try { transport.publishEvents(out); }
+        try {
+          const published = transport.publishEvents(out);
+          if (published && typeof published.then === 'function') {
+            Promise.resolve(published).catch(error => {
+              this.logger?.('warn', { component: 'EventMux', event: 'transport_failed', message: error?.message });
+            });
+          }
+        }
         catch (error) { this.logger?.('warn', { component: 'EventMux', event: 'transport_failed', message: error?.message }); }
       }
       for (const event of out) this.emit('event', event);

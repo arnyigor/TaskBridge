@@ -27,6 +27,9 @@ sealed class ApiError(open val message: String) {
     /** The server crashed while handling this command; check the history before re-sending. */
     data class UnknownAfterCrash(override val message: String) : ApiError(message)
 
+    /** An effect may have completed, but its result could not be persisted. */
+    data class UnknownOutcome(override val message: String) : ApiError(message)
+
     data class InputInvalid(override val message: String) : ApiError(message)
 
     data class Forbidden(val code: String?, override val message: String) : ApiError(message)
@@ -71,6 +74,7 @@ fun apiErrorOf(status: Int, body: String?): ApiError {
         code == "CONFLICT" -> ApiError.CommandConflict(message)
         code == "ACCEPTED" -> ApiError.CommandInFlight(message)
         code == "UNKNOWN_AFTER_CRASH" -> ApiError.UnknownAfterCrash(message)
+        code == "UNKNOWN_OUTCOME" -> ApiError.UnknownOutcome(message)
         code == "INPUT_INVALID" -> ApiError.InputInvalid(message)
         code == "RATE_LIMITED" || status == 429 -> ApiError.RateLimited(message)
         status == 409 -> ApiError.Busy(code ?: "BUSY", message)

@@ -39,8 +39,10 @@ test('policy classifies destructive shell commands, outside-workspace writes and
   assert.equal(classifyToolCall({ toolName: 'bash', input: { command: 'DROP TABLE users' } }).risk, 'destructive');
   assert.equal(classifyToolCall({ toolName: 'bash', input: { command: 'echo hi' }, config: { ...resolveApprovalConfig({ approvals: { enabled: true } }), extraPatterns: ['echo'] } }).risk, 'destructive');
   assert.equal(classifyToolCall({ toolName: 'write', input: { path: 'src/a.js' }, workspacePath: workspace }), null);
+  assert.equal(classifyToolCall({ toolName: 'write', input: { path: path.join(workspace, 'src', 'a.js') }, workspacePath: workspace }), null, 'native absolute paths inside the workspace remain allowed');
   assert.equal(classifyToolCall({ toolName: 'write', input: { path: '../outside.js' }, workspacePath: workspace }).risk, 'outside_workspace');
   assert.equal(classifyToolCall({ toolName: 'write', input: { path: 'C:\\Windows\\system32\\drivers\\etc\\hosts' }, workspacePath: workspace }).risk, 'outside_workspace');
+  assert.equal(classifyToolCall({ toolName: 'write', input: { path: '\\\\server\\share\\file.txt' }, workspacePath: workspace }).risk, 'outside_workspace');
   // Disabled shell approval means a destructive command is not gated.
   assert.equal(classifyToolCall({ toolName: 'bash', input: { command: 'rm -rf /' }, config: { ...resolveApprovalConfig({}), approveShell: false } }), null);
 });

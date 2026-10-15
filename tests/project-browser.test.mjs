@@ -21,7 +21,7 @@ async function fixture(t) {
 
 test('with no roots configured, listing and resolving fail clearly', async () => {
   await assert.rejects(listDirectory({}, null), { code: 'NOT_CONFIGURED' });
-  await assert.rejects(resolveBrowsablePath({}, 'C:\\anything'), { code: 'NOT_CONFIGURED' });
+  await assert.rejects(resolveBrowsablePath({}, path.resolve('anything')), { code: 'NOT_CONFIGURED' });
 });
 
 test('listing the empty path shows configured roots themselves', async t => {

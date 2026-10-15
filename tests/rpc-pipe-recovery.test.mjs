@@ -88,6 +88,16 @@ test('a session that never started reports a dead pipe with a classified, retrya
   assert.equal(error?.retryable, true);
 });
 
+test('an asynchronous stdin EPIPE settles pending requests without crashing or resending', async t => {
+  const session = await slowFixture(t, 2500);
+  const waiting = assert.rejects(session.getState(), { code: 'PI_RPC_NOT_WRITABLE' });
+  session.proc.stdin.emit('error', Object.assign(new Error('broken pipe'), { code: 'EPIPE' }));
+  await waiting;
+  assert.equal(session.pending.size, 0);
+  assert.equal(session.canSend(), false);
+  await assert.rejects(session.prompt('must not be sent'), { code: 'PI_RPC_NOT_WRITABLE' });
+});
+
 test('a session whose Pi exited reports a dead pipe as soon as the pipe closes', { timeout: 30000 }, async t => {
   const { command } = await fixture(t);
   const session = new PiRpcSession({ command, persistSessions: false });

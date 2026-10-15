@@ -6,6 +6,7 @@ import path from 'node:path';
 import { TaskStore } from '../src/task-store.mjs';
 import { TaskManager } from '../src/task-manager.mjs';
 import { SessionManager, sessionIdForTask } from '../src/session-manager.mjs';
+import { startFixture } from './server-fixture.mjs';
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-runs-test-'));
@@ -80,4 +81,67 @@ test('a delivered prompt records a run that finishes when the task settles', asy
   assert.equal(runs[0].kind, 'prompt');
   assert.equal(runs[0].status, 'SUCCEEDED');
   assert.ok(runs[0].finishedAt, 'the run is closed when the task settles');
+});
+
+test('late observations cannot reopen or replace a terminal run', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-runs-final-'));
+  const store = new TaskStore(root);
+  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
+  for (const status of ['SUCCEEDED', 'FAILED', 'CANCELLED']) {
+    const run = { id: status, taskId: 'a', status: 'RUNNING' };
+    store.recordRun(run);
+    store.recordRun({ ...run, status, finishedAt: '2026-10-15T00:00:00.000Z' });
+    const final = store.getRun(run.id);
+    store.recordRun({ ...run, status: 'RUNNING' });
+    store.recordRun({ ...run, status: 'FAILED', finishedAt: '2026-10-15T00:00:01.000Z' });
+    assert.deepEqual(store.getRun(run.id), final);
+  }
+});
+
+test('a failed run is terminal before the HTTP snapshot and survives restart and follow-up', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'fault-crash run-ledger' });
+  const settled = async expected => {
+    for (let i = 0; i < 300; i++) {
+      const snapshot = await fixture.api(`/api/tasks/${task.id}`);
+      if (snapshot.status === expected) return snapshot;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    assert.fail(`task did not reach ${expected}`);
+  };
+  await settled('FAILED');
+  const failed = (await fixture.api(`/api/tasks/${task.id}/runs`)).runs;
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0].status, 'FAILED');
+  await fixture.restart();
+  assert.deepEqual((await fixture.api(`/api/tasks/${task.id}/runs`)).runs, failed);
+  await fixture.api(`/api/tasks/${task.id}/message`, { text: 'clean follow-up' });
+  await settled('SUCCEEDED');
+  const runs = (await fixture.api(`/api/tasks/${task.id}/runs`)).runs;
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0].status, 'SUCCEEDED');
+  assert.deepEqual(runs[1], failed[0]);
+});
+
+test('restart interrupts the old run without reopening it when the session resumes', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'fault-hang interrupted-run' });
+  let original;
+  for (let i = 0; i < 300; i++) {
+    original = (await fixture.api(`/api/tasks/${task.id}/runs`)).runs[0];
+    if (original?.status === 'RUNNING') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  assert.equal(original?.status, 'RUNNING');
+  await fixture.restart();
+  const runs = (await fixture.api(`/api/tasks/${task.id}/runs`)).runs;
+  const interrupted = runs.find(run => run.id === original.id);
+  assert.equal(interrupted.status, 'FAILED');
+  assert.equal(interrupted.data.errorCode, 'UNKNOWN_AFTER_CRASH');
+  assert.ok(interrupted.finishedAt);
+  await fixture.restart();
+  const again = (await fixture.api(`/api/tasks/${task.id}/runs`)).runs;
+  assert.deepEqual(again.find(run => run.id === original.id), interrupted);
 });

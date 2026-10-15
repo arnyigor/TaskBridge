@@ -1,5 +1,6 @@
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
+import { createCommandClient, newCommandId } from './command-client.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -93,63 +94,7 @@ async function copyText(text) {
 // One call path for both realities (docs/cloud-ui.md). The local transport talks
 // HTTP to this server; the cloud transport sends protocol frames to the machine
 // and answers a PC-only screen with NOT_SUPPORTED instead of pretending.
-async function api(path, options = {}) {
-  const method = options.method || (options.body === undefined ? 'GET' : 'POST');
-  const raw = options.body;
-  const timeoutMs = Number.isSafeInteger(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : null;
-  // Call sites hand over an already serialized body; the transport takes objects
-  // (and the cloud transport needs the structure, not a string).
-  const body = raw === undefined ? undefined : (typeof raw === 'string' ? safeParse(raw) : raw);
-  try {
-    return await transport.request(method, path, body, timeoutMs);
-  } catch (error) {
-    if (error.code === 'AUTH_REQUIRED') showAuthGate();
-    const network = !error.code || ['RELAY_OFFLINE', 'REQUEST_TIMEOUT'].includes(error.code);
-    throw Object.assign(new Error(`${error.code || 'HTTP_ERROR'}: ${error.message}`), { code: error.code || 'HTTP_ERROR', network });
-  }
-}
-
-function safeParse(text) {
-  try { return JSON.parse(text); } catch { return undefined; }
-}
-
-// Every mutating request carries a commandId: a lost HTTP answer (Wi-Fi drop,
-// phone sleep, reload) can then be retried with the SAME id and the server
-// replays its recorded outcome instead of running the action twice.
-function newCommandId() {
-  return (globalThis.crypto && typeof crypto.randomUUID === 'function' && crypto.randomUUID())
-    || `cmd-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
-}
-
-function commandClientId() {
-  try {
-    let id = localStorage.getItem('tbClientId');
-    if (!id) { id = newCommandId(); localStorage.setItem('tbClientId', id); }
-    return id;
-  } catch { return 'web-client'; }
-}
-
-// POST with a commandId. A transport-level failure (the answer was lost, not
-// the command) is retried once with the same id; if that also fails, the
-// server's command ledger decides: accepted → the operator is told the send
-// is unconfirmed but may have landed, otherwise the error stands.
-async function commandApi(path, payload) {
-  const commandId = newCommandId();
-  let networkError = null;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      return await api(path, { method: 'POST', body: JSON.stringify({ ...payload, commandId, clientId: commandClientId() }) });
-    } catch (error) {
-      if (!error.network || attempt) { networkError = error; break; }
-    }
-  }
-  const status = await api(`/api/commands/${encodeURIComponent(commandId)}`).catch(() => null);
-  if (status && (status.status === 'ACCEPTED' || status.status === 'DISPATCHING' || status.status === 'COMPLETED')) {
-    const ambiguous = new Error('Отправка не подтверждена: соединение пропало. Возможно, сервер получил сообщение — проверьте историю.');
-    throw Object.assign(ambiguous, { commandId, ambiguous: true, cause: networkError });
-  }
-  throw Object.assign(networkError, { commandId });
-}
+const { api, commandApi } = createCommandClient({ transport, storage: () => localStorage, onAuthRequired: showAuthGate });
 
 /* ---------------- chat rendering ---------------- */
 

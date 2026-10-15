@@ -27,6 +27,12 @@ export function isTaskBridgeProcess(pid, entrypoint = 'server.mjs') {
 // name — one more way to answer the wrong thing about a reused PID.
 function isNodeProcess(pid) {
   try {
+    if (process.platform !== 'win32') {
+      const image = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
+        encoding: 'utf8', timeout: 5000,
+      }).trim().split('/').pop();
+      return /^(node(js)?|electron|bun|deno)$/.test(image);
+    }
     const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
       encoding: 'utf8', timeout: 5000, windowsHide: true,
     }).trim();
@@ -50,6 +56,12 @@ export function imageNameOf(csvOutput) {
 // the exact TaskBridge entrypoint recorded in their state.
 function hasEntrypoint(pid, entrypoint) {
   try {
+    if (process.platform !== 'win32') {
+      const command = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+        encoding: 'utf8', timeout: 5000,
+      }).trim();
+      return command.includes(entrypoint);
+    }
     const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
       `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\" -ErrorAction SilentlyContinue).CommandLine`], {
       encoding: 'utf8', timeout: 8000, windowsHide: true,

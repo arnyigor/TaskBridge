@@ -169,12 +169,14 @@ class ChatSession(
     private val persistenceMutex = Mutex()
     private val deliveryMutex = Mutex()
     private val delivering = mutableSetOf<String>()
+    private val commandDelivery = CommandDelivery(api, taskId, ::backoff)
     private var reducer: ChatReducer? = null
     private var oldestSeq: Long? = null
     private var startupJob: Job? = null
     private var streamJob: Job? = null
     private var refreshJob: Job? = null
     private var cachePersistJob: Job? = null
+    private var olderJob: Job? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
     private var started = false
@@ -218,6 +220,7 @@ class ChatSession(
         streamJob?.cancel()
         refreshJob?.cancel()
         cachePersistJob?.cancel()
+        olderJob?.cancel()
         // The owning Connected scope is cancelled immediately after close(). Use an
         // independent non-cancellable job so the final cache snapshot is not lost.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -306,11 +309,12 @@ class ChatSession(
 
     fun loadOlder() {
         val state = _state.value
-        if (state.reachedStart || state.loadingOlder) return
+        if (closed || state.reachedStart || state.loadingOlder) return
         if (oldestSeq == null) return
-        _state.update { it.copy(loadingOlder = true) }
-        scope.launch {
+        if (!_state.compareAndSet(state, state.copy(loadingOlder = true))) return
+        olderJob = scope.launch {
             try {
+                if (closed) return@launch
                 // One action loads SEVERAL pages. A page is [pageTurns] turns, which is
                 // less than a screen on a phone: pulling one page per tap left the
                 // operator tapping «Показать более раннюю историю» dozens of times on a
@@ -324,6 +328,7 @@ class ChatSession(
                 while (pages < OLDER_PAGE_LIMIT && events < OLDER_EVENT_LIMIT) {
                     val before = oldestSeq ?: break
                     val window = api.eventWindow(taskId, pageTurns, before = before)
+                    if (closed) return@launch
                     val nextOldest = window.events.firstOrNull()?.seq
                     // The cursor must move strictly down. A page that repeats the
                     // loaded window would be replayed into the same reducer, and a
@@ -331,9 +336,10 @@ class ChatSession(
                     // render two LazyColumn items with the same key (Android throws on
                     // that) and show the messages twice. So a server that answers the
                     // same window twice ends the paging here.
-                    if (nextOldest == null) { startReached = true; break }
-                    if (nextOldest >= before) { startReached = true; break }
+                    if (nextOldest == null) { startReached = window.reachedStart; break }
+                    if (nextOldest >= before) { startReached = window.reachedStart; break }
                     mutex.withLock {
+                        if (closed) return@withLock
                         val chat = reducer ?: return@withLock
                         val task = _state.value.task ?: return@withLock
                         chat.prependOlder(task, window.events, window.reachedStart)
@@ -348,7 +354,7 @@ class ChatSession(
                 }
                 _state.update { it.copy(reachedStart = it.reachedStart || startReached, loadingOlder = false) }
                 persistCache()
-                fillEmptyWindow()
+                if (pages > 0) fillEmptyWindow()
             } catch (cancel: CancellationException) {
                 throw cancel
             } catch (error: ApiException) {
@@ -360,6 +366,8 @@ class ChatSession(
                 // loadingOlder set forever, so the history never loaded again.
                 _state.update { it.copy(loadingOlder = false) }
                 _effects.tryEmit(ChatEffect.Notice(failure.message ?: "Не удалось загрузить историю"))
+            } finally {
+                _state.update { it.copy(loadingOlder = false) }
             }
         }
     }
@@ -613,50 +621,25 @@ class ChatSession(
      * final refusal gives the text back.
      */
     private suspend fun <T> withRetries(commandId: String, block: suspend () -> T): T? {
-        var attempt = 0
-        var inFlightChecks = 0
-        while (true) {
-            try {
-                return block()
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (failure: ApiException) {
-                val error = failure.error
-                when {
-                    error is ApiError.CommandInFlight -> {
-                        inFlightChecks += 1
-                        setStatus(commandId, OutgoingMessage.Status.Retrying(inFlightChecks, "Сервер принял команду, ожидается подтверждение агента"))
-                        if (inFlightChecks >= 30) {
-                            setStatus(commandId, OutgoingMessage.Status.Unknown)
-                            dropOptimistic(commandId)
-                            refreshRequests.trySend(Unit)
-                            return null
-                        }
-                        delay(1000)
-                        val status = runCatching { api.commandStatus(commandId) }.getOrNull()
-                        if (status?.done == true && status.status == "COMPLETED") {
-                            refreshRequests.trySend(Unit)
-                            removeFromOutbox(commandId)
-                            return null
-                        }
-                    }
-                    error is ApiError.UnknownAfterCrash -> {
-                        val landed = runCatching { api.events(taskId, 0, 0).any { it.type == "USER_MESSAGE" && it.string("commandId") == commandId } }.getOrDefault(false)
-                        if (landed) removeFromOutbox(commandId) else setStatus(commandId, OutgoingMessage.Status.Unknown)
-                        if (!landed) dropOptimistic(commandId)
-                        return null
-                    }
-                    error.transient && attempt < 6 -> {
-                        attempt += 1
-                        setStatus(commandId, OutgoingMessage.Status.Retrying(attempt, error.message))
-                        delay(backoff(attempt + 1, 1000))
-                    }
-                    else -> {
-                        setStatus(commandId, OutgoingMessage.Status.Failed(error.message))
-                        dropOptimistic(commandId)
-                        return null
-                    }
-                }
+        return when (val outcome = commandDelivery.run(commandId, { attempt, reason ->
+            setStatus(commandId, OutgoingMessage.Status.Retrying(attempt, reason))
+        }, block)) {
+            is DeliveryOutcome.Delivered -> outcome.value
+            DeliveryOutcome.Confirmed -> {
+                removeFromOutbox(commandId)
+                refreshRequests.trySend(Unit)
+                null
+            }
+            DeliveryOutcome.Unknown -> {
+                setStatus(commandId, OutgoingMessage.Status.Unknown)
+                dropOptimistic(commandId)
+                refreshRequests.trySend(Unit)
+                null
+            }
+            is DeliveryOutcome.Refused -> {
+                setStatus(commandId, OutgoingMessage.Status.Failed(outcome.error.message))
+                dropOptimistic(commandId)
+                null
             }
         }
     }
@@ -965,119 +948,6 @@ internal const val OLDER_PAGE_LIMIT = 12
  * (the phone has a 256 MB limit): past this the action stops and the button stays.
  */
 internal const val OLDER_EVENT_LIMIT = 2_000
-
-/**
- * Byte budget of the cached events, in JSON characters.
- *
- * A whole [ru.arny.taskbridge.core.client.session.CachedChat] is written as ONE
- * string (`Json.encodeToString`), so the encoder allocates a buffer of that size
- * and grows it by doubling. A session with large tool output reached tens of
- * millions of characters, the growth asked for a single 108 MB array, and
- * Android's 256 MB heap refused it: `OutOfMemoryError` inside
- * `JsonToStringWriter.ensureTotalCapacity`, thrown from `persistCache` on a
- * worker thread, which killed the whole process (measured on the phone
- * 2026-10-11: three crashes in one morning, every one of them right after
- * `loadOlder` — i.e. when the operator scrolled the history up).
- *
- * The budget keeps the newest events only; the full history lives on the
- * server, and a trimmed cache is stored with `reachedStart = false` so the
- * client pages back instead of pretending the history is complete.
- */
-internal const val CACHE_BUDGET_CHARS = 2_000_000
-
-/**
- * Сколько места событие занимает в файле — БЕЗ построения строки.
- *
- * Раньше вес считался как `event.data.toString().length`, и это же роняло
- * приложение: у большого кадра один только замер просил аллокацию в 108 МБ
- * (`java.lang.OutOfMemoryError` при `JsonToStringWriter.ensureTotalCapacity`,
- * dropbox OnePlus 6T, 2026-10-11). Оценка идёт обходом дерева JsonElement:
- * длины строк-значений, имена полей, по символу на структуру. Это на единицы
- * процентов отличается от сериализации и не выделяет память под копию данных.
- */
-internal fun jsonWeight(element: JsonElement, depth: Int = 0): Int {
-    // Глубина ограничена: у Pi кадры вложены неглубоко, а патологическую вложенность
-    // лучше посчитать приблизительно, чем упасть на переполнении стека.
-    if (depth > 24) return 16
-    return when (element) {
-        is JsonPrimitive -> element.content.length + 2
-        is JsonObject -> element.entries.sumOf { (key, value) -> key.length + 3 + jsonWeight(value, depth + 1) }
-        is JsonArray -> element.sumOf { jsonWeight(it, depth + 1) } + element.size
-        JsonNull -> 4
-        else -> 8
-    }
-}
-
-/** What one cached event adds to the file, measured the way the encoder sees it. */
-internal fun cacheWeight(event: TaskEvent): Int = jsonWeight(event.data) + 16
-
-/**
- * Drops the oldest cached events until the rest fit [budgetChars] and
- * [maxEvents]. Returns true when something was dropped — the caller then marks
- * the cache as not reaching the session start.
- */
-internal fun trimCacheToBudget(
-    events: MutableList<TaskEvent>,
-    budgetChars: Int = CACHE_BUDGET_CHARS,
-    maxEvents: Int = CACHE_MAX_EVENTS,
-): Boolean {
-    var dropped = false
-    if (events.size > maxEvents) {
-        events.subList(0, events.size - maxEvents).clear()
-        dropped = true
-    }
-    var chars = 0
-    var keepFrom = events.size
-    for (index in events.indices.reversed()) {
-        val weight = cacheWeight(events[index])
-        if (chars + weight > budgetChars) break
-        chars += weight
-        keepFrom = index
-    }
-    if (keepFrom > 0) {
-        events.subList(0, keepFrom).clear()
-        dropped = true
-    }
-    return dropped
-}
-
-/**
- * A saved event a client actually reads is a fraction of what Pi sends. A frame
- * carries tool arguments and results — file contents, whole command output,
- * base64 image data — that no client code needs: the reducer builds the
- * transcript from text deltas, the final assistant message and tool
- * names/arguments, and it never looks at the four payloads dropped here. Keeping
- * them filled the phone's heap until adding a file ended with OutOfMemoryError
- * and Android force-finishing the activity (2026-09-28, 253 MB of 256 MB).
- */
-internal fun lightenEvent(event: TaskEvent): TaskEvent {
-    val frame = event.piFrame ?: return event
-    val type = frame.str("type") ?: return event
-    val tool = frame.str("toolName")
-    val light: JsonObject = when (type) {
-        // The whole turn again, message by message: the reducer ignores agent_end.
-        "agent_end" -> JsonObject(frame - "messages")
-        // Only a trigger to close the previous answer's delivery line. The tool
-        // results arrive again as tool_execution_end frames (their own `result` is
-        // dropped below), so the copy kept here was the single largest thing in
-        // the cache: one bash run of a few hundred kilobytes was stored twice.
-        "turn_end" -> JsonObject(frame - "message" - "toolResults")
-        // A tool result is echoed as a message of its own, content and all.
-        "message_start", "message_end" ->
-            if (frame.obj("message")?.str("role") == "toolResult") JsonObject(frame - "message") else return event
-        // Read only for the subagent progress line; other results are megabytes.
-        "tool_execution_end" -> if (tool == "subagent") return event else JsonObject(frame - "result")
-        "tool_execution_update" -> if (tool == "subagent") return event else JsonObject(frame - "partialResult")
-        // `write` puts the whole file into args.content; only the label is used.
-        "tool_execution_start" -> {
-            val args = frame.obj("args") ?: return event
-            if ("content" !in args) return event
-            JsonObject(frame + ("args" to JsonObject(args - "content")))
-        }
-        else -> return event
-    }
-    return event.copy(data = JsonObject(event.data + ("pi" to light)))
-}
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 

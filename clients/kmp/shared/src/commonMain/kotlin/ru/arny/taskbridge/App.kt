@@ -18,6 +18,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -50,9 +51,11 @@ import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 fun App(graph: AppGraph, openTaskId: String? = null, navigatorSink: (Navigator) -> Unit = {}) {
     TaskBridgeTheme(graph.theme) {
         val connection = graph.connection
-        val navigator = remember(connection?.baseUrl) {
-            Navigator(if (connection == null) Screen.Connect else Screen.Sessions()).also(navigatorSink)
+        val startScreen = if (connection == null) Screen.Connect else Screen.Sessions()
+        val navigator = rememberSaveable(connection?.baseUrl, saver = Navigator.saver(connection?.baseUrl, startScreen)) {
+            Navigator(startScreen)
         }
+        LaunchedEffect(navigator) { navigatorSink(navigator) }
         // A saved address is trusted until the server says it needs a code: without this
         // the session list looks alive and every write fails with an auth error.
         LaunchedEffect(graph, connection) { graph.verifySavedConnection() }

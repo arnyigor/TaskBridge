@@ -71,6 +71,17 @@ export class PiRpcSession extends EventEmitter {
     });
     this.proc = proc;
 
+    // stdin errors are emitted by the Writable, independently of the child
+    // process 'error' event. A write racing Pi's exit must settle requests,
+    // never escape as an uncaught EPIPE and take the server down.
+    proc.stdin.on('error', cause => {
+      this.pipeError = Object.assign(new Error('Pi RPC input pipe failed', { cause }), {
+        code: 'PI_RPC_NOT_WRITABLE', retryable: true
+      });
+      this.#rejectAll(this.pipeError);
+      this.emit('diagnostic', { type: 'PI_PIPE_ERROR', code: cause.code, message: cause.message });
+    });
+
     proc.on('error', (error) => {
       this.emit('error', error);
       this.#rejectAll(error);
@@ -196,7 +207,7 @@ export class PiRpcSession extends EventEmitter {
   // command sent inside that window fails, so a caller that wants to hand the
   // command to a live Pi has to ask this, not `closed`.
   canSend() {
-    return Boolean(this.proc) && !this.closed && this.proc.stdin?.writable === true;
+    return Boolean(this.proc) && !this.closed && !this.pipeError && this.proc.stdin?.writable === true;
   }
 
   send(command) {

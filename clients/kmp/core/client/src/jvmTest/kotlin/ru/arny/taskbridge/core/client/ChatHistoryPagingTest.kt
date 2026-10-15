@@ -7,6 +7,8 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -219,7 +221,8 @@ class ChatHistoryPagingTest {
             await(session) { it.task != null && it.chat.items.size == 2 && !it.loading }
 
             session.loadOlder()
-            val stopped = await(session) { !it.loadingOlder && it.reachedStart }
+            val stopped = await(session) { !it.loadingOlder && it.chat.items.size == 4 }
+            assertTrue(!stopped.reachedStart, "a repeated page does not prove the history start was reached")
 
             assertEquals(
                 listOf("user-10", "assistant-10", "user-20", "assistant-20"),
@@ -229,6 +232,41 @@ class ChatHistoryPagingTest {
         } finally {
             scope.cancel()
         }
+    }
+
+    @Test
+    fun closingTheSessionCancelsPagingAndRefusesFurtherLoads() = runBlocking<Unit> {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val requested = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        var pageCalls = 0
+        try {
+            val api = api { path, before ->
+                when {
+                    !path.endsWith("/events") -> null
+                    before == null -> exchange(20, "свежий ответ") to false
+                    else -> {
+                        pageCalls++
+                        requested.complete(Unit)
+                        try { awaitCancellation() } finally { cancelled.complete(Unit) }
+                    }
+                }
+            }
+            val session = ChatSession(api, "t", scope, ids = { "id" }, now = { "2026-10-15T00:00:00Z" })
+            session.start()
+            await(session) { it.task != null && !it.loading }
+            session.loadOlder()
+            assertTrue(withTimeoutOrNull(5000) { requested.await(); true } == true)
+            session.loadOlder()
+            assertEquals(1, pageCalls, "one request per cursor while a page is pending")
+            session.close()
+            assertTrue(withTimeoutOrNull(5000) { cancelled.await(); true } == true, "closing cancels the pending network request")
+            await(session) { !it.loadingOlder }
+            session.loadOlder()
+            delay(50)
+            assertEquals(1, pageCalls, "a closed session must not page again")
+            assertEquals(listOf("user-20", "assistant-20"), session.state.value.chat.items.map { it.id })
+        } finally { scope.cancel() }
     }
 
     private suspend fun await(session: ChatSession, timeoutMillis: Long = 15_000, check: (ChatSessionState) -> Boolean): ChatSessionState =
@@ -244,7 +282,7 @@ class ChatHistoryPagingTest {
     private fun eventsJson(events: List<TaskEvent>): String = TaskBridgeJson.encodeToString(ListSerializer(TaskEvent.serializer()), events)
 
     /** A mock server: the tail window with no cursor, pages below it keyed by `before`. */
-    private fun api(page: (path: String, before: Long?) -> Pair<List<TaskEvent>, Boolean>?): TaskBridgeApi {
+    private fun api(page: suspend (path: String, before: Long?) -> Pair<List<TaskEvent>, Boolean>?): TaskBridgeApi {
         val http = HttpClient(MockEngine { request ->
             val json = headersOf(HttpHeaders.ContentType, "application/json")
             val path = request.url.encodedPath

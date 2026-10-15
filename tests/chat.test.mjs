@@ -282,6 +282,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
   const imported = resolveImports(appSource, {
     './chat-state.mjs': chatStateModule,
     './transport.mjs': transportModule,
+    './command-client.mjs': await import('../web/command-client.mjs'),
     './diagnostics.mjs': await import('../web/diagnostics.mjs'),
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },

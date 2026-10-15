@@ -96,7 +96,10 @@ export function classifyToolCall({ toolName, input = {}, workspacePath = null, c
       const root = path.resolve(workspacePath);
       const resolved = path.resolve(root, target);
       const relative = path.relative(root, resolved);
-      if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      // A Windows absolute path must not become a harmless relative filename
+      // when commands are classified on a POSIX relay/server.
+      const foreignAbsolute = path.sep === '/' && path.win32.isAbsolute(target) && !path.posix.isAbsolute(target);
+      if (foreignAbsolute || relative.startsWith('..') || path.isAbsolute(relative)) {
         if (config.approveOutsideWorkspace === false) return null;
         return { risk: 'outside_workspace', detail: target };
       }

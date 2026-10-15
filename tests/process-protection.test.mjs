@@ -46,7 +46,10 @@ test('tree kill refuses when a descendant of the target is a TaskBridge process'
     'console.log(child.pid);' +
     'setInterval(() => {}, 1000);',
   ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-  t.after(() => { try { parent.kill('SIGKILL'); } catch {} });
+  t.after(() => {
+    if (childPid) { try { process.kill(childPid, 'SIGKILL'); } catch {} }
+    try { parent.kill('SIGKILL'); } catch {}
+  });
 
   let childPid = 0;
   let line = '';
@@ -80,7 +83,10 @@ test('tree kill still works when no descendant is protected', { timeout: 60000 }
     'console.log(child.pid);' +
     'setInterval(() => {}, 1000);',
   ], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-  t.after(() => { try { parent.kill('SIGKILL'); } catch {} });
+  t.after(() => {
+    if (childPid) { try { process.kill(childPid, 'SIGKILL'); } catch {} }
+    try { parent.kill('SIGKILL'); } catch {}
+  });
 
   let childPid = 0;
   let line = '';

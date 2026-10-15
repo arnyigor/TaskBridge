@@ -123,3 +123,47 @@ test('removed sessions cannot be recreated by late writes and traversal is rejec
   await assert.rejects(store.save({ id: 'a' }), { code: 'NOT_FOUND' });
   for (const id of ['..', '../escape', '..\\escape', '/absolute', 'a/b']) assert.throws(() => store.taskDir(id));
 });
+
+test('legacy command receipts retain results and gain status columns idempotently', async t => {
+  const { root, open } = await fixture(t);
+  const { DatabaseSync } = await import('node:sqlite');
+  const legacy = new DatabaseSync(path.join(root, 'taskbridge.db'));
+  legacy.exec('CREATE TABLE commands (command_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0, result TEXT, at INTEGER NOT NULL)');
+  legacy.prepare('INSERT INTO commands VALUES (?, ?, ?, ?, ?)').run('old', 'intent', 1, JSON.stringify({ status: 'ACCEPTED' }), 1);
+  legacy.close();
+  const first = open();
+  assert.deepEqual(first.getCommand('old').result, { status: 'ACCEPTED' });
+  first.upsertCommand('new', { hash: 'next', done: false, status: 'DISPATCHING', clientId: 'phone' });
+  const second = open();
+  assert.equal(second.getCommand('new').clientId, 'phone');
+  assert.equal(second.getCommand('new').done, false);
+  assert.equal(second.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+  assert.deepEqual(second.db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('terminal event, snapshot and run commit together, including rollback on either write failure', async t => {
+  const { open } = await fixture(t);
+  const store = open();
+  const task = { id: 'atomic', status: 'RUNNING', createdAt: '2026-01-01T00:00:00.000Z' };
+  await store.create(task);
+  store.recordRun({ id: 'run-atomic', taskId: task.id, status: 'RUNNING' });
+  const run = { id: 'run-atomic', taskId: task.id, status: 'SUCCEEDED', finishedAt: '2026-01-01T00:00:01.000Z' };
+  store.db.exec("CREATE TRIGGER reject_terminal BEFORE UPDATE ON tasks WHEN json_extract(NEW.data, '$.status') = 'SUCCEEDED' BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END");
+  await assert.rejects(store.appendEventWithTask(task.id, { type: 'TASK_SUCCEEDED' }, { ...task, status: 'SUCCEEDED' }, run), /injected snapshot failure/);
+  assert.equal((await store.read(task.id)).status, 'RUNNING');
+  assert.equal(await store.maxSeq(task.id), 0, 'failed snapshot rolls back its terminal event');
+  store.db.exec('DROP TRIGGER reject_terminal');
+  store.db.exec("CREATE TRIGGER reject_run BEFORE UPDATE ON runs WHEN NEW.status = 'SUCCEEDED' BEGIN SELECT RAISE(ABORT, 'injected run failure'); END");
+  await assert.rejects(store.appendEventWithTask(task.id, { type: 'TASK_SUCCEEDED' }, { ...task, status: 'SUCCEEDED' }, run), /injected run failure/);
+  assert.equal((await store.read(task.id)).status, 'RUNNING');
+  assert.equal(await store.maxSeq(task.id), 0);
+  assert.equal(store.getRun(run.id).status, 'RUNNING');
+  store.db.exec('DROP TRIGGER reject_run');
+  const event = await store.appendEventWithTask(task.id, { type: 'TASK_SUCCEEDED' }, { ...task, status: 'SUCCEEDED' }, run);
+  const reopened = open();
+  assert.equal((await reopened.read(task.id)).status, 'SUCCEEDED');
+  assert.equal((await reopened.read(task.id)).snapshotSeq, event.seq);
+  assert.equal((await reopened.readEvents(task.id, 0))[0].type, 'TASK_SUCCEEDED');
+  assert.equal(reopened.getRun(run.id).status, 'SUCCEEDED');
+  assert.equal(reopened.db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+});

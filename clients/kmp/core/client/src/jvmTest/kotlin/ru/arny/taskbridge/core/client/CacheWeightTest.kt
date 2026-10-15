@@ -26,6 +26,15 @@ class CacheWeightTest {
     private fun event(data: JsonObject) = TaskEvent(taskId = "t", seq = 1, type = "PI_EVENT", data = data)
 
     @Test
+    fun `message fields and JSON escaping cannot bypass the cache budget`() {
+        val hugeMessage = TaskEvent(taskId = "t", seq = 1, type = "USER_MESSAGE", message = "x".repeat(3_000_000))
+        val escaped = event(buildJsonObject { put("control", "\u0001".repeat(400_000)) })
+        val events = mutableListOf(hugeMessage, escaped)
+        assertTrue(trimCacheToBudget(events))
+        assertTrue(events.isEmpty(), "both encoded events exceed the cache budget")
+    }
+
+    @Test
     fun `the estimate tracks the serialized size, without building it`() {
         val data = buildJsonObject {
             put("pi", buildJsonObject {

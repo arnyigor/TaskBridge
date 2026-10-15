@@ -93,7 +93,23 @@ export async function killProcess({ pid, name } = {}) {
   if (process.platform === 'win32') {
     await promisifiedExec('taskkill.exe', ['/PID', String(pidNum), '/T', '/F']);
   } else {
-    // POSIX: no tree kill without a supervisor; the single pid is what the panel showed.
+    // Only signal the descendants inspected above. Killing just the parent
+    // leaves its workers alive; killing the parent first also prevents it from
+    // reaping exited children on hosts whose init does not reap promptly.
+    const children = tree.slice(1).reverse();
+    for (const child of children) {
+      try { process.kill(child.pid, 'SIGKILL'); }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+    const deadline = Date.now() + 1000;
+    while (children.length && Date.now() < deadline) {
+      const alive = children.some(child => {
+        try { process.kill(child.pid, 0); return true; }
+        catch (error) { return error.code !== 'ESRCH'; }
+      });
+      if (!alive) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
     process.kill(pidNum, 'SIGKILL');
   }
   return { killed: true, pid: pidNum, name: target.name };

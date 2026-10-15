@@ -159,6 +159,7 @@ class FixtureParsingTest {
         assertIs<ApiError.InputInvalid>(of("error-input-invalid.json"))
         assertIs<ApiError.CommandInFlight>(apiErrorOf(409, """{"error":"Команда уже выполняется.","code":"ACCEPTED"}"""))
         assertIs<ApiError.UnknownAfterCrash>(apiErrorOf(409, """{"error":"x","code":"UNKNOWN_AFTER_CRASH"}"""))
+        assertIs<ApiError.UnknownOutcome>(apiErrorOf(500, """{"error":"x","code":"UNKNOWN_OUTCOME"}"""))
         assertIs<ApiError.Busy>(apiErrorOf(409, """{"error":"x","code":"MODEL_BUSY"}"""))
         assertIs<ApiError.AuthRequired>(apiErrorOf(401, """{"error":"x","code":"AUTH_REQUIRED"}"""))
         val broken = apiErrorOf(502, "<html>bad gateway</html>")

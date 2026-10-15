@@ -29,7 +29,9 @@ class MainActivity : ComponentActivity() {
         val app = application as TaskBridgeApplication
         // Kept for platform.exitApp(): the shared UI's «Выход» closes this activity.
         app.platform.activity = this
-        openTaskId = intent?.getStringExtra(EXTRA_TASK_ID)
+        // Saved navigation already includes any notification that was handled.
+        // Replaying the launch intent on rotation would reopen an older chat.
+        openTaskId = if (savedInstanceState == null) intent?.getStringExtra(EXTRA_TASK_ID) else null
         askForNotifications()
         setContent {
             App(app.graph, openTaskId = openTaskId)
@@ -38,6 +40,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         // A tapped notification while the app is open: go to that session.
         intent.getStringExtra(EXTRA_TASK_ID)?.let { openTaskId = it }
     }

@@ -36,6 +36,7 @@ export class CloudOutbox {
   }
 
   async init() {
+    this.bytes = 0;
     await fs.mkdir(this.dir, { recursive: true });
     // A crash during upload leaves a SENDING marker; treat it as pending again.
     for (const entry of await fs.readdir(this.dir).catch(() => [])) {
@@ -105,7 +106,7 @@ export class CloudOutbox {
   }
 
   async ack(record) {
-    await fs.rm(record.file, { force: true }).catch(() => {});
+    await fs.rm(record.file, { force: true });
     this.bytes = Math.max(0, this.bytes - Buffer.byteLength(JSON.stringify(record.events), 'utf8'));
   }
 

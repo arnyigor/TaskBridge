@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import { TerminalPublication } from './domain/terminal-publication.mjs';
+import { RunCoordinator } from './application/run-coordinator.mjs';
+import { CommandCoordinator } from './application/command-coordinator.mjs';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
@@ -533,6 +536,8 @@ async function dirBytes(dir) {
 }
 
 export class TaskManager extends EventEmitter {
+  #terminalPublication = new TerminalPublication();
+
   constructor(config, dataRoot, store) {
     super();
     this.config = config;
@@ -565,9 +570,7 @@ export class TaskManager extends EventEmitter {
     this.providerCooldownUntil = new Map();
     this.queueSince = new Map();
     this.queueWaitSamples = [];
-    // Open run ids per task (stage 2 telemetry): kept out of the task record
-    // so they never leak into saved/public task state.
-    this.openRuns = new Map();
+    this.runCoordinator = new RunCoordinator(store);
     // Files of prompts queued before their workspace existed: raw input kept in
     // memory only, never written into the task record where every save would
     // carry them.
@@ -582,7 +585,8 @@ export class TaskManager extends EventEmitter {
     // retry / second client / double-click cannot fire a prompt twice. TTL is
     // bounded by memory (see #dedupeCommand); persistence across a process
     // restart is a deliberate follow-up.
-    this.commandLedger = new Map();
+    this.commandCoordinator = new CommandCoordinator(store);
+    this.commandLedger = this.commandCoordinator.cache;
     this.admitting = false;
     this.admissionKeys = new Set();
     // Task id whose pending prompt the pump is delivering right now (delegating
@@ -767,6 +771,7 @@ export class TaskManager extends EventEmitter {
     await this.uploads.cleanup().catch(() => {});
     await this.mcp.ensureReady().catch(() => {});
     const previous = await this.store.list();
+    this.runCoordinator.recover();
     let trimmed = 0;
     for (const task of previous) {
       // One-time shrink of records written before text was bounded.
@@ -1443,7 +1448,7 @@ export class TaskManager extends EventEmitter {
       rows = rows.filter(task => `${task.title || ''}\n${task.prompt || ''}`.toLowerCase().includes(needle));
     }
     if (sort === 'created') rows.sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
-    else if (sort === 'title') rows.sort((a, b) => String(a.title || a.prompt || '').localeCompare(String(b.title || b.prompt || '')));
+    else if (sort === 'title') rows.sort((a, b) => String(a.title || a.prompt || '').localeCompare(String(b.title || b.prompt || ''), 'ru'));
     else if (sort === 'size') rows.sort((a, b) => (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0));
     else rows.sort((a, b) => String(b.updatedAt || b.createdAt || '').localeCompare(String(a.updatedAt || a.createdAt || '')));
     const total = rows.length;
@@ -2779,7 +2784,11 @@ export class TaskManager extends EventEmitter {
     return this.#publicTask(task);
   }
 
-  #publicTask(task) {
+  #publicTask(task, includeUnpublished = false) {
+    // Terminal status is prepared before its event writes finish. Keep reads
+    // on the preceding snapshot until the terminal event has been persisted.
+    const pendingTerminal = this.#terminalPublication.snapshot(task);
+    if (pendingTerminal && !includeUnpublished) return pendingTerminal;
     const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
@@ -4583,6 +4592,7 @@ export class TaskManager extends EventEmitter {
     // updates `verification`/`verificationStatus`.
     task.verification = [];
     task.verificationStatus = commands.length ? 'RUNNING' : 'NOT_CONFIGURED';
+    this.#terminalPublication.hold(task, this.#publicTask(task));
     task.status = 'SUCCEEDED';
     task.errorCode = null;
     task.error = null;
@@ -4596,7 +4606,6 @@ export class TaskManager extends EventEmitter {
     await this.#turnStateEvent(task, 'SETTLED');
     await this.#event(task, 'TASK_SUCCEEDED', task.current);
     await this.store.save(this.#publicTask(task));
-    this.#finishRun(task, task.status);
     await this.#writeResult(task).catch(() => {});
     if (commands.length) this.#runVerification(task, commands, turn);
   }
@@ -4830,6 +4839,7 @@ export class TaskManager extends EventEmitter {
     // even after Pi has stopped. The last completed snapshot remains available.
     // The turn ends cancelled: the in-flight marker is spent (see #deliverMessage).
     task.inFlightPrompt = null;
+    this.#terminalPublication.hold(task, this.#publicTask(task));
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
     task.updatedAt = now();
@@ -4837,7 +4847,6 @@ export class TaskManager extends EventEmitter {
     await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task);
-    this.#finishRun(task, 'CANCELLED');
   }
 
   async deleteTask(id) {
@@ -5309,6 +5318,7 @@ export class TaskManager extends EventEmitter {
     // operator's text. History is intact: the restart is not destructive.
     await this.#requeueUnconsumedPrompt(task);
     if (task.inFlightPrompt) task.inFlightPrompt = null;
+    this.#terminalPublication.hold(task, this.#publicTask(task));
     task.status = 'FAILED';
     task.errorCode = 'FAILED_RECOVERY';
     task.error = 'Сессия перезапущена по запросу. Следующее сообщение продолжит сессию.';
@@ -5576,6 +5586,7 @@ export class TaskManager extends EventEmitter {
       this.#removeQueued(id);
     }
     if (!runtime) {
+      this.#terminalPublication.hold(task, this.#publicTask(task));
       task.status = 'CANCELLED';
       task.current = 'Cancelled';
       await this.store.save(this.#publicTask(task));
@@ -5628,117 +5639,16 @@ export class TaskManager extends EventEmitter {
   // never finished (a prior process crashed) is UNKNOWN_AFTER_CRASH — never
   // re-run silently. The in-memory map is only a cache + in-flight tracker;
   // SQLite is the source of truth across restarts.
-  async #withCommand(commandId, clientId, hashOf, fn) {
-    if (!hashOf) throw new Error('internal: hashOf required');
-    this.#evictCommands();
-    const hash = hashOf();
-    let entry = this.commandLedger.get(commandId);
-    if (!entry) {
-      // Durable lookup: a finished command from a previous process replays, and
-      // an ACCEPTED-but-unfinished id is a possible crash.
-      const stored = this.store.getCommand(commandId);
-      if (stored) {
-        if (stored.hash !== hash) {
-          throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
-        }
-        if (stored.done) {
-          const status = stored.status || (stored.result != null ? 'COMPLETED' : 'REJECTED');
-          const replay = { hash, done: true, result: stored.result, at: stored.at, clientId: stored.clientId, status };
-          this.commandLedger.set(commandId, replay);
-          if (status === 'REJECTED') throw this.#commandError(stored.result);
-          return stored.result;
-        }
-        this.commandLedger.set(commandId, { hash, done: false, result: null, at: stored.at, clientId: stored.clientId, status: 'UNKNOWN_AFTER_CRASH' });
-        throw Object.assign(new Error('Исход команды неизвестен после перезапуска — отправьте её заново с новым commandId.'), { code: 'UNKNOWN_AFTER_CRASH' });
-      }
-    } else {
-      if (entry.hash !== hash) {
-        throw Object.assign(new Error('Команда уже принималась с другим содержимым.'), { code: 'CONFLICT' });
-      }
-      if (entry.done) {
-        if (entry.status === 'REJECTED') throw this.#commandError(entry.result);
-        return entry.result;
-      }
-      throw Object.assign(new Error('Команда уже выполняется.'), { code: entry.status === 'UNKNOWN_AFTER_CRASH' ? 'UNKNOWN_AFTER_CRASH' : 'ACCEPTED' });
-    }
-    // New command: persist ACCEPTED before running, so we cannot lose track of a
-    // command that crashed mid-run. If we cannot record it we must not run it.
-    try {
-      this.store.upsertCommand(commandId, { hash, done: false, clientId, status: 'ACCEPTED' });
-    } catch (error) {
-      throw Object.assign(new Error('Не удалось зафиксировать команду: ' + (error?.message || error)), { code: 'COMMAND_LEDGER_FAILED' });
-    }
-    this.commandLedger.set(commandId, { hash, done: false, result: null, at: Date.now(), clientId, status: 'ACCEPTED' });
-    try {
-      const e = this.commandLedger.get(commandId);
-      if (e) e.status = 'DISPATCHING';
-      try { this.store.upsertCommand(commandId, { hash, done: false, clientId, status: 'DISPATCHING' }); } catch {}
-      const result = await fn();
-      const f = this.commandLedger.get(commandId);
-      if (f) { f.done = true; f.result = result; f.status = 'COMPLETED'; }
-      try { this.store.upsertCommand(commandId, { hash, done: true, result, clientId, status: 'COMPLETED' }); } catch {}
-      return result;
-    } catch (error) {
-      const rejected = { error: { code: error?.code || 'INTERNAL_ERROR', message: error?.message || String(error) } };
-      const g = this.commandLedger.get(commandId);
-      if (g) { g.done = true; g.result = rejected; g.status = 'REJECTED'; }
-      try { this.store.upsertCommand(commandId, { hash, done: true, result: rejected, clientId, status: 'REJECTED' }); } catch {}
-      throw error;
-    }
-  }
-
-  #commandError(result) {
-    const saved = result?.error;
-    return Object.assign(new Error(saved?.message || 'Команда была отклонена.'), { code: saved?.code || 'INTERNAL_ERROR' });
-  }
+  async #withCommand(commandId, clientId, hashOf, fn) { return this.commandCoordinator.run(commandId, clientId, hashOf, fn); }
 
   // Command-status contract (TZ stage 3): ACCEPTED / DISPATCHING / COMPLETED /
   // REJECTED / UNKNOWN_AFTER_CRASH, plus the client that issued it. Read-only;
   // does not change the live command response shape.
-  commandStatus(commandId) {
-    const key = String(commandId);
-    const e = this.commandLedger.get(key);
-    if (e) return { commandId: key, status: e.status || (e.done ? 'COMPLETED' : 'DISPATCHING'), done: e.done, at: e.at, clientId: e.clientId || null };
-    const stored = this.store.getCommand(key);
-    if (!stored) return null;
-    return {
-      commandId: key,
-      status: stored.status || (stored.done ? (stored.result != null ? 'COMPLETED' : 'REJECTED') : 'UNKNOWN_AFTER_CRASH'),
-      done: stored.done,
-      at: stored.at,
-      clientId: stored.clientId || null,
-    };
-  }
+  commandStatus(commandId) { return this.commandCoordinator.status(commandId); }
 
 
   #payloadHash(...args) {
     return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
-  }
-
-  #evictCommands() {
-    const now = Date.now();
-    if (this.commandLedger.size >= 2) {
-      const ttl = 24 * 60 * 60 * 1000;
-      for (const [k, v] of this.commandLedger) if (now - v.at > ttl) this.commandLedger.delete(k);
-    }
-    // Hard ceiling for the in-memory cache: SQLite remains the source of
-    // truth, so a resolved entry is safe to drop. In-flight entries (done:false)
-    // are never evicted here — a replay of a command that is being executed
-    // must keep seeing ACCEPTED.
-    const maxCommands = 1000;
-    if (this.commandLedger.size > maxCommands) {
-      const removable = [...this.commandLedger.entries()]
-        .filter(([, v]) => v.done)
-        .sort((a, b) => a[1].at - b[1].at);
-      const excess = this.commandLedger.size - maxCommands;
-      for (let i = 0; i < Math.min(excess, removable.length); i++) this.commandLedger.delete(removable[i][0]);
-    }
-    // Prune resolved rows from SQLite at most hourly (in-flight rows survive to
-    // mark a possible crash).
-    if (!this._lastDbCommandPrune || now - this._lastDbCommandPrune > 60 * 60 * 1000) {
-      this._lastDbCommandPrune = now;
-      try { this.store.pruneCommands(24 * 60 * 60 * 1000); } catch {}
-    }
   }
 
   // A prompt the operator decided not to wait for: it is handed to Pi right
@@ -6245,33 +6155,13 @@ export class TaskManager extends EventEmitter {
     }
     // The UI shows "работает 12 с", so the moment of the transition matters.
     if (task.status !== status) task.statusChangedAt = now();
-    // Best-effort run ledger (stage 2): one run per RUNNING stint. Never lets
-    // telemetry failure affect execution.
-    if (status === 'RUNNING' && task.status !== 'RUNNING') this.#startRun(task);
-    else if (RUN_TERMINAL.has(status)) this.#finishRun(task, status);
+    // Re-entering RUNNING after an approval belongs to the same turn.
+    if (status === 'RUNNING' && task.status !== 'RUNNING') this.runCoordinator.start(task.id);
     task.status = status;
     task.current = current;
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
     await this.#event(task, 'STATUS', current, { status }, false);
-  }
-
-  // --- run ledger (stage 2, best-effort telemetry) -------------------------
-  #startRun(task) {
-    const id = crypto.randomUUID();
-    this.openRuns.set(task.id, id);
-    try {
-      this.store.recordRun({ id, taskId: task.id, sessionId: task.id, kind: 'prompt', status: 'RUNNING', startedAt: new Date().toISOString() });
-    } catch { /* telemetry only */ }
-  }
-
-  #finishRun(task, status) {
-    const id = this.openRuns.get(task.id);
-    if (!id) return;
-    this.openRuns.delete(task.id);
-    try {
-      this.store.recordRun({ id, taskId: task.id, sessionId: task.id, kind: 'prompt', status, finishedAt: new Date().toISOString() });
-    } catch { /* telemetry only */ }
   }
 
   // Runs recorded for a task, newest first (read-only; stage 2).
@@ -6337,6 +6227,7 @@ export class TaskManager extends EventEmitter {
     if (task.inFlightPrompt) task.inFlightPrompt = null;
     const classified = classifyEngineError(error) || classifyEngineError(task._modelError);
     const explicit = error?.code && !['MODEL_ERROR', 'INTERNAL_ERROR'].includes(error.code) ? error.code : null;
+    this.#terminalPublication.hold(task, this.#publicTask(task));
     task.status = 'FAILED';
     task.errorCode = explicit || classified?.code || error?.code || 'INTERNAL_ERROR';
     task.retryable = classified ? classified.retryable : null;
@@ -6381,17 +6272,23 @@ export class TaskManager extends EventEmitter {
     // Ход закончился — будим устройства (телефон в локальной сети): уведомление
     // придёт за секунды, а не с ближайшим фоновым опросом. Fire-and-forget:
     // промах — штатный сон устройства, запасной канал остаётся.
-    if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) {
-      this.wakeChannel.sendAll({ taskId: task.id, type, at: event.at }).catch(() => {});
-    }
-    if (seq === null) await this.store.appendEvent(task.id, event);
+    const atomicTerminal = seq === null && ['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type);
+    if (atomicTerminal) {
+      const run = this.runCoordinator.terminal(task.id, type.slice(5), event.at);
+      await this.store.appendEventWithTask(task.id, event, { ...this.#publicTask(task, true), updatedAt: event.at }, run);
+      if (run) this.runCoordinator.committed(task.id, run.id);
+    } else if (seq === null) await this.store.appendEvent(task.id, event);
     else await this.store.appendEventAt(task.id, seq, event);
+    if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) this.#terminalPublication.release(task);
     // Шаг C-B: снимок задачи теперь версионирован последним событием (appendEvent
     // проставляет event.seq). Старшинство сравнивается на клиенте.
     if (Number.isFinite(event.seq)) task._snapshotSeq = event.seq;
     if (persistTask) {
       task.updatedAt = event.at;
-      await this.store.save(this.#publicTask(task)).catch(() => {});
+      if (!atomicTerminal) await this.store.save(this.#publicTask(task)).catch(() => {});
+    }
+    if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) {
+      this.wakeChannel.sendAll({ taskId: task.id, type, at: event.at }).catch(() => {});
     }
     this.emit('task-event', event);
     // Every status change is followed by an event, so this is the one place the

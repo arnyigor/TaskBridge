@@ -1,4 +1,5 @@
 import { parseCommand } from '../domain/cloud-command.mjs';
+import { CommandInbox } from './command-inbox.mjs';
 
 // Idempotency ledger (§16). The cloud may deliver the same command twice
 // (polling overlap, retry after a lost ack). Persisting both the highest
@@ -30,12 +31,10 @@ export class CommandLedger {
     return this.ids.includes(commandId);
   }
 
-  // Returns true when the command was already processed. `seq <= lastSeq` is
-  // also a duplicate: the ledger only remembers the newest ids, but a seq that
-  // was already passed can never be new.
+  // Relay clients have independent sequence spaces (Web currently sends 1).
+  // Only identity proves duplication; the durable inbox covers evicted ids.
   isDuplicate(command) {
-    if (this.seen(command.commandId)) return true;
-    return Number(command.seq) <= this.seq && !this.seen(command.commandId) && this.ids.length >= this.maxIds;
+    return this.seen(command.commandId);
   }
 
   record(command) {
@@ -68,6 +67,7 @@ export class CommandDispatcher {
     this.manager = manager;
     this.approvals = approvals;
     this.ledger = ledger || new CommandLedger();
+    this.inbox = new CommandInbox({ store: this.ledger.store });
     this.logger = logger;
     this.now = now;
     this.stats = { received: 0, accepted: 0, rejected: 0, duplicates: 0, failed: 0 };
@@ -84,6 +84,11 @@ export class CommandDispatcher {
       return reject(error.code || 'COMMAND_REJECTED', error.message);
     }
     this.stats.received += 1;
+
+    return this.inbox.run(command, () => this.#execute(command), () => { this.stats.duplicates += 1; });
+  }
+
+  async #execute(command) {
 
     if (this.ledger.isDuplicate(command)) {
       this.stats.duplicates += 1;
@@ -110,7 +115,7 @@ export class CommandDispatcher {
       this.ledger.record(command);
     } else if (result.status === 'FAILED') {
       this.stats.failed += 1;
-      // Not recorded: a transient local failure may succeed on redelivery.
+      // The inbox retains failures too: an effect may precede the failure.
     }
 
     this.logger?.('info', {

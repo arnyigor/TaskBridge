@@ -24,16 +24,16 @@ export class EventUploader extends EventEmitter {
   // Enqueue first, then try to drain. The batch is durable before any network
   // call is attempted, so a crash mid-upload cannot lose it.
   async send(events) {
-    if (this.stopped) return null;
-    // The async body starts executing synchronously, so `pendingEnqueue` is set
-    // before the caller returns and a concurrent drain() cannot miss it.
-    const work = (async () => {
+    if (this.stopped || this.stopping) return null;
+    // Serialize persistence as well as upload. Otherwise a faster second disk
+    // write can overtake the first batch and drain() can miss the earlier one.
+    const work = this.pendingEnqueue.then(async () => {
       const record = await this.outbox.enqueue(events, { machineId: this.client.machineId });
       if (!record) return null;
       await this.outbox.enforceLimit().catch(() => {});
       this.emit('queued', record);
       return record;
-    })();
+    });
     this.pendingEnqueue = work.catch(() => {});
     const record = await work;
     if (record) this.drain().catch(() => {});
@@ -113,6 +113,7 @@ export class EventUploader extends EventEmitter {
   }
 
   async stop() {
+    this.stopping = true;
     this.reconnect.cancel();
     // Flush what is already enqueued before refusing new work, so a clean
     // shutdown does not leave an uploadable batch behind (it stays durable in
@@ -120,6 +121,7 @@ export class EventUploader extends EventEmitter {
     await this.pendingEnqueue.catch(() => {});
     await this.drain().catch(() => {});
     this.stopped = true;
+    this.reconnect.cancel();
     await this.draining?.catch(() => {});
   }
 }

@@ -254,7 +254,9 @@ export class TaskStore {
   // small; in-flight (done=0) rows are kept: they mark a possible crash.
   pruneCommands(olderThanMs) {
     const cutoff = Date.now() - olderThanMs;
-    this.db.prepare('DELETE FROM commands WHERE done = 1 AND at < ?').run(cutoff);
+    // Relay receipts outlive the recent-id cache and offline clients. Pruning
+    // them would let an old commandId execute again after the local cache TTL.
+    this.db.prepare("DELETE FROM commands WHERE done = 1 AND at < ? AND command_id NOT GLOB 'cloud-dispatch:*'").run(cutoff);
   }
 
   // Run ledger (TZ stage 2): one prompt/repair/retry turn, with its own status
@@ -262,7 +264,8 @@ export class TaskStore {
   recordRun(run) {
     this.db.prepare(`INSERT INTO runs (id, task_id, session_id, kind, status, started_at, finished_at, data)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET status=excluded.status, finished_at=excluded.finished_at, data=excluded.data`)
+      ON CONFLICT(id) DO UPDATE SET status=excluded.status, finished_at=excluded.finished_at, data=excluded.data
+      WHERE runs.task_id = excluded.task_id AND runs.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')`)
       .run(String(run.id), String(run.taskId), run.sessionId ?? null, String(run.kind || 'prompt'), String(run.status || 'RUNNING'),
         String(run.startedAt || new Date().toISOString()), run.finishedAt ?? null, run.data == null ? null : JSON.stringify(run.data));
   }
@@ -270,6 +273,14 @@ export class TaskStore {
   getRun(id) {
     const row = this.db.prepare('SELECT * FROM runs WHERE id = ?').get(String(id));
     return row ? this.#runRow(row) : null;
+  }
+
+  interruptRuns(finishedAt) {
+    // No process from the preceding server instance can still own these runs.
+    // An interrupted run says nothing about whether its external effects landed.
+    return this.db.prepare(`UPDATE runs SET status = 'FAILED', finished_at = ?,
+      data = json_patch(COALESCE(data, '{}'), json_object('errorCode', 'UNKNOWN_AFTER_CRASH'))
+      WHERE status = 'RUNNING'`).run(finishedAt).changes;
   }
 
   listRuns(taskId, limit = 50) {
@@ -450,6 +461,27 @@ export class TaskStore {
     if (this.removed.has(id)) throw notFound();
     const dir = this.taskDir(id);
     this.#appendRow(id, event);
+    await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+    return event;
+  }
+
+  // A terminal event and the task snapshot it describes must survive or roll
+  // back together. External runtime effects remain outside SQLite transactions.
+  async appendEventWithTask(id, event, task, run = null) {
+    if (this.removed.has(id)) throw notFound();
+    const dir = this.taskDir(id);
+    if (task.id !== id || (run && run.taskId !== id)) throw new Error('Task/event/run identity mismatch');
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      event.seq = this.#nextSeq(id);
+      this.db.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run(id, event.seq, JSON.stringify(event));
+      this.#upsert({ ...task, snapshotSeq: event.seq });
+      if (run) this.recordRun(run);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      try { this.db.exec('ROLLBACK'); } catch {}
+      throw error;
+    }
     await fsp.mkdir(dir, { recursive: true }).catch(() => {});
     return event;
   }
