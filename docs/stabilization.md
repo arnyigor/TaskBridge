@@ -28,6 +28,7 @@ Original evidence: [CI run 38667985170](https://github.com/arnyigor/TaskBridge/a
 | Local command durability | PRODUCT_BUG | An automatic 24-hour receipt purge allowed an old HTTP command ID to execute again; a final receipt-write failure was hidden behind a successful response. CommandCoordinator now owns local acceptance/replay, expires only the memory cache, and reports UNKNOWN_OUTCOME if an effect's result cannot be saved. Web and KMP retain the ambiguous state and reconcile against history. |
 | Attachment path aliases | PRODUCT_BUG | Windows CI exposed a workspace named through a junction/alias: input directories used realpath while metadata used the lexical path, producing ../ paths. Use the same canonical workspace for both; a junction/symlink regression reproduced the defect locally before the fix. |
 | Probe/remaining-time assertions | TEST_BUG | Ubuntu probe test counted unrelated router health requests; force that interleaving and assert the external model POST destination instead. Windows wait test required remainingMs to equal the original duration despite elapsed time; bound it by the actual observation interval. No sleeps, retries or skips were added. |
+| RPC kill/close window | PRODUCT_BUG | A subsequent Ubuntu run caught reuse between a requested SIGKILL and the OS close event. killTree now retires the input channel and pending RPCs synchronously; canSend also checks exit/signal facts. A process already known to have exited is not signalled again by its old PID. |
 
 The POSIX fixes passed an isolated Linux run. Handling EventMux rejection isolates failures; durable delivery belongs to the SQLite event store and the Cloud outbox, not to the synchronous multiplexer.
 
@@ -126,6 +127,8 @@ The script now instruments only its disposable server copy, sampling heap/RSS an
 ## Outstanding gates
 
 The first new CI run [38679764130](https://github.com/arnyigor/TaskBridge/actions/runs/38679764130) passed KMP and the separate security workflow, but exposed the alias defect and two timing-sensitive test assumptions above. Follow-up checks passed 62 tests on Windows and the 12 alias/probe tests on Linux; a new CI run is required for the follow-up commit.
+
+The next CI run [38680349537](https://github.com/arnyigor/TaskBridge/actions/runs/38680349537) exposed the RPC kill/close window. Focused RPC checks passed 26 tests with one existing Windows skip, and 16 Linux tests without skips. The new immediate-retirement regression verifies that an outstanding request is classified and settled before OS close, with no further sends through that channel.
 
 - Node 22/Linux CI on the resulting commit. Windows success cannot close this gate.
 - PID identity between inspection and signal: current process panel retains an OS time-of-check/time-of-use window.

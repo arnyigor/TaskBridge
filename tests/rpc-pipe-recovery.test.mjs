@@ -98,6 +98,15 @@ test('an asynchronous stdin EPIPE settles pending requests without crashing or r
   await assert.rejects(session.prompt('must not be sent'), { code: 'PI_RPC_NOT_WRITABLE' });
 });
 
+test('a requested kill retires the RPC channel before the OS close event', async t => {
+  const session = await slowFixture(t, 2500);
+  const pending = assert.rejects(session.getState(), { code: 'PI_RPC_NOT_WRITABLE' });
+  const stopping = session.killTree();
+  assert.equal(session.canSend(), false, 'the channel is unusable as soon as stopping starts');
+  await pending;
+  await stopping;
+});
+
 test('a session whose Pi exited reports a dead pipe as soon as the pipe closes', { timeout: 30000 }, async t => {
   const { command } = await fixture(t);
   const session = new PiRpcSession({ command, persistSessions: false });

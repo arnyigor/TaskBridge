@@ -207,7 +207,9 @@ export class PiRpcSession extends EventEmitter {
   // command sent inside that window fails, so a caller that wants to hand the
   // command to a live Pi has to ask this, not `closed`.
   canSend() {
-    return Boolean(this.proc) && !this.closed && !this.pipeError && this.proc.stdin?.writable === true;
+    return Boolean(this.proc) && !this.closed && !this.stopping && !this.pipeError
+      && this.proc.exitCode == null && this.proc.signalCode == null && !this.proc.killed
+      && this.proc.stdin?.writable === true;
   }
 
   send(command) {
@@ -361,7 +363,11 @@ export class PiRpcSession extends EventEmitter {
   }
 
   async killTree() {
-    if (!this.proc?.pid) return;
+    if (!this.proc?.pid || this.proc.exitCode != null || this.proc.signalCode != null) return;
+    // A signal request and the OS close event are different moments. Retire
+    // the channel now, so another caller cannot reuse it during that window.
+    this.stopping = true;
+    this.#rejectAll(Object.assign(new Error('Pi RPC session is stopping'), { code: 'PI_RPC_NOT_WRITABLE', retryable: true }));
     const pid = this.proc.pid;
     if (process.platform === 'win32') {
       await new Promise((resolve) => {
