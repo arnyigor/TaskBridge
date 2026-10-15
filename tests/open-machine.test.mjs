@@ -34,8 +34,15 @@ function post(fixture, routePath, { headers = {}, body } = {}) {
 function insertEvent(fixture, taskId, payload) {
   const db = new DatabaseSync(path.join(fixture.root, 'data', 'taskbridge.db'));
   try {
+    // This is a second writer beside the live fixture server. Reserve the write
+    // before choosing seq, and use the store's normal bounded contention budget.
+    db.exec('PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE');
     const seq = Number(db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE task_id = ?').get(taskId).seq);
     db.prepare('INSERT INTO events (task_id, seq, payload) VALUES (?, ?, ?)').run(taskId, seq, JSON.stringify({ taskId, ...payload }));
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch { /* transaction did not start */ }
+    throw error;
   } finally {
     db.close();
   }

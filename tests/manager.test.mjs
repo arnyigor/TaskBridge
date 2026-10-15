@@ -42,6 +42,18 @@ function recordSteering(f) {
   return { modes, aborts: () => aborts };
 }
 
+test('send-pending with an empty queue succeeds while the pump finishes delivery', async t => {
+  const f = await fixture(t);
+  f.task.pendingPrompts = [];
+  f.manager.dispatching = f.task.id;
+  const result = await f.manager.sendPendingNow(f.task.id);
+  assert.equal(result.id, f.task.id);
+  assert.deepEqual(f.sent, []);
+  f.task.pendingPrompts = [{ id: 'next', text: 'keep queued', files: [] }];
+  await assert.rejects(f.manager.sendPendingNow(f.task.id), error => error.code === 'BUSY');
+  assert.deepEqual(f.task.pendingPrompts.map(p => p.id), ['next']);
+});
+
 test('send-now cuts in as steering: the turn and its command keep running, the queue stays', async t => {
   const f = await fixture(t, true);
   f.manager.activeTaskId = 'a';

@@ -198,6 +198,33 @@ the earlier packaged EXE launch and tray-update checks; it does not automate the
 operator's window or send commands to their sessions. API-contract fetch failures
 now identify the exact method/path while retaining the existing 15-second budget.
 
+Final local gates at `f65670a`: Windows Node 22 **1115 pass, 0 fail, 5 existing
+skips**; shared JVM **203 pass**, including desktop UI acceptance; Android debug
+and portable desktop builds succeeded. A preceding full run hit one API fetch
+budget without identifying its route; the focused contract run and subsequent
+full corpus passed. The new method/path diagnostic preserves the timeout rather
+than hiding a future recurrence.
+
+A sequential 30-turn comparison used tracked sources from `19a486e` and the
+current checkout on the same Windows Node 24.16.0 and GC-instrumented fixture.
+ACK p50 was 16.12/16.20 ms, p95 22.63/25.45 ms, history p95 6.28/5.07 ms and final
+post-GC heap 13.52/13.51 MiB. These small, sequential samples characterize the
+current environment; they are not a statistically controlled speedup claim.
+The final Node 22 characterization separately measured ACK p95 28.04 ms and first
+durable SSE replay after restart p95 5.14 ms (three restart samples). Its runtime
+and measurement mode differ from the first baseline and must not be mixed into
+a before/after performance claim.
+
+Windows CI at `f65670a` exposed two additional races. In production, an empty
+pending queue could still return BUSY while the pump finished an already-accepted
+delivery: the no-op check ran after dispatch/capacity refusal. It now precedes
+those guards, while a nonempty queue still cannot cut into an active dispatch.
+A manager regression reproduced the error before the fix and pins both cases.
+Separately, open-machine's direct test SQL writer had SQLite's zero busy timeout
+and selected its next event sequence without a write transaction. Its insert now
+uses the store's five-second contention budget and BEGIN IMMEDIATE; production
+file-access policy and database settings are unchanged.
+
 ## Reproducible latency baseline
 
 `node scripts/quality-baseline.mjs --samples 20 --output <ignored-local-file>` creates its own server, fake runtime and SQLite database, measures warm HTTP, verifies exactly one USER_MESSAGE effect per command ID and cleans up only its fixture. It never connects to the operator's server. The report identifies its base commit, dirty-tree state, environment, source sizes and SQLite plan.

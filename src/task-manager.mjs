@@ -5373,6 +5373,13 @@ export class TaskManager extends EventEmitter {
       // Retrying a stale button must not deliver the NEXT queued message.
       if (pendingId && !(task.pendingPrompts || []).some(p => p.id === pendingId)) return this.#publicTask(task);
       if (!task.workspacePath) throw Object.assign(new Error('Сначала дождитесь запуска исходной задачи.'), { code: 'BUSY' });
+      // The pump may have already taken the last message but still own dispatch.
+      // With nothing left to send this request is a read of the current result,
+      // so it must not fail a capacity/dispatch check or deliver another prompt.
+      if (!(task.pendingPrompts || []).length) {
+        this.#removeQueued(id);
+        return this.#publicTask(task);
+      }
       // Check first: "сейчас" cannot mean a second generation in parallel, and a
       // refusal must leave the prompt where it was. The pump may be delivering
       // another session's queued prompt right now (a delegating delivery claims
@@ -5400,10 +5407,6 @@ export class TaskManager extends EventEmitter {
       // now: «Отправить сейчас» clicked right after Enter. An empty queue here is
       // not an error — the message is already on its way, and the operator must
       // not see «Нет сообщения в очереди» for a text that was sent.
-      if (!(task.pendingPrompts || []).length) {
-        this.#removeQueued(id);
-        return this.#publicTask(task);
-      }
       let pending, restore;
       try {
         ({ pending, restore } = await this.#takePending(task, pendingId));
