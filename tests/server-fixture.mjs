@@ -60,9 +60,11 @@ export async function startFixture(port, overrides = {}) {
   };
   const waitReady = async () => {
   let ready = false;
-  for (let i = 0; i < 100; i++) {
+  // 12s headroom: a loaded CI runner (Windows especially) can need several
+  // seconds just to spawn the child and answer the first health probe.
+  for (let i = 0; i < 240; i++) {
     try { await api('/api/health'); ready = true; break; } catch {}
-    await new Promise(resolve => setTimeout(resolve, 30));
+    await new Promise(resolve => setTimeout(resolve, 50));
   }
   if (!ready) throw new Error(`Fixture startup failed: ${logs}`);
   };

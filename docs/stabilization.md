@@ -132,6 +132,8 @@ The next CI run [38680349537](https://github.com/arnyigor/TaskBridge/actions/run
 
 Run [38680690469](https://github.com/arnyigor/TaskBridge/actions/runs/38680690469) passed Ubuntu and KMP. Windows had one SNAPSHOT_UNAVAILABLE during the real cleanup E2E: the OS process snapshot uses an existing 8-second PowerShell/CIM budget and fails closed. Windows CI now runs the entire corpus at concurrency 2, matching the existing regression runner's resource policy; Ubuntu remains at 4. No assertion, process protection or timeout is relaxed, and no test is skipped or retried.
 
+Run [38681223169](https://github.com/arnyigor/TaskBridge/actions/runs/38681223169) exposed two remaining load-sensitive test assumptions, both fixed without relaxing assertions. Ubuntu: the WormSoft sampling test read `/api/info` in the fire-and-forget window — the stub counts a request on receipt, while the status snapshot and usage file land after both responses are processed; the test now waits (bounded) for the sampled value and the persisted file. Windows: fixture startup kept a 3-second budget from the single-machine era and expired under parallel CI load (`waitReady` in `tests/server-fixture.mjs`); the budget is now 12 seconds with the same health-probe semantics. Full corpus after the fixes: Windows Node 22 — 1107 pass / 4 platform skips / 0 fail; Linux (WSL) — 1108 pass / 3 platform skips / 0 fail.
+
 - Node 22/Linux CI on the resulting commit. Windows success cannot close this gate.
 - PID identity between inspection and signal: current process panel retains an OS time-of-check/time-of-use window.
 - Additional lifecycle/coordinator and Web/KMP responsibility extractions, preserving contracts and regression coverage.

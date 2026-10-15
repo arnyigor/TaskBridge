@@ -785,9 +785,24 @@ test('a WormSoft model request samples the balance without a status poll', { tim
   });
   for (let i = 0; i < 80 && calls < 2; i++) await new Promise(resolve => setTimeout(resolve, 50));
   assert.equal(calls, 2, `model request should sample account and plan: ${fixture.logs()}`);
-  assert.equal((await fixture.api('/api/info')).providerStatuses.wormsoft.subscription.remaining, 800);
+  // The sample is fire-and-forget: the stub counts a request on receipt, while
+  // the status update and the usage file land after both responses are
+  // processed. On a loaded runner that window is wider than a single read, so
+  // wait for the sampled value instead of assuming it is already visible.
+  let sampled;
+  for (let i = 0; i < 100; i++) {
+    sampled = (await fixture.api('/api/info')).providerStatuses.wormsoft?.subscription?.remaining;
+    if (sampled === 800) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.equal(sampled, 800, `sampled balance must reach the status snapshot: ${fixture.logs()}`);
   assert.equal(calls, 2, 'subsequent info polls do not request the provider');
-  assert.ok((await fs.readFile(path.join(fixture.root, 'data', 'wormsoft-usage.json'), 'utf8')).includes('800'));
+  let usageFile = '';
+  for (let i = 0; i < 100 && !usageFile.includes('800'); i++) {
+    usageFile = await fs.readFile(path.join(fixture.root, 'data', 'wormsoft-usage.json'), 'utf8').catch(() => '');
+    if (!usageFile.includes('800')) await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(usageFile.includes('800'), 'usage sample must be persisted');
   assert.ok(task.id);
 });
 
