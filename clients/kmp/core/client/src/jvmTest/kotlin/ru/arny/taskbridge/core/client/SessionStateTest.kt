@@ -19,6 +19,14 @@ import kotlin.test.assertTrue
 class SessionStateTest {
 
     @Test
+    fun openRouterUpstreamReasonSurvivesGenericEnvelope() {
+        assertEquals("Liquid is temporarily rate-limited upstream. Please retry shortly.", humanizeError("""429: {"message":"Provider returned error","metadata":{"raw":"Liquid is temporarily rate-limited upstream. Please retry shortly.","headers":{"private":"must-not-render"}}}"""))
+        assertEquals("Shared pool exhausted (rate_limit_exceeded)", humanizeError("""{"message":"Provider returned error","metadata":{"raw":"{\"error\":{\"message\":\"Shared pool exhausted\",\"code\":\"rate_limit_exceeded\"}}"}}"""))
+        assertEquals("Useful primary explanation", humanizeError("""{"message":"Useful primary explanation","metadata":{"raw":"Incidental detail"}}"""))
+        assertEquals("Provider returned error", humanizeError("""{"message":"Provider returned error","metadata":{"raw":{"unexpected":true}}}"""))
+    }
+
+    @Test
     fun nestedProviderJsonErrorIsHumanized() {
         val raw = """{"error":{"message":"{\\n \\\"error\\\": {\\n \\\"code\\\": 503,\\n \\\"message\\\": \\\"This model is currently experiencing high demand.\\\",\\n \\\"status\\\": \\\"UNAVAILABLE\\\"\\n}\\n}"},"code":503}"""
         assertEquals("This model is currently experiencing high demand. (UNAVAILABLE)", humanizeError(raw))

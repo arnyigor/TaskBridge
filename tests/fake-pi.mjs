@@ -119,7 +119,7 @@ function finish(text, fail = false, errorMessage = 'Fixture model error', thinki
 let deaf = false;
 let tailAfterAbort = false;
 function faultOf(message) {
-  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
+  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|heavy-mixed|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
@@ -160,6 +160,43 @@ async function runFault(fault, command, respond) {
     process.stdout.write('{"type":"message_update","assistantMessageEvent":\n');
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
     finish('после мусора');
+    return;
+  }
+  if (fault === 'heavy-mixed') {
+    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    const block = '  \n' + 'Разбор кода, reasoning и bash-команд.\n'.repeat(7000) + '\n  ';
+    for (let part = 0; part < 3; part++) {
+      const text = (part ? '\n\n' : '') + block;
+      for (let offset = 0; offset < text.length; offset += 16000) {
+        send({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: text.slice(offset, offset + 16000) } });
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      if (part === 0 && String(command.message).includes('gated')) {
+        const started = Date.now();
+        while (!fs.existsSync('heavy-stream.release')) {
+          if (Date.now() - started > 60000) throw new Error('Heavy stream gate was not released');
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      }
+    }
+    const tools = [];
+    for (let index = 0; index < 120; index++) {
+      const name = ['bash', 'read', 'edit', 'write'][index % 4];
+      const args = name === 'bash' ? { command: `echo operation-${index}` } : { path: `mixed/file-${index}.kt`, oldText: 'old', newText: 'new', content: 'created' };
+      const id = `mixed-${turn}-${index}`;
+      tools.push({ type: 'toolCall', id, name, arguments: args });
+      send({ type: 'tool_execution_start', toolCallId: id, toolName: name, args });
+      send({ type: 'tool_execution_end', toolCallId: id, toolName: name, isError: false, result: { content: [{ type: 'text', text: `Result ${index}\n` + 'output line\n'.repeat(20) }] } });
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    const text = 'HEAVY_MIXED_STREAM_OK';
+    send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } });
+    const message = { role: 'assistant', content: [...Array.from({ length: 3 }, () => ({ type: 'thinking', thinking: block })), ...tools, { type: 'text', text }], stopReason: 'stop' };
+    persist(message);
+    send({ type: 'message_end', message });
+    streaming = false;
+    send({ type: 'agent_end', messages: [message] });
+    send({ type: 'agent_settled' });
     return;
   }
   if (fault === 'slow-stream') {

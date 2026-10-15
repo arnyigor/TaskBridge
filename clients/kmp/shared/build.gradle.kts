@@ -88,6 +88,15 @@ tasks.withType<Test>().configureEach {
     systemProperty("taskbridge.repo", rootProject.projectDir.resolve("../..").canonicalPath)
 }
 
+// Explicitly invoked live-provider acceptance; ordinary jvmTest stays offline.
+tasks.register<JavaExec>("realProviderUiProbe") {
+    dependsOn("jvmTestClasses")
+    val compilation = kotlin.targets.getByName("jvm").compilations.getByName("test")
+    classpath(compilation.output.allOutputs, compilation.runtimeDependencyFiles)
+    mainClass.set("ru.arny.taskbridge.RealProviderUiProbe")
+    systemProperty("taskbridge.repo", rootProject.projectDir.resolve("../..").canonicalPath)
+}
+
 dependencies {
     androidRuntimeClasspath(libs.compose.uiTooling)
 }

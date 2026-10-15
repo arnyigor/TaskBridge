@@ -45,6 +45,14 @@ test('provider JSON error bodies are flattened into one readable line', () => {
   assert.equal(humanizeError(new Error('boom')), 'boom');
 });
 
+test('OpenRouter generic failures preserve the upstream explanation without metadata noise', () => {
+  const wrap = (raw, message = 'Provider returned error') => JSON.stringify({ message, code: 429, metadata: { raw, headers: { private: 'must-not-render' } } });
+  assert.equal(humanizeError(wrap('Liquid is temporarily rate-limited upstream. Please retry shortly.')), 'Liquid is temporarily rate-limited upstream. Please retry shortly.');
+  assert.equal(humanizeError(wrap(JSON.stringify({ error: { message: 'Shared pool exhausted', code: 'rate_limit_exceeded' } }))), 'Shared pool exhausted (rate_limit_exceeded)');
+  assert.equal(humanizeError(wrap('Incidental detail', 'Useful primary explanation')), 'Useful primary explanation');
+  assert.equal(humanizeError(wrap({ unexpected: true })), 'Provider returned error');
+});
+
 test('retry-after hints are parsed and bounded', () => {
   assert.equal(parseRetryAfterMs('Rate limited. Retry after 30 seconds.'), 30000);
   assert.equal(parseRetryAfterMs('Retry-After: 1500 ms'), 1500);

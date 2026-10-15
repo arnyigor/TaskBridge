@@ -974,7 +974,11 @@ class TaskBridgeApi(
                     authorize()
                 }.execute { response ->
                     openingTimeout.cancel()
-                    if (!response.status.isSuccess()) throw ApiException(apiErrorOf(response.status.value, response.bodyAsText()))
+                    if (!response.status.isSuccess()) {
+                        val body = kotlinx.coroutines.withTimeoutOrNull(idleTimeoutMillis) { response.bodyAsText() }
+                            ?: throw ApiException(ApiError.Unreachable("Сервер не завершил ответ с ошибкой за ${idleTimeoutMillis / 1000} с"))
+                        throw ApiException(apiErrorOf(response.status.value, body))
+                    }
                     val channel = response.bodyAsChannel()
                     while (true) {
                         val line = try {

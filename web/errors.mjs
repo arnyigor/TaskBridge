@@ -70,6 +70,16 @@ function findMessage(body, depth = 0) {
     typeof body.error === 'string' && !parseNestedObject(body.error) ? body.error : '',
     body.detail, body.reason, body.description
   );
+  // OpenRouter wraps actionable upstream failures in this generic sentence.
+  // Read only the documented raw message, never stringify arbitrary metadata.
+  if (/^provider returned error\.?$/i.test(message)) {
+    const raw = pickString(body.metadata?.raw);
+    if (raw) {
+      const upstream = parseNestedObject(raw);
+      const found = upstream ? findMessage(upstream, depth + 1) : { message: raw, code: '', param: '' };
+      if (found.message) return found;
+    }
+  }
   const rawCode = pickString(body.error_type, body.type, body.code, body.errorCode, body.status);
   const code = /^[A-Za-z][\w-]*$/.test(rawCode) ? rawCode : '';
   const param = pickString(body.param);

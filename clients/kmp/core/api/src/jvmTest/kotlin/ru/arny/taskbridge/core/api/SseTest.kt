@@ -153,4 +153,31 @@ class SseTest {
         val error = assertFailsWith<ApiException> { api.stream("nope", 0).toList() }
         assertIs<ApiError.NotFound>(error.error)
     }
+
+    @Test
+    fun unfinishedHttpErrorBodyHasABoundedWait() = runBlocking<Unit> {
+        val body = io.ktor.utils.io.ByteChannel(autoFlush = true)
+        val http = HttpClient(MockEngine {
+            respond(body, HttpStatusCode.ServiceUnavailable)
+        })
+        try {
+            val api = TaskBridgeApi(http, SimpleConnection("http://pc:8787"))
+            val error = withTimeout(2_000) {
+                assertFailsWith<ApiException> { api.stream("t", 0, idleTimeoutMillis = 100).toList() }
+            }
+            assertIs<ApiError.Unreachable>(error.error)
+        } finally { body.close(); http.close() }
+    }
+
+    @Test
+    fun callerCancellationWhileReadingErrorBodyIsPreserved() = runBlocking<Unit> {
+        val body = io.ktor.utils.io.ByteChannel(autoFlush = true)
+        val http = HttpClient(MockEngine { respond(body, HttpStatusCode.ServiceUnavailable) })
+        try {
+            val api = TaskBridgeApi(http, SimpleConnection("http://pc:8787"))
+            assertFailsWith<TimeoutCancellationException> {
+                withTimeout(100) { api.stream("t", 0, idleTimeoutMillis = 5_000).toList() }
+            }
+        } finally { body.close(); http.close() }
+    }
 }

@@ -35,6 +35,14 @@ fun humanizeError(value: String?): String {
         }
         val message = listOf(source.str("message"), source.str("error"), source.str("detail"), source.str("reason"), source.str("description"))
             .firstOrNull { it.isNotEmpty() && nested(it) == null }.orEmpty()
+        if (message.removeSuffix(".").equals("Provider returned error", ignoreCase = true)) {
+            val raw = (source["metadata"] as? JsonObject).str("raw")
+            if (raw.isNotEmpty()) {
+                val upstream = nested(raw)
+                val found = if (upstream != null) find(upstream, depth + 1) else Triple(raw, "", "")
+                if (found.first.isNotEmpty()) return found
+            }
+        }
         val code = listOf(source.str("error_type"), source.str("type"), source.str("code"), source.str("errorCode"), source.str("status"))
             .firstOrNull { it.isNotEmpty() }.orEmpty()
         return Triple(message, code, source.str("param"))

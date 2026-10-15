@@ -8,6 +8,8 @@
 // Closing stdin shuts everything down.
 
 import readline from 'node:readline';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
 
 const fixture = await startFixture();
@@ -15,6 +17,10 @@ process.stdout.write(JSON.stringify({ base: fixture.base }) + '\n');
 
 const lines = readline.createInterface({ input: process.stdin });
 lines.on('line', async (line) => {
+  if (line.trim() === 'release-heavy') {
+    await fs.writeFile(path.join(fixture.root, 'heavy-stream.release'), 'released');
+    process.stdout.write('heavy-released\n');
+  }
   if (line.trim() === 'restart') {
     await fixture.restart();
     process.stdout.write('restarted\n');
