@@ -30,6 +30,25 @@ const settled = async id => {
   }
   throw new Error('Fixture did not settle');
 };
+const replayFirstEvent = async (id, cursor) => {
+  const start = performance.now();
+  const response = await fetch(`${fixture.base}/api/tasks/${id}/stream?after=${cursor}`, { signal: AbortSignal.timeout(5000) });
+  if (!response.ok) throw new Error(`SSE replay HTTP ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) throw new Error('SSE ended before replay');
+      buffer += decoder.decode(next.value, { stream: true });
+      const frame = /^data: ([^\r\n]+)\r?\n/m.exec(buffer);
+      if (!frame) continue;
+      if (!(JSON.parse(frame[1]).seq > cursor)) throw new Error('SSE replay did not advance its cursor');
+      return performance.now() - start;
+    }
+  } finally { await reader.cancel(); }
+};
 try {
   await fs.appendFile(path.join(fixture.root, 'src/server.mjs'), `
 const qualityPerf = await import('node:perf_hooks');
@@ -80,6 +99,14 @@ setInterval(() => {
   const sizes = await Promise.all(files.map(async file => ({ path: file, bytes: (await fs.stat(path.join(repo, file))).size })));
   const processProfile = JSON.parse(await fs.readFile(probeFile, 'utf8'));
   if (processProfile.pid !== fixture.appPid) throw new Error('Profile belongs to a different process');
+  const restart = [], replay = [];
+  const replayCursor = events[Math.floor(events.length / 2)].seq;
+  for (let i = 0; i < 3; i++) {
+    const start = performance.now();
+    await fixture.restart();
+    restart.push(performance.now() - start);
+    replay.push(await replayFirstEvent(task.id, replayCursor));
+  }
   const report = {
     schemaVersion: 1, at: new Date().toISOString(), commit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim(),
     workingTreeDirty: Boolean(execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { cwd: repo, encoding: 'utf8' }).trim()),
@@ -88,6 +115,7 @@ setInterval(() => {
     commandAck: summary(ack), duplicateAck: summary(dedupe), history100Events: summary(history),
     confirmedCommandEffects: commands.length, sqliteEventReplayPlan: queryPlan,
     serverProcess: processProfile,
+    restartToReady: summary(restart), sseFirstReplayAfterRestart: summary(replay),
     profilingNote: '10ms event-loop histogram; CPU since warm probe start; memory peaks sampled every 100ms with periodic local JSON write overhead; not a retained-heap measurement',
     largestSources: sizes.sort((a, b) => b.bytes - a.bytes).slice(0, 20)
   };

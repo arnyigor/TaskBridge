@@ -130,6 +130,8 @@ The first new CI run [38679764130](https://github.com/arnyigor/TaskBridge/action
 
 The next CI run [38680349537](https://github.com/arnyigor/TaskBridge/actions/runs/38680349537) exposed the RPC kill/close window. Focused RPC checks passed 26 tests with one existing Windows skip, and 16 Linux tests without skips. The new immediate-retirement regression verifies that an outstanding request is classified and settled before OS close, with no further sends through that channel.
 
+Run [38680690469](https://github.com/arnyigor/TaskBridge/actions/runs/38680690469) passed Ubuntu and KMP. Windows had one SNAPSHOT_UNAVAILABLE during the real cleanup E2E: the OS process snapshot uses an existing 8-second PowerShell/CIM budget and fails closed. Windows CI now runs the entire corpus at concurrency 2, matching the existing regression runner's resource policy; Ubuntu remains at 4. No assertion, process protection or timeout is relaxed, and no test is skipped or retried.
+
 - Node 22/Linux CI on the resulting commit. Windows success cannot close this gate.
 - PID identity between inspection and signal: current process panel retains an OS time-of-check/time-of-use window.
 - Additional lifecycle/coordinator and Web/KMP responsibility extractions, preserving contracts and regression coverage.
