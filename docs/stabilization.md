@@ -263,3 +263,7 @@ CI on the resulting commit remains a required gate. Local plan, raw reports, scr
 ### Chat menu overlay regression (2026-10-15)
 
 The desktop staged-update shortcut occupied the same top-right area as the session menu and intercepted its pointer input. Removed the window overlay; the existing tray update action remains available. DesktopChatAcceptanceTest now opens the session menu, selects history copy, and verifies the transcript delivered to PlatformServices.copyText. Portable staging and Android debug assembly succeeded.
+
+### CI request-recorder race (2026-10-15)
+
+CI 38728057712 passed both Node platforms but core JVM failed with ConcurrentModificationException in ProjectWorkspaceTest. Its MockEngine records concurrent workspace requests while assertions iterate the same mutable ArrayList; runNow also schedules a refresh. Replaced only the JVM test recorder with CopyOnWriteArrayList, whose iteration observes a stable snapshot. No production behavior, timeout, skip, or retry changed.
