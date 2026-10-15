@@ -328,6 +328,22 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, intervals, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
+test('DOM: long quiet tools are not model silence; stalled model response still warns', async () => {
+  const app = await ui();
+  const running = { ...task(), status: 'RUNNING', turnState: { phase: 'PROGRESS', turn: 1,
+    stage: 'bash: long command', silentMs: 600000 } };
+  for (const activity of ['tool', 'compacting', 'waiting_model']) {
+    app.renderActivity({ ...running, runtime: { state: 'WORKING', activity } });
+    assert.ok(app.document.getElementById('silenceBanner').classList.contains('hidden'), activity);
+    assert.doesNotMatch(app.document.getElementById('activity').textContent, /модель молчит/i);
+  }
+  app.renderActivity({ ...running, runtime: { state: 'WORKING', activity: 'streaming' } });
+  assert.equal(app.document.getElementById('silenceBanner').classList.contains('hidden'), false);
+  assert.match(app.document.getElementById('silenceText').textContent, /Модель молчит/);
+  app.renderActivity({ ...running, status: 'PREPARING' });
+  assert.ok(app.document.getElementById('silenceBanner').classList.contains('hidden'));
+});
+
 test('DOM: saved answers survive repeated polls, context loads immediately, reconnect is deduplicated', async () => {
   const app = await ui();
   await app.selectTask('a');

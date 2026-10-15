@@ -2164,8 +2164,10 @@ data class SilenceState(val totalMs: Long, val stage: String?) {
 }
 
 internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceState? {
+    // A quiet tool/compaction/provider retry is a known activity, not a silent model.
+    if (task?.status != "RUNNING" || task.providerWait != null ||
+        task.runtime?.activity in setOf("tool", "compacting", "waiting_model")) return null
     val silent = task?.turnState?.silentMs?.takeIf { it >= thresholdMs } ?: return null
-    if (task.status !in ACTIVE_STATUSES) return null
     return SilenceState(silent, task.turnState?.stage?.takeIf { it.isNotBlank() })
 }
 

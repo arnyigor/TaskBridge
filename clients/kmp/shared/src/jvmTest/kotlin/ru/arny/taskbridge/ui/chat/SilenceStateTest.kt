@@ -2,6 +2,7 @@ package ru.arny.taskbridge.ui.chat
 
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TurnState
+import ru.arny.taskbridge.core.api.RuntimeInfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -33,5 +34,20 @@ class SilenceStateTest {
     @Test
     fun `a blank stage is not shown as progress`() {
         assertNull(silenceState(task(stage = "  "))!!.stage)
+    }
+
+    @Test
+    fun `quiet long tools and known runtime waits are not model silence`() {
+        for (activity in listOf("tool", "compacting", "waiting_model")) {
+            assertNull(silenceState(task(silentMs = 600_000L).copy(
+                runtime = RuntimeInfo(state = "WORKING", activity = activity),
+            )), activity)
+        }
+        for (status in listOf("QUEUED", "PREPARING", "PREFLIGHT", "WAITING_USER", "VERIFYING", "CANCELLING")) {
+            assertNull(silenceState(task(status = status)), status)
+        }
+        assertEquals("Модель молчит 3:00", silenceState(task().copy(
+            runtime = RuntimeInfo(state = "WORKING", activity = "streaming"),
+        ))?.label)
     }
 }

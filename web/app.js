@@ -2532,6 +2532,10 @@ function silenceKey(task) {
 }
 
 function activitySilenceMs(task) {
+  // Silence of Pi's event stream is expected while a tool runs without output.
+  // These stages already have their own activity; they are not model silence.
+  if (task?.status !== 'RUNNING' || task.providerWait
+    || ['tool', 'compacting', 'waiting_model'].includes(task.runtime?.activity)) return null;
   const baseline = task?.turnState?.silentMs;
   // Use the server's duration, not the difference between two devices' clocks.
   return Number.isFinite(baseline) && baseline >= 0
