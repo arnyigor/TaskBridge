@@ -37,6 +37,7 @@ export const SECTIONS = {
       'tests/send-flow.test.mjs',
       'tests/send-e2e.test.mjs',
       'tests/queue-http.test.mjs',
+      'tests/queue-pump.test.mjs',
       'tests/runs.test.mjs',
       'tests/local-command-coordinator.test.mjs',
       'tests/runtime-faults.test.mjs',

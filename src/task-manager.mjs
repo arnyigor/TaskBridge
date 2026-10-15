@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { TerminalPublication } from './domain/terminal-publication.mjs';
 import { RunCoordinator } from './application/run-coordinator.mjs';
+import { QueuePump } from './application/queue-pump.mjs';
 import { CommandCoordinator } from './application/command-coordinator.mjs';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
@@ -387,8 +388,13 @@ export class TaskManager extends EventEmitter {
     // capacity 1: a task that cannot start yet (local model busy) is kept in
     // the queue and retried, instead of rejecting the operator's prompt.
     this.queuePollMs = Number(config.queue?.pollMs) > 0 ? Number(config.queue.pollMs) : 1000;
-    this.pumpTimer = null;
-    this.pumpAgain = false;
+    this.queuePump = new QueuePump({
+      isClosing: () => this.closing,
+      hasQueued: () => this.queue.length > 0,
+      hasCapacity: () => this.activeTaskIds.size < this.maxParallelSessions,
+      dispatch: () => this.#pumpOnce(),
+      pollMs: () => this.queuePollMs,
+    });
     this.closing = false;
     // commandId → { hash, done, result, at }: dedupes operator commands so a
     // retry / second client / double-click cannot fire a prompt twice. TTL is
@@ -766,7 +772,7 @@ export class TaskManager extends EventEmitter {
     this.closing = true;
     try { this.memoryProvider?.closeIndex(); } catch { /* индекс — кэш, его потеря не важна */ }
     if (this.memoryConsolidationTimer) { clearInterval(this.memoryConsolidationTimer); this.memoryConsolidationTimer = null; }
-    if (this.pumpTimer) { clearTimeout(this.pumpTimer); this.pumpTimer = null; }
+    this.queuePump.stopPolling();
     await this.#drainPump(2000);
     // A queued #event write that is still pending here would fire after the
     // caller closes the SQLite handle and crash ("reading 'exec' of null"),
@@ -801,12 +807,7 @@ export class TaskManager extends EventEmitter {
   // Waits until an in-flight pump has finished (bounded), so store.write from a
   // pump cannot race store.close(). The pump aborts promptly because closing is
   // latched and #executeInitial/#setStatus early-return on it.
-  async #drainPump(timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
-    while (this.pumping && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-  }
+  async #drainPump(timeoutMs) { return this.queuePump.drain(timeoutMs); }
 
   // Resolves when a child process has exited, else false after `ms`.
   #waitProcessClose(proc, ms) {
@@ -2641,14 +2642,7 @@ export class TaskManager extends EventEmitter {
 
   // Retry the queue later instead of spinning: the model is owned by someone
   // else for an unknown time.
-  #schedulePump() {
-    if (this.pumpTimer) return;
-    this.pumpTimer = setTimeout(() => {
-      this.pumpTimer = null;
-      setImmediate(() => this.#pump());
-    }, this.queuePollMs);
-    this.pumpTimer.unref?.();
-  }
+  #schedulePump() { this.queuePump.schedule(); }
 
   // One event per transition, so the UI (and the cloud) can explain why nothing
   // is happening yet.
@@ -2773,31 +2767,7 @@ export class TaskManager extends EventEmitter {
   }
 
 
-  async #pump() {
-    // One pump at a time. Two overlapping pumps used to take two pending prompts
-    // at once, so the queue could deliver them out of order (caught by
-    // tests/queue-http.test.mjs).
-    //
-    // A wake-up that arrives during a pump (or while a session owns the machine)
-    // must never be lost: it is remembered and acted on instead of dropped,
-    // because the thing it would have started is a message an operator is
-    // watching. Whatever stays in the queue keeps the poll timer armed, so the
-    // queue is self-healing even if some future path forgets to call #pump.
-    if (this.closing) return;
-    if (this.pumping) { this.pumpAgain = true; return; }
-    if (this.queue.length === 0) return;
-    this.pumping = true;
-    try {
-      do {
-        this.pumpAgain = false;
-        const started = await this.#pumpOnce();
-        if (started && this.queue.length) this.pumpAgain = true;
-      } while (this.pumpAgain && this.queue.length && this.activeTaskIds.size < this.maxParallelSessions);
-    } finally {
-      this.pumping = false;
-      if (this.queue.length) this.#schedulePump();
-    }
-  }
+  async #pump() { return this.queuePump.wake(); }
 
   async #pumpOnce() {
     if (this.queue.length === 0) return false;

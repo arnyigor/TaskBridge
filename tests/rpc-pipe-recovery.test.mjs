@@ -63,7 +63,6 @@ async function fixture(t) {
   manager.queuePollMs = 100000;
   t.after(async () => {
     manager.closing = true;
-    if (manager.pumpTimer) clearTimeout(manager.pumpTimer);
     await manager.close().catch(() => {});
     store.close();
     for (let attempt = 0; ; attempt++) {

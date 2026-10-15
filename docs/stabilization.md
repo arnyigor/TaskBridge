@@ -116,6 +116,18 @@ An AST inventory (ast-grep, method_definition/function_declaration, before local
 
 These are incremental boundaries, not a claim that the monoliths have already been fully decomposed. New JS coordinators have no imports back into TaskManager/server/Web; the new KMP delivery component depends on the API and coroutines, with no reducer or Compose dependency. No framework migration is part of stabilization.
 
+`application/queue-pump.mjs` now owns dispatch serialization, remembered wake-ups,
+poll scheduling and bounded draining. TaskManager supplies queue/capacity facts and
+one dispatch callback; task selection, workspace/provider admission and runtime
+ownership stay with TaskManager. Shutdown prevents polling from being rearmed by
+an in-flight dispatch. Queue HTTP regressions retain the ordering and admission
+contract; queue-pump tests explicitly cover overlapping wake-ups and shutdown.
+
+The terminal-snapshot stress test now bounds polling by elapsed time (10 seconds),
+instead of 2000 HTTP reads. The latter could exhaust its iterations in about two
+seconds while the fixture was still in PREFLIGHT. Tight polling and the assertion
+that the terminal snapshot includes the durable TASK_FAILED event remain intact.
+
 ## Reproducible latency baseline
 
 `node scripts/quality-baseline.mjs --samples 20 --output <ignored-local-file>` creates its own server, fake runtime and SQLite database, measures warm HTTP, verifies exactly one USER_MESSAGE effect per command ID and cleans up only its fixture. It never connects to the operator's server. The report identifies its base commit, dirty-tree state, environment, source sizes and SQLite plan.

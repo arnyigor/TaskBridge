@@ -13,7 +13,6 @@ async function setupFixture(t, streaming = false) {
   manager.queuePollMs = 100000; // prevent async pump race during quick unit assertions
   t.after(async () => {
     manager.closing = true;
-    if (manager.pumpTimer) clearTimeout(manager.pumpTimer);
     await manager.close();
     store.close();
     // A background finalizer (settle → verify) spawns git with the temp

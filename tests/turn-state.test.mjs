@@ -10,13 +10,14 @@ import { startFixture } from './server-fixture.mjs';
 
 const ACTIVE = ['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'VERIFYING', 'CANCELLING'];
 
-async function settle(api, id, { tries = 200, delay = 50 } = {}) {
+async function settle(api, id, { timeoutMs = 10000, delay = 50 } = {}) {
+  const deadline = Date.now() + timeoutMs;
   let task;
-  for (let i = 0; i < tries; i++) {
+  do {
     task = await api(`/api/tasks/${id}`);
     if (!ACTIVE.includes(task.status)) return task;
     if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-  }
+  } while (Date.now() < deadline);
   throw new Error(`task stayed ${task.status}`);
 }
 
@@ -86,7 +87,7 @@ test('snapshotSeq versions the task snapshot by its last event (C-B)', { timeout
 
   const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'snapshot-seq' });
   // Tight polling catches a terminal status exposed before its final event.
-  const done = await settle(api, task.id, { tries: 2000, delay: 0 });
+  const done = await settle(api, task.id, { delay: 0 });
   assert.equal(done.status, 'SUCCEEDED', done.error || '');
 
   const events = await api(`/api/tasks/${task.id}/events?limit=0`);
@@ -111,7 +112,7 @@ test('STOP publishes CANCELLED for the stopped turn', { timeout: 60000 }, async 
   const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-hang turn-state-stop' });
   await new Promise(resolve => setTimeout(resolve, 1500));
   const stopping = api(`/api/tasks/${task.id}/cancel`, {});
-  const done = await settle(api, task.id, { tries: 2000, delay: 0 });
+  const done = await settle(api, task.id, { delay: 0 });
   await stopping;
   assert.equal(done.status, 'CANCELLED', done.error || fixture.logs());
 
@@ -126,7 +127,7 @@ test('a failed snapshot never precedes its durable TASK_FAILED event', { timeout
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'fault-crash terminal-snapshot' });
-  const done = await settle(fixture.api, task.id, { tries: 2000, delay: 0 });
+  const done = await settle(fixture.api, task.id, { delay: 0 });
   assert.equal(done.status, 'FAILED');
   const events = await fixture.api(`/api/tasks/${task.id}/events?limit=0`);
   const terminal = events.find(event => event.type === 'TASK_FAILED');
