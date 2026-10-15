@@ -1,29 +1,9 @@
 // Provider account status lives under the exact Pi provider of the active model.
-// The test executes the real renderer functions extracted from web/app.js.
+// The test imports the real provider account view used by web/app.js.
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { parseHTML } from 'linkedom';
-
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const appSource = fs.readFileSync(path.join(root, 'web', 'app.js'), 'utf8');
-
-function extractFunction(source, name) {
-  const start = source.indexOf(`function ${name}(`);
-  assert.notEqual(start, -1, `в app.js нет функции ${name}`);
-  let depth = 0;
-  let i = source.indexOf('{', start);
-  for (; i < source.length; i++) {
-    if (source[i] === '{') depth++;
-    else if (source[i] === '}') {
-      depth--;
-      if (depth === 0) return source.slice(start, i + 1);
-    }
-  }
-  throw new Error(`не найдена закрывающая скобка для ${name}`);
-}
+import { renderProviderStatus as renderProviderStatusLine } from '../web/provider-status-view.mjs';
 
 const HTML = `<!doctype html><html><body>
   <div id="pcStateModel" class="pcStateModel"></div>
@@ -34,12 +14,7 @@ const HTML = `<!doctype html><html><body>
 function makeRenderer() {
   const { document } = parseHTML(HTML);
   const $ = (id) => document.getElementById(id);
-  const names = [
-    'providerStatusForModel', 'deepseekStatusText', 'wormsoftStatusText',
-    'providerStatusText', 'renderProviderStatus',
-  ];
-  const factory = new Function('document', '$', `${names.map(name => extractFunction(appSource, name)).join('\n')}\nreturn renderProviderStatus;`);
-  return { document, renderProviderStatus: factory(document, $) };
+  return { document, renderProviderStatus: (statuses, model) => renderProviderStatusLine($('pcStateProvider'), statuses, model) };
 }
 
 const deepseek = {
@@ -58,6 +33,29 @@ const wormsoft = {
 };
 const routerai = { provider: 'routerai', label: 'RouterAI', kind: 'credits', available: true, credits: 2097.61 };
 const statuses = { deepseek, wormsoft, routerai };
+
+test('refresh owns the provider line until its request finishes', () => {
+  const { document, renderProviderStatus } = makeRenderer();
+  const el = document.getElementById('pcStateProvider');
+  el.dataset.refreshing = '1';
+  el.textContent = 'Обновление…';
+  renderProviderStatus(statuses, { provider: 'wormsoft', id: 'x' });
+  assert.equal(el.textContent, 'Обновление…');
+  delete el.dataset.refreshing;
+  renderProviderStatus(statuses, { provider: 'wormsoft', id: 'x' });
+  assert.match(el.textContent, /WormSoft/);
+});
+
+test('Codex subscription displays remaining limits and reset credits', () => {
+  const { document, renderProviderStatus } = makeRenderer();
+  renderProviderStatus({ 'openai-codex': {
+    provider: 'openai-codex', kind: 'subscription', available: true,
+    limits: { fiveHour: { remainingPercent: 80 }, weekly: { remainingPercent: 30 } },
+    resetCredits: { available: 2 }, stale: true,
+  } }, { provider: 'openai-codex', id: 'test-model' });
+  assert.equal(document.getElementById('pcStateProvider').textContent,
+    'OpenAI Codex: 5 ч: 80% осталось · 7 дн.: 30% осталось · сбросов: 2 · данные устарели');
+});
 
 test('DeepSeek balance keeps its currency and runway details', () => {
   const { document, renderProviderStatus } = makeRenderer();

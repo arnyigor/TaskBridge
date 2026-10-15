@@ -207,10 +207,10 @@ function resolveImports(source, modules) {
     const braced = clause.match(/{([^}]*)}/);
     if (braced) {
       for (const raw of braced[1].split(',')) {
-        const name = raw.trim();
+        const [name, localName = name] = raw.trim().split(/\s+as\s+/);
         if (!name) continue;
         if (!(name in module)) throw new Error(`app.js imports ${name}, which ${match[2]} does not export`);
-        names[name] = module[name];
+        names[localName] = module[name];
       }
     }
     const defaultName = clause.replace(/{[^}]*}/, '').replace(/,/g, '').trim();
@@ -284,6 +284,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     './transport.mjs': transportModule,
     './command-client.mjs': await import('../web/command-client.mjs'),
     './diagnostics.mjs': await import('../web/diagnostics.mjs'),
+    './provider-status-view.mjs': await import('../web/provider-status-view.mjs'),
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
     './vendor/purify.mjs': { default: { sanitize: html => html } },

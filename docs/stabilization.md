@@ -128,6 +128,22 @@ instead of 2000 HTTP reads. The latter could exhaust its iterations in about two
 seconds while the fixture was still in PREFLIGHT. Tight polling and the assertion
 that the terminal snapshot includes the durable TASK_FAILED event remain intact.
 
+Web provider account presentation now lives in `web/provider-status-view.mjs`.
+The view receives its target element and model/status data; it owns no transport,
+selected-session state or refresh request. The existing DOM tests import the
+production module directly instead of extracting function bodies from app.js.
+The service worker shell includes the new view and the previously extracted
+command-client/diagnostics modules, so a new offline shell has its dependencies.
+
+`ChatActionRunner` owns admission of UI actions, busy activity, API error callbacks
+and refresh requests. ChatSession binds those callbacks to its state/effects and
+keeps the existing public action API. Streaming, paging and command delivery do
+not depend on the runner. Activity counts retain the busy flag while either of
+two concurrent STOP requests remains outstanding; the old set removed the flag
+when the first request finished. Tests cover repeated STOP, duplicate ordinary
+actions and cancellation without a failure notice or refresh. This extraction
+does not change the server's STOP target or add an automatic command retry.
+
 ## Reproducible latency baseline
 
 `node scripts/quality-baseline.mjs --samples 20 --output <ignored-local-file>` creates its own server, fake runtime and SQLite database, measures warm HTTP, verifies exactly one USER_MESSAGE effect per command ID and cleans up only its fixture. It never connects to the operator's server. The report identifies its base commit, dirty-tree state, environment, source sizes and SQLite plan.

@@ -179,6 +179,13 @@ class ChatSession(
     private var olderJob: Job? = null
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val refreshRequests = Channel<Unit>(Channel.CONFLATED)
+    private val actions = ChatActionRunner(
+        scope = scope,
+        busyChanged = { busy -> _state.update { it.copy(busy = busy) } },
+        notice = { _effects.tryEmit(ChatEffect.Notice(it)) },
+        failed = ::notice,
+        refresh = { refreshRequests.trySend(Unit) },
+    )
     private var started = false
     private var closed = false
     private var streamingEnabled = initialStreamingEnabled
@@ -894,23 +901,7 @@ class ChatSession(
     suspend fun openFileOnComputer(fileId: String, reveal: Boolean): Result<Unit> = runCatching { api.openFile(taskId, fileId, reveal) }
 
     private fun act(key: String, startNotice: String? = null, concurrent: Boolean = false, block: suspend () -> Unit) {
-        // concurrent=true — действие, которое обязано быть доступным всегда (STOP):
-        // предыдущая попытка могла не ответить, и повтор должен уйти на сервер.
-        if (!concurrent && key in _state.value.busy) return
-        _state.update { it.copy(busy = it.busy + key) }
-        startNotice?.let { _effects.tryEmit(ChatEffect.Notice(it)) }
-        scope.launch {
-            try {
-                block()
-                refreshRequests.trySend(Unit)
-            } catch (cancel: CancellationException) {
-                throw cancel
-            } catch (failure: ApiException) {
-                notice(failure.error)
-            } finally {
-                _state.update { it.copy(busy = it.busy - key) }
-            }
-        }
+        actions.run(key, startNotice, concurrent, block)
     }
 
     private fun notice(error: ApiError) {
