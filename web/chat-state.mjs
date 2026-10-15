@@ -166,6 +166,9 @@ export class ChatState {
     // server's stored message, which may be a provider JSON body (older events
     // kept it verbatim). Flatten once so no caller can put raw JSON on screen.
     error = error ? humanizeError(error) : null;
+    // Older servers stored only this generic envelope label after Pi had
+    // already supplied the upstream cause. Preserve that cause on replay/poll.
+    const errorFor = turn => /^provider returned error\.?$/i.test(error || '') && turn.error ? turn.error : error;
     const answered = (turn) => String(turn.text || '').trim().length > 0;
     const cutOff = (turn) => !answered(turn) && (turn.superseded || status === 'CANCELLED');
     const labelFor = (turn) => (turn.error || cutOff(turn) ? 'FAILED' : status);
@@ -177,7 +180,7 @@ export class ChatState {
       const prev = [...this.turns].reverse().find(t => t.role === 'assistant' && t !== this.current);
       if (prev) {
         prev.status = (error || prev.error || cutOff(prev)) ? 'FAILED' : status;
-        if (error) prev.error = error;
+        if (error) prev.error = errorFor(prev);
         prev.endedAt = prev.endedAt || at;
         prev.final = true;
         for (const tool of prev.tools) if (tool.state === 'run') tool.state = 'interrupted';
@@ -204,7 +207,7 @@ export class ChatState {
     }
     this.current.status = (error || this.current.error || cutOff(this.current)) ? 'FAILED' : status;
     this.current.final = true;
-    if (error) this.current.error = error;
+    if (error) this.current.error = errorFor(this.current);
     // The answer that just ended gets its end time — only that one: older turns
     // were finished by their own event. A marker that predates the turn it would
     // close (an overlapping cancel finalizing after the next message started) is

@@ -347,3 +347,11 @@ Still open in phase 07: Windows native frame/input/heap profiling, native Androi
 
 Validation for this change: core API 69 tests, core client 104 tests and shared Compose 206 tests passed with zero failures/errors. Android debug and desktop portable builds passed. Portable output is staged under clients/kmp/dist/.staging/TaskBridge; the running installed app was not overwritten or restarted. Apply it using the tray update command. Syntax/secrets and repository policy checks passed before staging.
 Full Windows Node v24.16.0 corpus: 1122 passed, 5 existing skips, 0 failures (131.4 s). Node22 Linux/Windows remains the authoritative CI matrix; this local result is explicitly Node24.
+
+### Legacy history must retain the recovered upstream cause (2026-10-16)
+
+The prior formatter fix exposed a second replay problem: old TASK_FAILED events and task polls contain only Provider returned error, which overwrote the concrete cause now recoverable from Pi message_end. Web/KMP finish paths now preserve an existing cause when that exact generic wrapper arrives. A different concrete terminal error still replaces it. Regression reproduces the old-event plus poll sequence; the Web test failed with the generic label before the fix and passes afterwards. This supersedes the preceding limitation about old stored terminal messages when the raw Pi event is still available; histories with no raw cause cannot be reconstructed.
+
+Windows Computer Use returned the real TaskBridge window and an empty accessibility tree, but screenshot capture failed with FrameArrived timed out; after fresh window selection, the one recovery attempt failed with window capture timed out. No stale-coordinate input, alternative automation or forced restart was attempted. Native Windows profiling remains open, rather than being inferred from headless Compose results.
+
+Legacy-history follow-up validation: Web chat 140 passed / 1 existing skip; core client 105 passed; shared Compose 206 passed. Android debug and desktop portable builds passed. The Windows portable remains staged for the tray update; no running install was overwritten. Original 925b3e4 CI Ubuntu Node22 is green; Windows/KMP are still running at this check.

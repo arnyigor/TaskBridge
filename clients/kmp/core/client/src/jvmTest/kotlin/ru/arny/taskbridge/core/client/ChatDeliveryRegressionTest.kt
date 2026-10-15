@@ -20,6 +20,18 @@ class ChatDeliveryRegressionTest {
     )
     private fun ChatReducer.frame(seq: Long, frame: String) = apply(event(seq, "PI_EVENT", """{"pi":$frame}"""))
 
+    @Test fun legacyGenericFailureCannotEraseUpstreamReason() {
+        val saved = task.copy(status = "FAILED", error = "Provider returned error")
+        val reducer = ChatReducer(saved)
+        reducer.frame(1, """{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"{\"message\":\"Provider returned error\",\"metadata\":{\"raw\":\"Liquid is temporarily rate-limited upstream.\"}}"}}""")
+        reducer.apply(event(2, "TASK_FAILED", "{}").copy(message = saved.error))
+        assertEquals("Liquid is temporarily rate-limited upstream.", reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last().error)
+        reducer.syncTask(saved)
+        assertEquals("Liquid is temporarily rate-limited upstream.", reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last().error)
+        reducer.syncTask(saved.copy(error = "A different concrete failure"))
+        assertEquals("A different concrete failure", reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last().error)
+    }
+
     @Test fun initialPromptShowsActualHandoffAndKeepsLaterProgress() {
         val reducer = ChatReducer(task.copy(status = "QUEUED"))
         assertEquals("В очереди на сервере", (reducer.snapshot().items.first() as ChatItem.User).delivery)

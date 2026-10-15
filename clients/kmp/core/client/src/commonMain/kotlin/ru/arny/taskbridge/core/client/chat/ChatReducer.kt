@@ -237,6 +237,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     private fun finish(status: String, error: String? = null, at: String? = null) {
         val humanError = error?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }
+        // Legacy terminal events/polls may contain only the generic wrapper.
+        // Keep the concrete cause already recovered from Pi's message_end.
+        fun errorFor(turn: Turn) = if (humanError?.removeSuffix(".").equals("Provider returned error", ignoreCase = true))
+            turn.error ?: humanError else humanError
         fun answered(turn: Turn) = turn.text.isNotBlank()
         fun cutOff(turn: Turn) = !answered(turn) && (turn.superseded || status == "CANCELLED")
         fun labelFor(turn: Turn) = if (turn.error != null || cutOff(turn)) "FAILED" else status
@@ -247,7 +251,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
             if (previous != null) {
                 previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
-                if (humanError != null) previous.error = humanError
+                if (humanError != null) previous.error = errorFor(previous)
                 previous.endedAt = previous.endedAt ?: at
                 previous.final = true
                 for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
@@ -268,7 +272,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
         current.status = if (humanError != null || current.error != null || cutOff(current)) "FAILED" else status
         current.final = true
-        if (humanError != null) current.error = humanError
+        if (humanError != null) current.error = errorFor(current)
         if (at != null) for (turn in running.ifEmpty { listOf(current) }) {
             if (before(at, turn.at)) continue
             turn.endedAt = turn.endedAt ?: at

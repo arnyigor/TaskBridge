@@ -8,6 +8,19 @@ import { ChatState, ACTIVE_STATUSES } from '../web/chat-state.mjs';
 import * as transportModule from '../web/transport.mjs';
 
 const task = (id = 'a') => ({ id, prompt: 'Первый вопрос', status: 'SUCCEEDED', assistantText: 'Первый ответВторой ответ', thinkingText: '', model: { contextWindow: 65536 }, lastUsage: { totalTokens: 13081 } });
+
+test('legacy generic terminal errors cannot erase the upstream reason from Pi', () => {
+  const saved = { id: 'a', prompt: 'question', status: 'FAILED', error: 'Provider returned error' };
+  const state = new ChatState(saved);
+  const raw = JSON.stringify({ message: 'Provider returned error', metadata: { raw: 'Liquid is temporarily rate-limited upstream.' } });
+  state.apply({ taskId: 'a', seq: 1, type: 'PI_EVENT', data: { pi: { type: 'message_end', message: { role: 'assistant', content: [], stopReason: 'error', errorMessage: raw } } } });
+  state.apply({ taskId: 'a', seq: 2, type: 'TASK_FAILED', message: saved.error, data: {} });
+  assert.equal(state.current.error, 'Liquid is temporarily rate-limited upstream.');
+  state.snapshot(saved);
+  assert.equal(state.current.error, 'Liquid is temporarily rate-limited upstream.');
+  state.finish('FAILED', 'A different concrete failure');
+  assert.equal(state.current.error, 'A different concrete failure');
+});
 function history(id = 'a') {
   const frames = [
     { type: 'message_start', message: { role: 'assistant' } },
