@@ -259,3 +259,7 @@ The cloud command surface is exactly eight types in `src/cloud/command-dispatche
 - The user additions (real free providers, >200k reasoning mixed with many tools, then Codex-style UI) follow original stages 00–06. They are not acceptance evidence for those original stages.
 
 CI on the resulting commit remains a required gate. Local plan, raw reports, scratch files and pre-existing untracked files must not be swept into a commit. The root plan remains local because it is outside the repository publication allowlist.
+
+### Chat menu overlay regression (2026-10-15)
+
+The desktop staged-update shortcut occupied the same top-right area as the session menu and intercepted its pointer input. Removed the window overlay; the existing tray update action remains available. DesktopChatAcceptanceTest now opens the session menu, selects history copy, and verifies the transcript delivered to PlatformServices.copyText. Portable staging and Android debug assembly succeeded.

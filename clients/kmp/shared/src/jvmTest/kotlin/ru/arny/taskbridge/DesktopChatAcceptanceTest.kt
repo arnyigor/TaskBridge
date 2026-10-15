@@ -46,7 +46,9 @@ class DesktopChatAcceptanceTest {
             val base = TaskBridgeJson.parseToJsonElement(ready).jsonObject.getValue("base").jsonPrimitive.content
             val memory = MemorySettings().apply { put("serverUrl", base) }
             val desktop = DesktopPlatformServices(store = memory)
+            var copiedText: String? = null
             val platform = object : PlatformServices by desktop {
+                override fun copyText(text: String) { copiedText = text }
                 override val secrets: SecretStore = memory
                 override fun chatPersistence(serverUrl: String): ChatPersistence = NoopChatPersistence
             }
@@ -58,6 +60,10 @@ class DesktopChatAcceptanceTest {
             setContent { App(app, openTaskId = task.id) }
             waitUntil(timeoutMillis = 30_000) { chat.state.value.task?.status == "SUCCEEDED" && chat.state.value.link == LinkState.Live }
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Desktop acceptance initial", substring = true).fetchSemanticsNodes().isNotEmpty() }
+
+            onNodeWithContentDescription("Меню сессии").performClick()
+            onNodeWithText("Копировать историю").performClick()
+            waitUntil(timeoutMillis = 10_000) { copiedText?.contains("Desktop acceptance initial") == true }
 
             onNode(hasSetTextAction()).performTextInput("unsent desktop draft")
             input.write("down 3000\n")

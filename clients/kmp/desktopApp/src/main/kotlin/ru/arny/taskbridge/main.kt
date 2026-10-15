@@ -16,16 +16,6 @@ import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -181,29 +171,8 @@ fun main() {
                     graph.connection?.appVisibilityChanged()
                 }
             }
-            Box(Modifier.fillMaxSize()) {
-                App(graph, openTaskId = startTaskId, navigatorSink = { navigator = it })
-                if (stagedUpdate != null) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(12.dp)
-                            .size(40.dp)
-                            .background(Color.Transparent)
-                            .clickable {
-                                if (installDir != null && DesktopUpdater.applyAndRestart(installDir, stagedUpdate!!)) {
-                                    exitApplication()
-                                }
-                            },
-                    ) {
-                        Image(
-                            painter = rememberVectorPainter(AppIcons.Refresh),
-                            contentDescription = "Установить обновление и перезапустить",
-                            modifier = Modifier.fillMaxSize().padding(8.dp),
-                        )
-                    }
-                }
-            }
+            // Updates belong to the tray menu; an overlay here intercepts the chat menu.
+            App(graph, openTaskId = startTaskId, navigatorSink = { navigator = it })
         }
     }
 }
