@@ -144,6 +144,14 @@ when the first request finished. Tests cover repeated STOP, duplicate ordinary
 actions and cancellation without a failure notice or refresh. This extraction
 does not change the server's STOP target or add an automatic command retry.
 
+`DraftAutosave` owns the composer's debounce, pending write cancellation and final
+flush, with a per-screen instance bound to one session's settings key. Compose
+retains cursor/selection and forwards text changes. Leaving the screen flushes
+the latest text even if the observer or 400 ms timer has not run; sending clears
+the stored draft immediately and cancels the older scheduled write. Virtual-time
+tests cover rapid typing, two independent chats, immediate departure and send
+without draft resurrection.
+
 ## Reproducible latency baseline
 
 `node scripts/quality-baseline.mjs --samples 20 --output <ignored-local-file>` creates its own server, fake runtime and SQLite database, measures warm HTTP, verifies exactly one USER_MESSAGE effect per command ID and cleans up only its fixture. It never connects to the operator's server. The report identifies its base commit, dirty-tree state, environment, source sizes and SQLite plan.

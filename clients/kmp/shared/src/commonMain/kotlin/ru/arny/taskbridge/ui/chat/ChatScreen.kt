@@ -1,5 +1,7 @@
 package ru.arny.taskbridge.ui.chat
 
+import ru.arny.taskbridge.core.client.session.DraftAutosave
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -74,9 +76,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.roundToInt
@@ -155,7 +155,6 @@ private sealed interface ChatDialog {
     data class Rerun(val turnId: String) : ChatDialog
 }
 
-@OptIn(FlowPreview::class)
 @Composable
 fun ChatScreen(
     graph: AppGraph,
@@ -180,6 +179,12 @@ fun ChatScreen(
     var viewing by androidx.compose.runtime.saveable.rememberSaveable(taskId, stateSaver = FileTargetSaver) { mutableStateOf<FileTarget?>(null) }
     var files by remember(taskId) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var draft by remember(taskId) { mutableStateOf(TextFieldValue(graph.settings.draft(taskId))) }
+    val draftAutosave = remember(connection, taskId) {
+        DraftAutosave(scope, graph.settings.draft(taskId), { graph.settings.saveDraft(taskId, it) })
+    }
+    DisposableEffect(draftAutosave) {
+        onDispose { draftAutosave.close(draft.text) }
+    }
     // The picker keeps its own copy; this one feeds the status bar's TTFT.
     var screenCatalog by remember { mutableStateOf<ModelCatalog?>(null) }
     var quickActions by remember(connection, taskId) { mutableStateOf(fallbackQuickActions()) }
@@ -197,8 +202,8 @@ fun ChatScreen(
         platform.clearNotification(taskId)
         onDispose { connection.hideChat(taskId) }
     }
-    LaunchedEffect(taskId) {
-        snapshotFlow { draft.text }.debounce(400).collect { graph.settings.saveDraft(taskId, it) }
+    LaunchedEffect(draftAutosave) {
+        snapshotFlow { draft.text }.collect { draftAutosave.update(it) }
     }
     LaunchedEffect(session) {
         session.effects.collect { effect ->
@@ -226,7 +231,7 @@ fun ChatScreen(
         session.send(text, files, mode)
         draft = TextFieldValue("")
         files = emptyList()
-        graph.settings.saveDraft(taskId, "")
+        draftAutosave.flush("")
         scope.launch { listState.animateScrollToItem(0) }
     }
 
