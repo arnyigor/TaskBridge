@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { containedExistingAncestor, containedFile } from '../src/files.mjs';
+import { containedExistingAncestor, containedFile, stageFiles, validateFiles } from '../src/files.mjs';
 
 async function withWorkspace(fn) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-files-'));
@@ -34,5 +34,18 @@ test('nearest existing ancestor stays inside the workspace and respects private 
 
     await assert.rejects(containedExistingAncestor(root, '../outside.jpg'), { code: 'INPUT_INVALID' });
     await assert.rejects(containedExistingAncestor(root, 'data/runtime/phone.png'), { code: 'FILE_FORBIDDEN' });
+  });
+});
+
+test('attachment metadata stays workspace-relative through a junction or directory alias', async () => {
+  await withWorkspace(async root => {
+    const workspace = path.join(root, 'canonical');
+    const alias = path.join(root, 'workspace-alias');
+    await fs.mkdir(workspace);
+    await fs.symlink(workspace, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const files = validateFiles([{ name: 'sample.txt', base64: Buffer.from('attachment').toString('base64') }]);
+    const staged = await stageFiles({ id: 'session', workspacePath: alias }, path.join(root, 'task'), files);
+    assert.equal(staged[0].path, `.taskbridge-input/session/${files[0].id}/sample.txt`);
+    assert.equal(await fs.readFile(path.join(alias, staged[0].path), 'utf8'), 'attachment');
   });
 });

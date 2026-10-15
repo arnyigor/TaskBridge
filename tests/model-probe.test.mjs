@@ -12,13 +12,14 @@ import { startFixture } from './server-fixture.mjs';
 // моделей, задержка — один запрос с max_tokens=1 и обрывом сразу после первого чанка.
 
 /** Заглушка провайдера: список моделей и стрим с настраиваемой задержкой и ответом. */
-async function providerStub({ delayMs = 120, streamErrorPayload = null, streamChunks = null, status = 200 } = {}) {
+async function providerStub({ delayMs = 120, streamErrorPayload = null, streamChunks = null, status = 200, onRequest = null } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
+    req.on('end', async () => {
       requests.push({ url: req.url, method: req.method, body, headers: req.headers });
+      await onRequest?.();
       if (status !== 200) {
         res.writeHead(status, { 'content-type': 'application/json' });
         res.end('{"error":{"message":"nope"}}');
@@ -142,8 +143,13 @@ test('the cooldown is per model and counts down', () => {
 });
 
 test('local probes use each external server address and the router key', { timeout: 60000 }, async t => {
-  const external = await providerStub();
   const router = await providerStub();
+  // A heartbeat/status request may reach the router while the external probe
+  // is in flight. Force that interleaving instead of depending on runner speed.
+  const external = await providerStub({ onRequest: async () => {
+    const response = await fetch(`${router.base}/health`);
+    await response.arrayBuffer();
+  } });
   t.after(() => external.close());
   t.after(() => router.close());
   const fixture = await startFixture(undefined, { root: { localRuntime: {
@@ -153,15 +159,17 @@ test('local probes use each external server address and the router key', { timeo
   } } });
   t.after(() => fixture.close());
 
-  const routerRequestsBeforeExternalProbe = router.requests.length;
-  const externalResult = await fixture.api('/api/models/probe', { provider: 'strata-test', id: 'stub-model' });
+  const externalResult = await fixture.api('/api/models/probe', { provider: 'strata-test', id: 'stub-model', mode: 'latency' });
   assert.equal(externalResult.ok, true, JSON.stringify(externalResult));
-  assert.equal(external.requests.filter(request => request.url.endsWith('/models')).length, 1, 'Strata проверяется на своём port');
-  assert.equal(router.requests.length, routerRequestsBeforeExternalProbe, 'внешняя модель не должна попадать в router');
+  const externalCalls = external.requests.filter(request => request.url.endsWith('/chat/completions'));
+  assert.equal(externalCalls.length, 1, 'внешняя модель проверяется на своём port');
+  assert.equal(JSON.parse(externalCalls[0].body).model, 'stub-model');
+  assert.equal(router.requests.filter(request => request.url.endsWith('/chat/completions')).length, 0, 'внешняя модель не должна попадать в router');
+  assert.ok(router.requests.some(request => request.url.endsWith('/health')), 'фоновый запрос намеренно совпал с пробой');
 
   const routerResult = await fixture.api('/api/models/probe', { provider: 'local-router', id: 'router-model' });
   assert.equal(routerResult.ok, true, JSON.stringify(routerResult));
-  assert.equal(router.requests.at(-1)?.headers?.authorization, 'Bearer router-secret');
+  assert.equal(router.requests.filter(request => request.url.endsWith('/models')).at(-1)?.headers?.authorization, 'Bearer router-secret');
 });
 
 test('the endpoint checks a real provider and reports its own refusals', { timeout: 60000 }, async t => {

@@ -200,6 +200,7 @@ test('a provider wait is reported with its retry moment and stays one note per r
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api } = fixture;
+  const observedStart = Date.now();
   const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-provider-wait' });
 
   const waiting = await until(async () => {
@@ -212,7 +213,12 @@ test('a provider wait is reported with its retry moment and stays one note per r
   assert.equal(wait.provider, 'wormsoft');
   assert.equal(wait.httpStatus, 429);
   assert.equal(wait.reason, 'user reached the limit', 'причина — словами провайдера, а не сырой строкой уведомления');
-  assert.equal(wait.waitMs, 5_472_000, '1h 31m 12s из объявления');
+  // The machine frame carries remainingMs, computed after its planned deadline.
+  // Time spent writing the preceding tool frame is real, including a few ms on
+  // slower Windows runners; the remaining budget cannot exceed the plan or
+  // shrink by more than the elapsed observation window.
+  assert.ok(wait.waitMs <= 5_472_000 && wait.waitMs >= 5_472_000 - (Date.now() - observedStart),
+    `остаток объявленного ожидания: ${wait.waitMs}`);
   const left = Date.parse(wait.retryAt) - Date.parse(wait.at);
   assert.ok(Math.abs(left - wait.waitMs) < 2000, `retryAt — абсолютный момент повтора (${left} мс)`);
   assert.equal(waiting.runtime.state, 'WORKING');

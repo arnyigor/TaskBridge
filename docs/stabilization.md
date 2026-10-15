@@ -26,6 +26,8 @@ Original evidence: [CI run 38667985170](https://github.com/arnyigor/TaskBridge/a
 | Android recreation | PRODUCT_BUG | A remember-only Navigator lost the selected chat and Back stack when Activity was recreated. Save typed routes and draft command identity with rememberSaveable, scope restoration to the connection, and avoid replaying an already handled notification launch intent. |
 | Run lifecycle | PRODUCT_BUG | A Pi failure left its run RUNNING; late writes could reopen or replace terminal outcomes. RunCoordinator owns active identities, preserves the identity across approval waits, and finishes a run inside the terminal event/task transaction. Restart closes abandoned runs with UNKNOWN_AFTER_CRASH; a resumed turn gets a fresh ID. |
 | Local command durability | PRODUCT_BUG | An automatic 24-hour receipt purge allowed an old HTTP command ID to execute again; a final receipt-write failure was hidden behind a successful response. CommandCoordinator now owns local acceptance/replay, expires only the memory cache, and reports UNKNOWN_OUTCOME if an effect's result cannot be saved. Web and KMP retain the ambiguous state and reconcile against history. |
+| Attachment path aliases | PRODUCT_BUG | Windows CI exposed a workspace named through a junction/alias: input directories used realpath while metadata used the lexical path, producing ../ paths. Use the same canonical workspace for both; a junction/symlink regression reproduced the defect locally before the fix. |
+| Probe/remaining-time assertions | TEST_BUG | Ubuntu probe test counted unrelated router health requests; force that interleaving and assert the external model POST destination instead. Windows wait test required remainingMs to equal the original duration despite elapsed time; bound it by the actual observation interval. No sleeps, retries or skips were added. |
 
 The POSIX fixes passed an isolated Linux run. Handling EventMux rejection isolates failures; durable delivery belongs to the SQLite event store and the Cloud outbox, not to the synchronous multiplexer.
 
@@ -122,6 +124,8 @@ Windows Node 24 warm baseline (20 samples): command ACK p50 **13.51 ms**, p95 **
 The script now instruments only its disposable server copy, sampling heap/RSS and CPU every 100 ms and a 10 ms event-loop histogram. A 30-command Windows run without the full test suite running concurrently measured ACK p50 **14.88 ms**, p95 **19.05 ms**, duplicate ACK p95 **1.96 ms**, history p95 **2.22 ms**. Sampled peak RSS **87.1 MiB**, heap **21.3 MiB**; CPU **1.844 s** over **8.158 s** elapsed; event-loop delay p95 **17.84 ms**, p99 **23.54 ms**, maximum **24.67 ms**. Periodic JSON writes and Windows timer granularity are part of this measurement. The earlier uninstrumented baseline is not a controlled before/after comparison; no performance improvement is claimed from these figures. Retained-heap/soak measurements remain open.
 
 ## Outstanding gates
+
+The first new CI run [38679764130](https://github.com/arnyigor/TaskBridge/actions/runs/38679764130) passed KMP and the separate security workflow, but exposed the alias defect and two timing-sensitive test assumptions above. Follow-up checks passed 62 tests on Windows and the 12 alias/probe tests on Linux; a new CI run is required for the follow-up commit.
 
 - Node 22/Linux CI on the resulting commit. Windows success cannot close this gate.
 - PID identity between inspection and signal: current process panel retains an OS time-of-check/time-of-use window.

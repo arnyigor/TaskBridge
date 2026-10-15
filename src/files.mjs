@@ -119,11 +119,15 @@ async function makeInputDirectory(workspace, taskId, fileId) {
 
 export async function stageFiles(task, taskDir, files) {
   const staged = [];
+  // Input directories are created under realpath(workspace). Compute metadata
+  // from that same base: Windows temp paths, junctions and 8.3 aliases may name
+  // the same directory differently and lexical relative() would produce ../.
+  const workspace = files.length ? await fs.realpath(task.workspacePath) : task.workspacePath;
   await fs.mkdir(path.join(taskDir, 'files'), { recursive: true });
   try {
     for (const file of files) {
-      const directory = await makeInputDirectory(task.workspacePath, task.id, file.id);
-      const item = { ...metadata(file), direction: 'input', path: path.relative(task.workspacePath, path.join(directory, file.name)).replaceAll('\\', '/') };
+      const directory = await makeInputDirectory(workspace, task.id, file.id);
+      const item = { ...metadata(file), direction: 'input', path: path.relative(workspace, path.join(directory, file.name)).replaceAll('\\', '/') };
       staged.push(item);
       if (file.sourcePath) {
         // Uploaded file: copy it into the task and the workspace, then the
