@@ -44,6 +44,8 @@ test('every published route is really served, and none answers "Not found"', { t
       method: route.method,
       signal: AbortSignal.timeout(15000),
       ...(route.method === 'GET' ? {} : { headers: { 'content-type': 'application/json' }, body: '{}' }),
+    }).catch(cause => {
+      throw new Error(`${route.method} ${route.path}: ${cause.name} ${cause.message}`, { cause });
     });
     const body = await response.json().catch(() => null);
     if (NOT_ROUTED(response.status, body)) missing.push(`${route.method} ${route.path}`);

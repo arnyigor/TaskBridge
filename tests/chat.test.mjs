@@ -285,6 +285,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     './command-client.mjs': await import('../web/command-client.mjs'),
     './diagnostics.mjs': await import('../web/diagnostics.mjs'),
     './provider-status-view.mjs': await import('../web/provider-status-view.mjs'),
+    './composer-drafts.mjs': await import('../web/composer-drafts.mjs'),
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
     './vendor/purify.mjs': { default: { sanitize: html => html } },
@@ -1765,6 +1766,17 @@ test('DOM: the typed text survives a page reload', async () => {
   prompt.value = '';
   app.saveDraft('b');
   assert.equal(app.localStorage.getItem('tbDraft:b'), null, 'an empty composer leaves no stale draft');
+});
+
+test('DOM: clearing a persisted composer removes the draft before a reload', async () => {
+  const app = await ui();
+  await app.selectTask('b');
+  app.document.getElementById('prompt').value = 'remove this draft';
+  app.saveDraft('b');
+  assert.ok(app.localStorage.getItem('tbDraft:b'));
+  app.document.getElementById('clearPrompt').onclick();
+  assert.equal(app.document.getElementById('prompt').value, '');
+  assert.equal(app.localStorage.getItem('tbDraft:b'), null, 'reload must not resurrect a cleared draft');
 });
 
 test('DOM: Ctrl+Enter asks for an immediate send, plain Enter accepts the queue', async () => {

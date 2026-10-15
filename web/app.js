@@ -1,4 +1,5 @@
 import { renderProviderStatus as renderProviderStatusLine } from './provider-status-view.mjs';
+import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
@@ -1519,33 +1520,13 @@ $('project').addEventListener('change', () => {
   if (!selectedTaskId) newTaskProjectId = $('project').value;
 });
 
-const drafts = new Map(); // taskId | '__new__' -> { text, files: File[] }
-const draftStorageKey = key => `tbDraft:${key}`;
+const drafts = new ComposerDraftStore({ storage: () => localStorage });
 
 function saveDraft(key) {
-  const text = promptEl.value;
-  const files = Array.from($('files').files || []);
-  if (!text && !files.length) {
-    drafts.delete(key);
-    try { localStorage.removeItem(draftStorageKey(key)); } catch { /* private mode */ }
-  } else {
-    drafts.set(key, { text, files });
-    // Files cannot survive a reload, the typed text can — a phone that
-    // refreshes mid-thought must not wipe the composer (see 1.6).
-    try { localStorage.setItem(draftStorageKey(key), JSON.stringify({ text })); } catch { /* storage full */ }
-  }
+  drafts.set(key, { text: promptEl.value, files: Array.from($('files').files || []) });
 }
 
 function restoreDraft(key) {
-  const draft = drafts.get(key);
-  if (!draft) {
-    // After a reload only the text is recoverable; attachments stay the
-    // operator's to re-add (browsers do not let a page re-read local files).
-    try {
-      const saved = JSON.parse(localStorage.getItem(draftStorageKey(key)) || 'null');
-      if (saved && saved.text) drafts.set(key, { text: saved.text, files: [] });
-    } catch { /* unreadable entry: fall back to an empty composer */ }
-  }
   const restored = drafts.get(key);
   promptEl.value = restored?.text || '';
   promptEl.style.height = 'auto';
@@ -3878,7 +3859,6 @@ $('form').addEventListener('submit', async (e) => {
     const draftKey = taskId || '__new__';
     const clearComposer = () => {
       drafts.delete(draftKey);
-      try { localStorage.removeItem(`tbDraft:${draftKey}`); } catch { /* best effort */ }
       if (promptEl.value.trim() === prompt) {
         promptEl.value = '';
         promptEl.style.height = '';

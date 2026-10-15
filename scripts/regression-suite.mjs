@@ -68,6 +68,7 @@ export const SECTIONS = {
       'tests/web-reconnect.test.mjs',
       'tests/web-transport.test.mjs',
       'tests/web-command-client.test.mjs',
+      'tests/composer-drafts.test.mjs',
       'tests/event-mux-failures.test.mjs',
     ],
   },

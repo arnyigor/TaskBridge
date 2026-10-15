@@ -107,12 +107,12 @@ An AST inventory (ast-grep, method_definition/function_declaration, before local
 
 | Entry point | Responsibilities / current boundary |
 | --- | --- |
-| TaskManager | Session orchestration, runtime ownership, queues, project services. RunCoordinator now owns run identity and recovery; RuntimeManager/PiRpcSession, persistence, approval policy, resume and scheduler modules are collaborators. TerminalPublication owns publication coordination without adding fields to persisted task JSON. Further session-lifecycle extraction remains open. |
+| TaskManager | Session orchestration, runtime ownership, queues, project services. RunCoordinator now owns run identity and recovery; RuntimeManager/PiRpcSession, persistence, approval policy, resume and scheduler modules are collaborators. TerminalPublication owns publication coordination without adding fields to persisted task JSON. Session startup reconciliation lives in session-recovery; TaskManager retains live-session orchestration and boot/shutdown ordering. |
 | server | HTTP/auth/SSE/DTO adaptation, composition and background-service startup. Domain decisions must remain in manager/domain services, not be duplicated in routes. |
 | Cloud command dispatcher | Protocol validation and action routing. CommandInbox owns acceptance/idempotency/unknown outcomes; TaskStore persists receipts. Neither inbox nor store imports the dispatcher. |
 | Local HTTP commands | CommandCoordinator owns durable receipt lookup, acceptance, result publication and bounded memory caching. TaskManager supplies action-specific hashes and effects, and preserves its existing command/status API. Durable identities are no longer automatically deleted on cache expiry; retained receipt storage must be included in capacity planning. Provider-wait state ("Ждём провайдера": parsing Pi/pi-limits-wait notices, episode dedup by periodId, PROVIDER_WAIT/END publication) lives in `src/provider-wait.mjs`; TaskManager keeps only the event-emission binding (276 declarations after the extraction). |
-| Web | transport.mjs owns HTTP/SSE/WebSocket, authentication and subscription lifetimes; command-client.mjs owns request adaptation, command identity/retry and receipt reconciliation; chat-state.mjs owns history reduction. app.js owns screen wiring/rendering and still has non-chat screen integrations to extract. |
-| KMP | ChatSession owns stream/paging lifetime and reducer serialization; ChatCache owns pure cache budgeting; CommandDelivery owns network retry/reconciliation with typed outcomes and cancellation propagation. Compose owns rendering, AppGraph connection lifetime, and Navigator route restoration. More separation of chat actions/drafts from session lifetime remains open. |
+| Web | transport.mjs owns HTTP/SSE/WebSocket, authentication and subscription lifetimes; command-client.mjs owns request adaptation, command identity/retry and receipt reconciliation; chat-state.mjs owns history reduction. provider-status-view owns provider account presentation and ComposerDraftStore owns composer persistence. app.js composes screens and binds DOM state to those collaborators. |
+| KMP | ChatSession owns stream/paging lifetime and reducer serialization; ChatCache owns pure cache budgeting; CommandDelivery owns network retry/reconciliation with typed outcomes and cancellation propagation. Compose owns rendering, AppGraph connection lifetime, and Navigator route restoration. ChatActionRunner owns action admission/activity, and DraftAutosave owns composer persistence. Streaming and paging retain a single serialized reducer owner. |
 
 These are incremental boundaries, not a claim that the monoliths have already been fully decomposed. New JS coordinators have no imports back into TaskManager/server/Web; the new KMP delivery component depends on the API and coroutines, with no reducer or Compose dependency. No framework migration is part of stabilization.
 
@@ -179,6 +179,24 @@ rotation retains the user's selected chat rather than reopening the older target
 These cases were exercised on the rebuilt APK, including switching through the
 session list after a notification and rotating with another notification target
 still present in the Activity intent.
+
+Web `ComposerDraftStore` now owns memory/localStorage draft persistence, leaving
+composer DOM adaptation in app.js. It persists text only, keeps File objects in
+page memory and tolerates unavailable/corrupt browser storage. A regression
+reproduced the clear button deleting only the memory entry, allowing reload to
+resurrect its localStorage text. All clear/send paths now use the store's deletion
+operation for both copies. The service-worker shell includes the new module.
+
+Desktop acceptance is now executable as `DesktopChatAcceptanceTest` in shared's
+JVM suite. It renders the production App with desktop platform services, isolated
+in-memory settings/secrets, no disk chat cache and a disposable fake-Pi server.
+The test opens history, types a draft, observes a broken stream during a real
+three-second server outage, reconnects with the draft intact, sends a hanging
+prompt through the composer and clicks STOP plus its confirmation. Both client
+and server must report CANCELLED. This is a Compose desktop UI test, separate from
+the earlier packaged EXE launch and tray-update checks; it does not automate the
+operator's window or send commands to their sessions. API-contract fetch failures
+now identify the exact method/path while retaining the existing 15-second budget.
 
 ## Reproducible latency baseline
 
