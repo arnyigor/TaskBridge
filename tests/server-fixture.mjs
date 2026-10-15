@@ -37,7 +37,7 @@ export async function startFixture(port, overrides = {}) {
     const providerKeys = new Set(['DEEPSEEK_API_KEY', 'WORMSOFT_API_KEY', 'ROUTERAI_API_KEY']);
     const inherited = Object.fromEntries(Object.entries(process.env)
       .filter(([key]) => !key.startsWith('TASKBRIDGE_') && !providerKeys.has(key)));
-    const child = spawn(process.execPath, ['src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: {
+    const child = spawn(process.execPath, [...(overrides.nodeArgs || []), 'src/server.mjs'], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: {
       ...inherited,
       // Память проекта — внутри каталога фикстуры. Без этого сервер писал предложения
       // памяти в НАСТОЯЩИЙ архив оператора: <Домашний>/.pi/memory-md/taskbridge-http-test-*

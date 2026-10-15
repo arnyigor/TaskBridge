@@ -122,7 +122,7 @@ These are incremental boundaries, not a claim that the monoliths have already be
 
 Windows Node 24 warm baseline (20 samples): command ACK p50 **13.51 ms**, p95 **17.00 ms**; duplicate ACK p95 **1.66 ms**; history of 100 events p95 **1.84 ms**. These are fixture HTTP measurements, not model latency. SQLite replay uses `SEARCH events USING PRIMARY KEY (task_id=? AND seq>?)`; this query did not justify an additional index. This first run did not instrument the server process.
 
-The script now instruments only its disposable server copy, sampling heap/RSS and CPU every 100 ms and a 10 ms event-loop histogram. A 30-command Windows run without the full test suite running concurrently measured ACK p50 **14.88 ms**, p95 **19.05 ms**, duplicate ACK p95 **1.96 ms**, history p95 **2.22 ms**. Sampled peak RSS **87.1 MiB**, heap **21.3 MiB**; CPU **1.844 s** over **8.158 s** elapsed; event-loop delay p95 **17.84 ms**, p99 **23.54 ms**, maximum **24.67 ms**. Periodic JSON writes and Windows timer granularity are part of this measurement. The earlier uninstrumented baseline is not a controlled before/after comparison; no performance improvement is claimed from these figures. Retained-heap/soak measurements remain open.
+The script now instruments only its disposable server copy, sampling heap/RSS and CPU every 100 ms and a 10 ms event-loop histogram. A 30-command Windows run without the full test suite running concurrently measured ACK p50 **14.88 ms**, p95 **19.05 ms**, duplicate ACK p95 **1.96 ms**, history p95 **2.22 ms**. Sampled peak RSS **87.1 MiB**, heap **21.3 MiB**; CPU **1.844 s** over **8.158 s** elapsed; event-loop delay p95 **17.84 ms**, p99 **23.54 ms**, maximum **24.67 ms**. Periodic JSON writes and Windows timer granularity are part of this measurement. The earlier uninstrumented baseline is not a controlled before/after comparison; no performance improvement is claimed from these figures. Retained-heap is now measured by the same script — see the run-38688570497 paragraph in Outstanding gates.
 
 ## Outstanding gates
 
@@ -134,11 +134,15 @@ Run [38680690469](https://github.com/arnyigor/TaskBridge/actions/runs/3868069046
 
 Run [38681223169](https://github.com/arnyigor/TaskBridge/actions/runs/38681223169) exposed two remaining load-sensitive test assumptions, both fixed without relaxing assertions. Ubuntu: the WormSoft sampling test read `/api/info` in the fire-and-forget window — the stub counts a request on receipt, while the status snapshot and usage file land after both responses are processed; the test now waits (bounded) for the sampled value and the persisted file. Windows: fixture startup kept a 3-second budget from the single-machine era and expired under parallel CI load (`waitReady` in `tests/server-fixture.mjs`); the budget is now 12 seconds with the same health-probe semantics. Full corpus after the fixes: Windows Node 22 — 1107 pass / 4 platform skips / 0 fail; Linux (WSL) — 1108 pass / 3 platform skips / 0 fail.
 
-- Node 22/Linux CI on the resulting commit. Windows success cannot close this gate.
+Run [38688570497](https://github.com/arnyigor/TaskBridge/actions/runs/38688570497) on the follow-up commit passed all three jobs (ubuntu, windows, kmp) plus the security workflow — the first fully green CI of this stabilization branch.
+
+The baseline script now also measures retained heap: the disposable fixture child runs with `--expose-gc` (forwarded via an explicit `nodeArgs` fixture option, since `NODE_OPTIONS` does not forward it), and the probe records post-GC `heapUsed` after every settled turn. Windows Node 24, 100 turns: retained **9.02 MB → 10.05 MB** (max 10.05), average **+10.7 KB/turn** and decelerating (the first 30 turns averaged +23 KB/turn) — a warm-up plateau, not a runaway leak. This closes the retained-heap/soak baseline for the server side; any future optimization must re-run this measurement for a controlled comparison.
+
+- Node 22/Linux CI on the resulting commit. Windows success cannot close this gate. **Closed by run 38688570497 — all jobs green.**
 - PID identity between inspection and signal: current process panel retains an OS time-of-check/time-of-use window.
 - Additional lifecycle/coordinator and Web/KMP responsibility extractions, preserving contracts and regression coverage.
 - Cross-platform desktop smoke on the staged build after applying it through tray; Android rotation/session switch and a 60-second fixture network outage were exercised.
-- Retained-heap/soak profiling and controlled comparable measurements after any performance optimization.
+- Retained-heap/soak profiling: server-side baseline closed (see above); controlled comparable measurements remain required after any performance optimization.
 - The user additions (real free providers, >200k reasoning mixed with many tools, then Codex-style UI) follow original stages 00–06. They are not acceptance evidence for those original stages.
 
 CI on the resulting commit remains a required gate. Local plan, raw reports, scratch files and pre-existing untracked files must not be swept into a commit. The root plan remains local because it is outside the repository publication allowlist.
