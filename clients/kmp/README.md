@@ -1,81 +1,81 @@
-# TaskBridge — клиент для Android и Desktop
+# TaskBridge — Android и Windows-клиенты
 
-Compose Multiplatform-клиент TaskBridge: список сессий агента, живой чат,
-очередь сообщений, STOP, подтверждения инструментов, правка истории, выбор
-модели и уведомления. Работает с тем же HTTP API, что и веб-интерфейс
-([docs/api-contract.md](../../docs/api-contract.md)); план — [docs/TASKBRIDGE_KMP_PLAN.md](../../docs/TASKBRIDGE_KMP_PLAN.md).
+**Версия 1.2.1.** Compose Multiplatform-клиенты для сервера TaskBridge: сессии, потоковый чат, очередь, STOP, подтверждения инструментов, история, выбор модели и уведомления.
 
-## Устройство
+Клиент подключается к HTTP/SSE API сервера. Установка Pi, авторизация провайдера, резервное копирование и обновление сервера описаны в [корневом README](../../README.md). Контракт — [docs/api-contract.md](../../docs/api-contract.md).
 
-```
-core/                      отдельная Gradle-сборка: логика клиента, без Android-плагина
-  api/                     DTO, TaskBridgeApi (REST, SSE, загрузка файлов), ApiError, SseParser
-  client/                  ChatReducer (порт web/chat-state.mjs), ChatSession (поток,
-                           переподключение, outbox с commandId), SessionList, SessionAlerts,
-                           AppSettings, разбор Markdown
-shared/                    Compose UI (commonMain) + платформенный слой (androidMain / jvmMain);
-                           исходники core компилируются сюда же (srcDir), одной копией
-androidApp/                Activity, фоновый сервис наблюдения, уведомления, манифест
-desktopApp/                окно, трей с уведомлениями, сохранение размера окна
-```
+## Поддержка
 
-Экраны: подключение (адрес → код, если на ПК включён вход) → сессии
-(группы по проектам, «ждут ответа» сверху, поиск, новая сессия с моделью,
-размышлениями и файлами) → чат. На широком окне список и чат стоят рядом.
+| Платформа | Подтверждённая конфигурация |
+| --- | --- |
+| Windows | x64, portable с вложенным Java runtime |
+| Android | API 24+, compile/target SDK 37; debug APK для локальной установки |
+| Web | Отдельный интерфейс из каталога `web/`, обслуживается сервером |
 
-Чат: потоковый ответ с Markdown (код с копированием, таблицы, списки),
-размышления (свёрнуты), вызовы инструментов с полным выводом по нажатию,
-вложения, очередь с «Сейчас»/«Убрать», три режима отправки во время ответа
-(в очередь / вклиниться / прервать и отправить), STOP с предупреждением об
-очереди, подтверждения инструментов, правка/удаление/ветка/перегенерация/
-продолжение, варианты ответа, смена модели и размышлений, сжатие контекста,
-черновик на сессию, подгрузка старой истории, переподключение без дублей.
+Другие desktop-платформы и iOS не входят в подтверждённую матрицу выпуска. Для Android release необходим постоянный ключ подписи; debug APK не является артефактом для магазина.
 
-## Сборка
+## Структура
 
-```bash
-./gradlew :androidApp:assembleDebug      # APK
-./gradlew :desktopApp:run                # Desktop
-./gradlew :desktopApp:packageDistributionForCurrentOS   # MSI / DMG / DEB
+```text
+core/api/       DTO, REST/SSE, типизированные ошибки, разбор протокола
+core/client/    ChatReducer, ChatSession, outbox, настройки и состояние сессий
+shared/         общий Compose UI и Android/JVM-адаптеры
+androidApp/     Activity, Android lifecycle, сервис уведомлений
+desktopApp/     окно, трей, single instance, portable updater
 ```
 
-Логика и её тесты (нужен только JDK и Maven Central; интеграционный тест
-поднимает настоящий TaskBridge на fake-pi и требует `node`):
+`core/` — отдельная Gradle-сборка без Android-плагина. Её common-исходники также компилируются в `shared/`; копии клиентской логики не расходятся.
 
-```bash
-cd core && ../gradlew jvmTest
+## Сборка в Windows
+
+Нужны JDK и Android SDK; используйте приложенный Gradle Wrapper. Android SDK укажите в локальном `local.properties`:
+
+```properties
+sdk.dir=C:/Users/USERNAME/AppData/Local/Android/Sdk
 ```
 
-## Что проверено, а что нет
+Из каталога `clients/kmp`:
 
-- `core/` скомпилирован и покрыт тестами: разбор всех ответов сервера
-  (`tests/fixtures/api`), SSE с разрезанными посреди UTF-8 чанками, ошибки по
-  кодам, **сверка редьюсера чата с веб-версией на 11 реальных сценариях**
-  (`tests/fixtures/chat`), Markdown, состояния и уведомления, и
-  интеграционный прогон `ChatSession` через OkHttp против живого сервера:
-  ответ, очередь, «Сейчас», STOP, файл, отказ модели, перезапуск сервера.
-- `shared/`, `androidApp/`, `desktopApp/` написаны без сборки: в среде, где
-  они писались, закрыт Google Maven (Android Gradle Plugin, androidx, а с
-  Compose 1.10 — и рантайм Compose). Синтаксис проверен ktlint, вызовы API
-  сверены вручную. **Первая сборка у вас может показать ошибки компиляции** —
-  они будут локальными (имя параметра, импорт), а не архитектурными.
+```powershell
+./gradlew.bat :shared:jvmTest --console=plain
+./gradlew.bat :androidApp:assembleDebug --console=plain
+./gradlew.bat :desktopApp:portable --console=plain
+```
 
-Фикстуры обновляются из корня репозитория, если меняется API:
+Результаты:
 
-```bash
+- Android: `androidApp/build/outputs/apk/debug/androidApp-debug.apk`.
+- Windows: `dist/.staging/TaskBridge/`, включая `TaskBridge.exe`, `app/` и `runtime/`.
+
+Работающий portable обновляется через трей **«Установить обновление и перезапустить»**. Перезапись файлов запущенного приложения приводит к блокировкам Windows. Если клиент закрыт, установка подготовленного пакета доступна через `:desktopApp:installPortable`.
+
+Клиентский Java runtime входит в portable. Для запуска сервера на этом компьютере по-прежнему нужны Node.js и Pi. Задача `:desktopApp:standalonePortable` добавляет серверные файлы; внешние Node.js/Pi она не заменяет.
+
+## Тесты
+
+```powershell
+Push-Location core
+../gradlew.bat :api:jvmTest :client:jvmTest --console=plain
+Pop-Location
+./gradlew.bat :shared:jvmTest :desktopApp:test --console=plain
+```
+
+Интеграционные тесты запускают изолированный сервер на fake Pi и требуют `node` в `PATH`. Обновление протокольных фикстур выполняется из корня репозитория:
+
+```powershell
 node scripts/export-api-fixtures.mjs
 node scripts/export-chat-fixtures.mjs
 ```
 
-## Ограничения сейчас
+`:shared:realProviderUiProbe` — отдельная ручная проверка реального OpenRouter. Она требует `OPENROUTER_API_KEY` и установленный Pi, проверяет нулевую цену выбранной модели и не запускается обычным offline CI.
 
-- Вход по коду — вручную (сканирование QR требует библиотеки камеры).
-- HTTPS с самоподписанным сертификатом ПК: без закрепления отпечатка
-  (план 3.7); по LAN используйте `http://`.
-- Файлы и артефакты открываются в браузере системы; при включённом входе по
-  коду браузер не знает cookie устройства.
-- Очередь неотправленных сообщений живёт в памяти; кэша истории на диске
-  пока нет (план K3) — без сети приложение показывает последнее, что успело
-  загрузить за время работы.
-- Android: фоновое наблюдение — сервис типа dataSync; с Android 15 система
-  ограничивает его 6 часами в сутки.
+## Подтверждённое поведение и ограничения
+
+- JVM-тесты API, client и shared Compose проходят; debug APK и Windows portable собираются. Подробные результаты — [отчёт стабилизации](../../docs/stabilization.md).
+- История, черновики, outbox и reconnect покрыты регрессиями. Команда, принятая сервером, и ответ модели имеют разные состояния.
+- KMP ограничивает открытие SSE, ожидание данных и чтение тела ошибки; общий автоматический предел генерации не задан.
+- Reasoning отображается ограниченным хвостом, копируется полный исходный текст. Проверены тяжёлый смешанный чат и ввод во время streaming.
+- Нативные Windows frame/input/retained-heap замеры и содержимое системного Android clipboard ещё требуют отдельной приёмки; callback копирования проверен через Compose.
+- Самоподписанный HTTPS и фоновые уведомления зависят от доверия сертификату и ограничений ОС. Проверяйте подключение и уведомления на целевом устройстве.
+
+Номер выпуска задаётся в `gradle.properties` (`taskbridgeVersion`), desktop-ресурсе `taskbridge-version.txt` и Android `versionName`; Android `versionCode` повышается отдельно. Версия сервера находится в корневом `package.json`.

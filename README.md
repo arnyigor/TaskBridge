@@ -1,1229 +1,217 @@
 # TaskBridge
 
-**Пульт управления локальным coding-агентом Pi с телефона по Wi‑Fi.**
+**Версия 1.2.1** · Windows desktop, Android и Web/PWA · [MIT](LICENSE)
 
-TaskBridge (v0.11.0) — небольшой локальный HTTP/PWA-сервер, который запускается на компьютере рядом с проектом и даёт с телефона:
+TaskBridge — сервер и клиенты для управления coding-агентом Pi: проекты, сессии, потоковые ответы, инструменты, очередь сообщений, подтверждения и STOP. Агент выполняет команды на компьютере, где запущен сервер, с правами его пользователя.
 
-- поставить задачу выбранной модели в выбранном проекте;
-- видеть в реальном времени, что делает агент (tools, streaming, статусы);
-- остановить выполнение кнопкой `STOP`;
-- дописать/уточнить задачу в живую сессию (follow-up / steering);
-- править, ветвить, удалять и перегенерировать отдельные сообщения и ходы;
-- видеть, почему машина думает долго: скорости модели (PP/TG) и загрузку GPU/CPU/RAM;
-- сжать контекст (`COMPACT`) и посмотреть состояние Pi;
-- открыть историю сессий, вложения и артефакты результата.
-
-## Скачать клиент
-
-Приложение для Android и Windows (кроме веб-интерфейса) — на странице
-[последнего релиза](https://github.com/arnyigor/TaskBridge/releases/latest):
-
-- **Windows** — `TaskBridge-…-windows-portable.zip`: распакуйте и запустите `TaskBridge.exe`, установка и Java не нужны;
-- **Android** — `TaskBridge-…-android-debug.apk`.
-
-Клиенту нужен запущенный на компьютере сервер TaskBridge (ниже — как его поставить). Исходники клиента — [clients/kmp](clients/kmp).
-
-Главная идея:
-
-```text
-Телефон → Wi‑Fi → TaskBridge → Pi RPC → выбранная модель → проект
-                        ↓
-                live events / STOP /
-                follow-up / compact
-```
-
-Это рабочий proof-of-concept. TaskBridge не содержит собственного агента и не вмешивается в настройки провайдера модели — он запускает тот же `pi --mode rpc`, которым вы пользуетесь вручную, и работает поверх его JSONL-протокола.
-
-Основной режим сейчас — **local-only по Wi‑Fi**: облачный транспорт (удалённый доступ через интернет) реализован на серверной стороне, но выключен (`cloud.enabled: false`), а вход в облачные настройки убран из интерфейса — см. [Cloud transport](#cloud-transport-remote-access). Облако **не входит в релиз 1.0** — см. [Roadmap](#roadmap).
-
----
-
-## Содержание
-
-- [Возможности](#возможности)
-- [Технологии](#технологии)
-- [Текущее состояние кода](#текущее-состояние-кода)
-- [Хранилище (SQLite)](#хранилище-sqlite)
-- [Архитектура](#архитектура)
-- [Структура проекта](#структура-проекта)
-- [Требования](#требования)
-- [Быстрый старт](#быстрый-старт)
-- [Добавление проекта](#добавление-проекта)
-- [Конфигурация](#конфигурация)
-- [HTTP API](#http-api)
-- [Данные и артефакты](#данные-и-артефакты)
-- [Git worktree](#git-worktree)
-- [Применение изменений и очистка](#применение-изменений-и-очистка)
-- [STOP, follow-up, compact, Pi state](#stop-follow-up-compact-pi-state)
-- [Файлы с телефона](#файлы-с-телефона)
-- [Cloud transport (remote access)](#cloud-transport-remote-access)
-- [Local Runtime Manager](#local-runtime-manager)
-- [Библиотека моделей и загрузки Hugging Face](#библиотека-моделей-и-загрузки-hugging-face)
-- [Панель процессов и питание машины](#панель-процессов-и-питание-машины)
-- [AUTO dispatcher](#auto-dispatcher)
-- [Engine health](#engine-health)
-- [Cloud bridge (Vercel Queues)](#cloud-bridge-vercel-queues)
-- [Безопасность](#безопасность)
-- [Тесты](#тесты)
-- [Известные ограничения](#известные-ограничения)
-- [Roadmap](#roadmap)
-
----
+Основной поддерживаемый сценарий — личный компьютер и доверенные устройства в локальной сети. Сервер, Pi и выбранный провайдер модели должны быть настроены отдельно. Доступность модели, её тарификация и лимиты определяются провайдером.
 
 ## Возможности
 
-### Управление задачами
+- Несколько сессий с раздельной историей, черновиками и курсорами событий.
+- Очередь, follow-up и steering, остановка текущего выполнения.
+- Markdown, код, reasoning, результаты bash/read/edit/write, вложения и файлы проекта.
+- Постраничная история, переподключение и восстановление после перезапуска.
+- Импорт Pi-сессий, ветвление и редактирование завершённых ходов.
+- Выбор провайдера и модели, локальные модели через llama.cpp, управление загрузками GGUF.
+- Диагностика состояния агента, соединения и объявленного провайдером ожидания.
 
-- список зарегистрированных проектов и Scratch workspace без проекта;
-- регистрация проекта из UI через встроенный браузер папок;
-- удаление и переименование сессий;
-- текстовая задача + небольшие вложения с телефона;
-- постановка задачи в очередь и запуск `pi --mode rpc` в правильном `cwd`;
-- строгий LF-JSONL parser протокола Pi RPC;
-- live Pi events через SSE (Server-Sent Events);
-- streaming assistant output, tool start/end, статусы задачи;
-- `STOP` через RPC `clear_queue` + `abort` с fallback на kill дерева процессов;
-- follow-up / steering в живую Pi-сессию;
-- `COMPACT` через Pi RPC и статистика сжатия, когда Pi её отдаёт;
-- `get_state` — модель, thinking level, streaming/compacting, id сессии;
-- переключатель auto compaction;
-- импорт уже существующих Pi-сессий как задач TaskBridge: кнопка «Импорт сессии Pi» показывает найденные сессии всех проектов с поиском и предпросмотром, а по умолчанию делает **безопасную копию** (оригинал в терминале не трогается); режим «забрать оригинал» — отдельно, с подтверждением;
-- постраничная (turn-aligned) загрузка истории длинных сессий;
-- у каждой сессии свой адрес `/session/<id>`: обновление страницы, закладка и ссылка на другом устройстве открывают тот же разговор (сервер отдаёт SPA-оболочку для таких путей);
-- экран сессий делит список на «Активные» и «Недавние», в строке — статус, проект, модель и относительное время обновления, кнопка 🔗 копирует ссылку на сессию;
-- очередь с capacity=1: если локальная модель занята (другой клиент, чужая сессия, залипший слот), промпт **не теряется** — задача/сообщение встаёт в очередь («ждёт модель»), отправляется автоматически при освобождении модели и переживает перезапуск TaskBridge;
-- как в современных чатах: `Enter` — поставить в очередь (даже если модель свободна: сессия подхватит сразу), `Ctrl+Enter` (Cmd+Enter) — отправить немедленно, не дожидаясь модели; сообщения в очереди видны над полем ввода (с количеством) и у каждого есть «Отправить сейчас» и «Убрать»; несколько сообщений к одной сессии ждут своей очереди по порядку и не теряются;
-- **команда расширения Pi (например `/nudge`) всегда идёт prompt'ом, а не steer'ом.** Pi отказывается ставить расширенческие команды в очередь: на текст, отправленный как steer/follow-up, он отвечает `Extension command "/nudge" cannot be queued. Use prompt() or execute the command when not streaming.` (`_throwIfExtensionCommand` в agent-session), и команда терялась — именно так выглядело «`/nudge` в TaskBridge не работает». При этом свой `prompt()` Pi выполняет команду сразу, даже пока агент работает, поэтому текст со слэшем теперь проверяется по ЖИВОМУ списку команд Pi (`get_commands`) и при совпадении отправляется prompt'ом в любом режиме, включая «вклиниться» (`Ctrl+Enter`); `/skill:…`, `/prompt:…` и любой неизвестный `/текст` командой расширения не считаются и остаются steer'ом — очередь для них законна (`tests/extension-command-delivery.test.mjs`);
-- действия на каждом сообщении завершённой сессии (встроенным SVG, без эмодзи): **править** сообщение оператора («исправить и запустить заново»), **ветвить** разговор от любого хода — в обе стороны: копия истории *до* этого сообщения или копия *от* него и ниже (`direction: "from"`), **удалить** ход, **перегенерировать** ответ. Под этим — `POST /api/tasks/:id/turns/:turnId/edit`, `…/delete`, `…/regenerate`, `…/fork`; правка сохраняет тот же seq, а обрезание хвоста помечается `TURN_EDITED` / `TURN_TRUNCATED`, поэтому живой клиент видит ровно то же, что и БД;
-- восстановление неудавшегося последнего хода: если модель уже успела выдать текст или вызвать инструмент, «⧉ Скопировать сообщение» возвращает вывод в поле ввода (откатить ход нельзя — вывод был бы потерян); если модель ничего не произвела, ход повторяют через «изменить и отправить заново» или «перегенерировать»;
-- пока задача выполняется, ход править/ветвить нельзя: панель действий скрыта, история живой сессии не меняется.
+## Требования и поддержка
 
-### Интерфейс
-
-- локальный веб-UI, адаптированный под телефон;
-- PWA (`manifest.webmanifest`, standalone), без внешних библиотек и CDN;
-- Markdown и код в ответах (vendored `marked` + `DOMPurify`);
-- ряд иконок уровня размышлений прямо под полем ввода: один тап переключает off/minimal/low/medium/high/xhigh (в шите «Настройки сессии» уровень больше не дублируется);
-- сворачиваемые секции, чтобы длинный чат не растягивал экран;
-- скачивание вложений и файлов workspace;
-- просмотр артефактов задачи.
-
-### Инфраструктура
-
-- persistent-хранилище задач и событий в SQLite (встроенный `node:sqlite`, без нативных зависимостей);
-- потоковая загрузка файлов (multipart, без base64);
-- `git status`, `git diff`, `diff.patch`;
-- изолированный `git worktree` на задачу, применение результата и очистка worktree;
-- project-specific verification commands;
-- проверка здоровья локального llama.cpp endpoint, managed router и legacy managed-запуск профилей `text` / `vision`;
-- экран «Локальные модели»: пресеты llama.cpp router, внешние серверы, прогресс загрузки, скрытие/возврат автонайденных строк, переключение vision у router-пресетов и удаление мёртвых записей без удаления файлов;
-- библиотека локальных GGUF-моделей: поиск Hugging Face, разбор квантов/шардов/mmproj, фоновые загрузки с retry/cancel/progress, регистрация модели в `models.ini`, запуск через router и безопасное удаление скачанных файлов;
-- панель процессов машины: список процессов, kill одного PID с защитой от переиспользования PID/системных процессов и групповой kill видимых `node`/`python`;
-- серверные действия из UI/API: перезапуск TaskBridge, выключение и перезагрузка машины с клиентским таймером отмены;
-- AUTO-выбор профиля модели под задачу и классификация ошибок движка (quota / rate limit / context);
-- скорости загруженной модели (PP/TG) и состояние ПК — CPU (дельтами `os.cpus()`), RAM и GPU через `nvidia-smi` — в `GET /api/info` (`engine.metrics`, `system`);
-- `GET /api/metrics` — счётчики задач/событий/облака, в том числе в формате Prometheus;
-- web-push уведомления (VAPID): `GET /api/push/key`, `POST /api/push/subscribe` / `unsubscribe` / `test`;
-- опциональная авторизация по pairing-коду и self-signed HTTPS для LAN.
-
----
-
-## Технологии
-
-| Слой | Что используется |
+| Компонент | Требования |
 | --- | --- |
-| Runtime | Node.js 22.13+, ESM (`.mjs`), без сборки и транспиляции |
-| Backend | стандартный `node:http`, `node:child_process`, `node:crypto`, `node:fs/promises` |
-| Агент | Pi CLI в режиме `--mode rpc` (JSONL over stdio) |
-| Транспорт UI | HTTP + SSE |
-| Frontend | нативный HTML/CSS/JS, PWA, без фреймворков |
-| Markdown | `marked` + `DOMPurify` (лежат в `web/vendor`, без CDN) |
-| Тесты | встроенный `node:test` + `linkedom` для DOM-тестов (актуальный счётчик — в разделе [Тесты](#тесты)) |
-| Хранилище | SQLite через встроенный `node:sqlite` (`data/taskbridge.db`, WAL), плюс JSON-реестры для скачиваний/локальной библиотеки моделей |
-| Наблюдаемость | `/api/metrics` (+ Prometheus), PP/TG из `/metrics` llama.cpp, GPU через `nvidia-smi` |
-| Облако (опция) | `cloud/` — Vercel-совместимый control plane: роутер, store (memory/sqlite/postgres), relay, WS; локально `npm run cloud` |
+| Сервер | Node.js ≥22.13 со встроенным `node:sqlite`; основная проверяемая ветка — Node22 |
+| Агент | Pi CLI в `PATH`, доступная модель и настроенная авторизация |
+| Git-проекты | Git в `PATH`; права на рабочие папки |
+| Windows-клиент | Проверяемая платформа — Windows x64; portable содержит Java runtime |
+| Android-клиент | Android 7.0 / API 24 и новее |
+| Web | Современный браузер с JavaScript, SSE и WebSocket для облачного транспорта |
+| Сборка клиентов | JDK, Android SDK и Gradle Wrapper; подробности в [clients/kmp](clients/kmp/README.md) |
 
----
+Диапазон совместимости Pi, проверяемый кодом: `>=0.85.0 <1.1.0`. Версия и предупреждения видны в `/api/info`; обновление Pi следует проверять на отдельной тестовой сессии.
 
-## Текущее состояние кода
+Windows — основная пользовательская платформа. Серверные тесты выполняются на Windows и Ubuntu. macOS/iOS и установщики для других ОС не входят в подтверждённую матрицу этого выпуска.
 
-Состояние рабочей ветки на 2026-10-16. Изменения стабилизации:
+## Установка сервера
 
-- Приём команды сохраняется до выполнения; повтор с тем же `commandId` не создаёт второе действие. После сбоя с неизвестным исходом команда не исполняется автоматически заново.
-- Финальный статус, событие и Run сохраняются согласованно; поздние кадры завершённого Pi не возвращают ход в `RUNNING`. Исправлены восстановление очереди, reconnect/replay и отмена загрузки истории при закрытии чата.
-- Несовместимая с авторизацией модель, неверный ключ и недостаток средств завершаются понятной ошибкой вместо бесконечного ожидания повтора. Временные rate limit и сетевые отказы показывают объявленное провайдером ожидание. Модель и аккаунт автоматически не переключаются.
-- KMP ограничивает ожидание открытия SSE, тишины потока и тела HTTP-ошибки; отмена клиента сохраняется. Это транспортные таймауты: предупреждение о молчании модели не является общим лимитом генерации, остановка остаётся доступна через `STOP`.
-- Большой reasoning отображается ограниченным предпросмотром, а копируется полностью. Убраны полноразмерные промежуточные копии reasoning в KMP и неограниченный текст reasoning в Web DOM. Проверены смешанные потоки с reasoning более 200 тыс. символов и bash/read/edit/write.
-
-Результаты, замеры и границы проверок — в [отчёте о стабилизации](docs/stabilization.md). Новый интерфейс по референсу Codex отложен и в текущую стабилизацию не входит.
-
-Другие возможности текущей версии:
-
-- **версия и клиенты:** серверный пакет остаётся Node.js/PWA-приложением (`package.json` — `0.11.0`), KMP-клиенты собираются с `taskbridgeVersion=1.2.0`;
-- **локальные модели:** router-режим стал основной веткой развития. В коде есть отдельные слои `local-models`, `router-presets`, `model-library`, `huggingface` и `download-manager`; UI умеет искать/скачивать GGUF, регистрировать их в `models.ini`, запускать через router, прятать автонайденные внешние строки и править vision у пресетов;
-- **сессии Pi:** импорт нативных Pi-сессий вынесен в отдельный API/клиентский экран; по умолчанию используется копия, а takeover требует явного подтверждения;
-- **администрирование машины:** добавлены API и UI для перезапуска TaskBridge, просмотра/остановки процессов, shutdown/reboot машины; потенциально опасные действия требуют подтверждения и выполняют серверные проверки;
-- **контракты:** опубликованный список маршрутов в `src/api-contract.mjs` и [`docs/api-contract.md`](docs/api-contract.md) обновлён под local library, downloads, processes, vision, hide/unhide, shutdown/reboot;
-- **провайдеры и локальные модели:** добавлены статус лимитов OpenAI Codex, bearer-загрузка приватных Hugging Face-репозиториев, SHA-256-проверка, возобновление `.taskbridge-part` и ограниченная параллельная очередь загрузок; Strata-провайдеры синхронизируются отдельным скриптом при запуске Windows;
-- **клиенты:** KMP-клиенты умеют сохранять файлы в Downloads/папку Downloads, выбирать LAN-сокет для локального адреса и показывать начало/окончание compaction без задержки heartbeat; панель процессов дополнена Java;
-- **покрытие:** добавлены тесты для Hugging Face tree parser, download manager, model library, router presets, процессов, local vision/hide, restart/import сессий и KMP UI-моделей. Подробные технические разборы доставки сообщений и вложений — [`docs/message-delivery-analysis.md`](docs/message-delivery-analysis.md) и [`docs/attachment-delivery-analysis.md`](docs/attachment-delivery-analysis.md).
-
----
-
-## Архитектура
-
-```text
-┌──────────────┐   HTTP / SSE    ┌──────────────────────────────────────┐
-│  Телефон     │ ───────────────▶│  TaskBridge (Node.js, node:http)     │
-│  браузер/PWA │◀─────────────── │                                      │
-                                 │  server.mjs  (loopback) / proxy.mjs │
-                                 │  task-manager/session-manager  цикл  │
-                                 │  pi-rpc.mjs / runners/pi-runner      │
-                                 │  task-store.mjs  события/метаданные  │
-                                 │  events/, domain/  TaskEvent, seq    │
-                                 │  git.mjs         worktree, diff      │
-                                 │  local-models    llama.cpp router    │
-                                 │  system-metrics/metrics  PP/TG, ж.   │
-                                 │  cloud/worker    outbox, relay (off) │
-                                 │  auth.mjs / tls.mjs  pairing, HTTPS  │
-                                 └───────────────┬──────────────────────┘
-                                                 │ stdio (JSONL)
-                                                 ▼
-                                 ┌──────────────────────────────────────┐
-                                 │  pi --mode rpc  (cwd = workspace)    │
-                                 │            ↓                         │
-                                 │  выбранная модель / provider         │
-                                 └──────────────────────────────────────┘
-```
-
-TaskBridge — тонкая прослойка: он не переписывает логику агента, а транслирует события Pi в SSE, хранит их и добавляет управление (STOP, follow-up, compact, worktree, артефакты).
-
----
-
-## Структура проекта
-
-```text
-Taskbridge/
-├─ src/
-│  ├─ server.mjs            HTTP-сервер, роутинг API, SSE, раздача статики
-│  ├─ api-contract.mjs      опубликованный контракт API: версия + список маршрутов
-│  ├─ proxy.mjs             LAN-турникет варианта B: LAN-вход в приложение на loopback (TLS, Host)
-│  ├─ task-manager.mjs      жизненный цикл задач, очередь, сообщения, Pi-сессии
-│  ├─ session-manager.mjs   владение Pi-сессиями: Run, idle, close
-│  ├─ runners/pi-runner.mjs запуск/остановка процесса Pi на задачу
-│  ├─ pi-rpc.mjs            JSONL RPC-клиент Pi
-│  ├─ task-store.mjs        SQLite-хранилище задач и событий
-│  ├─ instance-lock.mjs     один экземпляр на data-каталог (pid-lock)
-│  ├─ multipart.mjs         потоковый парсер multipart/form-data
-│  ├─ uploads.mjs           стейджинг загрузок с TTL
-│  ├─ engine.mjs            классификация ошибок провайдера (quota/rate limit/context)
-│  ├─ dispatcher.mjs        AUTO-выбор профиля/модели
-│  ├─ local-models.mjs      llama.cpp router: процесс, /models, load/unload, прогресс, внешние серверы
-│  ├─ router-presets.mjs    чтение/правка секций models.ini: файлы, vision, регистрация пресетов
-│  ├─ huggingface.mjs       поиск HF и разбор GGUF-вариантов/шардов/mmproj
-│  ├─ download-manager.mjs  фоновые загрузки моделей с progress/cancel/retry и .taskbridge-part
-│  ├─ model-library.mjs     локальный реестр GGUF-моделей, scan/register/delete
-│  ├─ provider-models.mjs   синхронизация списков моделей внешних provider'ов (modelSync.providers)
-│  ├─ model-catalog.mjs     список моделей Pi (get_available_models)
-│  ├─ context-report.mjs    отчёт «из чего собран запрос» и лимит контекста сессии
-│  ├─ pi-settings.mjs       чтение ~/.pi/agent/settings.json (blockImages)
-│  ├─ mcp-manager.mjs       MCP для задач: свой конфиг, вкл/выкл, import из Pi
-│  ├─ session-history.mjs   восстановление истории после restart
-│  ├─ native-sessions.mjs   импорт существующих Pi-сессий
-│  ├─ pi-session-index.mjs  безопасный поиск/чтение файлов сессий Pi
-│  ├─ process-info.mjs      снимок процессов ОС для диагностики панели
-│  ├─ process-kill.mjs      безопасная остановка PID/групп node/python
-│  ├─ event-trim.mjs        отбрасывание устаревших streaming-дельт
-│  ├─ event-window.mjs      постраничная выдача истории по turn'ам
-│  ├─ text-tail.mjs         ограниченный хвост текста (streaming)
-│  ├─ tool-output.mjs       rolling-окно вывода инструментов
-│  ├─ git.mjs               worktree, status, diff, patch
-│  ├─ files.mjs             вложения, лимиты, безопасные пути
-│  ├─ metrics.mjs           /api/metrics (в т.ч. Prometheus)
-│  ├─ system-metrics.mjs    CPU/RAM/GPU и PP/TG модели
-│  ├─ runtime-manager.mjs   health-check и запуск llama.cpp
-│  ├─ runtime-control.mjs   профили runtime, start/restart/status
-│  ├─ project-browser.mjs   браузер папок для регистрации проектов
-│  ├─ auth.mjs              pairing-код, токены устройств, Bearer/cookie, Origin, rate limit
-│  ├─ tls.mjs               self-signed сертификат для LAN HTTPS
-│  ├─ config.mjs            загрузка/сохранение config.json
-│  ├─ approvals/policy.mjs  политика подтверждений опасных tool-вызовов
-│  ├─ push/                 web-push (VAPID) и центр уведомлений
-│  ├─ domain/               протокол: TaskEvent, CloudCommand, machine state
-│  ├─ events/               EventMux, sequence, нормализация, snapshot'ы
-│  └─ cloud/                CloudWorker, outbox, heartbeat, dispatcher, approvals
-├─ pi-extension/            Pi-расширение: подтверждение опасных tool-вызовов
-├─ cloud/                   облачный control plane (Vercel-совместимый)
-│  ├─ lib/                  роутер API, auth, credentials, store (memory/sqlite/postgres), relay/ws, errors, ids
-│  ├─ api/index.mjs         Vercel function (общий роутер)
-│  └─ server.mjs            локальный хост облака + SSE (раздаёт тот же web/)
-├─ api/index.mjs            Vercel-энтрипоинт (реэкспорт cloud/api)
-├─ .vercelignore            исключает config.json/data из CLI-деплоя
-├─ vercel.json              конфиг Vercel (outputDirectory: web — один UI)
-├─ web/
-│  ├─ index.html            разметка UI
-│  ├─ app.js                логика UI, SSE, рендер чата
-│  ├─ chat-state.mjs        чистое состояние чата (тестируемое)
-│  ├─ transport.mjs         выбор local/cloud транспорта для UI
-│  ├─ cloud-config.js       /cloud-config.js (настройки облака для страницы)
-│  ├─ sw.js                 service worker PWA
-│  ├─ app.css               стили
-│  ├─ manifest.webmanifest  PWA-манифест
-│  └─ vendor/               marked, DOMPurify и их лицензии
-├─ tests/                   тесты на node:test (актуальный результат запуска — в разделе «Тесты»)
-├─ scripts/
-│  ├─ pi-rpc-smoke.mjs      smoke-тест Pi RPC
-│  ├─ cloud-secrets.mjs     генерация токенов/секретов (npm run cloud:secrets)
-│  ├─ cloud-deploy.mjs      автодеплой на Vercel (npm run cloud:deploy)
-│  ├─ cloud-local.mjs       локальный прогон облака (start/status/stop/verify)
-│  ├─ check-secrets.mjs     аудит утечек (npm run check:secrets)
-│  ├─ restart-and-verify.mjs перезапуск и проверка сервера
-│  ├─ start-lan.mjs         запуск варианта B (npm run lan:start/status/stop)
-│  ├─ lan-acceptance.mjs    приёмка шага 5: турникет переживает рестарт агента
-│  └─ backup.mjs            снимок БД (npm run backup)
-├─ docs/                    ТЗ, ревью и планы
-├─ config.example.json      шаблон конфигурации
-├─ models.example.ini       шаблон пресетов llama.cpp router (скопируйте в models.ini)
-├─ start.cmd                запуск на Windows (LAN-режим: приложение + турникет)
-└─ data/                    задачи, события, worktree, логи (не в git)
-```
-
----
-
-## Требования
-
-- Windows 10/11 (основная целевая платформа);
-- Node.js 22.13+ (нужен встроенный модуль `node:sqlite`);
-- Git — если проверяется Git-проект;
-- Pi CLI в `PATH`;
-- настроенный в Pi provider/model;
-- для локальной модели — работающий llama.cpp endpoint либо managed-запуск.
-
-Проверка:
+Команды ниже выполняются в PowerShell. Для уже настроенного экземпляра используйте раздел обновления; сохраняйте существующие `config.json` и `data/`.
 
 ```powershell
+git clone https://github.com/arnyigor/TaskBridge.git
+Set-Location TaskBridge
+git checkout v1.2.1
+npm ci
+Copy-Item config.example.json config.json
 node --version
 git --version
 pi --version
 ```
 
-Если Pi не установлен:
+Pi устанавливается и авторизуется отдельно. Для воспроизводимой установки проверяемой линии Pi:
 
 ```powershell
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.0.4
 ```
 
----
-
-## Быстрый старт
-
-### 1. Сначала проверить Pi отдельно
-
-TaskBridge не должен одновременно отлаживать и Pi, и модель. Из папки проекта:
+Затем настройте авторизацию и модель в Pi. До запуска TaskBridge проверьте его из рабочей папки проекта:
 
 ```powershell
 pi -p "Ответь только PI_OK"
 ```
 
-Если это не работает — сначала настроить Pi/model provider.
+Успешный ответ подтверждает доступность выбранной модели. Если запрос отклонён, исправьте настройки Pi/провайдера до проверки TaskBridge.
 
-RPC smoke-тест:
+### Настройка
 
-```powershell
-npm run smoke:pi -- "G:\path\to\project"
-```
+Отредактируйте созданный `config.json`, сохранив остальные поля примера:
 
-Успешный конец:
-
-```text
-[smoke] PI_RPC_OK: agent_settled received
-```
-
-### 2. Запустить TaskBridge
-
-```powershell
-start.cmd        # или: npm start
-```
-
-Запускается **LAN-режим**: приложение поднимается только на `127.0.0.1`,
-а в сеть смотрит турникет (`src/proxy.mjs`) — тогда перезапуск сетевой части не
-убивает агента (см. [Устойчивость процессов](#устойчивость-процессов-шаг-5-lan-турникет)).
-При первом старте автоматически создаётся `config.json` из `config.example.json`. В выводе видно оба процесса и адрес для телефона:
-
-```text
-TaskBridge MVP listening on 127.0.0.1:51234
-LAN (Ethernet 2): http://192.168.1.42:8787
-
-[lan] app 4242 on 127.0.0.1:51234 (loopback only)
-[lan] proxy 4243 on 0.0.0.0:8787 — this is what the phone opens
-[lan] http://127.0.0.1:8787 · Ctrl+C stops both
-```
-
-На телефоне в той же Wi‑Fi сети открыть LAN URL (порт из `config.json`).
-Остановить — `Ctrl+C` в этом окне, или `taskbridge stop` / `npm run lan:stop`.
-Фоновый запуск — `npm run lan:start`.
-
-Один процесс (старое поведение) остаётся доступен как аварийный вариант:
-`npm run start:monolith` или `taskbridge start --monolith`.
-
-### 3. Самая быстрая проверка без проекта
-
-В UI выбрать `Project: Scratch workspace` и отправить:
-
-```text
-Создай файл hello.txt со строкой TaskBridge works. Затем прочитай его и сообщи результат.
-```
-
-На телефоне должны появиться live Pi events.
-
-### 4. Настройка Pi для локальной модели
-
-TaskBridge не вмешивается в model provider Pi. Простейший путь:
-
-1. открыть `pi`;
-2. настроить provider/model;
-3. сохранить как default;
-4. убедиться, что `pi -p ...` работает;
-5. оставить `config.pi.args` пустым.
-
-Явные флаги при необходимости:
-
-```json
-"pi": {
-  "command": "pi",
-  "args": ["--provider", "YOUR_PROVIDER", "--model", "YOUR_MODEL", "--thinking", "medium"]
-}
-```
-
-Для OpenAI-совместимого single-model llama.cpp endpoint настройте custom provider в `~/.pi/agent/models.json`. Для llama.cpp router в Pi есть `/login llama.cpp`.
-
-**Практический критерий:** если команда ниже работает из нужной папки, TaskBridge использует те же настройки:
-
-```powershell
-pi -p "Прочитай README проекта и ответь одной строкой"
-```
-
----
-
-
-### 5. Внешний локальный сервер (Strata) — без ручных записей
-
-Внешний сервер на той же машине (например, [Strata](https://github.com/Niko1221/Strata)
-с Qwen3.8-Flash-Next) подключается двумя шагами.
-
-**1. Провайдер в Pi** (`~/.pi/agent/models.json`) — как любой OpenAI-совместимый endpoint:
-
-```json
-"strata-iq3s": {
-  "baseUrl": "http://127.0.0.1:8083/v1",
-  "api": "openai-completions",
-  "apiKey": "local",
-  "models": [{
-    "id": "qwen3.8-flash-next-iq3-s",
-    "name": "Qwen3.8-Flash-Next IQ3_S - Strata - 256k - images",
-    "contextWindow": 262144, "maxTokens": 32768,
-    "reasoning": true, "input": ["text", "image"]
-  }]
-}
-```
-
-`apiKey` обязателен: без него Pi считает провайдера ненастроенным и **выбрасывает его из
-каталога** — модель не появится ни в Pi, ни в выборе моделей TaskBridge. Значение может быть
-любым (`"local"`): сервер ключ не проверяет.
-
-**2. Каталог установки — в `config.json`:**
-
-```json
-"localRuntime": {
-  "externalDiscovery": {
-    "dir": "G:\AIModels\lmstudio\Strata",
-    "engine": "strata",
-    "configGlob": "strata-*.json"
-  }
-}
-```
-
-Дальше модели находятся сами. TaskBridge читает `models.json`, берёт провайдеры с локальным
-`baseUrl`, сопоставляет их **порт** с конфигом `strata-*.json` в каталоге установки (оттуда же
-берутся команда запуска и контекст) и показывает строкой в «Локальных моделях» — с рабочими
-кнопками «Загрузить»/«Выгрузить». Добавили в Pi четвёртую модель — она появится в списке без
-правки `config.json`.
-
-Ручные записи `localRuntime.externalServers` продолжают работать и имеют приоритет; они нужны
-теперь только для серверов вне каталога установки.
-
-В список **не** попадают: роутер llama.cpp и всё, что смотрит на его порт (`localRuntime.healthUrl`),
-а также локальные прокси/релеи — у них нет конфига в каталоге установки.
-
----
-
-### 6. Телеметрия внешнего сервера в чате
-
-«Модель читает промпт», PP и TG работают и на сессии с внешним сервером:
-
-- llama.cpp отдаёт prometheus-текст (`llamacpp:prompt_tokens_total`, ...) — его разбирает
-  `parsePrometheusMetrics`;
-- Strata отдаёт JSON на `GET /metrics` — его разбирает `parseStrataMetrics`. В нём есть фаза
-  (`live.phase`), прогресс чтения промпта (`prompt_read` / `prompt_total`) и скорость
-  последнего запроса. Поэтому на длинном вводе в чате видно «Модель читает промпт · 64%».
-
-PP у Strata считается по **новым** токенам (`prompt_tokens - reused` за `prompt_ms`):
-переиспользованная часть приходит из кеша беседа и не читается заново. Но у Strata `prompt_ms` —
-время всей промпт-фазы запроса, и в нём есть постоянная составляющая на запрос. Измерено на живом
-сервере (iq3_s, 12 запросов, 2026-09-30): `prompt_ms` ≈ 1.19 с + 1.55 мс на новый токен (r² = 0.91,
-≈ 650 ток/с), а от переиспользованной части не зависит вообще (r² = 0.003). Поэтому на длинной
-беседе, где `reused` доходит до 99.9%, «новые / prompt_ms» — уже не скорость чтения, а накладные
-расходы, поделённые на остаток: 23 новых токена за 677 мс давали «34 tok/s», 163 за 1502 мс —
-«108 tok/s». Такой промпт движок **вспомнил, а не прочитал** — честной скорости чтения у него нет,
-поэтому TaskBridge показывает не число, а факт: `pp = null`, `ppUnavailable =
-"conversation-cache"`, плюс `promptTokens` и `freshTokens` (сколько токенов всего и сколько из них
-движок прочитал) — интерфейс по ним и объясняет пропуск: «PP: — промпт из кеша беседы». Доля новых
-токенов выше половины промпта — PP публикуется как обычно и на свежем
-промпте сходится с измеренной таблицей самого движка (IQ3_S: 737 ток/с на 4K, 931-1070 на 64K-128K).
-
-TG у Strata всегда из самого движка: живая `live.tok_s` (среднее от первого токена текущего
-запроса) во время генерации, иначе `decode_tok_s` последнего запроса — это те же числа, что
-`[strata] answering: … 18.4 tok/s` в окне сервера.
-
----
-
-## Добавление проекта
-
-Вариант 1 — через UI: кнопка регистрации проекта открывает браузер папок, разрешённых в `projectBrowser.roots`.
-
-Вариант 2 — вручную в `config.json`:
-
-```json
-{
-  "projects": [
-    {
-      "id": "my-project",
-      "name": "My Project",
-      "path": "G:\\Projects\\MyProject",
-      "useWorktree": true,
-      "verification": [".\\gradlew.bat test --console=plain"]
-    }
-  ]
-}
-```
-
-После правки вручную — перезапустить TaskBridge. Изменения, сделанные через UI (регистрация/удаление проекта), сохраняются в `config.json` автоматически.
-
----
-
-## Конфигурация
-
-Шаблон — `config.example.json`. Ключевые поля:
-
-| Ключ | Назначение |
+| Поле | Назначение |
 | --- | --- |
-| `server.host` / `server.port` | адрес и порт HTTP-сервера (по умолчанию `0.0.0.0:8787`) |
-| `server.maxBodyMb` | максимальный размер JSON-тела запроса |
-| `server.maxUploadMb` | лимит одного файла при потоковой загрузке (суммарно — 2×) |
-| `server.maxEventsPerRequest` | потолок событий на один HTTP-запрос (по умолчанию 20000) |
-| `server.maxHistoryMb` | потолок размера окна истории для `?tail` в мегабайтах (по умолчанию 6) |
-| `server.sqlite.synchronous` | `NORMAL` (быстро) или `FULL` (выживает жёсткое отключение) |
-| `server.sqlite.busyTimeoutMs` | сколько ждать занятую БД (по умолчанию 5000) |
-| `server.auth.enabled` | включить pairing-авторизацию. **Без неё сервер слушает только `127.0.0.1`**, даже если `host = 0.0.0.0` |
-| `server.auth.allowedOrigins` | дополнительные разрешённые Origin, например `https://pc.<tailnet>.ts.net` для `tailscale serve` |
-| `server.tailscale.ip` / `httpsUrl` | переопределить Tailscale-IP (по умолчанию — адрес интерфейса из `100.64.0.0/10`) и адрес `tailscale serve` для QR |
-| `server.https.enabled` / `port` | self-signed HTTPS для LAN |
-| `pi.command` / `pi.args` | как запускать Pi |
-| `pi.env` | дополнительные env-переменные Pi (TaskBridge сама добавляет `LLAMA_BASE_URL` в router-режиме) |
-| `pi.mcp.mode` | MCP для задач: `inherit` (как в Pi), `managed` (свой конфиг TaskBridge), `off` (без MCP) |
-| `pi.mcp.configPath` | путь к своему MCP-конфигу (по умолчанию `data/mcp.json`) |
-| `pi.persistSessions` | сохранять файлы сессий Pi |
-| `pi.projectTrust` | доверие проекту в Pi |
-| `pi.abortTimeoutMs` | сколько ждать RPC `abort` до kill |
-| `pi.sessionRoots` | дополнительные папки сессий Pi для импорта |
-| `localRuntime.healthUrl` | health-check локальной модели |
-| `localRuntime.provider` | provider Pi, который обслуживает локальный runtime (по умолчанию `llama.cpp` в router-режиме, иначе `llamacpp`); для других provider'ов локальный health-check пропускается ||
-| `localRuntime.apiKey` | ключ роутера llama.cpp, если тот запущен с `--api-key` (`--api-key` пускает без ключа только `/health`): значение — сам ключ или `$ENV_NAME`, как у провайдеров Pi |
-| `localRuntime.router` | router-режим llama.cpp: `enabled`, `command`, `args`, `cwd`, `env`, `apiKey`, `startTimeoutMs`, `loadTimeoutMs` |
-| `localRuntime.profiles` | (legacy) профили одного процесса (`text`, `vision`, …) |
-| `localRuntime.managed` | управляемый запуск llama.cpp |
-| `localRuntime.auto.enabled` | AUTO-выбор профиля под задачу (vision при картинках) |
-| `cloud.enabled` / `cloud.url` | включить Internet bridge и указать Vercel deployment |
-| `cloud.machineId` / `machineSecretEnv` | идентификатор ПК и имя env-переменной с machine secret |
-| `workspace.requireCleanSource` | запрещать старт на dirty source repository |
-| `workspace.useGitWorktreeByDefault` | изолировать задачу в worktree |
-| `projectBrowser.roots` | корни, которые видит браузер папок |
-| `deepseek.costHistoryPath` | CSV расходов для прогноза, на сколько дней хватит баланса DeepSeek |
-| `modelSync.providers` | provider'ы, чьи списки моделей синхронизируются с их собственным API при `GET /api/models?refresh=1` (сегодня `wormsoft`); пусто — никого не трогать |
-| `providerStatus.wormsoft` / `routerai` | настройки кэша и переопределения URL для статуса аккаунта; ключи по умолчанию берутся из `WORMSOFT_API_KEY` / `ROUTERAI_API_KEY` |
-| `projects[]` | зарегистрированные проекты |
-
-`config.json` в git не хранится — он содержит локальные пути.
-
----
-
-## HTTP API
-
-Машиночитаемый контракт — [`src/api-contract.mjs`](src/api-contract.mjs) (версия
-`apiVersion` в `GET /api/info`), описание для клиента —
-[`docs/api-contract.md`](docs/api-contract.md); расхождение ловит
-`tests/api-contract.test.mjs`.
-
-Все `/api/*`, кроме `auth`/`health`, требуют авторизацию, если она включена.
-
-| Метод | Путь | Назначение |
-| --- | --- | --- |
-| `GET` | `/api/health` | liveness |
-| `GET` | `/api/auth` | статус авторизации |
-| `POST` | `/api/auth/pair` | вход по pairing-коду: `{code, deviceName?, clientKind?}` → устройство; браузер получает HttpOnly-cookie, `android`/`desktop`/`cli` — `token` в ответе для `Authorization: Bearer` |
-| `GET` | `/api/auth/pairing` | текущий код и данные QR (только с самого ПК; через прокси и `tailscale serve` — 403) |
-| `GET` | `/api/auth/devices` | подключённые устройства (без токенов) |
-| `DELETE` | `/api/auth/devices/:id` | отозвать устройство (только с ПК) |
-| `GET` | `/api/info` | имя, build, адреса, engine/system, лимиты файлов и `providerStatuses` (баланс/подписка точного provider активной модели) |
-| `POST` | `/api/uploads` | потоковая multipart-загрузка файлов |
-| `GET` | `/api/projects` | список проектов |
-| `DELETE` | `/api/projects/:id` | удалить проект |
-| `GET` | `/api/project-browser` | список папок в разрешённых корнях |
-| `POST` | `/api/project-browser/register` | зарегистрировать проект |
-| `GET` | `/api/projects/:id/pi-sessions` | существующие Pi-сессии проекта |
-| `GET` | `/api/native-sessions` | сессии всех проектов, сгруппированы, с подсказкой недавней |
-| `GET` | `/api/native-sessions/preview` | предпросмотр сессии: модель, thinking, размер, последние сообщения |
-| `GET` | `/api/models` | список доступных моделей Pi (`?refresh=1` — заново опросить Pi) |
-| `GET` | `/api/tasks` | список сессий/задач |
-| `POST` | `/api/tasks` | создать задачу |
-| `POST` | `/api/tasks/from-session` | импортировать Pi-сессию (`mode: clone` по умолчанию, `take-over` — с `confirmedClosed`) |
-| `GET` / `DELETE` / `PATCH` | `/api/tasks/:id` | получить / удалить / переименовать |
-| `GET` | `/api/tasks/:id/events` | события (`after`, `limit`, `tail`, `before`) |
-| `GET` | `/api/tasks/:id/stream` | SSE-поток live events |
-| `GET` | `/api/tasks/:id/state` | состояние Pi |
-| `POST` | `/api/tasks/:id/message` | follow-up / steering |
-| `POST` | `/api/tasks/:id/cancel` | STOP |
-| `POST` | `/api/tasks/:id/compact` | COMPACT |
-| `POST` | `/api/tasks/:id/session/restart` | убить Pi-процесс этой сессии; следующее сообщение перезапускает её из файла сессии — рутинный выход для зависшей сессии (рестарт сервера — аварийный, он затрагивает все сессии) |
-| `GET` | `/api/tasks/:id/context` | из чего собран запрос к модели: системный промпт, инструкции проекта, навыки, MCP-инструменты (оценки в токенах) плюс собственные итоги Pi |
-| `POST` | `/api/tasks/:id/context` | лимит контекста сессии (`{"limit": N}` или `null`); выше лимита TaskBridge сам сжимает историю в конце хода |
-| `POST` | `/api/tasks/:id/auto-compaction` | вкл/выкл auto compaction |
-| `POST` | `/api/tasks/:id/model` | сменить модель сессии (как `/model` в Pi) |
-| `POST` | `/api/tasks/:id/thinking` | задать thinking level сессии |
-| `POST` | `/api/tasks/:id/undo-last-turn` | откатить последний чистый ход (API; в UI заменён копированием текста) |
-| `POST` | `/api/tasks/:id/turns/:turnId/edit` | исправить сообщение оператора и перезапустить ход (`TURN_EDITED`) |
-| `POST` | `/api/tasks/:id/turns/:turnId/delete` | удалить ход и всё после него (`TURN_TRUNCATED`) |
-| `POST` | `/api/tasks/:id/regenerate` | удалить ответ и запросить его заново (вопрос тот же) |
-| `POST` | `/api/tasks/:id/fork` | ветка: новая сессия — разговор до выбранного хода или, с `direction: "from"`, выбранное сообщение и всё, что после него |
-| `GET` | `/api/tasks/:id/artifacts` | список артефактов |
-| `GET` | `/api/tasks/:id/artifacts/:name` | скачать артефакт |
-| `GET` | `/api/tasks/:id/files/:id` | скачать вложение |
-| `GET` | `/api/tasks/:id/workspace-file?path=` | файл из workspace |
-| `POST` | `/api/tasks/:id/apply` | применить `diff.patch` к исходному проекту |
-| `DELETE` | `/api/tasks/:id/worktree` | удалить worktree задачи |
-| `GET` | `/api/runtime` | статус локальной модели (legacy-профили) |
-| `POST` | `/api/runtime/start` / `restart` | запустить/перезапустить профиль (legacy) |
-| `GET` | `/api/local` | статус router-режима: state, pid, список локальных моделей (`?fresh=1` — без кэша, для кнопки «Обновить») |
-| `POST` | `/api/local/load` | загрузить локальную модель (`{ "model": "id" }`) |
-| `POST` | `/api/local/unload` | выгрузить локальную модель |
-| `POST` | `/api/local/context` | размер контекста внешнего сервера (`{ "model": "id", "context": 131072 }`) — правит `--max-context` в его конфиге, применяется при следующей загрузке |
-| `POST` | `/api/local/forget` | убрать запись внешнего сервера из конфига TaskBridge (`{ "model": "id" }`); модель, файлы и конфиг движка не трогаются |
-| `POST` | `/api/local/stop` | остановить router (только если его запустил TaskBridge) |
-| `GET` | `/api/local/events` | SSE: статус и прогресс загрузки локальных моделей |
-| `GET` | `/api/mcp` | MCP-серверы и режим (`inherit` / `managed` / `off`) |
-| `POST` | `/api/mcp/mode` | сменить режим MCP |
-| `POST` | `/api/mcp/import` | импортировать MCP-конфиг из Pi |
-| `POST` | `/api/mcp/servers` | включить/выключить сервер (`{ name, enabled }`) |
-| `POST` | `/api/mcp/tools` | включить/выключить один инструмент (`{ server, tool, enabled }`) |
-| `GET` | `/api/metrics` | метрики в JSON или Prometheus (`?format=prometheus`) |
-| `GET` / `POST` | `/api/push/key` · `/api/push/subscribe` · `/api/push/unsubscribe` · `/api/push/test` | web-push (VAPID): ключ, подписка, отписка, тест |
-| `POST` | `/api/commands/:commandId` | приём команды облака (идемпотентно) |
-| `GET` / `POST` | `/api/cloud/config` · `/api/cloud/test` · `/api/cloud/pair` · `/api/cloud/devices` | настройка, проверка, паринг и устройства облака (серверные) |
-| `GET` | `/debug/cloud` | диагностика облачного транспорта |
-
----
-
-## Данные и артефакты
-
-```text
-data/
-├─ taskbridge.db            SQLite: задачи (tasks) и события (events)
-├─ taskbridge.db-wal/-shm   WAL-журнал SQLite
-├─ taskbridge.lock          признак запущенного экземпляра (pid)
-├─ backups/                 снимки БД от `npm run backup`
-├─ tasks/<task-id>/
-│  ├─ files/                вложения
-│  └─ artifacts/
-│     ├─ result.md
-│     ├─ result.json
-│     ├─ diff.patch
-│     ├─ git-status.txt
-│     ├─ pi-events.jsonl
-│     ├─ pi.stderr.log      (если был stderr)
-│     ├─ verification.log   (если настроена verification)
-│     ├─ apply.log          (если изменения применялись)
-│     └─ runtime.log        (если TaskBridge запускал runtime)
-├─ worktrees/<task-id>/     изолированный checkout
-├─ uploads/<token>/         стейджинг потоковых загрузок (удаляется/TTL)
-├─ pi-sessions/             сессии Pi
-├─ server-auth.json         секрет pairing и хэши токенов устройств (если auth включён)
-└─ tls/                     self-signed сертификаты
-```
-
-Вложения, отправленные с телефона, попадают в `.taskbridge-input/` внутри workspace, а к prompt добавляется список путей.
-
-### Хранилище (SQLite)
-
-Задачи и события лежат в `data/taskbridge.db` (режим WAL, `synchronous = NORMAL`). Схема минимальна:
-
-| Таблица | Содержимое |
-| --- | --- |
-| `tasks` | `id`, `created_at`, `updated_at` + `data` (JSON задачи с ограниченным хвостом текста) |
-| `events` | `task_id`, `seq`, `payload` (JSON события), PK `(task_id, seq)`, FK → `tasks(id) ON DELETE CASCADE` |
-| `meta` | служебные отметки, в том числе факт миграции |
-
-- Полный JSON в колонках `data`/`payload` сохраняет контракт HTTP API неизменным при эволюции полей.
-- `seq` монотонен в пределах задачи и выдаётся атомарно, поэтому SSE-курсоры (`Last-Event-ID`) не ломаются при конкурентной записи.
-- `assistantText`/`thinkingText` в задаче — только хвост (64 КБ / 16 КБ); полная история живёт в событиях и нативной сессии Pi. Старые записи ужимаются один раз при старте + `VACUUM`.
-- Стриминговые дельты (`message_update`), уже закрытые `message_end`, удаляются при записи — длинная сессия не копит мегабайты мёртвых событий.
-- FK с `ON DELETE CASCADE` + удаление в транзакции — удаление задачи и её событий атомарно, осиротевшие события невозможны.
-- Схема версионируется через `PRAGMA user_version`; старые базы без FK пересобираются один раз при старте.
-- Снимок БД: `npm run backup` → `data/backups/taskbridge-<timestamp>.db` (`VACUUM INTO`, сервер можно не останавливать), хранятся последние 5. При закрытии и в бэкапе WAL схлопывается (`wal_checkpoint(TRUNCATE)`).
-- `PRAGMA synchronous`/`busy_timeout` настраиваются в `server.sqlite`.
-- Файлы (вложения, артефакты, worktree, Pi-сессии) остаются на диске — в БД только метаданные и события.
-- При удалении задачи удаляются также её worktree, `.taskbridge-input/<id>`, `data/pi-sessions/<id>` и `data/workspaces/<id>`; при старте подчищаются сироты.
-- Один экземпляр на data-каталог: `data/taskbridge.lock` с pid, устаревший lock мёртвого процесса перехватывается.
-- При первом запуске на старой установке `data/tasks/<id>/task.json` и `events.jsonl` автоматически импортируются один раз (отметка в `meta`), битые хвостовые строки пропускаются.
-
----
-
-## Git worktree
-
-По умолчанию AI **не работает в основном checkout**. TaskBridge создаёт
-
-```text
-data/worktrees/<task-id>/
-```
-
-и запускает Pi там, поэтому исходный проект остаётся нетронутым.
-
-Dirty source repository по умолчанию блокируется:
-
-```json
-"workspace": {
-  "requireCleanSource": true,
-  "useGitWorktreeByDefault": true
-}
-```
-
-Для теста проверку можно отключить, но это не рекомендуется.
-
-### Применение изменений и очистка
-
-- `POST /api/tasks/:id/apply` применяет `diff.patch` к исходному checkout. По умолчанию требует чистый source и тот же HEAD, что при создании worktree (`PROJECT_DIRTY` / `SOURCE_MOVED`); `{"force": true}` снимает проверки. `git apply --check` выполняется до записи, поэтому конфликт ничего не портит.
-- `DELETE /api/tasks/:id/worktree` закрывает idle-сессию Pi и удаляет worktree (`git worktree remove --force` + `prune`); удаление задачи тоже чистит её worktree.
-- Apply меняет только рабочее дерево, коммит не создаётся.
-
----
-
-## STOP, follow-up, compact, Pi state
-
-### STOP
-
-1. очищает queued steering/follow-up;
-2. отправляет Pi RPC `abort`;
-3. ждёт остановки (`pi.abortTimeoutMs`);
-4. если abort завис — убивает дерево процессов Pi;
-5. сохраняет частичный Git diff;
-6. задача получает `CANCELLED`.
-
-### Follow-up / steering
-
-Поле под кнопками отправляет инструкцию в живую сессию. В режиме `auto`:
-
-- если Pi streaming — используется `steer`;
-- если Pi idle — отправляется новый `prompt` в ту же session.
-
-После завершения follow-up verification выполняется повторно.
-
-### COMPACT
-
-TaskBridge отправляет RPC `{"type":"compact"}` и может показать статистику вида `1 · 51832 → 19416`. `estimatedTokensAfter` — оценка Pi, а не точный счётчик провайдера. Своего сжатия TaskBridge не делает — кроме случая, когда у сессии задан лимит контекста (ниже).
-
-### Контекст сессии и лимит
-
-- `GET /api/tasks/:id/context` отвечает на вопрос «из чего собран запрос к модели»: системный промпт, инструкции проекта, навыки, MCP-инструменты (оценка `символы/4`, как считает Pi, — подписана как оценка), а `totalTokens`, `conversation` и остаток берутся из `get_session_stats` самого Pi. Сессия не запущена — `totalTokens = null`: числа выдумывать нечем.
-- `POST /api/tasks/:id/context` с `{ "limit": N }` ставит лимит контекста сессии, `{ "limit": null }` — снимает. Лимит — настройка TaskBridge, а не Pi: когда ход закончен и оценка выше лимита, TaskBridge сам сжимает историю до публикации `TASK_SUCCEEDED` (события `CONTEXT_LIMIT_REACHED` / `CONTEXT_LIMIT_FAILED`; неудача сжатия на исход хода не влияет).
-- зависшая сессия (Pi жив, но не отвечает) перезапускается точечно: `POST /api/tasks/:id/session/restart` убивает Pi-процесс этой сессии, следующее сообщение перезапускает её из файла сессии; история не теряется, сообщение, которое Pi принял, но не обработал, перепоставляется в очередь. Рестарт сервера остаётся аварийным вариантом — он затрагивает все сессии.
-
-Подробности и ответ маршрутов — [docs/api-contract.md](docs/api-contract.md) (раздел «Откуда берётся контекст и лимит контекста сессии»).
-
-### PI STATE
-
-RPC `get_state`: текущая модель, thinking level, `isStreaming`, `isCompacting`, id/файл сессии, auto compaction, количество сообщений и pending. Точный размер контекста не выдумывается, если Pi его не отдаёт.
-
-### Model switching (как в Pi)
-
-Список моделей TaskBridge берёт напрямую у Pi: `GET /api/models` поднимает короткоживущий `pi --mode rpc --no-session`, спрашивает `get_available_models` / `get_available_thinking_levels` и кэширует ответ (по умолчанию 60 c). Поэтому видны все provider'ы Pi — не только локальные llama.cpp-профили, но и удалённые (`ollama`, OpenAI-совместимые и т.д.), ровно как в `/model`.
-
-- новая задача: `POST /api/tasks` принимает `model: { provider, id }` и `thinkingLevel`; TaskBridge передаёт их Pi как `--provider/--model/--thinking` поверх `pi.args`;
-- живая сессия: `POST /api/tasks/:id/model` вызывает RPC `set_model` (и `set_thinking_level` для `/thinking`). Pi пишет смену в транскрипт сессии, поэтому она переживает restart TaskBridge;
-- `GET /api/models?refresh=1` заново опрашивает Pi и первым делом синхронизирует списки моделей provider'ов из `modelSync.providers` (сегодня `wormsoft`) — модели, добавленные в кабинете провайдера, появляются в селекторе без правки `models.json`;
-- если задача ещё не запускалась, смена модели поднимет/восстановит Pi-сессию.
-
-Локальный health-check и переключение профиля применяются только к провайдеру `localRuntime.provider` (по умолчанию `llamacpp`). Для остальных провайдеров они пропускаются, поэтому удалённая модель работает даже при остановленном локальном llama.cpp.
-
-Pi знает два id одного и того же локального эндпоинта: рукописный провайдер `llamacpp` и встроенный `llama.cpp` (последний требует `LLAMA_BASE_URL` и без него отвечает «Provider is not configured»). Поэтому id, который TaskBridge передаёт в Pi, сверяется с каталогом Pi: если настроенного id у Pi больше нет, подставляется тот локальный id, который Pi действительно отдаёт. Подробности и правила именования — [docs/local-model-providers.md](docs/local-model-providers.md).
-
----
-
-## Файлы с телефона
-
-Файлы загружаются потоково через `POST /api/uploads` (`multipart/form-data`, без base64), поэтому размер ограничен не JSON-телом, а лимитами загрузки. UI отправляет файлы этим запросом, получает `{ token, files: [{ id, name, size, mimeType }] }` и передаёт только `id` в `POST /api/tasks` или `/api/tasks/:id/message` вместе с `uploadToken`. Клиентские имя/размер не принимаются на веру — они берутся из того, что реально записано на диск.
-
-| Лимит | По умолчанию | Где |
-| --- | --- | --- |
-| Файлов за раз | 10 | `FILE_LIMITS.count` |
-| Размер одного файла | 64 MiB | `server.maxUploadMb` |
-| Суммарно | 128 MiB | 2× `server.maxUploadMb` |
-| JSON-тело (inline base64) | 25 MiB | `server.maxBodyMb` |
-
-Стейджинг лежит в `data/uploads/<token>/` и удаляется после того, как файл попал в задачу, либо по TTL (1 час) для заброшенных загрузок. Встроенный base64 всё ещё принимается для совместимости, но ограничен `server.maxBodyMb`.
-
-Multipart — CORS-«простой» content-type, поэтому запрос дополнительно требует заголовок `x-taskbridge-upload: 1`: кросс-сайтовый `<form>` его выставить не может без preflight, который сервер не разрешает.
-
----
-
-## Cloud transport (remote access)
-
-Опциональный облачный control plane: удалённое управление и наблюдение за
-локальными задачами Pi с телефона через интернет — без port forwarding, публичного
-IP, VPN и без длительных Vercel-запросов. Локальный runtime остаётся единственным
-исполнителем, облако — только транспорт, аутентификация и durable-хранилище.
-
-> **Статус:** серверная часть готова и покрыта тестами, но транспорт сейчас
-> **выключен** (`cloud.enabled: false`), а вход в облачные настройки (иконка ☁ и
-> диалог) убран из UI — работаем только по локальной сети. Экран и включение
-> возвращаются откатом коммита `96792db`. В релиз **1.0 облако не входит**
-> (см. [Roadmap](#roadmap)).
-
-```text
-Телефон / PWA ──HTTPS/SSE──► Vercel (или npm run cloud)
-                                ▲               │ команды
-                         события│               ▼
-                                └── TaskBridge (исходящие соединения) → Pi
-```
-
-Текущее состояние работ и что проверено — [`docs/cloud-transport-status.md`](docs/cloud-transport-status.md).
-
-Деплой одной командой: `npm run cloud:deploy -- --project <name> --database-url "postgres://…"`
-(генерирует креды, ставит env в Vercel, деплоит, проверяет `/api/health` и что
-хранилище durable). GitHub для этого не нужен: CLI деплоит локальный каталог;
-для автодеплоя по push добавьте `--git` (подключит репозиторий и не будет
-деплоить вручную). Перед деплоем/пушем: `npm run check:secrets` — проверяет, что
-секреты и локальные данные не попадут ни в `vercel deploy` (он не читает
-`.gitignore`), ни в коммит. Только секреты: `npm run cloud:secrets -- --url https://<project>.vercel.app`.
-Полная пошаговая инструкция (ручной путь через дашборд, диагностика, ротация) —
-[`docs/cloud-deploy-vercel.md`](docs/cloud-deploy-vercel.md).
-
-Режимы (`Tech_next_version.md` §6): **local-only** (по умолчанию, облако не нужно),
-**cloud-only** (только исходящие соединения машины) и **hybrid** (LAN и облако
-одновременно видят одни и те же задачи).
-
-Что реализовано локально: нормализованные `TaskEvent` со строго монотонным `seq`
-(сохраняется между restart'ами), `EventMux`, батчинг дельт с coalescing,
-приоритеты событий, durable outbox с backpressure, heartbeat, polling команд,
-идемпотентность `commandId`, reconnect с backoff 1s→30s, reconcile при старте,
-redaction секретов и путей, метрики (`/api/metrics`, в т.ч. Prometheus),
-диагностика `/debug/cloud` (экран настроек облака убран из UI вместе с
-выключением транспорта, серверные `/api/cloud/*` работают как прежде).
-
-Дополнительно (Этап A): **подтверждения опасных tool-вызовов** работают
-по-настоящему — Pi-расширение блокирует `tool_call` до ответа оператора локально
-или с телефона, состояние задачи `WAITING_USER`, таймаут и fail-closed;
-**ограничение вывода инструментов** (полный лог остаётся на машине, в облако идёт
-rolling-окно и по запросу — ограниченный срез через `FETCH_TOOL_OUTPUT`);
-**SET_MODEL / SET_THINKING** через реальные RPC-команды Pi (`set_model`,
-`set_thinking_level`).
-
-Что реализовано в облаке: аутентификация пользователя и машины, реестр машин,
-задачи и их состояния, очередь команд с приоритетами, durable-события с
-дедупликацией `(taskId, seq)`/`eventId`, replay `?after=`, approvals, retention,
-PWA с живым стримингом ответа, tool-карточками, STOP / follow-up / compact и
-индикаторами Cloud / Machine / Realtime / Task.
-
-Включение — в `config.json`:
-
-```jsonc
-"cloud": {
-  "enabled": true,
-  "url": "https://taskbridge.example.app",
-  "machineId": "home-pc-01",
-  "machineSecret": "<secret>"
-}
-```
-
-или переменными окружения `TASKBRIDGE_CLOUD_ENABLED`, `TASKBRIDGE_CLOUD_URL`,
-`TASKBRIDGE_MACHINE_ID`, `TASKBRIDGE_MACHINE_SECRET` (перекрывают config.json).
-Запуск облака локально: `npm run cloud` (по умолчанию sqlite в `cloud/data/`).
-
-Гарантии: закрытый браузер, обрыв интернета на телефоне или на рабочей станции,
-падение облака и новый деплой Vercel не теряют вывод — клиент хранит
-`lastReceivedSeq` и дозабирает события, а машина копит их в outbox. Задача может
-идти часами: ни один HTTP-запрос не удерживается открытым.
-
-Полная документация, API и список известных пробелов — в
-[`docs/cloud-transport.md`](docs/cloud-transport.md).
-Текущая переделка облака: протокол — [`docs/cloud-protocol.md`](docs/cloud-protocol.md), решение по хранилищу — [`docs/cloud-integration-decision.md`](docs/cloud-integration-decision.md), сведение локального и облачного интерфейса в один — [`docs/cloud-ui.md`](docs/cloud-ui.md).
-
----
-
-## Local Runtime Manager
-
-### Router mode (рекомендуется)
-
-Один `llama-server`, запущенный без `-m` (`--models-preset` или `--models-dir`), обслуживает много моделей и грузит их по требованию — без перезапуска процесса и без убийства Pi-сессий. TaskBridge говорит на том же протоколе, что и встроенный в Pi провайдер `llama.cpp`: `/models`, `/models/load`, `/models/unload`, `/models/sse`.
-
-```json
-"localRuntime": {
-  "provider": "llama.cpp",
-  "healthUrl": "http://127.0.0.1:8080/health",
-  "router": {
-    "enabled": true,
-    "command": "G:\\AIModels\\llamacpp\\llama-server.exe",
-    "args": ["--host", "127.0.0.1", "--port", "8080", "--models-preset", "G:\\...\\models.ini", "--models-max", "1"],
-    "cwd": "G:\\AIModels\\llamacpp"
-  }
-}
-```
-
-`models.ini` — пресеты llama.cpp (см. `models.example.ini`). Имя секции = id модели, который видит Pi (`llama.cpp/<section>`). У vision-пресета указывается `mmproj`, тогда llama.cpp отдаёт `architecture.input_modalities: ["text","image"]`, и Pi помечает модель как умеющую картинки — никаких ручных `input` в `models.json` больше не нужно.
-
-Как это работает в UI/API:
-
-- включённый router виден в шапке кнопкой «Локальные модели»: список моделей, `loaded/loading/unloaded`, бейдж `vision`, кнопки «Загрузить/Выгрузить/Отменить»;
-- прогресс загрузки (включая mmproj) идёт из `/models/sse` и виден в оверлее и в событиях задачи (`LOCAL_MODEL_PROGRESS`);
-- `POST /api/local/stop` останавливает router (только если процесс запустил сам TaskBridge);
-- **размер контекста** локальной модели правится в строке модели (кнопка «Контекст» в приложении, клик по `ctx …` в веб-панели). Контекст — параметр ЗАГРУЗКИ, и хранится он там, где его читает движок: у внешнего сервера (Strata) — это `--max-context` в его собственном конфиге `strata-<модель>.json`, у пресета роутера — `ctx-size` в `models.ini`. TaskBridge правит первый (число в файле, остальное не трогая: `POST /api/local/context`) и честно говорит, что новое значение подхватит следующая загрузка; второй только показывает — подменить `ctx-size` при загрузке роутеру нечем;
-- **«Убрать из списка»** у строки с удалёнными весами: удаляется только запись TaskBridge (`config.json → localRuntime.externalServers`, `POST /api/local/forget`). Файлы модели, конфиг движка и запущенный процесс не трогаются, а строку, найденную в Pi (`models.json`), так убрать нельзя — у неё нет кнопки, потому что владелец записи Pi. После удаления запись исчезает сразу (кэш статуса сбрасывается), а не через пять секунд;
-- **удалённые веса видно сразу.** Конфиг и запись в `config.json` можно оставить, а `.gguf` модели удалить — тогда строка показывает «файлов нет» и путь до первого отсутствующего файла, а «Загрузить» для неё выключена (загрузка всё равно упала бы через минуты ожидания). Список читается из конфигов на диске, поэтому кнопка «Обновить локальные модели» (в веб-панели — «Обновить») отвечает без кэша: `GET /api/local?fresh=1`. Модель с `filesPresent: null` — чужая схема конфига, о файлах судить нечем;
-- **«сессия подвисла» без событий модели — это обычно отказ провайдера, а не задержка.** Движок не обрезает промпт: если история длиннее окна, он отвечает `400 prompt (N tokens) + max tokens (M) exceeds the context (K); requests are never truncated`, а Pi повторяет запрос с паузой (в логе сессии — `limits-wait` с `retries_total`). Панель теперь говорит это словами: фазой «История не влезает в окно модели» и первой строкой диагностики с числами (в веб-панели — состоянием контекста и процентом больше 100), а не «ожидается ответ агента». Лечится сжатием сессии или окном побольше: `262144` для IQ3_S влезает (144 к + 32 к вывода), `131072` — нет;
-- **резерв ответа считается только у тех, кто его отправляет.** Правило «промпт + резерв ≤ окно» — правило движка, который получает лимит вывода полем запроса; `maxTokens` модели из каталога — её потолок вывода, а не обязательство провайдера. Codex (адаптер `openai-codex-responses` в Pi) лимит вывода не отправляет вовсе: в теле запроса есть `model/store/stream/instructions/input/text/include/prompt_cache_key/tool_choice/parallel_tool_calls` и ни одного поля лимита, у остальных адаптеров поле есть (`max_output_tokens` у responses, `max_completion_tokens`/`max_tokens` у completions, `max_tokens` у anthropic и mistral, `maxOutputTokens` у google). Поэтому вычитать 128000 из окна 272000 у `gpt-5.5` нельзя: живая сессия 2026-10-12 прошла с промптом 217571 токен и получила ответ, а панель объявляла её «не влезает» и советовала окно 345775. Теперь правило «резерв» у Codex не применяется (проверка сводится к «история против окна»), и наоборот: без резерва панель не обещает 400 — она называет отказ только тогда, когда в окно не влезает сама история;
-- **окно контекста сессии для локальной модели берётся у движка, а не из каталога Pi.** В `models.json` у провайдера записан статический размер (256K), и после загрузки модели с окном 131K шкала хода показывала `30000/262144` — теперь живое число приходит из статуса TaskBridge (конфиг движка и `/health` его сервера), это же число видно в пикере моделей и в веб-панели; каталог остаётся фолбэком — для облачных моделей он и есть единственный источник;
-- Pi подключается к router автоматически: TaskBridge прокидывает `LLAMA_BASE_URL` в окружение Pi (`pi.env`), без ручного `/login llama.cpp`; локальные модели попадают в общий селектор моделей вместе с облачными.
-- **роутер с `--api-key` тоже читается.** Такой llama.cpp отвечает `401` на всё, кроме `/health`, поэтому без ключа список моделей пуст — «Локальные модели» без пресетов, «Скорость сейчас no-model», «Контекст нет данных» — хотя роутер жив (и это заметно именно тогда, когда он найден автодетектом на незнакомом порту). Ключ задаётся в `localRuntime.apiKey` (или в `localRuntime.router.apiKey`) самим значением либо ссылкой на переменную окружения: `"apiKey": "$HERMES_LLAMA_KEY"`. Заголовок уходит в `/models`, `/slots`, `/models/load`, `/models/unload`, `/models/sse` и `/metrics`; `/health` ключа не требует.
-
-`--models-max` (по умолчанию 4) — опасно на одной GPU: ставьте `1`, иначе модели могут не помещаться в VRAM. `--sleep-idle-seconds` выгружает простаивающие модели. `--models-max`/`--models-autoload` — это флаги router, их нужно писать в `args`, а не в INI.
-
-Перф-флаги в пресете не косметика. Без `device = CUDA0`, `split-mode = none`, `main-gpu = 0`, `load-mode = none`, `parallel = 1` и `cache-type-k/v = q4_0` на 16 ГБ 27B-Q4 уходит в RAM-спилл и prompt processing падает до нешаблонных ~20–130 tok/s. С ними на RTX 5070 Ti измерено **PP ≈ 1400 tok/s, TG ≈ 44 tok/s** (vision-пресет, ctx 33792).
-
-### Legacy: single-model profiles
-
-Если `localRuntime.router` не задан, работает прежняя схема: один процесс, профили `text`/`vision` в `localRuntime.profiles`, переключение через `/api/runtime/restart` (с перезапуском процесса и закрытием Pi-сессий).
-
-```json
-"localRuntime": {
-  "healthUrl": "http://127.0.0.1:8080/health",
-  "managed": { "enabled": true, "command": "...", "args": ["-m", "model.gguf", "-ngl", "all"] }
-}
-```
-
-### Thinking level для router-моделей
-
-Встроенный провайдер Pi `llama.cpp` отдаёт router-модели как `reasoning: false`,
-поэтому Pi зажимает thinking level в `off` независимо от `--reasoning on` на
-сервере. Чтобы thinking работал, в `~/.pi/agent/models.json` добавляется
-провайдер-оверрайд `llama.cpp` (merge по `id`): для каждого пресета
-`reasoning: true`, `thinkingLevelMap`, `compat.thinkingFormat = chat-template`
-с `enable_thinking`/`reasoning_effort`, `contextWindow` и `input`
-(`["text","image"]` для vision-пресетов). После этого
-`get_available_thinking_levels` отдаёт `off/low/medium/xhigh`, а состояние
-сессии показывает реальный уровень вместо `off`.
-
-### Vision и вложения
-
-Чтобы картинки дошли до модели, нужны два условия: (1) в Pi выключен `images.blockImages` в `~/.pi/agent/settings.json` — иначе Pi заменяет любую картинку на «Image reading is disabled.»; (2) у модели в Pi заявлен `input: ["text","image"]` — для router-моделей это приходит из llama.cpp автоматически. TaskBridge читает `settings.json` только для предупреждения: при `blockImages=true` `GET /api/info` возвращает `warnings` с кодом `PI_IMAGES_BLOCKED` и баннер в UI.
-
-## Библиотека моделей и загрузки Hugging Face
-
-Локальная библиотека — это слой поверх `localRuntime`: она скачивает и учитывает GGUF-файлы, но не меняет `~/.pi/agent/models.json`. Модель становится доступной Pi через llama.cpp router: TaskBridge добавляет/обновляет секцию в `models.ini`, а затем router должен увидеть пресет при следующем старте/перечитывании списка.
-
-Основной поток:
-
-1. `GET /api/hf/search?q=...` ищет репозитории Hugging Face, по умолчанию ориентируясь на GGUF.
-2. `GET /api/hf/repo?repo=...` читает дерево репозитория и группирует файлы в варианты: кванты, шардированные GGUF, `mmproj`-проекторы и прочие файлы. Неполный набор шардов помечается как недоступный для скачивания.
-3. `POST /api/hf/download` создаёт фоновую задачу. Состояние хранится в `data/downloads.json`; недокачанные файлы лежат в `.taskbridge-part`, поэтому они не выглядят установленными. Загрузки возобновляются через HTTP Range, проверяют SHA-256, если он указан в дереве Hugging Face, и выполняются ограниченной очередью (по умолчанию до двух одновременно); bearer-токен передаётся только в HTTP-запрос и не сохраняется в состоянии задачи.
-4. `GET /api/hf/downloads` показывает прогресс/скорость; доступны cancel, retry и очистка завершённых задач. После рестарта активные загрузки становятся `INTERRUPTED`, а retry использует готовые файлы и частичные `.taskbridge-part`; для vision выбирается один проектор `mmproj` или принимается явно заданный `projectorPath`.
-5. Установленная модель попадает в `data/model-library.json`. `GET /api/library` совмещает реестр с проверкой наличия файлов и сканом standalone `.gguf` внутри `modelLibrary.root`.
-6. `POST /api/library/register` пишет router-пресет в `models.ini`, `POST /api/library/run` при необходимости регистрирует модель, перезапускает managed-router и загружает пресет.
-7. `POST /api/library/delete` удаляет скачанную модель и её пресет, но не трогает файлы, которые всё ещё нужны другим записям (например общий `mmproj`).
-
-Настройки библиотеки живут в `config.json` в секции `modelLibrary`; корень по умолчанию — внутри data-каталога TaskBridge. Для больших моделей лучше указывать отдельный диск с достаточным свободным местом: перед скачиванием сервер проверяет `statfs`.
-
----
-
-## Панель процессов и питание машины
-
-В веб-UI и KMP-клиенте есть диагностическая панель машины:
-
-- `GET /api/processes` возвращает снимок процессов (`pid`, имя, память, время старта, command line); `?fresh=1` обходит 5-секундный кэш;
-- `POST /api/processes/kill` убивает один PID только если имя совпадает со снимком (защита от переиспользования PID), процесс не системный и не относится к самому TaskBridge;
-- `POST /api/processes/kill-group` применяет те же проверки к видимым процессам `node` или `python`;
-- `POST /api/server/restart` перезапускает сервер TaskBridge отдельным detached-процессом;
-- `POST /api/system/shutdown` и `POST /api/system/reboot` выполняют выключение/перезагрузку машины только после `{ "confirm": true }`. Таймер отмены живёт в клиенте: если пользователь отменил до отправки запроса, серверной команды нет.
-
-Эти действия предназначены для доверенного LAN/Tailscale-доступа. Если сервер открыт телефону, `server.auth.enabled` должен быть включён, иначе доступ к панели фактически равен доступу к shell/agent на ПК.
-
----
-
-### AUTO dispatcher
-
-При `localRuntime.auto.enabled = true` модель выбирается на задачу:
-
-- во вложениях есть изображения и задан `auto.visionProfile` → vision-модель;
-- иначе `auto.textProfile` / `defaultProfile`.
-
-В router-режиме значениями `auto.*` служат id пресетов (без `profiles`). Выбор и причина сохраняются в `task.engine`.
-
-### Engine health
-
-`GET /api/info` возвращает `engine` (для single-model: `reachable`, `model`, `contextWindow`, `slots` из `/props` и `/slots`) и `local` (router: `state`, `loaded`, `models`). Ошибки провайдера классифицируются в стабильные коды: `QUOTA_EXCEEDED`, `RATE_LIMITED`, `CONTEXT_OVERFLOW`, `ENGINE_AUTH`, `MODEL_UNAVAILABLE`, `ENGINE_OVERLOADED`, `ENGINE_UNREACHABLE`; у задачи появляются `retryable` и `retryAfterMs`.
-
-### Скорости модели и состояние ПК
-
-Пока модель отвечает, из `GET /api/info` видно, тормозит ли она (и почему):
-
-- `engine.metrics` — скорости загруженной llama.cpp-модели. PP (prompt) и TG
-  (generation) в tok/s берутся из `/metrics` сервера, который роутер
-  проксирует в дочерний процесс (`llamacpp:prompt_tokens_seconds`,
-  `llamacpp:predicted_tokens_seconds`). **Нужен `metrics = true` в пресете
-  (`[*]` в `models.ini`)** и перезапуск роутера. Без него `/metrics` отвечает
-  501, и UI честно показывает «нет данных», а не ноль.
-- TG облачной модели — из её же `usage`: output-токены за время, что приходили
-  дельты (`task.metrics`, поле `tg`). Паузы между дельтами > 2 с (выполнение
-  инструментов) в генерацию не считаются. Показывается в строке Context.
-- `system` — CPU (из дельт `os.cpus()`; `os.loadavg()` на Windows всегда нули),
-  RAM (used/total) и, если есть `nvidia-smi`, GPU: память, утилизация,
-  мощность draw/limit, температура. Нет данных — поле `null`, а не ноль.
-
-В UI это кликабельная плашка «Состояние системы» в шапке: компактная сводка
-(GPU/CPU/RAM), а по клику — все параметры и скорости модели. Обновляется тем же
-опросом `/api/info` раз в 4 с.
-
----
-
-## MCP (pi-mcp-adapter)
-
-TaskBridge не правит `~/.pi/agent/mcp.json`. Вместо этого у него свой файл
-(`data/mcp.json`) и режим `pi.mcp.mode`:
-
-- `inherit` — задачи используют MCP-конфиг Pi как есть (по умолчанию);
-- `managed` — задачи запускаются с `--mcp-config data/mcp.json` и
-  `PI_MCP_CONFIG_MODE=exclusive`, то есть используется **только** список
-  TaskBridge. В UI («MCP» в шапке) серверы включаются/выключаются, есть
-  «Импорт из Pi»;
-- `off` — Pi запускается с пустым конфигом, MCP-инструментов у задачи нет.
-
-Зачем: MCP-инструменты могут подменять работу модели. Например
-`image-description-engine` умеет описывать картинки, и модель может «смотреть»
-глазами MCP, а не своим vision. Отключив этот сервер в `managed`, получаем
-честное зрение модели (проверено: задача вызывает только встроенный `read`).
-
-В теле `POST /api/tasks` поддерживается `mcp: { disabledServers: ["..."] }` —
-задача отключает конкретные серверы, не меняя общий список.
-
-В диалоге «MCP» у каждого сервера раскрывается список инструментов с чекбоксами
-(имена берутся из `~/.pi/agent/mcp-cache.json`); выключение пишет `excludeTools`
-в `data/mcp.json`. Так можно отключить один инструмент, а не весь сервер.
-
----
-
-## Cloud bridge (Vercel Queues)
-
-Опциональный каталог `cloud/` разворачивается на Vercel отдельно от локального
-сервера. Команды приходят на ПК через очередь облака (poll) и WebSocket-релай
-(`cloud/lib/relay*.mjs`, `cloud/lib/ws.mjs` — RFC 6455 без зависимостей), а события
-уходят через дисковый outbox с batching, `taskId + seq` и idempotency keys.
-Локальный SQLite остаётся source of truth; хранилище облака — memory / sqlite /
-postgres (`cloud/lib/store-postgres.mjs`).
-
-Cloud по умолчанию выключен и не меняет LAN-режим. Локальный прогон облака —
-`npm run cloud:local` (`start` / `status` / `stop` / `verify`). Полная инструкция по
-environment variables, Vercel Root Directory и проверке —
-[docs/cloud-transport.md](docs/cloud-transport.md) и
-[docs/cloud-deploy-vercel.md](docs/cloud-deploy-vercel.md).
-
-## Безопасность
-
-Без авторизации (`server.auth.enabled = false`) TaskBridge слушает **только `127.0.0.1`** — и приложение, и LAN-турникет — и пишет предупреждение в консоль. Чтобы открыть его телефону, включите `server.auth.enabled: true` и спарьте устройство. Дополнительно:
-
-- Windows Firewall profile = Private;
-- не пробрасывать порт 8787 в интернет;
-- не включать UPnP/port-forwarding для этого порта.
-
-Каждое спаренное устройство получает свой токен (на ПК хранится только его SHA-256 в `data/server-auth.json`). Браузер держит его как HttpOnly-cookie, приложение шлёт `Authorization: Bearer`. Изменяющий запрос с cookie, но без `Origin`, отклоняется: браузер всегда шлёт `Origin`, а нативные клиенты работают через Bearer. Отозвать устройство — в окне «Подключить телефон» на ПК.
-
-Встроенные меры: CSP и security-заголовки, проверка Origin (плюс `allowedOrigins`), pairing-код с rate limit по реальному клиенту (последний `X-Forwarded-For` от своего прокси), timing-safe сравнение, защита от traversal при выдаче файлов, запрет symlink/junction при обходе сессий.
-
-### Доступ из интернета через Tailscale
-
-TaskBridge не нужен публичный адрес: телефон и ПК оказываются в одной приватной сети Tailscale (WireGuard).
-
-1. Установить Tailscale на ПК и телефон, войти одним аккаунтом. На Android включить «Постоянный VPN» (Настройки → Сеть → VPN → Tailscale → Always-on).
-2. В `config.json`: `server.auth.enabled: true`. Перезапустить TaskBridge.
-3. Firewall: входящие на 8787 только из tailnet и домашней подсети (подсеть — своя):
-   ```powershell
-   New-NetFirewallRule -DisplayName "TaskBridge" -Direction Inbound -Protocol TCP `
-     -LocalPort 8787 -RemoteAddress 100.64.0.0/10,192.168.1.0/24 -Action Allow
-   ```
-4. На ПК открыть `http://127.0.0.1:8787` → «Подключить телефон». В окне — 8-значный код и QR с адресами (`lan`, `tailnet` = `http://100.x.y.z:8787`, `tailnet-https`, если задан `server.tailscale.httpsUrl`). Приложение TaskBridge ходит на Tailscale-IP напрямую: трафик уже зашифрован WireGuard, и не нужен DNS `*.ts.net`.
-5. Браузер телефона по HTTPS — через `tailscale serve` на loopback-адрес TaskBridge (синтаксис сверить с `tailscale serve --help` своей версии), например `tailscale serve --bg http://127.0.0.1:8787`. Затем добавить `https://pc.<tailnet>.ts.net` в `server.auth.allowedOrigins` и в `server.tailscale.httpsUrl`. Запросы через `serve` не считаются «локальными»: код pairing по ним не выдаётся, авторизация обязательна.
-
-DNS на телефоне: системный «Частный DNS» с Tailscale совместим (приложение всё равно ходит по IP). DNS-приложения вроде AdGuard/NextDNS занимают VPN-слот Android и одновременно с Tailscale не работают.
-
-**Важно (изменилось):** в UI есть кнопки, которые выполняют команды на машине — `POST /api/tasks/:id/shell`, `…/run` и открытие/показ файлов `…/open`. Открыть/показать файл приложением разрешено **только самой машине**, а **выполнение** (`/shell`, `/run`) — машине **и авторизованному клиенту**. Пока `server.auth.enabled = false` (по умолчанию) авторизованным считается любой, кто дотянулся до API: то есть в LAN команды сможет запускать любое устройство в сети. Если это недопустимо — включи `server.auth.enabled: true` и спарь устройство (`/pair`), тогда выполнять смогут только спаренные; либо держи доверенную LAN, как выше.
-
-Плюс Pi сам является coding agent и имеет файловые/shell tools внутри выбранного workspace — доступ к TaskBridge фактически равен доступу к агенту.
-
----
-
-## Тесты
-
-Команды и фактически подтверждённый результат последней проверки:
+| `server.host`, `server.port` | Внешний адрес и порт; пример использует порт 8787 |
+| `server.auth.enabled` | Pairing и авторизация устройств; включите для доступа по LAN |
+| `server.auth.allowedOrigins` | Дополнительные доверенные Origin при использовании собственного HTTPS-входа |
+| `pi.command`, `pi.args` | Команда Pi и дополнительные аргументы |
+| `pi.projectTrust` | Политика доверия проектам Pi; в примере `approve` |
+| `projects` | Зарегистрированные проекты; их также можно добавить через UI |
+| `projectBrowser.roots` | Папки, доступные встроенному браузеру проектов |
+| `queue` | Общая, провайдерная и покаталожная параллельность |
+| `localRuntime` | Подключение или управляемый запуск локальной модели |
+| `approvals.enabled` | Подтверждения вызовов инструментов |
+| `server.sqlite` | Режим синхронизации SQLite и бюджет ожидания блокировки |
+
+Полный набор параметров и исходные значения — в [config.example.json](config.example.json). Схемы API — в [docs/api-contract.md](docs/api-contract.md).
+
+Ключи моделей храните в механизме авторизации Pi или переменных окружения. `config.json`, каталоги данных, токены устройств и локальная политика безопасности содержат данные конкретной установки и исключены из Git.
+
+### Запуск и подключение
 
 ```powershell
-npm test            # полный Node-набор; версии Node и результаты ниже
-npm run test:cloud  # только тесты облачного транспорта
-npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
-npm run check       # синтаксическая проверка основных файлов + аудит секретов
+npm start
+```
+
+По умолчанию запускаются два процесса: приложение на loopback и LAN-прокси. Веб-интерфейс на компьютере: `http://127.0.0.1:8787` при стандартном порте. Для остановки запуска в текущем окне используйте `Ctrl+C`.
+
+Управление фоновым экземпляром:
+
+```powershell
+npm run lan:start
+npm run lan:status
+npm run lan:stop
+```
+
+Если `server.auth.enabled` выключен, доступ ограничен loopback даже при `server.host = "0.0.0.0"`. Для телефона включите авторизацию, перезапустите сервер и используйте опубликованный LAN-адрес. Подключите устройство через pairing в локальном UI; после этого укажите тот же адрес в Android-клиенте или откройте его в браузере.
+
+Pairing ограничивает доступ, а шифрование обеспечивает HTTPS. Для передачи данных вне доверенной LAN требуется настроенный защищённый канал. Прямую публикацию HTTP-порта в интернет этот выпуск не предусматривает. Подробности: [архитектура LAN-входа](docs/agent-host-separation.md).
+
+## Клиенты
+
+Готовые пакеты: [GitHub Releases](https://github.com/arnyigor/TaskBridge/releases). Сверяйте версию выбранного пакета с нужным выпуском; серверу нужен отдельный Node.js и Pi.
+
+- **Windows portable:** распакуйте весь каталог и запустите `TaskBridge.exe`. Сохраняйте рядом `app/` и `runtime/`; системная Java для клиента не требуется.
+- **Android:** установите APK и укажите адрес сервера. Debug APK предназначен для локальной установки и тестирования; распространение release APK требует настройки постоянного ключа подписи.
+- **Web/PWA:** откройте адрес сервера. Доступность установки PWA и системного clipboard зависит от браузера и защищённости контекста.
+
+## Работа и восстановление
+
+1. Выберите проект и модель, отправьте задачу.
+2. Следите за стадией, событиями модели и вызовами инструментов. Принятие запроса Pi и ответ провайдера — разные события.
+3. Используйте очередь для следующего сообщения; steering меняет направление текущего хода.
+4. Для отмены используйте STOP. Если Pi не отвечает на RPC abort, сервер завершает принадлежащее этой сессии дерево процессов.
+
+Reasoning отображается ограниченным предпросмотром; кнопка копирования передаёт полный исходный текст. Тексты файлов, вывод инструментов и история загружаются отдельно от компактных превью.
+
+После сбоя сервера прерванный ход может получить `FAILED_RECOVERY`. Продолжайте его новым сообщением, проверив последние выполненные действия. Повтор с тем же `commandId` возвращает сохранённый результат; исход, неизвестный после сбоя, не исполняется автоматически заново. Это защита от повторного действия, а не гарантия транзакционности внешних команд агента.
+
+### Если модель не отвечает
+
+| Состояние | Что проверить |
+| --- | --- |
+| Очередь / подготовка | Занятость модели, ограничения параллельности и текущую стадию |
+| Pi принял запрос, вывода нет | Диагностику сессии; без событий провайдера источник задержки может быть неизвестен |
+| HTTP 429 / временный отказ | Причину провайдера и объявленное время повтора |
+| Неверный ключ / недостаток средств / несовместимая модель | Авторизацию, баланс или модель; такие известные постоянные отказы завершаются ошибкой |
+| Reasoning без финального ответа | Содержимое reasoning и итоговый статус; завершение хода не гарантирует непустой ответ |
+| Потеря соединения | Состояние сервера, LAN-адрес, сеть и переподключение |
+
+Предупреждение о молчании по умолчанию появляется после 120 секунд и исключает известную работу инструмента, compaction и ожидание провайдера. Автоматического общего предела генерации нет; для прекращения ожидания доступен STOP. KMP отдельно ограничивает открытие SSE, тишину потока и чтение тела HTTP-ошибки (по умолчанию 45 секунд). Транспортный timeout не означает, что команда не исполнилась.
+
+## Данные и резервное копирование
+
+По умолчанию состояние находится в `data/`: SQLite `taskbridge.db`, файлы Pi-сессий, вложения, артефакты и локальные служебные данные. `TASKBRIDGE_DATA_DIR` задаёт другой каталог сервера; используйте одно и то же значение при запуске и остановке экземпляра.
+
+Для стандартного `data/`:
+
+```powershell
+npm run backup
+```
+
+Команда создаёт согласованный SQLite-снимок в `data/backups/` и сохраняет последние пять `.db`-копий. Она работает со стандартным каталогом репозитория; параметр `TASKBRIDGE_DATA_DIR` этим скриптом не применяется. Снимок БД не включает файлы вложений, артефакты, настройки Pi или `config.json`.
+
+Для полного восстановления установки:
+
+1. Завершите активные задачи и остановите сервер штатной командой.
+2. Сохраните конфигурацию, **весь** каталог данных, рабочие проекты и необходимые настройки Pi в защищённое хранилище.
+3. Для восстановления остановите целевой экземпляр, сохраните его текущее состояние и восстановите согласованный комплект файлов. Старые SQLite `-wal`/`-shm` не смешивайте со снимком другой БД.
+4. Запустите соответствующую версию, проверьте `/api/health`, историю и доступность вложений. После восстановления отдельной БД недавние внешние действия агента требуют ручной сверки.
+
+Резервные копии проверяйте восстановлением на отдельной установке. Для отката используйте комплект «версия кода + данные до обновления»: совместимость более старого кода с новой схемой БД не гарантируется.
+
+## Обновление
+
+Перед обновлением дождитесь завершения задач, сделайте резервную копию и сохраните локальную конфигурацию. Исходники должны иметь чистое рабочее дерево.
+
+```powershell
+npm run lan:stop
+git fetch origin --tags
+git checkout v1.2.1
+npm ci
+npm run lan:start
+npm run lan:status
+```
+
+После запуска проверьте `build.version` и `build.commit` в `GET /api/info`. Полный restart сервера прерывает активные сессии; перезапуск одного LAN-прокси и перезапуск владельца Pi имеют разные последствия.
+
+При сборке Windows-клиента `:desktopApp:portable` готовит обновление в `clients/kmp/dist/.staging/TaskBridge`. Если установленный клиент запущен, примените его через трей **«Установить обновление и перезапустить»**. Работающую установку не перезаписывайте.
+
+## Проверки и сборка из исходников
+
+```powershell
+npm ci
+npm test
+npm run check
 npm run check:policy
 npm run check:secrets
 Push-Location clients/kmp/core
 ../gradlew.bat :api:jvmTest :client:jvmTest --console=plain
 Pop-Location
 Push-Location clients/kmp
-./gradlew.bat :shared:jvmTest :desktopApp:test --console=plain
+./gradlew.bat :shared:jvmTest :androidApp:assembleDebug :desktopApp:portable --console=plain
 Pop-Location
 ```
 
-Локальная проверка 2026-10-16: Windows Node22 — **1131 pass / 5 прежних skip / 0 fail**, Linux Node22 — **1133 pass / 3 прежних skip / 0 fail**; KMP core API — **69**, core client — **105**, shared Compose — **207** тестов без ошибок. Android debug и Windows portable собраны. CI на Node22/Windows, Node22/Ubuntu и KMP полностью прошёл для [e3597c7](https://github.com/arnyigor/TaskBridge/actions/runs/38924723685); проверка последующих серверных правок отслеживается в [GitHub Actions](https://github.com/arnyigor/TaskBridge/actions).
+Android SDK указывается в локальном `clients/kmp/local.properties`; Gradle Wrapper получает зависимости из настроенных репозиториев. Подробнее — [сборка клиентов](clients/kmp/README.md).
 
-Реальный бесплатный OpenRouter проверяется отдельно от offline CI: `:shared:realProviderUiProbe` требует `OPENROUTER_API_KEY`, установленный Pi и подтверждает нулевую цену выбранной модели по каталогу перед запросом. Обычные тесты не вызывают платные или бесплатные внешние модели.
+Обычный тестовый набор использует изолированные fake-provider фикстуры. Ручная `:shared:realProviderUiProbe` вызывает реальный OpenRouter, требует установленный Pi и `OPENROUTER_API_KEY`, проверяет нулевую цену выбранной модели перед запросом и не запускается в offline CI.
 
-Для обновления Windows portable сначала выполните `:desktopApp:portable`: новая версия попадёт в `clients/kmp/dist/.staging/TaskBridge`. Если установленный клиент работает, примените обновление через трей **«Установить обновление и перезапустить»**; файлы работающей установки не перезаписываются.
+Для разработки включите hooks: `git config core.hooksPath .githooks`. Правила коммитов и allowlist описаны в [AGENTS.md](AGENTS.md). Локальные запрещённые термины задаются в игнорируемом `security.local.json` по [примеру](security.local.example.json); pre-push требует эту локальную политику.
 
-Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals (политика, менеджер, маршрутизация и end-to-end через Pi-хук), ограничение вывода инструментов и загрузка полного лога, смена модели/reasoning, метрики, API настроек облака, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP. Стресс-набор (`npm run stress`) масштабируется переменными `TASKBRIDGE_STRESS_EVENTS`, `TASKBRIDGE_STRESS_LOG_MB`, `TASKBRIDGE_STRESS_SECONDS`.
+Результаты стабилизации, измерения и воспроизведения дефектов: [docs/stabilization.md](docs/stabilization.md). CI и security-policy: [GitHub Actions](https://github.com/arnyigor/TaskBridge/actions). История выпусков: [CHANGELOG.md](CHANGELOG.md).
 
----
+## Границы выпуска
 
-## Устойчивость процессов: шаг 5 (LAN-турникет)
+- Основной режим — локальный сервер/LAN. Cloud-адаптеры есть в исходниках, но Cloud выключен по умолчанию; рабочий внешний деплой и его эксплуатационная матрица не подтверждены. См. [Cloud status](docs/cloud-transport-status.md).
+- Приложение запускает доверенный coding-агент с доступом к ОС. Pairing и подтверждения инструментов не заменяют изоляцию учётной записи, проектов и секретов.
+- Пять предусмотренных пропусков Windows-набора и три Linux-набора учитываются отдельно от успешных тестов. Числа конкретного прогона и его окружение находятся в отчёте стабилизации.
+- Полные нативные Windows frame/input/retained-heap замеры тяжёлого чата и проверка системного Android clipboard остаются открытыми. Compose-тесты, CPU-эмулятор и allocation-пробы не объявляются заменой этим проверкам.
+- Подписанный Android release и проверка распространения через магазин не входят в текущие подтверждённые артефакты. Версия исходников и Git-тег фиксируют код; доступные бинарные пакеты перечислены в GitHub Releases.
 
-ТЗ v3 (этап 9) ставит цель: **перезапуск UI-слоя не должен убивать агента (Pi)
-и не должен помечать активные задачи `FAILED_RECOVERY`.**
+## Дополнительная документация
 
-### Проблема (что было)
-
-TaskBridge долго был одним монолитом: один OS-процесс (`node src/server.mjs`)
-владел и HTTP/SSE, и процессами Pi, и облачным коннектором, и router llama.cpp.
-Рестарт этого процесса убивал живую сессию: активные задачи на следующем старте
-помечались `FAILED_RECOVERY`, а Pi осиротевали.
-
-### Как сделано
-
-1. **CLI `taskbridge`** (`bin/taskbridge.mjs`): `open` (последняя сессия в браузере,
-   с авто-стартом сервера), `status`, `doctor`, `start`, `stop`.
-2. **Graceful shutdown агента.** `TaskManager.close()` останавливает приём новой
-   работы, закрывает каждую живую Pi-сессию (`close → closeStdin → (2500 мс)
-   killTree`) и останавливает router llama.cpp; вызывается из `SIGINT/SIGTERM` с
-   жёстким таймаутом, чтобы Ctrl+C всегда завершался и не оставлял осиротевших
-   Pi/llama.cpp. Покрыто `tests/manager.test.mjs`.
-3. **LAN-турникет — текущий дизайн (вариант B).** Приложение (`src/server.mjs`)
-   остаётся единственной реализацией API, но слушает только `127.0.0.1`; в LAN
-   смотрит `src/proxy.mjs`, который ничего не знает про TaskBridge и просто
-   передаёт запросы и ответы. Запуск — `npm start` / `npm run lan:start`,
-   состояние и остановка — `npm run lan:status` / `lan:stop`.
-   Паритет гарантирован **по построению**, а не по числу портированных маршрутов:
-   `tests/lan-mode.test.mjs` прогоняет через турникет весь опубликованный контракт.
-   Гарантию шага 5 проверяет процессная приёмка `npm run lan:acceptance`: убить
-   турникет → агент жив и держит сессию; новый турникет → история цела и живой
-   поток открывается.
-
-### Что рассматривалось и отвергнуто
-
-Был реализован полный split `host ⇄ gateway` (P-1…P-3): отдельный процесс-владелец
-агента плюс HTTP/SSE-фронт, говорившие по IPC (`HELLO/COMMAND/RESULT/EVENT`).
-От него отказались по цене: фронт отвечал **6 группам маршрутов из ~40**, и каждый
-маршрут пришлось бы описывать дважды — в IPC-команде и в самом фронте. Две таблицы
-расходятся, а расходящееся описание API ломает и «стабильное ядро», и «безупречный
-UI/UX». Код split'а удалён; разбор решения и остаток — в
-[`docs/agent-host-separation.md`](docs/agent-host-separation.md) §12/§12.1.
-
-Вариант «только graceful shutdown» остаётся частью решения (пункт 2), но сам по
-себе цель не закрывает: он не переживает аварийный kill (это отдельный критерий
-K2 в роадмапе).
-
-Дефолт переведён: `npm start`, `start.cmd` и `taskbridge start` поднимают именно
-LAN-режим (турникет + приложение на loopback); `taskbridge stop` и
-`npm run lan:stop` останавливают оба процесса. Владелец каталога данных записывает
-в `taskbridge.lock` PID, режим и порты; это авторитетное состояние, по которому
-лаунчер восстанавливает устаревший или отсутствующий `lan.json`. Полный restart
-сериализован файлом `lan-restart.lock` и использует те же команды stop/start,
-поэтому повторный запрос не запускает конкурирующую пару.
-
-
-## Известные ограничения
-
-1. После restart при следующем сообщении запускается новый Pi-процесс с тем же файлом сессии; если файла Pi нет, история восстанавливается из событий TaskBridge.
-2. Оборванные active tasks помечаются `FAILED` с кодом `FAILED_RECOVERY`; их можно продолжить новым сообщением. На штатном `SIGTERM` (Ctrl+C, `taskbridge stop`) агент теперь завершается чисто (`TaskManager.close()`): Pi и router llama.cpp не осиротвают, приём новых задач остановлен.
-3. Одновременно рассчитан на одну активную inference-задачу.
-4. Apply меняет рабочее дерево без коммита; проверки source-репозитория можно снять через `force`.
-5. Verification commands доверенные и читаются из локального `config.json`.
-6. Один HTTP-запрос отдаёт не более `server.maxEventsPerRequest` событий (по умолчанию 20000), а окно `?tail` дополнительно ограничено по размеру — `server.maxHistoryMb` (по умолчанию 6 МиБ), с выравниванием по границе хода; более старая история — через `?tail`/`?before` или «Показать более раннюю историю».
-7. `data/tasks/<id>/events.jsonl` и `task.json` после миграции остаются на диске как резерв и больше не обновляются.
-8. Claude Code и Codex как отдельные runner'ы пока не подключены.
-9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
-10. Cloud transport сейчас выключен (`cloud.enabled: false`) и убран из UI — рабочий режим local-only по Wi‑Fi. В серверной части есть WebSocket-релай (`cloud/lib/ws.mjs` + `relay-server.mjs`, машина через `src/cloud/relay-connector.mjs`) как realtime-канал, а poll-путь остаётся обязательным фолбэком; Postgres-адаптер для serverless написан, но на живом сервере не прогонялся (`TASKBRIDGE_TEST_DATABASE_URL=postgres://… npm run test:postgres`), и на живую Vercel деплой ещë не выполнялся.
-11. Подтверждения инструментов включаются опцией `approvals.enabled`; расширение передаётся Pi через `--extension` (не ставится глобально). Длительный soak-прогон (30+ минут) запускается вручную через `TASKBRIDGE_STRESS_SECONDS`.
-12. Полные нативные замеры Windows frame/input/heap для тяжёлого чата и проверка содержимого системного Android clipboard остаются открытыми. Compose-тесты проверяют отображение, ввод и полный текст callback копирования; замеры аллокаций не заменяют эти нативные проверки. Android-проверки проводились с CPU-графикой эмулятора.
-
----
-
-## Roadmap
-
-Ближайшая цель — **1.0: стабильное ядро и безупречный UI/UX**.
-Облако в первую версию намеренно **не входит**: транспорт остаётся выключенным
-(`cloud.enabled: false`), его работа вынесена за релиз.
-
-### Критерии 1.0
-
-**Стабильное ядро**
-
-- AgentHost / P-4: дефолт — «приложение на loopback + турникет»
-  (§12.1, шаги 5–6 сделаны: `npm start`, `start.cmd`, `taskbridge` про два
-  процесса; осталась только `restart-and-verify`);
-- аварийный рестарт больше не оставляет задачи в `FAILED_RECOVERY`;
-- долгий soak без потерь: очередь, восстановление сессии, повтор упавшего хода,
-  нет осиротевших Pi/llama.cpp;
-- HTTP API и контракт `TaskEvent` объявлены стабильными;
-- закрыты пункты «Известные ограничения» (одна активная inference-задача,
-  `FAILED_RECOVERY`, частичные картинки и т.д.);
-- выбрана лицензия.
-
-**Безупречный UI/UX**
-
-- ни одного «сырого» статуса и висящего оверлея; состояние модели/системы честное
-  («нет данных», а не ноль);
-- мобильный чат предсказуем: действия сообщений (править/ветка/удалить/заново),
-  очередь, вложения и ошибки — без потери набранного текста;
-- регресс-покрытие: DOM-тесты на ключевые сценарии + ручной чек-лист
-  ([TEST_PLAN.md](TEST_PLAN.md)).
-
-### После 1.0
-
-```text
-1. Cloud transport: живой деплой (Vercel + Postgres), проверка relay/WS,
-   возврат входа в облачные настройки в UI
-2. ClaudeCodeRunner
-3. CodexRunner
-4. Расширение KMP-клиентов и полная матрица Android/Desktop-приёмки
-```
-
-Главное — сначала проверить Pi RPC, live events и STOP на реальной локальной модели.
-
----
-
-## Лицензия
-
-MIT — см. [LICENSE](LICENSE). Правообладатель: `Arnyigor`.
-
-До этого лицензия не была выбрана, то есть права по умолчанию не передавались.
+- [Контракт HTTP API](docs/api-contract.md)
+- [Доставка сообщений](docs/message-delivery-analysis.md)
+- [Очереди и параллельность](docs/multi-session-queues.md)
+- [Локальные модели](docs/local-model-providers.md)
+- [Вложения](docs/attachment-delivery-analysis.md)
+- [Cloud-протокол](docs/cloud-protocol.md)
+- [Покрытие проверками](docs/testing-coverage.md)
+- [Лицензия MIT](LICENSE)
