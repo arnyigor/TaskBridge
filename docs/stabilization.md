@@ -379,3 +379,28 @@ The wait-reason parser also used its own first-message regex, losing OpenRouter 
 Full local Windows Node24 corpus after the permanent-auth/quota fix: 1128 passed / 5 existing skips / 0 failed (108.4 s). The final shared wait-formatter follow-up is undergoing the full gate as well. e3597c7 CI has passed Ubuntu Node22 and KMP; Windows Node22 remains in progress at this check.
 
 Final corrected local gate: Windows Node24.16.0 full corpus 1129 passed / 5 existing skips / 0 failed (108.6 s); engine/runtime-faults 29/29 passed; syntax/security checks passed. e3597c7 CI38924723685 and security38924724007 are fully green. The auth/quota retry fix and narrow OpenRouter wait formatting follow-up are ready for publication; native Windows frame/input/heap acceptance remains unverified.
+
+### Stabilization acceptance and deferred measurements (2026-10-16)
+
+The original stabilization stages 00–06 are complete. The additional diagnosis review distinguishes these cases using existing server facts rather than inferring provider health from UI silence:
+
+| Case | Operator-visible evidence / verification |
+| --- | --- |
+| Queue / preparation | task status, pending prompt order, current preparation stage; delivery/queue acceptance |
+| Command handoff / first model output | Pi acceptance is separate from assistant content; diagnostics retain unknown source until model/provider evidence arrives |
+| Reasoning-only / empty final answer | reasoning remains visible; completed empty output has an explicit placeholder rather than an endless typing indicator |
+| Quiet tool / compaction | named runtime activity; silence banner is suppressed for these known activities |
+| Active output | reasoning/text/tool events and stream cursor; mixed streaming acceptance types a draft while the server turn remains RUNNING |
+| Temporary provider refusal | provider/model, upstream reason and declared retry time; repeated notices are deduplicated |
+| Permanent model/auth/billing refusal | one FAILED outcome, original stable error code and guidance; owned retry runtime is retired, corrected follow-up works |
+| Connection failure | stream opening/read deadlines, reconnect cursor and separate server health; caller cancellation remains cancellation |
+
+This closes the functional diagnosis review, not every performance measurement in phase 07. Native Windows frame/input/retained-heap measurement and native Android clipboard verification remain unverified. Existing Compose correctness, CPU-emulator results and allocation probes must not be presented as substitutes. The Codex-style redesign is deferred per the user's current stabilization-only scope. README now records current behavior, validation and these limits.
+
+### CI fixture port ownership (2026-10-16)
+
+CI38925979597 on c5aac60 failed one Ubuntu open-machine test with FOREIGN KEY constraint failed in its direct SQLite event writer. The fixture selected an ephemeral port by binding then closing a probe socket, launched a child and accepted any /api/health response. Another fixture could bind that port first. A controlled same-port reproduction returned distinct temporary roots but the same storeId and created the second fixture's task in the first server's database, explaining the missing task row in the second database.
+
+The fixture now waits for its own child to report successful listen before health probing, detects exited/spawn-failed children, and never sends task traffic to an unrelated health endpoint. Explicit occupied ports fail closed. Automatically allocated port contention is resolved by choosing a new port before exposing the fixture (at most five allocation attempts); this does not retry a test or an application command. Failed startup cleans its verified temporary root; an already exited child PID is not signalled. Regression tests force both the explicit collision and the automatic reallocation, preserve the first server identity, and verify the created task in the second fixture's actual SQLite database. Targeted fixture/open-machine tests pass 9/9 on Windows Node22 and WSL Linux Node22. Full suites and KMP fixture integration are being rechecked.
+
+Final fixture-fix validation: full Windows Node22 1131 passed / 5 existing skips / 0 failed (216.8 s); full WSL Linux Node22 1133 passed / 3 existing skips / 0 failed (115.0 s). Shared Compose was forced to rerun after the external fixture change: 207 passed; core API69/client105 also forced to rerun and passed. Syntax/secrets checks passed. README reflects these results and the remaining native measurement limits. The live server still has an active task and was not restarted; installed Windows clients remain running and the staged portable must be applied through the tray.

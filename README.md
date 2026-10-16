@@ -147,7 +147,17 @@ TaskBridge (v0.11.0) — небольшой локальный HTTP/PWA-серв
 
 ## Текущее состояние кода
 
-Состояние README синхронизировано с кодом рабочей ветки на 2026-10-05. Ключевые изменения относительно предыдущего описания:
+Состояние рабочей ветки на 2026-10-16. Изменения стабилизации:
+
+- Приём команды сохраняется до выполнения; повтор с тем же `commandId` не создаёт второе действие. После сбоя с неизвестным исходом команда не исполняется автоматически заново.
+- Финальный статус, событие и Run сохраняются согласованно; поздние кадры завершённого Pi не возвращают ход в `RUNNING`. Исправлены восстановление очереди, reconnect/replay и отмена загрузки истории при закрытии чата.
+- Несовместимая с авторизацией модель, неверный ключ и недостаток средств завершаются понятной ошибкой вместо бесконечного ожидания повтора. Временные rate limit и сетевые отказы показывают объявленное провайдером ожидание. Модель и аккаунт автоматически не переключаются.
+- KMP ограничивает ожидание открытия SSE, тишины потока и тела HTTP-ошибки; отмена клиента сохраняется. Это транспортные таймауты: предупреждение о молчании модели не является общим лимитом генерации, остановка остаётся доступна через `STOP`.
+- Большой reasoning отображается ограниченным предпросмотром, а копируется полностью. Убраны полноразмерные промежуточные копии reasoning в KMP и неограниченный текст reasoning в Web DOM. Проверены смешанные потоки с reasoning более 200 тыс. символов и bash/read/edit/write.
+
+Результаты, замеры и границы проверок — в [отчёте о стабилизации](docs/stabilization.md). Новый интерфейс по референсу Codex отложен и в текущую стабилизацию не входит.
+
+Другие возможности текущей версии:
 
 - **версия и клиенты:** серверный пакет остаётся Node.js/PWA-приложением (`package.json` — `0.11.0`), KMP-клиенты собираются с `taskbridgeVersion=1.2.0`;
 - **локальные модели:** router-режим стал основной веткой развития. В коде есть отдельные слои `local-models`, `router-presets`, `model-library`, `huggingface` и `download-manager`; UI умеет искать/скачивать GGUF, регистрировать их в `models.ini`, запускать через router, прятать автонайденные внешние строки и править vision у пресетов;
@@ -1072,17 +1082,25 @@ DNS на телефоне: системный «Частный DNS» с Tailscal
 Команды и фактически подтверждённый результат последней проверки:
 
 ```powershell
-npm test            # 850 тестов: 845 pass, 4 skip, 1 fail (cloud-relay-socket; отдельный повтор прошёл)
+npm test            # полный Node-набор; версии Node и результаты ниже
 npm run test:cloud  # только тесты облачного транспорта
 npm run stress      # стресс/soak (масштабируется через TASKBRIDGE_STRESS_*)
 npm run check       # синтаксическая проверка основных файлов + аудит секретов
 npm run check:policy
 npm run check:secrets
-cd clients/kmp/core && ../gradlew :api:jvmTest :client:jvmTest --console=plain
-cd clients/kmp && ./gradlew :shared:jvmTest :desktopApp:test --console=plain
+Push-Location clients/kmp/core
+../gradlew.bat :api:jvmTest :client:jvmTest --console=plain
+Pop-Location
+Push-Location clients/kmp
+./gradlew.bat :shared:jvmTest :desktopApp:test --console=plain
+Pop-Location
 ```
 
-Полный `npm test` в этом рабочем дереве завершился одним сбоем файла `tests/cloud-relay-socket.test.mjs`; повтор этого файла отдельно дал 6/6 pass, поэтому единичный сбой полного параллельного прогона требует повторной проверки в CI и не считается полностью объяснённым. KMP Gradle-сборка в этой сессии не запускалась.
+Локальная проверка 2026-10-16: Windows Node22 — **1131 pass / 5 прежних skip / 0 fail**, Linux Node22 — **1133 pass / 3 прежних skip / 0 fail**; KMP core API — **69**, core client — **105**, shared Compose — **207** тестов без ошибок. Android debug и Windows portable собраны. CI на Node22/Windows, Node22/Ubuntu и KMP полностью прошёл для [e3597c7](https://github.com/arnyigor/TaskBridge/actions/runs/38924723685); проверка последующих серверных правок отслеживается в [GitHub Actions](https://github.com/arnyigor/TaskBridge/actions).
+
+Реальный бесплатный OpenRouter проверяется отдельно от offline CI: `:shared:realProviderUiProbe` требует `OPENROUTER_API_KEY`, установленный Pi и подтверждает нулевую цену выбранной модели по каталогу перед запросом. Обычные тесты не вызывают платные или бесплатные внешние модели.
+
+Для обновления Windows portable сначала выполните `:desktopApp:portable`: новая версия попадёт в `clients/kmp/dist/.staging/TaskBridge`. Если установленный клиент работает, примените обновление через трей **«Установить обновление и перезапустить»**; файлы работающей установки не перезаписываются.
 
 Покрыты: RPC-цикл, история и события, восстановление после restart, импорт Pi-сессий, SQLite и миграция, multipart-парсер, git/worktree/apply, project browser, лимиты и traversal, auth, классификация ошибок движка, AUTO-диспетчер, UI-состояние чата, а также cloud: нормализация и snapshot'ы, durable-последовательности, буфер/coalescing/backpressure, outbox и retry, идемпотентность команд, approvals (политика, менеджер, маршрутизация и end-to-end через Pi-хук), ограничение вывода инструментов и загрузка полного лога, смена модели/reasoning, метрики, API настроек облака, облачный API на memory и SQLite, replay без пропусков и дублей, reconcile, `/debug/cloud` и end-to-end запуск задачи из облака с живым стримингом и STOP. Стресс-набор (`npm run stress`) масштабируется переменными `TASKBRIDGE_STRESS_EVENTS`, `TASKBRIDGE_STRESS_LOG_MB`, `TASKBRIDGE_STRESS_SECONDS`.
 
@@ -1156,6 +1174,7 @@ LAN-режим (турникет + приложение на loopback); `taskbri
 9. Картинки в Markdown-ответах и предпросмотр входящих вложений поддержаны частично.
 10. Cloud transport сейчас выключен (`cloud.enabled: false`) и убран из UI — рабочий режим local-only по Wi‑Fi. В серверной части есть WebSocket-релай (`cloud/lib/ws.mjs` + `relay-server.mjs`, машина через `src/cloud/relay-connector.mjs`) как realtime-канал, а poll-путь остаётся обязательным фолбэком; Postgres-адаптер для serverless написан, но на живом сервере не прогонялся (`TASKBRIDGE_TEST_DATABASE_URL=postgres://… npm run test:postgres`), и на живую Vercel деплой ещë не выполнялся.
 11. Подтверждения инструментов включаются опцией `approvals.enabled`; расширение передаётся Pi через `--extension` (не ставится глобально). Длительный soak-прогон (30+ минут) запускается вручную через `TASKBRIDGE_STRESS_SECONDS`.
+12. Полные нативные замеры Windows frame/input/heap для тяжёлого чата и проверка содержимого системного Android clipboard остаются открытыми. Compose-тесты проверяют отображение, ввод и полный текст callback копирования; замеры аллокаций не заменяют эти нативные проверки. Android-проверки проводились с CPU-графикой эмулятора.
 
 ---
 
