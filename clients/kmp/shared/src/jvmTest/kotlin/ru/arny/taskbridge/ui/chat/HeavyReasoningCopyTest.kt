@@ -35,6 +35,18 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalTestApi::class)
 class HeavyReasoningCopyTest {
     @Test
+    fun previewKeepsTrimmedTailWithoutChangingTheSource() {
+        assertEquals("", thinkingTail(" \n\t", 12))
+        assertEquals("short", thinkingTail(" \nshort\n  ", 12))
+        assertEquals("…last", thinkingTail("  prefix-last  ", 4))
+        val source = " \n" + "Большой reasoning\n".repeat(20_000) + "the end\n "
+        val displayed = thinkingTail(source, 12_000)
+        assertEquals(12_001, displayed.length)
+        assertTrue(displayed.endsWith("the end"))
+        assertTrue(source.endsWith("\n "))
+    }
+
+    @Test
     fun mixedChatKeepsComposerAndFullReasoningCopyUsable() = runComposeUiTest {
         val reasoning = " \n" + "Проверка reasoning, bash и изменений файлов\n".repeat(6_000) + "\n "
         val tools = List(120) { index ->

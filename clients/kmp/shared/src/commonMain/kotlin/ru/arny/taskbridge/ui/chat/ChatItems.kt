@@ -372,7 +372,6 @@ internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String
     var open by remember { mutableStateOf(false) }
     val pinned = rememberPinned()
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val trimmed = remember(thinking) { thinking.trim() }
     Column(Modifier.padding(bottom = 6.dp).then(pinned.modifier)) {
         Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { pinned.toggle { open = !open } }.padding(vertical = 4.dp, horizontal = 2.dp),
@@ -383,11 +382,11 @@ internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String
             // The character count shows that the model received the message and is
             // producing output, the way the web's «Рассуждение · N симв.» does.
             Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted, modifier = Modifier.weight(1f))
-            if (open && trimmed.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления") { onCopy(thinking) }
+            if (open && thinking.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления") { onCopy(thinking) }
         }
         AnimatedVisibility(open) {
             Column {
-                SecondaryPane { ThinkingText(trimmed, muted) }
+                SecondaryPane { ThinkingText(thinking, muted) }
                 QuietRow(
                     leading = { Icon(AppIcons.ChevronUp, null, Modifier.size(14.dp), tint = muted) },
                     text = "Свернуть",
@@ -413,9 +412,14 @@ private fun ThinkingText(text: String, color: Color) {
     }
 }
 
-private fun thinkingTail(text: String, maxChars: Int): String = when {
-    text.length <= maxChars -> text
-    else -> "…" + text.takeLast(maxChars)
+internal fun thinkingTail(text: String, maxChars: Int): String {
+    // Find trim boundaries without allocating a full-sized intermediate copy.
+    var start = 0
+    var end = text.length
+    while (start < end && text[start].isWhitespace()) start++
+    while (end > start && text[end - 1].isWhitespace()) end--
+    return if (end - start <= maxChars) text.substring(start, end)
+        else "…" + text.substring(end - maxChars, end)
 }
 
 private const val ThinkingExpandedMaxLines = 30

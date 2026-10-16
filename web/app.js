@@ -476,7 +476,12 @@ function setReasoningText(details, text) {
   const pre = details.querySelector('.r-text');
   const label = details.querySelector('.r-label');
   const copy = details.querySelector('.copyBtn');
-  if (pre) pre.textContent = text;
+  // Keep huge reasoning out of layout, including folded <details>. The copy
+  // action retains the exact source; only the rendered preview is bounded.
+  const preview = text.length > 12000
+    ? `… Показан конец рассуждения. Полный текст — кнопка копирования.\n${text.slice(-12000)}`
+    : text;
+  if (pre && pre.textContent !== preview) pre.textContent = preview;
   if (label) label.textContent = `Рассуждение · ${text.length} симв.`;
   if (copy) copy._text = text;
 }

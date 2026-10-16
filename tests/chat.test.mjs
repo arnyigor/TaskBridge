@@ -1321,6 +1321,36 @@ test('DOM: reasoning block can copy the full current text', async () => {
   assert.equal(app.copied.at(-1), thinking);
 });
 
+test('DOM: heavy reasoning bounds rendered text while copying the exact current original', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const original = '  \n' + 'Большой reasoning и bash.\n'.repeat(12000) + '\n  ';
+  let current = original;
+  app.setFetchHook(async url => {
+    if (!new URL(url, 'http://localhost').pathname.endsWith('/events')) return null;
+    return { ok: true, json: async () => [...history('a'), { taskId: 'a', seq: 99, type: 'PI_EVENT', data: { pi: {
+      type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: current },
+    } } }] };
+  });
+  await app.refreshTask();
+  for (const suffix of ['', '\nЕщё одна порция reasoning.']) {
+    if (suffix) {
+      current += suffix;
+      app.streams.at(-1).onmessage({ data: JSON.stringify({ taskId: 'a', seq: 100, type: 'PI_EVENT', data: { pi: {
+        type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: suffix },
+      } } }) });
+      app.renderChat(); // Flush the normal debounced render without a timing assertion.
+    }
+    const reasoning = app.document.querySelector('.reasoning');
+    const displayed = reasoning.querySelector('.r-text').textContent;
+    assert.ok(displayed.length <= 12200, `rendered ${displayed.length} characters`);
+    assert.ok(displayed.endsWith(current.slice(-12000)), `suffix=${JSON.stringify(suffix)} actualTail=${JSON.stringify(displayed.slice(-60))}`);
+    assert.match(reasoning.querySelector('.r-label').textContent, new RegExp(`${current.length} симв\\.`));
+    await reasoning.querySelector('.copyBtn').onclick({ stopPropagation() {} });
+    assert.equal(app.copied.at(-1), current);
+  }
+});
+
 test('DOM: a long tool run folds into one collapsed line', async () => {
   const app = await ui();
   await app.selectTask('a');
