@@ -365,3 +365,25 @@ for (const shape of ['notice', 'structured']) {
     assert.equal(resumed.status, 'SUCCEEDED', resumed.error || '');
   });
 }
+
+for (const [failure, code] of [['invalid-auth', 'ENGINE_AUTH'], ['empty-quota', 'QUOTA_EXCEEDED']]) {
+  for (const shape of ['notice', 'structured']) {
+    test(`permanent provider failure ${code} stops announced retries (${shape})`, { timeout: 60000 }, async t => {
+      const fixture = await startFixture();
+      t.after(() => fixture.close());
+      const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: `fault-provider-incompatible ${failure} ${shape}` });
+      const failed = await settle(fixture.api, task.id);
+      assert.equal(failed.status, 'FAILED');
+      assert.equal(failed.errorCode, code);
+      assert.equal(failed.retryable, false);
+      assert.equal(failed.providerWait, null);
+      assert.equal(failed.piPid, null);
+      const events = await fixture.api(`/api/tasks/${task.id}/events?limit=0`);
+      assert.equal(events.filter(e => e.type === 'TASK_FAILED').length, 1);
+      assert.equal(events.filter(e => e.type === 'PROVIDER_WAIT').length, 0);
+      await fixture.api(`/api/tasks/${task.id}/message`, { text: 'corrected follow-up' });
+      const resumed = await settle(fixture.api, task.id);
+      assert.equal(resumed.status, 'SUCCEEDED', resumed.error || '');
+    });
+  }
+}

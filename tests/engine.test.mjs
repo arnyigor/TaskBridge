@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyEngineError, parseRetryAfterMs } from '../src/engine.mjs';
 import { humanizeError } from '../web/errors.mjs';
+import { parseProviderWait, parseProviderWaitStatus } from '../src/provider-wait.mjs';
 import { chooseEngine, profileList, usesLocalRuntime, resolveRouterModel } from '../src/dispatcher.mjs';
 
 test('provider failures map to stable engine codes', () => {
@@ -60,6 +61,14 @@ test('retry-after hints are parsed and bounded', () => {
   assert.equal(parseRetryAfterMs('retry after 99 hours'), 24 * 60 * 60 * 1000);
   assert.equal(parseRetryAfterMs('no hint here'), null);
   assert.equal(classifyEngineError('Rate limit hit, retry after 5s').retryAfterMs, 5000);
+});
+
+test('OpenRouter retry waits retain the actionable upstream reason', () => {
+  const error = '429: ' + JSON.stringify({ message: 'Provider returned error', metadata: { raw: 'Liquid is temporarily rate-limited upstream. Retry shortly.' } });
+  const notice = `openrouter/liquid retrying after error in 0m 05s. Error: ${error}`;
+  assert.equal(parseProviderWait(notice).reason, 'Liquid is temporarily rate-limited upstream. Retry shortly');
+  assert.equal(parseProviderWaitStatus(JSON.stringify({ event: 'wait', error, remainingMs: 5000 })).reason,
+    'Liquid is temporarily rate-limited upstream. Retry shortly');
 });
 
 test('AUTO dispatcher picks the vision profile only when images are attached', () => {

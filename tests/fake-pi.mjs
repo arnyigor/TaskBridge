@@ -254,7 +254,9 @@ async function runFault(fault, command, respond) {
   // deaf and child combine: `fault-deaf fault-child` is a hung tool that
   // ignores abort and holds a child process.
   if (fault === 'provider-incompatible') {
-    const error = `OpenAI API error (400): 400 {"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}`;
+    const error = String(command.message).includes('invalid-auth') ? 'HTTP 401: invalid API key'
+      : String(command.message).includes('empty-quota') ? 'HTTP 402: insufficient credits'
+      : `OpenAI API error (400): 400 {"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}`;
     const notice = `openai/gpt-5.5 retrying after error in 0m 05s. Error: ${error}`;
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
     if (String(command.message).includes('structured')) {

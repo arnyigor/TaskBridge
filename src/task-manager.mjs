@@ -6089,7 +6089,13 @@ export class TaskManager extends EventEmitter {
   // --- provider wait (a retry Pi announces while the agent is still alive) ----
   // Логика — в provider-wait.mjs; здесь только привязка публикации событий задачи.
   async #noteProviderWait(task, wait) {
-    if (classifyEngineError(wait?.reason)?.code === 'MODEL_AUTH_INCOMPATIBLE') {
+    const failure = classifyEngineError(wait?.reason);
+    const guidance = {
+      MODEL_AUTH_INCOMPATIBLE: 'Модель несовместима с авторизацией ChatGPT. Выберите доступную модель провайдера openai-codex или измените способ авторизации.',
+      ENGINE_AUTH: 'Провайдер отклонил авторизацию. Проверьте ключ или обновите вход у этого провайдера.',
+      QUOTA_EXCEEDED: 'Провайдер сообщил об исчерпанной квоте или недостатке средств. Проверьте лимиты и баланс провайдера.',
+    }[failure?.code];
+    if (guidance && failure.retryable === false) {
       // The retry belongs to Pi/its extension. Retire that owned process before
       // publishing failure; merely hiding PROVIDER_WAIT would still send again.
       const runtime = this.runtimes.get(task.id);
@@ -6105,8 +6111,8 @@ export class TaskManager extends EventEmitter {
       task._compactingSince = 0;
       await this.#clearProviderWait(task, 'non_retryable', { announce: false });
       const error = Object.assign(new Error(
-        `Модель несовместима с авторизацией ChatGPT. Выберите доступную модель провайдера openai-codex или измените способ авторизации. ${wait.reason}`
-      ), { code: 'MODEL_AUTH_INCOMPATIBLE' });
+        `${guidance} Автоматический повтор остановлен. ${wait.reason}`
+      ), { code: failure.code });
       try { await this.#fail(task, error); }
       finally { this.#resolveSettle(task.id); }
       return;

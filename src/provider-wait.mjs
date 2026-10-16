@@ -1,6 +1,7 @@
 // Состояние «ждём провайдера»: разбор объявлений Pi и pi-limits-wait, дедупликация
 // тиков одного эпизода и публикация PROVIDER_WAIT/PROVIDER_WAIT_END.
 // Выделено из task-manager.mjs 2026-10-15; поведение не менялось, только перенос.
+import { humanizeError } from '../web/errors.mjs';
 
 function now() { return new Date().toISOString(); }
 
@@ -55,6 +56,14 @@ function trimCause(text) {
 
 /** Своими словами провайдера: JSON, который он прислал, иначе названная причина. */
 function providerWaitReason(text) {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  // Only unwrap this generic provider wrapper. Other raw causes still feed
+  // the engine classifier (e.g. the Codex model/auth compatibility check).
+  if (start >= 0 && end > start && /"message"\s*:\s*"Provider returned error"/iu.test(text)) {
+    const human = humanizeError(text.slice(start, end + 1));
+    if (human && !human.startsWith('{')) return trimCause(human);
+  }
   const quoted = /"message"\s*:\s*"([^"]{1,200})"/u.exec(text)?.[1]?.trim();
   if (quoted) return quoted;
   // Причину называют двумя оборотами: Pi — «… Error: fetch failed», расширение —
