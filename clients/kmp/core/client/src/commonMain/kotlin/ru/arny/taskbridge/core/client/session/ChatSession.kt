@@ -442,7 +442,56 @@ class ChatSession(
         return (base + jitter).coerceIn(500, 5_000)
     }
 
+    /**
+     * Событие из live-потока. Перед применением закрывается дыра в потоке, если
+     * есть: редьюсер двигает курсор вперёд, и события из дыры для него потеряны
+     * навсегда (см. [repairGap]).
+     */
     private suspend fun onEvent(event: TaskEvent) {
+        repairGap(event.seq)
+        applyIncoming(event)
+    }
+
+    /**
+     * Дырка в потоке: события между курсором редьюсера и [seq] этому клиенту не
+     * дошли. Так бывает, когда переподключение получает обрезанный реплей
+     * (`: replay-trimmed` в server.mjs: от хвоста новее лимита байт остаётся
+     * только новое — старое не шлётся) и когда историю правили, пока чат был
+     * скрыт. Без догрузки редьюсер перепрыгивает дыру своим курсором, и эти
+     * сообщения пропадают у клиента навсегда — на десктопе так терялась часть
+     * истории при живом потоке (2026-10-16).
+     */
+    private suspend fun repairGap(seq: Long) {
+        val cursor = mutex.withLock { reducer?.cursor ?: return }
+        if (seq <= cursor + 1) return
+        if (seq - cursor - 1 <= GAP_FILL_EVENT_LIMIT && backfillUpTo(seq)) return
+        // Дыра велика или не догружается: окно истории ограничено байтами уже на
+        // сервере, старое листается как обычно — клиент не остаётся с дырой.
+        loadInitial()
+    }
+
+    /**
+     * Догружает события после курсора редьюсера страницами, пока дыра не
+     * закроется. false — закрыть не удалось (сервер отказал, страница пуста или
+     * потолок страниц); вызывающий чинит историю перечитыванием окна.
+     */
+    private suspend fun backfillUpTo(seq: Long): Boolean {
+        repeat(GAP_FILL_PAGE_LIMIT) {
+            val cursor = mutex.withLock { reducer?.cursor ?: 0 }
+            if (cursor >= seq - 1) return true
+            val events = try {
+                api.events(taskId, after = cursor, limit = GAP_FILL_PAGE_EVENTS)
+            } catch (error: ApiException) {
+                return false
+            }
+            if (events.isEmpty()) return false
+            for (event in events) applyIncoming(event)
+        }
+        return mutex.withLock { (reducer?.cursor ?: 0) >= seq - 1 }
+    }
+
+    /** Одно событие в редьюсер и состояние. Общий путь для потока и догрузки дыры. */
+    private suspend fun applyIncoming(event: TaskEvent) {
         var outboxChanged = false
         mutex.withLock {
             val chat = reducer ?: return
@@ -939,6 +988,15 @@ internal const val OLDER_PAGE_LIMIT = 12
  * (the phone has a 256 MB limit): past this the action stops and the button stays.
  */
 internal const val OLDER_EVENT_LIMIT = 2_000
+
+/**
+ * Догрузка дыры в потоке (см. ChatSession.repairGap): страница и потолок
+ * страниц. В сумме столько же событий, сколько один «показать раньше», —
+ * дыра побольше чинится перечитыванием окна, а не тащением мегабайтов.
+ */
+internal const val GAP_FILL_PAGE_EVENTS = 500
+internal const val GAP_FILL_PAGE_LIMIT = 4
+internal const val GAP_FILL_EVENT_LIMIT = 2_000
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 
