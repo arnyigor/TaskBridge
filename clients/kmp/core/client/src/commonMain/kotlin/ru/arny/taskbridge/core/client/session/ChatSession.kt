@@ -947,6 +947,12 @@ class ChatSession(
 
     suspend fun openWorkspaceFileOnComputer(path: String, reveal: Boolean): Result<Unit> = runCatching { api.openWorkspaceFile(taskId, path, reveal) }
 
+    /**
+     * Папка, в которой работает сессия: открывает файловый менеджер на самом ПК.
+     * Телефону это недоступно (сервер отвечает 403) — см. canOpenSessionFolder.
+     */
+    suspend fun openSessionFolderOnComputer(): Result<Unit> = runCatching { api.openWorkspaceFolder(taskId) }
+
     suspend fun openFileOnComputer(fileId: String, reveal: Boolean): Result<Unit> = runCatching { api.openFile(taskId, fileId, reveal) }
 
     private fun act(key: String, startNotice: String? = null, concurrent: Boolean = false, block: suspend () -> Unit) {

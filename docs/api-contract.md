@@ -864,6 +864,13 @@ llama.cpp получают тот же `400 LOCAL_CONTEXT_UNSUPPORTED`: их `ct
 сборочной машине. Действие доступно только у сессии с рабочей папкой (или у
 вложения/артефакта этой сессии).
 
+`POST /api/tasks/:id/workspace/open` (то же тело, без `reveal` — цель и есть папка)
+открывает **папку сессии** файловым менеджером: ту самую, в которой работает агент
+(`workspacePath`). Гейты те же (`403 FILE_OPEN_LOCAL_ONLY` у телефона и облака,
+`400 INPUT_INVALID` без `confirm`). У свежей сессии рабочей папки ещё нет — `404
+NOT_FOUND` («Рабочая папка не найдена»), а не открытие каталога задачи. Ответ:
+`{ opened: true, name, path }`.
+
 `POST /api/tasks/:id/files/:fileId/run`, `POST /api/tasks/:id/artifacts/:name/run` и
 `POST /api/tasks/:id/workspace-file/run` (то же тело) запускают файл-скрипт на
 машине и возвращают `{ command, exitCode, stdout, stderr, timedOut }`. Интерпретатор

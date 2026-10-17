@@ -158,6 +158,48 @@ test('workspace-file open/run read the path from the query, not an empty body', 
   assert.equal(empty.body.code, 'INPUT_INVALID');
 });
 
+// Иконка «открыть папку сессии» в шапке чата: папку открывает файловый менеджер на
+// самом ПК, поэтому у маршрута те же два гейта, что у открытия файла, — подтверждение и
+// «клиент — это машина» — и никакого запасного каталога, когда рабочей папки ещё нет.
+// Сам успешный путь окна не открывает: в сьюте нет ни одной сессии с готовой папкой,
+// которую маршрут мог бы показать (у проектной фикстуры это её корень, занятый
+// сервером, а сессия без папки — тот самый 404).
+test('workspace open needs confirmation, the machine itself and a folder that exists', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'session folder probe' });
+  const route = `/api/tasks/${task.id}/workspace/open`;
+
+  // Без confirm ничего не открывается — это же держит контрактный проб безобидным.
+  const noConfirm = await post(fixture, route, { body: {} });
+  assert.equal(noConfirm.status, 400);
+  assert.equal(noConfirm.body.code, 'INPUT_INVALID');
+
+  // Телефон в LAN приходит через прокси с чужим адресом в X-Forwarded-For: отказ
+  // даже с подтверждением — окно открылось бы на чужом экране.
+  const remote = await post(fixture, route, { headers: { 'x-forwarded-for': '203.0.113.9' }, body: { confirm: true } });
+  assert.equal(remote.status, 403);
+  assert.equal(remote.body.code, 'FILE_OPEN_LOCAL_ONLY');
+
+  // Неизвестная сессия с машины: 404 до любого обращения к папке.
+  const unknown = await post(fixture, '/api/tasks/does-not-exist/workspace/open', { body: { confirm: true } });
+  assert.equal(unknown.status, 404);
+
+  // Рабочей папки у сессии ещё нет: 404, а не открытие каталога задачи и не сырое
+  // сообщение Node с путями сервера. Папка проекта намеренно не существует —
+  // подготовка не пройдёт, и задача останется без workspacePath.
+  const nowhere = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-no-workspace-'));
+  await fs.rm(nowhere, { recursive: true, force: true });
+  const broken = await startFixture(undefined, { root: { projects: [{ id: 'gone', name: 'Пропавшая папка', path: path.join(nowhere, 'not-here'), useWorktree: false }] } });
+  t.after(() => broken.close());
+  const folderless = await broken.api('/api/tasks', { projectId: 'gone', prompt: 'folderless probe' });
+  const gone = await post(broken, `/api/tasks/${folderless.id}/workspace/open`, { body: { confirm: true } });
+  assert.equal(gone.status, 404);
+  assert.equal(gone.body.code, 'NOT_FOUND');
+  assert.match(gone.body.error, /не найдена/i);
+  assert.doesNotMatch(gone.body.error, /ENOENT|realpath|[A-Za-z]:\\/);
+});
+
 test('workspace-file may read an absolute file only after a tool event named it', { timeout: 60000 }, async t => {
   const fixture = await startFixture();
   const externalDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-external-file-'));

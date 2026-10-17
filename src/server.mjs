@@ -2316,8 +2316,8 @@ async function handleRequest(req, res) {
     // AccessControl.machine). A phone on the LAN does not qualify. A body flag
     // is required, too: without it the contract probe in
     // tests/api-contract.test.mjs would launch windows on the build machine.
-    const assertMachineLocal = () => {
-      if (!access.machine(req)) throw Object.assign(new Error('Открыть файл приложением можно только с самого компьютера.'), { code: 'FILE_OPEN_LOCAL_ONLY' });
+    const assertMachineLocal = (message = 'Открыть файл приложением можно только с самого компьютера.') => {
+      if (!access.machine(req)) throw Object.assign(new Error(message), { code: 'FILE_OPEN_LOCAL_ONLY' });
     };
     // Running is also allowed to an authenticated client (a paired phone): the PC
     // does the work and the phone reads the output, which is the point of a
@@ -2392,6 +2392,24 @@ async function handleRequest(req, res) {
       }
       await openLocalPath(target, { reveal });
       return json(res, 200, { opened: true, reveal: body.reveal === true, name: path.basename(target) });
+    }
+
+    // Открыть папку, в которой работает сессия, файловым менеджером. Как и у
+    // остальных маршрутов «открыть на машине»: подтверждение обязательно (иначе
+    // контрактный проб в tests/api-contract.test.mjs открывал бы окна на сборочной
+    // машине), и доступно только тому клиенту, чей адрес — сама машина (окно на
+    // экране оператора, а не на телефоне). Свежая сессия папки ещё не имеет —
+    // тогда честный 404, а не открытие каталога задачи.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/workspace\/open$/);
+    if (req.method === 'POST' && match) {
+      assertMachineLocal('Открыть папку сессии можно только на самом компьютере.');
+      await openConfirmed();
+      const task = manager.getTask(match[1]);
+      if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const folder = task.workspacePath ? await fs.realpath(task.workspacePath).catch(() => null) : null;
+      if (!folder) throw Object.assign(new Error('Рабочая папка не найдена.'), { code: 'NOT_FOUND' });
+      await openLocalPath(folder);
+      return json(res, 200, { opened: true, name: path.basename(folder), path: folder });
     }
 
     // Run a script on the machine. Same guards as opening (machine only,

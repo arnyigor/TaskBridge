@@ -922,6 +922,15 @@ class TaskBridgeApi(
         })
     }
 
+    /**
+     * Открывает папку, в которой работает сессия (`workspacePath`), файловым
+     * менеджером ПК. Как и остальные «открыть на машине» — только клиенту, чей
+     * адрес сама машина; у сессии без рабочей папки сервер отвечает 404.
+     */
+    suspend fun openWorkspaceFolder(id: String) {
+        send(HttpMethod.Post, "/api/tasks/${id.path()}/workspace/open", buildJsonObject { put("confirm", true) })
+    }
+
     /** The task's artifacts (tool output logs, diff patches), in the server's order. */
     suspend fun artifacts(id: String): List<String> =
         get("/api/tasks/${id.path()}/artifacts", ListSerializer(String.serializer()))

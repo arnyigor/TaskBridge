@@ -87,6 +87,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.Json
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ApiError
+import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.Approval
 import ru.arny.taskbridge.core.api.GenerationMetrics
@@ -235,6 +236,21 @@ fun ChatScreen(
         scope.launch { listState.animateScrollToItem(0) }
     }
 
+    // Иконка папки в шапке: папку открывает файловый менеджер на самом ПК, поэтому
+    // неудача (чужой сервер, папки ещё нет) должна быть видна словами, а не молчанием.
+    fun openSessionFolder() {
+        scope.launch {
+            session.openSessionFolderOnComputer()
+                .onSuccess {
+                    snackbar.currentSnackbarData?.dismiss()
+                    snackbar.showSnackbar("Папка сессии открыта на компьютере")
+                }
+                .onFailure { error ->
+                    snackbar.showSnackbar((error as? ApiException)?.let { e -> describe(e.error) } ?: error.message ?: "Не удалось открыть папку")
+                }
+        }
+    }
+
     // Выбор нескольких сообщений (как «Select messages» в ChatGPT): тап по сообщению
     // отмечает его, «Копировать» отправляет отмеченные в буфер в порядке ленты.
     var selecting by remember(taskId) { mutableStateOf(false) }
@@ -284,6 +300,9 @@ fun ChatScreen(
                 onDialog = { dialog = it },
                 onCopyHistory = { copyingHistory = true },
                 onSelectMessages = { selectedIds.clear(); selecting = true },
+                // Папки нет — открывать нечего: у свежей сессии рабочая папка ещё не
+                // подготовлена, и сервер ответил бы 404.
+                onOpenFolder = if (canOpenSessionFolder(platform.kind, state.task?.workspacePath)) ::openSessionFolder else null,
             )
         },
         // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
@@ -475,6 +494,8 @@ private fun ChatTopBar(
     onDialog: (ChatDialog) -> Unit,
     onCopyHistory: () -> Unit,
     onSelectMessages: () -> Unit,
+    /** null — папку открыть нельзя (телефон или у сессии ещё нет рабочей папки). */
+    onOpenFolder: (() -> Unit)?,
 ) {
     var menu by remember { mutableStateOf(false) }
     val task = state.task
@@ -532,6 +553,9 @@ private fun ChatTopBar(
             }
         },
         actions = {
+            onOpenFolder?.let { open ->
+                IconButton(onClick = open) { Icon(AppIcons.Folder, "Открыть папку сессии") }
+            }
             Box {
                 IconButton(onClick = { menu = true }) { Icon(AppIcons.More, "Меню сессии") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -582,6 +606,15 @@ internal fun projectPathFor(task: Task?, projects: List<Project>): String? =
     task?.projectId?.takeIf { it.isNotBlank() }
         ?.let { id -> projects.firstOrNull { it.id == id } }
         ?.path?.takeIf { it.isNotBlank() }
+
+/**
+ * Показывать ли иконку «открыть папку сессии» в шапке чата. Папку открывает файловый
+ * менеджер на самом ПК, поэтому у телефона кнопки нет (сервер всё равно ответит 403),
+ * и нет её у свежей сессии — рабочая папка появляется только после подготовки, а до неё
+ * открывать нечего. Чистая функция — проверяется в OpenFolderTest без устройства.
+ */
+internal fun canOpenSessionFolder(kind: String, workspacePath: String?): Boolean =
+    kind == "desktop" && !workspacePath.isNullOrBlank()
 
 /**
  * The conversation as plain text: who, when, what. Tools stay one line each

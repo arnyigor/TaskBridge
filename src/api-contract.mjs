@@ -150,6 +150,7 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/tasks/:id/files/:fileId/open', summary: 'open an upload with its OS application (or reveal it); the machine itself only' },
   { method: 'POST', path: '/api/tasks/:id/artifacts/:name/open', summary: 'open an artifact with its OS application (or reveal it); the machine itself only' },
   { method: 'POST', path: '/api/tasks/:id/workspace-file/open', summary: 'open a workspace file with its OS application (or reveal it); the machine itself only' },
+  { method: 'POST', path: '/api/tasks/:id/workspace/open', summary: 'open the folder the session works in with the OS file manager; the machine itself only (confirm:true)' },
   { method: 'POST', path: '/api/tasks/:id/files/:fileId/run', summary: 'run an upload as a script and return its output; the machine or an authenticated client (confirm:true)' },
   { method: 'POST', path: '/api/tasks/:id/artifacts/:name/run', summary: 'run an artifact as a script and return its output; the machine or an authenticated client (confirm:true)' },
   { method: 'POST', path: '/api/tasks/:id/workspace-file/run', summary: 'run a workspace file as a script and return its output; the machine or an authenticated client (confirm:true)' },
