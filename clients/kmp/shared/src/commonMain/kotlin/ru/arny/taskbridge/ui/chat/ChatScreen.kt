@@ -504,7 +504,11 @@ private fun ChatTopBar(
     TopAppBar(
         // Чуть выше дефолтных 64 dp: под названием теперь три строки (название,
         // статус с моделью, путь проекта), и без этого их срезало бы.
-        modifier = Modifier.height(88.dp),
+        //
+        // Именно expandedHeight, а не Modifier.height: инсет статус-бара TopAppBar
+        // прибавляет сам, а фиксированная высота включала его внутрь — на телефоне
+        // от 88 dp оставалось ~64, и третья строка (путь проекта) вылезала на ленту.
+        expandedHeight = 88.dp,
         navigationIcon = {
             if (showBack) IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад") }
         },
