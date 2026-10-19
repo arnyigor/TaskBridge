@@ -80,6 +80,8 @@ kotlin {
         jvmTest.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.compose.uiTest)
+            // A fake HTTP engine: the file panel is tested on real bytes without a server.
+            implementation(libs.ktor.client.mock)
         }
     }
 }

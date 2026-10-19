@@ -63,6 +63,14 @@ class AppSettings(
         get() = store.get("enterSends") != "false"
         set(value) = store.put("enterSends", value.toString())
 
+    /**
+     * Width of the docked file panel in dp. 0 means "not chosen yet": the screen
+     * then uses its default, and a nonsense stored value is ignored the same way.
+     */
+    var filePanelWidth: Int
+        get() = store.get("filePanel.width")?.toIntOrNull() ?: 0
+        set(value) = store.put("filePanel.width", value.toString())
+
     /** Models starred in the model chooser (ModelRef.key), shown first there. Per device. */
     var favoriteModels: Set<String>
         get() = store.get("favoriteModels")?.split('\n')?.filter { it.isNotEmpty() }?.toSet().orEmpty()

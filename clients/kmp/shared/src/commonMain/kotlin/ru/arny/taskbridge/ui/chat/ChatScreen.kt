@@ -66,11 +66,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.input.key.KeyEventType
-import androidx.compose.ui.input.key.key
-import androidx.compose.ui.input.key.onPreviewKeyEvent
-import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -177,7 +172,12 @@ fun ChatScreen(
     // Ход, для которого оператор нажал «Подождать»: баннер молчания скрыт, пока
     // идёт этот же ход (turn совпадает); новый ход показывает баннер снова.
     var silenceWaitTurn by remember { mutableStateOf<Long?>(null) }
-    var viewing by androidx.compose.runtime.saveable.rememberSaveable(taskId, stateSaver = FileTargetSaver) { mutableStateOf<FileTarget?>(null) }
+    // Файлы смотрятся в док-панели справа (широкое окно) или шитом снизу (телефон).
+    // Вкладки живут здесь, а не в просмотрщике: второй файл не закрывает первый,
+    // а ссылка внутри открытого Markdown открывается рядом с ним.
+    val fileTabs = rememberFileTabs(taskId)
+    fun openFile(target: FileTarget) = fileTabs.open(target)
+    var panelWidth by remember { mutableStateOf(panelWidthSetting(graph.settings.filePanelWidth)) }
     var files by remember(taskId) { mutableStateOf<List<UploadFile>>(emptyList()) }
     var draft by remember(taskId) { mutableStateOf(TextFieldValue(graph.settings.draft(taskId))) }
     val draftAutosave = remember(connection, taskId) {
@@ -289,199 +289,204 @@ fun ChatScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            ChatTopBar(
-                state = state,
-                projectPath = projectPathFor(state.task, sessionListState.projects),
-                working = working,
-                showBack = showBack,
-                onBack = onBack,
-                onDialog = { dialog = it },
-                onCopyHistory = { copyingHistory = true },
-                onSelectMessages = { selectedIds.clear(); selecting = true },
-                // Папки нет — открывать нечего: у свежей сессии рабочая папка ещё не
-                // подготовлена, и сервер ответил бы 404.
-                onOpenFolder = if (canOpenSessionFolder(platform.kind, state.task?.workspacePath)) ::openSessionFolder else null,
-            )
-        },
-        // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
-        contentWindowInsets = WindowInsets(0),
-    ) { padding ->
-        Column(
-            // Полоса выбора идёт над лентой: счётчик и кнопки должны быть видны там же,
-            // где отметки, а не в меню, которое уже закрылось.
-
-            Modifier.padding(padding).fillMaxSize().imePadding().onPreviewKeyEvent { event ->
+    // Файл открывается в док-панели справа (широкое окно) или шитом снизу (телефон):
+    // панель забирает ширину у чата, а не закрывает его, — ответ, который упоминает
+    // файл, остаётся на экране, пока файл читают.
+    ChatWithFilePanel(
+        tabs = fileTabs,
+        session = session,
+        platform = platform,
+        width = panelWidth,
+        onWidth = { panelWidth = it },
+        // Ширина пишется в настройки по окончании перетаскивания, а не на каждый кадр.
+        onWidthCommitted = { graph.settings.filePanelWidth = panelWidth.value.toInt() },
+        onOpenPath = { link -> openFile(FileTarget.Workspace(link.path, link.line, link.endLine)) },
+        onEscape = {
+            when {
+                // Открытый диалог — отдельное окно и обрабатывает Esc сам.
+                dialog != null -> false
+                // Панель ближе всего: Esc закрывает файл, а не ход. СТОП — следующим Esc.
+                fileTabs.items.isNotEmpty() -> { fileTabs.closeActive(); true }
                 // Esc = жёсткий стоп, как в консоли: подтверждение → killTree.
-                // preview-фаза доходит сюда раньше текстового поля, а открытый
-                // диалог — отдельное окно и Esc сюда вообще не пускает.
-                if (event.type == KeyEventType.KeyUp && event.key == Key.Escape && dialog == null &&
-                    canStop(task?.status, state.outbox.size)
-                ) {
-                    dialog = ChatDialog.ConfirmStop
-                    true
-                } else false
+                canStop(task?.status, state.outbox.size) -> { dialog = ChatDialog.ConfirmStop; true }
+                else -> false
+            }
+        },
+    ) {
+        Scaffold(
+            topBar = {
+                ChatTopBar(
+                    state = state,
+                    projectPath = projectPathFor(state.task, sessionListState.projects),
+                    working = working,
+                    showBack = showBack,
+                    onBack = onBack,
+                    onDialog = { dialog = it },
+                    onCopyHistory = { copyingHistory = true },
+                    onSelectMessages = { selectedIds.clear(); selecting = true },
+                    // Папки нет — открывать нечего: у свежей сессии рабочая папка ещё не
+                    // подготовлена, и сервер ответил бы 404.
+                    onOpenFolder = if (canOpenSessionFolder(platform.kind, state.task?.workspacePath)) ::openSessionFolder else null,
+                )
             },
-        ) {
-            if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
-            LinkBanner(state.link, onRetry = { session.reconnectNow() })
-            // Шаг C-A: таймер молчания. Сервер считает silentMs у себя (клиент не
-            // вычитает часы другого устройства); «Подождать» прячет баннер до нового
-            // хода, STOP идёт через уже существующее подтверждение.
-            val silence = silenceState(task)
-            if (silence != null && task?.turnState?.turn != silenceWaitTurn) {
-                SilenceBanner(
-                    silence,
-                    onWait = { silenceWaitTurn = task?.turnState?.turn },
-                    onStop = { dialog = ChatDialog.ConfirmStop },
-                    onRestart = { dialog = ChatDialog.ConfirmRestart },
-                )
-            }
-            // Полоса выбора стоит над лентой: счётчик и кнопки должны быть видны там же,
-            // где отметки, а не в меню, которое уже закрылось.
-            if (selecting) {
-                SelectionBar(
-                    count = selectedIds.count { it.value },
-                    onCopy = {
-                        // Тексты те же, что у одиночного «Копировать», в порядке ленты.
-                        val texts = selectedMessages(state.chat.items, selectedIds.filterValues { it }.keys)
-                        platform.copyText(texts.joinToString("\n\n"))
-                        snackbar.currentSnackbarData?.dismiss()
-                        scope.launch { snackbar.showSnackbar(if (texts.size == 1) "Сообщение скопировано" else "Скопировано сообщений: ${texts.size}") }
-                        selecting = false
-                        selectedIds.clear()
-                    },
-                    onCancel = { selecting = false; selectedIds.clear() },
-                )
-            }
-            Box(Modifier.weight(1f).fillMaxWidth()) {
-                // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
-                // зависят обе стороны поведения — держать низ или не давать ленте
-                // сдвинуть чтение.
-                val following by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 80 } }
-                when {
-                    state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                    state.link is LinkState.Failed && state.chat.items.isEmpty() -> EmptyState(
-                        AppIcons.Alert,
-                        "Сессию не открыть",
-                        describe((state.link as LinkState.Failed).error),
-                    )
-                    else -> MessageList(
-                        graph = graph,
-                        session = session,
-                        state = state,
-                        listState = listState,
-                        following = following,
-                        historyLocked = historyLocked,
-                        onDialog = { dialog = it },
-                        onViewFile = { viewing = it },
-                        onCopyMessage = { text ->
-                            platform.copyText(text)
-                            snackbar.currentSnackbarData?.dismiss()
-                            scope.launch { snackbar.showSnackbar("Сообщение скопировано") }
-                        },
-                        selectionMode = selecting,
-                        selectedIds = selectedIds,
-                        onToggleSelect = ::toggleSelected,
+            // The composer pads for the navigation bar itself; Scaffold adding it too left a blank strip.
+            contentWindowInsets = WindowInsets(0),
+        ) { padding ->
+            Column(
+                // Полоса выбора идёт над лентой: счётчик и кнопки должны быть видны там же,
+                // где отметки, а не в меню, которое уже закрылось.
+
+                Modifier.padding(padding).fillMaxSize().imePadding(),
+            ) {
+                if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
+                LinkBanner(state.link, onRetry = { session.reconnectNow() })
+                // Шаг C-A: таймер молчания. Сервер считает silentMs у себя (клиент не
+                // вычитает часы другого устройства); «Подождать» прячет баннер до нового
+                // хода, STOP идёт через уже существующее подтверждение.
+                val silence = silenceState(task)
+                if (silence != null && task?.turnState?.turn != silenceWaitTurn) {
+                    SilenceBanner(
+                        silence,
+                        onWait = { silenceWaitTurn = task?.turnState?.turn },
+                        onStop = { dialog = ChatDialog.ConfirmStop },
+                        onRestart = { dialog = ChatDialog.ConfirmRestart },
                     )
                 }
-                // Reading older messages: the list stays put; new output only lights up the jump button.
-                val showJump by remember { derivedStateOf { !following } }
-                val newest = state.chat.items.lastOrNull()
-                val newestSignature = newest?.let { it.id + ((it as? ChatItem.Assistant)?.let { a -> a.text.length + a.tools.size } ?: 0) }
-                var seenSignature by remember { mutableStateOf(newestSignature) }
-                LaunchedEffect(showJump, newestSignature) { if (!showJump) seenSignature = newestSignature }
-                val hasNew = showJump && newestSignature != seenSignature
-                // Qualified: inside Box-in-Column the ColumnScope overload would win and is illegal here.
-                androidx.compose.animation.AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)) {
-                    SmallFloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem(0) } }) {
-                        Row(Modifier.padding(horizontal = if (hasNew) 12.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Icon(AppIcons.ArrowDown, "К последнему сообщению", Modifier.size(18.dp))
-                            if (hasNew) {
-                                Spacer(Modifier.width(6.dp))
-                                Text("Новое", style = MaterialTheme.typography.labelLarge)
+                // Полоса выбора стоит над лентой: счётчик и кнопки должны быть видны там же,
+                // где отметки, а не в меню, которое уже закрылось.
+                if (selecting) {
+                    SelectionBar(
+                        count = selectedIds.count { it.value },
+                        onCopy = {
+                            // Тексты те же, что у одиночного «Копировать», в порядке ленты.
+                            val texts = selectedMessages(state.chat.items, selectedIds.filterValues { it }.keys)
+                            platform.copyText(texts.joinToString("\n\n"))
+                            snackbar.currentSnackbarData?.dismiss()
+                            scope.launch { snackbar.showSnackbar(if (texts.size == 1) "Сообщение скопировано" else "Скопировано сообщений: ${texts.size}") }
+                            selecting = false
+                            selectedIds.clear()
+                        },
+                        onCancel = { selecting = false; selectedIds.clear() },
+                    )
+                }
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
+                    // зависят обе стороны поведения — держать низ или не давать ленте
+                    // сдвинуть чтение.
+                    val following by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 80 } }
+                    when {
+                        state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+                        state.link is LinkState.Failed && state.chat.items.isEmpty() -> EmptyState(
+                            AppIcons.Alert,
+                            "Сессию не открыть",
+                            describe((state.link as LinkState.Failed).error),
+                        )
+                        else -> MessageList(
+                            graph = graph,
+                            session = session,
+                            state = state,
+                            listState = listState,
+                            following = following,
+                            historyLocked = historyLocked,
+                            onDialog = { dialog = it },
+                            onViewFile = { openFile(it) },
+                            onCopyMessage = { text ->
+                                platform.copyText(text)
+                                snackbar.currentSnackbarData?.dismiss()
+                                scope.launch { snackbar.showSnackbar("Сообщение скопировано") }
+                            },
+                            selectionMode = selecting,
+                            selectedIds = selectedIds,
+                            onToggleSelect = ::toggleSelected,
+                        )
+                    }
+                    // Reading older messages: the list stays put; new output only lights up the jump button.
+                    val showJump by remember { derivedStateOf { !following } }
+                    val newest = state.chat.items.lastOrNull()
+                    val newestSignature = newest?.let { it.id + ((it as? ChatItem.Assistant)?.let { a -> a.text.length + a.tools.size } ?: 0) }
+                    var seenSignature by remember { mutableStateOf(newestSignature) }
+                    LaunchedEffect(showJump, newestSignature) { if (!showJump) seenSignature = newestSignature }
+                    val hasNew = showJump && newestSignature != seenSignature
+                    // Qualified: inside Box-in-Column the ColumnScope overload would win and is illegal here.
+                    androidx.compose.animation.AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)) {
+                        SmallFloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem(0) } }) {
+                            Row(Modifier.padding(horizontal = if (hasNew) 12.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Icon(AppIcons.ArrowDown, "К последнему сообщению", Modifier.size(18.dp))
+                                if (hasNew) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Новое", style = MaterialTheme.typography.labelLarge)
+                                }
                             }
                         }
                     }
                 }
+                // Above the composer rather than over it: the field and its buttons must stay reachable
+                // while a notice is on screen.
+                AppSnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
+                for (approval in state.approvals) {
+                    ApprovalCard(approval, busy = "approval:${approval.approvalId}" in state.busy, onAnswer = { allow -> session.answerApproval(approval.approvalId, allow) })
+                }
+                Composer(
+                    moreItems = { close ->
+                        if (task != null) {
+                            DropdownMenuItem(text = { Text("Выбрать модель") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ChooseModel })
+                            DropdownMenuItem(text = { Text("Настройки сессии") }, leadingIcon = { Icon(AppIcons.Layers, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
+                            DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { close(); session.compact() })
+                            DropdownMenuItem(text = { Text("Перезапустить сессию") }, leadingIcon = { Icon(AppIcons.Refresh, null) }, onClick = { close(); session.restartSession() })
+                            DropdownMenuItem(
+                                text = { Text(if (task.workspaceTrusted) "Папка доверенная" else "Доверять папке") },
+                                leadingIcon = { Icon(AppIcons.Shield, null) },
+                                enabled = task.workspacePath != null && !task.workspaceTrusted && "workspace-trust" !in state.busy,
+                                onClick = { close(); dialog = ChatDialog.ConfirmTrustWorkspace },
+                            )
+                        }
+                    },
+                    top = {
+                        DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
+                        if (task != null && task.pendingPrompts.isNotEmpty()) {
+                            QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
+                        }
+                        for (message in state.outbox) {
+                            OutboxRow(
+                                message,
+                                onRetry = { session.retry(message.commandId) },
+                                onEdit = {
+                                    draft = TextFieldValue(message.text)
+                                    session.dismiss(message.commandId)
+                                },
+                                onDismiss = { session.dismiss(message.commandId) },
+                            )
+                        }
+                    },
+                    value = draft,
+                    onValueChange = { next ->
+                        val paste = pastedTextDraft(draft.text, next.text, graph.nowIso())
+                        draft = paste.caret
+                            ?.let { TextFieldValue(paste.text, TextRange(it.coerceIn(0, paste.text.length))) }
+                            ?: next
+                        paste.attached?.let { attached ->
+                            files = files + attached
+                            scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
+                        }
+                    },
+                    files = files,
+                    quickActions = quickActions,
+                    onQuickAction = { action -> draft = draft.withSlashCommand(action.insertText) },
+                    fileCompletions = { session.workspaceFiles().getOrNull()?.entries ?: emptyList() },
+                    onRemoveFile = { files = files - it },
+                    onAttach = pickFiles,
+                    onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
+                    working = working,
+                    enterSends = graph.settings.enterSends && platform.kind == "desktop",
+                    enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,
+                    onSend = { send(it) },
+                    onStop = if (canStop(task?.status, state.outbox.size)) ({ dialog = ChatDialog.ConfirmStop }) else null,
+                )
             }
-            // Above the composer rather than over it: the field and its buttons must stay reachable
-            // while a notice is on screen.
-            AppSnackbarHost(snackbar, Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
-            for (approval in state.approvals) {
-                ApprovalCard(approval, busy = "approval:${approval.approvalId}" in state.busy, onAnswer = { allow -> session.answerApproval(approval.approvalId, allow) })
-            }
-            Composer(
-                moreItems = { close ->
-                    if (task != null) {
-                        DropdownMenuItem(text = { Text("Выбрать модель") }, leadingIcon = { Icon(AppIcons.Spark, null) }, onClick = { close(); dialog = ChatDialog.ChooseModel })
-                        DropdownMenuItem(text = { Text("Настройки сессии") }, leadingIcon = { Icon(AppIcons.Layers, null) }, onClick = { close(); dialog = ChatDialog.ModelSettings })
-                        DropdownMenuItem(text = { Text("Сжать контекст") }, leadingIcon = { Icon(AppIcons.Layers, null) }, enabled = !working, onClick = { close(); session.compact() })
-                        DropdownMenuItem(text = { Text("Перезапустить сессию") }, leadingIcon = { Icon(AppIcons.Refresh, null) }, onClick = { close(); session.restartSession() })
-                        DropdownMenuItem(
-                            text = { Text(if (task.workspaceTrusted) "Папка доверенная" else "Доверять папке") },
-                            leadingIcon = { Icon(AppIcons.Shield, null) },
-                            enabled = task.workspacePath != null && !task.workspaceTrusted && "workspace-trust" !in state.busy,
-                            onClick = { close(); dialog = ChatDialog.ConfirmTrustWorkspace },
-                        )
-                    }
-                },
-                top = {
-                    DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
-                    if (task != null && task.pendingPrompts.isNotEmpty()) {
-                        QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
-                    }
-                    for (message in state.outbox) {
-                        OutboxRow(
-                            message,
-                            onRetry = { session.retry(message.commandId) },
-                            onEdit = {
-                                draft = TextFieldValue(message.text)
-                                session.dismiss(message.commandId)
-                            },
-                            onDismiss = { session.dismiss(message.commandId) },
-                        )
-                    }
-                },
-                value = draft,
-                onValueChange = { next ->
-                    val paste = pastedTextDraft(draft.text, next.text, graph.nowIso())
-                    draft = paste.caret
-                        ?.let { TextFieldValue(paste.text, TextRange(it.coerceIn(0, paste.text.length))) }
-                        ?: next
-                    paste.attached?.let { attached ->
-                        files = files + attached
-                        scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
-                    }
-                },
-                files = files,
-                quickActions = quickActions,
-                onQuickAction = { action -> draft = draft.withSlashCommand(action.insertText) },
-                fileCompletions = { session.workspaceFiles().getOrNull()?.entries ?: emptyList() },
-                onRemoveFile = { files = files - it },
-                onAttach = pickFiles,
-                onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
-                working = working,
-                enterSends = graph.settings.enterSends && platform.kind == "desktop",
-                enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,
-                onSend = { send(it) },
-                onStop = if (canStop(task?.status, state.outbox.size)) ({ dialog = ChatDialog.ConfirmStop }) else null,
-            )
         }
     }
 
-    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onDialog = { dialog = it }, onViewFile = { viewing = it }, onClose = { dialog = null })
-    viewing?.let {
-        FileViewer(
-            it,
-            session,
-            platform,
-            onDismiss = { viewing = null },
-            // A link inside a rendered Markdown file opens the file it points at.
-            onOpenPath = { link -> viewing = FileTarget.Workspace(link.path, link.line, link.endLine) },
-        )
-    }
+    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onDialog = { dialog = it }, onViewFile = { openFile(it) }, onClose = { dialog = null })
 }
 
 @Composable
