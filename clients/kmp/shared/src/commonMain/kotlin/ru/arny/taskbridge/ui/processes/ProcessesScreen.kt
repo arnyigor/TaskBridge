@@ -42,7 +42,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import kotlin.uuid.Uuid
 import ru.arny.taskbridge.AppGraph
+import ru.arny.taskbridge.core.api.CleanupPlan
+import ru.arny.taskbridge.core.api.CleanupResult
 import ru.arny.taskbridge.core.api.GpuProcessEntry
 import ru.arny.taskbridge.core.api.ProcessEntry
 import ru.arny.taskbridge.core.api.ResourceSnapshot
@@ -90,6 +93,9 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
     var filter by remember { mutableStateOf(ProcessFilter.ALL) }
     var selected by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var expandedPid by remember { mutableStateOf<Long?>(null) }
+    // План очистки GPU живёт 60 с на сервере, поэтому показывается сразу после preview.
+    var cleanupPlan by remember { mutableStateOf<CleanupPlan?>(null) }
+    var cleanupBusy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     fun refresh(fresh: Boolean) {
@@ -155,6 +161,29 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
                 resultNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                 ResourceOverview(resources)
                 FlowRow2 {
+                    OutlinedButton(
+                        onClick = {
+                            val pids = gpuProcesses?.map { it.pid }
+                            when {
+                                pids == null -> error = "nvidia-smi не ответил: неизвестно, какие процессы держат VRAM."
+                                pids.isEmpty() -> resultNote = "Ни один процесс сейчас не держит VRAM."
+                                else -> {
+                                    cleanupBusy = true
+                                    error = null
+                                    scope.launch {
+                                        runCatching { connection.api.cleanupPreview("gpu", pids) }
+                                            .onSuccess { plan ->
+                                                if (plan.candidates.isEmpty()) resultNote = "Процессы, державшие VRAM, уже завершены."
+                                                else cleanupPlan = plan
+                                            }
+                                            .onFailure { error = it.message ?: "Не удалось собрать план очистки GPU" }
+                                        cleanupBusy = false
+                                    }
+                                }
+                            }
+                        },
+                        enabled = !cleanupBusy,
+                    ) { Text(if (cleanupBusy) "Освобождаю…" else "Освободить GPU") }
                     OutlinedButton(onClick = { pendingGroup = "node" }) { Text("Завершить все Node") }
                     OutlinedButton(onClick = { pendingGroup = "python" }) { Text("Завершить все Python") }
                     OutlinedButton(onClick = { pendingGroup = "java" }) { Text("Завершить все Java") }
@@ -214,6 +243,43 @@ fun ProcessesScreen(connection: AppGraph.Connected, onBack: () -> Unit) {
                 }
             }
         }
+    }
+
+    cleanupPlan?.let { plan ->
+        AlertDialog(
+            onDismissRequest = { cleanupPlan = null },
+            title = { Text("Освободить GPU?") },
+            text = {
+                Column {
+                    Text("Будут принудительно завершены процессы, которые сейчас держат VRAM:")
+                    plan.candidates.take(8).forEach { candidate ->
+                        Text("• ${candidate.name ?: "процесс ${candidate.pid}"} — ${processMemoryLabel(candidate.memoryBytes)}")
+                    }
+                    if (plan.candidates.size > 8) Text("… и ещё ${plan.candidates.size - 8}")
+                    Text(
+                        "Защищённые процессы TaskBridge и системы сервер пропустит и сообщит об отказе. " +
+                            "Несохранённая работа в завершённых процессах будет потеряна; фактическое освобождение VRAM измеряется после завершения.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    cleanupPlan = null
+                    cleanupBusy = true
+                    scope.launch {
+                        runCatching { connection.api.cleanupExecute(plan.planId, Uuid.random().toString()) }
+                            .onSuccess { resultNote = cleanupResultNote(it); error = null }
+                            .onFailure { error = it.message ?: "Не удалось выполнить очистку GPU" }
+                        cleanupBusy = false
+                        refresh(true)
+                    }
+                }) { Text("Остановить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { cleanupPlan = null }) { Text("Отмена") } },
+        )
     }
 
     pendingGroup?.let { runtime ->
@@ -427,6 +493,22 @@ internal fun processAgeLabel(startedAtMs: Long, nowMs: Long? = null): String {
         else -> "${minutes / 60} ч ${minutes % 60} мин назад"
     }
 }
+
+/** Итог очистки: счётчики и замер VRAM до/после (per-process VRAM под WDDM врёт). */
+internal fun cleanupResultNote(result: CleanupResult): String {
+    val parts = mutableListOf("Остановлено: ${result.stopped}")
+    if (result.protectedCount > 0) parts.add("защищено: ${result.protectedCount}")
+    if (result.failedCount > 0) parts.add("ошибок: ${result.failedCount}")
+    result.gpu?.let { gpu ->
+        if (gpu.usedBeforeMb != null && gpu.usedAfterMb != null) {
+            parts.add("VRAM: ${vramLabel(gpu.usedBeforeMb)} → ${vramLabel(gpu.usedAfterMb)}")
+        }
+    }
+    return parts.joinToString(" · ")
+}
+
+/** МБ → «6.0 ГБ» одним знаком, как в шапке; null — «—»: замер недоступен. */
+internal fun vramLabel(mb: Long?): String = if (mb == null) "—" else "${(mb * 10 / 1024) / 10.0} ГБ"
 
 /** Самые прожорливые сверху; без памяти — в конец, а не вперемешку. */
 internal fun sortedProcesses(list: List<ProcessEntry>): List<ProcessEntry> =

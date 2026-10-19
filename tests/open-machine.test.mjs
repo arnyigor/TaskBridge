@@ -228,6 +228,18 @@ test('workspace-file may read an absolute file only after a tool event named it'
   const afterMessage = await fetch(`${fixture.base}${secondRoute}`);
   assert.equal(afterMessage.status, 200);
   assert.equal(await afterMessage.text(), 'from message tool call');
+
+  // Pi runs bash, so the argument that reaches the chat is «/c/Users/…/outside.txt»
+  // while the file is «C:\Users\…\outside.txt». «Файл не найден в рабочей папке»
+  // for a file that exists is what the operator saw when clicking that path.
+  if (process.platform === 'win32') {
+    const bashStyle = `/${external[0].toLowerCase()}${external.slice(2).replaceAll('\\', '/')}`;
+    insertPiToolPath(fixture, task.id, bashStyle);
+    const bashRoute = `/api/tasks/${task.id}/workspace-file?path=${encodeURIComponent(bashStyle)}`;
+    const afterBash = await fetch(`${fixture.base}${bashRoute}`);
+    assert.equal(afterBash.status, 200);
+    assert.equal(await afterBash.text(), 'outside file contents');
+  }
 });
 
 // 2026-10-12: файл вне рабочей папки открывался ТОЛЬКО если агент передал путь

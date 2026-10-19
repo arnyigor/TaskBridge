@@ -2,18 +2,26 @@ package ru.arny.taskbridge.ui.chat
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.decodeToImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
 private val IMAGE_EXT = Regex("\\.(png|jpe?g|gif|webp|bmp)$", RegexOption.IGNORE_CASE)
@@ -48,3 +56,31 @@ fun ChatImage(key: String, name: String, load: suspend () -> Result<ByteArray>, 
  */
 internal fun Modifier.pictureBox(width: Int, height: Int): Modifier =
     widthIn(max = 320.dp).heightIn(max = 240.dp).aspectRatio(width.toFloat() / height.coerceAtLeast(1))
+
+/**
+ * Скриншот агента (Blender и любой другой инструмент) свёрнут в одну строку:
+ * за один ход их бывает десяток, и развёрнутые они вытесняют сам ответ.
+ * Тап по строке раскрывает картинку на месте — тот же ChatImage, что и раньше.
+ */
+@Composable
+fun ChatImageSpoiler(
+    key: String,
+    name: String,
+    load: suspend () -> Result<ByteArray>,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    initiallyOpen: Boolean = false,
+) {
+    var open by remember(key) { mutableStateOf(initiallyOpen) }
+    Column(modifier) {
+        Text(
+            text = if (open) "▾ 🖼 $name" else "▸ 🖼 $name",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { open = !open }.padding(horizontal = 8.dp, vertical = 4.dp),
+        )
+        if (open) ChatImage(key, name, load, onClick, Modifier.padding(top = 4.dp))
+    }
+}

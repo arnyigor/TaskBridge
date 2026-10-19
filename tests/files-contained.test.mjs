@@ -37,6 +37,22 @@ test('nearest existing ancestor stays inside the workspace and respects private 
   });
 });
 
+test('a file named the way bash names a drive is served, not reported missing', { skip: process.platform !== 'win32' && 'bash drive letters are a Windows convention' }, async () => {
+  await withWorkspace(async root => {
+    await fs.writeFile(path.join(root, 'shot.png'), 'frame');
+    // Pi runs bash, so the argument that reaches the chat is «/c/Users/…/shot.png»
+    // while the file is «C:\Users\…\shot.png». Resolved literally, it pointed at
+    // «C:\c\Users\…» and the viewer answered «файл не найден в рабочей папке».
+    const bashRoot = `/${root[0].toLowerCase()}${root.slice(2).replaceAll('\\', '/')}`;
+    assert.equal(await containedFile(root, `${bashRoot}/shot.png`), await fs.realpath(path.join(root, 'shot.png')));
+    // The second reading is not a hole in containment: bounds and private names still apply.
+    await assert.rejects(containedFile(root, '/c/Windows/win.ini'), { code: 'INPUT_INVALID' });
+    await fs.mkdir(path.join(root, 'data', 'runtime'), { recursive: true });
+    await fs.writeFile(path.join(root, 'data', 'runtime', 'phone.png'), 'png');
+    await assert.rejects(containedFile(root, `${bashRoot}/data/runtime/phone.png`), { code: 'FILE_FORBIDDEN' });
+  });
+});
+
 test('attachment metadata stays workspace-relative through a junction or directory alias', async () => {
   await withWorkspace(async root => {
     const workspace = path.join(root, 'canonical');

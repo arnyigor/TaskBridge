@@ -142,6 +142,33 @@ class TaskBridgeApi(
         send(HttpMethod.Post, "/api/processes/kill-group", buildJsonObject { put("runtime", runtime) })
     }
 
+    /**
+     * План очистки (PROC-04): сервер сам отбирает кандидатов по цели ram|gpu и
+     * исключает защищённые. [pids] ограничивает план явным выбором — «Освободить
+     * GPU» присылает только процессы, которые nvidia-smi видит держащими VRAM,
+     * иначе GPU-цель предложила бы вообще все Node/Python/Java.
+     * План живёт 60 с: показать его, закрыть и выполнить через час нельзя.
+     */
+    suspend fun cleanupPreview(objective: String = "gpu", pids: List<Long>? = null): CleanupPlan =
+        call(HttpMethod.Post, "/api/system/cleanup/preview", CleanupPlan.serializer(), buildJsonObject {
+            put("objective", objective)
+            if (!pids.isNullOrEmpty()) {
+                put("pids", kotlinx.serialization.json.JsonArray(pids.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            }
+        })
+
+    /**
+     * Выполнение подтверждённого плана; commandId делает повтор безопасным
+     * (тот же commandId не убивает второй раз). Сервер отвечает 403 вне
+     * компьютера сервера — массовая остановка только локально (PROC-07).
+     */
+    suspend fun cleanupExecute(planId: String, commandId: String): CleanupResult =
+        call(HttpMethod.Post, "/api/system/cleanup/execute", CleanupResult.serializer(), buildJsonObject {
+            put("planId", planId)
+            put("commandId", commandId)
+            put("confirm", true)
+        })
+
     /** Агрегированные ресурсы машины (RAM ОС + GPU-агрегат nvidia-smi), см. PROC-01. */
     suspend fun systemResources(): ResourceSnapshot =
         get("/api/system/resources", ResourceSnapshot.serializer())

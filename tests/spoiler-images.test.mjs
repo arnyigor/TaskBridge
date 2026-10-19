@@ -103,3 +103,47 @@ test('две картинки и файл без превью — спойлер
   // Вложение без превью не считается картинкой и не уходит под спойлер.
   assert.equal(turn.querySelectorAll('.attachedFiles .fileChip').length, 3);
 });
+
+/** appendInlineImage — картинка, которую показал агент (скриншот инструмента). */
+function makeAppendInlineImage() {
+  const { document } = parseHTML(HTML);
+  const liveTurn = { body: document.getElementById('msgsInner'), bubble: null, metaRow: null };
+  const factory = new Function(
+    'document', 'selectedTaskId', 'liveTurn', 'scrollBottom',
+    [
+      extractFunction(appSource, 'shortName'),
+      extractFunction(appSource, 'imageSpoiler'),
+      extractFunction(appSource, 'appendInlineImage'),
+      'return appendInlineImage;'
+    ].join('\n')
+  );
+  const append = factory(document, 'task-1', liveTurn, () => {});
+  return { document, append, body: liveTurn.body };
+}
+
+// Скриншоты агента (Blender и любой другой инструмент) сворачиваются всегда:
+// за один ход их бывает десяток, и развёрнутые они вытесняют ответ модели.
+test('скриншот агента свёрнут в спойлер с именем файла', () => {
+  const { document, append, body } = makeAppendInlineImage();
+  append('shots/scene_after_walls.png');
+  const spoilers = body.querySelectorAll('details.imageSpoiler');
+  assert.equal(spoilers.length, 1, 'картинка агента — под спойлером');
+  const spoiler = spoilers[0];
+  assert.equal(spoiler.hasAttribute('open'), false, 'свёрнут по умолчанию');
+  assert.match(spoiler.querySelector('summary').textContent, /scene_after_walls\.png/);
+  // Адрес и поведение ссылки не изменились: клик по раскрытой картинке открывает её.
+  const link = spoiler.querySelector('a.chatImage');
+  assert.ok(link, 'ссылка внутри спойлера');
+  assert.equal(link.getAttribute('target'), '_blank');
+  assert.match(link.getAttribute('href'), /workspace-file\?path=shots%2Fscene_after_walls\.png/);
+  assert.equal(link.querySelector('img').getAttribute('src'), link.getAttribute('href'));
+});
+
+test('недоступный файл убирает спойлер целиком, а не оставляет битую картинку', () => {
+  const { append, body } = makeAppendInlineImage();
+  append('missing.png');
+  const img = body.querySelector('details.imageSpoiler img');
+  assert.ok(img, 'превью создано');
+  img.onerror();
+  assert.equal(body.querySelectorAll('details.imageSpoiler').length, 0, 'спойлер исчез вместе с картинкой');
+});

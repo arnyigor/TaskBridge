@@ -188,8 +188,17 @@ OpenAI-совместимый `GET {baseUrl}/models` и ДОБАВляет не�
 - прочее: `MODEL_SWITCH`, `THINKING_LEVEL`, `COMPACT_REQUESTED`, `QUEUE_*`,
   `APPROVAL_REQUIRED`, `APPROVAL_RESOLVED`, `LOCAL_MODEL_PROGRESS`, `RUNTIME_*`,
   `WORKSPACE_READY`, `OUTPUT_FILES`, `TOOL_OUTPUT`, `CHANGES_APPLIED`, `WORKTREE_REMOVED`,
-  `TASK_FORKED`, `SESSION_RESTORED`, `ENGINE_SWITCH`, `PI_STDERR`, `PI_PROTOCOL_ERROR`,
+  `TASK_FORKED`, `SESSION_RESTORED`, `SESSION_SHRUNK`, `SESSION_TOO_LARGE`, `SESSION_INVALID`, `ENGINE_SWITCH`, `PI_STDERR`, `PI_PROTOCOL_ERROR`,
   `ABORT_TIMEOUT`, `QUEUE_DROPPED`.
+
+`SESSION_SHRUNK` — перед запуском Pi (и повторно после ответа 413) история сессии
+восстановлена: base64 старых скриншотов перенесён в `data/media/<sha256>.<ext>`, в
+истории осталась ссылка на оригинал, новейшие изображения оставлены. id сообщений,
+`parentId`, tool calls и настройки модели не меняются, рядом с файлом лежит
+`.bak-<timestamp>`. `SESSION_TOO_LARGE` — файл больше бюджета (`pi.sessionMaxMb`,
+по умолчанию 24 МБ), но изображений в нём уже нет: не тронут, сессию надо
+сжимать или клонировать. `SESSION_INVALID` — файл не разбирается как JSON или
+проверка целостности после восстановления не прошла: сессия оставлена как есть.
 
 Список открытый: **неизвестный тип клиент обязан игнорировать**, а не падать.
 

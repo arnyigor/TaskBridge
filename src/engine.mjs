@@ -64,6 +64,24 @@ const RULES = [
     ]
   },
   {
+    // Not a token problem: the provider refuses the REQUEST BODY by size, and no
+    // retry can shrink it. Pi's own limit is token-based, so a session carrying
+    // screenshots hits the byte edge while still far from its context window
+    // (2026-10-19: 28 % of 1M tokens, 48.6 MB of history with 39 images, every
+    // request 413 — Pi retried that permanent error until the session looked
+    // hung). Kept apart from CONTEXT_OVERFLOW: the remedy is to drop the images
+    // (src/session-shrink.mjs), not to summarise tokens.
+    code: 'REQUEST_TOO_LARGE',
+    retryable: false,
+    patterns: [
+      /length limit exceeded/i,
+      /request body too large/i,
+      /request entity too large/i,
+      /payload too large/i,
+      /\b413\b/
+    ]
+  },
+  {
     code: 'ENGINE_AUTH',
     retryable: false,
     patterns: [

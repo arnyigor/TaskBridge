@@ -9,6 +9,14 @@ if (process.argv.includes('--version')) {
 }
 const sessionArg = process.argv.indexOf('--session');
 const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
+// Tests that check how TaskBridge launches Pi (extensions, media policy env) read
+// this dump instead of guessing from behaviour.
+if (process.env.FAKE_PI_DUMP_ARGS) {
+  fs.writeFileSync(process.env.FAKE_PI_DUMP_ARGS, JSON.stringify({
+    argv: process.argv.slice(2),
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('TASKBRIDGE_MEDIA_')))
+  }));
+}
 const argValue = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; };
 let model = { id: argValue('--model') || 'fixture', provider: argValue('--provider') || null, contextWindow: 65536, maxTokens: 1024 };
 let thinkingLevel = argValue('--thinking') || 'off';
@@ -254,9 +262,23 @@ async function runFault(fault, command, respond) {
   // deaf and child combine: `fault-deaf fault-child` is a hung tool that
   // ignores abort and holds a child process.
   if (fault === 'provider-incompatible') {
+    // `body-limit` is the permanent 413 a provider edge answers when the request
+    // body (a transcript full of base64 screenshots) is over its limit.
     const error = String(command.message).includes('invalid-auth') ? 'HTTP 401: invalid API key'
       : String(command.message).includes('empty-quota') ? 'HTTP 402: insufficient credits'
+      : String(command.message).includes('body-limit') ? '413 Failed to buffer the request body: length limit exceeded'
       : `OpenAI API error (400): 400 {"detail":"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."}`;
+    // `body-limit` also grows the transcript the way a real turn does: a tool
+    // read a screenshot, the file got big and the NEXT request is refused. The
+    // session file is what TaskBridge's preflight repairs.
+    if (error.includes('413') && sessionFile) {
+      for (const n of ['a', 'b', 'c']) {
+        persist({ role: 'toolResult', toolCallId: `call-img-${n}`, toolName: 'read', isError: false, content: [
+          { type: 'text', text: 'Read image file [image/png]' },
+          { type: 'image', data: 'A'.repeat(9 * 1024 * 1024), mimeType: 'image/png' }
+        ] });
+      }
+    }
     const notice = `openai/gpt-5.5 retrying after error in 0m 05s. Error: ${error}`;
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
     if (String(command.message).includes('structured')) {

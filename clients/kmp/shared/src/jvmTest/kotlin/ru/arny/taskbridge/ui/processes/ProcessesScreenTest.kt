@@ -1,5 +1,7 @@
 package ru.arny.taskbridge.ui.processes
 
+import ru.arny.taskbridge.core.api.CleanupGpuDelta
+import ru.arny.taskbridge.core.api.CleanupResult
 import ru.arny.taskbridge.core.api.ProcessEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -63,5 +65,30 @@ class ProcessesScreenTest {
             ),
         )
         assertEquals(listOf(3L, 4L, 2L, 1L), sorted.map { it.pid })
+    }
+
+    @Test
+    fun vramLabelSpeaksGigabytesAndKeepsUnknownAsDash() {
+        assertEquals("—", vramLabel(null))
+        assertEquals("6.0 ГБ", vramLabel(6144))
+        assertEquals("1.5 ГБ", vramLabel(1536))
+    }
+
+    @Test
+    fun cleanupNoteReportsCountsAndObservedVramDelta() {
+        // Счётчики читаются как есть; VRAM — замер до/после, а не обещание.
+        assertEquals(
+            "Остановлено: 3 · VRAM: 6.0 ГБ → 1.5 ГБ",
+            cleanupResultNote(CleanupResult(stopped = 3, gpu = CleanupGpuDelta(usedBeforeMb = 6144, usedAfterMb = 1536))),
+        )
+        assertEquals(
+            "Остановлено: 0 · защищено: 2 · ошибок: 1",
+            cleanupResultNote(CleanupResult(stopped = 0, protectedCount = 2, failedCount = 1, gpu = null)),
+        )
+        // Без nvidia-smi до или после дельты нет — VRAM в итог не подставляется.
+        assertEquals(
+            "Остановлено: 1",
+            cleanupResultNote(CleanupResult(stopped = 1, gpu = CleanupGpuDelta(usedBeforeMb = null, usedAfterMb = 1024))),
+        )
     }
 }

@@ -208,6 +208,34 @@ function imagePreview(file, taskId) {
   return link;
 }
 
+// A screenshot shown BY THE AGENT is folded into a one-line spoiler: a Blender
+// turn can produce a dozen pictures, and unfolded they push the answer off the
+// screen. Own attachments keep the rule in appendUserTurn (spoiler from two
+// pictures up), because that is the operator's own message.
+function imageSpoiler(link, label) {
+  const details = document.createElement('details');
+  details.className = 'imageSpoiler agentImage';
+  const summary = document.createElement('summary');
+  summary.textContent = label;
+  // A link that is already in the document (a picture inside a rendered answer)
+  // is wrapped where it stands: appending it to the details first would detach
+  // it, and nothing would be inserted in its place.
+  const parent = link.parentNode;
+  if (parent) {
+    parent.insertBefore(details, link);
+    details.append(summary, link);
+  } else {
+    details.append(summary, link);
+  }
+  return details;
+}
+
+// File name without the directory noise, for the spoiler summary.
+function shortName(value) {
+  const parts = String(value || '').split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || String(value || 'изображение');
+}
+
 function fileCard(file, taskId) {
   const card = document.createElement('span');
   card.className = 'fileChip';
@@ -736,9 +764,10 @@ function appendInlineImage(relPath) {
   // broken-image icon in the conversation. chat-state already filters paths the
   // server will refuse, but a missing or out-of-workspace file can only be told
   // apart by trying — so the preview withdraws itself instead of lying.
-  img.onerror = () => link.remove();
+  const spoiler = imageSpoiler(link, `🖼 ${shortName(relPath)}`);
+  img.onerror = () => spoiler.remove();
   link.append(img);
-  liveTurn.body.insertBefore(link, liveTurn.bubble || liveTurn.metaRow);
+  liveTurn.body.insertBefore(spoiler, liveTurn.bubble || liveTurn.metaRow);
   scrollBottom();
 }
 
@@ -2288,9 +2317,10 @@ function renderSettledTurn(turn, before) {
       img.loading = 'lazy';
       // Same reason as appendInlineImage: withdraw the preview rather than show
       // a broken picture when the server will not serve the file.
-      img.onerror = () => link.remove();
+      const spoiler = imageSpoiler(link, `🖼 ${shortName(tool.imagePath)}`);
+      img.onerror = () => spoiler.remove();
       link.append(img);
-      body.insertBefore(link, bubble);
+      body.insertBefore(spoiler, bubble);
       chip.dataset.imageShown = 'true';
     }
   }
@@ -3797,11 +3827,11 @@ function isTouchDevice() {
 // Both lists are the only registry of header controls: a button that index.html
 // has but these lists do not is never moved on a phone and stays in the header
 // (that is how «Выбрать сообщения» broke the phone layout — 2026-10-12).
-const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
 // Menu order, not header order: the model switcher is what a phone opens this
 // menu for. The status dot stays in the header — 12px of a live indicator costs
 // no row, and the model chip was what pushed the header onto a second line.
-const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
 // The one width the phone layout starts at, shared by the header menu, the
 // session drawer and the CSS (see the media queries in web/app.css).
 const MOBILE_QUERY = '(max-width: 900px)';
@@ -4170,6 +4200,10 @@ function rewriteMarkdownLinks(container) {
       a.href = inline;
       a.target = '_blank';
       a.rel = 'noopener';
+      a.className = 'chatImage';
+      // Folded like every other picture the agent shows: the link (and its new
+      // tab) stays, one summary line stands in for the picture.
+      imageSpoiler(a, `🖼 ${shortName(href)}`);
       continue;
     }
     // A relative link to a file the model produced: open it, do not push a
@@ -5133,6 +5167,9 @@ $('mcpButton').onclick = async () => {
   $('mcpOverlay').classList.remove('hidden');
   await refreshMcp();
 };
+// A separate page rather than an overlay: the provider form is long, and a
+// dialog over a live chat invites editing while a turn is streaming.
+$('providersButton').onclick = () => location.assign('/providers.html');
 $('mcpClose').onclick = () => $('mcpOverlay').classList.add('hidden');
 $('mcpRefresh').onclick = () => refreshMcp();
 $('mcpImport').onclick = async () => {

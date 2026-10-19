@@ -1593,6 +1593,78 @@ data class GpuCard(
 )
 
 /**
+ * План очистки из POST /api/system/cleanup/preview (PROC-04): сервер сам отбирает
+ * кандидатов по цели ram|gpu и исключает защищённые. planId живёт 60 с — план
+ * нельзя показать, отложить и выполнить через час.
+ */
+@Serializable
+data class CleanupPlan(
+    val planId: String,
+    val objective: String = "ram",
+    val candidates: List<CleanupCandidate> = emptyList(),
+    val protectedSkipped: List<CleanupSkipped> = emptyList(),
+    val warnings: List<String> = emptyList(),
+    /** Учтённое потребление кандидатов; не обещание освободить ровно столько. */
+    val estimatedRamBytes: Long? = null,
+    val expiresAt: Long? = null,
+)
+
+/** Сервер отдаёт здесь запись процесса как есть (pid, имя, parentPid, команда, память). */
+@Serializable
+data class CleanupCandidate(
+    val pid: Long,
+    val name: String? = null,
+    val parentPid: Long? = null,
+    val memoryBytes: Long? = null,
+    val startedAt: Long? = null,
+    val commandLine: String? = null,
+)
+
+@Serializable
+data class CleanupSkipped(
+    val pid: Long? = null,
+    val name: String? = null,
+    val reason: String? = null,
+)
+
+/** Результат POST /api/system/cleanup/execute: per-process статусы и замер до/после. */
+@Serializable
+data class CleanupResult(
+    val planId: String? = null,
+    val commandId: String? = null,
+    val items: List<CleanupItem> = emptyList(),
+    val stopped: Int = 0,
+    val protectedCount: Int = 0,
+    val failedCount: Int = 0,
+    val ram: CleanupRamDelta? = null,
+    /** null — замер VRAM недоступен (нет nvidia-smi до или после). */
+    val gpu: CleanupGpuDelta? = null,
+)
+
+@Serializable
+data class CleanupItem(
+    val pid: Long,
+    val name: String? = null,
+    /** STOPPED|ALREADY_EXITED|PROTECTED|IDENTITY_CHANGED|FAILED. */
+    val status: String = "FAILED",
+    val detail: String? = null,
+)
+
+@Serializable
+data class CleanupRamDelta(
+    val freeBeforeBytes: Long? = null,
+    val freeAfterBytes: Long? = null,
+    val observedDeltaBytes: Long? = null,
+)
+
+@Serializable
+data class CleanupGpuDelta(
+    val usedBeforeMb: Long? = null,
+    val usedAfterMb: Long? = null,
+    val sampledAt: String? = null,
+)
+
+/**
  * Pi-сессия на диске, найденная сервером (GET /api/native-sessions): единица импорта
  * в TaskBridge. `key` — непрозрачный sha256 от пути, клиент не имеет права присылать
  * путь сам; `existingTaskId` не null, если эта сессия уже импортирована.

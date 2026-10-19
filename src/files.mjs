@@ -12,6 +12,48 @@ const missingFile = () => Object.assign(new Error('Файл не найден в
 export const FILE_LIMITS = { count: 10, totalBytes: 16 * 1024 * 1024, uploadFileBytes: 64 * 1024 * 1024, uploadBytes: 128 * 1024 * 1024, outputBytes: 256 * 1024 * 1024, outputTotalBytes: 512 * 1024 * 1024 };
 const skippedDirs = new Set(['.git', '.pi', '.taskbridge-input', 'node_modules', 'data', '.gradle', '.idea']);
 
+/**
+ * Путь к диску так, как его пишет bash (Git-Bash/MSYS): «/f/3D/x» вместо «F:\3D\x».
+ *
+ * Зачем: Pi запускает bash, и его аргументы и вывод попадают в чат в этой форме —
+ * карточка инструмента показывает аргумент дословно. Разбор такого имени по буквам
+ * давал «F:\f\3D\x» и честный ответ «файл не найден» для файла, который лежит ровно
+ * там, где назван. Всё, что не «/<буква>/…», возвращается без изменений.
+ */
+export function driveLetterPath(value) {
+  const text = String(value ?? '');
+  if (process.platform !== 'win32') return text;
+  const match = /^\/([a-zA-Z])\/(.*)$/.exec(text);
+  return match ? `${match[1].toUpperCase()}:\\${match[2]}` : text;
+}
+
+/** realpath для имени в любой из двух записей; null, когда нет ни одной. */
+export async function realpathNamed(value) {
+  for (const candidate of new Set([String(value ?? ''), driveLetterPath(value)])) {
+    try { return await fs.realpath(candidate); }
+    catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error; }
+  }
+  return null;
+}
+
+/** Кандидаты одного имени: буквальное прочтение первым, bash-запись — вторым. */
+function namedCandidates(root, requestedPath, check) {
+  const candidates = [];
+  let refusal = null;
+  let precise = null;
+  for (const candidate of new Set([path.resolve(root, requestedPath), path.resolve(root, driveLetterPath(requestedPath))])) {
+    try { candidates.push(check(candidate)); }
+    catch (error) {
+      refusal = refusal || error;
+      // «Имя приватное» — отказ по существу, а не «путь вне папки» у второго
+      // прочтения; оно и должно прозвучать.
+      if (!precise && error.code !== 'INPUT_INVALID') precise = error;
+    }
+  }
+  if (!candidates.length) throw precise || refusal;
+  return candidates;
+}
+
 export function isPrivatePath(value) {
   const parts = String(value).replaceAll('\\', '/').split('/');
   return parts.some(p => /^(?:\.git|\.pi|\.ssh|\.aws|\.codex|node_modules|data)$/i.test(p) || /^(?:\.env(?:\..*)?|secret(?:s)?(?:\..*)?|credentials(?:\..*)?|config\.json|server-auth\.json|auth\.json)$/i.test(p) || /\.(?:pem|key|p12|pfx|jks|keystore)$/i.test(p));
@@ -69,22 +111,26 @@ function containedChecker(root, { allowPrivate = false } = {}) {
 
 export async function containedFile(rootDir, requestedPath, { allowPrivate = false } = {}) {
   const root = await fs.realpath(rootDir);
-  const requested = path.resolve(root, requestedPath);
   const check = containedChecker(root, { allowPrivate });
-  check(requested);
-  let resolved;
-  try {
-    resolved = await fs.realpath(requested);
-  } catch (error) {
-    // A path the chat still shows often points at a file the agent has already
-    // deleted — its own scratch frames, rewritten every run. Letting the raw
-    // error through painted «ENOENT: no such file or directory, realpath
-    // 'G:\…'» in the file viewer and handed the server's own paths to whoever
-    // asked, a phone on the LAN included.
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') throw missingFile();
-    throw error;
+  // «F:\…» и «/f/…» — одно и то же имя: буквальное прочтение идёт первым, чтобы
+  // папка, которая действительно называется «f», продолжала открываться.
+  const candidates = namedCandidates(root, requestedPath, check);
+  for (const candidate of candidates) {
+    let resolved;
+    try {
+      resolved = await fs.realpath(candidate);
+    } catch (error) {
+      // A path the chat still shows often points at a file the agent has already
+      // deleted — its own scratch frames, rewritten every run. Letting the raw
+      // error through painted «ENOENT: no such file or directory, realpath
+      // 'G:\…'» in the file viewer and handed the server's own paths to whoever
+      // asked, a phone on the LAN included.
+      if (error.code === 'ENOENT' || error.code === 'ENOTDIR') continue;
+      throw error;
+    }
+    return check(resolved);
   }
-  return check(resolved);
+  throw missingFile();
 }
 
 export async function containedExistingAncestor(rootDir, requestedPath, { allowPrivate = false } = {}) {

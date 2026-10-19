@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#101724" />
+  <title>TaskBridge — провайдеры</title>
+  <link rel="stylesheet" href="/providers.css" />
+  <script defer src="/providers.js"></script>
+</head>
+<body>
+  <main>
+    <header class="heading">
+      <div><a href="/" class="back">← Вернуться к сессиям</a><h1>Провайдеры</h1><p class="muted">Первый шаг: безопасная настройка собственных OpenAI-совместимых API для Pi.</p></div>
+      <button id="refresh" class="subtle" type="button">Обновить</button>
+    </header>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <div class="columns">
+      <section class="panel" aria-label="Список провайдеров">
+        <div class="panel-head"><h2>Подключения</h2><button id="add" type="button">+ Добавить</button></div>
+        <div id="providers" class="entries"></div>
+        <p class="muted hint">Существующие провайдеры — только для просмотра. TaskBridge редактирует только записи, которые создал сам (ID <code>tb-*</code>).</p>
+      </section>
+      <section class="panel" aria-label="Настройки подключения">
+        <div class="panel-head"><h2 id="editor-title">Новое подключение</h2><span class="pill">Pi</span></div>
+        <form id="provider-form">
+          <label for="preset">Шаблон</label>
+          <select id="preset">
+            <option value="custom">Свой OpenAI-compatible API</option>
+            <option value="openrouter">OpenRouter через API-ключ</option>
+            <option value="local">Локальная модель (llama.cpp / Strata / LM Studio)</option>
+          </select>
+          <label for="provider-id">Идентификатор подключения</label>
+          <input id="provider-id" placeholder="tb-my-provider" required maxlength="50" autocomplete="off" spellcheck="false" />
+          <label for="base-url">URL API</label>
+          <input id="base-url" type="url" required placeholder="https://provider.example/v1" autocomplete="off" spellcheck="false" />
+          <label for="key-env">Переменная окружения с API-ключом</label>
+          <input id="key-env" placeholder="MY_PROVIDER_API_KEY" autocomplete="off" spellcheck="false" />
+          <p class="hint">Вводи только <strong>имя</strong> переменной, не значение ключа. Локальным API без ключа оставь поле пустым. Секрет никогда не отправляется из этой формы.</p>
+          <label for="models">ID моделей, по одному на строку</label>
+          <textarea id="models" rows="6" spellcheck="false" required placeholder="model-name-1&#10;model-name-2"></textarea>
+          <p class="hint">Вводи реальные ID, которые принимает API. Большие каталоги лучше не импортировать целиком.</p>
+          <div class="actions">
+            <button id="save" type="submit">Сохранить</button>
+            <button id="test" class="subtle" type="button" disabled>Проверить /models</button>
+            <button id="delete" class="danger" type="button" disabled>Удалить</button>
+          </div>
+        </form>
+      </section>
+    </div>
+    <section class="panel footnotes">
+      <h2>Как пользоваться</h2>
+      <p>1. Добавь подключение и список моделей. 2. Если используется API-ключ, задай указанную переменную окружения <strong>в процессе запуска TaskBridge</strong> и перезапусти сервер. 3. Проверь <code>GET /models</code>, затем обнови каталог в TaskBridge и выбери модель. Текущие работающие сессии не перенастраиваются.</p>
+      <p>Проверка <code>/models</code> не запускает генерацию, не доказывает поддержку инструментов и не тратит токены генерации (провайдер может тарифицировать собственные запросы иначе). Генерацию проверяй отдельно из новой тестовой сессии.</p>
+      <p class="muted">Запись доступна только с компьютера через localhost. Ключи и сторонние конфиги здесь намеренно не редактируются. Полный мастер авторизации и OMP-адаптер — в следующих этапах.</p>
+    </section>
+  </main>
+</body>
+</html>

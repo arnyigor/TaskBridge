@@ -442,6 +442,11 @@ test('DOM: a model link to a picture renders inline instead of a download link',
   // A relative link to an image is a picture the model is showing: inline preview.
   const img = box.querySelector('a img');
   assert.ok(img, 'the image link becomes an inline <img>');
+  // Картинка модели свёрнута: один скриншот в ответе больше не занимает полэкрана.
+  const spoiler = box.querySelector('details.imageSpoiler');
+  assert.ok(spoiler, 'the picture is folded into a spoiler');
+  assert.equal(spoiler.hasAttribute('open'), false);
+  assert.ok(spoiler.querySelector('a img'), 'the link and its picture live inside');
   assert.match(img.getAttribute('src'), /\/api\/tasks\/a\/workspace-file\?path=telegram_window\.png$/);
   assert.doesNotMatch(img.getAttribute('src'), /download=1/);
   // A non-image link now opens the file inline (no attachment switch) instead
@@ -1607,7 +1612,7 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
   const actions = phone.document.querySelector('.headerActions');
 
   assert.deepEqual([...menuBody.children].map(node => node.id), [
-    'modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton',
+    'modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'serverRestartButton', 'pairButton',
     'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton',
   ]);
   // What is left in the header is the status dot: 12px of a live indicator costs
@@ -1624,7 +1629,7 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
   assert.equal(desktop.document.querySelectorAll('#headerMenuBody > *').length, 0);
   assert.equal(desktop.document.getElementById('headerMenu').hasAttribute('data-ready'), false, 'no empty ⋮ on a wide screen');
   assert.deepEqual([...desktop.document.querySelector('.headerActions').children].map(node => node.id), [
-    'runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'serverRestartButton', 'pairButton',
+    'runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'serverRestartButton', 'pairButton',
     'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton', 'headerMenu',
   ]);
 
@@ -1632,7 +1637,7 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
   // boundary the CSS and this query have to agree on (web-css.test.mjs checks
   // the stylesheet's half of it).
   const edge = await ui({ viewportWidth: 900 });
-  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 11, '900px is the phone layout');
+  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 12, '900px is the phone layout');
   const past = await ui({ viewportWidth: 901 });
   assert.equal(past.document.querySelectorAll('#headerMenuBody > *').length, 0, '901px is not');
   assert.equal(past.document.getElementById('headerMenu').hasAttribute('data-ready'), false);

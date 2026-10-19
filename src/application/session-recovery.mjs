@@ -2,7 +2,61 @@ import fs from 'node:fs/promises';
 import { tailText, TEXT_TAIL, THINKING_TAIL } from '../text-tail.mjs';
 import { metadata } from '../files.mjs';
 import { sessionContainsUserMessage } from '../session-history.mjs';
+import { shrinkSessionFile, describeShrink, DEFAULT_ARTIFACT_LABEL } from '../session-shrink.mjs';
 const now = () => new Date().toISOString();
+
+// Preflight of one session file, run before Pi is spawned on it.
+//
+// Pi re-sends the whole transcript with every request, and a provider refuses a
+// request body over ~50 MB (2026-10-19: a 48.6 MB Blender session of 39
+// screenshots answered 413 forever and could not start). Pi's own guard counts
+// TOKENS, so it never fired at 28 % of the window. This is the recovery path for
+// a session that is already over the byte budget: the originals of the old
+// images move to the artifact store, the transcript keeps its history plus a
+// reference, and the repair is verified before it is kept.
+//
+// The caller owns the "nobody else is writing this file" check — rewriting a
+// session while Pi appends to it is the one way to corrupt it.
+export async function preflightSession(file, {
+  limitBytes,
+  keepImages,
+  artifactDir = null,
+  artifactLabel = DEFAULT_ARTIFACT_LABEL
+} = {}) {
+  const result = await shrinkSessionFile(file, { limitBytes, keepImages, artifactDir, artifactLabel });
+  switch (result.reason) {
+    case 'shrunk':
+      return {
+        status: 'repaired',
+        ...result,
+        message: `Контекст сессии восстановлен: ${describeShrink(result)}. `
+          + `Оригиналы сохранены (${artifactLabel}), история сообщений, tool calls и ветвление не изменились.`
+      };
+    case 'no-images':
+      return {
+        status: 'too-large',
+        ...result,
+        message: `История сессии (${(result.beforeBytes / 1048576).toFixed(1)} МБ) больше, чем провайдер принимает за один запрос (~50 МБ), `
+          + 'а изображений в ней уже нет: уменьшать нечего, не тронув текст. Сожмите контекст или клонируйте сессию.'
+      };
+    case 'invalid':
+      return {
+        status: 'invalid',
+        ...result,
+        message: `Файл сессии повреждён (строка ${result.line} не разбирается как JSON): сессия оставлена как есть, ничего не переписано.`
+      };
+    case 'integrity':
+      return {
+        status: 'invalid',
+        ...result,
+        message: 'Проверка целостности после восстановления не прошла: id сообщений, parentId или типы записей изменились. Файл оставлен как был.'
+      };
+    case 'no-gain':
+      return { status: 'ok', ...result, message: 'Восстановление не дало выигрыша по размеру: файл оставлен как был.' };
+    default:
+      return { status: 'ok', ...result, message: '' };
+  }
+}
 
 // Startup reconciliation of stored sessions; runtime ownership stays with the caller.
 export async function restoreSessions(previous, { store, enqueue, restorePendingFiles, onRestored, continuePrompt }) {

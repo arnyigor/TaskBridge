@@ -1,4 +1,4 @@
-import { restoreSessions } from './application/session-recovery.mjs';
+import { restoreSessions, preflightSession } from './application/session-recovery.mjs';
 import { EventEmitter } from 'node:events';
 import { TerminalPublication } from './domain/terminal-publication.mjs';
 import { RunCoordinator } from './application/run-coordinator.mjs';
@@ -13,6 +13,7 @@ import { deliveryMetrics } from './delivery-metrics.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile, sessionContainsUserMessage } from './session-history.mjs';
+import { DEFAULT_SESSION_MAX_MB } from './session-shrink.mjs';
 import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
 import { UploadStore } from './uploads.mjs';
 import { NativeSessionService, acquireNativeLease, sweepOrphanLocks } from './native-sessions.mjs';
@@ -317,6 +318,12 @@ const RUN_TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
 // the answer it continues — the operator sees the same message grow.
 const CONTINUE_PROMPT = 'Продолжи свой предыдущий ответ ровно с того места, где он оборвался. Не повторяй уже написанное и не добавляй вступлений — продолжай текст сразу.';
 
+// After a 413 the model never saw the question; the transcript was repaired and
+// the same turn runs again. Re-sending the operator's text would put it in the
+// history twice (Pi already recorded it), so the retry is this short nudge — the
+// same shape the restart-resume uses.
+const RECOVERED_CONTEXT_PROMPT = 'Предыдущий запрос был отклонён провайдером по размеру тела запроса. Контекст восстановлен — продолжай работу с того же места и не повторяй уже сделанное.';
+
 // How a waiting session describes itself (task.current and the QUEUE_WAITING
 // message). One place, so the queueReason the clients branch on and the text the
 // operator reads cannot drift apart; KMP maps the same reasons in
@@ -457,6 +464,9 @@ export class TaskManager extends EventEmitter {
     this.approvalTokens = new Map();
     this.approvalBaseUrl = null;          // set by the HTTP server
     this.approvalExtensionPath = null;    // set by the HTTP server
+    // Media policy extension (pi-extension/taskbridge-media.js): keeps the
+    // request body small without rewriting the session file. Set by the server.
+    this.mediaExtensionPath = null;
     // Injected by the server; lets AUTO restart the managed runtime when the
     // chosen profile differs from the one currently loaded.
     this.runtimeSwitcher = null;
@@ -2945,6 +2955,29 @@ export class TaskManager extends EventEmitter {
           TASKBRIDGE_APPROVAL_WAIT_MS: String(Math.max(1000, this.approvalsConfig.timeoutMinutes * 60000)),
           TASKBRIDGE_APPROVAL_POLL_MS: '1000'
         });
+      }
+    }
+    // Media policy: Pi re-sends every image it ever read, and a provider refuses
+    // a request body over ~50 MB (2026-10-19: 39 screenshots, 48.6 MB of
+    // history, 413 on every request). The extension archives each screenshot as
+    // it arrives, keeps only the newest few in each model call, and leaves the
+    // session file readable.
+    if (this.mediaExtensionPath) {
+      const available = await fs.access(this.mediaExtensionPath).then(() => true, () => false);
+      if (available) {
+        const media = this.config.pi?.media || {};
+        const mediaRoot = path.join(this.dataRoot, 'media');
+        await fs.mkdir(mediaRoot, { recursive: true }).catch(() => {});
+        args.push('-e', this.mediaExtensionPath);
+        Object.assign(env, {
+          TASKBRIDGE_MEDIA_ROOT: mediaRoot,
+          TASKBRIDGE_MEDIA_KEEP_IMAGES: String(media.keepImages ?? 2),
+          TASKBRIDGE_MEDIA_IMAGE_BUDGET_MB: String(media.imageBudgetMb ?? 2),
+          TASKBRIDGE_MEDIA_REQUEST_BUDGET_MB: String(media.requestBudgetMb ?? 40),
+          TASKBRIDGE_MEDIA_NOTIFY: media.notify === false ? '0' : '1'
+        });
+      } else {
+        console.error(`[TaskBridge] media extension is missing: ${this.mediaExtensionPath}`);
       }
     }
     const pi = new PiRpcSession({
@@ -5633,6 +5666,9 @@ export class TaskManager extends EventEmitter {
     // before the RPC: a restart between the RPC and the acknowledgement must
     // not lose the command either.
     task.inFlightPrompt = { text: message, at: now() };
+    // A fresh operator message re-arms the automatic 413 recovery; the internal
+    // continuation of that recovery (announce:false) must not.
+    if (announce) task.mediaRecovery = false;
     await this.store.save(this.#publicTask(task)).catch(() => {});
     if (!streaming) await this.#turnStateEvent(task, 'DISPATCHING');
     const dispatchedAt = Date.now();
@@ -6084,6 +6120,40 @@ export class TaskManager extends EventEmitter {
       const ownWrite = task._lastPiExitAt ? stat && stat.mtimeMs <= task._lastPiExitAt + 2000 : false;
       if (stat && !ownWrite && Date.now() - stat.mtimeMs < quietMs) throw busy('файл менялся только что');
     }
+    // The transcript IS the request: Pi re-sends all of it every turn, and the
+    // provider refuses a body over ~50 MB (measured 2026-10-19: 50.3 MB accepted,
+    // 50.4 MB → 413). A session that crossed that line could never start again
+    // — Pi retried the permanent 413 until it looked hung. Pi loads this file
+    // right after this guard, so trimming here is what makes the start work.
+    await this.#preflight(task, sessionFile);
+  }
+
+  // Session preflight (src/application/session-recovery.mjs): a Pi session over
+  // the provider's request budget is repaired before Pi opens it — the originals
+  // of the old images move to the artifact store, the history stays. No model
+  // call is involved: a compaction request would be refused by the same limit.
+  async #preflight(task, sessionFile = task.piSessionFile) {
+    if (!sessionFile) return null;
+    const configured = Number(this.config.pi?.sessionMaxMb);
+    const maxMb = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_SESSION_MAX_MB;
+    const configuredKeep = Number(this.config.pi?.media?.keepImages);
+    const result = await preflightSession(sessionFile, {
+      limitBytes: Math.round(maxMb * 1048576),
+      keepImages: Number.isFinite(configuredKeep) && configuredKeep >= 0 ? configuredKeep : undefined,
+      artifactDir: path.join(this.dataRoot, 'media')
+    }).catch(error => ({ status: 'error', message: `Проверка сессии не удалась: ${error.message}` }));
+    if (!result) return null;
+    if (result.status === 'repaired') {
+      await this.#event(task, 'SESSION_SHRUNK', result.message, {
+        beforeBytes: result.beforeBytes, afterBytes: result.afterBytes, dropped: result.dropped,
+        kept: result.kept, artifacts: result.artifacts, backup: result.backup ? path.basename(result.backup) : null
+      }, false);
+    } else if (result.status === 'too-large') {
+      await this.#event(task, 'SESSION_TOO_LARGE', result.message, { beforeBytes: result.beforeBytes }, false);
+    } else if (result.status === 'invalid') {
+      await this.#event(task, 'SESSION_INVALID', result.message, { beforeBytes: result.beforeBytes }, false);
+    }
+    return result;
   }
 
   // --- provider wait (a retry Pi announces while the agent is still alive) ----
@@ -6094,6 +6164,9 @@ export class TaskManager extends EventEmitter {
       MODEL_AUTH_INCOMPATIBLE: 'Модель несовместима с авторизацией ChatGPT. Выберите доступную модель провайдера openai-codex или измените способ авторизации.',
       ENGINE_AUTH: 'Провайдер отклонил авторизацию. Проверьте ключ или обновите вход у этого провайдера.',
       QUOTA_EXCEEDED: 'Провайдер сообщил об исчерпанной квоте или недостатке средств. Проверьте лимиты и баланс провайдера.',
+      // 413 is permanent: Pi re-sends the same history every 5 s, so without this
+      // the session stays «ждём провайдера» forever (824 retries in one log).
+      REQUEST_TOO_LARGE: 'Провайдер отклонил запрос по размеру: история сессии больше, чем он принимает за один запрос (около 50 МБ).',
     }[failure?.code];
     if (guidance && failure.retryable === false) {
       // The retry belongs to Pi/its extension. Retire that owned process before
@@ -6110,11 +6183,38 @@ export class TaskManager extends EventEmitter {
       task._compacting = false;
       task._compactingSince = 0;
       await this.#clearProviderWait(task, 'non_retryable', { announce: false });
+      // The transcript is what the provider refused: repair it now (Pi is dead,
+      // so nothing is appending) and, once the payload is confirmed smaller,
+      // re-run the interrupted turn exactly once. The operator's own message is
+      // NOT sent again — Pi already recorded it, and a second copy would show the
+      // question twice; the continuation is the restart-resume nudge instead.
+      const repaired = failure.code === 'REQUEST_TOO_LARGE' ? await this.#preflight(task) : null;
+      const recovered = repaired?.status === 'repaired';
+      const remedy = recovered
+        ? ` ${repaired.message} Ход будет повторён автоматически.`
+        : '';
       const error = Object.assign(new Error(
-        `${guidance} Автоматический повтор остановлен. ${wait.reason}`
+        `${guidance} Автоматический повтор остановлен. ${wait.reason}${remedy}`
       ), { code: failure.code });
-      try { await this.#fail(task, error); }
-      finally { this.#resolveSettle(task.id); }
+      try {
+        await this.#fail(task, error);
+        if (recovered && !task.mediaRecovery) {
+          // One automatic recovery per task: a second 413 after a verified repair
+          // means the repair did not help, and repeating it would be a loop.
+          task.mediaRecovery = true;
+          task.pendingPrompts = [{
+            id: crypto.randomUUID(),
+            text: RECOVERED_CONTEXT_PROMPT,
+            mode: 'auto',
+            announce: false
+          }, ...(task.pendingPrompts || [])];
+          task.queueReason = 'CONTEXT_RECOVERED';
+          task.updatedAt = now();
+          await this.store.save(this.#publicTask(task)).catch(() => {});
+          this.#enqueue(task.id);
+          this.#schedulePump();
+        }
+      } finally { this.#resolveSettle(task.id); }
       return;
     }
     await noteProviderWait(task, wait, (type, message, data) => this.#event(task, type, message, data));

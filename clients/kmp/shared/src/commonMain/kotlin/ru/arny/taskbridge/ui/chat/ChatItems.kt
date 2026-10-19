@@ -210,7 +210,7 @@ fun AssistantMessage(
         // ends the same file arrives as an output file and is shown from there.
         val saved = item.files.mapNotNull { it.path }.toSet()
         for (path in item.tools.mapNotNull { it.path }.distinct().filter { isImageName(it) && it !in saved }) {
-            ChatImage("ws:$path", path, { loadWorkspaceFile(path) }, onClick = { onOpenPath(WorkspaceLink(path)) }, Modifier.padding(vertical = 4.dp))
+            ChatImageSpoiler("ws:$path", path.substringAfterLast('/'), { loadWorkspaceFile(path) }, onClick = { onOpenPath(WorkspaceLink(path)) }, Modifier.padding(vertical = 2.dp))
         }
         Row(verticalAlignment = Alignment.Top) {
             actions.onToggleSelect?.let { SelectMark(actions.selected, it) }

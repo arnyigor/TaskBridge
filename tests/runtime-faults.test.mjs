@@ -366,7 +366,7 @@ for (const shape of ['notice', 'structured']) {
   });
 }
 
-for (const [failure, code] of [['invalid-auth', 'ENGINE_AUTH'], ['empty-quota', 'QUOTA_EXCEEDED']]) {
+for (const [failure, code] of [['invalid-auth', 'ENGINE_AUTH'], ['empty-quota', 'QUOTA_EXCEEDED'], ['body-limit', 'REQUEST_TOO_LARGE']]) {
   for (const shape of ['notice', 'structured']) {
     test(`permanent provider failure ${code} stops announced retries (${shape})`, { timeout: 60000 }, async t => {
       const fixture = await startFixture();

@@ -844,6 +844,9 @@ body.selectingMessages .turn.selected .body::before { content: '✓'; order: -1;
 .imageSpoiler[open] summary::before { content: '▾ '; }
 .imageSpoiler[open] summary { color: var(--text); }
 .imageSpoiler .chatImage { margin: 4px 0 0; }
+/* Раскрытая картинка получает место, которого у неё не было в строке текста:
+   320 px хватало для превью в сообщении, но скриншот Blender в них не читается. */
+.imageSpoiler[open] .chatImage img { max-height: min(70vh, 900px); }
 
 .chatImage {
   display: block;

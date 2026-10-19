@@ -11,6 +11,13 @@ test('provider failures map to stable engine codes', () => {
   assert.equal(classifyEngineError('Rate limit reached for gpt-x').code, 'RATE_LIMITED');
   assert.equal(classifyEngineError('HTTP 429 Too Many Requests').retryable, true);
   assert.equal(classifyEngineError('This model maximum context length is 8192 tokens').code, 'CONTEXT_OVERFLOW');
+  // Byte-sized refusal, not a token one: retrying cannot help and the remedy is
+  // to drop the images (2026-10-19: a 48.6 MB history of screenshots answered
+  // 413 on every request, Pi retried that permanent error forever).
+  assert.equal(classifyEngineError('413 Failed to buffer the request body: length limit exceeded').code, 'REQUEST_TOO_LARGE');
+  assert.equal(classifyEngineError('413 Failed to buffer the request body: length limit exceeded').retryable, false);
+  assert.equal(classifyEngineError('413 Request Entity Too Large').code, 'REQUEST_TOO_LARGE');
+  assert.equal(classifyEngineError('failed to read call_413 result'), null);
   assert.equal(classifyEngineError('invalid api key provided').code, 'ENGINE_AUTH');
   assert.equal(classifyEngineError('The model does not exist').code, 'MODEL_UNAVAILABLE');
   assert.equal(classifyEngineError('connect ECONNREFUSED 127.0.0.1:8080').code, 'ENGINE_UNREACHABLE');

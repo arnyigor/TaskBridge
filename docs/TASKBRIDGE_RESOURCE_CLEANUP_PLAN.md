@@ -32,6 +32,7 @@
 - [x] Поиск (имя/команда/pid), фильтры Все/GPU/Node/Python/Java, сортировка по RAM.
 - [x] Мультивыбор + «Остановить выбранные» (последовательные /kill, защита сервера действует).
 - [x] KMP: ProcessEntry.parentPid, ResourceSnapshot/RamSnapshot/GpuSummary/GpuCard, TaskBridgeApi.systemResources().
+- [x] KMP: кнопка «Освободить GPU» — `cleanupPreview(objective=gpu, pids текущих GPU-процессов)` → диалог с кандидатами → `cleanupExecute`; итог показывает счётчики и VRAM до/после. PID присылаются явно: GPU-цель без pids предложила бы все Node/Python/Java.
 Критерий «500 процессов» замером не проверялся — виртуализация обеспечена LazyColumn с ключами; runtime-UI-тест не запускался.
 
 ### PROC-04 — Cleanup Preview & Batch API (P1)

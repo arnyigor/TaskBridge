@@ -214,4 +214,5 @@ Android SDK указывается в локальном `clients/kmp/local.prop
 - [Вложения](docs/attachment-delivery-analysis.md)
 - [Cloud-протокол](docs/cloud-protocol.md)
 - [Покрытие проверками](docs/testing-coverage.md)
+- [Дорожная карта LAN-first: стабильность → провайдеры → OMP](docs/TASKBRIDGE_OMP_ROADMAP.md)
 - [Лицензия MIT](LICENSE)

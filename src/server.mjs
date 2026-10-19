@@ -18,7 +18,7 @@ import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorks
 import { TaskStore } from './task-store.mjs';
 import { TaskManager, briefTask } from './task-manager.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
-import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, serveFile, FILE_LIMITS } from './files.mjs';
+import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, realpathNamed, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
 import { tailBytes } from './tool-output.mjs';
 import { RuntimeControl } from './runtime-control.mjs';
@@ -37,7 +37,8 @@ import { TrustedDevices, newDeviceId } from './cloud/trusted-devices.mjs';
 import { createRelayConnector } from './cloud/relay-connector.mjs';
 import { PushCenter, notificationFor } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
-import { readPiSettings, imagesBlocked } from './pi-settings.mjs';
+import { piAgentDir, readPiSettings, imagesBlocked } from './pi-settings.mjs';
+import { PiProviderProfiles } from './providers/pi-provider-profiles.mjs';
 import { listQuickActions } from './pi-quick-actions.mjs';
 import { listProcesses, listGpuProcesses, gpuSummary, systemRam } from './process-info.mjs';
 import { createCleanupPreview, executeCleanup, getCleanupResultByCommand, cleanupHistory } from './cleanup.mjs';
@@ -76,6 +77,7 @@ const build = await (async () => {
 
 const config = await loadConfig(rootDir);
 const providerRefreshes = new Map();
+const providerProfiles = new PiProviderProfiles({ agentDir: piAgentDir() });
 
 // Identifies this process run, not the code it runs: every page keeps the bootId
 // it first saw and reloads when it changes — that is how a phone tab (which has
@@ -128,6 +130,9 @@ piVersion.refresh().catch(() => {});
 // The Pi approval extension needs a loopback endpoint and its absolute path.
 manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
 manager.approvalExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-approval.js');
+// Media policy: keeps base64 screenshots out of the request without touching the
+// saved transcript (pi-extension/taskbridge-media.js).
+manager.mediaExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-media.js');
 await manager.init();
 // Router mode is meant to be always-on: the process is a cheap supervisor that
 // only loads models on demand. Start it eagerly so the model picker and the UI
@@ -692,12 +697,10 @@ const outsideWorkspace = () => Object.assign(new Error('Путь выходит 
 
 /** Файл существует и он файл; иначе — честная ошибка вместо «выходит за пределы». */
 async function observedFilePath(requestedPath) {
-  const resolved = await fs.realpath(requestedPath).catch(error => {
-    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') {
-      throw Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
-    }
-    throw error;
-  });
+  // Bash-запись диска («/f/…» для «F:\…») — второе прочтение того же имени: агент
+  // называет файлы так, и чат показывает их дословно.
+  const resolved = await realpathNamed(requestedPath);
+  if (!resolved) throw Object.assign(new Error('Файл не найден в рабочей папке — возможно, его удалили или переместили.'), { code: 'NOT_FOUND' });
   const stat = await fs.stat(resolved);
   if (!stat.isFile()) throw Object.assign(new Error('Файл не найден.'), { code: 'NOT_FOUND' });
   return resolved;
@@ -1074,6 +1077,33 @@ async function handleRequest(req, res) {
     }
 
     if (pathname.startsWith('/api/')) access.require(req);
+
+    // Local setup for TaskBridge-owned OpenAI-compatible providers. Not available
+    // over LAN: API keys remain in the Windows process environment, and no
+    // untrusted client may reconfigure what endpoint Pi talks to.
+    if (pathname === '/api/provider-profiles' || pathname.startsWith('/api/provider-profiles/')) {
+      if (!access.local(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Настраивать провайдеры можно только на компьютере через localhost.'), { code: 'ORIGIN_FORBIDDEN' }));
+      }
+      if (req.method === 'GET' && pathname === '/api/provider-profiles') {
+        return json(res, 200, await providerProfiles.list());
+      }
+      if (req.method === 'PUT' && pathname === '/api/provider-profiles') {
+        const body = await readJson(req);
+        return json(res, 200, await providerProfiles.upsert(body));
+      }
+      const providerRoute = pathname.match(/^\/api\/provider-profiles\/([^/]+)(?:\/(check))?$/);
+      if (providerRoute) {
+        const id = providerRoute[1];
+        if (req.method === 'POST' && providerRoute[2] === 'check') {
+          return json(res, 200, await providerProfiles.check(id));
+        }
+        if (req.method === 'DELETE' && !providerRoute[2]) {
+          const body = await readJson(req);
+          return json(res, 200, await providerProfiles.remove(id, body.revision));
+        }
+      }
+    }
 
     if (req.method === 'GET' && pathname === '/api/runtime') return json(res, 200, await runtimeControl.status());
     if (req.method === 'POST' && pathname === '/api/runtime/start') {
