@@ -12,6 +12,7 @@ import { loadConfig, saveConfig } from './config.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
 import { memoryMetrics } from './memory/memory-metrics.mjs';
 import { SseWriter } from './sse-writer.mjs';
+import { sessionStorage, warnSessionBytes } from './session-storage.mjs';
 import { WakeChannel } from './wake-channel.mjs';
 import { autoRestartDecision, autoRestartConfigured, nextRestartAt, normalizeAutoRestart } from './auto-restart.mjs';
 import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from './project-browser.mjs';
@@ -2249,6 +2250,17 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/artifacts$/);
     if (req.method === 'GET' && match) {
       return json(res, 200, await listArtifacts(match[1]));
+    }
+
+    // Сколько места сессия занимает на диске компьютера (артефакты, вложения,
+    // рабочая копия, нативная сессия pi). Только измерение: ничего не удаляет и не
+    // ограничивает; клиент показывает предупреждение по флагу `warn`.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/storage$/);
+    if (req.method === 'GET' && match) {
+      if (!manager.getTask(match[1])) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+      const measured = await sessionStorage({ dataRoot, taskId: match[1] });
+      const thresholdBytes = warnSessionBytes(config);
+      return json(res, 200, { ...measured, thresholdBytes, warn: measured.bytes >= thresholdBytes });
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/approvals$/);

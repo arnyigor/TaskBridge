@@ -857,6 +857,19 @@ llama.cpp получают тот же `400 LOCAL_CONTEXT_UNSUPPORTED`: их `ct
   (`.git`, `.pi`, `.ssh`, `node_modules`, `data`, `.env*`, `config.json`, `secret*`,
   `*.pem` …) не выдаются никогда — `403 FILE_FORBIDDEN`, даже если сессия их называла.
 
+### Размер сессии на диске
+
+`GET /api/tasks/:id/storage` отвечает `{ id, bytes, files, partial, computedAt,
+thresholdBytes, warn }` — сколько места занимает каталог сессии
+(`data/tasks/<id>`: журнал `pi-events.jsonl`, `diff.patch`, вложения `files/`),
+плюс нативная сессия pi и рабочая копия. Это **только измерение**: сервер ничего
+не удаляет, не обрезает и не ограничивает. `warn: true` — размер перешёл порог
+`storage.warnSessionMb` (по умолчанию 1 ГБ). Предупреждение нужно потому, что
+сырой журнал кадров (вывод bash, содержимое файлов) и вложения растут незаметно:
+на 2026-10-20 одна из сессий занимала 3,7 ГБ. Замер кэшируется на 5 минут на
+сессию, обход дерева ограничен 20 000 записей (`partial: true` — предел
+достигнут, цифра неполная).
+
 ### Открытие файла на компьютере
 
 `POST /api/tasks/:id/files/:fileId/open`, `POST /api/tasks/:id/artifacts/:name/open`

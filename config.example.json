@@ -247,5 +247,8 @@
       "useWorktree": true,
       "verification": []
     }
-  ]
+  ],
+  "storage": {
+    "warnSessionMb": 1024
+  }
 }

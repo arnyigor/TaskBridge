@@ -95,6 +95,7 @@ import ru.arny.taskbridge.core.api.PendingPrompt
 import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.ProviderWait
 import ru.arny.taskbridge.core.api.QuickAction
+import ru.arny.taskbridge.core.api.SessionStorage
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.client.chat.ChatItem
@@ -114,6 +115,7 @@ import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
+import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.formatMoment
 import ru.arny.taskbridge.ui.common.humanDuration
@@ -228,6 +230,12 @@ fun ChatScreen(
     LaunchedEffect(connection) { connection.sessions.models().onSuccess { screenCatalog = it }.onFailure { /* chooser can retry */ } }
     LaunchedEffect(connection, taskId, state.task?.runtime?.state) {
         quickActions = runCatching { connection.api.quickActions(taskId) }.getOrDefault(fallbackQuickActions()).ifEmpty { fallbackQuickActions() }
+    }
+    // Размер сессии на диске компьютера. Сервер измеряет его сам (кэш 5 минут), здесь
+    // только показ: отказ запроса не должен мешать чату, поэтому runCatching.
+    var storage by remember(taskId) { mutableStateOf<SessionStorage?>(null) }
+    LaunchedEffect(connection, taskId, state.task?.turnState?.turn) {
+        storage = runCatching { connection.api.sessionStorage(taskId) }.getOrNull()
     }
 
     DisposableEffect(taskId) {
@@ -374,6 +382,11 @@ fun ChatScreen(
             ) {
                 if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
                 LinkBanner(state.link, onRetry = { session.reconnectNow() })
+                // Сессия хранит журнал кадров (вывод инструментов) и вложения: гигабайты
+                // набираются незаметно. Предупреждение — только текст, ничего не удаляется.
+                sessionStorageWarning(storage)?.let { warning ->
+                    Banner(warning, AppIcons.Layers, LocalStatusColors.current.waiting)
+                }
                 // Шаг C-A: таймер молчания. Сервер считает silentMs у себя (клиент не
                 // вычитает часы другого устройства); «Подождать» прячет баннер до нового
                 // хода, STOP идёт через уже существующее подтверждение.
@@ -758,6 +771,20 @@ private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
  * (двухуровневый health, план 4.2) оператор увидел бы
  * «Degraded(attempt=2, inMillis=2000, reason=…)» — то, по чему нельзя решать.
  */
+/**
+ * Предупреждение о размере сессии на диске компьютера; null — предупреждать не о чем.
+ *
+ * Порог считает сервер (`storage.warnSessionMb`), клиент договаривает следствие:
+ * место занимают журнал кадров (вывод инструментов) и вложения сессии, освободить
+ * его можно удалением сессии. Автоматически ничего не удаляется и не ограничивается.
+ */
+internal fun sessionStorageWarning(storage: SessionStorage?): String? {
+    if (storage?.warn != true) return null
+    val atLeast = if (storage.partial) "не менее " else ""
+    return "Сессия занимает $atLeast${formatBytes(storage.bytes)} на диске компьютера — это её журнал и вложения. " +
+        "Освободить место можно удалением сессии"
+}
+
 internal fun linkLabel(link: LinkState): String = when (link) {
     LinkState.Connecting -> "подключаюсь"
     LinkState.Live -> "поток подключён"

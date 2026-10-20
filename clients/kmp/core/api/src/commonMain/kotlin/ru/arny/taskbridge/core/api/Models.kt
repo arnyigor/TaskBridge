@@ -961,6 +961,25 @@ data class WorkspaceFileEntry(val name: String, val path: String, val isFile: Bo
 @Serializable
 data class WorkspaceFileListing(val path: String? = null, val entries: List<WorkspaceFileEntry> = emptyList())
 
+/**
+ * Сколько места сессия занимает на диске компьютера (GET /api/tasks/:id/storage).
+ *
+ * Это измерение, а не лимит: сервер ничего не удаляет и не ограничивает. `warn` —
+ * размер перешёл порог `storage.warnSessionMb` на сервере, и клиент показывает
+ * предупреждение: сырой журнал кадров и вложения растут незаметно.
+ */
+@Serializable
+data class SessionStorage(
+    val id: String? = null,
+    val bytes: Long = 0,
+    val files: Int = 0,
+    /** Обход дерева упёрся в предел: цифра неполная. */
+    val partial: Boolean = false,
+    val computedAt: String? = null,
+    val thresholdBytes: Long = 0,
+    val warn: Boolean = false,
+)
+
 @Serializable
 data class ModelCost(
     val input: Double? = null,

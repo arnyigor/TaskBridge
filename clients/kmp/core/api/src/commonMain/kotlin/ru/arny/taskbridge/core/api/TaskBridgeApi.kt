@@ -962,6 +962,10 @@ class TaskBridgeApi(
     suspend fun artifacts(id: String): List<String> =
         get("/api/tasks/${id.path()}/artifacts", ListSerializer(String.serializer()))
 
+    /** Сколько места сессия занимает на диске компьютера (только измерение: сервер ничего не удаляет). */
+    suspend fun sessionStorage(id: String): SessionStorage =
+        get("/api/tasks/${id.path()}/storage", SessionStorage.serializer())
+
     /** The raw Pi session state (GET /api/tasks/:id/state → { state: … }), unwrapped. */
     suspend fun state(id: String): JsonObject =
         get("/api/tasks/${id.path()}/state", JsonObject.serializer())["state"]?.jsonObject ?: JsonObject(emptyMap())

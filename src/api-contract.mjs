@@ -140,6 +140,7 @@ export const API_ROUTES = [
 
   // --- tasks: artifacts and files ------------------------------------------
   { method: 'GET', path: '/api/tasks/:id/artifacts', summary: 'result.md, diff.patch, logs' },
+  { method: 'GET', path: '/api/tasks/:id/storage', summary: 'how much disk the session takes (artifacts, files, workspace); `warn` above config.storage.warnSessionMb' },
   { method: 'GET', path: '/api/tasks/:id/artifacts/:name', summary: 'download one artifact', binary: true },
   { method: 'GET', path: '/api/tasks/:id/files/:fileId', summary: 'download an upload', binary: true },
   { method: 'GET', path: '/api/tasks/:id/workspace-file', summary: 'read a file from the task workspace (?path=)', binary: true },
