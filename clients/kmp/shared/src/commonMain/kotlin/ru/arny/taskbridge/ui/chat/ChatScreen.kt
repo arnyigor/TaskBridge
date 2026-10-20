@@ -61,6 +61,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -70,6 +71,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -133,7 +135,7 @@ import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import ru.arny.taskbridge.ui.theme.MonoStyle
 
 /** A dialog the chat can show; one at a time. */
-private sealed interface ChatDialog {
+internal sealed interface ChatDialog {
     data class EditMessage(val turnId: String, val text: String) : ChatDialog
     data class EditAnswer(val turnId: String, val text: String) : ChatDialog
     /** [withAnswer]: started from an answer — the log is linear, so its question goes too. */
@@ -168,6 +170,38 @@ fun ChatScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    // «Оператор у низа ленты»: защёлка, которая переживает вставку элементов. Она
+    // считается здесь, потому что от неё зависят обе стороны — и сама лента, и
+    // кнопка «Новое».
+    // Сколько пикселей от нижней границы ещё считается «у низа». В dp: на телефоне
+    // 80 px ≈ 29 dp, то есть меньше одной строки — лента у низа считалась уехавшей.
+    val nearBottomPx = with(LocalDensity.current) { NEAR_BOTTOM_DP.dp.roundToPx() }
+    val bottomLatch = remember(taskId, nearBottomPx) { BottomLatch(nearBottomPx) }
+    var following by remember(taskId) { mutableStateOf(true) }
+    LaunchedEffect(listState, bottomLatch) {
+        snapshotFlow {
+            val chatItems = state.chat.items
+            Triple(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+                chatItems.size to chatItems.lastOrNull()?.id,
+            )
+        }.collect { (index, offset, newestItem) ->
+            bottomLatch.observe(index, offset, newestItem.first, newestItem.second)
+            following = bottomLatch.following
+        }
+    }
+    // Конец любой прокрутки — жест, флинг, колесо: решение принимается по тому, где
+    // лента остановилась. Пока лента стоит на месте, приход контента этот флаг не
+    // трогает вовсе — поэтому «сам по себе» он больше не выключается и не включается.
+    LaunchedEffect(listState, bottomLatch) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (!scrolling) {
+                bottomLatch.settle(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+                following = bottomLatch.following
+            }
+        }
+    }
     var dialog by remember { mutableStateOf<ChatDialog?>(null) }
     // Ход, для которого оператор нажал «Подождать»: баннер молчания скрыт, пока
     // идёт этот же ход (turn совпадает); новый ход показывает баннер снова.
@@ -373,7 +407,7 @@ fun ChatScreen(
                     // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
                     // зависят обе стороны поведения — держать низ или не давать ленте
                     // сдвинуть чтение.
-                    val following by remember { derivedStateOf { listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 80 } }
+                    val showJump = !following
                     when {
                         state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                         state.link is LinkState.Failed && state.chat.items.isEmpty() -> EmptyState(
@@ -401,7 +435,6 @@ fun ChatScreen(
                         )
                     }
                     // Reading older messages: the list stays put; new output only lights up the jump button.
-                    val showJump by remember { derivedStateOf { !following } }
                     val newest = state.chat.items.lastOrNull()
                     val newestSignature = newest?.let { it.id + ((it as? ChatItem.Assistant)?.let { a -> a.text.length + a.tools.size } ?: 0) }
                     var seenSignature by remember { mutableStateOf(newestSignature) }
@@ -757,9 +790,18 @@ internal class ReadingAnchor {
     var offset: Int = 0
         private set
 
-    /** Палец двигает ленту: запоминаем, где оператор остановился. */
-    fun record(scrolling: Boolean, index: Int, offset: Int, keyOf: (Int) -> String?) {
-        if (!scrolling) return
+    /**
+     * Позиция ленты изменилась: запоминаем, где оператор остановился.
+     *
+     * Раньше запоминание шло только при `isScrollInProgress` (то есть при жесте или
+     * анимации). Колесо мыши и мгновенные переходы этот флаг не поднимают, якорь
+     * оставался от прошлого жеста — и первая же дельта возвращала ленту туда: «скролл
+     * в самый низ при получении чанков» и «скролл вверх при добавлении элемента»
+     * (оператор 2026-10-17). Поэтому теперь запоминается любая позиция, которую
+     * сдвинул не приход контента, а сам оператор — любым способом.
+     */
+    fun record(contentArrived: Boolean, index: Int, offset: Int, keyOf: (Int) -> String?) {
+        if (contentArrived) return
         keyOf(index)?.let { key = it }
         this.offset = offset
     }
@@ -782,6 +824,51 @@ internal class ReadingAnchor {
     }
 }
 
+/**
+ * «Оператор у низа ленты» — защёлка, а не мгновенный замер.
+ *
+ * Замер `firstVisibleItemIndex == 0` ошибается ровно в тот момент, когда решается
+ * судьба ленты: новый элемент встаёт нулевым, прежний низ уезжает на индекс 1, и
+ * лента, которую никто не трогал, считается прокрученной вверх — новый элемент
+ * остаётся за нижней границей, а «Новое» загорается на пустом месте. Поэтому уход
+ * от низа засчитывается только тогда, когда позиция изменилась БЕЗ прихода
+ * контента: значит, это жест, колесо или программный переход.
+ */
+internal class BottomLatch(private val nearBottomPx: Int = 80) {
+    var following: Boolean = true
+        private set
+    private var seenCount: Int = -1
+    private var seenNewest: String? = null
+
+    fun observe(index: Int, offset: Int, count: Int, newestId: String?) {
+        val contentChanged = count != seenCount || newestId != seenNewest
+        seenCount = count
+        seenNewest = newestId
+        following = when {
+            index == 0 && offset <= nearBottomPx -> true
+            // Индекс сдвинула вставка (или удаление), а не жест: низ остаётся низом.
+            contentChanged -> following
+            else -> false
+        }
+    }
+
+    /**
+     * Прокрутка закончилась (жест, флинг, колесо) — решение по тому, где лента встала.
+     *
+     * Это главный сигнал: `isScrollInProgress` поднимается и от касания, и от колеса
+     * (замерено), а на приход контента не реагирует вовсе. В отличие от [observe],
+     * здесь нечему сбиться: переокно истории или переподключение в момент жеста больше
+     * не могут «защитать» уход от низа как приход контента (жалоба 2026-10-17:
+     * «на телефоне при получении сообщения идёт автоскролл вниз»).
+     */
+    fun settle(index: Int, offset: Int) {
+        following = index == 0 && offset <= nearBottomPx
+    }
+}
+
+/** Насколько близко к нижней границе считается «у низа», в dp. */
+internal const val NEAR_BOTTOM_DP = 40
+
 internal fun needsReadingRestore(
     following: Boolean,
     scrolling: Boolean,
@@ -796,7 +883,7 @@ internal fun needsReadingRestore(
 }
 
 @Composable
-private fun MessageList(
+internal fun MessageList(
     graph: AppGraph,
     session: ChatSession,
     state: ChatSessionState,
@@ -825,8 +912,8 @@ private fun MessageList(
     val reversed = remember(items) { items.asReversed() }
 
     // Якорь чтения: элемент, на котором стоит пользователь, и смещение внутри
-    // него. Обновляется, пока палец двигает список, и восстанавливается, когда
-    // контент пришёл, а пользователь читает выше низа.
+    // него. Обновляется на каждом сдвиге, который сделал сам оператор, и
+    // восстанавливается, когда контент пришёл, а пользователь читает выше низа.
     //
     // Почему так, а не через dispatchRawDelta: тот вариант уже один раз оставил
     // LazyList с незавершённым скроллом и уронил десктоп («entered drag with
@@ -837,16 +924,40 @@ private fun MessageList(
     // Сигнатура приходящего контента: длина растущего ответа и число сообщений.
     val newest = items.lastOrNull()
     val contentSignature = items.size to ((newest as? ChatItem.Assistant)?.let { it.text.length + it.tools.size } ?: 0)
+    // Живой список для эффекта ниже: обычная переменная застыла бы на составе,
+    // в котором эффект запустился, и приход контента был бы не виден.
+    val latestItems by rememberUpdatedState(items)
     LaunchedEffect(listState) {
+        var seen: Pair<Int, Int>? = null
         snapshotFlow {
-            listState.isScrollInProgress to (listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset)
-        }.collect { (scrolling, position) ->
-            readingAnchor.record(scrolling, position.first, position.second) { index -> reversed.getOrNull(index)?.id }
+            val now = latestItems
+            val last = now.lastOrNull()
+            Triple(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+                now.size to ((last as? ChatItem.Assistant)?.let { it.text.length + it.tools.size } ?: 0),
+            )
+        }.collect { (index, offset, signature) ->
+            // Позиция, которую сдвинул приход контента, — не выбор оператора:
+            // именно её и должен вернуть якорь.
+            val arrived = seen != null && signature != seen
+            seen = signature
+            readingAnchor.record(arrived, index, offset) { i -> latestItems.asReversed().getOrNull(i)?.id }
         }
     }
     LaunchedEffect(contentSignature, following) {
+        // Оператор у низа — низ держим сами: вставка нового элемента сдвигает
+        // индексы (новый элемент становится нулевым), поэтому мало не мешать
+        // ленте, надо вернуть её к нулевому.
+        if (following) {
+            // Дельты внутри нижнего элемента держит сам reverseLayout; догонять нужно
+            // только вставку, из-за которой низ перестал быть нулевым, и только не
+            // поверх собственного жеста оператора (защёлка узнает о нём кадром позже).
+            if (!listState.isScrollInProgress && listState.firstVisibleItemIndex != 0) listState.scrollToItem(0, 0)
+            return@LaunchedEffect
+        }
         val target = readingAnchor.target(
-            following = following,
+            following = false,
             scrolling = listState.isScrollInProgress,
             currentIndex = listState.firstVisibleItemIndex,
             currentOffset = listState.firstVisibleItemScrollOffset,

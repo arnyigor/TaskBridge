@@ -17,7 +17,7 @@ class ReadingAnchorTest {
         val anchor = ReadingAnchor()
         // До дельт лента была ["m5", "m6", "m7"]: оператор стоит на "m7" (индекс 2).
         val before = listOf("m5", "m6", "m7")
-        anchor.record(scrolling = true, index = 2, offset = 33) { before.getOrNull(it) }
+        anchor.record(contentArrived = false, index = 2, offset = 33) { before.getOrNull(it) }
         assertEquals("m7", anchor.key, "якорь держит элемент, а не индекс")
 
         // Пришли дельты, и в ленту добавилось новое сообщение: у того же "m7" теперь
@@ -38,7 +38,7 @@ class ReadingAnchorTest {
     @Test
     fun `nothing is restored when the operator is at the bottom or scrolling`() {
         val anchor = ReadingAnchor()
-        anchor.record(scrolling = true, index = 5, offset = 33, keyOf = { "m$it" })
+        anchor.record(contentArrived = false, index = 5, offset = 33, keyOf = { "m$it" })
         val indexOf = { id: String -> listOf("m2", "m3", "m4", "m5", "m6").indexOf(id) }
 
         assertNull(
@@ -54,16 +54,32 @@ class ReadingAnchorTest {
     @Test
     fun `an anchor that vanished from the feed is not a restore target`() {
         val anchor = ReadingAnchor()
-        anchor.record(scrolling = true, index = 3, offset = 12, keyOf = { "m$it" })
+        anchor.record(contentArrived = false, index = 3, offset = 12, keyOf = { "m$it" })
         // Сообщение исчезло (сессия очищена/сжата) — возвращаться некуда.
         assertNull(anchor.target(following = false, scrolling = false, currentIndex = 4, currentOffset = 12, indexOf = { -1 }))
     }
 
     @Test
-    fun `without any scrolling the anchor stays empty`() {
+    fun `a position moved without content arriving is remembered`() {
+        // Колесо мыши и программные переходы не поднимают `isScrollInProgress`;
+        // гейт по нему (до 2026-10-17) оставлял якорь от прошлого жеста, и первая
+        // же дельта возвращала ленту туда — те самые «скроллы» из жалобы оператора.
         val anchor = ReadingAnchor()
-        // Лента не двигалась: запоминать нечего, и первый же кадр не должен её дёрнуть.
-        anchor.record(scrolling = false, index = 2, offset = 5, keyOf = { "m$it" })
-        assertNull(anchor.target(following = false, scrolling = false, currentIndex = 3, currentOffset = 5, indexOf = { 3 }))
+        anchor.record(contentArrived = false, index = 2, offset = 5, keyOf = { "m$it" })
+        assertEquals("m2", anchor.key)
+        assertNull(
+            anchor.target(following = false, scrolling = false, currentIndex = 2, currentOffset = 5, indexOf = { 2 }),
+            "якорь совпадает с текущей позицией — возвращать нечего",
+        )
+    }
+
+    @Test
+    fun `a position moved by arriving content is not remembered`() {
+        // Иначе якорь запоминал бы сам сдвиг, который обязан отменить.
+        val anchor = ReadingAnchor()
+        anchor.record(contentArrived = false, index = 2, offset = 5, keyOf = { "m$it" })
+        anchor.record(contentArrived = true, index = 4, offset = 5, keyOf = { "m$it" })
+        assertEquals("m2", anchor.key, "сдвиг от контента якорь не переписывает")
+        assertEquals(5, anchor.offset)
     }
 }
