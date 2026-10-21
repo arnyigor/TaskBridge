@@ -198,7 +198,8 @@ OpenAI-совместимый `GET {baseUrl}/models` и ДОБАВляет не�
   `ABORT_TIMEOUT`, `QUEUE_DROPPED`.
 
 `TASK_FAILED` при ошибке модели (`errorCode: MODEL_ERROR`) несёт `data.toolEvidence`:
-до 10 подтверждённых выводов инструментов этого хода (`{toolName, target, excerpt}`).
+до 10 подтверждённых выводов инструментов этого хода (`{toolName, target, excerpt}`,
+`target` — до 160 символов, `excerpt` — одна строка до 240 символов).
 `task.error` при этом остаётся строкой провайдера — подтверждённое лежит рядом, а не
 внутри неё; то же содержимое есть в result.md, раздел `## Tool evidence`.
 

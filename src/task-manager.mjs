@@ -4288,7 +4288,8 @@ export class TaskManager extends EventEmitter {
     if (!text) return;
     // Bound before flattening: a bash command can return hundreds of KB, and only
     // the first line or two of it is ever quoted.
-    const excerpt = headText(headText(text, TURN_EVIDENCE_SCAN).replace(/\s+/g, ' ').trim(), TURN_EVIDENCE_EXCERPT);
+    const flat = text.slice(0, TURN_EVIDENCE_SCAN).replace(/\s+/g, ' ').trim();
+    const excerpt = flat.length > TURN_EVIDENCE_EXCERPT ? `${flat.slice(0, TURN_EVIDENCE_EXCERPT - 1)}…` : flat;
     if (!excerpt) return;
     const list = task._turnEvidence || (task._turnEvidence = []);
     list.push({

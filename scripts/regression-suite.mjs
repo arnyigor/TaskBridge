@@ -50,6 +50,11 @@ export const SECTIONS = {
       'tests/process-protection.test.mjs',
       'tests/instance-lock.test.mjs',
       'tests/turn-state.test.mjs',
+      // Запрошенный объём работы и сохранение найденного при ошибке модели
+      // (§4, §7 плана 1.3): инструкции хода, доказательства инструментов.
+      'tests/prompt-builder.test.mjs',
+      'tests/turn-instructions.test.mjs',
+      'tests/tool-evidence.test.mjs',
     ],
   },
   chat: {

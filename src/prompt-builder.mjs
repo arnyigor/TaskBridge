@@ -23,7 +23,7 @@ export const IMPLEMENT = 'implement';
 const CHANGE = new RegExp([
   // ru
   'исправ', 'почин', 'поправ', 'поправить', 'реализу', 'добав', 'созда', 'сделай',
-  'обнови', 'обновить', 'удали', 'удалить', 'перепиши', 'переписать', 'отрефактор',
+  'обнови', 'обновить', 'удали', 'удалить', 'перепиши', 'переписать', 'отрефактор', 'зарефактор', 'рефактори',
   'перенес', 'внедри', 'интегриру', 'собери', 'скомпилиру', 'протестиру', 'задеплой',
   'установи', 'доделай', 'доработай', 'поменя', 'замени', 'примени', 'вставь',
   'допиши', 'переимену', 'почисти', 'проведи рефакторинг',
@@ -50,11 +50,17 @@ const LOOKUP = new RegExp([
   'посмотри', 'посмотреть', 'найди', 'найти', 'покажи', 'есть ли', 'у меня есть',
   'сколько', 'где находится', 'где лежит', 'где взять',
   '\\bfind\\b', '\\blocate\\b', '\\blook for\\b', '\\bshow\\b', '\\blist\\b',
-  '\\bwhere\\b', '\\bdoes .* exist\\b',
+  '\\bwhere\\b', '\\bhow much\\b', '\\bhow many\\b', '\\bdoes .* exist\\b',
 ].join('|'), 'i');
 
+// «Не исправляй ничего, только найди» is a lookup, not a change request.
+const NEGATED_CHANGE = /(?:^|[^а-яёa-z])не\s+(исправ\w*|почин\w*|поправ\w*|добав\w*|удал\w*|обнов\w*|меня\w*|трогай\w*|переписыв\w*|создавай\w*|заменяй\w*|перенос\w*)/gi;
+const NEGATED_CHANGE_EN = /(?:^|[^a-z])(do not|don't|dont)\s+(fix|add|change|update|remove|delete|refactor|rewrite|touch|modify)/gi;
+
 export function detectProfile(text) {
-  const value = String(text ?? '');
+  // The strip is a heuristic, not a parser: dropping too much costs only the shape
+  // of the answer block (the request itself is still in the prompt untouched).
+  const value = String(text ?? '').replace(NEGATED_CHANGE, ' ').replace(NEGATED_CHANGE_EN, ' ');
   if (CHANGE.test(value)) return IMPLEMENT;
   if (INVESTIGATE.test(value)) return EXPLORE;
   if (LOOKUP.test(value)) return QUICK;

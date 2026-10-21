@@ -538,6 +538,21 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     const readResult = { content: [{ type: 'text', text: 'hello from example.txt' }] };
     send({ type: 'tool_execution_update', toolCallId: `call-${turn}`, toolName: 'read', args: { path: 'example.txt' }, partialResult: readResult });
     send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false, result: readResult });
+    // `many-tools`: more successes than the evidence list keeps (bounded at 10),
+    // `huge-output`: one result far larger than an excerpt (bounded at 240 chars).
+    // Both are keyed off the prompt text like every other fixture mode.
+    if (command.message.includes('many-tools')) {
+      for (let n = 0; n < 12; n += 1) {
+        const id = `bulk-${turn}-${n}`;
+        send({ type: 'tool_execution_start', toolCallId: id, toolName: 'bash', args: { command: `echo line-${n}` } });
+        send({ type: 'tool_execution_end', toolCallId: id, toolName: 'bash', isError: false, result: { content: [{ type: 'text', text: `line-${n}` }] } });
+      }
+    }
+    if (command.message.includes('huge-output')) {
+      const id = `huge-${turn}`;
+      send({ type: 'tool_execution_start', toolCallId: id, toolName: 'bash', args: { command: 'cat big.log' } });
+      send({ type: 'tool_execution_end', toolCallId: id, toolName: 'bash', isError: false, result: { content: [{ type: 'text', text: 'X'.repeat(200000) + '\nTAIL-MARKER\n' }] } });
+    }
     // `make-files`: the agent leaves an image and a text file in the workspace,
     // announcing the image through a write tool — the "files from the agent" case.
     if (command.message.includes('make-files')) {
