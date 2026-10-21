@@ -16,10 +16,18 @@ import { spawn } from 'node:child_process';
 // and the RPC recorder) before the range was widened.
 // 0.99.x: checked in real sessions on the operator's machine (2026-10-01) —
 // TaskBridge itself runs against Pi 0.99.1, steering, prompt delivery and
-// task events all exercised. 1.0.4 is the current Pi line used with TaskBridge
-// on the operator machine; keep the upper bound on the next minor so 1.0.x does
-// not show a false version warning.
-export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '1.1.0' });
+// task events all exercised.
+// 1.0.4: the Pi line TaskBridge ran on when the bound was set to 1.1.0.
+// 1.3.0 (2026-10-21): the whole RPC surface TaskBridge uses was exercised on the
+// installed Pi by experiments/pi-hooks/compat-check.mjs — get_state, prompt,
+// set_model, steer, follow_up, compact (a real compaction event), abort (run
+// settled, isStreaming false) and a restart of the saved session — plus real
+// sessions on the operator machine: STOP, model switch, prompt delivery, the
+// before_agent_start extension and session restore after a server restart.
+// Not covered there: provider-level 413 recovery (it is about the session file
+// and the request body, not the RPC protocol). Keep the upper bound on the next
+// minor so a compatible 1.3.x build does not show a false version warning.
+export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '1.4.0' });
 
 // `pi --version` has printed both "0.85.1" and "pi 0.85.1"; take the first
 // x.y.z anywhere in the output rather than depend on the prefix.
