@@ -5,6 +5,16 @@
 число команд: правильность ответа, лишние действия после подтверждения, записи без
 запроса, утверждения без подтверждения, точность выбора профиля.
 
+Сравнивать можно два разных фактора — но никогда оба в одном прогоне:
+
+| Что сравниваем | Флаги | Что различается |
+| --- | --- | --- |
+| доставку инструкций (`legacy` → `hook`) | `--variant A --policy legacy` против `--variant B --policy hook` на одном дереве | только способ доставки |
+| дерево кода (до/после `PromptBuilder`) | `--variant A --repo ../tb-before` против `--variant B` при одной политике | только код |
+
+Режим инструкций задаётся флагом и пишется в `meta.json`: раньше он наследовался
+из конфига TaskBridge, и прогон «B» мог на самом деле остаться `legacy`.
+
 ## Зачем
 
 Живой инцидент 2026-10-21 показал форму проблемы: на вопрос «есть ли у меня курс
@@ -46,6 +56,16 @@ node bench/agent-behavior/run.mjs --variant B \
 node bench/agent-behavior/report.mjs --a .local/bench/2026-10-21/A --b .local/bench/2026-10-21/B
 ```
 
+Сравнение доставки инструкций на одном дереве:
+
+```bash
+node bench/agent-behavior/run.mjs --variant A --policy legacy --model strata/qwen3.8-flash-next-iq3_s \
+  --only ue-filmmakers,missing-nuke,complex-compare --out .local/bench/p0/legacy
+node bench/agent-behavior/run.mjs --variant B --policy hook --model strata/qwen3.8-flash-next-iq3_s \
+  --only ue-filmmakers,missing-nuke,complex-compare --out .local/bench/p0/hook
+node bench/agent-behavior/report.mjs --a .local/bench/p0/legacy --b .local/bench/p0/hook
+```
+
 Полезные флаги: `--only ue-filmmakers,missing-nuke`, `--limit 4`, `--timeout 180000`,
 `--bulk 5000`, `--dry-run` (показать план, ничего не запуская).
 
@@ -71,7 +91,7 @@ node bench/agent-behavior/report.mjs --a .local/bench/2026-10-21/A --b .local/be
 | `toolCalls` | журнал Pi | сколько инструментов вызвано |
 | `unnecessaryCalls` | evaluate | вызовы после подтверждения пути (для отсутствия — сверх `maxCalls`) |
 | `elapsedMs`, `totalTokens` | задача | время и расход контекста |
-| `profileAccuracy` | строка `Task instructions (…)` в промпте | верно ли выбран профиль (у A профиля нет — `null`) |
+| `profileAccuracy` | профиль из system-секции Pi (`hook`) или из первого сообщения (`legacy`) | верно ли выбран профиль (у A профиля нет — `null`) |
 | `unsupportedClaims` | ответ × выводы инструментов | числа с единицами (ГБ, уроков, файлов), которых нет в выводе |
 | `unnecessaryWrites` | журнал Pi | вызовы `write/edit/apply_patch` там, где изменений не просили |
 
@@ -90,6 +110,10 @@ node bench/agent-behavior/report.mjs --a .local/bench/2026-10-21/A --b .local/be
 - **LLM-as-judge** не используется как источник оценки: только детерминированные
   проверки. Если понадобится оценка «качества формулировок», её стоит добавлять
   отдельной колонкой и не смешивать с `taskSuccess`.
+- **Режима `original`** (историческая фиксированная инструкция) здесь пока нет:
+  в `hook` текст в сообщение оператора не попадает, а воспроизвести старое
+  поведение без режима «без инструкций» в production нельзя. Пока этот случай
+  покрывает прогон на дереве до `PromptBuilder` (`--repo`, `--variant A`).
 - **Автоматических остановок** (ExecutionGuard) бенчмарк не включает и не проверяет:
   решение по ним принимается по результатам этих измерений.
 - Числа из одного прогона не публикуются как «результат A/B»: 24 сценария × 2

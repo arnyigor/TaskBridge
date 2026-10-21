@@ -13,7 +13,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildFixture } from '../bench/agent-behavior/fixtures/build.mjs';
-import { evaluateRun, summarize, verdicts, toMarkdown, profileOf, unsupportedClaims } from '../bench/agent-behavior/evaluate.mjs';
+import { evaluateRun, summarize, verdicts, toMarkdown, profileOf, appliedProfile, unsupportedClaims } from '../bench/agent-behavior/evaluate.mjs';
+import { appliedProfiles } from '../bench/agent-behavior/run.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const benchDir = path.join(here, '..', 'bench', 'agent-behavior');
@@ -234,9 +235,130 @@ test('run.mjs --dry-run печатает план и ничего не запу�
   const { execFile } = await import('node:child_process');
   const { promisify } = await import('node:util');
   const { stdout } = await promisify(execFile)(process.execPath, [path.join(benchDir, 'run.mjs'), '--dry-run', '--limit', '3'], { env: { ...process.env } });
-  assert.match(stdout, /3 сценариев × 1 вариант \(B\) = 3 запусков/);
+  assert.match(stdout, /3 сценариев × 1 вариант \(B, политика legacy\) = 3 запусков/);
   const lines = stdout.trim().split('\n').slice(1);
   assert.equal(lines.length, 3);
   assert.match(lines[0], /ue-filmmakers/);
   assert.equal(profileOf('без профиля'), null);
+});
+
+test('применённый профиль читается из system-секции Pi — это и есть hook', async () => {
+  const { turnInstructions } = await import('../src/prompt-builder.mjs');
+  const { INSTRUCTIONS_SECTION } = await import('../pi-extension/taskbridge-turn-instructions.js');
+  const systemFrame = profile => ({ type: 'message_start', message: { role: 'system', sections: { [INSTRUCTIONS_SECTION]: turnInstructions(profile) } } });
+
+  // Один и тот же текст генерирует prompt-builder, а читает run.mjs:
+  // расхождение в имени секции или в строке-маркере ловится здесь, а не молча в отчёте.
+  const frames = [
+    systemFrame('quick'),
+    { type: 'message_start', message: { role: 'user', content: 'Есть ли курс?' } },
+    { type: 'message_end', message: { role: 'system', sections: { [INSTRUCTIONS_SECTION]: turnInstructions('quick') } } },
+    systemFrame('explore'),
+  ];
+  assert.deepEqual(appliedProfiles(frames), ['quick', 'explore'], 'только message_start системных сообщений');
+  assert.deepEqual(appliedProfiles([]), []);
+  assert.deepEqual(appliedProfiles([{ type: 'message_start', message: { role: 'system', sections: { preamble: 'Task instructions (quick)' } } }]), []);
+});
+
+test('hook-прогон: профиль оценивается без служебного текста в промпте', () => {
+  const rawPrompt = 'Unreal filmmaking курс. У меня есть такой? В Learning посмотри.';
+  const hookRun = extra => ({
+    ...run({
+      scenarioId: 'ue-filmmakers',
+      variant: 'B',
+      prompt: rawPrompt,
+      toolCalls: [call('ls Learning/UnrealEngine', 'Unreal Engine For Filmmakers')],
+      answer: 'Да, папка Learning/UnrealEngine/Unreal Engine For Filmmakers на месте.',
+    }),
+    ...extra,
+  });
+
+  const ok = evaluateRun(scenario('ue-filmmakers'), hookRun({ appliedProfile: 'quick', profileSource: 'system-section' }));
+  assert.equal(ok.profile, 'quick', 'профиль из секции, а не из промпта');
+  assert.equal(ok.profileSource, 'system-section');
+  assert.equal(ok.profileAccuracy, true);
+  assert.equal(ok.taskSuccess, true, ok.reasons.join('; '));
+
+  // Ошибка выбора профиля в hook-режиме должна быть видна, а не выпадать в null.
+  const wrong = evaluateRun(scenario('ue-filmmakers'), hookRun({ appliedProfile: 'implement', profileSource: 'system-section' }));
+  assert.equal(wrong.profileAccuracy, false);
+  assert.equal(wrong.taskSuccess, false);
+  assert.match(wrong.reasons.join('; '), /профиль implement вместо quick/);
+
+  // Ровно то, что было до фикса: без секции и без текста профиль неизвестен.
+  const unknown = evaluateRun(scenario('ue-filmmakers'), hookRun({}));
+  assert.equal(unknown.profile, null);
+  assert.equal(unknown.profileAccuracy, null);
+  assert.equal(unknown.profileSource, null);
+
+  // Секция главнее текста: legacy-текст, случайно оставшийся в промпте, не должен подменять факт.
+  const both = evaluateRun(scenario('ue-filmmakers'), hookRun({ prompt: wrapped('quick'), appliedProfile: 'implement', profileSource: 'system-section' }));
+  assert.equal(both.profile, 'implement', 'appliedProfile приоритетнее разбора промпта');
+});
+
+test('--policy: принимаются все режимы из prompt-builder, остальное — ошибка', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const { TURN_INSTRUCTIONS_MODES } = await import('../src/prompt-builder.mjs');
+  const exec = promisify(execFile);
+  for (const mode of TURN_INSTRUCTIONS_MODES) {
+    const { stdout } = await exec(process.execPath, [path.join(benchDir, 'run.mjs'), '--dry-run', '--limit', '1', '--policy', mode]);
+    assert.match(stdout, new RegExp(`политика ${mode}`), mode);
+  }
+  await assert.rejects(exec(process.execPath, [path.join(benchDir, 'run.mjs'), '--dry-run', '--policy', 'none']), /--policy legacy\|hook/);
+});
+
+test('пути вне рабочей копии видны: фикстура — единственное место проверки', async () => {
+  const { externalPaths, clipOutput } = await import('../bench/agent-behavior/run.mjs');
+  const workspace = 'G:\\Android\\proj\\.local\\bench\\p0\\hook\\fixture';
+  const targets = [
+    'ls -la Learning/UnrealEngine',
+    'cd Learning && find . -type f | wc -l',
+    'find /g/Android/proj -maxdepth 2 -iname "*learning*"',
+    'ls "/g/Android/proj/.local/bench/p0/hook/fixture/Learning"',
+    'cat /dev/null; head -3 "/x/Archive/Learning/x.txt"',
+    'cmd //c dir //a C:\\Users\\someone',
+    'wc -c "Chapter 01"/* "Chapter 02"/*',
+  ];
+  assert.deepEqual(externalPaths(targets, workspace), ['g:/android/proj', 'x:/archive/learning/x.txt', 'c:/users/someone']);
+  assert.deepEqual(externalPaths(['ls Learning'], workspace), [], 'относительные пути — свои');
+
+  // Обрезка вывода сохраняет хвост: именно там печатается итог (wc -l, du -sh).
+  const long = `${'x'.repeat(8000)}\n5022\n`;
+  const clipped = clipOutput(long);
+  assert.equal(clipped.length < long.length, true);
+  assert.match(clipped, /вырезано/);
+  assert.match(clipped, /5022\s*$/, 'хвост с итогом сохраняется');
+  assert.equal(clipOutput('короткий'), 'короткий');
+});
+test('подтверждение вне рабочей копии не засчитывается', () => {
+  const marker = 'Unreal Engine For Filmmakers';
+  const outside = { toolName: 'bash', target: 'cd "/x/Archive/Learning/UnrealEngine/Unreal Engine For Filmmakers" && ls', external: ['x:/archive/learning/unrealengine/unreal engine for filmmakers'], output: `Chapter 01\nChapter 02\n${marker}` };
+  const inside = { toolName: 'bash', target: 'ls Learning/UnrealEngine', external: [], output: marker };
+  // Тот же ответ, что и в pilot: имя есть в чужом каталоге, ответ звучит верно.
+  const escaped = evaluateRun(scenario('ue-filmmakers'), {
+    ...run({
+      scenarioId: 'ue-filmmakers', variant: 'B', appliedProfile: 'quick', profileSource: 'system-section',
+      prompt: 'Unreal filmmaking курс. У меня есть такой? В Learning посмотри.',
+      toolCalls: [call('ls Learning', 'Houdini'), outside],
+      answer: 'Да, есть: X:/Archive/Learning/UnrealEngine/Unreal Engine For Filmmakers.',
+    }),
+    externalTargets: outside.external,
+  });
+  assert.equal(escaped.foundInTools, false, 'чужой каталог — не подтверждение');
+  assert.equal(escaped.foundOnlyOutside, true);
+  assert.equal(escaped.taskSuccess, false);
+  assert.match(escaped.reasons.join('; '), /только вне рабочей копии/);
+
+  // Если после чужого каталога агент проверил рабочую копию — подтверждение есть.
+  const recovered = evaluateRun(scenario('ue-filmmakers'), {
+    ...run({
+      scenarioId: 'ue-filmmakers', variant: 'B', appliedProfile: 'quick', prompt: 'Есть ли курс?',
+      toolCalls: [outside, inside],
+      answer: 'Да, Learning/UnrealEngine/Unreal Engine For Filmmakers на месте.',
+    }),
+  });
+  assert.equal(recovered.foundInTools, true);
+  assert.equal(recovered.confirmedAt, 2);
+  assert.equal(recovered.taskSuccess, true, recovered.reasons.join('; '));
 });

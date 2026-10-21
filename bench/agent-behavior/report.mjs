@@ -51,11 +51,20 @@ const summary = summarize(metrics);
 const verdictList = verdicts(summary);
 const metaA = JSON.parse(await fs.readFile(path.join(args.a, 'meta.json'), 'utf8').catch(() => '{}'));
 const metaB = JSON.parse(await fs.readFile(path.join(args.b, 'meta.json'), 'utf8').catch(() => '{}'));
+// Режим инструкций в подписи столбцов: без него «A против B» не говорит, что именно
+// различалось (дерево кода или доставка инструкций).
+const label = (letter, meta) => (meta.policy ? `${letter} (${meta.policy})` : null);
 const markdown = toMarkdown({
   summary,
   metrics,
   verdictList,
-  meta: { generatedAt: new Date().toISOString(), model: metaB.model || metaA.model || null, benchVersion: bench.version },
+  meta: {
+    generatedAt: new Date().toISOString(),
+    model: metaB.model || metaA.model || null,
+    benchVersion: bench.version,
+    labelA: label('A', metaA),
+    labelB: label('B', metaB),
+  },
 });
 
 const outDir = path.dirname(args.b);

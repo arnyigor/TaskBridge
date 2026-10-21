@@ -21,6 +21,24 @@ export function profileOf(prompt) {
   return match ? match[1].toLowerCase() : null;
 }
 
+/**
+ * Профиль, который РЕАЛЬНО получила модель, и откуда он взят.
+ *
+ * `hook` не пишет инструкции в сообщение оператора — они приходят в system-секции
+ * Pi (`message_start.message.sections.turn_instructions`), и run.mjs сохраняет её
+ * как `appliedProfile`. Искать строку в промпте можно только в `legacy`-режиме:
+ * в hook её там нет, поэтому прежняя реализация возвращала `null` и проверка
+ * профиля молча выпадала из `taskSuccess`.
+ */
+export function appliedProfile(run) {
+  const fromSection = String(run?.appliedProfile || '').trim().toLowerCase();
+  if (fromSection) return fromSection;
+  return profileOf(run?.prompt);
+}
+
+const profileSourceOf = (run, profile) => run?.profileSource
+  || (run?.appliedProfile ? 'system-section' : (profile ? 'prompt' : null));
+
 const baseName = value => String(value || '').replace(/\/+$/, '').split('/').pop();
 
 /**
@@ -58,7 +76,8 @@ export function evaluateRun(scenario, run) {
   const calls = Array.isArray(run.toolCalls) ? run.toolCalls : [];
   const outputs = calls.map(call => String(call.output || ''));
   const answer = String(run.answer || '');
-  const profile = profileOf(run.prompt);
+  const profile = appliedProfile(run);
+  const profileSource = profileSourceOf(run, profile);
 
   // Где подтвердилось: первый вызов, в выводе которого есть ожидаемый путь —
   // или все ожидаемые имена сразу (для неоднозначности это и значит «вскрыта»).
@@ -70,12 +89,24 @@ export function evaluateRun(scenario, run) {
       return toolMarkers.every(marker => output.includes(squash(marker)));
     });
   }
+  // Имя, найденное вне рабочей копии, — не подтверждение: в pilot на локальной
+  // модели агент нашёл папку курса на реальном диске оператора и ответил верно
+  // по форме, но не на вопрос стенда. Первый такой
+  // вызов пропускаем и ищем подтверждение в следующих.
+  while (confirmedAt >= 0 && Array.isArray(calls[confirmedAt].external) && calls[confirmedAt].external.length > 0) {
+    const next = calls.findIndex((call, index) => index > confirmedAt
+      && toolMarkers.every(marker => squash(call.output).includes(squash(marker))));
+    confirmedAt = next;
+  }
   const foundInTools = confirmedAt >= 0;
 
   const missing = expect.found === false;
   const answerMarkers = [...toolMarkers, ...(expect.mentions || [])];
   const answerText = squash(answer);
   const foundInAnswer = answerMarkers.length > 0 && answerMarkers.every(marker => answerText.includes(squash(marker)));
+  // Все ожидаемые имена встречались в выводах — но только в чужих каталогах.
+  const foundOnlyOutside = !foundInTools && toolMarkers.length > 0
+    && calls.some(call => toolMarkers.every(marker => squash(call.output).includes(squash(marker))));
 
   const writes = calls.filter(call => WRITE_TOOLS.has(String(call.toolName || '').toLowerCase())).length;
   const unnecessaryWrites = expect.writesAllowed ? 0 : writes;
@@ -108,6 +139,7 @@ export function evaluateRun(scenario, run) {
     status: run.status || null,
     errorCode: run.errorCode || null,
     profile,
+    profileSource,
     profileExpected: expect.profile || null,
     profileAccuracy,
     toolCalls: calls.length,
@@ -116,8 +148,13 @@ export function evaluateRun(scenario, run) {
     unnecessaryWrites,
     confirmedAt: confirmedAt >= 0 ? confirmedAt + 1 : null,
     foundInTools,
+    foundOnlyOutside,
     foundInAnswer,
     mentionsOk,
+    // Сколько абсолютных путей мимо рабочей копии нашли команды. На `taskSuccess`
+    // не влияет (это характеристика стенда), но прогон с ненулевым значением
+    // не доказывает, что ответ опирается на фикстуру.
+    externalPaths: Array.isArray(run.externalTargets) ? run.externalTargets.length : 0,
     unsupportedClaims: claims,
     elapsedMs: Number.isFinite(run.elapsedMs) ? run.elapsedMs : null,
     totalTokens: Number.isFinite(run.totalTokens) ? run.totalTokens : null,
@@ -125,7 +162,7 @@ export function evaluateRun(scenario, run) {
     reasons: [
       statusOk ? null : `status=${run.status}`,
       foundOk ? null : (missing ? 'найдено то, чего нет' : 'путь не подтверждён инструментом'),
-      answered ? null : 'пустой ответ',
+      foundOnlyOutside ? 'имя найдено только вне рабочей копии' : null,      answered ? null : 'пустой ответ',
       mentionsOk ? null : 'в ответе нет ожидаемых названий',
       denied ? null : 'отсутствие не названо словами',
       writesOk ? null : `записей без запроса: ${unnecessaryWrites}`,
@@ -159,7 +196,10 @@ export function summarize(metrics) {
       unnecessaryCalls: mean(items.map(item => item.unnecessaryCalls)),
       unnecessaryWrites: items.reduce((sum, item) => sum + item.unnecessaryWrites, 0),
       unsupportedClaims: items.reduce((sum, item) => sum + item.unsupportedClaims.length, 0),
+      externalPaths: items.reduce((sum, item) => sum + (item.externalPaths || 0), 0),
       profileAccuracy: rate(items.filter(item => item.profileAccuracy !== null), item => item.profileAccuracy),
+      profileValues: items.reduce((acc, item) => { const key = item.profile || 'нет'; acc[key] = (acc[key] || 0) + 1; return acc; }, {}),
+      profileSources: items.reduce((acc, item) => { const key = item.profileSource || 'нет'; acc[key] = (acc[key] || 0) + 1; return acc; }, {}),
       elapsedMs: mean(items.map(item => item.elapsedMs).filter(Number.isFinite)),
       totalTokens: mean(items.map(item => item.totalTokens).filter(Number.isFinite)),
     };
@@ -214,7 +254,9 @@ export function toMarkdown({ summary, metrics, verdictList, meta = {} }) {
   lines.push('');
   lines.push('## Сводка');
   lines.push('');
-  lines.push('| Метрика | A (до PromptBuilder) | B (PromptBuilder) |');
+  const labelA = meta.labelA || 'A (до PromptBuilder)';
+  const labelB = meta.labelB || 'B (PromptBuilder)';
+  lines.push(`| Метрика | ${labelA} | ${labelB} |`);
   lines.push('| --- | --- | --- |');
   const a = summary.A || {};
   const b = summary.B || {};
@@ -227,7 +269,12 @@ export function toMarkdown({ summary, metrics, verdictList, meta = {} }) {
   row('Лишних вызовов', 'unnecessaryCalls');
   row('Записей без запроса', 'unnecessaryWrites');
   row('Утверждений без подтверждения', 'unsupportedClaims');
+  row('Пути вне фикстуры', 'externalPaths');
   row('Точность профиля', 'profileAccuracy');
+  // Откуда взят профиль — доказательство, что сравнивались именно hook и legacy:
+  // `system-section` бывает только у hook, `prompt` — только у legacy.
+  const sources = value => Object.entries(value || {}).map(([key, count]) => `${key} ${count}`).join(', ') || '—';
+  row('Источник профиля', 'profileSources', sources);
   row('Время, мс', 'elapsedMs');
   row('Токенов на прогон', 'totalTokens');
   lines.push('');
@@ -237,11 +284,11 @@ export function toMarkdown({ summary, metrics, verdictList, meta = {} }) {
   lines.push('');
   lines.push('## Сценарии');
   lines.push('');
-  lines.push('| Сценарий | Вариант | Успех | Профиль | Вызовов | Лишних | Записей | Без подтверждения | Причины |');
-  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |');
+  lines.push('| Сценарий | Вариант | Успех | Профиль | Вызовов | Лишних | Записей | Без подтверждения | Вне фикстуры | Причины |');
+  lines.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
   const sorted = [...metrics].sort((x, y) => String(x.scenarioId).localeCompare(String(y.scenarioId)) || String(x.variant).localeCompare(String(y.variant)));
   for (const item of sorted) {
-    lines.push(`| ${item.scenarioId} | ${item.variant} | ${item.taskSuccess ? '✅' : '❌'} | ${item.profile || '—'} | ${item.toolCalls} | ${item.unnecessaryCalls} | ${item.unnecessaryWrites} | ${item.unsupportedClaims.length} | ${item.reasons.join('; ')} |`);
+    lines.push(`| ${item.scenarioId} | ${item.variant} | ${item.taskSuccess ? '✅' : '❌'} | ${item.profile || '—'} | ${item.toolCalls} | ${item.unnecessaryCalls} | ${item.unnecessaryWrites} | ${item.unsupportedClaims.length} | ${item.externalPaths ?? 0} | ${item.reasons.join('; ')} |`);
   }
   lines.push('');
   return lines.join('\n');
