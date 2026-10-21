@@ -340,6 +340,15 @@ private fun ColumnScope.PanelFile(
             }
         }
         if (markdown) ViewModeToggle(source) { source = it }
+        // Mobile's sheet has «Копировать» in its footer; the docked panel lost it when
+        // it replaced the dialog, leaving only «Копировать путь» in the overflow menu.
+        // A text file gets the same action right here — it is the one an operator
+        // reaches for after reading, and it must not hide behind a menu.
+        (state.loaded as? Loaded.Text)?.let { text ->
+            IconButton(onClick = { platform.copyText(text.text); state.setNotice("Скопировано") }) {
+                Icon(AppIcons.Copy, "Копировать содержимое файла", Modifier.size(17.dp))
+            }
+        }
         IconButton(onClick = { state.reload() }) { Icon(AppIcons.Refresh, "Прочитать файл заново", Modifier.size(17.dp)) }
         PanelActions(target, session, platform, state)
     }

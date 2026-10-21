@@ -32,6 +32,7 @@ import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.platform.DesktopPlatformServices
+import ru.arny.taskbridge.platform.PlatformServices
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -125,6 +126,33 @@ class FilePanelTest {
         waitUntil(timeoutMillis = 5_000) { onAllNodesWithText(text, substring = substring).fetchSemanticsNodes().isNotEmpty() }
     }
 
+    /**
+     * The mobile sheet copies the whole file from its footer; the docked panel lost
+     * that action when it replaced the dialog (only «Копировать путь» stayed in the
+     * menu). Copying a path instead of the text is the wrong thing to get from a
+     * button that says «Копировать».
+     */
+    @Test
+    fun thePanelCopiesTheWholeFileNotJustItsPath() = runComposeUiTest {
+        val (chat, http) = session()
+        val tabs = FileTabs()
+        tabs.open(FileTarget.Workspace("README.md"))
+        val copied = mutableListOf<String>()
+        val platform = object : PlatformServices by DesktopPlatformServices() {
+            override fun copyText(text: String) {
+                copied += text
+            }
+        }
+        setContent { Panel(tabs, chat, platform = platform) }
+
+        awaitSeen("План панели")
+        onNodeWithContentDescription("Копировать содержимое файла").performClick()
+        waitForIdle()
+        assertEquals(listOf(readme), copied)
+        awaitSeen("Скопировано")
+        http.close()
+    }
+
     @Test
     fun thePanelTakesWidthFromTheChatInsteadOfCoveringIt() = runComposeUiTest {
         val (chat, http) = session()
@@ -152,13 +180,18 @@ class FilePanelTest {
     }
 
     @Composable
-    private fun Panel(tabs: FileTabs, session: ChatSession, width: Dp = 1200.dp) {
+    private fun Panel(
+        tabs: FileTabs,
+        session: ChatSession,
+        width: Dp = 1200.dp,
+        platform: PlatformServices = DesktopPlatformServices(),
+    ) {
         MaterialTheme {
             Box(Modifier.size(width, 800.dp)) {
                 ChatWithFilePanel(
                     tabs = tabs,
                     session = session,
-                    platform = DesktopPlatformServices(),
+                    platform = platform,
                     width = 440.dp,
                     onWidth = {},
                     onWidthCommitted = {},
