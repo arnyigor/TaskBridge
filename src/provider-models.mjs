@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -87,8 +88,12 @@ function isRemote(baseUrl) {
 export async function syncProviderModels({ agentDir, env = process.env, fetch: fetchImpl = globalThis.fetch, timeoutMs = 10000, only = null } = {}) {
   const modelsPath = path.join(agentDir, 'models.json');
   let doc;
+  // Сырой текст читается один раз: после сетевых вызовов (секунды) файл мог
+  // измениться, и сравнивать с ним надо ровно те байты, которые мы разобрали.
+  let before;
   try {
-    doc = JSON.parse(await fs.readFile(modelsPath, 'utf8'));
+    before = await fs.readFile(modelsPath, 'utf8');
+    doc = JSON.parse(before);
   } catch {
     return { changed: false, providers: [], error: 'models.json is missing or unreadable' };
   }
@@ -122,11 +127,25 @@ export async function syncProviderModels({ agentDir, env = process.env, fetch: f
     }
   }
   if (changed) {
+    // CAS: пока шли сетевые вызовы, файл мог переписать редактор провайдеров.
+    // Чужая правка не перезаписывается — возвращается конфликт (пункт 2.4 плана).
+    const now = await fs.readFile(modelsPath, 'utf8').catch(() => null);
+    if (now !== before) return { changed: false, conflict: true, providers: summary };
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    await fs.copyFile(modelsPath, `${modelsPath}.bak-${stamp}`);
-    const tmp = `${modelsPath}.tmp`;
-    await fs.writeFile(tmp, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
-    await fs.rename(tmp, modelsPath);
+    const temp = `${modelsPath}.tb-${process.pid}-${crypto.randomBytes(5).toString('hex')}.tmp`;
+    // Бэкап — исходные байты, а не пересериализованный JSON: COPYFILE_EXCL не даёт
+    // затереть чужой бэкап с тем же именем.
+    await fs.copyFile(modelsPath, `${modelsPath}.bak-${stamp}`, fs.constants.COPYFILE_EXCL);
+    try {
+      await fs.writeFile(temp, `${JSON.stringify(doc, null, 2)}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      // Последняя проверка перед rename: между первым сравнением и этим моментом
+      // файл тоже мог измениться.
+      const latest = await fs.readFile(modelsPath, 'utf8').catch(() => null);
+      if (latest !== before) return { changed: false, conflict: true, providers: summary };
+      await fs.rename(temp, modelsPath);
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
   return { changed, providers: summary };
 }

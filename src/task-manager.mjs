@@ -3385,6 +3385,9 @@ export class TaskManager extends EventEmitter {
         only: this.config.modelSync?.providers ?? [],
       }).catch(error => ({ changed: false, providers: [], error: String(error.message || error) }));
       if (sync.error) console.log(`[TaskBridge] provider model sync skipped: ${sync.error}`);
+      // Конкурентная запись: редактор успел сохранить своё, наш проход не применён.
+      // Это не ошибка синхронизации — повторный refresh добавит недостающее.
+      else if (sync.conflict) console.log('[TaskBridge] provider model sync: models.json изменён во время запроса, запись отменена');
       else if (sync.changed) console.log(`[TaskBridge] provider model sync: ${sync.providers.filter(p => p.added).map(p => `${p.provider} +${p.added}`).join(', ')}`);
     }
     const catalog = await this.modelCatalog.list({ refresh });

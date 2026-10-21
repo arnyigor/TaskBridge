@@ -185,3 +185,26 @@ test('sync without models.json reports the skip instead of throwing', async () =
   assert.equal(result.changed, false);
   assert.equal(result.error, 'models.json is missing or unreadable');
 });
+
+// Пункт 2.4 плана: синхронизатор не перезаписывает чужую правку. Пока идёт
+// сетевой вызов, редактор провайдеров пишет свои изменения — sync обязан заметить
+// это по байтам и вернуть конфликт, а не сохранить свою версию поверх.
+test('sync не затирает чужую правку, сделанную во время запроса', async () => {
+  const dir = await writeAgentDir([{ id: 'openai/gpt-5.6-luna' }]);
+  const file = path.join(dir, 'models.json');
+  const edited = JSON.parse(await fs.readFile(file, 'utf8'));
+  edited.providers.wormsoft.models.push({ id: 'ручная-модель' });
+  const fetchRace = async () => {
+    // Ровно тот момент, когда пользователь нажал «Сохранить» в редакторе.
+    await fs.writeFile(file, JSON.stringify(edited), 'utf8');
+    return { ok: true, json: async () => wormsoftPayload };
+  };
+  const result = await syncProviderModels({ agentDir: dir, env: { WORMSOFT_API_KEY: 'k' }, fetch: fetchRace });
+  assert.equal(result.changed, false);
+  assert.equal(result.conflict, true);
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(doc.providers.wormsoft.models.map(m => m.id), ['openai/gpt-5.6-luna', 'ручная-модель']);
+  // Конфликт не оставляет за собой бэкапов и временных файлов.
+  const leftovers = (await fs.readdir(dir)).filter(name => name.startsWith('models.json.bak-') || name.endsWith('.tmp'));
+  assert.deepEqual(leftovers, []);
+});
