@@ -102,6 +102,11 @@ test('доказательство не подменяет ни строку о�
   assert.equal(failed.error, 'Fixture model error', 'ошибка провайдера остаётся как есть');
   assert.equal(failed.errorCode, 'MODEL_ERROR');
 
+  // Номер хода обязателен: по нему клиент отличает позднее событие прошлого
+  // хода от падения нового (время и seq там уже врут — см. tests/chat.test.mjs).
+  const failure = await failureEvent(api, created.id);
+  assert.equal(failure.data.turn, 1);
+
   const json = resultJson(fixture.root, created.id);
   assert.equal(json.status, 'FAILED');
   const md = fs.readFileSync(path.join(fixture.root, 'data', 'tasks', created.id, 'artifacts', 'result.md'), 'utf8');
@@ -109,6 +114,22 @@ test('доказательство не подменяет ни строку о�
   // Доказательство живёт в своём разделе, а не в тексте ответа модели.
   const answer = md.split('## Tool evidence')[0];
   assert.doesNotMatch(answer, /hello from example\.txt/, 'вывод инструмента не подмешивается в ответ модели');
+});
+
+test('USER_MESSAGE называет свой ход, чтобы позднюю ошибку можно было опознать', { timeout: 40000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  assert.equal((await terminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+  await api(`/api/tasks/${created.id}/message`, { text: 'второе' });
+  assert.equal((await terminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+
+  const events = await api(`/api/tasks/${created.id}/events?limit=200`);
+  const list = Array.isArray(events) ? events : (events.events || []);
+  const userTurns = list.filter(event => event.type === 'USER_MESSAGE').map(event => event.data?.turn);
+  assert.deepEqual(userTurns, [2], 'у follow-up свой номер хода, а не номер первого запроса');
 });
 
 test('успешный ход без инструментов не выдумывает доказательства', { timeout: 40000 }, async t => {

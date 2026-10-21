@@ -87,6 +87,14 @@ export function normalizeToolEvidence(value) {
   return list.length ? list : null;
 }
 
+// The server's turn number of an answer, or null when it is not known (the
+// exchange synthesized from task.prompt, an old event without `turn`, a variant).
+// Numbered answers let a late terminal event find its own turn.
+function turnNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
 function isEmptyAssistantPlaceholder(turn) {
   return turn?.role === 'assistant' && !turn.final && !turn.text && !turn.thinking && !turn.tools?.length && !turn.files?.length;
 }
@@ -160,7 +168,7 @@ export class ChatState {
     return turns;
   }
 
-  addUser(text, files, id, at = null, preservePrevious = false) {
+  addUser(text, files, id, at = null, preservePrevious = false, turn = null) {
     // If the previous turn was not marked final, close it cleanly:
     if (!preservePrevious && this.current && this.current.role === 'assistant' && !this.current.final) {
       this.current.active = false;
@@ -181,12 +189,12 @@ export class ChatState {
     // (`at`) and end (`endedAt`) without touching it.
     this.turns.push({ id: `user-${id}`, role: 'user', text: split[0], files, at });
     const key = id === 'initial' ? 0 : Number(id);
-    this.current = { id: `assistant-${id}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: key, at: null, endedAt: null, userAt: at };
+    this.current = { id: `assistant-${id}`, role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, turn: turnNumber(turn), variantKey: key, at: null, endedAt: null, userAt: at };
     this.turns.push(this.current);
     this.variants.set(key, { ids: [`assistant-${id}`], selected: `assistant-${id}` });
   }
 
-  finish(status, error = null, at = null, evidence = null) {
+  finish(status, error = null, at = null, evidence = null, turn = null) {
     // Every terminal path funnels through here — a TASK_FAILED event carries the
     // server's stored message, which may be a provider JSON body (older events
     // kept it verbatim). Flatten once so no caller can put raw JSON on screen.
@@ -201,9 +209,21 @@ export class ChatState {
 
     // A late cancel or settlement that predates the CURRENT user prompt belongs to
     // the PREVIOUS assistant turn, never to the fresh active answer!
+    //
+    // Two discriminators, because a timestamp alone is not enough: a failure
+    // written while the operator was already sending the next message carries a
+    // LATER `at` than that message (and a later seq too — the stream is ordered),
+    // and steering/regenerate can put two events in the same millisecond. The
+    // server's turn number is the exact fact, so it decides whenever both sides
+    // carry it; time stays as the fallback for old events and old servers.
     const currentStart = this.current?.at || this.current?.userAt;
-    if (at && currentStart && Date.parse(at) < Date.parse(currentStart)) {
-      const prev = [...this.turns].reverse().find(t => t.role === 'assistant' && t !== this.current);
+    const currentTurn = turnNumber(this.current?.turn);
+    const failedTurn = turnNumber(turn);
+    const lateByTurn = failedTurn !== null && currentTurn !== null && failedTurn < currentTurn;
+    const lateByTime = Boolean(at && currentStart) && Date.parse(at) < Date.parse(currentStart);
+    if (lateByTurn || lateByTime) {
+      const prev = (failedTurn !== null ? [...this.turns].reverse().find(t => t.role === 'assistant' && turnNumber(t.turn) === failedTurn) : null)
+        || [...this.turns].reverse().find(t => t.role === 'assistant' && t !== this.current);
       if (prev) {
         prev.status = (error || prev.error || cutOff(prev)) ? 'FAILED' : status;
         if (error) prev.error = errorFor(prev);
@@ -427,7 +447,7 @@ export class ChatState {
           this.current.active = true;
         }
       } else {
-        this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq, event.at || null, preservePrevious);
+        this.addUser(event.data?.text ?? event.message, event.data?.files || [], event.seq, event.at || null, preservePrevious, event.data?.turn ?? null);
         this.current.active = true;
       }
     } else if (event.type === 'TURN_TRUNCATED') {
@@ -472,7 +492,7 @@ export class ChatState {
         this.current.status = event.data.status;
       } else this.finish(event.data?.status || 'DONE');
     } else if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(event.type)) {
-      this.finish(event.type.slice(5), event.type === 'TASK_FAILED' ? event.message : null, event.at, event.type === 'TASK_FAILED' ? event.data?.toolEvidence : null);
+      this.finish(event.type.slice(5), event.type === 'TASK_FAILED' ? event.message : null, event.at, event.type === 'TASK_FAILED' ? event.data?.toolEvidence : null, event.type === 'TASK_FAILED' ? event.data?.turn ?? null : null);
     }
     if (!frame) return true;
     if (frame.type === 'agent_start') {

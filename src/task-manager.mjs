@@ -4342,7 +4342,7 @@ export class TaskManager extends EventEmitter {
     const turn = run.turn ?? null;
     // A newer turn already owns the session: this turn must not touch its state.
     if (turn != null && task._turn !== turn) return;
-    if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }));
+    if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }), turn);
     // The turn completed: the in-flight marker is spent (see #deliverMessage).
     if (task.inFlightPrompt) { task.inFlightPrompt = null; await this.store.save(this.#publicTask(task)).catch(() => {}); }
     await this.#setStatus(task, 'VERIFYING', 'Collecting diff and changed files');
@@ -5745,6 +5745,9 @@ export class TaskManager extends EventEmitter {
       if (announce) {
         await this.#event(task, 'USER_MESSAGE', userText, {
           text: userText, mode: effectiveMode, files: attached,
+          // The turn this message opens, so a terminal event of the PREVIOUS turn
+          // that arrives afterwards can be attributed by number, not by time.
+          turn: turn ?? task._turn ?? null,
           ...(origin || {}), ...(deliveredPendingId ? { pendingId: deliveredPendingId } : {}),
         });
       }
@@ -6025,7 +6028,7 @@ export class TaskManager extends EventEmitter {
     await this.#event(task, 'PROMPT_QUEUED', 'Сообщение осталось в очереди: Pi завершился до его обработки.', { pendingId }, false);
   }
 
-  async #fail(task, error) {
+  async #fail(task, error, turn = task._turn ?? null) {
     if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
     // A message Pi accepted into its own queue (a steer) but died before
@@ -6062,6 +6065,10 @@ export class TaskManager extends EventEmitter {
     await this.#turnStateEvent(task, 'FAILED');
     await this.#event(task, 'TASK_FAILED', task.error, {
       errorCode: task.errorCode,
+      // Which turn really failed. A failure written while the operator was
+      // already sending the next message gets a LATER seq and a later `at` than
+      // that message, so neither can attribute it; the turn number can.
+      turn: Number.isFinite(turn) ? turn : null,
       // «Ответ не завершён» alone hid the fact that the answer had already been
       // found by a tool (§7.2 of the 1.3 plan). The rows are in the chat; this
       // field lets a client summarise them without reparsing tool output.

@@ -3900,3 +3900,41 @@ test('DOM: без доказательств блок не появляется,
   assert.equal(block.querySelectorAll('script').length, 0);
   assert.match(block.textContent, /<script>alert\(1\)<\/script>/, 'вывод виден только текстом');
 });
+
+test('позднее событие с более поздним временем и seq остаётся у прошлого хода — по номеру хода', () => {
+  // Оператор отправил второе сообщение, пока сервер завершал первый ход. У
+  // TASK_FAILED и `at`, и seq ПОЗЖЕ второго сообщения (поток упорядочен), поэтому
+  // ни время, ни seq не могут сказать, к какому ходу он относится. Может — номер.
+  const state = new ChatState({ id: 'a', prompt: 'Первый', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 10, type: 'USER_MESSAGE', data: { text: 'Первый', files: [], turn: 1 }, at: '2026-10-21T10:00:00.000Z' });
+  const first = state.current;
+  state.apply({ taskId: 'a', seq: 11, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } }, at: '2026-10-21T10:00:01.000Z' });
+  state.apply({ taskId: 'a', seq: 20, type: 'USER_MESSAGE', data: { text: 'Второй', files: [], turn: 2 }, at: '2026-10-21T10:00:05.000Z' });
+  const second = state.current;
+  assert.notEqual(first, second);
+  assert.equal(first.turn, 1);
+  assert.equal(second.turn, 2);
+
+  // Ход 1 упал, но событие записано уже после старта хода 2 (seq 21 > 20).
+  const late = { taskId: 'a', seq: 21, at: '2026-10-21T10:00:06.000Z', type: 'TASK_FAILED',
+    message: 'Модель завершилась с ошибкой.', data: { errorCode: 'MODEL_ERROR', turn: 1, toolEvidence: evidence(2) } };
+  state.apply(late);
+
+  assert.equal(first.status, 'FAILED');
+  assert.equal(first.toolEvidence.length, 2, 'доказательства у своего хода, несмотря на время');
+  assert.equal(second.toolEvidence, undefined);
+  assert.notEqual(second.status, 'FAILED');
+});
+
+test('совпадение времени не мешает: событие своего хода остаётся своим', () => {
+  // Steering укладывается в ту же миллисекунду, что и старт ответа.
+  const state = new ChatState({ id: 'a', prompt: 'Первый', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 10, type: 'USER_MESSAGE', data: { text: 'Первый', files: [], turn: 1 }, at: '2026-10-21T10:00:00.000Z' });
+  state.apply({ taskId: 'a', seq: 20, type: 'USER_MESSAGE', data: { text: 'Второй', files: [], turn: 2 }, at: '2026-10-21T10:00:05.000Z' });
+  const second = state.current;
+  state.apply({ taskId: 'a', seq: 21, at: '2026-10-21T10:00:05.000Z', type: 'TASK_FAILED',
+    message: 'Модель завершилась с ошибкой.', data: { errorCode: 'MODEL_ERROR', turn: 2, toolEvidence: evidence(1) } });
+
+  assert.equal(second.status, 'FAILED', 'свой ход не должен считаться «поздним»');
+  assert.deepEqual(second.toolEvidence.map(x => x.excerpt), ['entry-0']);
+});
