@@ -48,6 +48,7 @@ const INVESTIGATE = new RegExp([
 // stays implement.
 const LOOKUP = new RegExp([
   'посмотри', 'посмотреть', 'найди', 'найти', 'покажи', 'есть ли', 'у меня есть',
+  'существует ли', 'существует ли файл',
   'сколько', 'где находится', 'где лежит', 'где взять',
   '\\bfind\\b', '\\blocate\\b', '\\blook for\\b', '\\bshow\\b', '\\blist\\b',
   '\\bwhere\\b', '\\bhow much\\b', '\\bhow many\\b', '\\bdoes .* exist\\b',

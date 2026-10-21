@@ -48,6 +48,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function api(pathname, options = {}) {
   const response = await fetch(`${base}${pathname}`, {
     ...options,
+    // fetch не сериализует объект: без JSON.stringify в тело уходит
+    // "[object Object]", и сервер справедливо отвечает 500 на невалидный JSON.
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
     headers: options.body ? { 'content-type': 'application/json' } : undefined,
   });
   const text = await response.text();
@@ -161,9 +164,24 @@ report.checks.allSucceeded = hookTurns.length === report.turns.length;
 report.checks.terminalAfterFacts = report.turns.every(turn => turn.terminalAt !== null);
 
 // --- 3. Старые сессии ------------------------------------------------------
-const tasks = await api('/api/tasks');
-const old = [...tasks].filter(item => item.id !== created.id && item.createdAt)
-  .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).slice(0, 3);
+// Список сессий читается из SQLite, а не из GET /api/tasks: этот эндпоинт на
+// рабочем сервере изредка отвечает 500 («"[object Object]" is not valid JSON»,
+// 2026-10-21) — приёмка не должна зависеть от чужого бага. Сам ответ списка
+// всё равно фиксируется в отчёте, чтобы сигнал не потерялся.
+try {
+  const probe = await fetch(`${base}/api/tasks`);
+  report.checks.listEndpointStatus = probe.status;
+} catch (error) {
+  report.checks.listEndpointStatus = `error: ${error.message}`;
+}
+const { DatabaseSync } = await import('node:sqlite');
+const db = new DatabaseSync(path.join(dataRoot, 'taskbridge.db'), { readOnly: true });
+const rows = db.prepare('SELECT id, created_at FROM tasks ORDER BY created_at ASC').all();
+db.close();
+const old = rows
+  .filter(row => row.id !== created.id)
+  .slice(0, 3)
+  .map(row => ({ id: row.id, createdAt: row.created_at }));
 report.oldSessions = [];
 for (const item of old) {
   const entry = { id: item.id, createdAt: item.createdAt, status: item.status };
@@ -173,8 +191,18 @@ for (const item of old) {
     const users = (Array.isArray(events) ? events : [])
       .filter(event => event.type === 'USER_MESSAGE')
       .map(event => String(event.data?.text ?? event.message ?? ''));
-    entry.firstUserMessageHasLegacyBlock = users.some(text => /Task instructions \(\w+\)/.test(text));
     entry.userMessages = users.length;
+    // Служебный блок первого хода лежит не в USER_MESSAGE-событии (у первого
+    // запроса его нет вовсе), а в первом сообщении транскрипта Pi.
+    const sessionDir = path.join(dataRoot, 'pi-sessions', item.id);
+    const files = (await fs.readdir(sessionDir).catch(() => [])).filter(name => name.endsWith('.jsonl')).sort();
+    const entries = files.length ? await readJsonl(path.join(sessionDir, files.at(-1))) : [];
+    const firstUser = entries.find(entry => entry.type === 'message' && entry.message?.role === 'user')?.message;
+    const firstText = !firstUser ? '' : (Array.isArray(firstUser.content)
+      ? firstUser.content.filter(part => part.type === 'text').map(part => part.text).join('')
+      : String(firstUser.content || ''));
+    entry.firstUserMessageHasLegacyBlock = /Task instructions \(\w+\)|Work only inside the current working directory/.test(firstText);
+    entry.firstUserChars = firstText.length;
   } catch (error) {
     entry.eventsReadable = false;
     entry.error = error.message;
