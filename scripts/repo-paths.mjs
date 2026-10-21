@@ -24,6 +24,8 @@ export const ALLOWED_ROOTS = [
   'cloud',
   'deliverables',
   'docs',
+  // pi-hooks PoC (TASKBRIDGE-CORE-01): изолированный эксперимент, не часть сборки.
+  'experiments',
   'pi-extension',
   'scripts',
   'src',
