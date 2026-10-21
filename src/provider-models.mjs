@@ -85,7 +85,7 @@ function isRemote(baseUrl) {
  * only     — провайдеры, которым синхронизация разрешена
  *            (config.modelSync.providers; пусто — никого не трогать).
  */
-export async function syncProviderModels({ agentDir, env = process.env, fetch: fetchImpl = globalThis.fetch, timeoutMs = 10000, only = null } = {}) {
+export async function syncProviderModels({ agentDir, env = process.env, fetch: fetchImpl = globalThis.fetch, timeoutMs = 10000, only = null, budgetMs = 0, now = () => Date.now() } = {}) {
   const modelsPath = path.join(agentDir, 'models.json');
   let doc;
   // Сырой текст читается один раз: после сетевых вызовов (секунды) файл мог
@@ -108,11 +108,22 @@ export async function syncProviderModels({ agentDir, env = process.env, fetch: f
 
   const summary = [];
   let changed = false;
+  // Общий deadline на весь проход (пункт 2.5 плана): медленный провайдер не должен
+  // задерживать остальных и ответ /api/models. Бюджет 0 — без общего ограничения.
+  const deadlineAt = budgetMs > 0 ? now() + budgetMs : Infinity;
+  let expired = false;
   for (const [name, entry] of targets) {
+    const remaining = deadlineAt === Infinity ? timeoutMs : Math.min(timeoutMs, deadlineAt - now());
+    if (remaining <= 0) {
+      expired = true;
+      // Не молчим: провайдер не проверен именно из-за бюджета, а не потому, что здоров.
+      summary.push({ provider: name, skipped: 'deadline' });
+      continue;
+    }
     try {
       const response = await fetchImpl(remoteModelsUrl(entry.baseUrl), {
         headers: { Authorization: `Bearer ${apiKey(entry.apiKey, env)}` },
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: AbortSignal.timeout(remaining),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const remote = parseProviderModels(await response.json());
@@ -129,8 +140,8 @@ export async function syncProviderModels({ agentDir, env = process.env, fetch: f
   if (changed) {
     // CAS: пока шли сетевые вызовы, файл мог переписать редактор провайдеров.
     // Чужая правка не перезаписывается — возвращается конфликт (пункт 2.4 плана).
-    const now = await fs.readFile(modelsPath, 'utf8').catch(() => null);
-    if (now !== before) return { changed: false, conflict: true, providers: summary };
+    const now_ = await fs.readFile(modelsPath, 'utf8').catch(() => null);
+    if (now_ !== before) return { changed: false, conflict: true, providers: summary, ...(expired ? { expired: true } : {}) };
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
     const temp = `${modelsPath}.tb-${process.pid}-${crypto.randomBytes(5).toString('hex')}.tmp`;
     // Бэкап — исходные байты, а не пересериализованный JSON: COPYFILE_EXCL не даёт
@@ -141,11 +152,12 @@ export async function syncProviderModels({ agentDir, env = process.env, fetch: f
       // Последняя проверка перед rename: между первым сравнением и этим моментом
       // файл тоже мог измениться.
       const latest = await fs.readFile(modelsPath, 'utf8').catch(() => null);
-      if (latest !== before) return { changed: false, conflict: true, providers: summary };
+      if (latest !== before) return { changed: false, conflict: true, providers: summary, ...(expired ? { expired: true } : {}) };
       await fs.rename(temp, modelsPath);
     } finally {
       await fs.rm(temp, { force: true }).catch(() => {});
     }
   }
+  if (expired) return { changed, providers: summary, expired: true };
   return { changed, providers: summary };
 }

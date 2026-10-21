@@ -2035,6 +2035,8 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .modelFavToggle { padding: 4px 9px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 0.71875rem; }
 .modelFavToggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 .modelCount { margin-left: auto; }
+/* Строка «откуда список» (пункт 2.5 плана): пустая не занимает места. */
+.modelCatalogState:not(:empty) { margin: 2px 0 8px; }
 .modelFav { flex: 0 0 auto; padding: 4px 7px; border-radius: 8px; border: 1px solid var(--border-strong); background: transparent; color: var(--muted); cursor: pointer; line-height: 1; }
 .modelFav[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .modelFav:focus-visible, .modelProbe:focus-visible, .modelFavToggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

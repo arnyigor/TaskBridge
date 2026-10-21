@@ -1,6 +1,6 @@
 import { renderProviderStatus as renderProviderStatusLine } from './provider-status-view.mjs';
 import { availableCapabilities, describeCount, describeEmpty, hasActiveFilters, isFavorite, loadFavorites, modelKey, providersOf, saveFavorites, selectModels, toggleFavorite } from './model-filter.mjs';
-import { renderCapabilityChips, renderEmptyState, renderGroupHeader, renderModelRow, renderProviderOptions, modelGroupLabel } from './model-picker-view.mjs';
+import { catalogStateText, renderCapabilityChips, renderEmptyState, renderGroupHeader, renderModelRow, renderProviderOptions, modelGroupLabel } from './model-picker-view.mjs';
 import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
@@ -5591,15 +5591,32 @@ async function openModelPicker(refresh = false) {
   $('modelPickerNote').textContent = rerunTurnId
     ? 'Выберите модель, которой запросить этот ответ заново. Выбор применяется к сессии: Pi не умеет менять модель на один запрос.'
     : 'Список берётся напрямую у Pi — те же provider\'ы, ключи и модели, что видны командой /model. Выбор применяется к текущей сессии или к следующей задаче.';
-  $('modelList').textContent = 'Загрузка…';
-  $('modelFilters').classList.add('hidden');
+  // Кэш показывается сразу: медленный провайдер или Pi не должен держать пустой
+  // экран (пункт 2.5 плана). Обновление идёт следом и заменяет список, когда придёт.
+  const cached = Boolean(modelCatalog?.models?.length);
+  if (cached) {
+    renderModelFilters();
+    renderThinkingOptions();
+    renderModelList();
+    $('modelCatalogState').textContent = refresh ? 'Список из кэша, обновляется…' : catalogStateText({ freshness: modelCatalog?.freshness, sync: modelCatalog?.sync });
+  } else {
+    $('modelList').textContent = 'Загрузка…';
+    $('modelFilters').classList.add('hidden');
+    $('modelCatalogState').textContent = '';
+  }
   try {
     modelCatalog = await api(`/api/models${refresh ? '?refresh=1' : ''}`);
     renderModelFilters();
     renderThinkingOptions();
     renderModelList();
+    $('modelCatalogState').textContent = catalogStateText({ freshness: modelCatalog.freshness, sync: modelCatalog.sync });
   } catch (error) {
-    $('modelList').textContent = `Не удалось получить список моделей: ${error.message}`;
+    if (cached) {
+      // Прежний список остаётся на экране: пустой список хуже устаревшего.
+      $('modelCatalogState').textContent = catalogStateText({ failed: error.message });
+    } else {
+      $('modelList').textContent = `Не удалось получить список моделей: ${error.message}`;
+    }
   }
 }
 

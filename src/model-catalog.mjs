@@ -105,6 +105,12 @@ export class ModelCatalog {
     return null;
   }
 
+  // Последний известный каталог без учёта TTL. Нужен, когда обновление не удалось:
+  // показать прежний список честнее, чем пустой экран (пункт 2.5 плана).
+  lastKnown() {
+    return this.cache ? this.cache.value : null;
+  }
+
   async list({ refresh = false } = {}) {
     if (!refresh) {
       const cached = this.peek();

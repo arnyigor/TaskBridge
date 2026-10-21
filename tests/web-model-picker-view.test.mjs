@@ -4,15 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
-import {
-  modelGroupLabel,
-  modelMetaText,
-  renderCapabilityChips,
-  renderEmptyState,
-  renderGroupHeader,
-  renderModelRow,
-  renderProviderOptions,
-} from '../web/model-picker-view.mjs';
+import { catalogStateText, modelGroupLabel, modelMetaText, renderCapabilityChips, renderEmptyState, renderGroupHeader, renderModelRow, renderProviderOptions } from '../web/model-picker-view.mjs';
 
 const dom = () => parseHTML('<!doctype html><html><body><div id="list"></div><div id="facets"></div><select id="providers"></select></body></html>').document;
 
@@ -122,4 +114,21 @@ test('фильтр провайдеров помечает выбранную о
   // Провайдер исчез из каталога — падаем на «все», а не показываем пустой фильтр.
   renderProviderOptions({ document, select, providers, selected: 'удалённый' });
   assert.equal(select.value, '');
+});
+
+// Пункт 2.5 плана: клиент говорит, откуда список, и не выдаёт кэш за свежий.
+test('строка состояния каталога различает кэш, частичное обновление и ошибку', async () => {
+  assert.equal(catalogStateText({ freshness: 'refreshed' }), '', 'свежий каталог молчит');
+  assert.equal(catalogStateText({ failed: 'boom' }), 'Не удалось обновить список — показан прежний.');
+  assert.equal(catalogStateText({ freshness: 'cache' }), 'Список из кэша: Pi сейчас не ответил.');
+  const partial = catalogStateText({
+    freshness: 'partial',
+    sync: { providers: [{ provider: 'wormsoft' }, { provider: 'routerai', error: 'HTTP 500' }, { provider: 'zai', skipped: 'deadline' }] },
+  });
+  assert.match(partial, /частично/);
+  assert.match(partial, /routerai/);
+  assert.match(partial, /zai/);
+  assert.equal(partial.includes('wormsoft'), false, 'ответивший провайдер не упоминается');
+  // Конфликт ревизии: список обновился, но чужую правку models.json не затёрли.
+  assert.match(catalogStateText({ freshness: 'refreshed', sync: { conflict: true } }), /models\.json менялся/);
 });

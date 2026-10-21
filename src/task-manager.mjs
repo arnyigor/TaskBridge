@@ -3379,18 +3379,38 @@ export class TaskManager extends EventEmitter {
   // models.json are hand-written, and models the provider added later only
   // reach Pi after the file gains them. Only-add merge, see provider-models.mjs.
   async listModels({ refresh = false } = {}) {
+    let sync = null;
+    // «Откуда список» — отдельный факт, а не догадка клиента (пункт 2.5 плана).
+    let freshness = 'cache';
     if (refresh) {
-      const sync = await syncProviderModels({
+      freshness = 'refreshed';
+      sync = await syncProviderModels({
         agentDir: piAgentDir(process.env),
         only: this.config.modelSync?.providers ?? [],
+        // Общий бюджет прохода, а не только таймаут одного провайдера.
+        budgetMs: Number(this.config.modelSync?.budgetMs ?? 12_000),
       }).catch(error => ({ changed: false, providers: [], error: String(error.message || error) }));
       if (sync.error) console.log(`[TaskBridge] provider model sync skipped: ${sync.error}`);
       // Конкурентная запись: редактор успел сохранить своё, наш проход не применён.
       // Это не ошибка синхронизации — повторный refresh добавит недостающее.
       else if (sync.conflict) console.log('[TaskBridge] provider model sync: models.json изменён во время запроса, запись отменена');
       else if (sync.changed) console.log(`[TaskBridge] provider model sync: ${sync.providers.filter(p => p.added).map(p => `${p.provider} +${p.added}`).join(', ')}`);
+      // Провайдер, который не ответил или не был проверен из-за бюджета, — это
+      // частичное обновление, и клиент должен сказать об этом, а не выдавать каталог
+      // за свежий.
+      if (sync.expired || (sync.providers || []).some(entry => entry.error || entry.skipped)) freshness = 'partial';
     }
-    const catalog = await this.modelCatalog.list({ refresh });
+    let catalog;
+    try {
+      catalog = await this.modelCatalog.list({ refresh });
+    } catch (error) {
+      const known = this.modelCatalog.lastKnown?.();
+      if (!known) throw error;
+      // Pi не ответил: показываем прежний каталог и говорим, что он прежний.
+      console.log(`[TaskBridge] model catalogue refresh failed, showing the last known list: ${error.message}`);
+      catalog = known;
+      freshness = 'cache';
+    }
     await this.modelLatency.load();
     // `local` is a grouping fact for the pickers: llama.cpp presets and the
     // configured external servers (Strata) carry different Pi provider ids but
@@ -3399,7 +3419,13 @@ export class TaskManager extends EventEmitter {
     const local = localProviderIds(this.config.localRuntime || {}, this.localServers.servers);
     const models = (catalog.models || []).map(model =>
       model && local.has(model.provider) ? { ...model, local: true } : model);
-    return { ...catalog, models, latency: this.modelLatency.stats() };
+    return {
+      ...catalog,
+      models,
+      latency: this.modelLatency.stats(),
+      freshness,
+      ...(sync ? { sync: { changed: Boolean(sync.changed), conflict: Boolean(sync.conflict), expired: Boolean(sync.expired), providers: sync.providers || [] } } : {}),
+    };
   }
 
   // ---- local llama.cpp router (router mode) ----

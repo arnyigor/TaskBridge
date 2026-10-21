@@ -263,6 +263,8 @@
     <div class="authCard wide">
       <h2 id="modelPickerTitle">Модель Pi</h2>
       <p class="muted small" id="modelPickerNote">Список берётся напрямую у Pi — те же provider'ы, ключи и модели, что видны командой <code>/model</code>. Выбор применяется к текущей сессии или к следующей задаче.</p>
+      <!-- Откуда список: кэш, обновление, частичный результат или ошибка (пункт 2.5 плана). -->
+      <p class="muted small modelCatalogState" id="modelCatalogState" role="status" aria-live="polite"></p>
       <input id="modelSearch" type="search" placeholder="Поиск по названию, ID или провайдеру…" aria-label="Поиск модели" />
       <!-- Фильтры каталога: панель наполняется из /api/models; чипы возможностей
            появляются только для тех полей, о которых API дал достоверные данные. -->

@@ -208,3 +208,27 @@ test('sync не затирает чужую правку, сделанную в�
   const leftovers = (await fs.readdir(dir)).filter(name => name.startsWith('models.json.bak-') || name.endsWith('.tmp'));
   assert.deepEqual(leftovers, []);
 });
+
+// Пункт 2.5 плана: общий deadline на весь проход, а не только таймаут одного
+// провайдера. Медленный или зависший провайдер не должен задерживать ответ.
+test('общий бюджет прохода: провайдеры за его границей не опрашиваются', async () => {
+  const dir = await writeAgentDir([]);
+  const doc = JSON.parse(await fs.readFile(path.join(dir, 'models.json'), 'utf8'));
+  doc.providers.routerai = { baseUrl: 'https://routerai.ru/api/v1', api: 'openai-completions', apiKey: '$ROUTERAI_API_KEY', models: [] };
+  await fs.writeFile(path.join(dir, 'models.json'), JSON.stringify(doc), 'utf8');
+  const calls = [];
+  let reads = 0;
+  const result = await syncProviderModels({
+    agentDir: dir,
+    env: { WORMSOFT_API_KEY: 'k', ROUTERAI_API_KEY: 'r' },
+    budgetMs: 1000,
+    // Первые два чтения часов — старт бюджета и первый провайдер; дальше время
+    // ушло далеко вперёд, то есть бюджет уже исчерпан.
+    now: () => (reads++ < 2 ? 0 : 5000),
+    fetch: async (url) => { calls.push(String(url)); return { ok: true, json: async () => wormsoftPayload }; },
+  });
+  assert.equal(result.expired, true);
+  assert.equal(calls.length, 1, 'за границей бюджета запросов нет');
+  const skipped = result.providers.filter(entry => entry.skipped === 'deadline').map(entry => entry.provider);
+  assert.deepEqual(skipped, ['routerai']);
+});

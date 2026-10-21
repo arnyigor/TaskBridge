@@ -95,3 +95,56 @@ test('the local models endpoint probes Pi once, the polled info call does not', 
   assert.equal((await manager.localStatus({ probeCatalog: true })).provider, 'llamacpp');
   assert.equal(probes, 1);
 });
+
+// Пункт 2.5 плана: если Pi не ответил, показываем последний известный каталог и
+// честно говорим, что он из кэша; если каталога нет — ошибка, а не пустой список.
+test('listModels: сбой обновления отдаёт прежний каталог и freshness=cache', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-freshness-'));
+  const store = new TaskStore(path.join(root, 'data'));
+  t.after(async () => { store.close(); await fs.rm(root, { recursive: true, force: true }); });
+  const manager = new TaskManager({ projects: [] }, path.join(root, 'data'), store);
+  const known = { models: [{ provider: 'deepseek', id: 'deepseek-flash' }], thinkingLevels: [], defaultModel: null, defaultThinkingLevel: null };
+
+  manager.modelCatalog.list = async ({ refresh }) => { if (refresh) throw new Error('Pi молчит'); return known; };
+  manager.modelCatalog.lastKnown = () => known;
+
+  const result = await manager.listModels({ refresh: true });
+  assert.equal(result.freshness, 'cache');
+  assert.deepEqual(result.models.map(model => model.id), ['deepseek-flash']);
+
+  // Каталога ещё не было — повод вернуть ошибку, а не притвориться пустым списком.
+  manager.modelCatalog.lastKnown = () => null;
+  await assert.rejects(manager.listModels({ refresh: true }), /Pi молчит/);
+
+  // Успешное обновление помечается как свежее.
+  manager.modelCatalog.list = async () => known;
+  assert.equal((await manager.listModels({ refresh: true })).freshness, 'refreshed');
+  assert.equal((await manager.listModels()).freshness, 'cache', 'без refresh каталог не обновлялся');
+});
+
+// Пункт 2.5 плана: провайдер, который не ответил, делает обновление частичным,
+// и клиент может об этом сказать. Имя в зоне .invalid не разрешается — быстро и без сети.
+test('listModels: неответивший провайдер делает обновление частичным', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-partial-'));
+  const store = new TaskStore(path.join(root, 'data'));
+  const previous = process.env.PI_AGENT_DIR;
+  process.env.PI_AGENT_DIR = path.join(root, 'agent');
+  t.after(async () => {
+    if (previous === undefined) delete process.env.PI_AGENT_DIR;
+    else process.env.PI_AGENT_DIR = previous;
+    store.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  await fs.mkdir(process.env.PI_AGENT_DIR, { recursive: true });
+  await fs.writeFile(path.join(process.env.PI_AGENT_DIR, 'models.json'), JSON.stringify({
+    providers: { dead: { baseUrl: 'https://dead.invalid/v1', api: 'openai-completions', apiKey: 'literal-key', models: [] } },
+  }), 'utf8');
+
+  const manager = new TaskManager({ projects: [], modelSync: { providers: ['dead'] } }, path.join(root, 'data'), store);
+  manager.modelCatalog.list = async () => ({ models: [], thinkingLevels: [] });
+
+  const result = await manager.listModels({ refresh: true });
+  assert.equal(result.freshness, 'partial');
+  assert.equal(result.sync.providers[0].provider, 'dead');
+  assert.match(String(result.sync.providers[0].error), /.+/);
+});

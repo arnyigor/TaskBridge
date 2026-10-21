@@ -44,6 +44,7 @@ function makePanel() {
     <div id="modelPickerOverlay" class="hidden"></div>
     <h2 id="modelPickerTitle"></h2>
     <p id="modelPickerNote"></p>
+    <p id="modelCatalogState"></p>
     <div id="modelFilters" class="hidden"></div>
     <div id="modelList"></div>
     <button id="modelButton"></button>
@@ -69,6 +70,8 @@ function makePanel() {
     extractFunction(appSource, 'openModelPicker'),
     'function renderThinkingOptions() {}',
     'function renderModelList() {}',
+    // Строка «откуда каталог» (пункт 2.5 плана) к MR-07 отношения не имеет.
+    'function catalogStateText() { return ""; }',
     // Панель фильтров к MR-07 отношения не имеет: openModelPicker её только скрывает.
     'function renderModelFilters() {}',
     'function renderTaskDetails(task) { currentTask = task; }',

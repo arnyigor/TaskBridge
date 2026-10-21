@@ -142,3 +142,23 @@ export function renderProviderOptions({ document, select, providers = [], select
   }
   return select;
 }
+
+/**
+ * Честная строка о том, откуда список (пункт 2.5 плана). Клиент не должен
+ * выдавать кэш за свежий каталог и молчать, когда часть провайдеров не ответила.
+ *
+ * freshness: 'refreshed' | 'partial' | 'cache' — что ответил сервер;
+ * sync.providers[].error | skipped — провайдер не проверен или не ответил.
+ */
+export function catalogStateText({ freshness = 'refreshed', sync = null, failed = null } = {}) {
+  if (failed) return 'Не удалось обновить список — показан прежний.';
+  if (freshness === 'partial') {
+    const broken = (sync?.providers || []).filter(entry => entry.error || entry.skipped);
+    const names = broken.map(entry => entry.provider).filter(Boolean);
+    const tail = names.length ? `: ${names.join(', ')}` : '';
+    return `Список обновлён частично — эти провайдеры не ответили${tail}.`;
+  }
+  if (freshness === 'cache') return 'Список из кэша: Pi сейчас не ответил.';
+  if (sync?.conflict) return 'Список обновлён, но models.json менялся в это время — правка сохранена за вами.';
+  return '';
+}
