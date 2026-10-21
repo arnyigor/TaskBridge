@@ -115,3 +115,41 @@ test('сломанное расширение действительно пад�
   brokenExtension(pi);
   await assert.rejects(() => handlers.get('before_agent_start')(startEvent('что угодно')), /намеренная ошибка/);
 });
+
+/* ---------------- production-расширение (CORE-02) ---------------- */
+
+import { default as productionExtension } from '../pi-extension/taskbridge-turn-instructions.js';
+import { turnInstructions as sharedInstructions } from '../src/prompt-builder.mjs';
+
+test('production-расширение берёт текст из общего генератора, а не из своей копии', async () => {
+  const { pi, handlers } = fakePi();
+  productionExtension(pi);
+  const handler = handlers.get('before_agent_start');
+
+  for (const [prompt, profile] of [
+    ['Посмотри, есть ли файл note.txt', 'quick'],
+    ['Исправь опечатку в README.md', 'implement'],
+    ['Разберись, почему падает сборка', 'explore'],
+  ]) {
+    const event = startEvent(prompt);
+    await handler(event);
+    assert.equal(event.systemPromptOptions.sections.turn_instructions, sharedInstructions(profile), prompt);
+  }
+});
+
+test('production-расширение не дописывает секции и не трогает custom-ходы', async () => {
+  const { pi, handlers } = fakePi();
+  productionExtension(pi);
+  const handler = handlers.get('before_agent_start');
+
+  const first = startEvent('Есть ли курс Unreal?', { sections: { cwd: 'F:/Learning', rules: 'x' } });
+  await handler(first);
+  const second = startEvent('Есть ли курс Blender?', { sections: { cwd: 'F:/Learning', rules: 'x' } });
+  await handler(second);
+  assert.deepEqual(Object.keys(second.systemPromptOptions.sections).sort(), ['cwd', 'rules', 'turn_instructions']);
+  assert.match(second.systemPromptOptions.sections.turn_instructions, /\(quick\)/);
+
+  const custom = startEvent(undefined, { messageType: 'custom' });
+  await handler(custom);
+  assert.deepEqual(custom.systemPromptOptions.sections, {}, 'continuation/regenerate не получает профиль');
+});

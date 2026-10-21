@@ -82,6 +82,22 @@ const PROFILE_NOTES = {
 };
 
 /**
+ * The instructions for one turn: the same text goes into the first message
+ * (legacy mode) and into Pi's system prompt section `turn_instructions` (hook
+ * mode). One generator, so the two delivery paths cannot drift apart.
+ */
+export function turnInstructions(profile = EXPLORE, { files = [] } = {}) {
+  const list = Array.isArray(files) ? files.filter(Boolean) : [];
+  const lines = [
+    `Task instructions (${profile}):`,
+    ...CONTRACT.map(line => `- ${line}`),
+    `- ${PROFILE_NOTES[profile] || PROFILE_NOTES[EXPLORE]}`,
+    `- Work only inside the current working directory.${list.length ? ' Read attached files as needed.' : ''}`,
+  ];
+  return lines.join('\n');
+}
+
+/**
  * The text sent to Pi for one turn: the operator's own words, then the notes.
  * `files` are workspace-relative paths of attachments staged for this turn.
  */
@@ -90,11 +106,25 @@ export function buildTurnPrompt({ text, profile = EXPLORE, files = [] } = {}) {
   const note = list.length
     ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${list.map(file => `- ${file}`).join('\n')}`
     : '';
-  const lines = [
-    `Task instructions (${profile}):`,
-    ...CONTRACT.map(line => `- ${line}`),
-    `- ${PROFILE_NOTES[profile] || PROFILE_NOTES[EXPLORE]}`,
-    `- Work only inside the current working directory.${list.length ? ' Read attached files as needed.' : ''}`,
-  ];
-  return `${String(text ?? '').trimEnd()}${note}\n\n${lines.join('\n')}`;
+  return `${String(text ?? '').trimEnd()}${note}\n\n${turnInstructions(profile, { files: list })}`;
+}
+
+/**
+ * How instructions reach the model: `legacy` appends them to the first message,
+ * `hook` gives them to the Pi extension (`before_agent_start`) on every turn and
+ * leaves that message untouched. Exactly one mode is active — both at once would
+ * send the model two sets of rules.
+ */
+export const TURN_INSTRUCTIONS_MODES = ['legacy', 'hook'];
+
+export function resolveTurnInstructionsMode(config = {}, env = process.env) {
+  const fromEnv = String(env?.TASKBRIDGE_TURN_INSTRUCTIONS || '').trim().toLowerCase();
+  const fromConfig = String(config?.pi?.turnInstructions?.mode || '').trim().toLowerCase();
+  const chosen = fromEnv || fromConfig;
+  // An unknown value is a configuration mistake, not a reason to fall through to
+  // the other mechanism silently: say which values exist.
+  if (chosen && !TURN_INSTRUCTIONS_MODES.includes(chosen)) {
+    throw Object.assign(new Error(`Неизвестный режим инструкций: ${chosen}. Допустимо: ${TURN_INSTRUCTIONS_MODES.join(', ')}.`), { code: 'CONFIG_INVALID' });
+  }
+  return TURN_INSTRUCTIONS_MODES.includes(chosen) ? chosen : 'legacy';
 }

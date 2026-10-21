@@ -21,12 +21,18 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, '..', '..');
 
 function parseArgs(argv) {
-  const args = { out: path.join(repo, '.local', 'pi-hooks', new Date().toISOString().replace(/[:.]/g, '-')), model: null, timeoutMs: 120000 };
+  const args = { out: path.join(repo, '.local', 'pi-hooks', new Date().toISOString().replace(/[:.]/g, '-')), model: null, timeoutMs: 120000, extension: null, slash: '/tb-profile' };
   for (let i = 0; i < argv.length; i += 1) {
     const next = () => argv[++i];
     if (argv[i] === '--out') args.out = path.resolve(next());
     else if (argv[i] === '--model') args.model = String(next());
     else if (argv[i] === '--timeout') args.timeoutMs = Number(next());
+    // --extension проверяет ЛЮБОЕ расширение тем же стендом: PoC или production
+    // (pi-extension/taskbridge-turn-instructions.js). --slash — команда для
+    // сценария «команда обрабатывается штатно» (/tb-profile есть только у PoC).
+    else if (argv[i] === '--extension') args.extension = path.resolve(String(next()));
+    else if (argv[i] === '--slash') args.slash = String(next()); // из git-bash нужен MSYS_NO_PATHCONV=1
+    else if (argv[i] === '--skip-slash') args.skipSlash = true;
     else throw new Error(`Неизвестный аргумент: ${argv[i]}`);
   }
   return args;
@@ -125,6 +131,12 @@ async function sessionFacts(sessionFile) {
     entries: entries.length,
     userTexts,
     systemMessages: systemMessages.length,
+    // Профиль виден в самом тексте секции: «Task instructions (quick):». Это
+    // единственный след хука, который есть у ЛЮБОГО расширения, а не только у PoC
+    // с журналом.
+    turnInstructionsProfiles: sectionPatches
+      .map(m => /Task instructions \((\w+)\)/.exec(String(m.sections.turn_instructions || ''))?.[1] || null)
+      .filter(Boolean),
     turnInstructionsPatches: sectionPatches.length,
     turnInstructionsChars: sectionPatches.map(m => String(m.sections.turn_instructions || '').length),
     profiles: entries.map(entry => (entry.type === 'compaction' ? 'compaction' : null)).filter(Boolean),
@@ -154,7 +166,7 @@ await fs.mkdir(agentDir, { recursive: true });
 await fs.writeFile(path.join(agentDir, 'settings.json'), `${JSON.stringify({ compaction: { keepRecentTokens: 200 } }, null, 2)}
 `);
 
-const extension = path.join(here, 'turn-instructions.js');
+const extension = args.extension || path.join(here, 'turn-instructions.js');
 const broken = path.join(here, 'broken-extension.js');
 const modelArgs = args.model ? ['--provider', args.model.split('/')[0], '--model', args.model.split('/')[1]] : [];
 // Pi читает именно PI_CODING_AGENT_DIR; TaskBridge в src/pi-settings.mjs зовёт его
@@ -170,9 +182,34 @@ report.piVersion = (await new Promise(resolve => {
 })).trim();
 
 const hookEntries = async () => readJsonl(hookLog);
+
+/**
+ * Сколько ходов реально получили инструкции. Журнал хука пишет только PoC-
+ * расширение; production-расширение (pi-extension/taskbridge-turn-instructions.js)
+ * ничего не логирует, поэтому вторым источником служит сам транскрипт: Pi
+ * записывает системный патч секции `turn_instructions` на каждый ход.
+ * Берётся максимум из двух — стенд не должен зависеть от того, какое
+ * расширение загружено.
+ */
+const sessionPatchCount = async () => {
+  const files = (await fs.readdir(sessions).catch(() => [])).filter(name => name.endsWith('.jsonl')).sort();
+  const file = files.at(-1);
+  if (!file) return 0;
+  const facts = await sessionFacts(path.join(sessions, file));
+  return facts.turnInstructionsPatches;
+};
+
+const lastSessionFacts = async () => {
+  const files = (await fs.readdir(sessions).catch(() => [])).filter(name => name.endsWith('.jsonl')).sort();
+  const file = files.at(-1);
+  return file ? sessionFacts(path.join(sessions, file)) : null;
+};
+
 const counts = async () => {
   const entries = await hookEntries();
-  return { total: entries.filter(entry => entry.profile).length, entries };
+  const logged = entries.filter(entry => entry.profile).length;
+  const patched = await sessionPatchCount();
+  return { total: Math.max(logged, patched), logged, patched, entries };
 };
 
 const runPrompt = async (rpc, text, { expectRun = true } = {}) => {
@@ -196,7 +233,7 @@ report.scenarios.initialQuick = await (async () => {
     prompt: 'Посмотри, есть ли файл README.md в текущей папке.',
     disposition: result.response.data?.disposition,
     hookCalls: result.after.total - result.before.total,
-    profile: result.after.entries.filter(entry => entry.profile).at(-1)?.profile || null,
+    profile: (await lastSessionFacts())?.turnInstructionsProfiles.at(-1) || null,
     promptChars: result.after.entries.filter(entry => entry.profile).at(-1)?.promptChars ?? null,
     systemPromptChars: [result.after.entries.filter(entry => entry.profile).at(-1)?.systemPromptCharsBefore, result.after.entries.filter(entry => entry.profile).at(-1)?.systemPromptCharsAfter],
   };
@@ -206,17 +243,18 @@ report.scenarios.followUpProfile = await (async () => {
   const implement = await runPrompt(rpc, 'Исправь опечатку в README.md.');
   const quick = await runPrompt(rpc, 'А теперь просто посмотри, есть ли файл note.txt.');
   const entries = quick.after.entries.filter(entry => entry.profile);
+  const profiles = (await lastSessionFacts())?.turnInstructionsProfiles || [];
   return {
-    implementProfile: entries.at(-2)?.profile || null,
-    quickProfile: entries.at(-1)?.profile || null,
+    implementProfile: entries.at(-2)?.profile || profiles.at(-2) || null,
+    quickProfile: entries.at(-1)?.profile || profiles.at(-1) || null,
     hookCallsTotal: quick.after.total,
     systemPromptChars: entries.slice(-2).map(entry => entry.systemPromptCharsAfter),
   };
 })();
 
-report.scenarios.slashCommand = await (async () => {
+report.scenarios.slashCommand = args.skipSlash ? { skipped: 'команда не регистрируется этим расширением' } : await (async () => {
   const before = await counts();
-  const response = await rpc.send({ type: 'prompt', message: '/tb-profile' });
+  const response = await rpc.send({ type: 'prompt', message: args.slash });
   await sleep(500);
   const after = await counts();
   return {
@@ -224,6 +262,7 @@ report.scenarios.slashCommand = await (async () => {
     success: response.success,
     hookCallsForCommand: after.total - before.total,
     commandLogged: after.entries.some(entry => entry.command === 'tb-profile'),
+    command: args.slash,
   };
 })();
 
@@ -319,8 +358,8 @@ report.verdict = {
     // Размер системного промпта не должен расти от хода к ходу на длину инструкции.
     return sizes.length < 2 || Math.abs(sizes[1] - sizes[0]) < 80;
   })(),
-  commandHandled: report.scenarios.slashCommand.disposition === 'handled'
-    && report.scenarios.slashCommand.hookCallsForCommand === 0,
+  commandHandled: report.scenarios.slashCommand.skipped ? 'skipped' : (report.scenarios.slashCommand.disposition === 'handled'
+    && report.scenarios.slashCommand.hookCallsForCommand === 0),
   steerDoesNotAddInstructions: report.scenarios.steering.hookCallsForPrompt === 1,
   compactionNoHook: report.scenarios.compaction.hookCallsForCompaction === 0,
   restoredSessionWorks: report.scenarios.restoredSession.hookCalls === 1

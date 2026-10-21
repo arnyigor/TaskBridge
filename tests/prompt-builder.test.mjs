@@ -13,7 +13,7 @@
 // неясный запрос уходит в `explore`, а не в `quick`.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTurnPrompt, detectProfile, QUICK, EXPLORE, IMPLEMENT } from '../src/prompt-builder.mjs';
+import { buildTurnPrompt, detectProfile, turnInstructions, resolveTurnInstructionsMode, QUICK, EXPLORE, IMPLEMENT } from '../src/prompt-builder.mjs';
 
 // [запрос, ожидаемый профиль, почему]
 const CASES = [
@@ -122,4 +122,25 @@ test('неизвестный профиль не оставляет ход бе�
   assert.match(prompt, /Task instructions \(nonsense\)/);
   assert.match(prompt, /Investigation is allowed/, 'неизвестное значение ведёт себя как explore');
   assert.match(prompt, /Work only inside the current working directory\./);
+});
+
+test('инструкции хода собираются одним генератором: buildTurnPrompt вставляет ровно turnInstructions', () => {
+  for (const profile of [QUICK, EXPLORE, IMPLEMENT]) {
+    const block = turnInstructions(profile);
+    const prompt = buildTurnPrompt({ text: 'вопрос', profile });
+    assert.ok(prompt.endsWith(block), `${profile}: блок совпадает`);
+    assert.equal(prompt.split('Task instructions (').length, 2, `${profile}: блок один, а не два`);
+  }
+  // Вложения влияют только на строку про рабочую папку и на note, не на профиль.
+  const withFiles = turnInstructions(QUICK, { files: ['.taskbridge-input/a.txt'] });
+  assert.match(withFiles, /Read attached files as needed/);
+  assert.doesNotMatch(turnInstructions(QUICK), /Read attached files/);
+});
+
+test('режим инструкций: по умолчанию legacy, переменная окружения важнее конфига', () => {
+  assert.equal(resolveTurnInstructionsMode({}), 'legacy', 'существующие установки не должны менять поведение молча');
+  assert.equal(resolveTurnInstructionsMode({ pi: { turnInstructions: { mode: 'hook' } } }, {}), 'hook');
+  assert.equal(resolveTurnInstructionsMode({ pi: { turnInstructions: { mode: 'legacy' } } }, { TASKBRIDGE_TURN_INSTRUCTIONS: 'hook' }), 'hook');
+  assert.equal(resolveTurnInstructionsMode({ pi: { turnInstructions: { mode: 'hook' } } }, { TASKBRIDGE_TURN_INSTRUCTIONS: '' }), 'hook');
+  assert.throws(() => resolveTurnInstructionsMode({ pi: { turnInstructions: { mode: 'both' } } }, {}), error => error.code === 'CONFIG_INVALID');
 });

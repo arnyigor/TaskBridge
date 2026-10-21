@@ -131,6 +131,10 @@ piVersion.refresh().catch(() => {});
 // The Pi approval extension needs a loopback endpoint and its absolute path.
 manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
 manager.approvalExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-approval.js');
+// Turn instructions in `hook` mode (CORE-02): the same extension directory the
+// approval gate uses. A missing file fails the task loudly instead of sending a
+// prompt without the rules (see TaskManager#createPi).
+manager.turnInstructionsExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-turn-instructions.js');
 // Media policy: keeps base64 screenshots out of the request without touching the
 // saved transcript (pi-extension/taskbridge-media.js).
 manager.mediaExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-media.js');

@@ -10,6 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
 
@@ -108,4 +109,72 @@ test('служебные инструкции не попадают в steer, к
   const steer = deliveries(fixture.root).find(entry => entry.type === 'steer');
   assert.ok(steer, JSON.stringify(deliveries(fixture.root)));
   assert.equal(steer.message, 'короткая ремарка по ходу', 'ремарка оператора уходит как есть');
+});
+
+/* ---------------- режим hook (CORE-02) ---------------- */
+
+// В режиме `hook` правила несёт расширение Pi (`before_agent_start`), поэтому
+// текст оператора уходит дословно, а расширение обязано быть подключено через -e.
+// Фикстурный Pi сам хук не исполняет — здесь проверяется доставка: что ушло в Pi
+// и с какими аргументами оно запустилось. Сам хук проверен на настоящем Pi
+// (docs/pi-hooks-feasibility.md) и в tests/pi-hooks-poc.test.mjs.
+
+async function startHookFixture(t) {
+  const dump = path.join(os.tmpdir(), `tb-argv-${process.pid}-${Math.random().toString(36).slice(2)}.json`);
+  const fixture = await startFixture(0, {
+    env: { TASKBRIDGE_TURN_INSTRUCTIONS: 'hook', FAKE_PI_DUMP_ARGS: dump },
+  });
+  t.after(async () => {
+    await fixture.close();
+    await fs.promises.rm(dump, { force: true }).catch(() => {});
+  });
+  return { fixture, dump };
+}
+
+test('режим hook: сообщение оператора дословно, расширение подключено', { timeout: 40000 }, async t => {
+  const { fixture, dump } = await startHookFixture(t);
+  const { api } = fixture;
+
+  const prompt = 'Есть ли у меня курс Unreal? В Learning посмотри.';
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt });
+  const done = await terminal(api, created.id);
+  assert.equal(done.status, 'SUCCEEDED', fixture.logs());
+
+  const delivered = deliveries(fixture.root).find(entry => entry.message.includes('В Learning посмотри'));
+  assert.ok(delivered, JSON.stringify(deliveries(fixture.root)));
+  assert.equal(delivered.message, prompt, 'в hook-режиме сообщение уходит без блока Task instructions');
+
+  const argv = JSON.parse(fs.readFileSync(dump, 'utf8')).argv;
+  const extension = argv[argv.indexOf('-e') + 1];
+  assert.match(extension, /taskbridge-turn-instructions\.js$/, JSON.stringify(argv));
+});
+
+test('режим hook: follow-up тоже дословен, вложения остаются в тексте', { timeout: 40000 }, async t => {
+  const { fixture } = await startHookFixture(t);
+  const { api } = fixture;
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  assert.equal((await terminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+  await api(`/api/tasks/${created.id}/message`, { text: 'Исправь заодно опечатку' });
+  assert.equal((await terminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+
+  const followUp = deliveries(fixture.root).find(entry => entry.message.includes('Исправь заодно опечатку'));
+  assert.ok(followUp, JSON.stringify(deliveries(fixture.root)));
+  assert.equal(followUp.message, 'Исправь заодно опечатку');
+});
+
+test('режим hook без расширения: задача падает с понятной диагностикой, промпт не уходит', { timeout: 40000 }, async t => {
+  const { fixture } = await startHookFixture(t);
+  const { api } = fixture;
+
+  // Расширение «не установлено»: файла нет там, откуда его берёт сервер.
+  await fs.promises.rm(path.join(fixture.root, 'pi-extension', 'taskbridge-turn-instructions.js'));
+
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'Есть ли файл?' });
+  const failed = await terminal(api, created.id);
+  assert.equal(failed.status, 'FAILED', fixture.logs());
+  assert.equal(failed.errorCode, 'TURN_INSTRUCTIONS_UNAVAILABLE');
+  assert.match(failed.error, /taskbridge-turn-instructions\.js/);
+  assert.match(failed.error, /legacy/, 'сообщение называет способ вернуться к рабочему режиму');
+  assert.deepEqual(deliveries(fixture.root), [], 'без инструкций промпт не отправляется молча');
 });

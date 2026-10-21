@@ -38,7 +38,7 @@ import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs'
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 import { piAgentDir } from './pi-settings.mjs';
-import { buildTurnPrompt, detectProfile } from './prompt-builder.mjs';
+import { buildTurnPrompt, detectProfile, resolveTurnInstructionsMode, turnInstructions } from './prompt-builder.mjs';
 import { deriveRecap, readSavedRecap, writeRecap, removeRecap, reconcileVerification, RECAP_MD } from './resume/recap.mjs';
 import { buildResumeContext, sessionSummary, WORKSPACE_STRATEGIES, MEMORY_MODES } from './resume/resume-builder.mjs';
 import { buildResumePreview } from './resume/resume-preview.mjs';
@@ -481,6 +481,11 @@ export class TaskManager extends EventEmitter {
     this.approvalTokens = new Map();
     this.approvalBaseUrl = null;          // set by the HTTP server
     this.approvalExtensionPath = null;    // set by the HTTP server
+    // How turn instructions reach the model (CORE-02). `legacy` appends them to
+    // the first message; `hook` gives them to the Pi extension on every turn and
+    // leaves the message untouched. Both at once would send two sets of rules.
+    this.turnInstructionsMode = resolveTurnInstructionsMode(config);
+    this.turnInstructionsExtensionPath = null; // set by the HTTP server
     // Media policy extension (pi-extension/taskbridge-media.js): keeps the
     // request body small without rewriting the session file. Set by the server.
     this.mediaExtensionPath = null;
@@ -2948,10 +2953,20 @@ export class TaskManager extends EventEmitter {
     // «/prompt:…» itself, and an appended instruction block would turn the command
     // into a sentence.
     if (String(task.prompt || '').trimStart().startsWith('/')) return task.prompt;
+    const files = (task.files || []).map((f) => f.path || `.taskbridge-input/${f.name}`);
+    if (this.turnInstructionsMode === 'hook') {
+      // The instructions go through Pi's `before_agent_start` for every turn; the
+      // operator's message is delivered as typed (§CORE-02). The attachment note
+      // stays: it is not an instruction, it is the path list the model needs.
+      const note = files.length
+        ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${files.map(file => `- ${file}`).join('\n')}`
+        : '';
+      return `${String(task.prompt ?? '').trimEnd()}${note}`;
+    }
     return buildTurnPrompt({
       text: task.prompt,
       profile: detectProfile(task.prompt),
-      files: (task.files || []).map((f) => f.path || `.taskbridge-input/${f.name}`),
+      files,
     });
   }
 
@@ -2978,6 +2993,21 @@ export class TaskManager extends EventEmitter {
           TASKBRIDGE_APPROVAL_POLL_MS: '1000'
         });
       }
+    }
+    // Turn instructions (CORE-02). In `hook` mode the extension is the ONLY
+    // source of the rules, so a missing file must fail the task loudly: sending
+    // the prompt without them would look like a configured run while the model
+    // works without the boundaries the operator expects.
+    if (this.turnInstructionsMode === 'hook') {
+      const extensionPath = this.turnInstructionsExtensionPath;
+      const available = extensionPath ? await fs.access(extensionPath).then(() => true, () => false) : false;
+      if (!available) {
+        throw Object.assign(new Error(
+          `Режим инструкций «hook» включён, но расширение Pi не найдено: ${extensionPath || '(путь не задан)'}. `
+          + 'Проверьте установку или переключите pi.turnInstructions.mode на legacy.'
+        ), { code: 'TURN_INSTRUCTIONS_UNAVAILABLE' });
+      }
+      args.push('-e', extensionPath);
     }
     // Media policy: Pi re-sends every image it ever read, and a provider refuses
     // a request body over ~50 MB (2026-10-19: 39 screenshots, 48.6 MB of
