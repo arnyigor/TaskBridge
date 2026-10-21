@@ -399,3 +399,90 @@ test('зависшая проверка закрывает запуск как �
   assert.match(stuck.reason, /не завершилась за/, `причина называет срок, а не тесты: ${stuck.reason}`);
   assert.match(stuck.reason, /итог неизвестен/);
 });
+
+// AUTO-01C (находка A3): расписание сдвигается только в конце обработки, поэтому
+// наложившийся тик увидел бы его снова и создал вторую сессию. Проверка детерминированная:
+// первый тик держим на незавершённом запуске, второй обязан отказаться.
+test('два тика не создают два запуска одного расписания', { timeout: 60000 }, async t => {
+  const { TaskManager } = await import('../src/task-manager.mjs');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-tick-lock-'));
+  const store = new TaskStore(dir);
+  const manager = new TaskManager({ projects: [] }, dir, store);
+  t.after(async () => {
+    try { await manager.close?.(); } catch { /* закрытие — не предмет теста */ }
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const at = '2026-10-11T12:00:00.000Z';
+  store.createRecipe({
+    id: 'rc-lock', projectId: 'p', workItemId: null, name: 'Locked', promptTemplate: 'Проверь',
+    parameters: {}, runtime: { id: 'pi' }, verification: {}, createdAt: at, updatedAt: at,
+  });
+  // Интервал, а не «ежедневно в 09:00»: у интервала моменты считаются арифметикой,
+  // поэтому тест не зависит от часового пояса машины (в фикстуре с daily момент
+  // «09:00 по местному» мог не попасть в окно между due и now).
+  const created = '2026-10-11T00:00:00.000Z';
+  store.createSchedule({
+    id: 'sc-lock', recipeId: 'rc-lock', enabled: true,
+    spec: { kind: 'interval', everyMinutes: 60 }, misfirePolicy: 'RUN_ONCE', concurrencyPolicy: 'QUEUE',
+    notify: 'never', approvalMode: 'pause', parameters: {}, nextRunAt: '2026-10-11T11:00:00.000Z',
+    lastRunAt: null, createdAt: created, updatedAt: created,
+  });
+
+  // Первый тик «зависает» на старте сессии — ровно то окно, в котором раньше
+  // создавался дубль.
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  manager.runRecipe = async () => { await held; return { task: { id: 'sess-lock' } }; };
+
+  const first = manager.schedulerTick({ nowIso: '2026-10-11T12:00:00.000Z' });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  const second = await manager.schedulerTick({ nowIso: '2026-10-11T12:00:00.000Z' });
+  assert.equal(second.skipped, 'busy', `второй тик обязан отказаться: ${JSON.stringify(second)}`);
+  assert.deepEqual(second.decisions, []);
+  assert.equal(store.listInvocations({ scheduleId: 'sc-lock' }).length, 1, 'второй запуск не создан');
+
+  // Пробный тик блокировку не берёт: он ничего не создаёт.
+  const dry = await manager.schedulerTick({ nowIso: '2026-10-11T12:00:00.000Z', dryRun: true });
+  assert.equal(dry.skipped, undefined);
+
+  release();
+  await first;
+  const all = store.listInvocations({ scheduleId: 'sc-lock' });
+  assert.equal(all.length, 1, `после освобождения — та же одна инвокация: ${JSON.stringify(all.map(item => item.id))}`);
+});
+
+// AUTO-01D (находка A4): падение между созданием инвокации и стартом сессии
+// оставляет RUNNING без sessionId. Такая запись не должна ни переисполняться
+// молча, ни висеть «в процессе» навсегда.
+test('брошенная инвокация закрывается как «неизвестный исход», молодая — нет', { timeout: 60000 }, async t => {
+  const { TaskManager } = await import('../src/task-manager.mjs');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-orphan-'));
+  const store = new TaskStore(dir);
+  const manager = new TaskManager({ projects: [], schedules: { orphanMs: 1000 } }, dir, store);
+  t.after(async () => {
+    try { await manager.close?.(); } catch { /* не предмет теста */ }
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const create = (id, startedAt) => store.createInvocation({
+    id, recipeId: 'rc-x', scheduleId: null, trigger: 'schedule', scheduledAt: startedAt, startedAt,
+    finishedAt: null, status: 'RUNNING', reason: null, misfire: false, parameters: {},
+    sessionId: null, verification: null, workspaceRef: null, resultArtifact: null,
+  });
+  create('inv-old', new Date(Date.now() - 60_000).toISOString());
+  create('inv-young', new Date().toISOString());
+
+  await manager.schedulerTick({ nowIso: new Date().toISOString() });
+
+  const old = store.getInvocation('inv-old');
+  assert.equal(old.status, 'FAILED', JSON.stringify(old));
+  assert.match(old.reason, /сессия не была создана/, `причина называет, что именно неизвестно: ${old.reason}`);
+  assert.match(old.reason, /повтор не выполнялся/, 'молчаливого переисполнения нет');
+  assert.ok(old.finishedAt, 'у записи есть момент завершения');
+
+  const young = store.getInvocation('inv-young');
+  assert.equal(young.status, 'RUNNING', 'молодая запись не закрывается: #invoke вот-вот проставит sessionId');
+});

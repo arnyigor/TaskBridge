@@ -82,6 +82,11 @@ const INTERRUPTED_STATUSES = Object.freeze(['FAILED', 'CANCELLED']);
 // Переопределяется через `config.verification.staleAfterMs` — тестам нужен короткий срок.
 const DEFAULT_STALE_VERIFICATION_MS = 10 * 60_000;
 
+// Сколько инвокация может оставаться `RUNNING` без `sessionId`, прежде чем сверка
+// признает её брошенной: между записью инвокации и стартом сессии процесс мог умереть.
+// Молодые записи не трогаем — обычный `#invoke` проставляет `sessionId` в том же вызове.
+const DEFAULT_ORPHAN_INVOCATION_MS = 5 * 60_000;
+
 /** Одна формулировка для предпросмотра и для инспектора: почему памяти нет. */
 export function ambiguousMemoryWarning(collisions = []) {
   const roots = collisions.flatMap(entry => entry.projects.map(project => project.root)).filter(Boolean);
@@ -466,6 +471,8 @@ export class TaskManager extends EventEmitter {
     // Одновременные пробы одной модели: второй запрос получает COOLDOWN, а не
     // свою платную попытку (см. probeModel).
     this.probeInFlight = new Set();
+    // Защита тика от наложения (AUTO-01C): один тик на машину в момент времени.
+    this.schedulerTickInFlight = false;
     // Свой push в локальной сети (4.3): завершение хода будит телефон, вместо
     // того чтобы тот опрашивал список каждые N секунд.
     this.wakeChannel = new WakeChannel();
@@ -511,6 +518,21 @@ export class TaskManager extends EventEmitter {
   set activeTaskId(value) {
     this.activeTaskIds.clear();
     if (value) this.activeTaskIds.add(value);
+  }
+
+  /**
+   * Есть ли незавершённая работа (AUTO-01E, находка A5): занятые слоты ПЛЮС очередь
+   * промптов, которая живёт в памяти. Автоперезапуск, смотревший только на слоты,
+   * считал машину свободной и терял очередь при рестарте.
+   */
+  get pendingWork() {
+    return { sessions: this.activeTaskIds.size, queued: Array.isArray(this.queue) ? this.queue.length : 0 };
+  }
+
+  /** Сессии или очередь непусты → перезапуск сервера откладывается. */
+  hasPendingWork() {
+    const { sessions, queued } = this.pendingWork;
+    return sessions > 0 || queued > 0;
   }
 
   #claimSlot(id) { this.activeTaskIds.add(id); }
@@ -2041,6 +2063,22 @@ export class TaskManager extends EventEmitter {
    * anything — the same decision code, so a test can ask instead of waiting.
    */
   async schedulerTick({ nowIso = now(), dryRun = false } = {}) {
+    // Два тика не должны работать над одним и тем же моментом: расписание сдвигается
+    // только в конце своей обработки, поэтому наложившийся тик увидел бы его снова и
+    // создал вторую сессию (QUEUE и PARALLEL сами по себе не дедуплицируют).
+    // Пробный тик (`dryRun`) ничего не создаёт и блокировку не берёт.
+    if (!dryRun && this.schedulerTickInFlight) {
+      return { at: nowIso, decisions: [], reconciled: [], skipped: 'busy' };
+    }
+    if (!dryRun) this.schedulerTickInFlight = true;
+    try {
+      return await this.#schedulerTickLocked({ nowIso, dryRun });
+    } finally {
+      if (!dryRun) this.schedulerTickInFlight = false;
+    }
+  }
+
+  async #schedulerTickLocked({ nowIso, dryRun }) {
     const decisions = [];
     for (const schedule of this.store.dueSchedules(nowIso)) {
       const recipe = this.store.getRecipe(schedule.recipeId);
@@ -2217,7 +2255,20 @@ export class TaskManager extends EventEmitter {
             finishedAt: nowIso,
           });
           finished.push(invocation.id);
+          continue;
         }
+        // Падение между созданием инвокации и стартом сессии: исход неизвестен.
+        // Молодую запись не трогаем — `#invoke` вот-вот проставит `sessionId`;
+        // старую закрываем как неизвестную и НЕ переисполняем автоматически.
+        const startedAt = Date.parse(invocation.startedAt ?? '');
+        const age = Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
+        if (age < this.#orphanInvocationMs()) continue;
+        await this.store.updateInvocation(invocation.id, {
+          status: 'FAILED',
+          reason: 'сессия не была создана: исход запуска неизвестен, повтор не выполнялся',
+          finishedAt: nowIso,
+        });
+        finished.push(invocation.id);
         continue;
       }
       if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(session.status)) continue;
@@ -2264,6 +2315,13 @@ export class TaskManager extends EventEmitter {
       finished.push(invocation.id);
     }
     return finished;
+  }
+
+  /** Через сколько «инвокация без сессии» считается брошенной, а не начинающейся. */
+  #orphanInvocationMs() {
+    const configured = Number(this.config.schedules?.orphanMs);
+    if (Number.isFinite(configured) && configured >= 0) return configured;
+    return DEFAULT_ORPHAN_INVOCATION_MS;
   }
 
   /** Срок, после которого зависшая проверка считается неизвестным исходом. */
