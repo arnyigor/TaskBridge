@@ -76,6 +76,12 @@ const WORK_ITEM_RELATIONS = Object.freeze(['implementation', 'investigation', 'r
 // входят: они ещё идут, а не оборвались.
 const INTERRUPTED_STATUSES = Object.freeze(['FAILED', 'CANCELLED']);
 
+// Сколько проверка рецепта может висеть в `RUNNING`, прежде чем сверка закроет запуск
+// как «итог неизвестен». Проверка запускается после `SUCCEEDED` и не переживает
+// перезапуск сервера: без срока такой запуск остался бы `RUNNING` навсегда.
+// Переопределяется через `config.verification.staleAfterMs` — тестам нужен короткий срок.
+const DEFAULT_STALE_VERIFICATION_MS = 10 * 60_000;
+
 /** Одна формулировка для предпросмотра и для инспектора: почему памяти нет. */
 export function ambiguousMemoryWarning(collisions = []) {
   const roots = collisions.flatMap(entry => entry.projects.map(project => project.root)).filter(Boolean);
@@ -2217,7 +2223,31 @@ export class TaskManager extends EventEmitter {
       if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(session.status)) continue;
       const recipe = this.store.getRecipe(invocation.recipeId);
       const verification = session.verificationStatus ?? null;
-      const failedVerification = recipe?.verification?.required === true && verification !== 'PASSED';
+      const requiresVerification = recipe?.verification?.required === true;
+      // Проверка запускается ОТДЕЛЬНО после публикации `SUCCEEDED` (см. `#runVerification`):
+      // между этими моментами `verificationStatus === 'RUNNING'`, и считать это
+      // провалом значило бы записывать `FAILED` успешному прогону, у которого тесты
+      // ещё идут. Ждём следующего тика; зависшая проверка (сервер перезапустили
+      // посреди неё) не может держать запуск вечно — её закрывает срок ниже.
+      if (requiresVerification && verification === 'RUNNING') {
+        // Возраст считается по реальным часам, а не по `nowIso` тика: в тестах «сейчас»
+        // намеренно уезжает вперёд, и проверка, идущая секунду, выглядела бы зависшей.
+        const staleAfterMs = this.#staleVerificationMs();
+        const since = Date.parse(session.updatedAt ?? '');
+        const waited = Number.isFinite(since) ? Date.now() - since : staleAfterMs;
+        if (!Number.isFinite(waited) || waited < staleAfterMs) continue;
+        await this.store.updateInvocation(invocation.id, {
+          status: 'FAILED',
+          reason: `проверка не завершилась за ${Math.round(staleAfterMs / 60_000) || 1} мин: итог неизвестен`,
+          verification,
+          finishedAt: nowIso,
+          workspaceRef: session.workspacePath ?? invocation.workspaceRef,
+          resultArtifact: null,
+        });
+        finished.push(invocation.id);
+        continue;
+      }
+      const failedVerification = requiresVerification && verification !== 'PASSED';
       const status = failedVerification ? 'FAILED' : session.status;
       const reason = failedVerification
         ? `проверка не пройдена (${verification ?? 'не запускалась'}), хотя рецепт её требует`
@@ -2234,6 +2264,13 @@ export class TaskManager extends EventEmitter {
       finished.push(invocation.id);
     }
     return finished;
+  }
+
+  /** Срок, после которого зависшая проверка считается неизвестным исходом. */
+  #staleVerificationMs() {
+    const configured = Number(this.config.verification?.staleAfterMs);
+    if (Number.isFinite(configured) && configured >= 0) return configured;
+    return DEFAULT_STALE_VERIFICATION_MS;
   }
 
   /** Work items a session belongs to — the chat screen shows this. */

@@ -12,12 +12,13 @@ import { startFixture } from './server-fixture.mjs';
 // занимала бы три дня. Решения принимает тот же код, что работает на машине.
 
 /** A fixture whose config knows one passing and one failing verification profile. */
-async function fixtureWithProfiles(t) {
+async function fixtureWithProfiles(t, extraProfiles = {}) {
   const fixture = await startFixture(undefined, {
     root: {
       verificationProfiles: {
         passing: ['node -e "process.exit(0)"'],
         failing: ['node -e "process.exit(1)"'],
+        ...extraProfiles,
       },
     },
   });
@@ -305,4 +306,96 @@ test('schedules and invocations survive reopening the database', async t => {
   assert.equal(reopened.deleteSchedule('sc-1').id, 'sc-1');
   assert.equal(reopened.getSchedule('sc-1'), null);
   assert.equal(reopened.getInvocation('inv-1').status, 'SUCCEEDED', 'удаление расписания не стирает историю запусков');
+});
+
+// AUTO-01B (находка A2 из docs/auto-00-audit.md): проверка рецепта запускается
+// ОТДЕЛЬНО после `SUCCEEDED`, поэтому между двумя событиями `verificationStatus`
+// равен `RUNNING`. Сверка не имеет права принять это за провал — иначе успешный
+// прогон записывается как неудача просто потому, что тесты ещё шли.
+test('обязательная проверка: запуск ждёт её окончания, а не падает на RUNNING', { timeout: 120000 }, async t => {
+  const slow = { slow: ['node -e "setTimeout(() => process.exit(0), 4000)"'] };
+  const fixture = await fixtureWithProfiles(t, slow);
+  const api = fixture.api;
+  const [project] = await api('/api/projects');
+  const created = await fetch(`${fixture.base}/api/recipes`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      projectId: project.id,
+      name: 'Slow checks',
+      promptTemplate: 'Проверь {{area}}.',
+      parameters: { area: { type: 'enum', values: ['all'], default: 'all' } },
+      verification: { required: true, command: 'slow' },
+    }),
+  }).then(response => response.json());
+  const schedule = await fetch(`${fixture.base}/api/schedules`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ recipeId: created.id, spec: { kind: 'daily', at: '09:00' } }),
+  }).then(response => response.json());
+
+  const due = new Date(Date.parse(schedule.nextRunAt) + 60_000).toISOString();
+  const decision = (await tick(fixture, due)).decisions.find(entry => entry.scheduleId === schedule.id);
+  assert.equal(decision.action, 'run', JSON.stringify(decision));
+
+  // Ход закончен, тесты ещё идут: ровно то окно, в котором сверка и ошибалась.
+  await until(async () => (await api(`/api/tasks/${decision.sessionId}`)).status === 'SUCCEEDED');
+  const during = await api(`/api/tasks/${decision.sessionId}`);
+  assert.equal(during.verificationStatus, 'RUNNING', 'проверка обязана быть ещё в процессе');
+
+  await tick(fixture, due);
+  const waiting = await api(`/api/invocations/${decision.invocationId}`);
+  assert.equal(waiting.status, 'RUNNING', `пока проверка идёт, запуск не завершён: ${JSON.stringify(waiting)}`);
+  assert.equal(waiting.reason, null);
+
+  // Проверка прошла — теперь запуск завершается и засчитывается.
+  await until(async () => (await api(`/api/tasks/${decision.sessionId}`)).verificationStatus === 'PASSED');
+  await tick(fixture, due);
+  const done = await api(`/api/invocations/${decision.invocationId}`);
+  assert.equal(done.status, 'SUCCEEDED', JSON.stringify(done));
+  assert.equal(done.verification, 'PASSED');
+  assert.equal(done.resultArtifact, 'result.md');
+});
+
+test('зависшая проверка закрывает запуск как «итог неизвестен», а не как провал тестов', { timeout: 120000 }, async t => {
+  // Проверка действительно не завершается, а срок укорочен конфигом: иначе тест ждал бы
+  // десять минут реального времени.
+  const hanging = { hanging: ['node -e "setTimeout(() => {}, 60000)"'] };
+  const fixture = await startFixture(undefined, {
+    root: {
+      verificationProfiles: { passing: ['node -e "process.exit(0)"'], failing: ['node -e "process.exit(1)"'], ...hanging },
+      verification: { staleAfterMs: 400 },
+    },
+  });
+  t.after(() => fixture.close());
+  const api = fixture.api;
+  const [project] = await api('/api/projects');
+  const created = await fetch(`${fixture.base}/api/recipes`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      projectId: project.id,
+      name: 'Stuck checks',
+      promptTemplate: 'Проверь {{area}}.',
+      parameters: { area: { type: 'enum', values: ['all'], default: 'all' } },
+      verification: { required: true, command: 'hanging' },
+    }),
+  }).then(response => response.json());
+  const schedule = await fetch(`${fixture.base}/api/schedules`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ recipeId: created.id, spec: { kind: 'daily', at: '09:00' } }),
+  }).then(response => response.json());
+
+  const due = new Date(Date.parse(schedule.nextRunAt) + 60_000).toISOString();
+  const decision = (await tick(fixture, due)).decisions.find(entry => entry.scheduleId === schedule.id);
+  await until(async () => (await api(`/api/tasks/${decision.sessionId}`)).status === 'SUCCEEDED');
+
+  // Сверка пришла после истечения срока: исход проверки неизвестен.
+  await new Promise(resolve => setTimeout(resolve, 700));
+  await tick(fixture, due);
+  const stuck = await api(`/api/invocations/${decision.invocationId}`);
+  assert.equal(stuck.status, 'FAILED', JSON.stringify(stuck));
+  assert.match(stuck.reason, /не завершилась за/, `причина называет срок, а не тесты: ${stuck.reason}`);
+  assert.match(stuck.reason, /итог неизвестен/);
 });
