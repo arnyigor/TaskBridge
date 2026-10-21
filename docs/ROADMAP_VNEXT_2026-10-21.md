@@ -248,7 +248,11 @@
 | AUTO-00 | ✅ выполнен 2026-10-21 (аудит без живых прогонов) | [auto-00-audit.md](auto-00-audit.md) | 8 находок по коду: A1–A3 (P0), A4/A5/A8 (P1), A6/A7 (P2). Планировщик не переписываем; автоматизации для ночной работы включать после A1–A4 (AUTO-01A…E) |
 | AUTO-01B | ✅ выполнен 2026-10-21 (находка A2) | `src/task-manager.mjs`, `tests/invocations.test.mjs` | Инвокация ждёт окончания обязательной проверки (`RUNNING` больше не провал); зависшая проверка закрывается по `config.verification.staleAfterMs` с причиной «итог неизвестен» |
 | AUTO-01E (часть) | ✅ выполнен 2026-10-21 — только A6 (переход часов) | `src/scheduler/schedule.mjs`, `tests/schedules.test.mjs` | Недельное расписание прибавляет день календарно; тест в зоне `Europe/Berlin` |
-| AUTO-01A / 01C / 01D, 01E (A5) | 🔎 следующие шаги (P0) | [auto-00-audit.md](auto-00-audit.md) | A1 — поля рецепта теряются; A3 — наложение `schedulerTick`; A4 — `RUNNING` без `sessionId`; A5 — автоперезапуск не видит очередь |
+| AUTO-01A | ✅ выполнен 2026-10-21 (A1) | `src/recipes/recipe.mjs`, `src/task-store.mjs`, `tests/recipes.test.mjs` | Неисполняемые поля рецепта отклоняются, `runtime.id` — только `pi`, предпросмотр показывает только применяемое |
+| AUTO-01C | ✅ выполнен 2026-10-21 (A3) | `src/task-manager.mjs`, `tests/invocations.test.mjs` | Второй одновременный тик получает `skipped: "busy"`; дубль запуска невозможен |
+| AUTO-01D | ✅ выполнен 2026-10-21 (A4) | `src/task-manager.mjs`, `tests/invocations.test.mjs` | `RUNNING` без `sessionId` старше `config.schedules.orphanMs` закрывается как неизвестный исход без переисполнения |
+| AUTO-01E (A5) | ✅ выполнен 2026-10-21 | `src/task-manager.mjs`, `src/server.mjs`, `tests/auto-restart.test.mjs` | Автоперезапуск считает занятостью очередь промптов, а не только слоты |
+| A7 / A8 | 🔎 открыты | [auto-00-audit.md](auto-00-audit.md) | A7 — экран автоматизаций (AUTO-02); A8 — README про диапазон Pi |
 | TB-PROV-02 / 03, TB-KMP-01, TB-STAB-02, RELEASE-01 | ⏸ не начаты | — | По последовательности раздела B |
 
 Замечание по OMP-02: первая серия прогонов была недействительна из-за ошибки стенда

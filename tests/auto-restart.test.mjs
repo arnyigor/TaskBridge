@@ -147,3 +147,32 @@ test('an interval counts its moments from the start and never fires early', () =
     new Date(Date.parse('2026-10-14T03:00:00')).toISOString());
   assert.equal(autoRestartDecision(config, { now: Date.parse('2026-10-14T03:10:00'), startedAt }).reason, 'due');
 });
+
+// AUTO-01E, находка A5 (docs/auto-00-audit.md): «свободная машина» определялась только
+// по занятым слотам, а очередь промптов живёт в памяти — рестарт по таймеру её терял.
+test('очередь промптов делает машину занятой для автоперезапуска', async t => {
+  const fs = await import('node:fs/promises');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { TaskStore } = await import('../src/task-store.mjs');
+  const { TaskManager } = await import('../src/task-manager.mjs');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-pending-'));
+  const store = new TaskStore(dir);
+  const manager = new TaskManager({ projects: [] }, dir, store);
+  t.after(async () => {
+    try { await manager.close?.(); } catch { /* не предмет теста */ }
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  assert.deepEqual(manager.pendingWork, { sessions: 0, queued: 0 });
+  assert.equal(manager.hasPendingWork(), false, 'пустая машина свободна');
+
+  manager.queue.push('task-queued');
+  assert.deepEqual(manager.pendingWork, { sessions: 0, queued: 1 });
+  assert.equal(manager.hasPendingWork(), true, 'очередь — тоже работа, хотя слотов нет');
+  manager.queue.length = 0;
+
+  manager.activeTaskIds.add('task-running');
+  assert.equal(manager.hasPendingWork(), true, 'занятый слот по-прежнему блокирует рестарт');
+});

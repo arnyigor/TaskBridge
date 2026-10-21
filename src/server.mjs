@@ -402,7 +402,8 @@ if (autoRestartConfigured(autoRestartConfig)) {
       lastRestartAt: lastAutoRestartAt,
       // Живая работа: при onlyWhenIdle перезапуск откладывается, а не обрывает ход —
       // оператор ставит таймер, чтобы сервер поднялся свежим, а не чтобы потерять ответ.
-      active: manager.activeTaskIds.size > 0,
+      // Считаем и очередь промптов: она живёт в памяти, и рестарт её теряет (A5).
+      active: manager.hasPendingWork(),
     });
     autoRestartState = { reason: decision.reason, deferred: decision.deferred === true };
     if (!decision.restart) return;
