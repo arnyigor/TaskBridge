@@ -537,3 +537,36 @@ test('повторная сверка не меняет уже завершён�
   assert.equal(after.reason, null);
   assert.equal(after.finishedAt, at, 'момент завершения не переписан');
 });
+
+// AUTO-03D: история автоматизации листается страницами — расписание с шагом 5 минут
+// быстро перерастает первую страницу.
+test('история запусков листается по смещению без дублей и пропусков', { timeout: 60000 }, async t => {
+  const { TaskManager } = await import('../src/task-manager.mjs');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-history-'));
+  const store = new TaskStore(dir);
+  const manager = new TaskManager({ projects: [] }, dir, store);
+  t.after(async () => {
+    try { await manager.close?.(); } catch { /* не предмет теста */ }
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const base = Date.parse('2026-10-21T09:00:00.000Z');
+  for (let index = 0; index < 25; index += 1) {
+    const startedAt = new Date(base + index * 60_000).toISOString();
+    store.createInvocation({
+      id: `inv-${String(index).padStart(2, '0')}`, recipeId: 'rc-h', scheduleId: 'sc-h', trigger: 'schedule',
+      scheduledAt: startedAt, startedAt, finishedAt: startedAt, status: 'SUCCEEDED', reason: null,
+      misfire: false, parameters: {}, sessionId: null, verification: null, workspaceRef: null, resultArtifact: null,
+    });
+  }
+
+  const first = manager.listInvocations({ scheduleId: 'sc-h', limit: 20, offset: 0 });
+  const second = manager.listInvocations({ scheduleId: 'sc-h', limit: 20, offset: 20 });
+  assert.equal(first.length, 20);
+  assert.equal(second.length, 5);
+  assert.equal(new Set([...first, ...second].map(item => item.id)).size, 25, 'страницы не пересекаются');
+  // Порядок — от новых к старым: первая страница не содержит самый старый запуск.
+  assert.equal(first[0].id, 'inv-24');
+  assert.equal(second.at(-1).id, 'inv-00');
+});

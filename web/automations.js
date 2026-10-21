@@ -86,10 +86,16 @@ function show(recipeId, scheduleId) {
   renderHistory();
 }
 
-async function loadHistory() {
+const HISTORY_PAGE = 20;
+let historyShown = 0;
+
+async function loadHistory({ append = false } = {}) {
   const schedule = selectedSchedule();
   const root = el('history');
-  root.replaceChildren();
+  if (!append) {
+    root.replaceChildren();
+    historyShown = 0;
+  }
   if (!schedule) {
     const line = document.createElement('p');
     line.className = 'muted';
@@ -97,18 +103,21 @@ async function loadHistory() {
     root.append(line);
     return;
   }
-  const result = await api(`/invocations?scheduleId=${encodeURIComponent(schedule.id)}&limit=20`).catch(error => ({ items: [], error }));
+  const result = await api(`/invocations?scheduleId=${encodeURIComponent(schedule.id)}&limit=${HISTORY_PAGE}&offset=${historyShown}`).catch(error => ({ items: [], error }));
   if (result.error) {
     status(`История не загружена: ${result.error.message}`, 'error');
     return;
   }
   if (!result.items.length) {
-    const line = document.createElement('p');
-    line.className = 'muted';
-    line.textContent = 'Запусков ещё не было';
-    root.append(line);
+    if (!append) {
+      const line = document.createElement('p');
+      line.className = 'muted';
+      line.textContent = 'Запусков ещё не было';
+      root.append(line);
+    }
     return;
   }
+  historyShown += result.items.length;
   for (const invocation of result.items) {
     const row = document.createElement('div');
     row.className = 'entry static';
@@ -142,6 +151,20 @@ async function loadHistory() {
     });
     row.append(title, sub, more, details);
     root.append(row);
+  }
+  // Следующая страница: у автоматизации с шагом 5 минут история растёт быстро.
+  if (result.items.length === HISTORY_PAGE) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'subtle small';
+    more.textContent = 'Показать ещё';
+    more.addEventListener('click', async () => {
+      more.disabled = true;
+      try { await loadHistory({ append: true }); }
+      catch (error) { status(error.message, 'error'); }
+      finally { more.disabled = false; }
+    });
+    root.append(more);
   }
 }
 

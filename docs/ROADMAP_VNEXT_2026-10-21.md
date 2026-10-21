@@ -254,7 +254,12 @@
 | AUTO-01E (A5) | ✅ выполнен 2026-10-21 | `src/task-manager.mjs`, `src/server.mjs`, `tests/auto-restart.test.mjs` | Автоперезапуск считает занятостью очередь промптов, а не только слоты |
 | AUTO-02 | ✅ выполнен 2026-10-21 (закрывает A7) | `web/automations.html`, `web/automations.js`, `web/automations-view.mjs`, `tests/web-automations-view.test.mjs` | Список, редактор промпта, настройки запуска и история на существующих API; форма повторяет серверные проверки |
 | A8 | ✅ выполнен 2026-10-21 | `README.md` | Диапазон Pi приведён к проверенному: `>=0.85.0 <1.4.0` |
-| A7–A8 по аудиту планировщика | ✅ закрыты | [auto-00-audit.md](auto-00-audit.md) | Открытых находок AUDIT больше нет; дальше — AUTO-03 (наблюдаемость) и CONT-01 по плану |
+| A7–A8 по аудиту планировщика | ✅ закрыты | [auto-00-audit.md](auto-00-audit.md) | Открытых находок AUDIT больше нет |
+| AUTO-03A | ✅ выполнен 2026-10-21 | `src/task-manager.mjs`, `tests/invocations.test.mjs` | `CANCELLED` остаётся `CANCELLED`; повторная сверка не меняет завершённый запуск |
+| AUTO-03B | ✅ выполнен 2026-10-21 | `src/automation/invocation-summary.mjs`, `GET /api/invocations/:id/summary` | Сводка: длительность, ожидание, фактическая модель, токены (`last-turn`), проверка; неизвестное — `null` |
+| AUTO-03C | ✅ выполнен 2026-10-21 | `src/push/push-center.mjs`, `src/server.mjs` | Push по итогу инвокации, политики расписания, ключ `invocation:<id>` |
+| AUTO-03D | ✅ выполнен 2026-10-21 | `src/task-store.mjs`, `web/automations.js` | История листается по `offset`, 20 на страницу |
+| AUTO-03E | 🔎 следующий шаг | — | Живая приёмка на изолированном экземпляре (AUTO-T01…T14) и публикация коммитов |
 | TB-PROV-02 / 03, TB-KMP-01, TB-STAB-02, RELEASE-01 | ⏸ не начаты | — | По последовательности раздела B |
 
 Замечание по OMP-02: первая серия прогонов была недействительна из-за ошибки стенда

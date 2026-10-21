@@ -914,15 +914,17 @@ export class TaskStore {
     return this.#invocationRow(this.db.prepare('SELECT * FROM invocations WHERE id = ?').get(String(id)));
   }
 
-  listInvocations({ recipeId = null, scheduleId = null, status = null, limit = 50 } = {}) {
+  listInvocations({ recipeId = null, scheduleId = null, status = null, limit = 50, offset = 0 } = {}) {
     const clauses = [];
     const values = [];
     if (recipeId) { clauses.push('recipe_id = ?'); values.push(String(recipeId)); }
     if (scheduleId) { clauses.push('schedule_id = ?'); values.push(String(scheduleId)); }
     if (status) { clauses.push('status = ?'); values.push(String(status).toUpperCase()); }
     const where = clauses.length ? ` WHERE ${clauses.join(' AND ')}` : '';
-    const rows = this.db.prepare(`SELECT * FROM invocations${where} ORDER BY started_at DESC LIMIT ?`)
-      .all(...values, Math.min(Math.max(Number(limit) || 50, 1), 500));
+    // Смещение нужно истории автоматизаций: расписание с шагом 5 минут быстро
+    // перерастает первую страницу (AUTO-03D).
+    const rows = this.db.prepare(`SELECT * FROM invocations${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`)
+      .all(...values, Math.min(Math.max(Number(limit) || 50, 1), 500), Math.max(Number(offset) || 0, 0));
     return rows.map(row => this.#invocationRow(row));
   }
 
