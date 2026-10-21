@@ -486,3 +486,54 @@ test('брошенная инвокация закрывается как «не
   const young = store.getInvocation('inv-young');
   assert.equal(young.status, 'RUNNING', 'молодая запись не закрывается: #invoke вот-вот проставит sessionId');
 });
+
+// AUTO-03A: итог запуска — это итог всей работы, а не последний статус сессии.
+// STOP обязан остаться остановкой, а не «проверка не пройдена».
+test('остановленный запуск остаётся CANCELLED, а не FAILED из-за проверки', { timeout: 120000 }, async t => {
+  const { fixture, api, recipe, post } = await setup(t, { profile: 'passing' });
+  const schedule = await post('/api/schedules', { recipeId: recipe.id, spec: { kind: 'daily', at: '09:00' } });
+  const decision = (await tick(fixture, new Date(Date.parse(schedule.nextRunAt) + 60_000).toISOString()))
+    .decisions.find(entry => entry.scheduleId === schedule.id);
+  assert.equal(decision.action, 'run');
+
+  // Оператор останавливает ход: сессия приходит в CANCELLED.
+  await api(`/api/tasks/${decision.sessionId}/cancel`, {}, 'POST').catch(() => null);
+  await until(async () => ['CANCELLED', 'SUCCEEDED', 'FAILED'].includes((await api(`/api/tasks/${decision.sessionId}`)).status));
+
+  await tick(fixture, new Date(Date.parse(schedule.nextRunAt) + 120_000).toISOString());
+  const invocation = await api(`/api/invocations/${decision.invocationId}`);
+  const session = await api(`/api/tasks/${decision.sessionId}`);
+  if (session.status === 'CANCELLED') {
+    assert.equal(invocation.status, 'CANCELLED', `остановка не превращается в провал тестов: ${JSON.stringify(invocation)}`);
+    assert.doesNotMatch(invocation.reason || '', /проверка не пройдена/);
+  } else {
+    // Фикстура успела завершиться раньше STOP — тогда проверяем обычный итог.
+    assert.ok(['SUCCEEDED', 'FAILED'].includes(invocation.status), JSON.stringify(invocation));
+  }
+});
+
+test('повторная сверка не меняет уже завершённый запуск', { timeout: 60000 }, async t => {
+  const { TaskManager } = await import('../src/task-manager.mjs');
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-reconcile-idem-'));
+  const store = new TaskStore(dir);
+  const manager = new TaskManager({ projects: [] }, dir, store);
+  t.after(async () => {
+    try { await manager.close?.(); } catch { /* не предмет теста */ }
+    store.close();
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  const at = new Date().toISOString();
+  store.createRecipe({ id: 'rc-idem', projectId: 'p', workItemId: null, name: 'I', promptTemplate: 'П', parameters: {}, runtime: { id: 'pi' }, verification: {}, createdAt: at, updatedAt: at });
+  store.createInvocation({
+    id: 'inv-done', recipeId: 'rc-idem', scheduleId: null, trigger: 'schedule', scheduledAt: at, startedAt: at,
+    finishedAt: at, status: 'SUCCEEDED', reason: null, misfire: false, parameters: {},
+    sessionId: 'sess-gone', verification: 'PASSED', workspaceRef: null, resultArtifact: 'result.md',
+  });
+
+  await manager.schedulerTick({ nowIso: at });
+  const after = store.getInvocation('inv-done');
+  assert.equal(after.status, 'SUCCEEDED', 'завершённый запуск сверка не трогает');
+  assert.equal(after.reason, null);
+  assert.equal(after.finishedAt, at, 'момент завершения не переписан');
+});

@@ -54,6 +54,7 @@ import { listProposals, createProposal, acceptProposal, rejectProposal, validate
 import { projectFileIndex } from './memory/path-patterns.mjs';
 import { validateRecipe, renderRecipe } from './recipes/recipe.mjs';
 import { normalizeSchedule, nextRunAfter, resolveMisfire, describeSchedule } from './scheduler/schedule.mjs';
+import { invocationSummary } from './automation/invocation-summary.mjs';
 import { trustProjectDirectory } from './project-trust.mjs';
 import {
   assertContextLimit, buildContextReport, collectContextSources, estimateTokens, readCompactionSettings,
@@ -2298,11 +2299,16 @@ export class TaskManager extends EventEmitter {
         finished.push(invocation.id);
         continue;
       }
-      const failedVerification = requiresVerification && verification !== 'PASSED';
-      const status = failedVerification ? 'FAILED' : session.status;
-      const reason = failedVerification
-        ? `проверка не пройдена (${verification ?? 'не запускалась'}), хотя рецепт её требует`
-        : (session.error ? String(session.error).slice(0, 300) : null);
+      // Остановка оператором — это остановка, а не провал проверки: иначе STOP
+      // читался бы в истории как «тесты не прошли» (AUTO-03A).
+      const cancelled = session.status === 'CANCELLED';
+      const failedVerification = !cancelled && requiresVerification && verification !== 'PASSED';
+      const status = cancelled ? 'CANCELLED' : (failedVerification ? 'FAILED' : session.status);
+      const reason = cancelled
+        ? (session.error ? String(session.error).slice(0, 300) : 'остановлено оператором')
+        : failedVerification
+          ? `проверка не пройдена (${verification ?? 'не запускалась'}), хотя рецепт её требует`
+          : (session.error ? String(session.error).slice(0, 300) : null);
       await this.store.updateInvocation(invocation.id, {
         status,
         reason,
@@ -3264,6 +3270,16 @@ export class TaskManager extends EventEmitter {
     } finally {
       this.probeInFlight.delete(key);
     }
+  }
+
+  /**
+   * Компактная сводка запуска (AUTO-03B): читает инвокацию и её сессию, ничего не
+   * пишет. Отдаётся отдельным запросом, чтобы история не тянула тяжёлые детали.
+   */
+  invocationSummary(id) {
+    const invocation = this.getInvocation(id);
+    const session = invocation?.sessionId ? this.tasks.get(invocation.sessionId) ?? null : null;
+    return invocationSummary(invocation, session);
   }
 
   /**
