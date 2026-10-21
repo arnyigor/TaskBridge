@@ -106,3 +106,35 @@ test('a schedule describes itself for the UI', () => {
   assert.equal(describeSchedule({ spec: { kind: 'weekly', at: '10:30', weekday: 'sun' } }), 'по sun в 10:30');
   assert.equal(describeSchedule({ spec: { kind: 'interval', everyMinutes: 120 } }), 'каждые 120 мин');
 });
+
+// AUTO-01E, находка A6 (docs/auto-00-audit.md): недельное расписание считало сутки
+// как 24 часа в миллисекундах, поэтому в день перевода часов время уезжало на час.
+// Проверка идёт в отдельном процессе с зоной, где переход есть: на машине без DST
+// ошибка невидима.
+test('недельное расписание держит локальное время через переход зимнего/летнего', async () => {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const script = `
+    import { nextRunAfter } from './src/scheduler/schedule.mjs';
+    // Суббота 27 марта 2027, 13:00 по Берлину; в ночь на воскресенье часы переводят.
+    const next = nextRunAfter({ kind: 'weekly', at: '09:00', weekday: 'sun' }, '2027-03-27T12:00:00.000Z');
+    console.log(JSON.stringify({ next, hour: new Date(next).getHours(), day: new Date(next).getDay() }));
+  `;
+  const run = async tz => {
+    const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script], {
+      cwd: new URL('..', import.meta.url).pathname.replace(/^\/([a-z]):/i, '$1:'),
+      env: { ...process.env, TZ: tz },
+    });
+    return JSON.parse(stdout.trim());
+  };
+
+  const berlin = await run('Europe/Berlin');
+  assert.equal(berlin.hour, 9, `локальное время осталось 09:00: ${berlin.next}`);
+  assert.equal(berlin.day, 0, 'это воскресенье');
+  // 09:00 в CEST — это 07:00Z; при арифметике «+24 часа» получилось бы 08:00Z.
+  assert.equal(berlin.next, '2027-03-28T07:00:00.000Z');
+
+  // Зона без перехода — тот же ответ, чтобы правка не поменяла обычное поведение.
+  const almaty = await run('Asia/Almaty');
+  assert.equal(almaty.hour, 9, `без DST время тоже 09:00: ${almaty.next}`);
+});

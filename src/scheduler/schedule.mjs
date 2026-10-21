@@ -26,7 +26,6 @@ export const NOTIFY_POLICIES = Object.freeze(['action-required', 'always', 'erro
 export const APPROVAL_MODES = Object.freeze(['pause']);
 
 const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * 60_000;
 const WEEKDAYS = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
 
 const invalid = (message) => Object.assign(new Error(message), { code: 'INPUT_INVALID' });
@@ -93,7 +92,10 @@ export function nextRunAfter(spec, after, { anchor = null } = {}) {
     const current = (candidate.getDay() + 6) % 7; // Monday = 0
     let shift = (target - current + 7) % 7;
     if (shift === 0 && candidate.getTime() <= from.getTime()) shift = 7;
-    return new Date(candidate.getTime() + shift * DAY_MS).toISOString();
+    // Календарные сутки, а не `shift * 24 ч`: в день перевода часов сутки длятся 23 или
+    // 25 часов, и фиксированные миллисекунды уводили бы время запуска на час.
+    candidate.setDate(candidate.getDate() + shift);
+    return candidate.toISOString();
   }
   if (candidate.getTime() <= from.getTime()) candidate.setDate(candidate.getDate() + 1);
   return candidate.toISOString();
