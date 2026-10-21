@@ -62,6 +62,31 @@ function paragraphSeparator(text) {
   return trimmed.endsWith('\n') ? '\n' : '\n\n';
 }
 
+// Подтверждённые результаты инструментов (§7 плана 1.3): сервер уже ограничивает
+// список, но история могла быть записана другой версией и прийти из чужого
+// источника — reducer единственное место, где данные видны до отрисовки, поэтому
+// границы повторяются здесь, а не только в рендере.
+const EVIDENCE_MAX = 10;
+const EVIDENCE_TARGET = 160;
+const EVIDENCE_EXCERPT = 240;
+
+export function normalizeToolEvidence(value) {
+  if (!Array.isArray(value)) return null;
+  const list = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const excerpt = typeof entry.excerpt === 'string' ? entry.excerpt.trim() : '';
+    if (!excerpt) continue;
+    list.push({
+      toolName: (typeof entry.toolName === 'string' ? entry.toolName.trim() : '') || 'tool',
+      target: typeof entry.target === 'string' ? entry.target.trim().slice(0, EVIDENCE_TARGET) : '',
+      excerpt: excerpt.slice(0, EVIDENCE_EXCERPT),
+    });
+    if (list.length >= EVIDENCE_MAX) break;
+  }
+  return list.length ? list : null;
+}
+
 function isEmptyAssistantPlaceholder(turn) {
   return turn?.role === 'assistant' && !turn.final && !turn.text && !turn.thinking && !turn.tools?.length && !turn.files?.length;
 }
@@ -161,7 +186,7 @@ export class ChatState {
     this.variants.set(key, { ids: [`assistant-${id}`], selected: `assistant-${id}` });
   }
 
-  finish(status, error = null, at = null) {
+  finish(status, error = null, at = null, evidence = null) {
     // Every terminal path funnels through here — a TASK_FAILED event carries the
     // server's stored message, which may be a provider JSON body (older events
     // kept it verbatim). Flatten once so no caller can put raw JSON on screen.
@@ -169,6 +194,7 @@ export class ChatState {
     // Older servers stored only this generic envelope label after Pi had
     // already supplied the upstream cause. Preserve that cause on replay/poll.
     const errorFor = turn => /^provider returned error\.?$/i.test(error || '') && turn.error ? turn.error : error;
+    const proofs = normalizeToolEvidence(evidence);
     const answered = (turn) => String(turn.text || '').trim().length > 0;
     const cutOff = (turn) => !answered(turn) && (turn.superseded || status === 'CANCELLED');
     const labelFor = (turn) => (turn.error || cutOff(turn) ? 'FAILED' : status);
@@ -181,6 +207,9 @@ export class ChatState {
       if (prev) {
         prev.status = (error || prev.error || cutOff(prev)) ? 'FAILED' : status;
         if (error) prev.error = errorFor(prev);
+        // The evidence belongs to the turn the error belongs to: a late failure
+        // must not hand the found results to the answer that just started.
+        if (proofs && prev.status === 'FAILED') prev.toolEvidence = proofs;
         prev.endedAt = prev.endedAt || at;
         prev.final = true;
         for (const tool of prev.tools) if (tool.state === 'run') tool.state = 'interrupted';
@@ -196,7 +225,10 @@ export class ChatState {
       // it must replace it. Otherwise a stop showed DONE, because Pi settles
       // before TaskBridge records TASK_CANCELLED.
       const interim = !turn.status || turn.status === 'DONE';
-      if (turn.active || (interim && !turn.superseded)) turn.status = labelFor(turn);
+      if (turn.active || (interim && !turn.superseded)) {
+        turn.status = labelFor(turn);
+        if (proofs && turn.status === 'FAILED') turn.toolEvidence = proofs;
+      }
       turn.active = false;
       // `final` is the turn's own "the answer is as complete as it will get":
       // an empty final turn really was not answered, while a turn that has not
@@ -208,6 +240,7 @@ export class ChatState {
     this.current.status = (error || this.current.error || cutOff(this.current)) ? 'FAILED' : status;
     this.current.final = true;
     if (error) this.current.error = errorFor(this.current);
+    if (proofs && this.current.status === 'FAILED') this.current.toolEvidence = proofs;
     // The answer that just ended gets its end time — only that one: older turns
     // were finished by their own event. A marker that predates the turn it would
     // close (an overlapping cancel finalizing after the next message started) is
@@ -439,7 +472,7 @@ export class ChatState {
         this.current.status = event.data.status;
       } else this.finish(event.data?.status || 'DONE');
     } else if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(event.type)) {
-      this.finish(event.type.slice(5), event.type === 'TASK_FAILED' ? event.message : null, event.at);
+      this.finish(event.type.slice(5), event.type === 'TASK_FAILED' ? event.message : null, event.at, event.type === 'TASK_FAILED' ? event.data?.toolEvidence : null);
     }
     if (!frame) return true;
     if (frame.type === 'agent_start') {

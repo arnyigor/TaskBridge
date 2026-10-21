@@ -71,6 +71,8 @@ export const SECTIONS = {
       'tests/web-css.test.mjs',
       'tests/machine-load-panel.test.mjs',
       'tests/web-reconnect.test.mjs',
+      // Блок «Результаты инструментов» на упавшем ходе (MR-04 Web).
+      'tests/web-tool-evidence.test.mjs',
       'tests/web-transport.test.mjs',
       'tests/web-command-client.test.mjs',
       'tests/composer-drafts.test.mjs',

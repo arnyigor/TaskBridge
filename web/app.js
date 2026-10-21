@@ -592,6 +592,8 @@ function resetTurnDom(node) {
     node.toolGroup = null;
   }
   node.md?.querySelector('.turnError')?.remove();
+  node.md?.querySelector('.toolEvidence')?.remove();
+  node.evidenceKey = '';
   if (node.copyBtn) node.copyBtn._text = '';
   // Force the next comparison to see "everything changed".
   node.text = node.thinking = node.status = node.error = node.active = undefined;
@@ -617,6 +619,52 @@ function updateText() {
   // Рост ответа: если были у низа — следуем за текстом, иначе не трогаем позицию, но
   // говорим, что ниже появилось новое.
   if (!scrollBottom()) renderNewBelow('продолжение ответа');
+}
+
+/* ---------------- confirmed tool results on a failed turn ---------------- */
+
+// The evidence travels beside the error, never inside the answer (§7 of the 1.3
+// plan): a turn whose model died may still have found something, and that has to
+// be visible without pretending an answer exists. Collapsed by default — it is
+// the second thing an operator needs, and a long list must not move the chat.
+function toolEvidenceBlock(evidence) {
+  const details = document.createElement('details');
+  details.className = 'toolEvidence';
+  const summary = document.createElement('summary');
+  summary.textContent = `Результаты инструментов · ${evidence.length}`;
+  details.append(summary);
+  for (const entry of evidence) {
+    const row = document.createElement('div');
+    row.className = 'evidenceRow';
+    const head = document.createElement('div');
+    head.className = 'evidenceHead';
+    head.textContent = entry.target ? `${entry.toolName}: ${entry.target}` : entry.toolName;
+    const text = document.createElement('div');
+    text.className = 'evidenceText';
+    // textContent, never innerHTML: tool output is arbitrary file content.
+    text.textContent = entry.excerpt;
+    row.append(head, text);
+    details.append(row);
+  }
+  return details;
+}
+
+// updateText() rebuilds the answer's .md on every change, so the block is
+// re-created when the DOM lost it, and left alone when nothing changed — a poll
+// must not churn the DOM of a settled turn.
+function syncToolEvidence(node, evidence) {
+  if (!node || !node.md) return;
+  const list = Array.isArray(evidence) ? evidence : [];
+  if (!list.length) {
+    node.md.querySelector('.toolEvidence')?.remove();
+    node.evidenceKey = '';
+    return;
+  }
+  const key = JSON.stringify(list.map(entry => [entry.toolName, entry.target, String(entry.excerpt || '').length]));
+  if (node.evidenceKey === key && node.md.querySelector('.toolEvidence')) return;
+  node.md.querySelector('.toolEvidence')?.remove();
+  node.md.append(toolEvidenceBlock(list));
+  node.evidenceKey = key;
 }
 
 // Whether an empty assistant turn is still waiting for its answer. Both signals
@@ -1702,6 +1750,7 @@ function renderChat() {
       node.error = turn.error;
     }
     setTurnTime(node, turn, node.metaRow);
+    syncToolEvidence(node, turn.toolEvidence);
     if (node.thinking !== turn.thinking) {
       updateThinking();
       node.thinking = turn.thinking;
@@ -2288,6 +2337,7 @@ function renderSettledTurn(turn, before) {
     error.textContent = turn.error;
     md.append(error);
   }
+  if (Array.isArray(turn.toolEvidence) && turn.toolEvidence.length) md.append(toolEvidenceBlock(turn.toolEvidence));
 
   const tools = new Map();
   for (const tool of turn.tools) {

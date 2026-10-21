@@ -13,7 +13,11 @@ export const DIAGNOSTICS_VERSION = 1;
 // Поля задачи, которые не должны покидать машину оператора.
 const PRIVATE_TASK_FIELDS = new Set([
   'prompt', 'assistantText', 'thinkingText', 'followup', 'followupInstructions',
-  'errorStack', 'apiKeys', 'secrets'
+  'errorStack', 'apiKeys', 'secrets',
+  // Подтверждённые результаты инструментов — это содержимое файлов и вывод
+  // команд (§7 плана 1.3). Бандл копируется в буфер и уходит человеку, поэтому
+  // выжимки в него не попадают: диагностике нужно только «сколько и чего».
+  'toolEvidence'
 ]);
 
 function publicMeta(value) {

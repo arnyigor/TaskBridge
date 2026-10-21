@@ -113,3 +113,19 @@ test('without metrics the server section is null rather than a lie', () => {
   assert.equal(buildDiagnosticsBundle({ now: 0 }).server, null);
   assert.equal(buildDiagnosticsBundle({ now: 0, server: {} }).server, null);
 });
+
+test('выжимки выводов инструментов не попадают в бандл диагностики', () => {
+  // Результаты инструментов — это содержимое файлов (§7 плана 1.3). Бандл
+  // копируется в буфер и уходит человеку, поэтому в него идёт только форма:
+  // сколько записей и по каким инструментам, без текста.
+  const proofText = 'DEEPSEEK_API_KEY=sk-live-0123456789abcdef';
+  const bundle = buildDiagnosticsBundle({
+    now: Date.now(),
+    task: { ...task, status: 'FAILED', errorCode: 'MODEL_ERROR', error: 'Fixture model error',
+      toolEvidence: [{ toolName: 'bash', target: 'env', excerpt: proofText }] },
+    chat: { cursor: 7 },
+  });
+  const text = JSON.stringify(bundle);
+  assert.doesNotMatch(text, /sk-live-0123456789abcdef/, 'выжимка не уходит в буфер');
+  assert.doesNotMatch(text, /toolEvidence/, 'даже имени поля в бандле нет');
+});

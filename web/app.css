@@ -970,6 +970,34 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
 }
 .turnError button:hover { background: rgba(251, 113, 133, 0.14); }
 
+/* Подтверждённые результаты инструментов на упавшем ходе (§7 плана 1.3): блок
+   рядом с ошибкой, не внутри ответа. Свёрнут по умолчанию — длинный список не
+   должен двигать чат и дёргать прокрутку; выжимка ограничена сервером. */
+.toolEvidence {
+  margin-top: 8px;
+  border-left: 2px solid var(--border-strong);
+  background: var(--surface-2);
+  border-radius: 0 6px 6px 0;
+  max-width: 100%;
+  font-size: 0.75rem;
+}
+.toolEvidence summary {
+  padding: 5px 9px;
+  cursor: pointer;
+  color: var(--muted);
+  list-style: none;
+}
+.toolEvidence summary::-webkit-details-marker { display: none; }
+.toolEvidence[open] summary { color: var(--text); }
+.evidenceRow { padding: 6px 9px; border-top: 1px solid var(--border); }
+.evidenceHead {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.evidenceText { margin-top: 2px; overflow-wrap: anywhere; }
+
 /* Per-message actions, each an inline SVG mark: a pencil fixes the text in
    place, a branch forks a new session from the message, a trash can drops it
    with everything after, a refresh re-runs the newest answer. They follow the

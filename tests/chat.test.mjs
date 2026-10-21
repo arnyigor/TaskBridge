@@ -3706,3 +3706,197 @@ test('DOM: subagent progress refreshes while still running, including the collap
   assert.match(group.querySelector('.tool.run > summary').textContent, /scout · вызов: grep/);
   assert.doesNotMatch(group.textContent, /PRIVATE/);
 });
+
+/* ---------------- подтверждённые результаты инструментов (§7, MR-04) ------- */
+
+const evidence = (n = 2) => Array.from({ length: n }, (_, i) => ({
+  toolName: 'bash',
+  target: `ls dir-${i}`,
+  excerpt: `entry-${i}`,
+}));
+
+const failedEvent = (seq, { toolEvidence, at = null, message = 'Модель завершилась с ошибкой.' } = {}) => ({
+  taskId: 'a', seq, at, type: 'TASK_FAILED', message,
+  data: { errorCode: 'MODEL_ERROR', ...(toolEvidence ? { toolEvidence } : {}) },
+});
+
+test('TASK_FAILED с доказательствами привязывает их к упавшему ответу', () => {
+  const state = new ChatState({ id: 'a', prompt: 'Вопрос', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Вопрос', files: [] } });
+  state.apply({ taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply({ taskId: 'a', seq: 3, type: 'PI_EVENT', data: { pi: { type: 'tool_execution_end', toolCallId: 't1', toolName: 'bash', isError: false } } });
+  state.apply(failedEvent(4, { toolEvidence: evidence(2) }));
+
+  assert.equal(state.current.status, 'FAILED');
+  assert.deepEqual(state.current.toolEvidence.map(x => x.excerpt), ['entry-0', 'entry-1']);
+  assert.equal(state.current.toolEvidence[0].toolName, 'bash');
+  // Ошибка остаётся ошибкой, а доказательство — отдельным полем, не текстом ответа.
+  assert.equal(state.current.error, 'Модель завершилась с ошибкой.');
+  assert.equal(state.current.text, '');
+});
+
+test('TASK_FAILED без доказательств не создаёт поле вовсе', () => {
+  const state = new ChatState({ id: 'a', prompt: 'Вопрос', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Вопрос', files: [] } });
+  state.apply(failedEvent(2));
+  assert.equal(state.current.status, 'FAILED');
+  assert.equal(state.current.toolEvidence, undefined, 'пустого блока быть не должно');
+});
+
+test('успешный ход не получает блок доказательств даже при данных в событии', () => {
+  const state = new ChatState({ id: 'a', prompt: 'Вопрос', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Вопрос', files: [] } });
+  state.apply({ taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  // Сервер не шлёт доказательства в успешном ходе, но клиент не должен
+  // показывать блок и в этом случае: доказательства — признак незавершённого ответа.
+  state.apply({ taskId: 'a', seq: 3, type: 'TASK_SUCCEEDED', message: 'Done', data: { toolEvidence: evidence(1) } });
+  assert.equal(state.current.status, 'SUCCEEDED');
+  assert.equal(state.current.toolEvidence, undefined, 'на успешном ходе блока нет');
+});
+
+test('поздний TASK_FAILED не передаёт доказательства следующему ходу', () => {
+  const state = new ChatState({ id: 'a', prompt: 'Первый', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Первый', files: [] }, at: '2026-10-21T10:00:00.000Z' });
+  const first = state.current;
+  state.apply({ taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } }, at: '2026-10-21T10:00:01.000Z' });
+  // Новое сообщение оператора: у второго хода свой отсчёт времени.
+  state.apply({ taskId: 'a', seq: 3, type: 'USER_MESSAGE', data: { text: 'Второй', files: [] }, at: '2026-10-21T10:00:05.000Z' });
+  const second = state.current;
+  assert.notEqual(first, second);
+
+  // Терминальное событие относится к ПЕРВОМУ ходу (его время раньше старта второго).
+  state.apply(failedEvent(4, { toolEvidence: evidence(1), at: '2026-10-21T10:00:02.000Z' }));
+
+  assert.equal(first.status, 'FAILED');
+  assert.deepEqual(first.toolEvidence.map(x => x.excerpt), ['entry-0'], 'доказательства остались у своего хода');
+  assert.equal(second.toolEvidence, undefined, 'новый ответ их не получил');
+  assert.notEqual(second.status, 'FAILED');
+});
+
+test('повторная загрузка истории восстанавливает блок один раз', () => {
+  const events = [
+    { taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Вопрос', files: [] } },
+    { taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } },
+    failedEvent(3, { toolEvidence: evidence(2) }),
+  ];
+  const state = new ChatState(task());
+  for (const event of events) state.apply(event);
+  assert.equal(state.current.toolEvidence.length, 2);
+
+  // Тот же журнал в новом reducer — как после перезагрузки страницы/реконнекта.
+  const replay = new ChatState({ id: 'a', prompt: 'Вопрос', status: 'FAILED', error: 'Модель завершилась с ошибкой.' });
+  for (const event of events) replay.apply(event);
+  // Синтезированный из task.prompt обмен + ход из USER_MESSAGE: блок один, не два.
+  assert.equal(replay.turns.filter(t => Array.isArray(t.toolEvidence)).length, 1, 'без дублей');
+  assert.equal(replay.current.toolEvidence.length, 2);
+  // Опрос задачи (snapshot) приходит без доказательств и не должен их стереть.
+  replay.snapshot({ id: 'a', status: 'FAILED', error: 'Модель завершилась с ошибкой.' });
+  replay.snapshot({ id: 'a', status: 'FAILED', error: 'Модель завершилась с ошибкой.' });
+  assert.equal(replay.current.toolEvidence.length, 2);
+});
+
+test('доказательства уходят вместе с ходом: regenerate, удаление и ветка', () => {
+  const state = new ChatState({ id: 'a', prompt: 'Первое', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Первое', files: [] } });
+  state.apply({ taskId: 'a', seq: 2, type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
+  state.apply(failedEvent(3, { toolEvidence: evidence(2) }));
+  const failedTurn = state.current;
+  assert.equal(failedTurn.toolEvidence.length, 2);
+
+  // Regenerate: сервер начинает новый вариант — это ДРУГОЙ объект хода, у него
+  // нет ни ошибки, ни доказательств предыдущего ответа.
+  state.apply({ taskId: 'a', seq: 4, type: 'TURN_VARIANT_START', data: { turnSeq: 1, variantId: 'v2' } });
+  assert.notEqual(state.current, failedTurn);
+  assert.equal(state.current.toolEvidence, undefined, 'новый ответ начинается без чужих доказательств');
+  assert.equal(failedTurn.toolEvidence.length, 2, 'старый ответ сохранил свои как вариант');
+
+  // Переключение на предыдущий вариант показывает его собственные доказательства.
+  state.apply({ taskId: 'a', seq: 5, type: 'TURN_VARIANT_SELECTED', data: { turnSeq: 1, variantId: '1' } });
+  assert.equal(failedTurn.hidden, false);
+
+  // Retry/удаление: ход уходит из истории вместе со своими доказательствами.
+  state.apply({ taskId: 'a', seq: 6, type: 'TURN_TRUNCATED', data: { fromSeq: 1, dropInitial: true } });
+  const alive = state.turns.filter(t => t.role === 'assistant');
+  assert.equal(alive.some(t => t === failedTurn), false);
+  assert.equal(alive.some(t => Array.isArray(t.toolEvidence)), false);
+});
+
+test('границы доказательств держатся и в reducer: 10 записей, 240 символов, только текст', () => {
+  const state = new ChatState({ id: 'a', prompt: 'Вопрос', status: 'RUNNING' });
+  state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', data: { text: 'Вопрос', files: [] } });
+  const dirty = [
+    ...Array.from({ length: 14 }, (_, i) => ({ toolName: 'bash', target: 'x'.repeat(500), excerpt: 'y'.repeat(1000) })),
+    { toolName: 'read', excerpt: '' },
+    null,
+    'строка вместо записи',
+    { toolName: 42, excerpt: 'ok' },
+  ];
+  state.apply(failedEvent(2, { toolEvidence: dirty }));
+  const proofs = state.current.toolEvidence;
+  assert.equal(proofs.length, 10);
+  assert.equal(proofs[0].target.length, 160);
+  assert.equal(proofs[0].excerpt.length, 240);
+  assert.ok(proofs.every(x => typeof x.toolName === 'string' && typeof x.target === 'string'));
+});
+
+test('DOM: блок доказательств появляется под упавшим ответом и не дублируется опросом', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  const failed = {
+    taskId: 'a', seq: 100, at: '2026-10-21T10:00:00.000Z', type: 'TASK_FAILED',
+    message: 'Модель завершилась с ошибкой.',
+    data: { errorCode: 'MODEL_ERROR', toolEvidence: [{ toolName: 'bash', target: 'ls "F:/Install/Learning"', excerpt: 'UnrealEngine' }] },
+  };
+  app.streams[0].onmessage({ data: JSON.stringify(failed) });
+  // Живой кадр рисуется отложенно (setTimeout 80 мс в onEvent), поэтому ждём кадр.
+  await new Promise(resolve => setTimeout(resolve, 150));
+
+  const inner = app.document.getElementById('msgsInner');
+  const blocks = inner.querySelectorAll('.toolEvidence');
+  assert.equal(blocks.length, 1, 'один блок на упавший ход');
+  assert.match(blocks[0].textContent, /Результаты инструментов · 1/);
+  assert.match(blocks[0].textContent, /ls "F:\/Install\/Learning"/);
+  assert.match(blocks[0].textContent, /UnrealEngine/);
+  // Ошибка и результаты живут в одном ответе, но отдельными блоками: текст
+  // модели в этот блок не подмешивается.
+  const answer = blocks[0].parentElement;
+  assert.match(answer.textContent, /Модель завершилась с ошибкой\./);
+  assert.equal(answer.querySelectorAll('.turnError').length, 1);
+
+  // Два опроса задачи подряд — блок тот же, копий нет.
+  await app.refreshTask();
+  await app.refreshTask();
+  assert.equal(inner.querySelectorAll('.toolEvidence').length, 1);
+
+  // Новый вопрос оператора: доказательства остаются у прошлого ответа.
+  const next = { taskId: 'a', seq: 101, type: 'USER_MESSAGE', message: 'Второй вопрос', data: { text: 'Второй вопрос', files: [] } };
+  app.streams[0].onmessage({ data: JSON.stringify(next) });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(inner.querySelectorAll('.toolEvidence').length, 1, 'к следующему ходу блок не переехал');
+});
+
+test('DOM: без доказательств блок не появляется, а HTML из вывода не исполняется', async () => {
+  const app = await ui();
+  await app.selectTask('a');
+  app.streams[0].onmessage({ data: JSON.stringify({
+    taskId: 'a', seq: 110, at: '2026-10-21T10:00:00.000Z', type: 'TASK_FAILED',
+    message: 'Модель завершилась с ошибкой.', data: { errorCode: 'MODEL_ERROR' },
+  }) });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  assert.equal(app.document.querySelectorAll('.toolEvidence').length, 0, 'пустого блока быть не должно');
+
+  app.streams[0].onmessage({ data: JSON.stringify({
+    taskId: 'a', seq: 111, type: 'USER_MESSAGE', message: 'Ещё', data: { text: 'Ещё', files: [] },
+  }) });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  app.streams[0].onmessage({ data: JSON.stringify({
+    taskId: 'a', seq: 112, at: '2026-10-21T10:00:10.000Z', type: 'TASK_FAILED',
+    message: 'Модель завершилась с ошибкой.',
+    data: { errorCode: 'MODEL_ERROR', toolEvidence: [{ toolName: 'bash', target: 'cat', excerpt: '<script>alert(1)</script>' }] },
+  }) });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  const block = app.document.querySelector('.toolEvidence');
+  assert.ok(block);
+  assert.equal(block.querySelectorAll('script').length, 0);
+  assert.match(block.textContent, /<script>alert\(1\)<\/script>/, 'вывод виден только текстом');
+});
