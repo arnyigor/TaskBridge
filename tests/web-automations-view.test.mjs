@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   CONCURRENCY_LABELS, INVOCATION_LABELS, MISFIRE_LABELS, NOTIFY_LABELS,
-  invocationText, recipePayload, schedulePayload, scheduleStateText, scheduleText,
+  durationText, invocationText, recipePayload, schedulePayload, scheduleStateText, scheduleText, summaryText,
 } from '../web/automations-view.mjs';
 
 test('расписание описывается словами на всех трёх видах', () => {
@@ -100,4 +100,45 @@ test('страница автоматизаций и её модули отда�
   // И вход в раздел есть в основном интерфейсе.
   const index = await (await fetch(`${fixture.base}/`)).text();
   assert.match(index, /id="automationsButton"/, 'кнопка раздела в шапке');
+});
+
+test('каждый элемент, который ищет automations.js, есть на странице', async () => {
+  // Браузер нам здесь недоступен, но самая частая поломка такого экрана — опечатка
+  // в id: `el('x')` возвращает null, и страница умирает без единой ошибки сервера.
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const root = new URL('..', import.meta.url);
+  const js = await fs.readFile(new URL('web/automations.js', root), 'utf8');
+  const html = await fs.readFile(new URL('web/automations.html', root), 'utf8');
+  const used = new Set([...js.matchAll(/\bel\('([A-Za-z0-9_-]+)'\)/g)].map(match => match[1]));
+  const present = new Set([...html.matchAll(/\bid="([A-Za-z0-9_-]+)"/g)].map(match => match[1]));
+  assert.ok(used.size >= 15, `скрипт ищет элементы: ${used.size}`);
+  for (const id of used) assert.ok(present.has(id), `на странице нет элемента #${id}`);
+});
+
+test('сводка запуска печатается словами и не подменяет неизвестное нулём', () => {
+  assert.equal(durationText(41_000), '41 с');
+  assert.equal(durationText(161_000), '2 мин 41 с');
+  assert.equal(durationText(3_780_000), '1 ч 3 мин');
+  assert.equal(durationText(null), '—');
+  assert.equal(durationText(-5), '—');
+
+  const full = summaryText({
+    status: 'SUCCEEDED', durationMs: 161_000, model: { provider: 'deepseek', id: 'deepseek-flash' },
+    tokens: { total: 18_420, scope: 'last-turn' }, waitingMs: 20_000, verification: 'PASSED', sessionExists: true,
+  });
+  assert.match(full, /длительность 2 мин 41 с/);
+  assert.match(full, /deepseek\/deepseek-flash/);
+  assert.match(full, /токены последнего хода: 18420/);
+  assert.match(full, /проверка пройдена/);
+  assert.match(full, /ожидание 20 с/);
+  assert.doesNotMatch(full, /NaN|null|undefined/);
+
+  const empty = summaryText({ status: 'FAILED', durationMs: 5000, tokens: null, verification: 'NOT_CONFIGURED' });
+  assert.match(empty, /токены: нет данных/);
+  assert.match(empty, /проверка не настроена/, 'ненастроенная проверка не читается как успех');
+  assert.match(summaryText({ status: 'RUNNING', durationMs: null }), /ещё выполняется/);
+  assert.equal(summaryText(null), 'нет данных');
+  const gone = summaryText({ status: 'FAILED', durationMs: 1000, sessionExists: false });
+  assert.match(gone, /сессия удалена/);
 });

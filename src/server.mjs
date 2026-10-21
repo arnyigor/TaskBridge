@@ -1812,6 +1812,15 @@ async function handleRequest(req, res) {
         })
       });
     }
+    // Компактная сводка запуска (AUTO-03B): отдельный запрос, чтобы история не
+    // тянула детали при каждом обновлении списка.
+    const invocationSummaryRoute = pathname.match(/^\/api\/invocations\/([^/]+)\/summary$/);
+    if (invocationSummaryRoute) {
+      if (req.method !== 'GET') {
+        return errorJson(res, 405, Object.assign(new Error('Метод не поддерживается.'), { code: 'METHOD_NOT_ALLOWED' }));
+      }
+      return json(res, 200, manager.invocationSummary(decodeURIComponent(invocationSummaryRoute[1])));
+    }
     const invocationRoute = pathname.match(/^\/api\/invocations\/([^/]+)$/);
     if (req.method === 'GET' && invocationRoute) {
       return json(res, 200, manager.getInvocation(decodeURIComponent(invocationRoute[1])));

@@ -130,3 +130,47 @@ export function recipePayload(form = {}) {
   if (form.model) body.runtime = { id: 'pi', model: String(form.model) };
   return body;
 }
+
+/** Длительность по-человечески: «41 с», «2 мин 41 с», «1 ч 3 мин». */
+export function durationText(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return '—';
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${totalSeconds} с`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return seconds ? `${minutes} мин ${seconds} с` : `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+}
+
+const VERIFICATION_TEXT = Object.freeze({
+  PASSED: 'проверка пройдена',
+  FAILED: 'проверка не пройдена',
+  RUNNING: 'проверка идёт',
+  NOT_CONFIGURED: 'проверка не настроена',
+});
+
+/**
+ * Строка сводки запуска (AUTO-03B). Неизвестное печатается словами, а не нулями:
+ * «0 токенов» и «нет данных» — разные вещи.
+ */
+export function summaryText(summary) {
+  if (!summary) return 'нет данных';
+  const parts = [];
+  if (Number.isFinite(summary.durationMs)) parts.push(`длительность ${durationText(summary.durationMs)}`);
+  else if (String(summary.status || '').toUpperCase() === 'RUNNING') parts.push('ещё выполняется');
+  if (summary.model?.id) parts.push(summary.model.provider ? `${summary.model.provider}/${summary.model.id}` : summary.model.id);
+  if (summary.tokens?.total != null) {
+    parts.push(`токены последнего хода: ${summary.tokens.total}`);
+  } else if (summary.tokens) {
+    parts.push('токены последнего хода: нет данных');
+  } else {
+    parts.push('токены: нет данных');
+  }
+  if (summary.waitingMs != null) parts.push(`ожидание ${durationText(summary.waitingMs)}`);
+  const verification = VERIFICATION_TEXT[String(summary.verification || '').toUpperCase()];
+  if (verification) parts.push(verification);
+  if (summary.sessionExists === false) parts.push('сессия удалена');
+  return parts.join(' · ');
+}

@@ -5,7 +5,7 @@
 // (`/api/invocations?scheduleId=…`). Всё, что можно проверить без DOM, живёт в
 // `automations-view.mjs`.
 import {
-  invocationText, recipePayload, schedulePayload, scheduleStateText, scheduleText,
+  invocationText, recipePayload, schedulePayload, scheduleStateText, scheduleText, summaryText,
 } from './automations-view.mjs';
 
 const el = id => document.getElementById(id);
@@ -120,7 +120,27 @@ async function loadHistory() {
     if (invocation.resultArtifact) parts.push(`результат: ${invocation.resultArtifact}`);
     if (invocation.finishedAt) parts.push('завершён');
     sub.textContent = parts.join(' · ') || 'ожидает завершения';
-    row.append(title, sub);
+
+    // Сводка (длительность, модель, токены) грузится по нажатию: десятки запусков
+    // не должны тянуть детали при каждом обновлении истории (AUTO-03B).
+    const details = document.createElement('small');
+    details.className = 'muted';
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'subtle small';
+    more.textContent = 'Подробнее';
+    more.addEventListener('click', async () => {
+      more.disabled = true;
+      try {
+        const summary = await api(`/invocations/${encodeURIComponent(invocation.id)}/summary`);
+        details.textContent = summaryText(summary);
+      } catch (error) {
+        details.textContent = `Сводка недоступна: ${error.message}`;
+      } finally {
+        more.disabled = false;
+      }
+    });
+    row.append(title, sub, more, details);
     root.append(row);
   }
 }
