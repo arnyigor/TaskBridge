@@ -44,6 +44,7 @@ function makePanel() {
     <div id="modelPickerOverlay" class="hidden"></div>
     <h2 id="modelPickerTitle"></h2>
     <p id="modelPickerNote"></p>
+    <div id="modelFilters" class="hidden"></div>
     <div id="modelList"></div>
     <button id="modelButton"></button>
     <div id="createError"></div>
@@ -68,6 +69,8 @@ function makePanel() {
     extractFunction(appSource, 'openModelPicker'),
     'function renderThinkingOptions() {}',
     'function renderModelList() {}',
+    // Панель фильтров к MR-07 отношения не имеет: openModelPicker её только скрывает.
+    'function renderModelFilters() {}',
     'function renderTaskDetails(task) { currentTask = task; }',
     'function updateModelChip() {}',
     'async function refreshTask() { calls.push({ refresh: true }); }',

@@ -1994,3 +1994,48 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .modelProbe:disabled { opacity: 0.5; cursor: default; }
 .modelProbeResult { flex: 0 0 auto; white-space: nowrap; }
 .modelProbeResult.err { color: var(--danger); }
+
+/* ---------------- фильтры и избранное в выборе модели ----------------
+   Панель фильтров появляется только когда каталог загружен (класс hidden
+   снимается в app.js). display задан через :not(.hidden), иначе правило класса
+   перебило бы `.hidden { display: none }` — на этом уже обжигались (web-css). */
+.modelFilters { flex-direction: column; gap: 8px; margin: 2px 0 8px; }
+.modelFilters:not(.hidden) { display: flex; }
+#modelProviderFilter {
+  width: 100%;
+  background: #0d1220;
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-s);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 0.8125rem;
+  outline: none;
+}
+#modelProviderFilter:focus { border-color: var(--accent); }
+.modelScopes, .modelFacets { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; border: 0; }
+.modelFacets:not([hidden]) { display: flex; }
+.modelScope, .modelFacet {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.71875rem;
+  color: var(--text);
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.03);
+}
+/* Сам чекбокс/радио остаётся нативным (клавиатура, скринридер), но не растягивает чип */
+.modelScope input, .modelFacet input { margin: 0; accent-color: var(--accent); }
+.modelScope:has(input:checked), .modelFacet:has(input:checked) { border-color: var(--accent); background: rgba(167, 139, 250, 0.14); }
+.modelScope:focus-within, .modelFacet:focus-within { outline: 2px solid var(--accent); outline-offset: 1px; }
+.modelFilterActions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.modelFavToggle { padding: 4px 9px; border-radius: 999px; border: 1px solid var(--border); background: transparent; color: var(--text); cursor: pointer; font-size: 0.71875rem; }
+.modelFavToggle[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.modelCount { margin-left: auto; }
+.modelFav { flex: 0 0 auto; padding: 4px 7px; border-radius: 8px; border: 1px solid var(--border-strong); background: transparent; color: var(--muted); cursor: pointer; line-height: 1; }
+.modelFav[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.modelFav:focus-visible, .modelProbe:focus-visible, .modelFavToggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.modelEmpty { margin: 6px 2px; }

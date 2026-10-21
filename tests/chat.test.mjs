@@ -251,7 +251,7 @@ class TestWebSocket {
   drop() { this.readyState = 3; this.listeners.close?.(); }
 }
 
-async function ui({ coarsePointer = false, cloud = false, viewportWidth = null } = {}) {
+async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, initialStorage = null } = {}) {
   const { document, window } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
   // Without viewportWidth every query answers with the pointer flag, as before.
   // With it, width queries are evaluated for real — the phone layout is chosen
@@ -298,6 +298,8 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     './command-client.mjs': await import('../web/command-client.mjs'),
     './diagnostics.mjs': await import('../web/diagnostics.mjs'),
     './provider-status-view.mjs': await import('../web/provider-status-view.mjs'),
+    './model-filter.mjs': await import('../web/model-filter.mjs'),
+    './model-picker-view.mjs': await import('../web/model-picker-view.mjs'),
     './composer-drafts.mjs': await import('../web/composer-drafts.mjs'),
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
@@ -310,6 +312,9 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     setItem(key, value) { this.store[key] = String(value); },
     removeItem(key) { delete this.store[key]; }
   };
+  // Предзаполненное хранилище: проверка «страница открылась с уже сохранёнными
+  // предпочтениями» и «повреждённое значение не ломает пикер».
+  if (initialStorage) Object.assign(localStorageStub.store, initialStorage);
   const context = vm.createContext({ document, window, console, URL, history: historyStub, location: locationStub, localStorage: localStorageStub,
     WebSocket: TestWebSocket,
     __TASKBRIDGE_CLOUD__: cloud ? globalThis.__taskbridgeTestCloud : undefined,
@@ -338,7 +343,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null }
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, probeResultText, renderModelList, openModelPicker, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, probeResultText, renderModelList, renderModelFilters, resetModelFilters, openModelPicker, toggleModelFavorite, getFavorites: () => favoriteModels, setModelFilters: (patch) => { Object.assign(modelFilters, patch); renderModelFilters(); renderModelList(); }, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, intervals, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -2257,6 +2262,132 @@ test('DOM: a refused check explains itself instead of showing a number', async (
   assert.equal(app.probeResultText({ ok: false, code: 'RATE_LIMITED' }), 'провайдер ограничил запросы (429)');
   assert.equal(app.probeResultText({ ok: false, code: 'COOLDOWN', retryInMs: 4200 }), 'повтор через 5 с');
   assert.equal(app.probeResultText({ ok: true, ms: 90, tokensUsed: 0 }), '90 мс · без токенов');
+});
+
+// Общий каталог для тестов пикера: две облачные модели и одна локальная, с разными
+// возможностями — чтобы фильтры было на чём проверить.
+const PICKER_CATALOG = [
+  { provider: 'deepseek', id: 'deepseek-flash', name: 'DeepSeek Flash', images: false, tools: true, reasoning: true },
+  { provider: 'wormsoft', id: 'wormsoft-luna', name: 'Luna', images: true, tools: true, reasoning: false },
+  { provider: 'llamacpp', id: 'qwen-27b', name: 'Qwen 27B', local: true, images: true },
+];
+
+async function pickerApp(extra = {}) {
+  const app = await ui(extra);
+  const calls = [];
+  app.setFetchHook((url, options) => {
+    const path = new URL(url, 'http://localhost').pathname;
+    calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
+    if (path === '/api/models') return { ok: true, json: async () => ({ models: PICKER_CATALOG.map(model => ({ ...model })) }) };
+    return null;
+  });
+  await app.openModelPicker();
+  return { app, calls };
+}
+
+const pickerRows = app => [...app.document.querySelectorAll('#modelList .modelRow')];
+const pickerIds = app => pickerRows(app).map(row => row.querySelector('.modelId').textContent);
+const starOf = (app, id) => pickerRows(app).find(row => row.querySelector('.modelId').textContent === id)?.querySelector('.modelFav');
+// linkedom не даёт присвоить select.value, поэтому опция отмечается атрибутом,
+// как это делает сам браузер при выборе из списка.
+const selectProvider = (app, value) => {
+  const select = app.document.getElementById('modelProviderFilter');
+  for (const option of select.querySelectorAll('option')) {
+    if (option.getAttribute('value') === value) option.setAttribute('selected', 'selected');
+    else option.removeAttribute('selected');
+  }
+  select.onchange();
+};
+
+test('DOM: фильтры каталога сужают список и не меняют выбранную модель', async () => {
+  const { app, calls } = await pickerApp();
+  const doc = app.document;
+  assert.equal(doc.getElementById('modelFilters').classList.contains('hidden'), false, 'панель фильтров показана');
+  assert.deepEqual(doc.getElementById('modelCount').textContent, '3 модели');
+  // Чипы только по тем возможностям, о которых каталог дал достоверные данные.
+  assert.deepEqual(
+    [...doc.getElementById('modelFacets').querySelectorAll('input')].map(input => input.value).sort(),
+    ['images', 'reasoning', 'tools'],
+  );
+  assert.deepEqual(
+    [...doc.getElementById('modelProviderFilter').querySelectorAll('option')].map(option => option.textContent),
+    ['Все провайдеры', 'deepseek (1)', 'llamacpp (1)', 'wormsoft (1)'],
+  );
+  assert.equal(pickerIds(app).length, 3);
+
+  // Провайдер
+  selectProvider(app, 'deepseek');
+  assert.deepEqual(pickerIds(app), ['deepseek-flash'], 'фильтр по провайдеру');
+  // Локальные
+  selectProvider(app, '');
+  const localScope = [...doc.querySelectorAll('input[name="modelScope"]')].find(input => input.value === 'local');
+  localScope.checked = true;
+  localScope.onchange();
+  assert.deepEqual(pickerIds(app), ['qwen-27b'], 'только локальные');
+  // Возможности
+  const cloudScope = [...doc.querySelectorAll('input[name="modelScope"]')].find(input => input.value === 'all');
+  cloudScope.checked = true;
+  cloudScope.onchange();
+  const reasoning = [...doc.getElementById('modelFacets').querySelectorAll('input')].find(input => input.value === 'reasoning');
+  reasoning.checked = true;
+  reasoning.onchange();
+  assert.deepEqual(pickerIds(app), ['deepseek-flash'], 'только с подтверждённым thinking');
+  // Поиск — словами, а не по точной строке
+  app.setModelFilters({ capabilities: [], query: 'wormsoft luna' });
+  assert.deepEqual(pickerIds(app), ['wormsoft-luna']);
+  // Пустой результат объясняется и не выглядит сломанным каталогом
+  app.setModelFilters({ query: 'такой-модели-нет' });
+  assert.match(doc.getElementById('modelList').textContent, /Ничего не найдено\. Сбросьте фильтры/);
+  assert.equal(doc.getElementById('modelCount').textContent, '0 из 3 модели');
+  // Сброс возвращает полный каталог
+  app.resetModelFilters();
+  assert.equal(pickerIds(app).length, 3);
+  assert.equal(doc.getElementById('modelSearch').value, '', 'поиск очищен');
+  // И главное: ни один фильтр не переключал модель в сессии
+  assert.equal(calls.filter(call => call.path.endsWith('/model')).length, 0, 'фильтр не меняет модель');
+});
+
+test('DOM: избранное поднимает модель наверх, сохраняется и не выбирает её', async () => {
+  const { app, calls } = await pickerApp({ initialStorage: { 'taskbridge.favoriteModels': '[1, "wormsoft/wormsoft-luna"]' } });
+  const doc = app.document;
+  // Повреждённая запись (число вместо ключа) не помешала: избранное читается частично.
+  assert.deepEqual([...app.getFavorites()], ['wormsoft/wormsoft-luna']);
+  assert.equal(pickerIds(app)[0], 'wormsoft-luna', 'избранная модель первая');
+  assert.equal(starOf(app, 'wormsoft-luna').getAttribute('aria-pressed'), 'true');
+
+  // Звёздочка снимает избранное и НЕ выбирает модель
+  const before = calls.length;
+  starOf(app, 'wormsoft-luna').onclick({ stopPropagation() {} });
+  assert.deepEqual([...app.getFavorites()], []);
+  assert.equal(JSON.parse(app.localStorage.getItem('taskbridge.favoriteModels')).length, 0, 'пустое избранное сохранено');
+  assert.equal(calls.slice(before).filter(call => call.path.endsWith('/model')).length, 0, 'звёздочка не выбирает модель');
+
+  // Добавление избранного через кнопку и составной ключ provider/id
+  starOf(app, 'deepseek-flash').onclick({ stopPropagation() {} });
+  assert.deepEqual([...app.getFavorites()], ['deepseek/deepseek-flash']);
+  assert.equal(JSON.parse(app.localStorage.getItem('taskbridge.favoriteModels'))[0], 'deepseek/deepseek-flash');
+  assert.equal(pickerIds(app)[0], 'deepseek-flash');
+
+  // Фильтр «только избранное»
+  doc.getElementById('modelFavoritesOnly').onclick();
+  assert.equal(doc.getElementById('modelFavoritesOnly').getAttribute('aria-pressed'), 'true');
+  assert.deepEqual(pickerIds(app), ['deepseek-flash']);
+  // Одноимённая модель другого провайдера в избранное не попала
+  app.setModelFilters({ favoritesOnly: false });
+  assert.ok(!app.getFavorites().has?.('wormsoft/deepseek-flash'));
+});
+
+test('DOM: выбор модели после фильтрации применяется к выбранной строке', async () => {
+  const { app, calls } = await pickerApp();
+  const doc = app.document;
+  app.setModelFilters({ scope: 'local' });
+  const row = pickerRows(app)[0];
+  assert.equal(row.querySelector('.modelId').textContent, 'qwen-27b');
+  row.querySelector('.modelItem').onclick();
+  // Сессии нет — выбор запомнен для следующей задачи, модель именно выбранная.
+  assert.equal(JSON.parse(app.localStorage.getItem('taskbridge.pendingModel')).id, 'qwen-27b');
+  assert.equal(JSON.parse(app.localStorage.getItem('taskbridge.pendingModel')).provider, 'llamacpp');
+  assert.equal(calls.filter(call => call.path.endsWith('/model')).length, 0, 'без сессии смена не уходит на сервер');
 });
 
 test('DOM: the feed never pulls itself down while the operator reads above', async () => {

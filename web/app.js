@@ -1,4 +1,6 @@
 import { renderProviderStatus as renderProviderStatusLine } from './provider-status-view.mjs';
+import { availableCapabilities, describeCount, describeEmpty, hasActiveFilters, isFavorite, loadFavorites, modelKey, providersOf, saveFavorites, selectModels, toggleFavorite } from './model-filter.mjs';
+import { renderCapabilityChips, renderEmptyState, renderGroupHeader, renderModelRow, renderProviderOptions, modelGroupLabel } from './model-picker-view.mjs';
 import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
@@ -5258,6 +5260,28 @@ function savePendingModel() {
   } catch {}
 }
 
+// Фильтры пикера живут только в памяти страницы: это способ найти модель сейчас,
+// а не настройка. Избранное — наоборот, переживает перезагрузку и лежит в
+// localStorage под составным ключом provider/id (см. web/model-filter.mjs).
+const modelFilters = { query: '', provider: '', scope: 'all', capabilities: [], favoritesOnly: false };
+
+function favoriteStorage() {
+  // Приватный режим браузера может бросить при самом обращении к localStorage.
+  try { return globalThis.localStorage || null; } catch { return null; }
+}
+
+let favoriteModels = loadFavorites(favoriteStorage());
+
+function toggleModelFavorite(model) {
+  const key = modelKey(model);
+  if (!key) return;
+  favoriteModels = toggleFavorite(favoriteModels, key);
+  // Отказ хранилища (квота, приватный режим) не мешает: избранное работает до
+  // перезагрузки, но обманывать себя записью «сохранено» не станем.
+  saveFavorites(favoriteStorage(), favoriteModels);
+  renderModelList();
+}
+
 function modelFullLabel(model) {
   if (!model) return '—';
   return model.provider ? `${model.provider}/${model.id}` : String(model.id || '—');
@@ -5403,7 +5427,7 @@ if (modelListSentinelObserver) modelListSentinelObserver.observe(modelListSentin
 // Локальные модели — одна группа: у пресетов llama.cpp-роутера и настроенных
 // внешних серверов (Strata) разные Pi-провайдеры, а машина одна. Признак `local`
 // считает сервер по localRuntime (provider + externalServers) — TaskManager.listModels.
-const modelGroupLabel = model => (model && model.local === true ? 'Локальные модели' : (model?.provider || '—'));
+// Сам заголовок группы — web/model-picker-view.mjs (modelGroupLabel).
 
 function renderModelListBatch() {
   const list = $('modelList');
@@ -5414,49 +5438,26 @@ function renderModelListBatch() {
   // The group header must consider the item rendered right before the batch
   // start, otherwise a boundary between two batches duplicates it.
   let group = from > 0 ? modelGroupLabel(filtered[from - 1]) : null;
+  const active = currentModel();
+  const activeKey = active ? modelKey(active) : '';
   for (let i = from; i < to; i++) {
     const m = filtered[i];
     const label = modelGroupLabel(m);
     if (label !== group) {
       group = label;
-      const header = document.createElement('div');
-      header.className = 'modelGroup';
-      header.textContent = label;
-      list.append(header);
+      list.append(renderGroupHeader({ document, label }));
     }
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'modelItem';
-    const active = currentModel();
-    if (active && active.provider === m.provider && active.id === m.id) item.classList.add('active');
-    const id = document.createElement('div');
-    id.className = 'modelId';
-    id.textContent = m.id;
-    const meta = document.createElement('div');
-    meta.className = 'modelMeta';
-    meta.textContent = [
-      // В общей локальной группе заголовок больше не называет движок, поэтому
-      // провайдер виден в самой строке.
-      m.local === true && m.provider ? m.provider : null,
-      m.name && m.name !== m.id ? m.name : null,
-      m.contextWindow ? `ctx ${m.contextWindow}` : null,
-      m.reasoning ? 'thinking' : null,
-      m.images ? 'vision' : null
-    ].filter(Boolean).join(' · ');
-    item.append(id, meta);
-    item.onclick = () => chooseModel(m);
-    // Кнопка проверки — отдельный элемент строки, а не внутри кнопки выбора: вложенная
-    // кнопка и всплытие клика выбирали бы модель вместо проверки (пункт §3.3 плана).
-    const row = document.createElement('div');
-    row.className = 'modelRow';
-    const probe = document.createElement('button');
-    probe.type = 'button';
-    probe.className = 'modelProbe';
-    probe.title = 'Проверить модель: один короткий запрос (1 токен) и задержка до первого ответа';
-    probe.textContent = '⏱';
-    probe.onclick = event => { event.stopPropagation(); return probeModelRow(m, probe, row); };
-    row.append(item, probe);
-    list.append(row);
+    // Строка собирается в web/model-picker-view.mjs: выбор, избранное и проверка —
+    // три раздельные кнопки, чтобы клик по одной не срабатывал как другая.
+    list.append(renderModelRow({
+      document,
+      model: m,
+      active: Boolean(activeKey) && modelKey(m) === activeKey,
+      favorite: isFavorite(m, favoriteModels),
+      onPick: chooseModel,
+      onProbe: (model, button, row) => probeModelRow(model, button, row),
+      onToggleFavorite: toggleModelFavorite,
+    }));
   }
   modelListWindow.rendered = to;
   modelListSentinel.textContent = `Показать ещё (${to} из ${filtered.length})`;
@@ -5510,20 +5511,67 @@ function probeResultText(result) {
 function renderModelList() {
   const list = $('modelList');
   const models = modelCatalog?.models || [];
-  const query = $('modelSearch').value.trim().toLowerCase();
-  const matched = query
-    ? models.filter(m => `${m.provider}/${m.id} ${m.name || ''}`.toLowerCase().includes(query))
-    : models;
-  // Стабильная сортировка: локальные наверх, внутри группы — порядок каталога.
-  const filtered = [...matched].sort((a, b) =>
-    (b.local === true ? 1 : 0) - (a.local === true ? 1 : 0));
+  // Правила поиска, фильтров и порядка — в web/model-filter.mjs: страница только
+  // передаёт состояние и получает готовый список. Выбранная модель не трогается:
+  // фильтрация не меняет ни сессию, ни pendingModel.
+  const filtered = selectModels(models, { ...modelFilters, favorites: favoriteModels });
   modelListWindow = { filtered, rendered: 0 };
-  list.innerHTML = '';
+  $('modelCount').textContent = describeCount(filtered.length, models.length);
   if (!filtered.length) {
-    list.textContent = models.length ? 'Ничего не найдено.' : 'Pi не вернул ни одной доступной модели.';
+    // Пустой результат объясняет причину, а не выглядит как сломанный каталог.
+    renderEmptyState({ document, list, text: describeEmpty({ total: models.length, hasFilters: hasActiveFilters(modelFilters) }) });
     return;
   }
+  list.innerHTML = '';
   renderModelListBatch();
+}
+
+// Панель фильтров: провайдеры и чипы возможностей строятся из загруженного каталога,
+// поэтому появляются только тогда, когда есть из чего их построить.
+function renderModelFilters() {
+  const models = modelCatalog?.models || [];
+  const panel = $('modelFilters');
+  panel.classList.toggle('hidden', !models.length);
+  if (!models.length) return;
+  renderProviderOptions({ document, select: $('modelProviderFilter'), providers: providersOf(models), selected: modelFilters.provider });
+  const capability = availableCapabilities(models);
+  // Если фильтр выбрал возможность, которой больше нет в каталоге — снимаем выбор,
+  // иначе список молча остался бы пустым по устаревшему условию.
+  modelFilters.capabilities = modelFilters.capabilities.filter(key => capability.includes(key));
+  renderCapabilityChips({
+    document,
+    container: $('modelFacets'),
+    available: capability,
+    selected: modelFilters.capabilities,
+    onToggle: (key, checked) => {
+      modelFilters.capabilities = checked
+        ? [...new Set([...modelFilters.capabilities, key])]
+        : modelFilters.capabilities.filter(item => item !== key);
+      renderModelList();
+    },
+  });
+  syncModelFilterControls();
+}
+
+// Состояние контролов ⇄ modelFilters: единственное место, где они сверяются.
+function syncModelFilterControls() {
+  $('modelFavoritesOnly').setAttribute('aria-pressed', String(modelFilters.favoritesOnly));
+  $('modelFavoritesOnly').textContent = `${modelFilters.favoritesOnly ? '★' : '☆'} Избранное`;
+  for (const input of document.querySelectorAll('input[name="modelScope"]')) {
+    input.checked = input.value === modelFilters.scope;
+  }
+}
+
+/** Сброс всех фильтров — кнопка в панели и подсказка в пустом результате. */
+function resetModelFilters() {
+  modelFilters.query = '';
+  modelFilters.provider = '';
+  modelFilters.scope = 'all';
+  modelFilters.capabilities = [];
+  modelFilters.favoritesOnly = false;
+  $('modelSearch').value = '';
+  renderModelFilters();
+  renderModelList();
 }
 
 async function openModelPicker(refresh = false) {
@@ -5535,8 +5583,10 @@ async function openModelPicker(refresh = false) {
     ? 'Выберите модель, которой запросить этот ответ заново. Выбор применяется к сессии: Pi не умеет менять модель на один запрос.'
     : 'Список берётся напрямую у Pi — те же provider\'ы, ключи и модели, что видны командой /model. Выбор применяется к текущей сессии или к следующей задаче.';
   $('modelList').textContent = 'Загрузка…';
+  $('modelFilters').classList.add('hidden');
   try {
     modelCatalog = await api(`/api/models${refresh ? '?refresh=1' : ''}`);
+    renderModelFilters();
     renderThinkingOptions();
     renderModelList();
   } catch (error) {
@@ -5603,9 +5653,27 @@ $('changeModelButton').onclick = () => openModelPicker();
 $('modelRefresh').onclick = () => openModelPicker(true);
 $('modelPickerClose').onclick = () => { rerunTurnId = null; $('modelPickerOverlay').classList.add('hidden'); };
 $('modelSearch').addEventListener('input', () => {
+  modelFilters.query = $('modelSearch').value;
   clearTimeout(modelListSearchTimer);
   modelListSearchTimer = setTimeout(renderModelList, MODEL_LIST_SEARCH_DEBOUNCE_MS);
 });
+$('modelProviderFilter').onchange = () => {
+  modelFilters.provider = $('modelProviderFilter').value;
+  renderModelList();
+};
+for (const input of document.querySelectorAll('input[name="modelScope"]')) {
+  input.onchange = () => {
+    if (!input.checked) return;
+    modelFilters.scope = input.value;
+    renderModelList();
+  };
+}
+$('modelFavoritesOnly').onclick = () => {
+  modelFilters.favoritesOnly = !modelFilters.favoritesOnly;
+  syncModelFilterControls();
+  renderModelList();
+};
+$('modelFiltersReset').onclick = () => resetModelFilters();
 $('modelThinking').addEventListener('change', async () => {
   const level = $('modelThinking').value || null;
   if (!level) {

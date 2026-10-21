@@ -262,7 +262,23 @@
     <div class="authCard wide">
       <h2 id="modelPickerTitle">Модель Pi</h2>
       <p class="muted small" id="modelPickerNote">Список берётся напрямую у Pi — те же provider'ы, ключи и модели, что видны командой <code>/model</code>. Выбор применяется к текущей сессии или к следующей задаче.</p>
-      <input id="modelSearch" type="search" placeholder="Поиск модели…" aria-label="Поиск модели" />
+      <input id="modelSearch" type="search" placeholder="Поиск по названию, ID или провайдеру…" aria-label="Поиск модели" />
+      <!-- Фильтры каталога: панель наполняется из /api/models; чипы возможностей
+           появляются только для тех полей, о которых API дал достоверные данные. -->
+      <div id="modelFilters" class="modelFilters hidden">
+        <select id="modelProviderFilter" aria-label="Провайдер"></select>
+        <fieldset id="modelScopes" class="modelScopes" aria-label="Локальные или облачные модели">
+          <label class="modelScope"><input type="radio" name="modelScope" value="all" checked /><span>Все</span></label>
+          <label class="modelScope"><input type="radio" name="modelScope" value="local" /><span>Локальные</span></label>
+          <label class="modelScope"><input type="radio" name="modelScope" value="cloud" /><span>Облачные</span></label>
+        </fieldset>
+        <div id="modelFacets" class="modelFacets" hidden></div>
+        <div class="modelFilterActions">
+          <button id="modelFavoritesOnly" type="button" class="modelFavToggle" aria-pressed="false">☆ Избранное</button>
+          <button id="modelFiltersReset" type="button">Сбросить</button>
+          <span id="modelCount" class="muted small modelCount" role="status" aria-live="polite"></span>
+        </div>
+      </div>
       <label class="fieldLabel" for="modelThinking">Thinking level</label>
       <select id="modelThinking" aria-label="Thinking level"></select>
       <div id="modelList" class="sessionPickerList">Загрузка…</div>
@@ -559,6 +575,6 @@
     </div>
   </div>
 
-  <script type="module" src="/app.js?v=20261016-50"></script>
+  <script type="module" src="/app.js?v=20261021-51"></script>
 </body>
 </html>

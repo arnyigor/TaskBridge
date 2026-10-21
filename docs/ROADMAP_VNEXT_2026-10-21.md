@@ -239,7 +239,8 @@
 | BASE-01 | ✅ выполнен 2026-10-21 | [base-01-baseline.md](base-01-baseline.md) | Гейты зелёные: `npm test` 1291/1287 pass/0 fail, `check` и `check:policy` — exit 0; KMP и `pi-deliveries.ndjson` не тронуты |
 | OMP-02 | ✅ выполнен 2026-10-21 (12/12 успешны), **решение NO-GO** | [omp-02-comparison.md](omp-02-comparison.md), `experiments/omp-02/` | Этап закрыт. OMP-02b не выполняется, OMP Adapter не создаётся. Возобновление — только при появлении конкретной задачи, которую Pi систематически не решает (§8 отчёта) |
 | OMP-03A / 03B / 04 | ⛔ отменены решением NO-GO от 2026-10-21 | — | Не начинаются; Pi 1.3.0 остаётся основным ядром |
-| TB-PROV-01 | 🔎 идёт аудит (P1) | [tb-prov-01-audit.md](tb-prov-01-audit.md) | Инвентаризация, карта дублирования, контракт отображения; реализация — после GO по аудиту |
+| TB-PROV-01A | ✅ выполнен 2026-10-21 | [tb-prov-01-audit.md](tb-prov-01-audit.md), `web/model-filter.mjs`, `web/model-picker-view.mjs` | Фильтры и избранное в Web-пикере; API, Pi и KMP не менялись |
+| TB-PROV-01B | 🔎 следующий шаг (P1), ждёт приёмки 01A | [tb-prov-01-audit.md](tb-prov-01-audit.md) §3 п.2 | Проверка доступности провайдеров: контракт AVAILABLE/UNAUTHORIZED/RATE_LIMITED/UNREACHABLE/TIMEOUT/UNSUPPORTED/UNKNOWN |
 | TB-PROV-02 / 03, TB-KMP-01, TB-STAB-02, RELEASE-01 | ⏸ не начаты | — | По последовательности раздела B |
 
 Замечание по OMP-02: первая серия прогонов была недействительна из-за ошибки стенда
