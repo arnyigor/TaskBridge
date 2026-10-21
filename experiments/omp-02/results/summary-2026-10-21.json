@@ -1,0 +1,752 @@
+{
+  "at": "2026-10-21T08:30:26.357Z",
+  "model": "deepseek-flash",
+  "thinking": "high",
+  "versions": {
+    "node": "v24.16.0",
+    "pi": "1.3.0",
+    "omp": "omp/18.11.0"
+  },
+  "runs": 12,
+  "passed": 12,
+  "results": [
+    {
+      "scenario": "CODE-01",
+      "variant": "pi-a",
+      "runtime": "pi",
+      "variantLabel": "A: Pi 1.3.0, сопоставимый набор инструментов (read,write,edit,bash,grep,find,ls)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "started",
+      "settled": true,
+      "wallMs": 18098,
+      "firstActivityMs": 3009,
+      "toolCalls": 16,
+      "toolNames": {
+        "bash": 4,
+        "read": 6,
+        "write": 6
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 379,
+        "output": 407,
+        "total": 8594
+      },
+      "changedFiles": [
+        "src/shop/Cart.java",
+        "src/shop/Checkout.java",
+        "src/shop/Item.java",
+        "src/shop/ItemRepository.java",
+        "src/shop/Main.java",
+        "src/shop/ReceiptFormatter.java"
+      ],
+      "diffLines": 150,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "agent_start": 1,
+        "turn_start": 6,
+        "message_start": 24,
+        "message_end": 24,
+        "message_update": 2520,
+        "tool_execution_start": 16,
+        "tool_execution_update": 10,
+        "tool_execution_end": 16,
+        "turn_end": 6,
+        "agent_end": 1,
+        "agent_settled": 1
+      },
+      "answerTail": "s(double rate)` с телом `Math.round(subtotalCents() * (1 + rate))`.\n- **`src/shop/ReceiptFormatter.java`** — `line(Item)` даёт ту же строку (`priceCents() / 100.0`), `total(double)` → `totalCents(long)` с прежним форматом `%.2f ₽`.\n- **`src/shop/Checkout.java`** — `formatter.totalCents(cart.totalWithVatCents(0.2))`.\n- **`src/shop/Main.java`** — проверки тех же значений через точные целые сравнения: `6250L`, `5750L`, `6900L`, `totalCents(6900L)`; лишний `expectClose` удалён (duoble-значений больше нет).\n\nПроверка:\n```\njavac -encoding UTF-8 -d out src/shop/*.java && java -cp out shop.Main\nOK\n```",
+      "check": {
+        "sourcesCompiled": 7,
+        "compileCode": 0,
+        "compileTail": "",
+        "runCode": 0,
+        "runTail": "OK\r\n",
+        "leftoverOldCalls": []
+      }
+    },
+    {
+      "scenario": "CODE-01",
+      "variant": "omp-b",
+      "runtime": "omp",
+      "variantLabel": "B: OMP 18.11.0, сопоставимый набор инструментов (read,write,edit,bash,grep,glob, без LSP/PTY)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 17702,
+      "firstActivityMs": 2625,
+      "toolCalls": 9,
+      "toolNames": {
+        "bash": 3,
+        "write": 6
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 242,
+        "output": 328,
+        "total": 10938
+      },
+      "changedFiles": [
+        "src/shop/Cart.java",
+        "src/shop/Checkout.java",
+        "src/shop/Item.java",
+        "src/shop/ItemRepository.java",
+        "src/shop/Main.java",
+        "src/shop/ReceiptFormatter.java"
+      ],
+      "diffLines": 150,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 5,
+        "message_start": 15,
+        "message_end": 15,
+        "message_update": 2746,
+        "tool_execution_start": 9,
+        "tool_execution_update": 13,
+        "tool_execution_end": 9,
+        "turn_end": 5,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "алог в копейках (`1250, 475, 4500, 25`), `totalCents(): long`.\n- `Cart` — `subtotalCents(): long`, `totalWithVatCents(double rate) = Math.round(subtotalCents() * (1 + rate))`.\n- `ReceiptFormatter` — `line(Item)` без изменений подписи/строки (`%.2f` от `priceCents() / 100.0`), `totalCents(long)` с прежним форматом.\n- `Checkout` — `formatter.totalCents(cart.totalWithVatCents(0.2))`.\n- `Main` — сравнения целых значений (6250/5750/6900), те же строковые проверки, неиспользуемый `expectClose` удалён.\n\nПроверки `Main` подтверждают идентичный вывод: `Кофе — 12.50 ₽`, `Итого: 69.00 ₽`, `Чай — 0.25 ₽`.",
+      "check": {
+        "sourcesCompiled": 7,
+        "compileCode": 0,
+        "compileTail": "",
+        "runCode": 0,
+        "runTail": "OK\r\n",
+        "leftoverOldCalls": []
+      }
+    },
+    {
+      "scenario": "CODE-01",
+      "variant": "omp-c",
+      "runtime": "omp",
+      "variantLabel": "C: OMP 18.11.0, штатные инструменты (LSP, PTY, все builtin)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 20954,
+      "firstActivityMs": 1853,
+      "toolCalls": 15,
+      "toolNames": {
+        "bash": 2,
+        "read": 6,
+        "write": 6,
+        "grep": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 485,
+        "output": 548,
+        "total": 15113
+      },
+      "changedFiles": [
+        "src/shop/Cart.java",
+        "src/shop/Checkout.java",
+        "src/shop/Item.java",
+        "src/shop/ItemRepository.java",
+        "src/shop/Main.java",
+        "src/shop/ReceiptFormatter.java"
+      ],
+      "diffLines": 156,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 5,
+        "message_start": 21,
+        "message_end": 21,
+        "message_update": 3384,
+        "tool_execution_start": 15,
+        "tool_execution_update": 10,
+        "tool_execution_end": 15,
+        "turn_end": 5,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "ены.\n- `Checkout.java` — `formatter.totalCents(cart.totalWithVatCents(0.2))`.\n- `Main.java` — те же проверки на `long`-значениях (6250, 5750, 6900) и те же строки чека; неиспользуемый `expectClose` удалён.\n\nПроверка:\n```\njavac -encoding UTF-8 -d out src/shop/*.java && java -cp out shop.Main\n→ OK\n```\nСсылок на старый API (`getPrice`, `totalPrice`, `subtotal()`, `totalWithVat(`, `total(double`) в `src` не осталось.\n\nРешение по формату: `%.2f` заменён на целочисленный `%d.%02d`, чтобы не возвращать `double` в форматтер и не зависеть от округления; для отрицательных копеек знак выносится отдельно.",
+      "check": {
+        "sourcesCompiled": 7,
+        "compileCode": 0,
+        "compileTail": "",
+        "runCode": 0,
+        "runTail": "OK\r\n",
+        "leftoverOldCalls": []
+      }
+    },
+    {
+      "scenario": "CODE-02",
+      "variant": "pi-a",
+      "runtime": "pi",
+      "variantLabel": "A: Pi 1.3.0, сопоставимый набор инструментов (read,write,edit,bash,grep,find,ls)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "started",
+      "settled": true,
+      "wallMs": 15683,
+      "firstActivityMs": 3065,
+      "toolCalls": 11,
+      "toolNames": {
+        "bash": 6,
+        "read": 4,
+        "edit": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 275,
+        "output": 195,
+        "total": 7254
+      },
+      "changedFiles": [
+        "src/units.mjs"
+      ],
+      "diffLines": 2,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "agent_start": 1,
+        "turn_start": 7,
+        "message_start": 20,
+        "message_end": 20,
+        "message_update": 665,
+        "tool_execution_start": 11,
+        "tool_execution_update": 13,
+        "tool_execution_end": 11,
+        "turn_end": 7,
+        "agent_end": 1,
+        "agent_settled": 1
+      },
+      "answerTail": "## Итог\n\n**Корневая причина:** в `src/units.mjs` функция `kilogramsToGrams()` умножала килограммы на `100` вместо `1000`. Из-за этого весь конвейер веса/стоимости считал в 10 раз меньше:\n\n- `parseWeight('1.5kg')` → 150 вместо 1500 г\n- `shipmentCost('2kg', 300)` → 60 вместо 600 ₽\n- строка отчёта и итог — тоже в 10 раз меньше\n\n**Исправление** (одна строка, тесты не тронуты):\n\n```js\n// src/units.mjs\nexport function kilogramsToGrams(kilograms) {\n  return kilograms * 1000;   // было * 100\n}\n```\n\n`npm test`: **8/8 pass, 0 fail**.",
+      "check": {
+        "passed": 8,
+        "failed": 0,
+        "touchedTests": [],
+        "testTail": "012ms)\n✔ граммы остаются граммами (0.1409ms)\n✔ неразборчивый текст — ошибка (0.4477ms)\n✔ 2 кг по 300 ₽/кг стоят 600 ₽ (0.7552ms)\n✔ 500 г по 400 ₽/кг стоят 200 ₽ (0.1562ms)\n✔ цена округляется до копеек (0.7569ms)\n✔ строка отчёта показывает вес и стоимость (0.7374ms)\n✔ итог складывает отправки (0.1926ms)\nℹ tests 8\nℹ suites 0\nℹ pass 8\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 87.4404\n"
+      }
+    },
+    {
+      "scenario": "CODE-02",
+      "variant": "omp-b",
+      "runtime": "omp",
+      "variantLabel": "B: OMP 18.11.0, сопоставимый набор инструментов (read,write,edit,bash,grep,glob, без LSP/PTY)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 14095,
+      "firstActivityMs": 3411,
+      "toolCalls": 6,
+      "toolNames": {
+        "bash": 4,
+        "read": 1,
+        "edit": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 522,
+        "output": 188,
+        "total": 10054
+      },
+      "changedFiles": [
+        "src/units.mjs"
+      ],
+      "diffLines": 2,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 7,
+        "message_start": 14,
+        "message_end": 14,
+        "message_update": 881,
+        "tool_execution_start": 6,
+        "tool_execution_update": 12,
+        "tool_execution_end": 6,
+        "turn_end": 7,
+        "tool_stream_update": 9,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "Готово.\n\n- **Корневая причина:** `src/units.mjs:2` — `kilogramsToGrams` использовал множитель `100` вместо `1000`. Отсюда десятикратное занижение веса в граммах у всех `kg`-входов и, каскадом, стоимости в `pricing.mjs`/`report.mjs` (`600 → 60 ₽`, `300.00 → 30.00 ₽`, `150.00 → 60.00 ₽`). Градусный случай `g` не затронут — он и проходил.\n- **Правка:** `return kilograms * 1000;` — одна строка, тесты не тронуты.\n- **Проверка:** `npm test` — 8/8 pass, 0 fail.",
+      "check": {
+        "passed": 8,
+        "failed": 0,
+        "touchedTests": [],
+        "testTail": "872ms)\n✔ граммы остаются граммами (0.1556ms)\n✔ неразборчивый текст — ошибка (0.3472ms)\n✔ 2 кг по 300 ₽/кг стоят 600 ₽ (0.7046ms)\n✔ 500 г по 400 ₽/кг стоят 200 ₽ (0.1482ms)\n✔ цена округляется до копеек (0.6607ms)\n✔ строка отчёта показывает вес и стоимость (0.7282ms)\n✔ итог складывает отправки (0.1843ms)\nℹ tests 8\nℹ suites 0\nℹ pass 8\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 87.3767\n"
+      }
+    },
+    {
+      "scenario": "CODE-02",
+      "variant": "omp-c",
+      "runtime": "omp",
+      "variantLabel": "C: OMP 18.11.0, штатные инструменты (LSP, PTY, все builtin)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 15114,
+      "firstActivityMs": 2482,
+      "toolCalls": 6,
+      "toolNames": {
+        "bash": 5,
+        "edit": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 227,
+        "output": 185,
+        "total": 12572
+      },
+      "changedFiles": [
+        "src/units.mjs"
+      ],
+      "diffLines": 2,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 7,
+        "message_start": 14,
+        "message_end": 14,
+        "message_update": 669,
+        "tool_execution_start": 6,
+        "tool_execution_update": 12,
+        "tool_execution_end": 6,
+        "turn_end": 7,
+        "tool_stream_update": 6,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "**Корневая причина:** `src/units.mjs:2` — `kilogramsToGrams` умножал на 100 вместо 1000. Ошибка жила в единой точке конверсии, поэтому ломала всё выше по стеку: `parseWeight('1.5kg')` давал 150 г, из-за чего `shipmentCost` считал цену в 10 раз меньше, а `reportRow`/`reportTotal` выводили заниженные суммы. Прямые тесты граммов (`250g`) её не ловили — только килограммовые пути.\n\n**Правка:** `return kilograms * 1000;` — одна строка, тесты не тронуты.\n\n**Проверка:** `npm test` — 8/8 pass, 0 fail.",
+      "check": {
+        "passed": 8,
+        "failed": 0,
+        "touchedTests": [],
+        "testTail": "524ms)\n✔ граммы остаются граммами (0.5364ms)\n✔ неразборчивый текст — ошибка (0.7414ms)\n✔ 2 кг по 300 ₽/кг стоят 600 ₽ (1.8812ms)\n✔ 500 г по 400 ₽/кг стоят 200 ₽ (0.178ms)\n✔ цена округляется до копеек (1.8329ms)\n✔ строка отчёта показывает вес и стоимость (1.9921ms)\n✔ итог складывает отправки (0.2473ms)\nℹ tests 8\nℹ suites 0\nℹ pass 8\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 191.7065\n"
+      }
+    },
+    {
+      "scenario": "CODE-03",
+      "variant": "pi-a",
+      "runtime": "pi",
+      "variantLabel": "A: Pi 1.3.0, сопоставимый набор инструментов (read,write,edit,bash,grep,find,ls)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "started",
+      "settled": true,
+      "wallMs": 10849,
+      "firstActivityMs": 3339,
+      "toolCalls": 6,
+      "toolNames": {
+        "bash": 3,
+        "read": 2,
+        "edit": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 205,
+        "output": 83,
+        "total": 5408
+      },
+      "changedFiles": [
+        "src/big.mjs"
+      ],
+      "diffLines": 2,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "agent_start": 1,
+        "turn_start": 5,
+        "message_start": 13,
+        "message_end": 13,
+        "message_update": 414,
+        "tool_execution_start": 6,
+        "tool_execution_update": 7,
+        "tool_execution_end": 6,
+        "turn_end": 5,
+        "agent_end": 1,
+        "agent_settled": 1
+      },
+      "answerTail": "Fixed. `src/big.mjs:4406` — `sliceWindow` used a `+ 1` off-by-one offset:\n\n```js\nreturn values.slice(start, start + length);   // было: start + length + 1\n```\n\nOnly that line inside `sliceWindow` was changed; the rest of the file is untouched. `npm test` passes (6/6).",
+      "check": {
+        "passed": 6,
+        "failed": 0,
+        "changedFiles": [
+          "src/big.mjs"
+        ],
+        "changedLines": 2,
+        "testTail": "о с нуля (0.1407ms)\n✔ окно обрезается по концу массива (1.0812ms)\n✔ пустая длина даёт пустое окно (0.1397ms)\n✔ среднее считается по тем же элементам (0.2596ms)\n✔ однотипные функции не тронуты (0.1769ms)\nℹ tests 6\nℹ suites 0\nℹ pass 6\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 156.9891\n"
+      }
+    },
+    {
+      "scenario": "CODE-03",
+      "variant": "omp-b",
+      "runtime": "omp",
+      "variantLabel": "B: OMP 18.11.0, сопоставимый набор инструментов (read,write,edit,bash,grep,glob, без LSP/PTY)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 11230,
+      "firstActivityMs": 2926,
+      "toolCalls": 5,
+      "toolNames": {
+        "grep": 1,
+        "bash": 2,
+        "read": 1,
+        "edit": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 211,
+        "output": 127,
+        "total": 8018
+      },
+      "changedFiles": [
+        "src/big.mjs"
+      ],
+      "diffLines": 2,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 5,
+        "message_start": 11,
+        "message_end": 11,
+        "message_update": 542,
+        "tool_execution_start": 5,
+        "tool_execution_end": 5,
+        "tool_execution_update": 7,
+        "turn_end": 5,
+        "tool_stream_update": 9,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "Fixed `src/big.mjs:4412`: `values.slice(start, start + length + 1)` → `values.slice(start, start + length)`. That `+ 1` was the extra element.\n\nVerification: `npm test` — 6/6 pass, including \"окно берёт ровно length элементов\" (`sliceWindow(values, 2, 3)` → `[3, 4, 5]`) and the end-clamp case. `windowAverage` (only other caller) uses `sliceWindow` unchanged and its test passes. No other lines touched.",
+      "check": {
+        "passed": 6,
+        "failed": 0,
+        "changedFiles": [
+          "src/big.mjs"
+        ],
+        "changedLines": 2,
+        "testTail": "о с нуля (0.1229ms)\n✔ окно обрезается по концу массива (1.0492ms)\n✔ пустая длина даёт пустое окно (0.1768ms)\n✔ среднее считается по тем же элементам (0.1988ms)\n✔ однотипные функции не тронуты (0.3423ms)\nℹ tests 6\nℹ suites 0\nℹ pass 6\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 131.0735\n"
+      }
+    },
+    {
+      "scenario": "CODE-03",
+      "variant": "omp-c",
+      "runtime": "omp",
+      "variantLabel": "C: OMP 18.11.0, штатные инструменты (LSP, PTY, все builtin)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 15137,
+      "firstActivityMs": 2902,
+      "toolCalls": 7,
+      "toolNames": {
+        "bash": 4,
+        "read": 1,
+        "glob": 1,
+        "edit": 1
+      },
+      "repeatedCalls": 0,
+      "errorCalls": 1,
+      "tokens": {
+        "input": 289,
+        "output": 135,
+        "total": 11944
+      },
+      "changedFiles": [
+        "src/big.mjs"
+      ],
+      "diffLines": 2,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 7,
+        "message_start": 15,
+        "message_end": 15,
+        "message_update": 871,
+        "tool_execution_start": 7,
+        "tool_execution_update": 12,
+        "tool_execution_end": 7,
+        "turn_end": 7,
+        "tool_stream_update": 5,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "Fixed.\n\n**Root cause:** `src/big.mjs:4412` used `values.slice(start, start + length + 1)` — the `+ 1` produced `length + 1` elements.\n\n**Change:** end index is now `start + length`; sole edit, rest of file untouched. Clamping at the array end remains handled by `slice` (test \"окно обрезается по концу массива\" passes unchanged), and `windowAverage` — which consumes `sliceWindow` — now averages exactly the intended window.\n\n**Verification:** `npm test` → 6/6 pass, 0 fail.",
+      "check": {
+        "passed": 6,
+        "failed": 0,
+        "changedFiles": [
+          "src/big.mjs"
+        ],
+        "changedLines": 2,
+        "testTail": "о с нуля (0.2123ms)\n✔ окно обрезается по концу массива (1.1712ms)\n✔ пустая длина даёт пустое окно (0.1439ms)\n✔ среднее считается по тем же элементам (0.2225ms)\n✔ однотипные функции не тронуты (0.2026ms)\nℹ tests 6\nℹ suites 0\nℹ pass 6\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 122.6056\n"
+      }
+    },
+    {
+      "scenario": "CODE-04",
+      "variant": "pi-a",
+      "runtime": "pi",
+      "variantLabel": "A: Pi 1.3.0, сопоставимый набор инструментов (read,write,edit,bash,grep,find,ls)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "started",
+      "settled": true,
+      "wallMs": 17037,
+      "firstActivityMs": 2928,
+      "toolCalls": 24,
+      "toolNames": {
+        "ls": 1,
+        "grep": 3,
+        "read": 3,
+        "bash": 3,
+        "edit": 14
+      },
+      "repeatedCalls": 1,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 158,
+        "output": 169,
+        "total": 8519
+      },
+      "changedFiles": [
+        "src/api.mjs",
+        "src/index.mjs",
+        "src/services/svc01.mjs",
+        "src/services/svc02.mjs",
+        "src/services/svc03.mjs",
+        "src/services/svc04.mjs",
+        "src/services/svc05.mjs",
+        "src/services/svc06.mjs",
+        "src/services/svc07.mjs",
+        "src/services/svc08.mjs",
+        "src/services/svc09.mjs",
+        "src/services/svc10.mjs",
+        "src/services/svc11.mjs",
+        "src/services/svc12.mjs"
+      ],
+      "diffLines": 130,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "agent_start": 1,
+        "turn_start": 6,
+        "message_start": 32,
+        "message_end": 32,
+        "message_update": 2027,
+        "tool_execution_start": 24,
+        "tool_execution_end": 24,
+        "turn_end": 6,
+        "tool_execution_update": 7,
+        "agent_end": 1,
+        "agent_settled": 1
+      },
+      "answerTail": "Готово. `fetchUser(id)` → `loadUser({ id })`.\n\nИзменено 14 файлов:\n- `src/api.mjs` — сигнатура: `export function loadUser({ id })`, тело и поведение (поиск в `USERS`, ошибка `нет пользователя ${id}`) без изменений.\n- `src/index.mjs` — импорт + вызов `loadUser({ id })`.\n- `src/services/svc01.mjs` … `svc12.mjs` — импорт `loadUser` и вызов `loadUser({ id })` в каждом.\n\nПроверки:\n- `grep fetchUser` — ни одного вхождения не осталось.\n- `npm test` — 3/3 pass, 0 fail.",
+      "check": {
+        "passed": 3,
+        "failed": 0,
+        "changedFiles": 14,
+        "changedServices": 12,
+        "leftovers": [],
+        "testTail": "✔ сервисы первого плана (0.6895ms)\n✔ профиль собирает все двенадцать подписей (0.6864ms)\n✔ неизвестный пользователь — ошибка (0.3806ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 83.7599\n"
+      }
+    },
+    {
+      "scenario": "CODE-04",
+      "variant": "omp-b",
+      "runtime": "omp",
+      "variantLabel": "B: OMP 18.11.0, сопоставимый набор инструментов (read,write,edit,bash,grep,glob, без LSP/PTY)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 12621,
+      "firstActivityMs": 1813,
+      "toolCalls": 11,
+      "toolNames": {
+        "bash": 3,
+        "grep": 1,
+        "read": 4,
+        "edit": 3
+      },
+      "repeatedCalls": 1,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 440,
+        "output": 168,
+        "total": 10848
+      },
+      "changedFiles": [
+        "src/api.mjs",
+        "src/index.mjs",
+        "src/services/svc01.mjs",
+        "src/services/svc02.mjs",
+        "src/services/svc03.mjs",
+        "src/services/svc04.mjs",
+        "src/services/svc05.mjs",
+        "src/services/svc06.mjs",
+        "src/services/svc07.mjs",
+        "src/services/svc08.mjs",
+        "src/services/svc09.mjs",
+        "src/services/svc10.mjs",
+        "src/services/svc11.mjs",
+        "src/services/svc12.mjs"
+      ],
+      "diffLines": 130,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 5,
+        "message_start": 17,
+        "message_end": 17,
+        "message_update": 1226,
+        "tool_execution_start": 11,
+        "tool_execution_end": 11,
+        "tool_execution_update": 11,
+        "turn_end": 5,
+        "tool_stream_update": 35,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "Renamed `fetchUser(id)` → `loadUser({ id })`; behavior unchanged.\n\nChanges:\n- `src/api.mjs:13` — `export function loadUser({ id })`, body untouched.\n- `src/services/svc01..svc12.mjs` — import `loadUser`; call `loadUser({ id })`. Each service keeps its external positional `id` signature, so `test/services.test.mjs` needs no change.\n- `src/index.mjs:1,16` — updated import and `profile()` call.\n\nVerification: `grep -rn fetchUser src test` → none; `npm test` → 3/3 pass (including unknown-user throw path).",
+      "check": {
+        "passed": 3,
+        "failed": 0,
+        "changedFiles": 14,
+        "changedServices": 12,
+        "leftovers": [],
+        "testTail": "✔ сервисы первого плана (0.6897ms)\n✔ профиль собирает все двенадцать подписей (0.6405ms)\n✔ неизвестный пользователь — ошибка (0.3439ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 80.7843\n"
+      }
+    },
+    {
+      "scenario": "CODE-04",
+      "variant": "omp-c",
+      "runtime": "omp",
+      "variantLabel": "C: OMP 18.11.0, штатные инструменты (LSP, PTY, все builtin)",
+      "model": "deepseek-flash",
+      "thinking": "high",
+      "ok": true,
+      "error": null,
+      "status": "completed",
+      "settled": true,
+      "wallMs": 24347,
+      "firstActivityMs": 2425,
+      "toolCalls": 40,
+      "toolNames": {
+        "read": 10,
+        "grep": 2,
+        "edit": 27,
+        "bash": 1
+      },
+      "repeatedCalls": 14,
+      "errorCalls": 0,
+      "tokens": {
+        "input": 541,
+        "output": 234,
+        "total": 18695
+      },
+      "changedFiles": [
+        "src/api.mjs",
+        "src/index.mjs",
+        "src/services/svc01.mjs",
+        "src/services/svc02.mjs",
+        "src/services/svc03.mjs",
+        "src/services/svc04.mjs",
+        "src/services/svc05.mjs",
+        "src/services/svc06.mjs",
+        "src/services/svc07.mjs",
+        "src/services/svc08.mjs",
+        "src/services/svc09.mjs",
+        "src/services/svc10.mjs",
+        "src/services/svc11.mjs",
+        "src/services/svc12.mjs"
+      ],
+      "diffLines": 130,
+      "stopReason": "stop",
+      "errorMessage": null,
+      "eventTypes": {
+        "response": 1,
+        "agent_start": 1,
+        "turn_start": 7,
+        "message_start": 48,
+        "message_end": 48,
+        "message_update": 3500,
+        "tool_execution_start": 40,
+        "tool_execution_end": 40,
+        "turn_end": 7,
+        "tool_stream_update": 243,
+        "tool_execution_update": 4,
+        "agent_end": 1,
+        "prompt_result": 1,
+        "session_settled": 1
+      },
+      "answerTail": "Готово.\n\n**API** — `src/api.mjs`:\n```js\nexport function loadUser({ id }) { … }\n```\nЛогика без изменений: `USERS.get(id)`, та же ошибка `` `нет пользователя ${id}` ``.\n\n**Вызовы и импорты** — все 13 файлов:\n- `src/index.mjs`\n- `src/services/svc01.mjs` … `svc12.mjs`\n\n`fetchUser(id)` → `loadUser({ id })`, `import { fetchUser }` → `import { loadUser }`.\n\n**Проверка**:\n- `grep fetchUser` по проекту — 0 совпадений.\n- `npm test` — 3/3 pass, 0 fail (включая проброс ошибки для неизвестного id).",
+      "check": {
+        "passed": 3,
+        "failed": 0,
+        "changedFiles": 14,
+        "changedServices": 12,
+        "leftovers": [],
+        "testTail": "✔ сервисы первого плана (0.6922ms)\n✔ профиль собирает все двенадцать подписей (0.6516ms)\n✔ неизвестный пользователь — ошибка (0.3445ms)\nℹ tests 3\nℹ suites 0\nℹ pass 3\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 79.2152\n"
+      }
+    }
+  ]
+}
