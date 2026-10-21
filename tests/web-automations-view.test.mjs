@@ -83,6 +83,7 @@ test('страница автоматизаций и её модули отда�
   for (const [route, expected] of [
     ['/automations.html', /^text\/html/],
     ['/automations.js', /^text\/javascript/],
+    ['/automations.css', /^text\/css/],
     ['/automations-view.mjs', /^text\/javascript/],
   ]) {
     const response = await fetch(fixture.base + route);

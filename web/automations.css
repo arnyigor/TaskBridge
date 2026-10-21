@@ -1,0 +1,34 @@
+/* Экран «Автоматизации» (AUTO-02/T13): только то, чего нет в общей оболочке
+   providers.css. Общие панели, поля и кнопки остаются там — второй дизайн не
+   заводим. */
+
+/* Три панели в двухколоночной сетке: история запусков идёт под ними во всю ширину,
+   иначе она встаёт в первую колонку и на десктопе выглядит обрезанной. */
+.columns > section:last-child { grid-column: 1 / -1; }
+
+/* Группа расписания: у fieldset по умолчанию своя рамка, на тёмном фоне она
+   читается как вложенная панель. */
+fieldset { border: 1px solid var(--stroke); border-radius: 10px; padding: 10px 14px 14px; margin: 16px 0 0; }
+legend { padding: 0 6px; color: var(--muted); font-size: 12px; }
+
+/* Галочка «Расписание включено»: общее правило `input {width:100%}` делает из
+   чекбокса полосу во всю ширину — здесь возвращаем ему размер. */
+label.inline { display: flex; align-items: center; gap: 10px; margin-top: 18px; }
+label.inline input { width: auto; margin: 0; }
+
+/* «Удалить» не должно стоять вплотную к «Запустить сейчас»: на телефоне кнопки
+   переносятся по строкам, и промах пальцем стоит дорого. */
+.actions #delete { margin-left: auto; }
+@media (max-width: 760px) {
+  .actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .actions #delete { margin-left: 0; grid-column: 1 / -1; }
+  .actions button { width: 100%; }
+  label.inline { margin-top: 14px; }
+  textarea#prompt { min-height: 140px; }
+}
+
+/* История: строка — это текст и кнопка, а не целая кнопка-плитка. */
+.entry.static { cursor: default; display: grid; gap: 6px; }
+.entry.static:hover { border-color: var(--stroke); }
+.entry.static button.small { justify-self: start; padding: 5px 10px; font-size: 12px; }
+.entry.static small.muted:empty { display: none; }
