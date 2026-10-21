@@ -2529,7 +2529,9 @@ async function handleRequest(req, res) {
     errorJson(res, 404, Object.assign(new Error('Not found'), { code: 'NOT_FOUND' }));
   } catch (error) {
     if (res.headersSent) { res.destroy(); return; }
-    console.error(error.message);
+    // The proxy's request id makes its 502 and this line the same event: without
+    // it «the app hung up» and «the socket died» look identical in two logs.
+    console.error(`[${req.headers['x-taskbridge-request-id'] || '-'}] ${error.message}`);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
       : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'LOCAL_CONTEXT_UNSUPPORTED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
       // CONFLICT / UNKNOWN_AFTER_CRASH / ACCEPTED come from the commandId journal.

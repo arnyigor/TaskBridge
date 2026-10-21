@@ -205,3 +205,42 @@ test('with a certificate the proxy terminates TLS and still forwards plain http'
   assert.deepEqual(JSON.parse(body), { scheme: 'http' });
   assert.match(proxy.baseUrl, /^https:/);
 });
+
+// TB-STAB-01, задача 2: редкий 502 на POST /cancel нельзя было сопоставить с
+// логом приложения — у запроса не было идентификатора. Причина того 502 не
+// доказана (в изолированном стенде не воспроизвелась), поэтому вместо
+// предположительного «исправления» добавлена трассировка: один id на запрос,
+// он же в теле 502 и в логе приложения.
+test('a 502 names the request: the same id reaches the app and the client', async (t) => {
+  let seenByUpstream = null;
+  const { proxy } = await withProxy(t, (req, res) => {
+    seenByUpstream = req.headers['x-taskbridge-request-id'] || null;
+    // Обрыв до ответа — ровно то, что видно в логе прокси как «socket hang up».
+    res.destroy();
+  });
+
+  const response = await request(proxy.port, { method: 'POST', path: '/api/tasks/x/cancel', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(response.status, 502);
+  const body = JSON.parse(response.body);
+  assert.equal(body.code, 'BAD_GATEWAY');
+  assert.equal(typeof body.requestId, 'string');
+  assert.ok(body.requestId.length >= 8);
+  assert.equal(seenByUpstream, body.requestId, 'приложение получило тот же id');
+  assert.equal(response.headers['x-taskbridge-request-id'], body.requestId);
+});
+
+test('an existing request id is reused, a malformed one is replaced', async (t) => {
+  const ids = [];
+  const { proxy } = await withProxy(t, (req, res) => {
+    ids.push(req.headers['x-taskbridge-request-id']);
+    res.writeHead(204);
+    res.end();
+  });
+
+  await request(proxy.port, { path: '/api/tasks', headers: { 'x-taskbridge-request-id': 'retry-42-abcdef' } });
+  await request(proxy.port, { path: '/api/tasks', headers: { 'x-taskbridge-request-id': 'bad id with spaces' } });
+  assert.equal(ids[0], 'retry-42-abcdef', 'валидный id клиента сохраняется: по нему ищут в двух логах');
+  assert.equal(typeof ids[1], 'string');
+  assert.notEqual(ids[1], 'bad id with spaces');
+  assert.ok(ids[1].length >= 8);
+});

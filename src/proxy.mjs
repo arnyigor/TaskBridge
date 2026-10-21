@@ -17,6 +17,7 @@
 
 import http from 'node:http';
 import https from 'node:https';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -33,7 +34,15 @@ const HOP_BY_HOP = new Set([
   'te', 'trailer', 'transfer-encoding', 'upgrade',
 ]);
 
-function forwardRequestHeaders(headers, clientAddress) {
+// One id per proxied request, logged on both sides. Without it a 502 from the
+// proxy cannot be matched to the app's own log line (2026-10-21: a rare 502 on
+// POST /cancel had no way to tell «the app hung up» from «the socket died»).
+function requestIdOf(headers) {
+  const incoming = headers['x-taskbridge-request-id'];
+  return typeof incoming === 'string' && /^[\w.-]{8,64}$/.test(incoming) ? incoming : crypto.randomUUID();
+}
+
+function forwardRequestHeaders(headers, clientAddress, requestId = null) {
   const out = {};
   for (const [name, value] of Object.entries(headers)) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
@@ -47,6 +56,7 @@ function forwardRequestHeaders(headers, clientAddress) {
   const client = clientAddress ? String(clientAddress) : '127.0.0.1';
   const existing = headers['x-forwarded-for'];
   out['x-forwarded-for'] = existing ? `${existing}, ${client}` : client;
+  if (requestId) out['x-taskbridge-request-id'] = requestId;
   return out;
 }
 
@@ -68,12 +78,14 @@ export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, p
   const sockets = new Set();
 
   const handle = (req, res) => {
+    const requestId = requestIdOf(req.headers);
+    res.setHeader('x-taskbridge-request-id', requestId);
     const upstream = http.request({
       host: upstreamHost,
       port: upstreamPort,
       method: req.method,
       path: req.url,
-      headers: forwardRequestHeaders(req.headers, req.socket?.remoteAddress),
+      headers: forwardRequestHeaders(req.headers, req.socket?.remoteAddress, requestId),
     });
 
     upstream.on('response', (up) => {
@@ -86,8 +98,9 @@ export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, p
 
     upstream.on('error', (error) => {
       if (res.headersSent) { res.destroy(); return; }
-      logger.error?.(`[proxy] upstream ${upstreamHost}:${upstreamPort} unreachable: ${error.message}`);
-      const body = JSON.stringify({ error: 'TaskBridge upstream is not reachable', code: 'BAD_GATEWAY' });
+      // The id ties this line to the app's own log for the same request.
+      logger.error?.(`[proxy] ${requestId} upstream ${upstreamHost}:${upstreamPort} unreachable: ${error.message} (${req.method} ${req.url})`);
+      const body = JSON.stringify({ error: 'TaskBridge upstream is not reachable', code: 'BAD_GATEWAY', requestId });
       res.writeHead(502, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) });
       res.end(body);
     });
