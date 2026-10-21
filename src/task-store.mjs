@@ -706,6 +706,17 @@ export class TaskStore {
       if (!json) return null;
       try { return JSON.parse(json); } catch { return null; }
     };
+    // Пустые `context`/`workspace`/`limits` не отдаём: рецепт их не применяет
+    // (AUTO-01A), а `{}` в ответе читался бы как «настройка есть, но пустая».
+    // Непустые значения из старых записей возвращаются как есть — молча терять
+    // данные оператора нельзя.
+    const present = (json) => {
+      const value = parse(json);
+      return value && typeof value === 'object' && Object.keys(value).length ? value : null;
+    };
+    const context = present(row.context_json);
+    const workspace = present(row.workspace_json);
+    const limits = present(row.limits_json);
     return {
       id: row.id,
       projectId: row.project_id,
@@ -714,10 +725,10 @@ export class TaskStore {
       promptTemplate: row.prompt_template,
       parameters: parse(row.parameters_json) ?? {},
       runtime: parse(row.runtime_json) ?? {},
-      context: parse(row.context_json) ?? {},
-      workspace: parse(row.workspace_json) ?? {},
+      ...(context ? { context } : {}),
+      ...(workspace ? { workspace } : {}),
       verification: parse(row.verification_json) ?? {},
-      limits: parse(row.limits_json) ?? {},
+      ...(limits ? { limits } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

@@ -23,10 +23,7 @@ const recipe = {
   promptTemplate: 'Проверь {{area}} относительно {{base_ref}}.',
   parameters: schema,
   runtime: { id: 'pi', model: null, thinking: null },
-  context: { profile: 'work-item', includeMemory: true, includeRecap: true, includeGit: true },
-  workspace: { strategy: 'fresh-worktree', baseRef: '{{base_ref}}' },
   verification: { required: true, command: null },
-  limits: { timeoutMinutes: null },
 };
 
 test('parameters take their defaults, and a value of the wrong kind is refused', () => {
@@ -43,7 +40,9 @@ test('parameters take their defaults, and a value of the wrong kind is refused',
 test('substitution happens in the allowed fields and nowhere else', () => {
   const rendered = renderRecipe(recipe, { area: 'android', base_ref: 'release' });
   assert.equal(rendered.prompt, 'Проверь android относительно release.');
-  assert.equal(rendered.workspace.baseRef, 'release', 'Git base — тоже подстановка, а не только текст');
+  // Предпросмотр показывает только то, что запуск применяет (AUTO-01A): полей
+  // workspace/context/limits в нём нет, потому что их никто не исполняет.
+  assert.deepEqual(Object.keys(rendered).sort(), ['name', 'parameters', 'projectId', 'prompt', 'recipeId', 'runtime', 'verification', 'workItemId']);
   assert.deepEqual(rendered.parameters, { base_ref: 'release', area: 'android', run_tests: true, attempts: 2 });
   // An unknown placeholder stays as it was written: it can never become a value.
   assert.equal(renderRecipe({ ...recipe, promptTemplate: 'x {{nothing}}' }, {}).prompt, 'x {{nothing}}');
@@ -54,22 +53,29 @@ test('a recipe is validated where the operator can still see the typo', () => {
   assert.throws(() => validateRecipe({ name: 'x', promptTemplate: 'привет {{are}}', parameters: { area: { type: 'string' } } }), /которых нет в схеме/, 'опечатка в placeholder ловится при сохранении');
   assert.throws(() => validateRecipe({ name: '', promptTemplate: 'x' }), { code: 'INPUT_INVALID' });
   assert.throws(() => validateRecipe({ name: 'x', promptTemplate: '   ' }), { code: 'INPUT_INVALID' });
-  assert.throws(() => validateRecipe({ name: 'x', promptTemplate: 'y', workspace: { strategy: 'apply-patch' } }), /Стратегия рабочей папки/);
-  assert.throws(() => validateRecipe({ name: 'x', promptTemplate: 'y', context: { profile: 'магия' } }), /Профиль контекста/);
-  // A placeholder in a FIELD (not only in the prompt) must be declared too: an
-  // undeclared one would only surface at 03:00.
-  assert.throws(
-    () => validateRecipe({ name: 'x', promptTemplate: 'y', workspace: { strategy: '{{strategy}}' }, parameters: {} }),
-    /которых нет в схеме/,
-  );
+  // AUTO-01A (A1 из docs/auto-00-audit.md): настройки, которые запуск не исполняет,
+  // отклоняются при сохранении, а не хранятся как обещание.
+  for (const field of ['context', 'workspace', 'limits']) {
+    assert.throws(
+      () => validateRecipe({ name: 'x', promptTemplate: 'y', [field]: { any: 'value' } }),
+      /рецепт не применяет/,
+      `${field} обязан быть отклонён`,
+    );
+  }
+  // Пустой объект — это «не указано», а не обещание: он проходит.
+  assert.equal(validateRecipe({ name: 'x', promptTemplate: 'y', context: {}, workspace: {}, limits: {} }).name, 'x');
+  // Второго ядра нет: `runtime.id` не может обещать OMP.
+  assert.throws(() => validateRecipe({ name: 'x', promptTemplate: 'y', runtime: { id: 'omp' } }), /Ядро запуска/);
   const ok = validateRecipe({
     name: '  Daily audit  ', promptTemplate: 'Проверь {{area}}',
-    parameters: { area: { type: 'enum', values: ['all', 'android'], default: 'all' }, strategy: { type: 'string', default: 'fresh-worktree' } },
-    workspace: { strategy: '{{strategy}}' }, context: { profile: 'work-item' },
+    parameters: { area: { type: 'enum', values: ['all', 'android'], default: 'all' } },
+    verification: { required: true, command: 'passing' },
   });
   assert.equal(ok.name, 'Daily audit');
-  assert.equal(ok.workspace.strategy, '{{strategy}}', 'стратегию можно задать параметром — её значение проверит запуск');
-  assert.equal(ok.context.profile, 'work-item');
+  assert.equal(ok.runtime.id, 'pi');
+  assert.equal(ok.verification.command, 'passing');
+  // Сохранённые поля — только те, что применяются.
+  assert.deepEqual(Object.keys(ok).sort(), ['name', 'parameters', 'projectId', 'promptTemplate', 'runtime', 'verification', 'workItemId']);
 });
 
 test('a recipe runs as an ordinary session, and the run remembers its parameters', { timeout: 120000 }, async t => {
@@ -96,12 +102,15 @@ test('a recipe runs as an ordinary session, and the run remembers its parameters
       area: { type: 'enum', values: ['all', 'android', 'server'], default: 'all' },
     },
     runtime: { id: 'pi', thinking: 'low' },
-    context: { profile: 'work-item+recap' },
     verification: { required: true },
   });
   assert.match(created.id, /^rc-/, `рецепт отличается от сессии и задачи: ${created.id}`);
   assert.deepEqual(created.parameters.area.values, ['all', 'android', 'server']);
-  assert.equal(created.context.profile, 'work-item+recap');
+  assert.equal(created.runtime.thinking, 'low', 'уровень thinking применяется: он уходит в задачу');
+  // Обещанного, но не исполняемого в рецепте не остаётся.
+  assert.equal('context' in created, false);
+  assert.equal('workspace' in created, false);
+  assert.equal('limits' in created, false);
 
   // The list is per project, and a fresh store keeps it.
   assert.deepEqual((await api(`/api/recipes?projectId=${project.id}`)).items.map(r => r.id), [created.id]);
@@ -173,9 +182,7 @@ test('recipes survive reopening the database', async t => {
     id: 'rc-1', projectId: 'p', workItemId: 'wi-1', name: 'Audit', promptTemplate: 'Проверь {{area}}',
     parameters: { area: { type: 'string', default: 'all' } },
     runtime: { id: 'pi', model: 'local/qwen', thinking: 'low' },
-    context: { profile: 'work-item', includeMemory: true, includeRecap: true, includeGit: true },
-    workspace: { strategy: 'fresh-worktree', baseRef: 'master' },
-    verification: { required: true, command: null }, limits: { timeoutMinutes: 60 },
+    verification: { required: true, command: null },
     createdAt: at, updatedAt: at,
   });
   store.close();
@@ -185,8 +192,6 @@ test('recipes survive reopening the database', async t => {
   const stored = reopened.getRecipe('rc-1');
   assert.equal(stored.promptTemplate, 'Проверь {{area}}');
   assert.equal(stored.runtime.model, 'local/qwen');
-  assert.equal(stored.workspace.baseRef, 'master');
-  assert.equal(stored.limits.timeoutMinutes, 60);
   assert.equal(stored.workItemId, 'wi-1');
   assert.deepEqual(stored.parameters, { area: { type: 'string', default: 'all' } });
   assert.deepEqual(reopened.listRecipes('p').map(r => r.id), ['rc-1']);

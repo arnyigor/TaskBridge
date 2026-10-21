@@ -16,18 +16,26 @@ export const PARAMETER_TYPES = Object.freeze(['string', 'enum', 'boolean', 'numb
 /** Where `{{parameter}}` may appear. Anything else is data, never a template. */
 export const SUBSTITUTABLE = Object.freeze([
   'promptTemplate',
-  'runtime.id',
   'runtime.model',
   'runtime.thinking',
-  'workspace.baseRef',
-  'workspace.strategy',
   'verification.command',
-  'context.profile',
 ]);
 
-export const RECIPE_WORKSPACE_STRATEGIES = Object.freeze(['fresh-worktree', 'reuse']);
+/**
+ * Настройки, которые рецепт НЕ применяет (AUTO-01A, находка A1 из
+ * docs/auto-00-audit.md): `runRecipe` передаёт в `createTask` только projectId,
+ * prompt, title, model и thinkingLevel. Обещанное, но не исполняемое поле хуже
+ * отсутствующего — поэтому они не сохраняются, а отклоняются при записи, пока в
+ * исполнении не появится то, что их исполняет.
+ */
+export const UNSUPPORTED_SETTINGS = Object.freeze({
+  context: 'сборки контекста (work item, recap, память) при запуске рецепта нет',
+  workspace: 'отдельной рабочей папки или worktree на запуск рецепта нет',
+  limits: 'ограничения времени на запуск рецепта нет',
+});
 
-export const CONTEXT_PROFILES = Object.freeze(['none', 'work-item', 'work-item+recap', 'project']);
+/** Единственное ядро, которое TaskBridge запускает (OMP — NO-GO, см. docs/omp-02b-ast-tools.md). */
+export const SUPPORTED_ENGINES = Object.freeze(['pi']);
 
 const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g;
 const NAME_LIMIT = 200;
@@ -148,13 +156,12 @@ export function setPath(target, path, value) {
 export function renderRecipe(recipe, given = {}) {
   const schema = recipe.parameters ?? {};
   const values = resolveParameters(schema, given);
+  // Только то, что запуск действительно применяет: предпросмотр не должен
+  // показывать настройки, которых `runRecipe` не исполняет.
   const rendered = JSON.parse(JSON.stringify({
     promptTemplate: recipe.promptTemplate,
     runtime: recipe.runtime ?? {},
-    context: recipe.context ?? {},
-    workspace: recipe.workspace ?? {},
     verification: recipe.verification ?? {},
-    limits: recipe.limits ?? {},
   }));
   for (const path of SUBSTITUTABLE) {
     const value = getPath(rendered, path);
@@ -168,10 +175,7 @@ export function renderRecipe(recipe, given = {}) {
     prompt: rendered.promptTemplate,
     parameters: values,
     runtime: rendered.runtime,
-    context: rendered.context,
-    workspace: rendered.workspace,
     verification: rendered.verification,
-    limits: rendered.limits,
   };
 }
 
@@ -191,25 +195,23 @@ export function validateRecipe(input = {}) {
     'runtime.id': input.runtime?.id ?? '',
     'runtime.model': input.runtime?.model ?? '',
     'runtime.thinking': input.runtime?.thinking ?? '',
-    'workspace.baseRef': input.workspace?.baseRef ?? '',
-    'workspace.strategy': input.workspace?.strategy ?? '',
     'verification.command': input.verification?.command ?? '',
-    'context.profile': input.context?.profile ?? '',
   };
   const used = new Set(Object.values(fields).flatMap(placeholdersIn));
   const missing = [...used].filter(field => !(field in parameters));
   if (missing.length) {
     throw invalid(`В шаблоне есть параметры, которых нет в схеме: ${missing.join(', ')}.`);
   }
-  const strategy = input.workspace?.strategy ?? 'fresh-worktree';
-  // A strategy that only names a parameter cannot be checked here; one that names a
-  // value must be a strategy the server actually implements.
-  if (!strategy.includes('{{') && !RECIPE_WORKSPACE_STRATEGIES.includes(strategy)) {
-    throw invalid(`Стратегия рабочей папки — одна из: ${RECIPE_WORKSPACE_STRATEGIES.join(', ')}.`);
+  // Настройки, которые некому исполнять, не сохраняются: пустой объект — это «не
+  // указано», а любое значение в нём было бы обещанием, которое запуск не выполнит.
+  for (const [field, why] of Object.entries(UNSUPPORTED_SETTINGS)) {
+    const value = input[field];
+    const used = value && typeof value === 'object' && Object.values(value).some(item => item !== undefined && item !== null && item !== '');
+    if (used) throw invalid(`Поле ${field} рецепт не применяет: ${why}. Уберите его из рецепта.`);
   }
-  const profile = input.context?.profile ?? 'work-item';
-  if (!profile.includes('{{') && !CONTEXT_PROFILES.includes(profile)) {
-    throw invalid(`Профиль контекста — один из: ${CONTEXT_PROFILES.join(', ')}.`);
+  const engine = String(input.runtime?.id ?? 'pi');
+  if (!SUPPORTED_ENGINES.includes(engine)) {
+    throw invalid(`Ядро запуска — только ${SUPPORTED_ENGINES.join(', ')}: второго ядра в TaskBridge нет.`);
   }
   return {
     name: name.slice(0, NAME_LIMIT),
@@ -218,28 +220,13 @@ export function validateRecipe(input = {}) {
     promptTemplate: fields.promptTemplate,
     parameters,
     runtime: {
-      id: String(input.runtime?.id ?? 'pi').slice(0, 40) || 'pi',
+      id: 'pi',
       model: input.runtime?.model ? String(input.runtime.model).slice(0, 200) : null,
       thinking: input.runtime?.thinking ? String(input.runtime.thinking).slice(0, 40) : null,
-    },
-    context: {
-      profile,
-      includeMemory: input.context?.includeMemory !== false,
-      includeRecap: input.context?.includeRecap !== false,
-      includeGit: input.context?.includeGit !== false,
-    },
-    workspace: {
-      strategy,
-      baseRef: input.workspace?.baseRef ? String(input.workspace.baseRef).slice(0, 200) : null,
     },
     verification: {
       required: input.verification?.required === true,
       command: input.verification?.command ? String(input.verification.command).slice(0, 500) : null,
-    },
-    limits: {
-      timeoutMinutes: Number.isSafeInteger(input.limits?.timeoutMinutes) && input.limits.timeoutMinutes > 0
-        ? Math.min(input.limits.timeoutMinutes, 24 * 60)
-        : null,
     },
   };
 }
