@@ -1255,6 +1255,18 @@ async function handleRequest(req, res) {
       return json(res, 200, noteClientLink(req, body));
     }
 
+    // Проверка соединения с провайдером (TB-PROV-01B). Read-only: один `GET /models`
+    // по адресу из каталога Pi или из локальных серверов. Адрес из тела запроса не
+    // принимается — иначе проверка стала бы SSRF-ручкой.
+    if (req.method === 'POST' && pathname === '/api/providers/check') {
+      const body = await readJson(req);
+      return json(res, 200, await manager.checkProvider({
+        provider: body?.provider ?? null,
+        id: body?.id ?? null,
+        requestId: req.headers['x-taskbridge-request-id'] || null,
+      }));
+    }
+
     // Короткая проверка модели по кнопке (пункт §3.3 плана): доступность без токенов
     // и задержка (один токен) по явному нажатию.
     if (req.method === 'POST' && pathname === '/api/models/probe') {

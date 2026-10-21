@@ -47,7 +47,7 @@ import { contextFingerprint, validateResume, describeChanges } from './resume/re
 import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions, INDEX_BUDGET_TOKENS, GLOBAL_BUDGET_TOKENS } from './memory/project-memory-provider.mjs';
 import { memoryMetrics } from './memory/memory-metrics.mjs';
 import { MERGE_THRESHOLD_DEFAULT, findMergeCandidates, mergeProposalText } from './memory/memory-consolidator.mjs';
-import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency } from './model-probe.mjs';
+import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency, providerCheckStatus } from './model-probe.mjs';
 import { WakeChannel } from './wake-channel.mjs';
 import { apiKey as providerApiKey } from './provider-models.mjs';
 import { listProposals, createProposal, acceptProposal, rejectProposal, validateProposal, proposalCounts } from './memory/memory-proposals.mjs';
@@ -3172,11 +3172,54 @@ export class TaskManager extends EventEmitter {
   }
 
   /**
+   * Проверка соединения с провайдером (TB-PROV-01B): один бесплатный `GET /models`.
+   *
+   * Отличается от `probeModel` тем, что не требует ID модели и работает для НЕуправляемых
+   * провайдеров (из `models.json` Pi) и локальных серверов.
+   * Адрес резолвится только на сервере (каталог Pi / настроенные локальные серверы):
+   * URL из тела запроса не принимается, поэтому проверка не превращается в SSRF.
+   * Ничего не пишется в `models.json`, токены не тратятся.
+   */
+  async checkProvider({ provider = null, id = null, requestId = null } = {}) {
+    const providerId = String(provider || '').trim();
+    const modelId = String(id || '').trim() || null;
+    if (!providerId) throw Object.assign(new Error('Нужен provider.'), { code: 'INPUT_INVALID' });
+    const key = `check:${providerId}`;
+    const retryInMs = this.probeCooldown.remaining(key);
+    if (retryInMs > 0) {
+      return { provider: providerId, id: modelId, status: 'UNKNOWN', code: 'COOLDOWN', ok: false, retryInMs, checkedAt: now(), requestId };
+    }
+    this.probeCooldown.mark(key);
+    const target = await this.#probeTarget(providerId, modelId);
+    if (!target.ok) {
+      const status = providerCheckStatus({ code: target.code });
+      return { provider: providerId, id: modelId, status, ok: status === 'AVAILABLE', code: target.code, message: target.message, checkedAt: now(), requestId };
+    }
+    const probe = await probeAvailability({ baseUrl: target.baseUrl, apiKey: target.apiKey });
+    const status = providerCheckStatus(probe);
+    return {
+      provider: providerId,
+      id: modelId,
+      status,
+      ok: status === 'AVAILABLE',
+      code: probe.code ?? null,
+      httpStatus: probe.httpStatus ?? null,
+      latencyMs: Number.isFinite(probe.ms) ? probe.ms : null,
+      models: Number.isFinite(probe.models) ? probe.models : null,
+      checkedAt: now(),
+      // Проверяется только список моделей: успешный ответ на `/models` не доказывает,
+      // что модель генерирует, — это отдельная проба задержки.
+      message: 'Проверен только GET /models. Генерация модели не выполнялась.',
+      requestId,
+    };
+  }
+
+  /**
    * Где искать модель: внешний локальный сервер (его собственный адрес), локальный
    * llama.cpp-роутер (с его ключом) или провайдер из Pi-каталога. Отказ вместо
    * догадки: нет адреса или ключа — код NO_ENDPOINT/NO_KEY.
    */
-  async #probeTarget(providerId, modelId) {
+  async #probeTarget(providerId, modelId = null) {
     // Strata и другие externalServers — НЕ llama.cpp router: у каждого свой port.
     // Ищем и по provider, и по model, как в телеметрии рабочего хода.
     // Пара обязана совпасть атомарно: совпадение только по модели уводило бы
@@ -3206,7 +3249,8 @@ export class TaskManager extends EventEmitter {
     const entry = doc?.providers?.[providerId];
     if (!entry?.baseUrl) return { ok: false, code: 'NO_ENDPOINT', message: `у провайдера ${providerId} нет адреса в models.json` };
     const catalog = Array.isArray(entry.models) ? entry.models : [];
-    if (catalog.length && !catalog.some(model => model?.id === modelId)) {
+    // Проверка провайдера (без ID модели) каталог не сужает: у неё нет модели.
+    if (modelId && catalog.length && !catalog.some(model => model?.id === modelId)) {
       return { ok: false, code: 'MODEL_UNKNOWN', message: `модель ${modelId} не описана у провайдера ${providerId}` };
     }
     const key = providerApiKey(entry.apiKey, process.env);

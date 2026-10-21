@@ -4,7 +4,7 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { ProbeCooldown, probeAvailability, probeLatency, streamError } from '../src/model-probe.mjs';
+import { ProbeCooldown, probeAvailability, probeLatency, providerCheckStatus, streamError } from '../src/model-probe.mjs';
 import { startFixture } from './server-fixture.mjs';
 
 // Пункт §3.3 плана (запрос оператора 2026-10-14): кнопка проверки модели. Проверка
@@ -218,4 +218,74 @@ test('the endpoint checks a real provider and reports its own refusals', { timeo
   assert.equal(unknownProvider.code, 'NO_ENDPOINT');
   await assert.rejects(api('/api/models/probe', { provider: 'stub' }), { code: 'INPUT_INVALID' });
   await assert.rejects(api('/api/models/probe', { provider: 'stub', id: 'stub-model', mode: 'чепуха' }), { code: 'INPUT_INVALID' });
+});
+
+test('providerCheckStatus: один HTTP-ответ даёт один статус контракта', () => {
+  // Контракт из аудита TB-PROV-01: AVAILABLE/UNAUTHORIZED/RATE_LIMITED/TIMEOUT/
+  // UNREACHABLE/UNSUPPORTED/UNKNOWN — иначе UI не сможет сказать, что делать.
+  assert.equal(providerCheckStatus({ ok: true, httpStatus: 200 }), 'AVAILABLE');
+  assert.equal(providerCheckStatus({ ok: false, httpStatus: 401 }), 'UNAUTHORIZED');
+  assert.equal(providerCheckStatus({ ok: false, httpStatus: 403 }), 'UNAUTHORIZED');
+  assert.equal(providerCheckStatus({ ok: false, httpStatus: 429 }), 'RATE_LIMITED');
+  assert.equal(providerCheckStatus({ ok: false, httpStatus: 404 }), 'UNSUPPORTED', 'нет /models — не «сломано»');
+  assert.equal(providerCheckStatus({ ok: false, code: 'AUTH' }), 'UNAUTHORIZED');
+  assert.equal(providerCheckStatus({ ok: false, code: 'NO_KEY' }), 'UNAUTHORIZED');
+  assert.equal(providerCheckStatus({ ok: false, code: 'TIMEOUT' }), 'TIMEOUT');
+  assert.equal(providerCheckStatus({ ok: false, code: 'UNREACHABLE' }), 'UNREACHABLE');
+  assert.equal(providerCheckStatus({ ok: false, code: 'NO_ENDPOINT' }), 'UNSUPPORTED');
+  assert.equal(providerCheckStatus({ ok: false, code: 'MODEL_UNKNOWN' }), 'UNSUPPORTED');
+  assert.equal(providerCheckStatus({ ok: false, httpStatus: 500, code: 'HTTP_ERROR' }), 'UNKNOWN', '5xx не выдаёт вердикт');
+  assert.equal(providerCheckStatus({}), 'UNKNOWN');
+});
+
+test('POST /api/providers/check: проверка неуправляемого провайдера по контракту', { timeout: 90000 }, async t => {
+  const ok = await providerStub();
+  const denied = await providerStub({ status: 401 });
+  const limited = await providerStub({ status: 429 });
+  t.after(() => Promise.all([ok.close(), denied.close(), limited.close()]));
+  const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-check-agent-'));
+  t.after(() => fs.rm(agentDir, { recursive: true, force: true }).catch(() => {}));
+  await fs.writeFile(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: {
+      stub: { api: 'openai-completions', baseUrl: ok.base, apiKey: '$STUB_KEY', models: [{ id: 'stub-model' }] },
+      denied: { api: 'openai-completions', baseUrl: denied.base, apiKey: '$STUB_KEY', models: [{ id: 'stub-model' }] },
+      limited: { api: 'openai-completions', baseUrl: limited.base, apiKey: '$STUB_KEY', models: [{ id: 'stub-model' }] },
+      // Внешний адрес без ключа: проверка обязана отказать до сети.
+      keyless: { api: 'openai-completions', baseUrl: 'https://example.invalid/v1', models: [{ id: 'other' }] },
+    },
+  }), 'utf8');
+
+  const fixture = await startFixture(undefined, { env: { PI_AGENT_DIR: agentDir, STUB_KEY: 'test-key' } });
+  t.after(() => fixture.close());
+  const { api } = fixture;
+
+  const available = await api('/api/providers/check', { provider: 'stub' });
+  assert.equal(available.status, 'AVAILABLE', JSON.stringify(available));
+  assert.equal(available.ok, true);
+  assert.equal(available.provider, 'stub');
+  assert.ok(Number.isFinite(available.latencyMs), 'задержка измерена');
+  assert.equal(available.models, 2);
+  assert.ok(available.checkedAt, 'время проверки есть');
+  assert.equal(ok.requests.filter(request => request.url.endsWith('/chat/completions')).length, 0, 'токены не тратились');
+  assert.ok(ok.requests.every(request => request.url.endsWith('/models')), 'только список моделей');
+
+  assert.equal((await api('/api/providers/check', { provider: 'denied' })).status, 'UNAUTHORIZED');
+  assert.equal((await api('/api/providers/check', { provider: 'limited' })).status, 'RATE_LIMITED');
+
+  const keyless = await api('/api/providers/check', { provider: 'keyless' });
+  assert.equal(keyless.status, 'UNAUTHORIZED', JSON.stringify(keyless));
+  assert.equal(keyless.code, 'NO_KEY');
+
+  // Провайдера нет в каталоге Pi — это не поломка, а «так проверить нельзя».
+  const unknown = await api('/api/providers/check', { provider: 'nobody-here' });
+  assert.equal(unknown.status, 'UNSUPPORTED', JSON.stringify(unknown));
+
+  // Без provider — понятная ошибка, а не пустая проверка.
+  await assert.rejects(api('/api/providers/check', {}), error => error.code === 'INPUT_INVALID');
+
+  // Повторная проверка того же провайдера — кулдаун, а не второй запрос.
+  const again = await api('/api/providers/check', { provider: 'stub' });
+  assert.equal(again.status, 'UNKNOWN');
+  assert.equal(again.code, 'COOLDOWN');
+  assert.equal(ok.requests.length, 1, 'провайдеру не отправляли второй запрос');
 });

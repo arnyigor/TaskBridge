@@ -1,5 +1,10 @@
 (() => {
   'use strict';
+  // Подписи проверки соединения — отдельный модуль: их проверяет тест, и они
+  // одинаковы для управляемых и неуправляемых подключений (TB-PROV-01B).
+  let checkView = null;
+  import('./provider-check-view.mjs').then(module => { checkView = module; })
+    .catch(() => { /* без модуля останется технический код статуса */ });
   const el = id => document.getElementById(id);
   let revision = null;
   let profiles = [];
@@ -12,6 +17,15 @@
   };
   const api = async (endpoint, options = {}) => {
     const response = await fetch(`/api/provider-profiles${endpoint}`, {
+      credentials: 'same-origin', cache: 'no-store', ...options,
+      headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    return body;
+  };
+  const apiRoot = async (endpoint, options = {}) => {
+    const response = await fetch(`/api${endpoint}`, {
       credentials: 'same-origin', cache: 'no-store', ...options,
       headers: { 'content-type': 'application/json', ...(options.headers || {}) },
     });
@@ -50,7 +64,9 @@
     el('preset').value = 'custom';
     const disabled = !!item && !item.managed;
     for (const id of ['base-url', 'key-env', 'models', 'preset', 'save']) el(id).disabled = disabled;
-    el('test').disabled = !item?.managed;
+    // Проверка соединения не требует управляемого профиля: адрес резолвится на
+    // сервере из каталога Pi, а models.json при этом не меняется.
+    el('test').disabled = !item;
     el('delete').disabled = !item?.managed;
     renderList();
   };
@@ -103,9 +119,20 @@
   el('test').addEventListener('click', async () => {
     if (!selected || busy) return;
     busy = true; el('test').disabled = true;
+    const item = profiles.find(p => p.id === selected);
+    status('Проверяем соединение…');
     try {
-      const result = await api(`/${encodeURIComponent(selected)}/check`, { method: 'POST', body: '{}' });
-      status(`${result.ok ? 'Сервер ответил' : 'Соединение не подтверждено'}: ${result.status}${result.ms != null ? ` (${result.ms} мс)` : ''}. ${result.note || ''}`, result.ok ? 'success' : 'error');
+      // Проверка провайдера, а не профиля: работает и для tb-*, и для записей,
+      // которые TaskBridge не принадлежат. Модель передаём, если она у записи одна.
+      const only = item?.models?.length === 1 ? item.models[0].id : null;
+      const result = await apiRoot('/providers/check', {
+        method: 'POST',
+        body: JSON.stringify({ provider: selected, ...(only ? { id: only } : {}) }),
+      });
+      const text = checkView
+        ? checkView.providerCheckText(result)
+        : `${result.status}${result.latencyMs != null ? ` · ${result.latencyMs} мс` : ''}. ${result.message || ''}`;
+      status(text, result.status === 'AVAILABLE' ? 'success' : 'error');
     } catch (e) { status(e.message, 'error'); }
     finally { busy = false; el('test').disabled = false; }
   });

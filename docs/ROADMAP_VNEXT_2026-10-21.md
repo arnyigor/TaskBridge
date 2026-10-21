@@ -244,7 +244,9 @@
 | OMP-02b | ✅ выполнен 2026-10-21 (12/12 успешны), **NO-GO / evidence limited** | [omp-02b-ast-tools.md](omp-02b-ast-tools.md), `experiments/omp-02b/` | `ast_grep`/`ast_edit`/`hashline` включены и видны модели, но вызваны 0 раз из 12; качество не выше Pi, EDIT-01 в 7 раз дороже по времени. Сами AST-операции в работе агента не проверены. LSP остаётся наиболее интересной непроверенной возможностью — отдельный PoC, не ради него продолжать OMP |
 | OMP-03A / 03B / 04 | ⛔ отменены решением NO-GO от 2026-10-21 | — | Не начинаются; Pi 1.3.0 остаётся основным ядром |
 | TB-PROV-01A | ✅ выполнен 2026-10-21 | [tb-prov-01-audit.md](tb-prov-01-audit.md), `web/model-filter.mjs`, `web/model-picker-view.mjs` | Фильтры и избранное в Web-пикере; API, Pi и KMP не менялись |
-| TB-PROV-01B | 🔎 следующий шаг (P1), ждёт приёмки 01A | [tb-prov-01-audit.md](tb-prov-01-audit.md) §3 п.2 | Проверка доступности провайдеров: контракт AVAILABLE/UNAUTHORIZED/RATE_LIMITED/UNREACHABLE/TIMEOUT/UNSUPPORTED/UNKNOWN |
+| TB-PROV-01B | ✅ выполнен 2026-10-21 | [api-contract.md](api-contract.md), `src/model-probe.mjs`, `web/provider-check-view.mjs` | `POST /api/providers/check`: `GET /models` для любого провайдера (включая неуправляемые), адрес резолвится только на сервере (без SSRF), контракт AVAILABLE/UNAUTHORIZED/RATE_LIMITED/TIMEOUT/UNREACHABLE/UNSUPPORTED/UNKNOWN, кнопка проверки в Web для любой записи, молчаливый no-op статуса аккаунта объяснён. Тесты: `tests/model-probe.test.mjs` (+2), `tests/web-provider-check.test.mjs` (2) |
+| AUTO-00 | ✅ выполнен 2026-10-21 (аудит без живых прогонов) | [auto-00-audit.md](auto-00-audit.md) | 8 находок по коду: A1–A3 (P0), A4/A5/A8 (P1), A6/A7 (P2). Планировщик не переписываем; автоматизации для ночной работы включать после A1–A4 (AUTO-01A…E) |
+| AUTO-01 | 🔎 следующий шаг (P0): первый тест — гонка проверки (A2), затем A6 (DST) | — | По разделу AUTO-01 отчёта |
 | TB-PROV-02 / 03, TB-KMP-01, TB-STAB-02, RELEASE-01 | ⏸ не начаты | — | По последовательности раздела B |
 
 Замечание по OMP-02: первая серия прогонов была недействительна из-за ошибки стенда

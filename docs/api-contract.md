@@ -111,6 +111,26 @@ Cookie старого формата `<expires>.<nonce>.<sig>` принимаю�
 Отсутствующий ключ даёт `available: false`; старое поле `deepseek` временно
 сохранено для совместимости.
 
+### `POST /api/providers/check` (TB-PROV-01B)
+
+Проверка соединения с провайдером: один бесплатный `GET {baseUrl}/models`.
+Тело — `{ "provider": "<id>", "id": "<model>"? }` (модель необязательна: без неё
+проверяется провайдер целиком). Работает и для управляемых `tb-*`, и для записей,
+которыми TaskBridge не владеет.
+
+Адрес резолвится **только на сервере** — из каталога Pi (`models.json`) или из
+настроенных локальных серверов; URL из тела не принимается, поэтому проверка не
+становится SSRF-ручкой. Ничего не пишется в `models.json`, токены не тратятся,
+генерация модели не выполняется.
+
+Ответ: `{ provider, id, status, ok, code, httpStatus, latencyMs, models, checkedAt, message, requestId }`,
+где `status` — один из `AVAILABLE` | `UNAUTHORIZED` | `RATE_LIMITED` | `TIMEOUT` |
+`UNREACHABLE` | `UNSUPPORTED` | `UNKNOWN`. `UNSUPPORTED` означает «так проверить
+нельзя» (нет адреса в каталоге, нет `/models`), а не «сломано». HTTP 200 от `/models`
+не доказывает, что модель умеет генерировать — для этого отдельная проба
+`POST /api/models/probe` с `mode: "latency"`. Повторная проверка того же провайдера
+в течение 5 секунд возвращает `code: "COOLDOWN"` без запроса к провайдеру.
+
 ### `GET /api/quick-actions`
 
 Возвращает список slash-команд для нативных клиентов: skills из Pi, prompts из

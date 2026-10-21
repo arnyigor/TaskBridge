@@ -31,6 +31,37 @@ export function probeKey(provider, id) {
 }
 
 /**
+ * Контракт проверки соединения с провайдером (TB-PROV-01B).
+ *
+ * Отдельно от баланса и от проверки модели: `GET /models` говорит только о том,
+ * что сервер вообще отвечает. HTTP 200 от `/models` не значит, что конкретная
+ * модель умеет генерировать — для этого есть проба задержки.
+ */
+export const PROVIDER_CHECK_STATUSES = Object.freeze([
+  'AVAILABLE', 'UNAUTHORIZED', 'RATE_LIMITED', 'TIMEOUT', 'UNREACHABLE', 'UNSUPPORTED', 'UNKNOWN',
+]);
+
+/**
+ * Результат пробы → один из статусов контракта. Чистая функция: тест проверяет
+ * правила, а не сеть.
+ *
+ * `UNSUPPORTED` — не «сломано», а «этот провайдер так проверить нельзя»: нет
+ * адреса в каталоге, нет `/models` (404/405) или модель не описана у провайдера.
+ */
+export function providerCheckStatus({ ok = false, httpStatus = null, code = null } = {}) {
+  if (ok) return 'AVAILABLE';
+  if (httpStatus === 401 || httpStatus === 403) return 'UNAUTHORIZED';
+  if (httpStatus === 429) return 'RATE_LIMITED';
+  if (httpStatus === 404 || httpStatus === 405) return 'UNSUPPORTED';
+  if (code === 'AUTH' || code === 'NO_KEY') return 'UNAUTHORIZED';
+  if (code === 'TIMEOUT') return 'TIMEOUT';
+  if (code === 'UNREACHABLE') return 'UNREACHABLE';
+  if (code === 'NO_ENDPOINT' || code === 'MODEL_UNKNOWN') return 'UNSUPPORTED';
+  // 5xx, COOLDOWN и всё незнакомое: честно «неизвестно», а не выдуманный вердикт.
+  return 'UNKNOWN';
+}
+
+/**
  * Доступность провайдера: `GET /models` без токенов.
  * Возвращает время ответа и число моделей — этого достаточно, чтобы отличить
  * «провайдер жив, но модель недоступна» от «провайдер не отвечает».

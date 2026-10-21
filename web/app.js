@@ -5364,7 +5364,15 @@ $('pcStateProvider').onclick = async () => {
   const el = $('pcStateProvider');
   if (!el || el.classList.contains('hidden') || el.dataset.refreshing === '1') return;
   const provider = currentModel()?.provider;
-  if (!['wormsoft', 'deepseek', 'routerai', 'openai-codex'].includes(provider)) return;
+  // Баланс читается только для четырёх биллинговых провайдеров. Для остальных
+  // молчаливый `return` читался как «кнопка сломана» — говорим, где искать
+  // проверку соединения (TB-PROV-01B).
+  if (!['wormsoft', 'deepseek', 'routerai', 'openai-codex'].includes(provider)) {
+    showNotice(provider
+      ? `Баланс аккаунта доступен только для wormsoft, deepseek, routerai и openai-codex. Соединение с «${provider}» проверяется в разделе «Провайдеры».`
+      : 'Сначала выберите модель: баланс относится к её провайдеру.');
+    return;
+  }
   el.dataset.refreshing = '1';
   const previous = el.textContent;
   el.textContent = 'Обновляем данные провайдера…';
