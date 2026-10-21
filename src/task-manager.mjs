@@ -38,6 +38,7 @@ import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs'
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 import { piAgentDir } from './pi-settings.mjs';
+import { buildTurnPrompt, detectProfile } from './prompt-builder.mjs';
 import { deriveRecap, readSavedRecap, writeRecap, removeRecap, reconcileVerification, RECAP_MD } from './resume/recap.mjs';
 import { buildResumeContext, sessionSummary, WORKSPACE_STRATEGIES, MEMORY_MODES } from './resume/resume-builder.mjs';
 import { buildResumePreview } from './resume/resume-preview.mjs';
@@ -170,6 +171,14 @@ function pendingOrigin(pending) {
 function safeFileName(name) {
   const base = path.basename(String(name || 'file.bin'));
   return base.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').slice(0, 180) || 'file.bin';
+}
+
+// What one tool call confirmed, on one line: what ran, on what, and the start of
+// its answer. The same entry feeds the TASK_FAILED event, so result.md and the
+// event cannot describe the turn differently.
+function evidenceLine(entry) {
+  const what = entry.target ? `${entry.toolName}: ${entry.target}` : entry.toolName;
+  return `- ${what} → ${entry.excerpt}`;
 }
 
 // Pi's `agent_end` repeats the WHOLE conversation (messages, base64 images and
@@ -312,6 +321,14 @@ function summarizePiEvent(frame) {
 
 // Statuses that end a run (TZ stage 2 telemetry).
 const RUN_TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
+
+// Что инструменты уже подтвердили в этом ходе (в памяти, не в событии): модель
+// может завершиться ошибкой после полезного вывода, и тогда найденное не должно
+// исчезнуть вместе с пустым финальным текстом (2026-10-21). Границы выбраны под
+// событие TASK_FAILED и result.md, а не под полный вывод — тот лежит в tool-*.log.
+const TURN_EVIDENCE_MAX = 10;
+const TURN_EVIDENCE_SCAN = 2000;
+const TURN_EVIDENCE_EXCERPT = 240;
 
 // "Continue" has no RPC in Pi, so the request is an explicit instruction. It is
 // delivered with announce:false, and what the model writes next is appended to
@@ -2542,7 +2559,7 @@ export class TaskManager extends EventEmitter {
     // on the preceding snapshot until the terminal event has been persisted.
     const pendingTerminal = this.#terminalPublication.snapshot(task);
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
-    const { _incomingFiles, _modelError, _baseline, _turn, _nativeLease, _uploadToken,
+    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
@@ -2927,10 +2944,15 @@ export class TaskManager extends EventEmitter {
   }
 
   #buildPrompt(task) {
-    const attachmentNote = task.files?.length
-      ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${task.files.map((f) => `- ${f.path || '.taskbridge-input/' + f.name}`).join('\n')}`
-      : '';
-    return `${task.prompt}${attachmentNote}\n\nWork only inside the current working directory. Read attached files as needed. At the end, summarize what you changed and what checks you ran. Link deliverable files using Markdown relative paths, e.g. [Download report](report.pdf).`;
+    // A Pi command must arrive as the whole message: Pi resolves «/skill:…» and
+    // «/prompt:…» itself, and an appended instruction block would turn the command
+    // into a sentence.
+    if (String(task.prompt || '').trimStart().startsWith('/')) return task.prompt;
+    return buildTurnPrompt({
+      text: task.prompt,
+      profile: detectProfile(task.prompt),
+      files: (task.files || []).map((f) => f.path || `.taskbridge-input/${f.name}`),
+    });
   }
 
   async #createPi(task, sessionFile) {
@@ -4056,7 +4078,9 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'tool_execution_start') {
       const arg = frame.args?.command || frame.args?.path || frame.args?.file_path || '';
       task.current = `${frame.toolName || 'tool'}${arg ? `: ${String(arg).slice(0, 160)}` : ''}`;
-      if (frame.toolCallId) this.toolLogs.set(`${task.id}:${frame.toolCallId}`, { name: `tool-${safeFileName(frame.toolCallId)}.log`, bytes: 0 });
+      // The target travels with the log entry: `tool_execution_end` carries the
+      // result but not the arguments, and the evidence line needs both.
+      if (frame.toolCallId) this.toolLogs.set(`${task.id}:${frame.toolCallId}`, { name: `tool-${safeFileName(frame.toolCallId)}.log`, bytes: 0, target: String(arg || '').split('\n')[0] });
     }
     if (frame.type === 'tool_execution_update') {
       // Only a text chunk streams into the log. Pi's partialResult is an object
@@ -4080,6 +4104,10 @@ export class TaskManager extends EventEmitter {
       }
       if (log.bytes > 0) this.store.writeArtifact(task.id, `${log.name}.meta.json`, JSON.stringify({ toolCallId: frame.toolCallId, toolName: frame.toolName ?? null, bytes: log.bytes, at: now() })).catch(() => {});
       this.toolLogs.delete(key);
+      // What this turn's tools actually confirmed. Kept in memory (bounded), so a
+      // model error at the end of the turn can still say what was found instead
+      // of leaving «Ответ не завершён» alone (2026-10-21).
+      this.#rememberEvidence(task, frame, log.target);
     }
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result) {
       task.compaction.count += 1;
@@ -4241,6 +4269,7 @@ export class TaskManager extends EventEmitter {
     const turn = (runtime?.turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
+    task._turnEvidence = [];
     // Шаг C-A: фаза хода начинается с диспетчеризации. Поле сбрасывается, а не
     // ставится в DISPATCHING: публикацию делает #turnStateEvent в точке отправки
     // (иначе дедупликация съела бы первое событие хода).
@@ -4248,6 +4277,26 @@ export class TaskManager extends EventEmitter {
     // Silence starts with this dispatch, not the previous turn's last frame.
     task._lastProgressAt = Date.now();
     return turn;
+  }
+
+  // One entry per successful tool of the current turn. In memory only: it feeds
+  // the failure event and result.md, not the chat (the tool rows are already
+  // there), and it must not grow the persisted task or the event stream.
+  #rememberEvidence(task, frame, target = '') {
+    if (frame.isError === true) return;
+    const text = toolResultText(frame.result);
+    if (!text) return;
+    // Bound before flattening: a bash command can return hundreds of KB, and only
+    // the first line or two of it is ever quoted.
+    const excerpt = headText(headText(text, TURN_EVIDENCE_SCAN).replace(/\s+/g, ' ').trim(), TURN_EVIDENCE_EXCERPT);
+    if (!excerpt) return;
+    const list = task._turnEvidence || (task._turnEvidence = []);
+    list.push({
+      toolName: frame.toolName || 'tool',
+      target: headText(String(target || '').trim(), 160),
+      excerpt,
+    });
+    if (list.length > TURN_EVIDENCE_MAX) list.splice(0, list.length - TURN_EVIDENCE_MAX);
   }
 
   // Шаг C-A: фаза хода не откатывается. Кадр Pi может опередить запись ACK
@@ -4553,11 +4602,16 @@ export class TaskManager extends EventEmitter {
       assistantText: task.assistantText,
       thinkingText: task.thinkingText,
       errorCode: task.errorCode,
-      error: task.error
+      error: task.error,
+      toolEvidence: task._turnEvidence || []
     };
     await this.store.writeArtifact(task.id, 'result.json', JSON.stringify(result, null, 2));
     const verificationLines = (task.verification || []).map((v) => `- ${v.ok ? 'PASS' : 'FAIL'}: \`${v.command}\``).join('\n') || '- not configured';
-    const md = `# Task ${task.id}\n\nStatus: **${task.status}**\n\n## Pi summary/output\n\n${task.assistantText || '(no assistant text captured)'}\n\n## Changed files\n\n${(task.git?.changedFiles || []).map((f) => `- ${f}`).join('\n') || '- none'}\n\n## Verification\n\n${verificationLines}\n\n## Compaction\n\nCount: ${task.compaction?.count || 0}\n`;
+    // What the tools confirmed this turn, separately from the assistant text: on
+    // a model error the answer is empty while the evidence is not (§7 of the 1.3
+    // plan), and a reader of result.md must see the difference.
+    const evidenceLines = (task._turnEvidence || []).map(evidenceLine).join('\n') || '- none';
+    const md = `# Task ${task.id}\n\nStatus: **${task.status}**\n\n## Pi summary/output\n\n${task.assistantText || '(no assistant text captured)'}\n\n## Tool evidence\n\n${evidenceLines}\n\n## Changed files\n\n${(task.git?.changedFiles || []).map((f) => `- ${f}`).join('\n') || '- none'}\n\n## Verification\n\n${verificationLines}\n\n## Compaction\n\nCount: ${task.compaction?.count || 0}\n`;
     await this.store.writeArtifact(task.id, 'result.md', md);
   }
 
@@ -5624,8 +5678,6 @@ export class TaskManager extends EventEmitter {
     // those records keeps one copy on disk and one entry in task.attachments.
     const attached = staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles);
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
-    // The queued text already carries the note about its files.
-    const message = userText + (attached.length && !staged.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
     // Расширенческую команду Pi нельзя ставить в очередь: отправленная как
     // steer/follow-up, пока агент работает, она отвечает «Extension command "/nudge"
     // cannot be queued. Use prompt() or execute the command when not streaming.»
@@ -5642,6 +5694,12 @@ export class TaskManager extends EventEmitter {
       ? await this.#isPiExtensionCommand(runtime, userText)
       : false;
     const effectiveMode = extendableCommand ? 'prompt' : requestedMode;
+    // The queued text already carries the note about its files. The task
+    // instructions are NOT re-added here: they come with the turn that started the
+    // session and stay in Pi's transcript (§4.3 of the 1.3 plan), while the text
+    // delivered for a follow-up stays exactly what the operator typed — the queue,
+    // the restart recovery and the extension-command rule all read it verbatim.
+    const message = userText + (attached.length && !staged.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
     // are persisted. A rejected RPC must not create a phantom user turn.
     await runtime.eventChain.catch(() => {});
@@ -5991,13 +6049,23 @@ export class TaskManager extends EventEmitter {
     // the UI, result.md and push notifications. Classification above still ran
     // against the untouched error.
     task.error = humanizeError(error.message || String(error));
+    // A model error ends the turn without an answer, but it does not undo what
+    // this turn's tools already confirmed. `error` stays the provider's line (its
+    // value is part of the API), so the evidence travels beside it: on the failure
+    // event and in result.md.
     task.current = 'Failed';
     task.updatedAt = now();
     // Publish the event before the failed status is observable (see
     // #verifyAndFinalize): a late TASK_FAILED broke the "no events after a
     // terminal status" contract the client relies on.
     await this.#turnStateEvent(task, 'FAILED');
-    await this.#event(task, 'TASK_FAILED', task.error, { errorCode: task.errorCode });
+    await this.#event(task, 'TASK_FAILED', task.error, {
+      errorCode: task.errorCode,
+      // «Ответ не завершён» alone hid the fact that the answer had already been
+      // found by a tool (§7.2 of the 1.3 plan). The rows are in the chat; this
+      // field lets a client summarise them without reparsing tool output.
+      ...(task._modelError && (task._turnEvidence || []).length ? { toolEvidence: task._turnEvidence } : {}),
+    });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
   }

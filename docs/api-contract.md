@@ -57,6 +57,12 @@ Cookie старого формата `<expires>.<nonce>.<sig>` принимаю�
 ## Поток работы (модель для клиента)
 
 1. `POST /api/tasks` — создать задачу в проекте. Ответ содержит `id`.
+   К первому запросу TaskBridge дописывает короткий блок `Task instructions (<профиль>)`:
+   границы (рабочая папка, «только то, что просят») и форма ответа. Профиль
+   (`quick` — поиск факта, `explore` — разбор по умолчанию, `implement` — изменения)
+   определяется по тексту запроса без отдельного вызова модели; отчёт об изменениях
+   требуется только в `implement`. Follow-up уходит дословно: правила уже лежат
+   в транскрипте Pi, а очередь и восстановление после перезапуска читают текст как есть.
 2. `GET /api/tasks/:id/stream` (SSE) — живая лента. При обрыве клиент
    переподключается и передаёт `Last-Event-ID: <последний seq>`.
 3. `GET /api/tasks/:id/events?after=<seq>` — то же самое, но «пачкой»: этим
@@ -190,6 +196,11 @@ OpenAI-совместимый `GET {baseUrl}/models` и ДОБАВляет не�
   `WORKSPACE_READY`, `OUTPUT_FILES`, `TOOL_OUTPUT`, `CHANGES_APPLIED`, `WORKTREE_REMOVED`,
   `TASK_FORKED`, `SESSION_RESTORED`, `SESSION_SHRUNK`, `SESSION_TOO_LARGE`, `SESSION_INVALID`, `ENGINE_SWITCH`, `PI_STDERR`, `PI_PROTOCOL_ERROR`,
   `ABORT_TIMEOUT`, `QUEUE_DROPPED`.
+
+`TASK_FAILED` при ошибке модели (`errorCode: MODEL_ERROR`) несёт `data.toolEvidence`:
+до 10 подтверждённых выводов инструментов этого хода (`{toolName, target, excerpt}`).
+`task.error` при этом остаётся строкой провайдера — подтверждённое лежит рядом, а не
+внутри неё; то же содержимое есть в result.md, раздел `## Tool evidence`.
 
 `SESSION_SHRUNK` — перед запуском Pi (и повторно после ответа 413) история сессии
 восстановлена: base64 старых скриншотов перенесён в `data/media/<sha256>.<ext>`, в
