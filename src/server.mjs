@@ -36,7 +36,8 @@ import { secretFingerprint } from './cloud/machine-auth.mjs';
 import { issueDeviceToken, DEFAULT_DEVICE_TOKEN_TTL_MS } from './cloud/device-token.mjs';
 import { TrustedDevices, newDeviceId } from './cloud/trusted-devices.mjs';
 import { createRelayConnector } from './cloud/relay-connector.mjs';
-import { PushCenter, notificationFor, notificationForInvocation } from './push/push-center.mjs';
+import { PushCenter, notificationFor } from './push/push-center.mjs';
+import { createInvocationNotifier } from './automation/invocation-notifier.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { piAgentDir, readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { PiProviderProfiles } from './providers/pi-provider-profiles.mjs';
@@ -382,26 +383,9 @@ manager.on('task-event', (event) => {
 // configuration mistake gets made.
 // Итоговые уведомления автоматизаций (AUTO-03C). Событие сессии молчит, пока идёт
 // обязательная проверка, поэтому финальное уведомление отправляется здесь — когда
-// сверка перевела инвокацию в терминальное состояние.
-const notifiedInvocations = new Set();
-async function notifyFinishedInvocations(ids = []) {
-  for (const id of ids) {
-    if (notifiedInvocations.has(id)) continue;
-    notifiedInvocations.add(id);
-    if (notifiedInvocations.size > 500) notifiedInvocations.delete(notifiedInvocations.values().next().value);
-    const invocation = manager.getInvocation(id);
-    if (!invocation || invocation.trigger !== 'schedule') continue;
-    const task = invocation.sessionId ? manager.getTask?.(invocation.sessionId) ?? null : null;
-    const recipe = invocation.recipeId ? manager.getRecipe?.(invocation.recipeId) ?? null : null;
-    const notification = notificationForInvocation({
-      invocation,
-      policy: task?.scheduleNotify ?? null,
-      recipeName: recipe?.name ?? null,
-      task,
-    });
-    if (notification) push.notify(notification).catch(() => {});
-  }
-}
+// сверка перевела инвокацию в терминальное состояние. Решение и дедупликация — в
+// src/automation/invocation-notifier.mjs (её проверяет приёмка AUTO-03E).
+const notifyFinishedInvocations = createInvocationNotifier({ manager, push });
 
 const schedulerConfig = config.schedules || {};
 if (schedulerConfig.enabled !== false) {
