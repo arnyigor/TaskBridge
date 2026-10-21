@@ -1,6 +1,5 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import os from 'node:os';
 
 // "Откуда в модели берётся контекст" — разбор запроса к модели по источникам.
 //
@@ -27,6 +26,11 @@ export function estimateTokens(chars) {
  * Имена файлов инструкций, которые Pi ищет в каждом каталоге (resource-loader
  * `loadContextFileFromDir`), в том же порядке: первый найденный побеждает.
  */
+// The agent dir has one definition (src/pi-settings.mjs): a second copy here
+// drifted from Pi's own variable name and read the wrong settings file.
+import { piAgentDir } from './pi-settings.mjs';
+export { piAgentDir };
+
 export const CONTEXT_FILE_CANDIDATES = ['AGENTS.override.md', 'AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'];
 
 /** Файлы системного промпта: `SYSTEM.md` заменяет базовый, `APPEND_SYSTEM.md` дописывается. */
@@ -35,10 +39,6 @@ export const SYSTEM_PROMPT_FILES = Object.freeze({ system: 'SYSTEM.md', append: 
 // Pi читает настройки сжатия из своего каталога и из `<проект>/.pi/settings.json`
 // (проект перекрывает агентский). Значения ниже — её дефолты (docs/settings.md).
 export const COMPACTION_DEFAULTS = Object.freeze({ reserveTokens: 16384, keepRecentTokens: 20000 });
-
-export function piAgentDir(env = process.env) {
-  return env.PI_AGENT_DIR || path.join(os.homedir(), '.pi', 'agent');
-}
 
 async function readTextFile(file) {
   try {
