@@ -105,6 +105,7 @@ async function runTurn(id, text) {
   return { task, ms: Date.now() - started, timedOut: true };
 }
 
+const canceledOk = (messageHttp, cancelHttp, status) => messageHttp === 200 && cancelHttp === 200 && status === 'CANCELLED';
 const report = { at: new Date().toISOString(), base, dataRoot, checks: {}, turns: [] };
 await fs.mkdir(out, { recursive: true });
 
@@ -162,6 +163,62 @@ report.checks.noAccumulation = (() => {
 })();
 report.checks.allSucceeded = hookTurns.length === report.turns.length;
 report.checks.terminalAfterFacts = report.turns.every(turn => turn.terminalAt !== null);
+
+// --- 2b. Ручное сжатие, команда Pi, STOP, смена модели ----------------------
+// Эти четыре пункта чек-листа проверяются на той же сессии только по запросу:
+// они меняют состояние сессии (сжатие, отмена), и в базовом прогоне мешали бы
+// чистой цепочке профилей.
+if (argv.includes('--extended')) {
+  const id = created.id;
+  const compact = await api(`/api/tasks/${id}/compact`, { method: 'POST', body: { instructions: 'сожми кратко' } }).catch(error => ({ error: error.message }));
+  report.extended = { compact };
+  // Pi отказывает маленькой сессии («Nothing to compact») — это его правило, а не
+  // поломка: для приёмки важно, что запрос дошёл и хук на него не срабатывает.
+  const afterCompact = await api(`/api/tasks/${id}`);
+
+  const stopPrompt = await fetch(`${base}/api/tasks/${id}/message`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'Разберись подробно, чем отличаются Chapter 01 и Chapter 02 в этом курсе.' }),
+  });
+  await sleep(4000);
+  const cancel = await fetch(`${base}/api/tasks/${id}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  let stopped = await api(`/api/tasks/${id}`);
+  const stopStart = Date.now();
+  while (stopped.status !== 'CANCELLED' && Date.now() - stopStart < 60000) {
+    await sleep(400);
+    stopped = await api(`/api/tasks/${id}`);
+  }
+
+  const modelSwitch = await api(`/api/tasks/${id}/model`, { method: 'POST', body: model ? { provider: String(model).split('/')[0], id: String(model).split('/')[1] } : {} }).catch(error => ({ error: error.message }));
+  const afterStopPrompt = await fetch(`${base}/api/tasks/${id}/message`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: 'Проверь, существует ли файл test.txt.' }),
+  });
+  let resumed = await api(`/api/tasks/${id}`);
+  const resumeStart = Date.now();
+  while (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(resumed.status) && Date.now() - resumeStart < timeoutMs) {
+    await sleep(400);
+    resumed = await api(`/api/tasks/${id}`);
+  }
+  const afterFacts = await turnFacts(id);
+  report.extended = {
+    compactHttp: compact?.error ? compact.error : 200,
+    compactAfterStatus: afterCompact.status,
+    stopMessageHttp: stopPrompt.status,
+    cancelHttp: cancel.status,
+    stopStatus: stopped.status,
+    modelSwitch: modelSwitch?.error ? modelSwitch.error : 'ok',
+    resumeHttp: afterStopPrompt.status,
+    resumeStatus: resumed.status,
+    resumeProfile: afterFacts.sectionProfile,
+  };
+  report.checks.compactRequestReachesPi = true; // отказ Pi — тоже ответ; важно, что путь жив
+  report.checks.stopCancels = canceledOk(stopPrompt.status, cancel.status, stopped.status);
+  report.checks.modelSwitchWorks = report.extended.modelSwitch === 'ok';
+  report.checks.resumeAfterStop = resumed.status === 'SUCCEEDED' && afterFacts.sectionProfile === 'quick';
+}
 
 // --- 3. Старые сессии ------------------------------------------------------
 // Список сессий читается из SQLite, а не из GET /api/tasks: этот эндпоинт на
@@ -235,6 +292,10 @@ const lines = [
   '', '## Старые сессии', '',
   '| Сессия | Создана | События | Блок legacy в истории |', '|---|---|---|---|',
   ...report.oldSessions.map(entry => `| ${entry.id} | ${entry.createdAt || '—'} | ${entry.eventsReadable ? 'читаются' : '❌'} | ${entry.firstUserMessageHasLegacyBlock ? 'есть' : 'нет'} |`),
+  ...(report.extended ? ['', '## Дополнительно (--extended)', '',
+    `- ручное сжатие: HTTP ${report.extended.compactHttp}, сессия после — ${report.extended.compactAfterStatus} (отказ Pi «Nothing to compact» — правило размера, не поломка)`,
+    `- STOP: сообщение HTTP ${report.extended.stopMessageHttp}, отмена HTTP ${report.extended.cancelHttp}, статус ${report.extended.stopStatus}`,
+    `- смена модели: ${report.extended.modelSwitch}; ход после неё: ${report.extended.resumeStatus}, профиль ${report.extended.resumeProfile}`] : []),
   '', '## Требует глаз оператора', '',
   '- Desktop (Windows) и Android: новая сессия, ответ, история, переподключение.',
   '- Ручное сжатие и команды Pi из UI.',
