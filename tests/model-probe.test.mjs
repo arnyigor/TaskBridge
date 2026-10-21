@@ -289,3 +289,19 @@ test('POST /api/providers/check: проверка неуправляемого �
   assert.equal(again.code, 'COOLDOWN');
   assert.equal(ok.requests.length, 1, 'провайдеру не отправляли второй запрос');
 });
+
+// Пункт 2.2 плана (SSRF): 302 на внутренний адрес — не повод идти туда. Проверка
+// обязана остановиться на первом ответе и сказать об этом, а не сходить за редиректом.
+test('перенаправление не выполняется: один запрос, честный отказ', async () => {
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(String(url));
+    return { status: 302, ok: false, headers: { get: () => 'http://169.254.169.254/latest/meta-data/' } };
+  };
+  const result = await probeAvailability({ baseUrl: 'https://provider.example/v1', fetchImpl });
+  assert.equal(calls.length, 1, 'за редиректом ходить нельзя');
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'REDIRECT');
+  assert.equal(result.httpStatus, 302);
+  assert.equal(providerCheckStatus(result), 'UNSUPPORTED');
+});

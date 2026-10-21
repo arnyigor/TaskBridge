@@ -56,7 +56,7 @@ export function providerCheckStatus({ ok = false, httpStatus = null, code = null
   if (code === 'AUTH' || code === 'NO_KEY') return 'UNAUTHORIZED';
   if (code === 'TIMEOUT') return 'TIMEOUT';
   if (code === 'UNREACHABLE') return 'UNREACHABLE';
-  if (code === 'NO_ENDPOINT' || code === 'MODEL_UNKNOWN') return 'UNSUPPORTED';
+  if (code === 'NO_ENDPOINT' || code === 'MODEL_UNKNOWN' || code === 'REDIRECT') return 'UNSUPPORTED';
   // 5xx, COOLDOWN и всё незнакомое: честно «неизвестно», а не выдуманный вердикт.
   return 'UNKNOWN';
 }
@@ -73,8 +73,15 @@ export async function probeAvailability({ baseUrl, apiKey = null, fetchImpl = gl
     const response = await fetchImpl(url, {
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       signal: AbortSignal.timeout(timeoutMs),
+      // Redirect не выполняем: адрес узла пришёл из конфигурации сервера, но 302 на
+      // внутренний адрес превратил бы проверку в SSRF-запрос от имени сервера
+      // (пункт 2.2 плана). Честный отказ лучше тихого перехода.
+      redirect: 'manual',
     });
     const ms = Date.now() - started;
+    if (response.status >= 300 && response.status < 400) {
+      return { mode: 'availability', ok: false, ms, httpStatus: response.status, code: 'REDIRECT', message: 'Провайдер перенаправляет запрос; переход по redirect не выполняется.' };
+    }
     if (!response.ok) {
       return { mode: 'availability', ok: false, ms, httpStatus: response.status, code: response.status === 401 ? 'AUTH' : 'HTTP_ERROR' };
     }
