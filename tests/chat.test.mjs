@@ -1617,8 +1617,8 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
   const actions = phone.document.querySelector('.headerActions');
 
   assert.deepEqual([...menuBody.children].map(node => node.id), [
-    'modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'serverRestartButton', 'pairButton',
-    'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton',
+    'modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'automationsButton',
+    'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton',
   ]);
   // What is left in the header is the status dot: 12px of a live indicator costs
   // no row, while the model chip (158px of 332 available at 360px) did.
@@ -1634,15 +1634,15 @@ test('DOM: on a phone the secondary header controls move into the ⋮ menu', asy
   assert.equal(desktop.document.querySelectorAll('#headerMenuBody > *').length, 0);
   assert.equal(desktop.document.getElementById('headerMenu').hasAttribute('data-ready'), false, 'no empty ⋮ on a wide screen');
   assert.deepEqual([...desktop.document.querySelector('.headerActions').children].map(node => node.id), [
-    'runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'serverRestartButton', 'pairButton',
-    'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton', 'headerMenu',
+    'runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'automationsButton',
+    'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton', 'headerMenu',
   ]);
 
   // The two sides of the breakpoint: 900 is a phone, 901 is not. This is the
   // boundary the CSS and this query have to agree on (web-css.test.mjs checks
   // the stylesheet's half of it).
   const edge = await ui({ viewportWidth: 900 });
-  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 12, '900px is the phone layout');
+  assert.equal(edge.document.querySelectorAll('#headerMenuBody > *').length, 13, '900px is the phone layout');
   const past = await ui({ viewportWidth: 901 });
   assert.equal(past.document.querySelectorAll('#headerMenuBody > *').length, 0, '901px is not');
   assert.equal(past.document.getElementById('headerMenu').hasAttribute('data-ready'), false);

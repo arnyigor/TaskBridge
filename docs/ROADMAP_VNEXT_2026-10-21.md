@@ -252,7 +252,9 @@
 | AUTO-01C | ✅ выполнен 2026-10-21 (A3) | `src/task-manager.mjs`, `tests/invocations.test.mjs` | Второй одновременный тик получает `skipped: "busy"`; дубль запуска невозможен |
 | AUTO-01D | ✅ выполнен 2026-10-21 (A4) | `src/task-manager.mjs`, `tests/invocations.test.mjs` | `RUNNING` без `sessionId` старше `config.schedules.orphanMs` закрывается как неизвестный исход без переисполнения |
 | AUTO-01E (A5) | ✅ выполнен 2026-10-21 | `src/task-manager.mjs`, `src/server.mjs`, `tests/auto-restart.test.mjs` | Автоперезапуск считает занятостью очередь промптов, а не только слоты |
-| A7 / A8 | 🔎 открыты | [auto-00-audit.md](auto-00-audit.md) | A7 — экран автоматизаций (AUTO-02); A8 — README про диапазон Pi |
+| AUTO-02 | ✅ выполнен 2026-10-21 (закрывает A7) | `web/automations.html`, `web/automations.js`, `web/automations-view.mjs`, `tests/web-automations-view.test.mjs` | Список, редактор промпта, настройки запуска и история на существующих API; форма повторяет серверные проверки |
+| A8 | ✅ выполнен 2026-10-21 | `README.md` | Диапазон Pi приведён к проверенному: `>=0.85.0 <1.4.0` |
+| A7–A8 по аудиту планировщика | ✅ закрыты | [auto-00-audit.md](auto-00-audit.md) | Открытых находок AUDIT больше нет; дальше — AUTO-03 (наблюдаемость) и CONT-01 по плану |
 | TB-PROV-02 / 03, TB-KMP-01, TB-STAB-02, RELEASE-01 | ⏸ не начаты | — | По последовательности раздела B |
 
 Замечание по OMP-02: первая серия прогонов была недействительна из-за ошибки стенда

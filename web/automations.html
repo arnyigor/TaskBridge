@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#101724" />
+  <title>TaskBridge — автоматизации</title>
+  <link rel="stylesheet" href="/providers.css" />
+  <script defer src="/automations.js" type="module"></script>
+</head>
+<body>
+  <main>
+    <header class="heading">
+      <div>
+        <a href="/" class="back">← Вернуться к сессиям</a>
+        <h1>Автоматизации</h1>
+        <p class="muted">Промпт, который выполняется по расписанию на этом компьютере. Телефон может быть выключен — запуск всё равно произойдёт.</p>
+      </div>
+      <button id="refresh" class="subtle" type="button">Обновить</button>
+    </header>
+
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+
+    <div class="columns">
+      <section class="panel" aria-label="Список автоматизаций">
+        <div class="panel-head"><h2>Автоматизации</h2><button id="add" type="button">+ Добавить</button></div>
+        <label for="project">Проект</label>
+        <select id="project"></select>
+        <div id="items" class="entries"></div>
+        <p class="muted hint">Автоматизация — это рецепт (промпт) плюс расписание. Запуски сохраняются в истории.</p>
+      </section>
+
+      <section class="panel" aria-label="Настройки автоматизации">
+        <div class="panel-head"><h2 id="editor-title">Новая автоматизация</h2><span class="pill">Pi</span></div>
+        <form id="automation-form">
+          <label for="name">Название</label>
+          <input id="name" required maxlength="200" autocomplete="off" spellcheck="false" placeholder="Ежедневный аудит проекта" />
+
+          <label for="prompt">Промпт</label>
+          <textarea id="prompt" rows="6" required placeholder="Проверь сборку проекта и перечисли ошибки."></textarea>
+
+          <label for="model">Модель <span class="muted">(необязательно, <code>провайдер/модель</code>)</span></label>
+          <input id="model" autocomplete="off" spellcheck="false" placeholder="deepseek/deepseek-flash" />
+
+          <fieldset>
+            <legend>Расписание</legend>
+            <label for="kind">Вид</label>
+            <select id="kind">
+              <option value="daily">каждый день</option>
+              <option value="weekly">по дням недели</option>
+              <option value="interval">через интервал</option>
+            </select>
+            <label for="at">Время (ЧЧ:ММ)</label>
+            <input id="at" value="09:00" autocomplete="off" spellcheck="false" />
+            <label for="weekday">День недели</label>
+            <select id="weekday">
+              <option value="mon">понедельник</option>
+              <option value="tue">вторник</option>
+              <option value="wed">среда</option>
+              <option value="thu">четверг</option>
+              <option value="fri">пятница</option>
+              <option value="sat">суббота</option>
+              <option value="sun">воскресенье</option>
+            </select>
+            <label for="everyMinutes">Интервал, минут</label>
+            <input id="everyMinutes" type="number" min="5" max="10080" value="60" />
+          </fieldset>
+
+          <label for="misfirePolicy">Если время пропущено</label>
+          <select id="misfirePolicy">
+            <option value="RUN_ONCE">один запуск за пропущенное время</option>
+            <option value="SKIP">пропустить</option>
+            <option value="CATCH_UP">догнать все пропущенные</option>
+          </select>
+
+          <label for="concurrencyPolicy">Если предыдущий запуск ещё идёт</label>
+          <select id="concurrencyPolicy">
+            <option value="SKIP_IF_RUNNING">пропустить</option>
+            <option value="QUEUE">поставить в очередь</option>
+            <option value="PARALLEL">запускать параллельно</option>
+            <option value="REPLACE">остановить предыдущий</option>
+          </select>
+
+          <label for="notify">Уведомления</label>
+          <select id="notify">
+            <option value="action-required">только когда нужно действие</option>
+            <option value="always">о каждом запуске</option>
+            <option value="errors-only">только об ошибках</option>
+            <option value="never">не уведомлять</option>
+          </select>
+
+          <label class="inline"><input id="enabled" type="checkbox" checked /> Расписание включено</label>
+
+          <div class="actions">
+            <button id="save" type="submit">Сохранить</button>
+            <button id="run" class="subtle" type="button" disabled>Запустить сейчас</button>
+            <button id="pause" class="subtle" type="button" disabled>Пауза</button>
+            <button id="delete" class="subtle danger" type="button" disabled>Удалить</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="panel" aria-label="История запусков">
+        <div class="panel-head"><h2>История</h2><button id="history-refresh" class="subtle" type="button">Обновить</button></div>
+        <div id="history" class="entries"></div>
+        <p class="muted hint">Показаны последние 20 запусков выбранной автоматизации: время, статус, результат проверки и причина.</p>
+      </section>
+    </div>
+  </main>
+</body>
+</html>
