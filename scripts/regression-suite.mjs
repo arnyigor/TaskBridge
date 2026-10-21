@@ -130,6 +130,8 @@ export const SECTIONS = {
       'tests/invocations.test.mjs',
       // Бенчмарк поведения агента (MR-05): оценка без моделей.
       'tests/agent-behavior.test.mjs',
+      // PoC Pi hooks (TASKBRIDGE-CORE-01): логика хука без Pi и модели.
+      'tests/pi-hooks-poc.test.mjs',
     ],
   },
 };
