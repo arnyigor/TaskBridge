@@ -1051,7 +1051,7 @@ internal fun MessageList(
                                 ),
                                 onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
                                 loadFile = { session.readFile(it) },
-                                hoverActions = platform.kind == "desktop",
+                                desktop = platform.kind == "desktop",
                             )
                         }
                         is ChatItem.Assistant -> {
@@ -1077,7 +1077,7 @@ internal fun MessageList(
                                 onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
                                 loadFile = { session.readFile(it) },
                                 loadWorkspaceFile = { session.readWorkspaceFile(it) },
-                                hoverActions = platform.kind == "desktop",
+                                desktop = platform.kind == "desktop",
                                 onSelectVariant = { position ->
                                     val variants = item.variants
                                     val variantId = variants?.variantIdAt(position)

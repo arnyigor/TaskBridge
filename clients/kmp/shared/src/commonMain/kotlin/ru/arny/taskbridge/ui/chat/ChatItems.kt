@@ -133,8 +133,14 @@ fun UserBubble(
     actions: MessageActions,
     onOpenFile: (fileId: String, name: String) -> Unit,
     loadFile: suspend (fileId: String) -> Result<ByteArray>,
-    /** Desktop: the action icons appear on hover; the time stays. */
-    hoverActions: Boolean = false,
+    /**
+     * Desktop: the action icons appear on hover, and the message menu opens on a right
+     * click. A long press is left to text selection there — holding the pointer over a
+     * word selects it, and the selection already shows its own «Копировать», so a second
+     * copy of the same action only gets in the way. On Android nothing selects text on a
+     * hold inside a message, so the menu keeps the long press.
+     */
+    desktop: Boolean = false,
 ) {
     val colors = LocalStatusColors.current
     val deliveryIcon = when {
@@ -153,7 +159,7 @@ fun UserBubble(
                     color = colors.userBubble,
                     contentColor = colors.onUserBubble,
                     shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
-                    modifier = Modifier.menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = { menu.open = true }),
+                    modifier = Modifier.menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = if (desktop) null else ({ menu.open = true })),
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                         if (item.mode == "steer") {
@@ -168,7 +174,7 @@ fun UserBubble(
         }
         Row(Modifier.padding(top = 2.dp).heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
             // Same order as the web's msgActions: copy, time, then edit / fork / delete.
-            Row(Modifier.alpha(if (!hoverActions || hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.alpha(if (!desktop || hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
                 SmallAction(AppIcons.Copy, "Копировать", actions.copy)
                 actions.edit?.let { SmallAction(AppIcons.Edit, "Изменить и отправить заново", it) }
                 actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка: история до этого сообщения", it) }
@@ -196,8 +202,8 @@ fun AssistantMessage(
     onOpenFile: (fileId: String, name: String) -> Unit,
     loadFile: suspend (fileId: String) -> Result<ByteArray>,
     loadWorkspaceFile: suspend (path: String) -> Result<ByteArray>,
-    /** Desktop: the action row appears on hover (the newest answer keeps it). */
-    hoverActions: Boolean = false,
+    /** Desktop: the action row appears on hover (the newest answer keeps it); the menu opens on a right click. */
+    desktop: Boolean = false,
 ) {
     val menu = remember { MenuAnchor() }
     var buttonMenu by remember { mutableStateOf(false) }
@@ -215,7 +221,7 @@ fun AssistantMessage(
         Row(verticalAlignment = Alignment.Top) {
             actions.onToggleSelect?.let { SelectMark(actions.selected, it) }
             Box(Modifier.weight(1f)) {
-                Column(Modifier.fillMaxWidth().menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = { menu.open = true })) {
+                Column(Modifier.fillMaxWidth().menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = if (desktop) null else ({ menu.open = true }))) {
                     when {
                         item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
                             SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
@@ -259,7 +265,7 @@ fun AssistantMessage(
                 AnchoredMenu(menu, actions, isUser = false)
             }
         }
-        val showActions = !hoverActions || hovered || menu.open || buttonMenu || actions.regenerate != null
+        val showActions = !desktop || hovered || menu.open || buttonMenu || actions.regenerate != null
         if (item.final || !item.active) {
             Row(Modifier.padding(top = 4.dp).heightIn(min = 32.dp).alpha(if (showActions) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
                 item.variants?.let { variants ->

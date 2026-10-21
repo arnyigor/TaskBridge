@@ -30,6 +30,12 @@ import ru.arny.taskbridge.platform.SystemBarsAppearance
 private val Indigo = Color(0xFF4F5BD5)
 private val IndigoLight = Color(0xFFA3ACFF)
 
+// Selection highlight: the blue of the reference screenshot (#3266D0). It is
+// painted behind the text, so it cannot be opaque — syntax colours and inline
+// code would lose their contrast — and the alpha keeps the glyphs readable.
+private val SelectionLight = Color(0xFF3266D0)
+private val SelectionDark = Color(0xFF4C87F0)
+
 private val LightColors = lightColorScheme(
     primary = Indigo,
     onPrimary = Color.White,
@@ -94,6 +100,8 @@ data class StatusColors(
     val done: Color,
     val muted: Color,
     val codeBackground: Color,
+    /** Filled box behind inline `code`; translucent, so the line underneath and the selection stay visible. */
+    val codeChip: Color,
     val userBubble: Color,
     val onUserBubble: Color,
 ) {
@@ -117,6 +125,7 @@ private val LightStatus = StatusColors(
     done = Color(0xFF16A34A),
     muted = Color(0xFF8A8B99),
     codeBackground = Color(0xFFF3F4F6),
+    codeChip = Color(0x141B1C20),
     userBubble = Color(0xFFEDEFF9),
     onUserBubble = Color(0xFF1B1C20),
 )
@@ -130,6 +139,7 @@ private val DarkStatus = StatusColors(
     done = Color(0xFF4ADE80),
     muted = Color(0xFF7E818B),
     codeBackground = Color(0xFF0F1012),
+    codeChip = Color(0x1FE6E6EA),
     userBubble = Color(0xFF272A38),
     onUserBubble = Color(0xFFE6E6EA),
 )
@@ -164,9 +174,12 @@ fun TaskBridgeTheme(mode: String = "system", content: @Composable () -> Unit) {
         else -> isSystemInDarkTheme()
     }
     val colors: ColorScheme = if (dark) DarkColors else LightColors
+    // A saturated blue, unlike the pale tint the accent gives at low alpha: a
+    // selection has to be obvious at a glance while the text keeps its colour.
     val selectionColors = TextSelectionColors(
-        handleColor = colors.primary,
-        backgroundColor = colors.primary.copy(alpha = if (dark) 0.34f else 0.26f),
+        handleColor = if (dark) SelectionDark else SelectionLight,
+        backgroundColor = (if (dark) SelectionDark else SelectionLight)
+            .copy(alpha = if (dark) 0.52f else 0.42f),
     )
     androidx.compose.runtime.CompositionLocalProvider(LocalStatusColors provides if (dark) DarkStatus else LightStatus) {
         SystemBarsAppearance(dark)

@@ -41,12 +41,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.em
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -88,7 +91,7 @@ private fun Block(block: MdBlock, onCopy: (String) -> Unit) {
     val colors = MaterialTheme.colorScheme
     when (block) {
         is MdBlock.Heading -> Column(Modifier.padding(top = if (block.level <= 2) 12.dp else 6.dp)) {
-            Text(
+            ChipText(
                 inlineText(block.text),
                 style = when (block.level) {
                     1 -> MaterialTheme.typography.titleLarge
@@ -99,7 +102,7 @@ private fun Block(block: MdBlock, onCopy: (String) -> Unit) {
             // Top-level sections get a hairline, as on GitHub: long answers read as parts.
             if (block.level <= 2) HorizontalDivider(Modifier.padding(top = 6.dp), color = colors.outlineVariant.copy(alpha = 0.6f))
         }
-        is MdBlock.Paragraph -> Text(inlineText(block.text), style = MaterialTheme.typography.bodyLarge)
+        is MdBlock.Paragraph -> ChipText(inlineText(block.text), style = MaterialTheme.typography.bodyLarge)
         is MdBlock.Code -> CodeBlock(block.language, block.code, onCopy)
         is MdBlock.Quote -> Row(Modifier.height(IntrinsicSize.Min)) {
             Box(Modifier.width(3.dp).fillMaxHeight().clip(RoundedCornerShape(2.dp)).background(colors.outlineVariant))
@@ -215,7 +218,7 @@ private fun TableBlock(table: MdBlock.Table) {
                 content = {
                     rows.forEachIndexed { r, cells ->
                         for (c in 0 until columns) {
-                            Text(
+                            ChipText(
                                 inlineText(cells.getOrNull(c).orEmpty()),
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = if (r == 0) FontWeight.SemiBold else FontWeight.Normal),
                                 textAlign = when (table.alignments.getOrNull(c)) {
@@ -287,21 +290,82 @@ internal fun fitColumns(desired: IntArray, floor: IntArray, available: Int): Int
 }
 
 private class TableGrid { var rowBottoms = IntArray(0) }
+
+/**
+ * Text with a rounded box behind every inline code run.
+ *
+ * A [SpanStyle] background cannot be padded or rounded, and — drawn with the
+ * glyphs — it also paints over the selection highlight. So the boxes are drawn
+ * by the text itself, from its [TextLayoutResult], underneath both the glyphs
+ * and the selection: the same result the reference screenshot shows.
+ */
+@Composable
+private fun ChipText(text: AnnotatedString, style: TextStyle, modifier: Modifier = Modifier, textAlign: TextAlign = TextAlign.Unspecified) {
+    val chip = LocalStatusColors.current.codeChip
+    val ranges = remember(text) { codeRanges(text) }
+    val boxes = remember { mutableStateOf(emptyList<Rect>()) }
+    Text(
+        text = text,
+        style = style,
+        textAlign = textAlign,
+        onTextLayout = { layout -> boxes.value = codeChipRects(layout, ranges) },
+        modifier = modifier.drawBehind {
+            for (box in boxes.value) drawRoundRect(chip, box.topLeft, box.size, CornerRadius(box.height * 0.22f))
+        },
+    )
+}
+
+/** Spans of [AnnotatedString] set in monospace, i.e. inline code; adjacent spans merge into one box. */
+internal fun codeRanges(text: AnnotatedString): List<IntRange> {
+    val ranges = ArrayList<IntRange>()
+    for (span in text.spanStyles) {
+        if (span.item.fontFamily != FontFamily.Monospace || span.end <= span.start) continue
+        val last = ranges.lastOrNull()
+        if (last != null && last.last + 1 >= span.start) ranges[ranges.lastIndex] = last.first..maxOf(last.last, span.end - 1)
+        else ranges += span.start..(span.end - 1)
+    }
+    return ranges
+}
+
+/**
+ * One box per line a code range covers: the line box of the run, widened by a
+ * fifth of its height on the sides and trimmed by the same amount above and
+ * below, so the chip hugs the glyphs instead of the whole line (line spacing is
+ * taller than the text, and boxed spacing reads as a table cell).
+ */
+internal fun codeChipRects(layout: TextLayoutResult, ranges: List<IntRange>): List<Rect> {
+    val boxes = ArrayList<Rect>(ranges.size)
+    for (range in ranges) {
+        var offset = maxOf(range.first, 0)
+        while (offset <= range.last && offset < layout.layoutInput.text.length) {
+            val line = layout.getLineForOffset(offset)
+            val end = minOf(range.last + 1, layout.getLineEnd(line, visibleEnd = false))
+            if (end <= offset) break
+            val first = layout.getBoundingBox(offset)
+            val last = layout.getBoundingBox(end - 1)
+            val pad = first.height * 0.2f
+            boxes += Rect(first.left - pad, first.top + pad, maxOf(last.right, first.right) + pad, first.bottom - pad)
+            offset = end
+        }
+    }
+    return boxes
+}
+
 /** Inline runs as one AnnotatedString; links are real links (LinkAnnotation), code is monospace. */
 @Composable
 fun inlineText(runs: List<MdRun>): AnnotatedString {
     val colors = MaterialTheme.colorScheme
-    val codeBackground = LocalStatusColors.current.codeBackground
     val openFile = LocalOpenFile.current
-    return remember(runs, colors, codeBackground, openFile) {
+    return remember(runs, colors, openFile) {
         buildAnnotatedString {
             for (run in runs) {
                 val style = SpanStyle(
                     fontWeight = if (run.bold) FontWeight.SemiBold else null,
                     fontStyle = if (run.italic) FontStyle.Italic else null,
+                    // Inline code keeps the colour of the text around it: the monospace
+                    // face and the chip (ChipText) already say "code", and the box is
+                    // drawn under the glyphs, so a selection highlight is not covered.
                     fontFamily = if (run.code) FontFamily.Monospace else null,
-                    color = if (run.code) colors.onSurface else Color.Unspecified,
-                    background = if (run.code) colors.surfaceContainerHighest else Color.Unspecified,
                     fontSize = if (run.code) 0.9.em else androidx.compose.ui.unit.TextUnit.Unspecified,
                     textDecoration = if (run.strike) TextDecoration.LineThrough else null,
                 )
