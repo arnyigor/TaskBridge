@@ -36,6 +36,9 @@ export function notificationFor(event, task = null) {
   const approval = event.type === 'APPROVAL_REQUIRED';
   const changed = Array.isArray(task?.git?.changedFiles) && task.git.changedFiles.length > 0;
   const verificationFailed = task?.verificationStatus === 'FAILED';
+  // Обязательная проверка ещё идёт: итог запуска неизвестен, и уведомлять рано.
+  // Финальное событие придёт из сверки инвокации (notificationForInvocation).
+  if (event.type === 'TASK_SUCCEEDED' && task?.verificationStatus === 'RUNNING') return null;
   if (policy === 'never') return null;
   if (policy === 'errors-only' && !failed && !approval) return null;
   if (policy === 'action-required' && !failed && !approval && !changed && !verificationFailed) return null;
@@ -45,6 +48,45 @@ export function notificationFor(event, task = null) {
     : '';
   const body = (String(task?.title || task?.prompt || event.message || '').slice(0, 140) + reason).trim();
   return { title, body, taskId: event.taskId, type: event.type, at: event.at || new Date().toISOString() };
+}
+
+/**
+ * Уведомление по ИТОГУ запланированного запуска (AUTO-03C).
+ *
+ * Отдельно от `notificationFor`: там событие сессии, а здесь итог всей работы —
+ * включая обязательную проверку, которая завершается уже после ответа модели.
+ * Пока проверка идёт, событие сессии молчит (см. `notificationFor`), иначе телефон
+ * получил бы «Готово», а через минуту «Тесты не пройдены».
+ */
+export function notificationForInvocation({ invocation, policy = null, recipeName = null, task = null } = {}) {
+  if (!invocation) return null;
+  const status = String(invocation.status || '').toUpperCase();
+  // Пропущенный по политике запуск — не событие: он ничего не делал.
+  if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(status)) return null;
+  const verificationFailed = invocation.verification === 'FAILED';
+  // Провал обязательной проверки — это ошибка и для политики «только об ошибках»,
+  // даже если сама модель ответила успешно.
+  const failed = status !== 'SUCCEEDED' || verificationFailed;
+  const changed = Array.isArray(task?.git?.changedFiles) && task.git.changedFiles.length > 0;
+  if (policy === 'never') return null;
+  if (policy === 'errors-only' && !failed) return null;
+  if (policy === 'action-required' && !failed && !verificationFailed && !changed) return null;
+  const title = `TaskBridge: ${status === 'SUCCEEDED' ? 'Автоматизация выполнена' : status === 'CANCELLED' ? 'Автоматизация остановлена' : 'Автоматизация не удалась'}`;
+  const body = [
+    recipeName ? String(recipeName).slice(0, 120) : 'запуск по расписанию',
+    verificationFailed ? 'проверка не пройдена' : (invocation.verification === 'PASSED' ? 'проверка пройдена' : ''),
+    invocation.reason ? String(invocation.reason).slice(0, 120) : '',
+  ].filter(Boolean).join(' · ').slice(0, 200);
+  return {
+    title,
+    body,
+    // Ключ события: одна инвокация — одно уведомление, даже если сверка повторится.
+    tag: `invocation:${invocation.id}`,
+    invocationId: invocation.id ?? null,
+    taskId: invocation.sessionId ?? null,
+    type: `INVOCATION_${status}`,
+    at: invocation.finishedAt || new Date().toISOString(),
+  };
 }
 
 export class PushCenter {

@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { encryptPayload, vapidHeader, generateVapidKeys } from '../src/push/web-push.mjs';
-import { PushCenter, notificationFor } from '../src/push/push-center.mjs';
+import { PushCenter, notificationFor, notificationForInvocation } from '../src/push/push-center.mjs';
 import { startFixture } from './server-fixture.mjs';
 
 // Web Push straight from the machine (RFC 8030/8291/8292). Nothing here talks to
@@ -231,4 +231,54 @@ test('HTTP: a finished session actually reaches the push loop', { timeout: 60000
     return null;
   })();
   assert.ok(attempted, 'a finished session must be handed to the push center');
+});
+
+// AUTO-03C: уведомление обязано относиться к ИТОГУ автоматизации, а не к концу
+// ответа модели. Пока идёт обязательная проверка, событие сессии молчит.
+test('пока идёт обязательная проверка, уведомление не отправляется', () => {
+  const base = { type: 'TASK_SUCCEEDED', taskId: 't1', at: '2026-10-21T09:00:00.000Z' };
+  const checking = { title: 'Аудит', verificationStatus: 'RUNNING', scheduleNotify: 'always' };
+  assert.equal(notificationFor(base, checking), null, 'итог ещё неизвестен');
+
+  const passed = { title: 'Аудит', verificationStatus: 'PASSED', scheduleNotify: 'always' };
+  assert.ok(notificationFor(base, passed), 'после проверки событие снова отправляется');
+  // Обычная сессия без проверки не меняется.
+  assert.ok(notificationFor(base, { title: 'Чат' }));
+});
+
+test('итоговое уведомление автоматизации учитывает проверку и политику', () => {
+  const done = (extra = {}) => notificationForInvocation({
+    invocation: { id: 'inv-1', status: 'SUCCEEDED', verification: 'PASSED', finishedAt: '2026-10-21T09:03:00.000Z', sessionId: 's1', ...extra },
+    policy: 'always',
+    recipeName: 'Утренний аудит',
+  });
+  const success = done();
+  assert.match(success.title, /выполнена/);
+  assert.match(success.body, /Утренний аудит/);
+  assert.match(success.body, /проверка пройдена/);
+  assert.equal(success.tag, 'invocation:inv-1', 'ключ события — одна инвокация, одно уведомление');
+  assert.equal(success.invocationId, 'inv-1');
+
+  // «Только ошибки» молчит об успехе, но говорит о провале проверки.
+  assert.equal(done().title && notificationForInvocation({
+    invocation: { id: 'inv-2', status: 'SUCCEEDED', verification: 'PASSED' }, policy: 'errors-only',
+  }), null);
+  const verificationFailed = notificationForInvocation({
+    invocation: { id: 'inv-3', status: 'SUCCEEDED', verification: 'FAILED' }, policy: 'errors-only',
+  });
+  assert.ok(verificationFailed, 'провал обязательной проверки — это ошибка для политики errors-only');
+
+  // «Требует внимания»: успех без изменений и без проблем не будит.
+  assert.equal(notificationForInvocation({ invocation: { id: 'inv-4', status: 'SUCCEEDED', verification: 'PASSED' }, policy: 'action-required' }), null);
+  assert.ok(notificationForInvocation({
+    invocation: { id: 'inv-5', status: 'SUCCEEDED', verification: 'PASSED' }, policy: 'action-required',
+    task: { git: { changedFiles: ['a.mjs'] } },
+  }), 'изменённые файлы достойны внимания');
+
+  // Никогда — никогда.
+  assert.equal(notificationForInvocation({ invocation: { id: 'inv-6', status: 'FAILED' }, policy: 'never' }), null);
+  // Пропущенный запуск не уведомляет: он ничего не делал.
+  assert.equal(notificationForInvocation({ invocation: { id: 'inv-7', status: 'SKIPPED' }, policy: 'always' }), null);
+  // Остановка — это не ошибка выполнения, но и не успех: политика всегда сообщает.
+  assert.match(notificationForInvocation({ invocation: { id: 'inv-8', status: 'CANCELLED' }, policy: 'always' }).title, /остановлена/);
 });

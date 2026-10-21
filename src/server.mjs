@@ -36,7 +36,7 @@ import { secretFingerprint } from './cloud/machine-auth.mjs';
 import { issueDeviceToken, DEFAULT_DEVICE_TOKEN_TTL_MS } from './cloud/device-token.mjs';
 import { TrustedDevices, newDeviceId } from './cloud/trusted-devices.mjs';
 import { createRelayConnector } from './cloud/relay-connector.mjs';
-import { PushCenter, notificationFor } from './push/push-center.mjs';
+import { PushCenter, notificationFor, notificationForInvocation } from './push/push-center.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { piAgentDir, readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { PiProviderProfiles } from './providers/pi-provider-profiles.mjs';
@@ -380,12 +380,37 @@ manager.on('task-event', (event) => {
 // `schedules`, not `scheduler`: the latter already means the session-queue scheduler in
 // /api/info and in the docs, and two different things under one name is how a
 // configuration mistake gets made.
+// Итоговые уведомления автоматизаций (AUTO-03C). Событие сессии молчит, пока идёт
+// обязательная проверка, поэтому финальное уведомление отправляется здесь — когда
+// сверка перевела инвокацию в терминальное состояние.
+const notifiedInvocations = new Set();
+async function notifyFinishedInvocations(ids = []) {
+  for (const id of ids) {
+    if (notifiedInvocations.has(id)) continue;
+    notifiedInvocations.add(id);
+    if (notifiedInvocations.size > 500) notifiedInvocations.delete(notifiedInvocations.values().next().value);
+    const invocation = manager.getInvocation(id);
+    if (!invocation || invocation.trigger !== 'schedule') continue;
+    const task = invocation.sessionId ? manager.getTask?.(invocation.sessionId) ?? null : null;
+    const recipe = invocation.recipeId ? manager.getRecipe?.(invocation.recipeId) ?? null : null;
+    const notification = notificationForInvocation({
+      invocation,
+      policy: task?.scheduleNotify ?? null,
+      recipeName: recipe?.name ?? null,
+      task,
+    });
+    if (notification) push.notify(notification).catch(() => {});
+  }
+}
+
 const schedulerConfig = config.schedules || {};
 if (schedulerConfig.enabled !== false) {
   const tickSec = Math.min(Math.max(Number(schedulerConfig.tickSec) || 30, 5), 3600);
-  const tick = () => manager.schedulerTick().catch((error) => {
-    console.error(`scheduler tick failed: ${error.message}`);
-  });
+  const tick = () => manager.schedulerTick()
+    .then(result => notifyFinishedInvocations(result?.reconciled ?? []))
+    .catch((error) => {
+      console.error(`scheduler tick failed: ${error.message}`);
+    });
   // The first tick waits one interval: startup is not the moment for a backlog.
   const schedulerTimer = setInterval(tick, tickSec * 1000);
   schedulerTimer.unref?.();
@@ -1799,7 +1824,9 @@ async function handleRequest(req, res) {
       if (!access.local(req)) return errorJson(res, 403, Object.assign(new Error('Тик планировщика можно запустить только на компьютере сервера.'), { code: 'FORBIDDEN' }));
       const body = await readJson(req).catch(() => ({}));
       const nowIso = typeof body.now === 'string' && !Number.isNaN(Date.parse(body.now)) ? new Date(body.now).toISOString() : undefined;
-      return json(res, 200, await manager.schedulerTick(nowIso ? { nowIso } : {}));
+      const result = await manager.schedulerTick(nowIso ? { nowIso } : {});
+      await notifyFinishedInvocations(result?.reconciled ?? []);
+      return json(res, 200, result);
     }
 
     if (req.method === 'GET' && pathname === '/api/invocations') {
@@ -1808,7 +1835,9 @@ async function handleRequest(req, res) {
           recipeId: url.searchParams.get('recipeId'),
           scheduleId: url.searchParams.get('scheduleId'),
           status: url.searchParams.get('status'),
-          limit: Number(url.searchParams.get('limit')) || 50
+          limit: Number(url.searchParams.get('limit')) || 50,
+          // История автоматизаций листается страницами (AUTO-03D).
+          offset: Math.max(Number(url.searchParams.get('offset')) || 0, 0)
         })
       });
     }
