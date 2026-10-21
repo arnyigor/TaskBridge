@@ -45,6 +45,8 @@ export const SECTIONS = {
       'tests/context-limit.test.mjs',
       'tests/context-report.test.mjs',
       'tests/api-contract.test.mjs',
+      // TB-STAB-01: неправильный запрос — ошибка клиента, а не 500.
+      'tests/http-errors.test.mjs',
       'tests/rpc-pipe-recovery.test.mjs',
       'tests/session-startup-recovery.test.mjs',
       'tests/process-protection.test.mjs',

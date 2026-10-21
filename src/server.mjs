@@ -496,8 +496,28 @@ async function readJson(req) {
     }
     chunks.push(chunk);
   }
-  const text = Buffer.concat(chunks).toString('utf8');
-  return text ? JSON.parse(text) : {};
+  const buffer = Buffer.concat(chunks);
+  if (buffer.length === 0) return {};
+  // A body that is not valid UTF-8 is a client mistake: `toString('utf8')` would
+  // quietly turn the bad bytes into U+FFFD and hand the endpoint a body nobody
+  // sent. Node's fetch makes this easy to hit by passing an object instead of a
+  // string (`JSON.stringify` never ran → "[object Object]" bytes through).
+  let text;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+  } catch {
+    throw Object.assign(new Error('Тело запроса не является корректным UTF-8.'), { code: 'INPUT_INVALID' });
+  }
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Malformed JSON used to fall through to the generic handler: it answered
+    // 500 INTERNAL_ERROR with the parser's own words and made a client mistake
+    // look like a server fault (2026-10-21). The parser message stays in the
+    // server log; the client gets the contract's INPUT_INVALID.
+    throw Object.assign(new Error('Тело запроса не является корректным JSON.'), { code: 'INPUT_INVALID' });
+  }
 }
 
 // How this process was started, so a restart relaunches the same shape. LAN mode
