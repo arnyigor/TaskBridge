@@ -128,6 +128,8 @@ export const SECTIONS = {
       'tests/recipes.test.mjs',
       'tests/schedules.test.mjs',
       'tests/invocations.test.mjs',
+      // Бенчмарк поведения агента (MR-05): оценка без моделей.
+      'tests/agent-behavior.test.mjs',
     ],
   },
 };

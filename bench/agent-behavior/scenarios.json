@@ -1,0 +1,358 @@
+{
+  "version": 1,
+  "fixture": {
+    "root": "fixtures",
+    "bulkFiles": 5000,
+    "note": "Синтетический каталог Learning строится fixtures/build.mjs; содержимое детерминировано, ни один файл не нужен в git."
+  },
+  "scenarios": [
+    {
+      "id": "ue-filmmakers",
+      "category": "lookup-existing",
+      "prompt": "Unreal filmmaking курс. У меня есть такой? В Learning посмотри.",
+      "expect": {
+        "found": true,
+        "path": "Learning/UnrealEngine/Unreal Engine For Filmmakers",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "blender-guru",
+      "category": "lookup-existing",
+      "prompt": "Есть ли у меня курс Blender Guru? Посмотри в Learning.",
+      "expect": {
+        "found": true,
+        "path": "Learning/Blender/Blender Guru - Donut",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "houdini",
+      "category": "lookup-existing",
+      "prompt": "Найди папку с курсом Houdini в Learning.",
+      "expect": {
+        "found": true,
+        "path": "Learning/Houdini/Houdini Course 01",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "substance",
+      "category": "lookup-existing",
+      "prompt": "Есть ли Substance Painter в Learning?",
+      "expect": {
+        "found": true,
+        "path": "Learning/Substance Painter",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "ue-automotive",
+      "category": "lookup-existing",
+      "prompt": "У меня есть курс UE5 Automotive Masterclass?",
+      "expect": {
+        "found": true,
+        "path": "Learning/UnrealEngine/UE5 Automotive Masterclass",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "exr-folder",
+      "category": "lookup-existing",
+      "prompt": "Есть ли папка EXR в курсе Unreal Engine For Filmmakers?",
+      "expect": {
+        "found": true,
+        "path": "Learning/UnrealEngine/Unreal Engine For Filmmakers/EXR",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "green-screen-folder",
+      "category": "lookup-existing",
+      "prompt": "Посмотри, есть ли папка Green Screen в курсе Unreal Engine For Filmmakers.",
+      "expect": {
+        "found": true,
+        "path": "Learning/UnrealEngine/Unreal Engine For Filmmakers/Green Screen",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "houdini-where",
+      "category": "lookup-existing",
+      "prompt": "Где лежит Houdini Course 01?",
+      "expect": {
+        "found": true,
+        "path": "Learning/Houdini/Houdini Course 01",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "missing-nuke",
+      "category": "lookup-missing",
+      "prompt": "Есть ли у меня курс Nuke Compositing? В Learning посмотри.",
+      "expect": {
+        "found": false,
+        "absent": [
+          "Nuke Compositing"
+        ],
+        "profile": "quick",
+        "maxCalls": 5,
+        "writes": 0
+      }
+    },
+    {
+      "id": "missing-zbrush",
+      "category": "lookup-missing",
+      "prompt": "Найди папку ZBrush в Learning.",
+      "expect": {
+        "found": false,
+        "absent": [
+          "ZBrush"
+        ],
+        "profile": "quick",
+        "maxCalls": 5,
+        "writes": 0
+      }
+    },
+    {
+      "id": "missing-houdini-02",
+      "category": "lookup-missing",
+      "prompt": "Есть ли Houdini Course 02?",
+      "expect": {
+        "found": false,
+        "absent": [
+          "Houdini Course 02"
+        ],
+        "profile": "quick",
+        "maxCalls": 5,
+        "writes": 0,
+        "note": "рядом лежит Learning/_bulk с 5000 файлов: рекурсивное сканирование здесь бесполезно"
+      }
+    },
+    {
+      "id": "missing-davinci",
+      "category": "lookup-missing",
+      "prompt": "Есть ли курс DaVinci Resolve?",
+      "expect": {
+        "found": false,
+        "absent": [
+          "DaVinci"
+        ],
+        "profile": "quick",
+        "maxCalls": 5,
+        "writes": 0
+      }
+    },
+    {
+      "id": "ambiguous-ocean",
+      "category": "ambiguous",
+      "prompt": "Есть ли у меня курс Ocean? В Learning посмотри.",
+      "expect": {
+        "found": true,
+        "ambiguous": [
+          "Ocean Course A",
+          "Ocean Course B"
+        ],
+        "profile": "quick",
+        "maxCalls": 6,
+        "writes": 0
+      }
+    },
+    {
+      "id": "ambiguous-unreal-list",
+      "category": "ambiguous",
+      "prompt": "Какие курсы Unreal есть в Learning?",
+      "expect": {
+        "found": true,
+        "mentions": [
+          "UE5 Automotive Masterclass",
+          "Other Unreal Course"
+        ],
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0,
+        "ambiguous": [
+          "UE5 Automotive Masterclass",
+          "Other Unreal Course"
+        ]
+      }
+    },
+    {
+      "id": "ambiguous-automotive",
+      "category": "ambiguous",
+      "prompt": "Есть ли курс по автомобильному рендеру в Unreal?",
+      "expect": {
+        "found": true,
+        "mentions": [
+          "UE5 Automotive Masterclass"
+        ],
+        "profile": "quick",
+        "maxCalls": 6,
+        "writes": 0,
+        "ambiguous": [
+          "UE5 Automotive Masterclass"
+        ]
+      }
+    },
+    {
+      "id": "ambiguous-blender-list",
+      "category": "ambiguous",
+      "prompt": "Есть ли у меня курсы Blender?",
+      "expect": {
+        "found": true,
+        "mentions": [
+          "Blender Guru - Donut"
+        ],
+        "profile": "quick",
+        "maxCalls": 6,
+        "writes": 0,
+        "ambiguous": [
+          "Blender Guru - Donut"
+        ]
+      }
+    },
+    {
+      "id": "negative-lookup",
+      "category": "mixed",
+      "prompt": "Не исправляй ничего, просто скажи, есть ли курс Unreal Engine For Filmmakers.",
+      "expect": {
+        "found": true,
+        "path": "Learning/UnrealEngine/Unreal Engine For Filmmakers",
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0
+      }
+    },
+    {
+      "id": "negative-create",
+      "category": "mixed",
+      "prompt": "Ничего не создавай, только проверь: есть ли папка Ocean Course C?",
+      "expect": {
+        "found": false,
+        "absent": [
+          "Ocean Course C"
+        ],
+        "profile": "quick",
+        "maxCalls": 5,
+        "writes": 0
+      }
+    },
+    {
+      "id": "find-and-fix",
+      "category": "mixed",
+      "prompt": "Найди и исправь опечатку в названии папки Unreal filmmaking в Learning.",
+      "expect": {
+        "found": true,
+        "profile": "implement",
+        "maxCalls": 10,
+        "writesAllowed": true,
+        "note": "ложный quick здесь стоит дороже лишнего вызова: просят изменение",
+        "ambiguous": [
+          "Unreal Engine For Filmmakers"
+        ]
+      }
+    },
+    {
+      "id": "mixed-english",
+      "category": "mixed",
+      "prompt": "do not fix anything, just find the UE5 folder in Learning",
+      "expect": {
+        "found": true,
+        "mentions": [
+          "UE5 Automotive Masterclass"
+        ],
+        "profile": "quick",
+        "maxCalls": 4,
+        "writes": 0,
+        "ambiguous": [
+          "UE5 Automotive Masterclass"
+        ]
+      }
+    },
+    {
+      "id": "complex-compare",
+      "category": "complex",
+      "prompt": "Разберись, чем отличаются Chapter 01 и Chapter 02 в курсе Unreal Engine For Filmmakers.",
+      "expect": {
+        "found": true,
+        "profile": "explore",
+        "maxCalls": 12,
+        "writes": 0,
+        "ambiguous": [
+          "Chapter 01",
+          "Chapter 02"
+        ],
+        "mentions": [
+          "Chapter 01",
+          "Chapter 02"
+        ]
+      }
+    },
+    {
+      "id": "complex-why-empty",
+      "category": "complex",
+      "prompt": "Почему папка Green Screen в курсе Unreal Engine For Filmmakers выглядит пустой?",
+      "expect": {
+        "found": true,
+        "mentions": [
+          "Links.txt"
+        ],
+        "profile": "explore",
+        "maxCalls": 12,
+        "writes": 0,
+        "ambiguous": [
+          "Links.txt"
+        ]
+      }
+    },
+    {
+      "id": "complex-catalog",
+      "category": "complex",
+      "prompt": "Проанализируй, какие направления обучения есть в Learning и чего в наборе не хватает.",
+      "expect": {
+        "found": true,
+        "profile": "explore",
+        "maxCalls": 12,
+        "writes": 0,
+        "ambiguous": [
+          "Blender",
+          "Houdini",
+          "UnrealEngine"
+        ]
+      }
+    },
+    {
+      "id": "bulk-count",
+      "category": "complex",
+      "prompt": "Сколько файлов в Learning/_bulk?",
+      "expect": {
+        "found": true,
+        "profile": "quick",
+        "maxCalls": 3,
+        "writes": 0,
+        "ambiguous": [
+          "5000"
+        ],
+        "mentions": [
+          "5000"
+        ]
+      }
+    }
+  ]
+}
