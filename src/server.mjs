@@ -1127,6 +1127,17 @@ async function handleRequest(req, res) {
         const body = await readJson(req);
         return json(res, 200, await providerProfiles.upsert(body));
       }
+      // Мастер подключения, шаги 3–4 (пункт 2.3 плана): проверка ещё не сохранённого
+      // подключения и каталог его моделей. Разрешение адреса и запрет redirect — там же.
+      if (req.method === 'POST' && pathname === '/api/provider-profiles/draft-check') {
+        const body = await readJson(req);
+        return json(res, 200, await providerProfiles.draftCheck({
+          baseUrl: body?.baseUrl,
+          keyEnv: body?.keyEnv ?? '',
+          kind: body?.kind ?? 'remote',
+          limit: body?.limit,
+        }));
+      }
       const providerRoute = pathname.match(/^\/api\/provider-profiles\/([^/]+)(?:\/(check))?$/);
       if (providerRoute) {
         const id = providerRoute[1];

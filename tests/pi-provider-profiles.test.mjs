@@ -139,3 +139,55 @@ test('delete only removes managed provider, preserves other entries and backs up
   const backups = (await fs.readdir(dir)).filter(f => f.startsWith('models.json.bak-taskbridge-'));
   assert.equal(backups.length, 2);
 });
+
+// Пункт 2.3 плана, шаги 3–4: проверка черновика до сохранения. Адрес приходит от
+// клиента, поэтому здесь же проверяется, что проверка не превращается в SSRF-ручку.
+test('draft-check отдаёт каталог моделей и не идёт по redirect', async t => {
+  const seen = [];
+  const { dir } = await fixture({
+    env: { TB_TEST_API_KEY: 'k' },
+    fetchImpl: async (url, options) => {
+      seen.push({ url: String(url), redirect: options?.redirect, auth: options?.headers?.Authorization ?? null });
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: 'qwen/qwen3:27b', context_length: 32768 }, { id: 'openai/gpt-5' }] }) };
+    },
+  });
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const service = new PiProviderProfiles({ agentDir: dir, env: { TB_TEST_API_KEY: 'k' }, fetchImpl: async (url, options) => {
+    seen.push({ url: String(url), redirect: options?.redirect, auth: options?.headers?.Authorization ?? null });
+    return { ok: true, status: 200, json: async () => ({ data: [{ id: 'qwen/qwen3:27b', context_length: 32768 }, { id: 'openai/gpt-5' }] }) };
+  } });
+
+  const result = await service.draftCheck({ baseUrl: 'https://gateway.example/v1', keyEnv: 'TB_TEST_API_KEY' });
+  assert.equal(result.status, 'AVAILABLE');
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.models.map(model => model.id), ['qwen/qwen3:27b', 'openai/gpt-5']);
+  assert.equal(result.models[0].contextWindow, 32768, 'размер контекста не теряется');
+  assert.equal(seen[0].url, 'https://gateway.example/v1/models');
+  assert.equal(seen[0].redirect, 'manual', 'за редиректом ходить нельзя');
+  assert.equal(seen[0].auth, 'Bearer k');
+
+  // 302 — отказ, а не поход на внутренний адрес.
+  const redirecting = new PiProviderProfiles({ agentDir: dir, env: { TB_TEST_API_KEY: 'k' }, fetchImpl: async () => ({ ok: false, status: 302, json: async () => ({}) }) });
+  const redirected = await redirecting.draftCheck({ baseUrl: 'https://gateway.example/v1', keyEnv: 'TB_TEST_API_KEY' });
+  assert.equal(redirected.status, 'REDIRECT');
+  assert.equal(redirected.ok, false);
+});
+
+test('draft-check отказывает опасным адресам и не подставляет ключ молча', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-provider-draft-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const service = new PiProviderProfiles({ agentDir: dir, env: {}, fetchImpl: async () => { throw new Error('ходить нельзя'); } });
+
+  // Link-local (metadata облака), multicast, 0.0.0.0 и file: не проверяются вообще.
+  for (const baseUrl of ['http://169.254.169.254/latest', 'https://169.254.169.254/v1', 'http://224.0.0.1/v1', 'http://0.0.0.0:8080/v1', 'file:///etc/passwd']) {
+    await assert.rejects(service.draftCheck({ baseUrl }), error => error.code === 'INPUT_INVALID', baseUrl);
+  }
+  // Параметр keyEnv — имя переменной, а не секрет.
+  await assert.rejects(service.draftCheck({ baseUrl: 'https://gateway.example/v1', keyEnv: 'sk-live-123' }), error => error.code === 'INPUT_INVALID');
+  // Облачный провайдер без имени переменной не проверяется.
+  await assert.rejects(service.draftCheck({ baseUrl: 'https://gateway.example/v1' }), error => error.code === 'INPUT_INVALID');
+  // Имя есть, переменная не задана: честное NO_KEY без сетевого запроса.
+  const missing = await service.draftCheck({ baseUrl: 'https://gateway.example/v1', keyEnv: 'TB_TEST_API_KEY' });
+  assert.equal(missing.status, 'NO_KEY');
+  assert.deepEqual(missing.models, []);
+});

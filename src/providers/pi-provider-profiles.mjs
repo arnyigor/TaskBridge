@@ -8,6 +8,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { parseProviderModels } from '../provider-models.mjs';
 
 const ID = /^tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const ENV = /^[A-Z][A-Z0-9_]{0,95}$/;
@@ -30,6 +31,13 @@ function normalizedUrl(raw) {
   const localV4 = ipv4.length === 4 && ipv4.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
     && (ipv4[0] === 10 || (ipv4[0] === 172 && ipv4[1] >= 16 && ipv4[1] <= 31)
       || (ipv4[0] === 192 && ipv4[1] === 168) || ipv4[0] === 127);
+  const isV4 = ipv4.length === 4 && ipv4.every(n => Number.isInteger(n) && n >= 0 && n <= 255);
+  // Адреса служебных диапазонов (link-local 169.254 — там живёт metadata-сервис облака,
+  // 0.0.0.0, multicast, зарезервированное) не проверяются даже как локальные:
+  // проверка черновика и сохранение не должны уметь говорить с ними.
+  const serviceV4 = isV4 && (ipv4[0] === 0 || ipv4[0] >= 224 || (ipv4[0] === 169 && ipv4[1] === 254));
+  const serviceV6 = /^(fe80:|fc|fd|ff|::)/.test(host);
+  if (serviceV4 || serviceV6) throw fail('INPUT_INVALID', 'Этот адрес не используется как сервер моделей.');
   const local = host === 'localhost' || host === '::1' || localV4;
   if (url.protocol === 'http:' && !local) throw fail('INPUT_INVALID', 'Обычный HTTP допустим только для localhost и локальных IPv4-адресов.');
   if (url.protocol === 'http:' && !localV4 && host !== 'localhost' && host !== '::1') throw fail('INPUT_INVALID', 'Локальный адрес не поддерживается.');
@@ -164,6 +172,51 @@ export class PiProviderProfiles {
       };
     } catch (e) {
       return { ok: false, status: e.name === 'TimeoutError' ? 'timeout' : 'unreachable', ms: Math.round(performance.now() - started), note: 'Проверьте URL, DNS, TLS или доступность локального сервера.' };
+    }
+  }
+
+  /**
+   * Проверка ЧЕРНОВИКА подключения — до сохранения (шаги 3–4 мастера): соединение,
+   * ответ /models и каталог моделей для выбора.
+   *
+   * Адрес приходит от клиента, поэтому права и разбор URL те же, что у сохранения:
+   * только localhost-администратор (проверяется на маршруте), только http(s), без
+   * логина/пароля/query, служебные диапазоны запрещены, redirect не выполняется
+   * (иначе проверка черновика стала бы SSRF-ручкой).
+   */
+  async draftCheck({ baseUrl, keyEnv = '', kind = 'remote', limit = 300 } = {}) {
+    const { baseUrl: url, local } = normalizedUrl(baseUrl);
+    const rawEnv = String(keyEnv || '').trim();
+    if (rawEnv && !ENV.test(rawEnv)) throw fail('INPUT_INVALID', 'Укажите имя переменной окружения, не сам API-ключ.');
+    const key = rawEnv ? this.env[rawEnv] : null;
+    // Локальный endpoint может быть без ключа; облачный без ключа не проверяем —
+    // «нет ключа» это не «недоступен», и делать вид обратного нельзя.
+    if (!local && !rawEnv) throw fail('INPUT_INVALID', 'Для облачного провайдера требуется имя переменной окружения API-ключа.');
+    if (!local && !key) return { ok: false, status: 'NO_KEY', code: 'NO_KEY', baseUrl: url, models: [], note: `Переменная ${rawEnv} не задана на компьютере или сервер запущен без неё.` };
+    const started = performance.now();
+    try {
+      const response = await this.fetchImpl(`${url}/models`, {
+        method: 'GET',
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        redirect: 'manual',
+        signal: AbortSignal.timeout(8000),
+      });
+      const latencyMs = Math.round(performance.now() - started);
+      if (response.status >= 300 && response.status < 400) {
+        return { ok: false, status: 'REDIRECT', code: 'REDIRECT', httpStatus: response.status, latencyMs, baseUrl: url, models: [], note: 'Сервер перенаправляет запрос; переход по redirect не выполняется.' };
+      }
+      if (!response.ok) {
+        return { ok: false, status: response.status === 401 || response.status === 403 ? 'UNAUTHORIZED' : response.status === 429 ? 'RATE_LIMITED' : `HTTP_${response.status}`, httpStatus: response.status, latencyMs, baseUrl: url, models: [], note: 'Проверен только GET /models. Генерация модели не выполнялась.' };
+      }
+      const payload = await response.json().catch(() => null);
+      const models = parseProviderModels(payload).slice(0, Math.max(1, Math.min(500, Number(limit) || 300)));
+      if (!models.length) {
+        return { ok: false, status: 'UNSUPPORTED', code: 'NO_MODELS', httpStatus: response.status, latencyMs, baseUrl: url, models: [], note: 'Сервер ответил, но список моделей пуст или в незнакомом формате. ID можно ввести вручную.' };
+      }
+      return { ok: true, status: 'AVAILABLE', httpStatus: response.status, latencyMs, baseUrl: url, models, note: 'Проверен только GET /models. Генерация модели не выполнялась.' };
+    } catch (error) {
+      const timeout = error?.name === 'TimeoutError' || error?.name === 'AbortError';
+      return { ok: false, status: timeout ? 'TIMEOUT' : 'UNREACHABLE', code: timeout ? 'TIMEOUT' : 'UNREACHABLE', latencyMs: Math.round(performance.now() - started), baseUrl: url, models: [], note: 'Проверьте URL, DNS, TLS или доступность локального сервера.' };
     }
   }
 

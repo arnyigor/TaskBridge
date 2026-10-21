@@ -3,13 +3,21 @@
   // Подписи проверки соединения — отдельный модуль: их проверяет тест, и они
   // одинаковы для управляемых и неуправляемых подключений (TB-PROV-01B).
   let checkView = null;
+  let wizard = null;
   import('./provider-check-view.mjs').then(module => { checkView = module; })
     .catch(() => { /* без модуля останется технический код статуса */ });
+  // Мастер подключения (пункт 2.3 плана): фильтр найденных моделей, предпросмотр
+  // записи и итог — отдельный модуль, по нему принимают решение о записи в файл.
+  import('./provider-wizard-view.mjs').then(module => { wizard = module; renderDraft(); })
+    .catch(() => { /* без модуля форма остаётся в ручном режиме */ });
   const el = id => document.getElementById(id);
   let revision = null;
   let profiles = [];
   let selected = null;
   let busy = false;
+  // Найденные у провайдера модели и отметки для переноса в поле ID.
+  let discovered = [];
+  let picked = [];
 
   const status = (message, kind = '') => {
     el('notice').textContent = message;
@@ -32,6 +40,50 @@
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
     return body;
+  };
+  const splitLines = value => String(value || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  const draftFields = () => ({
+    id: el('provider-id').value.trim(),
+    baseUrl: el('base-url').value.trim(),
+    keyEnv: el('key-env').value.trim(),
+    models: splitLines(el('models').value),
+  });
+  const renderDiscovered = () => {
+    const box = el('discovered');
+    if (!discovered.length) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    const filtered = wizard
+      ? wizard.filterDiscoveredModels({ models: discovered, query: el('model-query').value })
+      : { shown: discovered.slice(0, 50), total: discovered.length };
+    const list = el('discovered-list');
+    list.replaceChildren();
+    for (const model of filtered.shown) {
+      const label = document.createElement('label');
+      label.className = 'entry static';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.checked = picked.includes(model.id);
+      input.addEventListener('change', () => {
+        picked = input.checked ? [...new Set([...picked, model.id])] : picked.filter(id => id !== model.id);
+        renderDiscovered();
+      });
+      const text = document.createElement('span');
+      text.textContent = model.name && model.name !== model.id ? `${model.id} — ${model.name}` : model.id;
+      label.append(input, text);
+      list.append(label);
+    }
+    const limit = wizard ? wizard.WIZARD_MODEL_LIMIT : 100;
+    el('discovered-count').textContent = `Показано ${filtered.shown.length} из ${filtered.total}; отмечено ${picked.length} из ${limit}`;
+    el('add-selected').disabled = picked.length === 0;
+  };
+  // Предпросмотр (шаг 5): видно ровно то, что уйдёт в models.json, до нажатия «Сохранить».
+  const renderDraft = () => {
+    const fields = draftFields();
+    if (wizard) {
+      el('draft-preview').textContent = wizard.draftPreviewText(fields);
+      if (selected === null) el('save').disabled = !wizard.draftReady(fields);
+    }
+    if (!el('discovered').classList.contains('hidden')) renderDiscovered();
   };
   const renderList = () => {
     const root = el('providers');
@@ -63,11 +115,15 @@
     el('models').value = item?.models?.map(m => m.id).join('\n') || '';
     el('preset').value = 'custom';
     const disabled = !!item && !item.managed;
-    for (const id of ['base-url', 'key-env', 'models', 'preset', 'save']) el(id).disabled = disabled;
+    for (const id of ['base-url', 'key-env', 'models', 'preset', 'save', 'draft-check']) el(id).disabled = disabled;
     // Проверка соединения не требует управляемого профиля: адрес резолвится на
     // сервере из каталога Pi, а models.json при этом не меняется.
     el('test').disabled = !item;
     el('delete').disabled = !item?.managed;
+    // Найденные ранее модели относились к другому адресу — не подмешиваем их в новый.
+    discovered = []; picked = []; el('model-query').value = ''; el('draft-status').textContent = '';
+    renderDiscovered();
+    renderDraft();
     renderList();
   };
   const refresh = async ({ preserve = true } = {}) => {
@@ -99,22 +155,55 @@
         break;
       default: break;
     }
+    renderDraft();
+  });
+  for (const id of ['provider-id', 'base-url', 'key-env', 'models']) el(id).addEventListener('input', renderDraft);
+  el('model-query').addEventListener('input', renderDiscovered);
+  el('add-selected').addEventListener('click', () => {
+    const current = splitLines(el('models').value);
+    const limit = wizard ? wizard.WIZARD_MODEL_LIMIT : 100;
+    el('models').value = [...new Set([...current, ...picked])].slice(0, limit).join('\n');
+    // Отметки снимаются: они уже в списке выше, повторное «добавить» ничего не даст.
+    picked = [];
+    el('model-query').value = '';
+    renderDiscovered();
+    renderDraft();
+  });
+  el('draft-check').addEventListener('click', async () => {
+    if (busy) return;
+    const fields = draftFields();
+    busy = true; el('draft-check').disabled = true;
+    el('draft-status').textContent = 'Проверяем адрес и запрашиваем список моделей…';
+    try {
+      // Черновик не пишется в models.json: этот запрос только читает GET /models.
+      const result = await api('/draft-check', { method: 'POST', body: JSON.stringify({ baseUrl: fields.baseUrl, keyEnv: fields.keyEnv }) });
+      const text = checkView
+        ? checkView.providerCheckText(result)
+        : `${result.status}. ${result.note || ''}`;
+      el('draft-status').textContent = result.models?.length ? text : `${text} ${result.note || ''}`.trim();
+      discovered = Array.isArray(result.models) ? result.models : [];
+      // Отмеченными сразу становятся те, что уже введены руками: человек их выбрал.
+      picked = fields.models.filter(id => discovered.some(model => model.id === id));
+      renderDiscovered();
+    } catch (error) {
+      el('draft-status').textContent = error.message;
+    }
+    finally { busy = false; el('draft-check').disabled = false; renderDraft(); }
   });
   el('provider-form').addEventListener('submit', async event => {
     event.preventDefault();
     if (busy) return;
     busy = true; el('save').disabled = true;
     try {
-      const id = el('provider-id').value.trim();
-      const models = el('models').value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      const result = await api('', { method: 'PUT', body: JSON.stringify({
-        revision, id, baseUrl: el('base-url').value.trim(), keyEnv: el('key-env').value.trim(), models,
-      }) });
+      const { id, baseUrl, keyEnv, models } = draftFields();
+      const result = await api('', { method: 'PUT', body: JSON.stringify({ revision, id, baseUrl, keyEnv, models }) });
       revision = result.revision; profiles = result.providers;
       show(profiles.find(p => p.id === id));
-      status('Сохранено. Обнови каталог моделей в TaskBridge. Для нового API-ключа перезапусти сервер.', 'success');
+      status(wizard
+        ? wizard.wizardResultText({ id, keyEnv, changed: true, modelCount: models.length })
+        : 'Сохранено. Обнови каталог моделей в TaskBridge. Для нового API-ключа перезапусти сервер.', 'success');
     } catch (e) { status(e.message, 'error'); }
-    finally { busy = false; if (!selected || profiles.find(p => p.id === selected)?.managed) el('save').disabled = false; }
+    finally { busy = false; if (!selected || profiles.find(p => p.id === selected)?.managed) el('save').disabled = false; renderDraft(); }
   });
   el('test').addEventListener('click', async () => {
     if (!selected || busy) return;

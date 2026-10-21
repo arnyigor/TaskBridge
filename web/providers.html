@@ -40,6 +40,23 @@
           <label for="models">ID моделей, по одному на строку</label>
           <textarea id="models" rows="6" spellcheck="false" required placeholder="model-name-1&#10;model-name-2"></textarea>
           <p class="hint">Вводи реальные ID, которые принимает API. Большие каталоги лучше не импортировать целиком.</p>
+          <!-- Шаги 3–4 мастера (пункт 2.3 плана): проверка до сохранения и выбор
+               моделей из каталога провайдера. Ручной ввод ID выше остаётся для API
+               без discovery. -->
+          <div class="actions">
+            <button id="draft-check" class="subtle" type="button">Проверить и показать модели</button>
+            <span id="draft-status" class="hint" role="status" aria-live="polite"></span>
+          </div>
+          <fieldset id="discovered" class="hidden">
+            <legend>Найдено у провайдера</legend>
+            <input id="model-query" type="search" placeholder="Поиск по ID или названию…" aria-label="Поиск среди найденных моделей" />
+            <div id="discovered-list" class="entries"></div>
+            <div class="actions">
+              <button id="add-selected" class="subtle" type="button">Добавить отмеченные</button>
+              <span id="discovered-count" class="hint" role="status" aria-live="polite"></span>
+            </div>
+          </fieldset>
+          <p id="draft-preview" class="hint" role="status" aria-live="polite"></p>
           <div class="actions">
             <button id="save" type="submit">Сохранить</button>
             <button id="test" class="subtle" type="button" disabled>Проверить /models</button>
