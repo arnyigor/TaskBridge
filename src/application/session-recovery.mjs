@@ -120,14 +120,34 @@ export async function restoreSessions(previous, { store, enqueue, restorePending
           // R3.6: with the Pi session file intact the conversation is only
           // interrupted — the next message resumes it (RESTORABLE). Without it
           // there is nothing to resume from: a real failure.
-          task.status = 'FAILED';
-          task.errorCode = intact ? 'FAILED_RECOVERY' : 'SESSION_LOST';
-          task.error = intact
+          //
+          // Терминальное состояние обязано попасть в журнал: SSE-клиент,
+          // вернувшийся по курсору, иначе не узнает о падении никогда и увидит
+          // его только опросом снимка (STAB-02D). Событие и снимок пишутся
+          // одной транзакцией: FAILED без TASK_FAILED невозможен, и наоборот
+          // (REC-05). Сам ход не перезапускается — Pi здесь не поднимается.
+          const at = now();
+          const errorCode = intact ? 'FAILED_RECOVERY' : 'SESSION_LOST';
+          const error = intact
             ? 'TaskBridge перезапустился во время ответа. Следующее сообщение продолжит сессию.'
             : 'TaskBridge перезапустился во время ответа, а файл сессии Pi не сохранился.';
-          if (!intact) task._sessionLost = true;
-          task.updatedAt = now();
-          await store.save(task);
+          const terminal = {
+            ...task,
+            status: 'FAILED',
+            errorCode,
+            error,
+            current: 'Failed',
+            updatedAt: at,
+            ...(intact ? {} : { _sessionLost: true })
+          };
+          await store.appendEventWithTask(task.id, {
+            at,
+            taskId: task.id,
+            type: 'TASK_FAILED',
+            message: error,
+            data: { errorCode, recovered: true, turn: Number.isFinite(task._turn) ? task._turn : null }
+          }, terminal);
+          Object.assign(task, terminal);
         }
       }
       // Pi is gone after a restart: a dialog it was waiting on is gone with it.
