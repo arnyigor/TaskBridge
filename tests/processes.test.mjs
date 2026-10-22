@@ -12,7 +12,10 @@ test('GET /api/processes lists real processes with name and memory', { timeout: 
   const fixture = await startFixture();
   t.after(() => fixture.close());
 
+  // null — это «ОС не ответила», а не «процессов нет»: различать обязательно
+  // (STAB-02C), иначе тест падает на собственном `find` под нагрузкой.
   const { processes } = await fixture.api('/api/processes?fresh=1');
+  assert.notEqual(processes, null, 'список процессов должен быть получен');
   assert.equal(Array.isArray(processes), true);
   const self = processes.find(p => p.pid === fixture.appPid);
   assert.ok(self, 'the fixture server process itself must be in the list');
@@ -37,7 +40,8 @@ test('POST /api/processes/kill kills a spawned dummy process', { timeout: 60000 
   let seen = false;
   for (let i = 0; i < 40 && !seen; i++) {
     const { processes } = await fixture.api('/api/processes?fresh=1').catch(() => ({ processes: [] }));
-    seen = processes.some(p => p.pid === dummy.pid);
+    // null = ОС не успела ответить: это не «dummy нет», повод повторить запрос.
+    seen = Array.isArray(processes) && processes.some(p => p.pid === dummy.pid);
     if (!seen) await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.ok(seen, 'dummy process must appear in the list before the kill');
@@ -49,7 +53,7 @@ test('POST /api/processes/kill kills a spawned dummy process', { timeout: 60000 
   let gone = false;
   for (let i = 0; i < 20 && !gone; i++) {
     const { processes } = await fixture.api('/api/processes?fresh=1').catch(() => ({ processes: [] }));
-    gone = !processes.some(p => p.pid === dummy.pid);
+    gone = Array.isArray(processes) && !processes.some(p => p.pid === dummy.pid);
     if (!gone) await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.ok(gone, 'killed pid must disappear from a fresh list');

@@ -7,6 +7,17 @@ if (process.argv.includes('--version')) {
   process.stdout.write(`${process.env.FAKE_PI_VERSION || '0.85.1'}\n`);
   process.exit(0);
 }
+// FAKE_PI_GATE_DIR: тест придерживает старт Pi (файл hold) и отпускает (release).
+// Нужно, чтобы STOP гарантированно попадал в окно «работа снята с очереди, но ход
+// ещё не начался» (STAB-02A) — без таймеров и задержек в production коде.
+const gateDir = process.env.FAKE_PI_GATE_DIR;
+if (gateDir && fs.existsSync(`${gateDir}/hold`)) {
+  fs.writeFileSync(`${gateDir}/parked`, '1');
+  const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const deadline = Date.now() + 120000;
+  while (!fs.existsSync(`${gateDir}/release`) && Date.now() < deadline) sleepSync(20);
+}
+
 const sessionArg = process.argv.indexOf('--session');
 const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
 // Tests that check how TaskBridge launches Pi (extensions, media policy env) read
@@ -285,6 +296,12 @@ async function runFault(fault, command, respond) {
           { type: 'image', data: 'A'.repeat(9 * 1024 * 1024), mimeType: 'image/png' }
         ] });
       }
+    }
+    // Заранее взведённая заслонка для следующего запуска Pi (STAB-02A): 413 уже
+    // отправлен, значит следующий spawn — это продолжение из очереди.
+    if (process.env.FAKE_PI_GATE_ARM_ON_413) {
+      const gateDir = process.env.FAKE_PI_GATE_DIR;
+      if (gateDir) fs.writeFileSync(`${gateDir}/hold`, '1');
     }
     const notice = `openai/gpt-5.5 retrying after error in 0m 05s. Error: ${error}`;
     // Какие инструменты успели выполниться до отказа провайдера: от этого зависит,
