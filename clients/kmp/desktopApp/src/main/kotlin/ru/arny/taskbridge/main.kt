@@ -19,7 +19,6 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
-import androidx.compose.ui.window.Notification
 import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
@@ -32,6 +31,7 @@ import ru.arny.taskbridge.core.client.sessions.SessionAlert
 import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.ui.Navigator
+import ru.arny.taskbridge.ui.notice.noticesAfter
 import ru.arny.taskbridge.ui.theme.AppIcons
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
@@ -63,26 +63,30 @@ fun main() {
         LaunchedEffect(shows) { if (shows > 0) visible = true }
 
         // Alerts may come from background client coroutines. Hop through the Compose coroutine
-        // before touching TrayState/AWT; otherwise desktop notifications can crash the app.
+        // before touching window state; a card outlives the alert that produced it.
         DisposableEffect(alerts) {
             platform.notifier = { alert: SessionAlert -> alerts.trySend(alert) }
             onDispose { platform.notifier = null }
         }
+        var notices by remember { mutableStateOf<List<SessionAlert>>(emptyList()) }
         LaunchedEffect(alerts) {
             for (alert in alerts) {
-                runCatching {
-                    trayState.sendNotification(
-                        Notification(
-                            alertTitle(alert),
-                            alert.text,
-                            if (alert.kind == SessionAlert.Kind.WAITING_USER) Notification.Type.Warning else Notification.Type.Info,
-                        ),
-                    )
-                }
-                // The screen is never taken away: an alert only pulses the session row in the
-                // list, so reading another chat or typing is never interrupted.
+                // Карточку видно, но экран не отбирается: чат откроется по клику.
+                notices = noticesAfter(notices, alert)
             }
         }
+        SessionNoticeWindow(
+            notices = notices,
+            theme = graph.theme,
+            onOpen = { taskId ->
+                notices = notices.filterNot { it.taskId == taskId }
+                navigator?.openChat(taskId)
+                // Свёрнутое или убранное в трей окно поднимается тем же путём, что и по второму запуску.
+                visible = true
+                showRequests.value += 1
+            },
+            onDismiss = { taskId -> notices = notices.filterNot { it.taskId == taskId } },
+        )
 
         val installDir = DesktopUpdater.installDir()
         var stagedUpdate by remember { mutableStateOf(installDir?.let { DesktopUpdater.stagedUpdate(it) }) }
