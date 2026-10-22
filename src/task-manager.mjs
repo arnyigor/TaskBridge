@@ -6423,7 +6423,21 @@ export class TaskManager extends EventEmitter {
     // 50.4 MB → 413). A session that crossed that line could never start again
     // — Pi retried the permanent 413 until it looked hung. Pi loads this file
     // right after this guard, so trimming here is what makes the start work.
-    await this.#preflight(task, sessionFile);
+    const preflight = await this.#preflight(task, sessionFile);
+    // A transcript that does not parse is not something Pi can be started on:
+    // Pi dies on the torn line while loading, and the operator saw «Pi RPC session
+    // is not writable» instead of «файл сессии повреждён» (reproduced 3/3 on
+    // 2026-10-22). Refuse here, before anything is spawned, and say why.
+    if (preflight?.status === 'invalid') {
+      const error = Object.assign(new Error(preflight.message), {
+        code: 'SESSION_INVALID',
+        line: preflight.line ?? null,
+      });
+      // The failed continuation is visible on the session itself, not just in the
+      // HTTP answer; an already-recorded damage is not republished on every retry.
+      if (task.errorCode !== 'SESSION_INVALID') await this.#fail(task, error);
+      throw error;
+    }
   }
 
   // Session preflight (src/application/session-recovery.mjs): a Pi session over

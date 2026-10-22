@@ -133,3 +133,22 @@ test('текстовая сессия больше лимита: ни запис
     assert.deepEqual((await fs.readdir(dir)).filter(name => name !== 's.jsonl'), [], `попытка ${attempt}: мусора нет`);
   }
 });
+
+// Тот же обрыв, но файл меньше лимита: раньше восстановление ничего не делало с
+// таким файлом (экономия разбора), и обрыв доходил до Pi. Проверка размера не
+// должна быть проверкой целостности.
+test('повреждённая сессия меньше лимита: разбор всё равно происходит', async t => {
+  const dir = await workdir(t);
+  const file = path.join(dir, 's.jsonl');
+  const artifactDir = path.join(dir, 'media');
+  const session = `${[sessionHeader, userText('короткий разговор'), imageLine('img', 200, 'A')].join('\n')}\n{"type":"message","id":"cut"`;
+  await fs.writeFile(file, session);
+  const limitBytes = DEFAULT_SESSION_MAX_MB * 1024 * 1024;
+  assert.ok(Buffer.byteLength(session) < limitBytes, 'фикстура меньше лимита');
+
+  const result = await preflightSession(file, { limitBytes, keepImages: 0, artifactDir });
+  assert.equal(result.status, 'invalid', 'PASS требует разбора, а не только размера');
+  assert.equal(result.line, 4);
+  assert.equal(await fs.readFile(file, 'utf8'), session, 'файл не тронут');
+  assert.deepEqual(await fs.readdir(dir).then(list => list.filter(name => name !== 's.jsonl')), [], 'ни архива, ни .bak');
+});

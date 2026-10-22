@@ -210,7 +210,6 @@ export async function shrinkSessionFile(file, {
   if (!file) return { changed: false, reason: 'no-file' };
   const stat = await fs.stat(file).catch(() => null);
   if (!stat) return { changed: false, reason: 'missing' };
-  if (stat.size <= limitBytes) return { changed: false, reason: 'under-limit', beforeBytes: stat.size };
 
   const text = await fs.readFile(file, 'utf8');
   const plan = planShrink(text, { keepImages });
@@ -218,6 +217,11 @@ export async function shrinkSessionFile(file, {
     // A corrupt transcript is not something to rewrite on a guess.
     return { changed: false, reason: 'invalid', line: plan.unparsedLine, beforeBytes: stat.size };
   }
+  // Разбор идёт и для файла в пределах бюджета (2026-10-22): по этому разбору
+  // решается, можно ли вообще пускать Pi на эту историю. Скрытый здесь обрыв
+  // строки иначе дошёл бы до Pi, который падает на нём при загрузке, и оператор
+  // видел бы «сессия не пишется» вместо «файл сессии повреждён».
+  if (stat.size <= limitBytes) return { changed: false, reason: 'under-limit', beforeBytes: stat.size };
   if (!plan.drop.length) {
     return { changed: false, reason: 'no-images', beforeBytes: stat.size, images: plan.images.length };
   }

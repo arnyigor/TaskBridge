@@ -46,34 +46,78 @@ const events = async (api, id) => {
   return Array.isArray(list) ? list : list.events || [];
 };
 
-test('оборванная история: сессия не переписана, оператор видит повреждение', { timeout: 120000 }, async t => {
+test('оборванная история: сессия не переписана, отправка отклонена 409 SESSION_INVALID', { timeout: 120000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api } = fixture;
   const content = `${[sessionHeader, userLine('x'.repeat(LIMIT + 4096))].join('\n')}\n{"type":"message","id":"cut","message":{"role":"assis`;
   const { id, file } = await prepareSession(api, fixture, { content });
+  const runsBefore = (await api(`/api/tasks/${id}/runs`)).runs;
 
-  // Pi разбирает JSONL сразу при старте и падает на оборванной строке — отправка
-  // сообщения поэтому отклоняется: канал Pi уже закрыт. Проверяем те инварианты,
-  // которые от этой гонки не зависят: файл не переписан, повреждение названо
-  // один раз, восстановления не было.
-  const sent = await api(`/api/tasks/${id}/message`, { text: 'продолжим' }).then(() => ({ ok: true }), error => ({ ok: false, error }));
-  const finished = await settle(api, id);
+  // Pi на повреждённом файле больше не запускается: попытка отклонена с причиной.
+  const mediaDir = path.join(fixture.root, 'data', 'media');
+  const mediaBefore = await fs.readdir(mediaDir).catch(() => []);
+  const refusal = await api(`/api/tasks/${id}/message`, { text: 'продолжим' }).then(() => null, error => error);
+  assert.ok(refusal, 'отправка должна быть отклонена');
+  assert.equal(refusal.status, 409, 'HTTP 409, а не 500');
+  assert.equal(refusal.code, 'SESSION_INVALID');
+  assert.match(refusal.message, /повреждён/i, 'причина названа человеческим текстом');
+  assert.match(refusal.message, /строка 3/, 'названа именно оборванная строка');
+  assert.deepEqual(await fs.readdir(mediaDir).catch(() => []), mediaBefore, 'архив не тронут');
 
   const list = await events(api, id);
   const invalid = list.filter(event => event.type === 'SESSION_INVALID');
   assert.equal(invalid.length, 1, 'повреждение названо, а не спрятано');
-  assert.match(invalid[0].message, /повреждён/i);
-  assert.match(invalid[0].message, /строка 3/, 'названа именно оборванная строка');
   assert.equal(list.filter(event => event.type === 'SESSION_SHRUNK').length, 0, 'восстановления не было');
+  assert.equal(list.filter(event => event.type === 'SESSION_RESTORED').length, 0, 'Pi не запускался на повреждённом файле');
+  assert.equal(list.filter(event => event.type === 'USER_MESSAGE').length, 0, 'фантомного USER_MESSAGE нет');
+  assert.equal(list.filter(event => event.type === 'PROMPT_QUEUED').length, 0, 'автоматического повтора нет');
   assert.equal(await fs.readFile(file, 'utf8'), content, 'файл байт в байт прежний');
-  // Наблюдаемое поведение (описано в отчёте, не закрепляется как желаемое):
-  // отправка возвращает 500 «Pi RPC session is not writable», и по этой ошибке
-  // причину не видно — она есть только в ленте событий.
-  if (!sent.ok) {
-    assert.match(sent.error.message, /not writable/i);
-    assert.ok(finished.error || finished.errorCode || finished.status, 'снимок сессии доступен');
-  }
+
+  // Неудачная попытка видна в состоянии сессии, прежние Runs и история целы.
+  const task = await api(`/api/tasks/${id}`);
+  assert.equal(task.status, 'FAILED');
+  assert.equal(task.errorCode, 'SESSION_INVALID');
+  assert.match(task.error || '', /повреждён/i);
+  const runsAfter = (await api(`/api/tasks/${id}/runs`)).runs;
+  assert.deepEqual(runsAfter.map(run => [run.id, run.status]), runsBefore.map(run => [run.id, run.status]), 'прошлые прогоны не пере писаны');
+  assert.ok(runsBefore.some(run => run.status === 'SUCCEEDED'), 'история прогонов не пуста');
+
+  // Повторная попытка — тот же отказ, без нового TASK_FAILED и без роста ленты.
+  const again = await api(`/api/tasks/${id}/message`, { text: 'ещё раз' }).then(() => null, error => error);
+  assert.ok(again, 'и вторая попытка отклонена');
+  const later = await events(api, id);
+  assert.equal(later.filter(event => event.type === 'SESSION_INVALID').length, 2, 'каждая попытка названа');
+  assert.equal(later.filter(event => event.type === 'USER_MESSAGE').length, 0);
+  assert.equal(await fs.readFile(file, 'utf8'), content);
+});
+
+// MEDIA-07, маленький файл: под лимитом восстановление ничего не делает, но пускать
+// на него Pi нельзя — обрыв строки не зависит от размера.
+test('повреждённая сессия меньше лимита тоже не пускает Pi', { timeout: 120000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const content = `${[sessionHeader, userLine('короткий разговор')].join('\n')}\n{"type":"message","id":"cut","message":{"role":"assis`;
+  assert.ok(Buffer.byteLength(content) < LIMIT, 'фикстура действительно меньше лимита');
+  const { id, file } = await prepareSession(api, fixture, { content });
+
+  const mediaDir = path.join(fixture.root, 'data', 'media');
+  const mediaBefore = await fs.readdir(mediaDir).catch(() => []);
+  const refusal = await api(`/api/tasks/${id}/message`, { text: 'продолжим' }).then(() => null, error => error);
+  assert.ok(refusal, 'маленький файл тоже защищён');
+  assert.equal(refusal.status, 409);
+  assert.equal(refusal.code, 'SESSION_INVALID');
+  assert.match(refusal.message, /повреждён/i);
+  assert.deepEqual(await fs.readdir(mediaDir).catch(() => []), mediaBefore, 'архив не тронут');
+  assert.match(refusal.message, /строка 3/);
+  const list = await events(api, id);
+  assert.equal(list.filter(event => event.type === 'SESSION_RESTORED').length, 0, 'Pi не запускался');
+  assert.equal(list.filter(event => event.type === 'SESSION_SHRUNK').length, 0, 'чинить было нечего');
+  assert.equal(await fs.readFile(file, 'utf8'), content, 'файл не тронут');
+  const task = await api(`/api/tasks/${id}`);
+  assert.equal(task.status, 'FAILED');
+  assert.equal(task.errorCode, 'SESSION_INVALID');
 });
 
 test('без возможности писать архив ложное «восстановлено» не появляется', { timeout: 120000 }, async t => {
