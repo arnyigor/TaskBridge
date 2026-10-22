@@ -249,3 +249,24 @@ test('09E: рестарт после удержанного восстановл
   assert.equal(count(after, 'PROMPT_QUEUED'), 0, 'в очередь ничего не встало');
   assert.equal(await fs.readFile(file, 'utf8'), fileBefore, 'история не тронута');
 });
+
+// 09D (вторая половина): инструмент мог изменить файл и НЕ прислать
+// `tool_execution_end` — отмена хода или падение Pi. Считается факт начала.
+test('09D2: начатый, но не завершённый инструмент тоже запрещает автоповтор', { timeout: 120000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const { id } = await prepareSession(api, fixture);
+
+  // Без ключевого слова фикстура шлёт только tool_execution_start (bash) — так
+  // выглядит ход, который умер посреди инструмента.
+  await api(`/api/tasks/${id}/message`, { text: 'fault-provider-incompatible body-limit structured' });
+  const failed = await settle(api, id);
+  assert.equal(failed.status, 'FAILED');
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal((await api(`/api/tasks/${id}`)).status, 'FAILED', 'продолжения не было');
+  const list = await events(api, id);
+  assert.equal(count(list, 'RECOVERY_WITHHELD'), 1, 'решение названо');
+  assert.equal(count(list, 'PROMPT_QUEUED'), 0);
+  assert.equal((await api(`/api/tasks/${id}`)).unknownResult, true);
+});

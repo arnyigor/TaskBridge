@@ -93,7 +93,7 @@ test('оборванная история: сессия не переписан�
   assert.equal(again.status, 409);
   assert.equal(again.code, 'SESSION_INVALID');
   assert.match(again.message, /повреждён/i);
-  assert.equal(later.filter(event => event.type === 'SESSION_INVALID').length, 1, 'одно предупреждение, без дублей');
+  assert.equal(later.filter(event => event.type === 'SESSION_INVALID').length, 2, 'каждая попытка названа, но не дважды');
   assert.equal(later.filter(event => event.type === 'USER_MESSAGE').length, 0);
   assert.equal(await fs.readFile(file, 'utf8'), content);
 });
