@@ -3157,6 +3157,19 @@ export class TaskManager extends EventEmitter {
         console.error(`[TaskBridge] media extension is missing: ${this.mediaExtensionPath}`);
       }
     }
+    // Follow Plan (FP-05A): the checkpoint tool the model reports through. Loaded
+    // only when the mode is enabled, so a session without plans does not carry a
+    // tool nobody uses.
+    if (this.config.followPlan?.enabled === true && this.followPlanExtensionPath) {
+      const available = await fs.access(this.followPlanExtensionPath).then(() => true, () => false);
+      if (available) {
+        args.push('-e', this.followPlanExtensionPath);
+        const logPath = path.join(this.dataRoot, 'follow-plan-checkpoints.ndjson');
+        env.TASKBRIDGE_PLAN_CHECKPOINT_LOG = logPath;
+      } else {
+        console.error(`[TaskBridge] follow-plan extension is missing: ${this.followPlanExtensionPath}`);
+      }
+    }
     const pi = new PiRpcSession({
       command: this.config.pi?.command || 'pi',
       args,
@@ -4262,6 +4275,12 @@ export class TaskManager extends EventEmitter {
     if (frame.type === 'tool_execution_start' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL) {
       task._planCheckpoint = frame.args && typeof frame.args === 'object' ? frame.args : null;
     }
+    // A checkpoint whose tool ended with an error was never delivered to the
+    // model as a result: Pi reports the failure, so the claim is not evidence and
+    // the turn counts as "settled without a checkpoint" (CP-02).
+    if (frame.type === 'tool_execution_end' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL && frame.isError === true) {
+      task._planCheckpoint = null;
+    }
     // Живой кадр = фаза PROGRESS. Публикуется один раз на ход (дальше только
     // обновление _lastProgressAt в снимке), чтобы не дублировать кадры в ленту.
     if (task._turnPhase !== 'PROGRESS') await this.#turnStateEvent(task, 'PROGRESS');
@@ -4882,6 +4901,8 @@ export class TaskManager extends EventEmitter {
     const runtime = this.runtimes.get(task.id);
     if (runtime?.cancelFinalizing) return runtime.cancelFinalizing;
     const pending = this.#writeCancelled(task, forTurn ?? task._turn);
+    // A cancelled turn is not a settle either: Follow Plan pauses for review.
+    this.#notifyPlanFailed(task, 'CANCELLED');
     if (runtime) runtime.cancelFinalizing = pending;
     return pending;
   }
@@ -6435,6 +6456,18 @@ export class TaskManager extends EventEmitter {
     });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
+    // A failed turn settles nothing: Follow Plan must pause for review instead of
+    // believing its step is still running (RC-03, a permanent 413).
+    this.#notifyPlanFailed(task, task.errorCode || 'FAILED');
+  }
+
+  // The cycle cannot continue after a turn that produced no result: the plan is
+  // paused for the operator, never re-sent.
+  #notifyPlanFailed(task, reason) {
+    const hooks = this.followPlanHooks;
+    if (!hooks || typeof hooks.turnFailed !== 'function') return;
+    Promise.resolve(hooks.turnFailed({ taskId: task.id, commandId: this.runtimes.get(task.id)?.commandId || null, reason }))
+      .catch(() => {});
   }
 
   async #event(task, type, message, data = {}, persistTask = true) {

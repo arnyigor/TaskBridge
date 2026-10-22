@@ -259,3 +259,34 @@ test('with the flag off the status stays readable and control is refused', async
   await assert.rejects(service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd' }), error => error.code === 'FOLLOW_PLAN_DISABLED');
   assert.equal(manager.dispatched.length, 0);
 });
+
+test('CP-06: evidence from an older run of the same session does not confirm this step', async t => {
+  const { service, store, workspace, planPath } = await setup(t);
+  // An earlier turn of THIS session: its run exists, but it ran before the step.
+  store.recordRun({ id: 'run-old', taskId: 't-1', sessionId: 't-1', kind: 'prompt', status: 'SUCCEEDED', startedAt: '2026-10-01T10:00:00.000Z' });
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cp06-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cp06-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+  // The turn being settled has its own run, newer than the cited one.
+  const managerRun = 'run-current';
+  store.recordRun({ id: managerRun, taskId: 't-1', sessionId: 't-1', kind: 'prompt', status: 'RUNNING', startedAt: '2026-10-22T10:00:00.000Z' });
+  service.manager.dispatched.length = 0;
+  // getTask() reports the open run, exactly as TaskManager does.
+  service.manager.getTask = id => (String(id) === 't-1' ? { id: 't-1', workspacePath: workspace, runId: managerRun } : null);
+
+  const result = await service.turnSettled({
+    taskId: 't-1', commandId,
+    checkpoint: {
+      planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE',
+      completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-old', summary: 'старый прогон' }]
+    }
+  });
+  assert.equal(result.code, 'PLAN_BLOCKED');
+  // The controller's own reason is reported with the checkpoint event; the
+  // verdict sees the stripped ref and refuses for lack of proof.
+  const checkpoint = service.manager.events.find(event => event.type === 'PLAN_STEP_CHECKPOINT');
+  assert.match(checkpoint.data.evidenceProblems.join('\n'), /старше текущего хода/);
+  assert.match(result.message, /без ссылки/);
+  const written = await readPlanFile(workspace, planPath);
+  assert.equal(written.steps[0].status, 'TODO');
+});

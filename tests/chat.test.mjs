@@ -301,6 +301,8 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, 
     './model-filter.mjs': await import('../web/model-filter.mjs'),
     './model-picker-view.mjs': await import('../web/model-picker-view.mjs'),
     './composer-drafts.mjs': await import('../web/composer-drafts.mjs'),
+    // Follow Plan (FP-05C): the card and the switch take their decisions here.
+    './follow-plan-view.mjs': await import('../web/follow-plan-view.mjs'),
     // app.js takes `marked` as a named import and DOMPurify as the default one.
     './vendor/marked.js': { marked: { setOptions() {}, parse: text => text } },
     './vendor/purify.mjs': { default: { sanitize: html => html } },

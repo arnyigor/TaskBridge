@@ -85,11 +85,11 @@ export class FollowPlanService {
       now: this.now,
       dispatch: async ({ taskId, commandId, message }) => {
         // The existing delivery path: command ledger, queue and STOP all apply.
-        // The run id is named in the instruction so evidence can reference the run
-        // that actually produced it instead of a made-up label.
-        const runId = this.manager.getTask(taskId)?.runId || null;
-        const text = runId ? `${message} Идентификатор текущего прогона для evidence.ref: ${runId}.` : message;
-        const result = await this.manager.message(taskId, text, 'auto', [], null, { commandId, clientId: CONTROL_CLIENT });
+        // The run id is deliberately NOT named in the instruction: the run of this
+        // turn starts after the prompt is delivered, so any id known here belongs
+        // to the previous turn — and evidence must come from the turn that ran the
+        // step (see #checkEvidence).
+        const result = await this.manager.message(taskId, message, 'auto', [], null, { commandId, clientId: CONTROL_CLIENT });
         return { id: commandId, queued: Boolean(result?.pendingPrompts?.length) };
       },
       cancel: async ({ taskId, commandId }) => this.manager.cancel(taskId, { commandId: `${commandId}:stop`, hard: true })
@@ -330,6 +330,26 @@ export class FollowPlanService {
   }
 
   /**
+   * The turn failed or was cancelled without a settle: nothing about the step is
+   * known, so the plan pauses for the operator. Re-sending it would repeat a
+   * possible side effect.
+   */
+  async turnFailed({ taskId, commandId = null, reason = 'FAILED' }) {
+    const binding = this.store.getPlanBinding(String(taskId));
+    if (!binding?.path) return { code: 'IGNORED', reason: 'plan not attached' };
+    if (!['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) return { code: 'IGNORED', reason: `state ${binding.state}` };
+    this.store.savePlanBinding({
+      ...binding,
+      state: 'PAUSED_REVIEW',
+      dispatchCommandId: null,
+      dispatchStepId: null,
+      updatedAt: new Date(this.now()).toISOString()
+    });
+    await this.#publish(taskId, 'PLAN_PAUSED', `Ход не завершился (${reason}): нужен разбор`, { reason, commandId });
+    return { code: 'PAUSED_REVIEW', reason };
+  }
+
+  /**
    * Evidence refs that name a run must exist and belong to THIS session. A wrong
    * ref is stripped, so the checkpoint is refused for lack of proof instead of
    * being believed.
@@ -337,6 +357,10 @@ export class FollowPlanService {
   #checkEvidence({ taskId, checkpoint }) {
     if (!checkpoint || !Array.isArray(checkpoint.evidence)) return { checkpoint, problems: [] };
     const problems = [];
+    // The turn being settled is the only one that could have produced this
+    // evidence: a run from an earlier turn of the same session proves nothing
+    // about the step that just ran (CP-06).
+    const currentRun = this.store.getRun(String(this.manager.getTask(taskId)?.runId || ''));
     const evidence = checkpoint.evidence.map(item => {
       const ref = String(item?.ref || '').trim();
       if (!ref) return item;
@@ -345,6 +369,10 @@ export class FollowPlanService {
         if (!run) { problems.push(`шаг ${item?.stepId}: run ${ref} не найден`); return { ...item, ref: '' }; }
         if (String(run.taskId) !== String(taskId)) {
           problems.push(`шаг ${item?.stepId}: run ${ref} принадлежит другой сессии`);
+          return { ...item, ref: '' };
+        }
+        if (currentRun && ref !== currentRun.id && String(run.startedAt || '') < String(currentRun.startedAt || '')) {
+          problems.push(`шаг ${item?.stepId}: run ${ref} старше текущего хода — он не подтверждает этот шаг`);
           return { ...item, ref: '' };
         }
       }

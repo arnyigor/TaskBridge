@@ -111,12 +111,16 @@ function followPlanCheckpoint(message) {
   try { text = fs.readFileSync(file[1], 'utf8'); } catch { return null; }
   const statuses = [...text.matchAll(/^###\s+(S-\d+)\s*\|\s*([A-Z_]+)/gm)].map(match => ({ id: match[1], status: match[2] }));
   if (!statuses.some(step => step.id === stepId[1])) return null;
-  const heading = text.split('\n').some(line => line.startsWith(`### ${stepId[1]}`) && line.includes('slow'));
-  if (heading) planSlow = true;
+  // Один разбор заголовка текущего шага: он же решает про медленный ход,
+  // повторный settle и отсутствие checkpoint.
+  const headingLine = text.split('\n').find(line => line.startsWith(`### ${stepId[1]}`)) || '';
+  if (headingLine.includes('slow')) planSlow = true;
+  if (headingLine.includes('double-settle')) planDoubleSettle = true;
   const left = statuses.filter(step => step.id !== stepId[1] && step.status !== 'DONE' && step.status !== 'SKIPPED');
   // `finding-P1` в заголовке шага: этот ход «находит» связанный дефект — так
   // проверяется автоправка плана (FP-04/FP-05D) на уровне HTTP.
   const finding = /finding-(P\d)/.exec(text.split('\n').find(line => line.startsWith(`### ${stepId[1]}`)) || '');
+  if (headingLine.includes('no-checkpoint')) return null;
   const findings = finding
     ? [{ id: 'F-900', priority: finding[1], blocking: finding[1] === 'P0' || finding[1] === 'P1', summary: 'дефект, найденный в шаге' }]
     : [];
@@ -124,6 +128,8 @@ function followPlanCheckpoint(message) {
     ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]
     : [{ stepId: stepId[1], kind: 'file', ref: file[1], summary: 'fixture: шаг выполнен' }];
   return {
+    // The runner turns this into a failed tool end and drops the field.
+    ...(headingLine.includes('checkpoint-error') ? { __failed: true } : {}),
     planId: planId[1],
     revision: Number(revision[1]),
     cycleId: cycleId[1],
@@ -699,13 +705,16 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       const checkpoint = followPlanCheckpoint(command.message);
       if (checkpoint) {
         send({ type: 'tool_execution_start', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', args: checkpoint });
-        send({ type: 'tool_execution_end', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', isError: false, result: { content: [{ type: 'text', text: 'Checkpoint received' }] } });
-      }
-      if (planDoubleSettle) {
-        setTimeout(() => {
-          send({ type: 'agent_settled' });
-          send({ type: 'agent_settled' });
-        }, 400);
+        // `checkpoint-error`: the tool itself fails, so the claim was never
+        // delivered as a result and must not move the cycle (CP-02).
+        // `no-checkpoint`: the turn simply has none (CP-07).
+        const failed = checkpoint.__failed === true;
+        delete checkpoint.__failed;
+        send({
+          type: 'tool_execution_end', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint',
+          isError: failed,
+          ...(failed ? { errorMessage: 'fixture: checkpoint tool failed' } : { result: { content: [{ type: 'text', text: 'Checkpoint received' }] } })
+        });
       }
     }
     // A provider that answers with a JSON error envelope (as Pi forwards it
@@ -714,6 +723,16 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       ? '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}'
       : 'Fixture model error';
     const thinkingText = command.message.includes('think') ? 'Сначала взвешу варианты, потом отвечу.' : null;
-    pending = setTimeout(() => finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError, thinkingText), command.message.includes('slow') || planSlow ? 10000 : 80);
+    pending = setTimeout(() => {
+      finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError, thinkingText);
+      // Duplicates of the settled frame arrive AFTER the turn ended — the shape a
+      // reconnect or a duplicated delivery produces, never a mid-turn event.
+      if (planDoubleSettle) {
+        setTimeout(() => {
+          send({ type: 'agent_settled' });
+          send({ type: 'agent_settled' });
+        }, 100);
+      }
+    }, command.message.includes('slow') || planSlow ? 10000 : 80);
   }
 });

@@ -140,12 +140,18 @@ manager.turnInstructionsExtensionPath = path.join(rootDir, 'pi-extension', 'task
 // Media policy: keeps base64 screenshots out of the request without touching the
 // saved transcript (pi-extension/taskbridge-media.js).
 manager.mediaExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-media.js');
+// Follow Plan checkpoint tool (FP-05A): only loaded when followPlan.enabled.
+manager.followPlanExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-follow-plan.js');
 await manager.init();
 // Follow Plan (PLAN-FOLLOW-01, FP-05A): a controller over the dispatch that
 // already exists. The flag stays off until the FP-06 acceptance; with it off the
 // control routes refuse and nothing generates on its own.
 const followPlan = new FollowPlanService({ manager, store, config });
-manager.setFollowPlanHooks({ turnSettled: input => followPlan.turnSettled(input) });
+manager.setFollowPlanHooks({
+  turnSettled: input => followPlan.turnSettled(input),
+  // A failed turn (403/413/… or a cancelled one) settles nothing: the plan pauses.
+  turnFailed: input => followPlan.turnFailed(input)
+});
 if (followPlan.enabled) {
   // Nothing is re-sent after a restart: a dispatched-but-unsettled cycle pauses.
   followPlan.recoverAll().catch(error => console.error(`[TaskBridge] Follow Plan recovery failed: ${error.message}`));
