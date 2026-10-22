@@ -674,7 +674,8 @@ private fun FolderHeader(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(10.dp))
                 .combinedClickable(onClick = onToggle, onLongClick = { menu = true })
-                .padding(start = 8.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+                // end = 12.dp и кнопка 32.dp — тот же правый край, что у строк сессий ниже.
+                .padding(start = 8.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Icon(if (open) AppIcons.ChevronDown else AppIcons.ChevronRight, if (open) "Свернуть" else "Развернуть", Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -692,9 +693,11 @@ private fun FolderHeader(
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                // Заголовок забирает всё свободное место: с fill = false остаток веса
+                // оставался пустым у правого края, и счётчики с меню вставали вразнобой —
+                // тем левее, чем короче имя папки.
+                modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
             if (working > 0) FolderCount(working, colors.working)
             if (waiting > 0) FolderCount(waiting, colors.waiting)
             Text("${group.sessions.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 8.dp))
@@ -702,7 +705,7 @@ private fun FolderHeader(
                 Text(formatBytes(totalBytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = 6.dp))
             }
             Box {
-                IconButton(onClick = { menu = true }, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = { menu = true }, modifier = Modifier.size(32.dp)) {
                     Icon(AppIcons.More, "Действия с папкой", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
