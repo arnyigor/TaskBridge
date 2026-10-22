@@ -5814,6 +5814,16 @@ export class TaskManager extends EventEmitter {
     }
   }
 
+  // Отменён ли ход за время длинного await в доставке (STAB-02A). Сравнивается
+  // счётчик отмен: он растёт в #cancel ещё до возврата по терминальному статусу,
+  // а флаги runtime здесь не годятся — их сбрасывает сама доставка.
+  #cancelledDuring(task, epochAtStart) {
+    // Только счётчик: статус CANCELLED сам по себе — законное состояние перед
+    // новым сообщением оператора (отмена не блокирует сессию), а вот рост счётчика
+    // означает отмену именно этого хода.
+    return (task._cancelEpoch || 0) !== epochAtStart;
+  }
+
   async #deliverMessage(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
     const deliveryStartedAt = Date.now();
     const task = this.tasks.get(id);
@@ -5916,9 +5926,16 @@ export class TaskManager extends EventEmitter {
     // предупреждение уже сказано именно в этой попытке (MEDIA-09F), а новое
     // сообщение оператора начинает новую.
     task._attemptId = crypto.randomUUID();
+    // Отметка отмены на момент начала доставки: STOP во время любого await ниже
+    // делает отправку бессмысленной (STAB-02A).
+    const epochAtStart = task._cancelEpoch || 0;
     if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
     const runtime = await this.#ensureSession(task);
+    // STOP мог прийти, пока поднималась сессия (в том числе на старте снятого
+    // с очереди продолжения): отменённый текст больше не отправляем (STAB-02A).
+    if (this.#cancelledDuring(task, epochAtStart)) return this.#publicTask(task);
     const state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
+    if (this.#cancelledDuring(task, epochAtStart)) return this.#publicTask(task);
     // Fresh state, taken right before delivering: this decides steer vs prompt.
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });

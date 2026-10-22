@@ -11,9 +11,9 @@ const CACHE_MS = 5000;
 const TIMEOUT_MS = 8000;
 let cached = null;
 
-function run(file, args) {
+function run(file, args, timeoutMs = TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    execFile(file, args, { windowsHide: true, timeout: TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
+    execFile(file, args, { windowsHide: true, timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (error, stdout) => {
       if (error) reject(error); else resolve(stdout);
     });
   });
@@ -28,13 +28,13 @@ export function parseWmiDate(value) {
   return utc - (sign === '+' ? 1 : -1) * Number(offset) * 60000;
 }
 
-async function query() {
+async function query(timeoutMs = TIMEOUT_MS) {
   if (process.platform === 'win32') {
     // Six tab-separated fields: pid, parent pid, created, name, working-set bytes, command line.
     // The command line is the last field on purpose — it may contain tabs,
     // and the parser re-joins the remainder.
     const script = 'Get-CimInstance Win32_Process | ForEach-Object { "{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f $_.ProcessId, $_.ParentProcessId, $_.CreationDate.ToString("yyyyMMddHHmmss.fff000zzz").Replace(":", ""), $_.Name, $_.WorkingSetSize, $_.CommandLine }';
-    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+    const out = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], timeoutMs);
     return out.split(/\r?\n/).filter(Boolean).map(line => {
       const [pid, parentPid, created, name, workingSet, ...rest] = line.split('\t');
       const bytes = Number(workingSet);
@@ -49,7 +49,7 @@ async function query() {
       };
     }).filter(item => Number.isInteger(item.pid));
   }
-  const out = await run('ps', ['-eo', 'pid=,ppid=,lstart=,args=']);
+  const out = await run('ps', ['-eo', 'pid=,ppid=,lstart=,args='], timeoutMs);
   return out.split('\n').filter(Boolean).map(line => {
     const match = /^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4})\s+(.*)$/.exec(line);
     if (!match) return null;
@@ -69,9 +69,9 @@ function parsePsOffsetDate(value) {
 }
 
 /** [{pid, startedAt (ms epoch or null), name, memoryBytes, commandLine}], or null when the OS would not say. */
-export async function listProcesses({ fresh = false } = {}) {
+export async function listProcesses({ fresh = false, timeoutMs = TIMEOUT_MS } = {}) {
   if (!fresh && cached && Date.now() - cached.at < CACHE_MS) return cached.list;
-  const list = await query().catch(() => null);
+  const list = await query(timeoutMs).catch(() => null);
   cached = { at: Date.now(), list };
   return list;
 }
