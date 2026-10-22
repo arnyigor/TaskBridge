@@ -139,7 +139,12 @@ function startTurn(message) {
   send({ type: 'message_start', message: user });
   send({ type: 'message_end', message: user });
   send({ type: 'message_start', message: { role: 'assistant', content: [] } });
-  send({ type: 'tool_execution_start', toolCallId: `call-${turn}`, toolName: 'bash', args: { command: 'pytest' } });
+  // `no-tools`: ход без единого инструмента; `read-only`: только чтение картинки —
+  // оба случая проверяют автоповтор после 413 там, где повторять нечего (MEDIA-09A).
+  const messageText = String(message || '');
+  const withTools = !messageText.includes('no-tools');
+  const readOnly = messageText.includes('read-only');
+  if (withTools) send({ type: 'tool_execution_start', toolCallId: `call-${turn}`, toolName: readOnly ? 'read' : 'bash', args: readOnly ? { path: 'shot.png' } : { command: 'pytest' } });
 }
 async function runFault(fault, command, respond) {
   respond();
@@ -282,7 +287,16 @@ async function runFault(fault, command, respond) {
       }
     }
     const notice = `openai/gpt-5.5 retrying after error in 0m 05s. Error: ${error}`;
-    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: false });
+    // Какие инструменты успели выполниться до отказа провайдера: от этого зависит,
+    // безопасен ли автоматический повтор (MEDIA-09D). `no-tools` — ход без
+    // инструментов вообще; `tools-ran` — уже выполненная запись файла; по умолчанию
+    // bash без результата (в свидетельства не попадает).
+    const asked = String(command.message);
+    if (!asked.includes('no-tools')) {
+      const toolName = asked.includes('tools-ran') ? 'write' : asked.includes('read-only') ? 'read' : 'bash';
+      send({ type: 'tool_execution_start', toolCallId: `call-${turn}`, toolName, args: { path: 'src/example.mjs' } });
+      send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName, isError: false, result: { content: [{ type: 'text', text: 'Файл записан' }] } });
+    }
     if (String(command.message).includes('structured')) {
       send({ type: 'extension_ui_request', method: 'setStatus', statusKey: 'test.pi-limits-wait.json', statusText: JSON.stringify({ event: 'wait', error, model: { provider: 'openai', id: 'gpt-5.5' }, remainingMs: 5000, plannedDeadline: Date.now() + 5000 }) });
     } else send({ type: 'extension_ui_request', method: 'notify', notifyType: 'info', message: notice });
@@ -508,6 +522,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (command.message.includes('reject')) return respond({}, false);
     const fault = faultOf(command.message);
     if (fault) return runFault(fault, command, respond);
+    // FAKE_PI_ALWAYS_413: каждый ход получает тот же 413 по размеру — так проверяется,
+    // что второй отказ после восстановления останавливает цикл (MEDIA-09B).
+    // Флаг можно включить файлом уже после первого хода: env сервера меняется только
+    // перезапуском, а сценарию 09B нужен успешный первый ход и 413 на всех следующих.
+    const flagFile = process.env.FAKE_PI_413_FLAG;
+    const always413 = process.env.FAKE_PI_ALWAYS_413 || (flagFile && fs.existsSync(flagFile));
+    if (always413) return runFault('provider-incompatible', { ...command, message: `${command.message} body-limit no-tools` }, respond);
     // A model error BEFORE any output: the «Повторить сообщение» case. No text
     // deltas and no tool call, so the turn is genuinely empty.
     if (command.message.includes('model-error-empty')) {

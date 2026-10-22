@@ -219,7 +219,9 @@ test('a 413 mid-turn repairs the session and re-runs the turn once', { timeout: 
 
   // The fake grows the transcript by three screenshots (like a real Blender turn)
   // and then answers 413 — exactly the sequence that used to hang forever.
-  const prompt = 'fault-provider-incompatible body-limit structured';
+  // `read-only`: в раздувшемся ходе выполнялось только чтение скриншотов, поэтому
+  // автоматическое продолжение безопасно (кейс с записью/ shell — MEDIA-09D).
+  const prompt = 'fault-provider-incompatible body-limit read-only structured';
   await api(`/api/tasks/${id}/message`, { text: prompt });
   const failed = await settle(api, id);
   assert.equal(failed.status, 'FAILED');

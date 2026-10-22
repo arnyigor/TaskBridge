@@ -87,7 +87,13 @@ test('оборванная история: сессия не переписан�
   const again = await api(`/api/tasks/${id}/message`, { text: 'ещё раз' }).then(() => null, error => error);
   assert.ok(again, 'и вторая попытка отклонена');
   const later = await events(api, id);
-  assert.equal(later.filter(event => event.type === 'SESSION_INVALID').length, 2, 'каждая попытка названа');
+  // Повторный отказ приходит ответом 409 с тем же текстом, но лента не дублирует
+  // одно и то же предупреждение (MEDIA-09F): вторая строка «файл повреждён» ничего
+  // не добавляет.
+  assert.equal(again.status, 409);
+  assert.equal(again.code, 'SESSION_INVALID');
+  assert.match(again.message, /повреждён/i);
+  assert.equal(later.filter(event => event.type === 'SESSION_INVALID').length, 1, 'одно предупреждение, без дублей');
   assert.equal(later.filter(event => event.type === 'USER_MESSAGE').length, 0);
   assert.equal(await fs.readFile(file, 'utf8'), content);
 });

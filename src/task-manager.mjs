@@ -77,6 +77,12 @@ const WORK_ITEM_RELATIONS = Object.freeze(['implementation', 'investigation', 'r
 // входят: они ещё идут, а не оборвались.
 const INTERRUPTED_STATUSES = Object.freeze(['FAILED', 'CANCELLED']);
 
+// Инструменты, которые только читают. После 413 такой ход можно продолжить сами:
+// отказ провайдера ничего не отменил и повторять нечего. Всё остальное (bash,
+// write, edit, инструменты MCP) считается способным изменить мир — такой ход
+// автоматически не продолжаем, решает оператор (MEDIA-09D).
+const READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'taskbridge_media_open']);
+
 // Сколько проверка рецепта может висеть в `RUNNING`, прежде чем сверка закроет запуск
 // как «итог неизвестен». Проверка запускается после `SUCCEEDED` и не переживает
 // перезапуск сервера: без срока такой запуск остался бы `RUNNING` навсегда.
@@ -2665,7 +2671,7 @@ export class TaskManager extends EventEmitter {
     // on the preceding snapshot until the terminal event has been persisted.
     const pendingTerminal = this.#terminalPublication.snapshot(task);
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
-    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _nativeLease, _uploadToken,
+    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
@@ -2984,6 +2990,8 @@ export class TaskManager extends EventEmitter {
         // a restart between here and the turn's end finishes the command instead
         // of reporting a failure. Cleared when the turn reaches a terminal state.
         task.inFlightPrompt = { text: this.#buildPrompt(task), initial: true, at: now() };
+        // Счётчик инструментов этого хода — с момента отправки текста (9D).
+        task._turnTools = 0;
         await this.store.save(this.#publicTask(task)).catch(() => {});
         const dispatchedAt = Date.now();
         let ackError = null;
@@ -4243,7 +4251,13 @@ export class TaskManager extends EventEmitter {
     if (task.providerWait && (frame.type === 'message_start' || frame.type === 'message_update' || frame.type === 'agent_settled')) {
       await this.#clearProviderWait(task, frame.type);
     }
-    if (frame.type === 'tool_execution_start') task._toolsRunning = (task._toolsRunning || 0) + 1;
+    if (frame.type === 'tool_execution_start') {
+      task._toolsRunning = (task._toolsRunning || 0) + 1;
+      // Считаются только инструменты, способные что-то изменить: чтение скриншота
+      // (типичный случай раздутой истории) ничего не меняет, и повтор после 413
+      // для такого хода безопасен (MEDIA-09D).
+      if (!READ_ONLY_TOOLS.has(String(frame.toolName || ''))) task._turnTools = (task._turnTools || 0) + 1;
+    }
     if (frame.type === 'tool_execution_end') {
       task._toolsRunning = Math.max(0, (task._toolsRunning || 0) - 1);
       // The next model call starts after the tool result becomes available.
@@ -4488,6 +4502,9 @@ export class TaskManager extends EventEmitter {
     if (runtime) runtime.turn = turn;
     task._turn = turn;
     task._turnEvidence = [];
+    // Инструменты, выполненные в этом ходу: решение о безопасном автоповторе
+    // после 413 принимается только по счётчику текущего хода (MEDIA-09D).
+    task._turnTools = 0;
     // Шаг C-A: фаза хода начинается с диспетчеризации. Поле сбрасывается, а не
     // ставится в DISPATCHING: публикацию делает #turnStateEvent в точке отправки
     // (иначе дедупликация съела бы первое событие хода).
@@ -5947,6 +5964,9 @@ export class TaskManager extends EventEmitter {
     // before the RPC: a restart between the RPC and the acknowledgement must
     // not lose the command either.
     task.inFlightPrompt = { text: message, at: now() };
+    // Ход начинается с этой отправки (в том числе когда Pi уже стримит steer):
+    // счётчик инструментов прежнего хода не должен решать за этот (MEDIA-09D).
+    task._turnTools = 0;
     // A fresh operator message re-arms the automatic 413 recovery; the internal
     // continuation of that recovery (announce:false) must not.
     if (announce) task.mediaRecovery = false;
@@ -6250,14 +6270,17 @@ export class TaskManager extends EventEmitter {
     await this.#event(task, 'PROMPT_QUEUED', 'Сообщение осталось в очереди: Pi завершился до его обработки.', { pendingId }, false);
   }
 
-  async #fail(task, error, turn = task._turn ?? null) {
+  async #fail(task, error, turn = task._turn ?? null, { requeuePrompt = true } = {}) {
     if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
     // A message Pi accepted into its own queue (a steer) but died before
     // consuming is otherwise lost silently: the chat kept showing «ожидание
     // события агента» while nothing would ever deliver it (observed 2026-09-30,
     // deepseek-flash, code=4294967295 four hundred ms after the steer).
-    await this.#requeueUnconsumedPrompt(task);
+    // requeuePrompt: false — для отказа по размеру: сообщение ещё может попасть в
+    // историю, но повторять его после 413 бессмысленно, а очередь возврата делала
+    // из этого бесконечный цикл (MEDIA-09B).
+    if (requeuePrompt) await this.#requeueUnconsumedPrompt(task);
     // The turn reached a terminal state: the in-flight command is spent.
     if (task.inFlightPrompt) task.inFlightPrompt = null;
     const classified = classifyEngineError(error) || classifyEngineError(task._modelError);
@@ -6455,6 +6478,14 @@ export class TaskManager extends EventEmitter {
       artifactDir: path.join(this.dataRoot, 'media')
     }).catch(error => ({ status: 'error', message: `Проверка сессии не удалась: ${error.message}` }));
     if (!result) return null;
+    // Одно и то же предупреждение — один раз за попытку: preflight зовётся и на
+    // старте сессии, и на самом 413, из-за чего оператор видел две одинаковые строки
+    // «уменьшать нечего» подряд (MEDIA-09F).
+    const note = `${result.status}|${result.message || ''}`;
+    // Ключ — статус, а не текст: в тексте есть размер файла, и он меняется между
+    // вызовами одной и той же попытки, из-за чего дубль не ловился (MEDIA-09F).
+    if (task._preflightNote === result.status) return result;
+    task._preflightNote = result.status;
     if (result.status === 'repaired') {
       await this.#event(task, 'SESSION_SHRUNK', result.message, {
         beforeBytes: result.beforeBytes, afterBytes: result.afterBytes, dropped: result.dropped,
@@ -6508,15 +6539,38 @@ export class TaskManager extends EventEmitter {
       // question twice; the continuation is the restart-resume nudge instead.
       const repaired = failure.code === 'REQUEST_TOO_LARGE' ? await this.#preflight(task) : null;
       const recovered = repaired?.status === 'repaired';
+      // Ход уже выполнил инструменты (запись файла, shell-команда): результат мог
+      // измениться, и автоматическая продолжение стало бы слепым повтором побочного
+      // действия. Такой ход сами не продолжаем — оператор проверит изменение и
+      // продолжит вручную (MEDIA-09D). Критерий — исполнения в ЭТОМ ходу (счётчик
+      // ведёт существующая обработка кадров Pi), а не догадки о намерениях модели.
+      const turnTools = task._turnTools || 0;
+      const withheld = recovered && turnTools > 0 && !task.mediaRecovery;
       const remedy = recovered
-        ? ` ${repaired.message} Ход будет повторён автоматически.`
+        ? (withheld
+          ? ` ${repaired.message} В отказавшем ходе уже выполнились инструменты (${turnTools}): результат мог измениться, автоматическое продолжение не запускается — проверьте изменения и продолжите вручную.`
+          : ` ${repaired.message} Ход будет повторён автоматически.`)
         : '';
       const error = Object.assign(new Error(
         `${guidance} Автоматический повтор остановлен. ${wait.reason}${remedy}`
       ), { code: failure.code });
       try {
-        await this.#fail(task, error);
-        if (recovered && !task.mediaRecovery) {
+        // Отказ по размеру — окончательный: возвращать сообщение в очередь нельзя,
+        // иначе каждый повтор снова упирается в тот же лимит (MEDIA-09B). Решение о
+        // продолжении принимает ветка восстановления ниже.
+        await this.#fail(task, error, task._turn ?? null, { requeuePrompt: failure.code !== 'REQUEST_TOO_LARGE' });
+        if (withheld) {
+          // Состояние неопределённого результата: история восстановлена, но что
+          // именно успели сделать инструменты — знает только человек. Флаг виден
+          // в снимке сессии, событие — в ленте.
+          task.mediaRecovery = true;
+          task.unknownResult = true;
+          await this.#event(task, 'RECOVERY_WITHHELD',
+            `Инструментов в отказавшем ходе: ${turnTools}. Результат мог измениться, поэтому автоматическое продолжение не запущено.`,
+            { tools: turnTools, dropped: repaired.dropped ?? null }, false);
+          task.updatedAt = now();
+          await this.store.save(this.#publicTask(task)).catch(() => {});
+        } else if (recovered && !task.mediaRecovery) {
           // One automatic recovery per task: a second 413 after a verified repair
           // means the repair did not help, and repeating it would be a loop.
           task.mediaRecovery = true;
