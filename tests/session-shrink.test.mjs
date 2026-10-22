@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { shrinkSession, shrinkSessionFile, describeShrink } from '../src/session-shrink.mjs';
 
 // A provider refuses a request body over ~50 MB (api.deepseek.com, measured
@@ -161,4 +164,106 @@ test('describeShrink reads as «X → Y МБ»', async t => {
   await fs.writeFile(file, [sessionHeader, userText('a'), toolResultWithImage('a', 200_000), toolResultWithImage('b', 200_000)].join('\n'));
   const result = await shrinkSessionFile(file, { keepImages: 1, limitBytes: 1000 });
   assert.match(describeShrink(result), /^\d+\.\d → \d+\.\d МБ/);
+});
+
+// --- MEDIA-06: восстановление можно повторять -------------------------------
+// Один и тот же файл проходит preflight при каждом запуске Pi (в том числе после
+// перезапуска TaskBridge). Повторный проход не должен ни переписывать историю,
+// ни плодить копии в архиве, ни оставлять лишние .bak.
+
+test('повторное восстановление не плодит ни копий, ни резервных файлов', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shrink-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 's.jsonl');
+  const artifactDir = path.join(dir, 'media');
+  await fs.writeFile(file, [sessionHeader, userText('a'), toolResultWithImage('a', 100_000, 'one'), toolResultWithImage('b', 100_000, 'two')].join('\n'));
+
+  const first = await shrinkSessionFile(file, { keepImages: 0, limitBytes: 1000, artifactDir });
+  assert.equal(first.changed, true, `первый прогон: ${first.reason}`);
+  const repaired = await fs.readFile(file, 'utf8');
+  const artifactsAfterFirst = (await fs.readdir(artifactDir)).sort();
+  const backupsAfterFirst = (await fs.readdir(dir)).filter(name => name.includes('.bak-'));
+  assert.equal(artifactsAfterFirst.length, 2);
+  assert.equal(backupsAfterFirst.length, 1, 'один бэкап на одну правку');
+
+  const second = await shrinkSessionFile(file, { keepImages: 0, limitBytes: 1000, artifactDir });
+  assert.equal(second.changed, false, `второй прогон ничего не меняет: ${second.reason}`);
+  assert.equal(await fs.readFile(file, 'utf8'), repaired, 'байты те же');
+  assert.deepEqual((await fs.readdir(artifactDir)).sort(), artifactsAfterFirst, 'копий в архиве не прибавилось');
+  assert.deepEqual((await fs.readdir(dir)).filter(name => name.includes('.bak-')), backupsAfterFirst, 'лишних бэкапов нет');
+});
+
+test('после восстановления архивируются только новые изображения', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shrink-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 's.jsonl');
+  const artifactDir = path.join(dir, 'media');
+  await fs.writeFile(file, [sessionHeader, userText('a'), toolResultWithImage('a', 100_000, 'one'), toolResultWithImage('b', 100_000, 'two')].join('\n'));
+  const first = await shrinkSessionFile(file, { keepImages: 0, limitBytes: 1000, artifactDir });
+  assert.equal(first.changed, true);
+  const repaired = await fs.readFile(file, 'utf8');
+  const artifactsAfterFirst = (await fs.readdir(artifactDir)).sort();
+
+  // Разговор продолжился: в историю добавились два новых скриншота.
+  const fresh = [toolResultWithImage('c', 100_000, 'three'), toolResultWithImage('d', 100_000, 'four')];
+  await fs.writeFile(file, `${repaired}\n${fresh.join('\n')}`);
+
+  const second = await shrinkSessionFile(file, { keepImages: 0, limitBytes: 1000, artifactDir });
+  assert.equal(second.changed, true, `второй прогон: ${second.reason}`);
+  assert.equal(second.dropped, 2, 'сняты ровно новые картинки, старые уже были ссылками');
+  const text = await fs.readFile(file, 'utf8');
+  assert.ok(text.startsWith(repaired), 'прежняя часть истории не переписана');
+  const artifactsAfterSecond = (await fs.readdir(artifactDir)).sort();
+  assert.equal(artifactsAfterSecond.length, artifactsAfterFirst.length + 2, 'в архиве только новые файлы');
+  assert.deepEqual(artifactsAfterSecond.filter(name => artifactsAfterFirst.includes(name)), artifactsAfterFirst, 'старые файлы на месте');
+  // Новые файлы — это именно новые байты (адресация по содержимому).
+  for (const name of artifactsAfterSecond.filter(entry => !artifactsAfterFirst.includes(entry))) {
+    const bytes = await fs.readFile(path.join(artifactDir, name));
+    assert.equal(name, `${crypto.createHash('sha256').update(bytes).digest('hex')}.png`);
+  }
+});
+
+// MEDIA-06F: восстановление — это «сначала архив, потом одна замена файла».
+// Убитый посреди работы процесс не должен оставить полу-записанную историю.
+test('прерванный посреди архивации процесс оставляет оригинал читаемым', { timeout: 180000 }, async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shrink-kill-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 's.jsonl');
+  const artifactDir = path.join(dir, 'media');
+  const IMAGES = 40;
+  const lines = [sessionHeader, userText('начало')];
+  for (let index = 0; index < IMAGES; index += 1) lines.push(toolResultWithImage(`img${index}`, 900 * 1024, `pic${index}`));
+  const session = lines.join('\n');
+  await fs.writeFile(file, session);
+
+  const runner = path.join(dir, 'repair.mjs');
+  const moduleHref = new URL('../src/session-shrink.mjs', import.meta.url).href;
+  await fs.writeFile(runner, `import { shrinkSessionFile } from ${JSON.stringify(moduleHref)};\n`
+    + `await shrinkSessionFile(${JSON.stringify(file)}, { keepImages: 2, limitBytes: 1024, artifactDir: ${JSON.stringify(artifactDir)} });\n`);
+
+  const child = spawn(process.execPath, [runner], { stdio: 'ignore' });
+  t.after(() => { try { child.kill('SIGKILL'); } catch { /* уже мёртв */ } });
+
+  // Ждём, пока архивация действительно начнётся, и только тогда убиваем.
+  let archivedBeforeKill = 0;
+  for (let attempt = 0; attempt < 1500; attempt += 1) {
+    archivedBeforeKill = (await fs.readdir(artifactDir).catch(() => [])).length;
+    if (archivedBeforeKill >= 3) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.ok(archivedBeforeKill >= 3, 'архивация успела начаться');
+  child.kill('SIGKILL');
+  await once(child, 'exit');
+
+  // Оригинал не тронут: каждая строка по-прежнему разбирается как JSON.
+  const after = await fs.readFile(file, 'utf8');
+  assert.equal(after, session, 'прерванный прогон не переписал историю');
+  const parsed = after.split('\n').filter(Boolean).map(line => { assert.doesNotThrow(() => JSON.parse(line)); return true; });
+  assert.equal(parsed.length, IMAGES + 2);
+  // Архивные файлы, которые успели лечь, целы и адресуются содержимым.
+  for (const name of await fs.readdir(artifactDir)) {
+    const bytes = await fs.readFile(path.join(artifactDir, name));
+    assert.equal(bytes.length, 900 * 1024, `${name} дописан целиком`);
+    assert.equal(name, `${crypto.createHash('sha256').update(bytes).digest('hex')}.png`);
+  }
 });
