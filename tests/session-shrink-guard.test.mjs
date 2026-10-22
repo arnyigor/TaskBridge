@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -26,7 +27,9 @@ async function settle(api, id, { tries = 200, delay = 50 } = {}) {
 
 const sessionHeader = JSON.stringify({ type: 'session', version: 1, id: 'fixture-session' });
 const userLine = text => JSON.stringify({ type: 'message', message: { role: 'user', content: [{ type: 'text', text }] } });
-const imageLine = (id, bytes) => JSON.stringify({
+// fill — чтобы одна и та же фикстура давала разные картинки: архив адресуется по
+// содержимому, и сорок одинаковых PNG законно помещаются в один файл.
+const imageLine = (id, bytes, fill = 'A') => JSON.stringify({
   type: 'message',
   message: {
     role: 'toolResult',
@@ -34,7 +37,7 @@ const imageLine = (id, bytes) => JSON.stringify({
     toolName: 'read',
     content: [
       { type: 'text', text: 'Read image file [image/png]' },
-      { type: 'image', data: 'A'.repeat(bytes) }
+      { type: 'image', data: fill.repeat(bytes) }
     ]
   }
 });
@@ -102,6 +105,68 @@ test('a session over the byte budget is shrunk before Pi starts it', { timeout: 
   assert.ok(notices[0].text.includes(artifactPath), `placeholder names the original: ${notices[0].text}`);
   assert.ok(await fs.stat(artifactPath).then(() => true, () => false), 'the artifact really exists');
   assert.equal(shrunk[0].data?.dropped, 1);
+});
+
+// MEDIA-01 из плана стабилизации (2026-10-22): не три картинки, а десятки —
+// так выглядит реальная сессия, где агент прочитал сорок скриншотов. Проверяется,
+// что защита работает по счёту, а не только по одному «тяжёлому» случаю: остаются
+// две последние картинки, все предыдущие уходят в архив по одной.
+test('сорок крупных изображений: остаются две последние, остальные в архиве', { timeout: 120000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'first turn' });
+  const id = created.id;
+  assert.equal((await settle(api, id)).status, 'SUCCEEDED');
+
+  await api(`/api/tasks/${id}/session/restart`, {});
+  const dir = path.join(fixture.root, 'data', 'pi-sessions', id);
+  await fs.mkdir(dir, { recursive: true });
+  const existing = (await fs.readdir(dir)).filter(name => name.endsWith('.jsonl'));
+  const file = path.join(dir, existing[0] || '2026-01-01T00-00-00-000Z_fixture.jsonl');
+  const IMAGES = 40;
+  const lines = [sessionHeader, userLine('начало разговора')];
+  // Подпись — символ из алфавита base64 (A–Z, a–z): Buffer.from молча выбрасывает
+  // посторонние символы, и картинки с `[`, `\`, `]` выродились бы в один нулевой файл.
+  const fill = index => String.fromCharCode(index < 26 ? 65 + index : 97 + index - 26);
+  for (let index = 0; index < IMAGES; index += 1) lines.push(imageLine(`img${index}`, 900 * 1024, fill(index)));
+  await fs.writeFile(file, `${lines.join('\n')}\n`);
+  const before = (await fs.stat(file)).size;
+  assert.ok(before > DEFAULT_SESSION_MAX_MB * 1024 * 1024, `фикстура больше бюджета (${before} байт)`);
+
+  await api(`/api/tasks/${id}/message`, { text: 'следующий ход' });
+  const finished = await settle(api, id);
+  assert.equal(finished.status, 'SUCCEEDED', finished.error || '');
+
+  const text = await fs.readFile(file, 'utf8');
+  const kept = (text.match(/"type":"image"/g) || []).length;
+  const archived = (text.match(/скриншот исключён/g) || []).length;
+  assert.equal(kept, 2, 'модели остаются две последние картинки');
+  assert.equal(archived, IMAGES - 2, 'все остальные заменены ссылками на оригиналы');
+  assert.ok((await fs.stat(file)).size < DEFAULT_SESSION_MAX_MB * 1024 * 1024, 'файл уложился в бюджет');
+  // Оригиналы не потеряны: по файлу на каждое снятое изображение. Считаем именно
+  // РАЗНЫЕ файлы — по декодированным байтам и sha256, а не по строке фикстуры:
+  // Buffer.from молча выбрасывает посторонние символы, и «разные» картинки могли
+  // бы дать один и тот же файл (адресация архива идёт по содержимому).
+  const mediaDir = path.join(fixture.root, 'data', 'media');
+  const artifacts = await fs.readdir(mediaDir);
+  assert.equal(artifacts.length, IMAGES - 2, 'каждая снятая картинка сохранена отдельно');
+  const digests = new Map();
+  for (const name of artifacts) {
+    const bytes = await fs.readFile(path.join(mediaDir, name));
+    assert.equal(bytes.length, (900 * 1024) / 4 * 3, `файл ${name} — это исходные байты картинки, а не пустышка`);
+    digests.set(crypto.createHash('sha256').update(bytes).digest('hex'), name);
+  }
+  assert.equal(digests.size, IMAGES - 2, 'у каждого архива свой sha256');
+  // Ссылки в истории ведут на существующие файлы и на разные: плейсхолдер — это
+  // приглашение перечитать оригинал, а не текст «на всякий случай».
+  const referenced = [...text.matchAll(/оригинал: (.+?) — можно/g)].map(match => JSON.parse(`"${match[1]}"`));
+  assert.equal(new Set(referenced).size, IMAGES - 2, 'каждый плейсхолдер указывает на свой файл');
+  for (const file of referenced) {
+    assert.ok(digests.has(crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex')), `ссылка ${file} открывается`);
+  }
+  // Текст разговора цел.
+  assert.match(text, /начало разговора/);
 });
 
 test('a text-only session over the budget is reported, not rewritten', { timeout: 90000 }, async t => {
