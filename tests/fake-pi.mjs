@@ -271,7 +271,9 @@ async function runFault(fault, command, respond) {
     // `body-limit` also grows the transcript the way a real turn does: a tool
     // read a screenshot, the file got big and the NEXT request is refused. The
     // session file is what TaskBridge's preflight repairs.
-    if (error.includes('413') && sessionFile) {
+    // `body-limit-text` — тот же 413, но история НЕ растёт: она и так текстовая и
+    // уже больше, чем провайдер принимает, поэтому уменьшать в ней нечего (MEDIA-08D).
+    if (error.includes('413') && sessionFile && !String(command.message).includes('body-limit-text')) {
       for (const n of ['a', 'b', 'c']) {
         persist({ role: 'toolResult', toolCallId: `call-img-${n}`, toolName: 'read', isError: false, content: [
           { type: 'text', text: 'Read image file [image/png]' },
