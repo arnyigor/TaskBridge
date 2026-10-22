@@ -3,7 +3,14 @@ package ru.arny.taskbridge.core.client.sessions
 import ru.arny.taskbridge.core.api.Task
 
 /** Something the operator should hear about while not looking at the session. */
-data class SessionAlert(val taskId: String, val kind: Kind, val title: String, val text: String) {
+data class SessionAlert(
+    val taskId: String,
+    val kind: Kind,
+    val title: String,
+    val text: String,
+    /** Название проекта сессии; null — сессия без проекта. */
+    val project: String? = null,
+) {
     enum class Kind { WAITING_USER, FINISHED, FAILED }
 
     /** One notification per session: a newer alert replaces the older one. */
@@ -18,7 +25,7 @@ data class SessionAlert(val taskId: String, val kind: Kind, val title: String, v
 class SessionAlerts {
     private var previous: Map<String, DisplayState>? = null
 
-    fun update(tasks: List<Task>): List<SessionAlert> {
+    fun update(tasks: List<Task>, projects: Map<String, String> = emptyMap()): List<SessionAlert> {
         val now = tasks.associate { it.id to displayStateOf(it) }
         val before = previous
         previous = now
@@ -28,13 +35,15 @@ class SessionAlerts {
             val state = now.getValue(task.id)
             if (was == state) return@mapNotNull null
             val title = task.displayTitle
+            // Проект в уведомлении идёт первым: по одной сессии не видно, чья она.
+            val project = task.projectId?.let { id -> projects[id] ?: id }
             when {
                 state == DisplayState.WAITING_USER ->
-                    SessionAlert(task.id, SessionAlert.Kind.WAITING_USER, title, task.current ?: "Нужен ваш ответ")
+                    SessionAlert(task.id, SessionAlert.Kind.WAITING_USER, title, task.current ?: "Нужен ваш ответ", project)
                 was.active && state == DisplayState.DONE ->
-                    SessionAlert(task.id, SessionAlert.Kind.FINISHED, title, task.assistantText?.lineSequence()?.lastOrNull { it.isNotBlank() }?.take(200) ?: "Готово")
+                    SessionAlert(task.id, SessionAlert.Kind.FINISHED, title, task.assistantText?.lineSequence()?.lastOrNull { it.isNotBlank() }?.take(200) ?: "Готово", project)
                 was.active && (state == DisplayState.FAILED || state == DisplayState.RESTORABLE) ->
-                    SessionAlert(task.id, SessionAlert.Kind.FAILED, title, task.error ?: "Ход завершился ошибкой")
+                    SessionAlert(task.id, SessionAlert.Kind.FAILED, title, task.error ?: "Ход завершился ошибкой", project)
                 else -> null
             }
         }

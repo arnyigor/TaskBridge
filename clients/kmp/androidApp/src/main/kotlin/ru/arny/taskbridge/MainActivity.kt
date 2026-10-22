@@ -30,9 +30,16 @@ class MainActivity : ComponentActivity() {
         val app = application as TaskBridgeApplication
         // Kept for platform.exitApp(): the shared UI's «Выход» closes this activity.
         app.platform.activity = this
-        // Saved navigation already includes any notification that was handled.
-        // Replaying the launch intent on rotation would reopen an older chat.
-        openTaskId = if (savedInstanceState == null) intent?.getStringExtra(EXTRA_TASK_ID) else null
+        // A notification tap is the only source of EXTRA_TASK_ID: the launcher intent never
+        // carries it. The extra is consumed as soon as it is read, so a later recreation of
+        // this Activity (rotation, or the system reclaiming the UI while the watch service
+        // keeps the process alive) does not replay an older target. A real tap still arrives
+        // with the extra even when the Activity had to restore its saved state first — that
+        // was the tap that looked like nothing happened.
+        intent?.getStringExtra(EXTRA_TASK_ID)?.let { tapped ->
+            intent?.removeExtra(EXTRA_TASK_ID)
+            openTaskId = tapped
+        }
         askForNotifications()
         setContent {
             App(app.graph, openTaskId = openTaskId, openRequestId = openRequestId)
@@ -44,6 +51,8 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         // A tapped notification while the app is open: go to that session.
         intent.getStringExtra(EXTRA_TASK_ID)?.let {
+            // Consumed, so a later recreation of this Activity does not replay this tap.
+            intent.removeExtra(EXTRA_TASK_ID)
             openTaskId = it
             // A second tap may name the same session after Back returned to the list.
             // Its delivery is new even though the target string has not changed.

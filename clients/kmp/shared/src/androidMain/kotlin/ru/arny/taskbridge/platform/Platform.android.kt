@@ -42,6 +42,7 @@ import ru.arny.taskbridge.core.client.session.PersistedOutgoing
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.core.client.settings.SecretStore
 import ru.arny.taskbridge.core.api.TaskBridgeJson
+import ru.arny.taskbridge.alertTitle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.channels.awaitClose
@@ -273,13 +274,8 @@ class AndroidPlatformServices(
         val builder = if (Build.VERSION.SDK_INT >= 26) android.app.Notification.Builder(context, channel) else android.app.Notification.Builder(context)
         val notification = builder
             .setSmallIcon(android.R.drawable.stat_notify_chat)
-            .setContentTitle(
-                when (alert.kind) {
-                    SessionAlert.Kind.WAITING_USER -> "Ждёт ответа · ${alert.title}"
-                    SessionAlert.Kind.FINISHED -> "Готово · ${alert.title}"
-                    SessionAlert.Kind.FAILED -> "Ошибка · ${alert.title}"
-                },
-            )
+            // Одна строка с названием проекта в начале: она и есть верх уведомления.
+            .setContentTitle(alertTitle(alert))
             .setContentText(alert.text)
             .setStyle(android.app.Notification.BigTextStyle().bigText(alert.text))
             .setContentIntent(intent)

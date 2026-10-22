@@ -222,7 +222,8 @@ class AppGraph(val platform: PlatformServices) {
                     if (info?.storeId != null && info.storeId != settings.storeId) {
                         settings.storeId = info.storeId
                     }
-                    for (alert in alerts.update(state.tasks)) {
+                    val projectNames = state.projects.associate { it.id to it.displayName }
+                    for (alert in alerts.update(state.tasks, projectNames)) {
                         val onScreen = platform.inForeground && alert.taskId == visibleSession
                         if (onScreen) continue
                         _attention.update { it + alert.taskId }

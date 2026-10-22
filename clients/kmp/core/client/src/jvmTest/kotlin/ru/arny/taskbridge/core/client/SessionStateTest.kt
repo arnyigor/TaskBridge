@@ -77,6 +77,20 @@ class SessionStateTest {
         assertEquals(listOf("c" to SessionAlert.Kind.FAILED), failed.map { it.taskId to it.kind })
     }
 
+    /**
+     * Уведомление называет проект: по одной только сессии не видно, чья она,
+     * а на телефоне это единственная строка, видная до раскрытия.
+     */
+    @Test
+    fun alertNamesTheProject() {
+        val alerts = SessionAlerts()
+        val projects = mapOf("p" to "Проект")
+        val baseline = listOf(task("a", "RUNNING"), task("s", "RUNNING", project = null))
+        alerts.update(baseline, projects)
+        val waiting = alerts.update(listOf(task("a", "WAITING_USER"), task("s", "WAITING_USER", project = null)), projects)
+        assertEquals(listOf("Проект", null), waiting.map { it.project })
+    }
+
     @Test
     fun serverAddresses() {
         assertEquals("http://192.168.1.5:8787", normalizeServerUrl("192.168.1.5"))

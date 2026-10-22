@@ -233,9 +233,13 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
     }
 }
 
-/** Title for a system notification about [alert]. */
-fun alertTitle(alert: SessionAlert): String = when (alert.kind) {
-    SessionAlert.Kind.WAITING_USER -> "Ждёт ответа"
-    SessionAlert.Kind.FINISHED -> "Готово"
-    SessionAlert.Kind.FAILED -> "Ошибка"
-} + " · " + alert.title
+/** Title for a system notification about [alert]: the project names the session first. */
+fun alertTitle(alert: SessionAlert): String = listOfNotNull(
+    alert.project,
+    when (alert.kind) {
+        SessionAlert.Kind.WAITING_USER -> "Ждёт ответа"
+        SessionAlert.Kind.FINISHED -> "Готово"
+        SessionAlert.Kind.FAILED -> "Ошибка"
+    },
+    alert.title,
+).joinToString(" · ")
