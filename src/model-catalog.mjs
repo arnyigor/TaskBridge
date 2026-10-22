@@ -96,6 +96,19 @@ export class ModelCatalog {
     this.timeoutMs = Math.max(1000, Number(options.timeoutMs ?? 90000));
     this.cache = null;
     this.inFlight = null;
+    this.generation = 0;
+  }
+
+  // models.json изменился (модель добавлена или убрана из записи провайдера):
+  // закэшированная проба описывает прежний файл, и выбранная из неё модель может
+  // уже не существовать. Дальше каталог собирается заново, как при холодном старте.
+  // Проба, начатая до этого вызова, свой результат не закэширует (generation).
+  invalidate() {
+    this.generation += 1;
+    this.cache = null;
+    // Текущую пробу не отменяем (её ещё ждут вызывающие), но следующий list()
+    // должен начать новую: результат старой уже протух.
+    this.inFlight = null;
   }
 
   // Cached value only; never spawns Pi. Used on hot paths (task creation) to
@@ -131,13 +144,18 @@ export class ModelCatalog {
 
   // One probe at a time: concurrent callers share the same in-flight promise.
   #start() {
-    this.inFlight = this.#probe()
+    const generation = this.generation;
+    const pending = this.#probe()
       .then(value => {
-        this.cache = { at: Date.now(), value };
+        // Проба могла пережить invalidate(): описывает старый models.json — не кэшируем.
+        if (generation === this.generation) this.cache = { at: Date.now(), value };
         return value;
       })
-      .finally(() => { this.inFlight = null; });
-    return this.inFlight;
+      .finally(() => {
+        if (this.inFlight === pending) this.inFlight = null;
+      });
+    this.inFlight = pending;
+    return pending;
   }
 
   async #probe() {

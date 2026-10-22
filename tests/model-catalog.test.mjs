@@ -11,7 +11,7 @@ import { normalizeModels, supportedThinkingLevels, providerThinkingValues, Model
 // (spaces in "Program Files") breaks there — the same .cmd wrapper trick the
 // other RPC tests use is required. args therefore stay empty: the wrapper
 // forwards them and PiRpcSession appends --mode rpc itself.
-async function fixtureCatalog(options = {}) {
+async function fixtureCatalog(options = {}, config = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-catalog-test-'));
   const fixture = fileURLToPath(new URL('fake-pi.mjs', import.meta.url));
   const command = path.join(root, process.platform === 'win32' ? 'pi.cmd' : 'pi');
@@ -22,7 +22,7 @@ node "${fixture}" %*
     : `#!/bin/sh
 exec node '${fixture}' "$@"
 `, { mode: 0o755 });
-  return new ModelCatalog({ pi: { command, args: [] }, cwd: root }, options);
+  return new ModelCatalog({ pi: { command, args: [] }, cwd: root, ...config }, options);
 }
 
 test('normalizeModels projects Pi models to a safe, sorted shape', () => {
@@ -123,4 +123,61 @@ test('refresh=true always waits for a fresh probe, never the stale cache', async
   assert.ok(catalog.inFlight, 'refresh starts its own probe');
   const fresh = await pending;
   assert.ok(fresh.models.length >= 2);
+});
+
+// models.json меняется кнопками страницы провайдеров, а кэш каталога — нет:
+// без сброса убранная модель ещё TTL предлагается в выборе модели, а её выбор
+// падает на следующем ходе (STAB-00, «обновление каталога после удаления»).
+test('invalidate() drops the fresh cache so the next list() probes again', async () => {
+  const catalog = await fixtureCatalog({ ttlMs: 60_000 });
+  const first = await catalog.list();
+  assert.ok(catalog.cache, 'cache filled');
+  catalog.invalidate();
+  assert.equal(catalog.cache, null);
+  const again = await catalog.list({ refresh: true });
+  assert.deepEqual(again.models.length, first.models.length, 'каталог собран заново, а не из кэша');
+  assert.ok(catalog.cache.at > 0);
+});
+
+test('a probe started before invalidate() does not refill the cache', async () => {
+  const catalog = await fixtureCatalog({ ttlMs: 60_000 });
+  const pending = catalog.list({ refresh: true });
+  catalog.invalidate();
+  await pending; // ответ ещё устарел: его ещё ждали, но кэшировать его нельзя
+  assert.equal(catalog.cache, null, 'результат старой пробы не попал в кэш');
+});
+
+// Полный сценарий STAB-00B: медленная проба уже идёт, models.json правится,
+// приходит invalidate(), старая проба завершается. Кэш не должен «вылечиться»
+// старым списком, а следующий запрос — описывать уже новый файл.
+test('медленная проба, пережившая invalidate(), не возвращает старый каталог', async () => {
+  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-models-file-'));
+  const modelsFile = path.join(workDir, 'models.json');
+  const modelEntry = id => [{ provider: 'p', id, name: id, contextWindow: 8000, maxTokens: 512, input: ['text'] }];
+  await fs.writeFile(modelsFile, JSON.stringify(modelEntry('old-model')), 'utf8');
+  const marker = path.join(workDir, 'models-read.marker');
+  const catalog = await fixtureCatalog({ ttlMs: 60_000 }, {
+    env: { ...process.env, FAKE_PI_MODELS_FILE: modelsFile, FAKE_PI_MODELS_DELAY_MS: '600', FAKE_PI_MODELS_READ_MARKER: marker },
+  });
+
+  // 1. Проба, которая читает файл ДО правки, и заканчивается позже неё.
+  const slow = catalog.list({ refresh: true });
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await fs.access(marker).then(() => true, () => false)) break;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.equal(await fs.readFile(marker, 'utf8'), '["old-model"]', 'проба прочитала прежний список');
+  // 2. Файл меняется (модель убрана из записи провайдера).
+  await fs.writeFile(modelsFile, JSON.stringify(modelEntry('new-model')), 'utf8');
+  // 3. Правка провайдера сбрасывает кэш.
+  catalog.invalidate();
+  // 4–5. Старая проба досчитывается; её ответ ещё ждут, но в кэш он не идёт.
+  const stale = await slow;
+  assert.deepEqual(stale.models.map(m => m.id), ['old-model'], 'вызывающий получил то, что успела прочитать проба');
+  assert.equal(catalog.cache, null, 'кэш не заполнен устаревшим списком');
+  // 6. Следующий запрос собирает каталог заново — уже по новому models.json.
+  const fresh = await catalog.list();
+  assert.deepEqual(fresh.models.map(m => m.id), ['new-model'], 'каталог описывает изменённый файл');
+  assert.ok(catalog.cache, 'свежая проба закэширована');
+  assert.notEqual(stale, fresh, 'старый и новый ответы — разные объекты');
 });

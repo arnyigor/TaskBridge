@@ -1125,7 +1125,11 @@ async function handleRequest(req, res) {
       }
       if (req.method === 'PUT' && pathname === '/api/provider-profiles') {
         const body = await readJson(req);
-        return json(res, 200, await providerProfiles.upsert(body));
+        const result = await providerProfiles.upsert(body);
+        // Модели записи изменились прямо сейчас: закэшированный каталог Pi
+        // описывает прежний models.json (STAB-00, обновление каталога после правки).
+        manager.modelCatalog?.invalidate?.();
+        return json(res, 200, result);
       }
       // Мастер подключения, шаги 3–4 (пункт 2.3 плана): проверка ещё не сохранённого
       // подключения и каталог его моделей. Разрешение адреса и запрет redirect — там же.
@@ -1134,10 +1138,13 @@ async function handleRequest(req, res) {
       const modelRemoval = pathname.match(/^\/api\/provider-profiles\/([^/]+)\/models\/remove$/);
       if (req.method === 'POST' && modelRemoval) {
         const body = await readJson(req);
-        return json(res, 200, await providerProfiles.removeModels(decodeURIComponent(modelRemoval[1]), {
+        const result = await providerProfiles.removeModels(decodeURIComponent(modelRemoval[1]), {
           models: body?.models ?? [],
           revision: body?.revision ?? null,
-        }));
+        });
+        // Убранная модель не должна оставаться в выборе модели ещё TTL каталога.
+        manager.modelCatalog?.invalidate?.();
+        return json(res, 200, result);
       }
       if (req.method === 'POST' && pathname === '/api/provider-profiles/draft-check') {
         const body = await readJson(req);
@@ -1156,7 +1163,9 @@ async function handleRequest(req, res) {
         }
         if (req.method === 'DELETE' && !providerRoute[2]) {
           const body = await readJson(req);
-          return json(res, 200, await providerProfiles.remove(id, body.revision));
+          const result = await providerProfiles.remove(id, body.revision);
+          manager.modelCatalog?.invalidate?.();
+          return json(res, 200, result);
         }
       }
     }

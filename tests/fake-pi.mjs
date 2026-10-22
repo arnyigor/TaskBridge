@@ -433,7 +433,26 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (command.type === 'get_commands') {
     return respond({ commands: [{ name: 'nudge', source: 'command', description: 'Надзиратель bench-harness' }] });
   }
-  if (command.type === 'get_available_models') return respond({ models: availableModels });
+  // Каталог моделей, который можно менять на ходу: FAKE_PI_MODELS_FILE — JSON-список
+  // вместо статичного, FAKE_PI_MODELS_DELAY_MS — задержка ответа. Так проверяется,
+  // что проба, пережившая сброс кэша, не возвращает в кэш устаревший models.json.
+  if (command.type === 'get_available_models') {
+    let models = availableModels;
+    const file = process.env.FAKE_PI_MODELS_FILE;
+    if (file) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (Array.isArray(parsed)) models = parsed;
+      } catch { /* файл ещё не записан — остаётся статичный список */ }
+    }
+    // Отметка «список прочитан»: тест меняет файл только после неё, иначе правка
+    // обгоняет чтение и доказывает не то, что собиралась.
+    const marker = process.env.FAKE_PI_MODELS_READ_MARKER;
+    if (marker) fs.writeFileSync(marker, JSON.stringify(models.map(model => model.id)));
+    const delay = Number(process.env.FAKE_PI_MODELS_DELAY_MS || 0);
+    if (delay > 0) { setTimeout(() => respond({ models }), delay); return; }
+    return respond({ models });
+  }
   if (command.type === 'get_available_thinking_levels') return respond({ levels: ['off', 'low', 'medium', 'high'] });
   if (command.type === 'set_thinking_level') { thinkingLevel = command.level; return respond(); }
   if (command.type === 'set_model') {
