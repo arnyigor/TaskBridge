@@ -1129,6 +1129,16 @@ async function handleRequest(req, res) {
       }
       // Мастер подключения, шаги 3–4 (пункт 2.3 плана): проверка ещё не сохранённого
       // подключения и каталог его моделей. Разрешение адреса и запрет redirect — там же.
+      // Убрать модели из записи провайдера (запрос оператора 2026-10-22): правится
+      // ТОЛЬКО список моделей, с ревизией файла и резервной копией.
+      const modelRemoval = pathname.match(/^\/api\/provider-profiles\/([^/]+)\/models\/remove$/);
+      if (req.method === 'POST' && modelRemoval) {
+        const body = await readJson(req);
+        return json(res, 200, await providerProfiles.removeModels(decodeURIComponent(modelRemoval[1]), {
+          models: body?.models ?? [],
+          revision: body?.revision ?? null,
+        }));
+      }
       if (req.method === 'POST' && pathname === '/api/provider-profiles/draft-check') {
         const body = await readJson(req);
         return json(res, 200, await providerProfiles.draftCheck({

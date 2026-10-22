@@ -191,3 +191,37 @@ test('draft-check отказывает опасным адресам и не п�
   assert.equal(missing.status, 'NO_KEY');
   assert.deepEqual(missing.models, []);
 });
+
+// Запрос оператора 2026-10-22: «нельзя удалить модель». Чужие записи TaskBridge
+// не редактирует, но список моделей убрать можно — явно, с ревизией и бэкапом.
+test('модель убирается из чужой записи, остальные поля не трогаются', async t => {
+  const { dir, file, service } = await fixture();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, JSON.stringify({
+    providers: {
+      deepseek: {
+        baseUrl: 'https://api.deepseek.com', api: 'openai-completions', apiKey: '$DEEPSEEK_API_KEY',
+        models: [{ id: 'deepseek-flash', name: 'Flash' }, { id: 'deepseek-v4-pro', thinkingLevelMap: { max: 'max' } }],
+      },
+    },
+  }, null, 2), 'utf8');
+  const { revision } = await service.list();
+
+  const result = await service.removeModels('deepseek', { models: ['deepseek-v4-pro'], revision });
+  assert.deepEqual(result.removed, ['deepseek-v4-pro']);
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(doc.providers.deepseek.models, [{ id: 'deepseek-flash', name: 'Flash' }]);
+  assert.equal(doc.providers.deepseek.apiKey, '$DEEPSEEK_API_KEY', 'ключ не тронут');
+  assert.equal(doc.providers.deepseek.baseUrl, 'https://api.deepseek.com', 'адрес не тронут');
+  const backups = (await fs.readdir(dir)).filter(name => name.startsWith('models.json.bak-'));
+  assert.equal(backups.length, 1, 'перед записью снимается резервная копия');
+
+  // Промах по ID и устаревшая ревизия отклоняются, файл не меняется.
+  const fresh = (await service.list()).revision;
+  await rejectCode(service.removeModels('deepseek', { models: ['нет-такой'], revision: fresh }), 'INPUT_INVALID');
+  await rejectCode(service.removeModels('deepseek', { models: ['deepseek-flash'], revision: revision }), 'CONFLICT');
+  await rejectCode(service.removeModels('absent-provider', { models: ['x'], revision: fresh }), 'NOT_FOUND');
+  // Не-ASCII идентификатор — не имя провайдера Pi, а мусор из запроса.
+  await rejectCode(service.removeModels('нет-провайдера', { models: ['x'], revision: fresh }), 'INPUT_INVALID');
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')).providers.deepseek.models, [{ id: 'deepseek-flash', name: 'Flash' }]);
+});

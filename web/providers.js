@@ -85,6 +85,43 @@
     }
     if (!el('discovered').classList.contains('hidden')) renderDiscovered();
   };
+  // Список моделей выбранного провайдера с кнопкой «Убрать»: адрес, api и ключ
+  // записи не меняются, правится только models (маршрут /models/remove).
+  const renderModelRemoval = item => {
+    const box = el('model-removal');
+    const list = el('model-removal-list');
+    list.replaceChildren();
+    const models = Array.isArray(item?.models) ? item.models : [];
+    if (!item || !models.length) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    for (const model of models) {
+      const row = document.createElement('div');
+      row.className = 'entry static';
+      const name = document.createElement('span');
+      name.textContent = model.id;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'subtle small';
+      remove.textContent = 'Убрать';
+      remove.addEventListener('click', async () => {
+        if (busy) return;
+        if (!confirm(`Убрать модель ${model.id} из ${item.id}? Файл models.json будет сохранён с резервной копией.`)) return;
+        busy = true;
+        try {
+          const result = await api(`/${encodeURIComponent(item.id)}/models/remove`, {
+            method: 'POST',
+            body: JSON.stringify({ models: [model.id], revision }),
+          });
+          revision = result.revision; profiles = result.providers;
+          show(profiles.find(p => p.id === item.id));
+          status(`Модель ${model.id} убрана из ${item.id}. Копия models.json сохранена рядом.`, 'success');
+        } catch (error) { status(error.message, 'error'); }
+        finally { busy = false; }
+      });
+      row.append(name, remove);
+      list.append(row);
+    }
+  };
   const renderList = () => {
     const root = el('providers');
     root.replaceChildren();
@@ -124,6 +161,7 @@
     discovered = []; picked = []; el('model-query').value = ''; el('draft-status').textContent = '';
     renderDiscovered();
     renderDraft();
+    renderModelRemoval(item);
     renderList();
   };
   const refresh = async ({ preserve = true } = {}) => {

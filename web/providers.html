@@ -40,6 +40,13 @@
           <label for="models">ID моделей, по одному на строку</label>
           <textarea id="models" rows="6" spellcheck="false" required placeholder="model-name-1&#10;model-name-2"></textarea>
           <p class="hint">Вводи реальные ID, которые принимает API. Большие каталоги лучше не импортировать целиком.</p>
+          <!-- Убрать модель из записи провайдера: чужие записи TaskBridge не правит,
+               но ошибку в списке моделей оператор должен уметь исправить сам. -->
+          <fieldset id="model-removal" class="hidden">
+            <legend>Убрать модель из Pi</legend>
+            <div id="model-removal-list" class="entries"></div>
+            <p class="hint">Меняется только список моделей выбранного провайдера. Перед записью снимается резервная копия models.json; текущие сессии не перенастраиваются.</p>
+          </fieldset>
           <!-- Шаги 3–4 мастера (пункт 2.3 плана): проверка до сохранения и выбор
                моделей из каталога провайдера. Ручной ввод ID выше остаётся для API
                без discovery. -->

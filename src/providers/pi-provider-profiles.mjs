@@ -13,6 +13,8 @@ import { parseProviderModels } from '../provider-models.mjs';
 const ID = /^tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const ENV = /^[A-Z][A-Z0-9_]{0,95}$/;
 const MODEL_ID = /^[A-Za-z0-9_.:/+@-]{1,160}$/;
+// ID провайдера в Pi: имена вида deepseek, llama.cpp, strata-ud-iq4xs — не только tb-*.
+const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_MODELS = 100;
 const OWNED_NAME = id => `TaskBridge: ${id}`;
 const isOwned = (id, entry) => ID.test(id) && entry?.name === OWNED_NAME(id);
@@ -173,6 +175,35 @@ export class PiProviderProfiles {
     } catch (e) {
       return { ok: false, status: e.name === 'TimeoutError' ? 'timeout' : 'unreachable', ms: Math.round(performance.now() - started), note: 'Проверьте URL, DNS, TLS или доступность локального сервера.' };
     }
+  }
+
+  /**
+   * Убрать модели из записи провайдера в models.json (запрос оператора 2026-10-22:
+   * «нельзя удалить модель»). Касается ТОЛЬКО списка моделей: адрес, api, ключ и
+   * прочие поля чужой записи остаются как были — их TaskBridge по-прежнему не
+   * правит. Действие явное (оператор видит список ID и подтверждает), поэтому это
+   * не «незаметная потеря чужих настроек»: перед записью снимается резервная копия,
+   * запись идёт через ревизию файла (CAS), а промах по ID отклоняется.
+   */
+  async removeModels(id, { models = [], revision = null } = {}) {
+    const providerId = String(id || '');
+    if (!PROVIDER_ID.test(providerId)) throw fail('INPUT_INVALID', 'Некорректный ID провайдера.');
+    const wanted = (Array.isArray(models) ? models : []).map(model => String(model?.id ?? model ?? '').trim()).filter(Boolean);
+    if (!wanted.length) throw fail('INPUT_INVALID', 'Не указано ни одной модели.');
+    if (wanted.length > MAX_MODELS) throw fail('INPUT_INVALID', `За один раз можно убрать не более ${MAX_MODELS} моделей.`);
+    return this.#serialize(async () => {
+      const old = await readDocument(this.file);
+      if (revision !== old.revision) throw fail('CONFLICT', 'Конфигурация изменилась. Обновите список и повторите правку.');
+      const entry = old.doc.providers[providerId];
+      if (!entry) throw fail('NOT_FOUND', `Провайдера ${providerId} нет в models.json.`);
+      const current = Array.isArray(entry.models) ? entry.models : [];
+      const present = new Set(current.map(model => String(model?.id ?? '')));
+      const missing = wanted.filter(modelId => !present.has(modelId));
+      if (missing.length) throw fail('INPUT_INVALID', `Этих моделей нет у провайдера ${providerId}: ${missing.join(', ')}`);
+      entry.models = current.filter(model => !wanted.includes(String(model?.id ?? '')));
+      await this.#write(old);
+      return { ...(await this.list()), removed: wanted };
+    });
   }
 
   /**

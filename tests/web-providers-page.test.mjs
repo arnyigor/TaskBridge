@@ -131,3 +131,19 @@ test('проверка черновика показывает модели и �
   fire(document.getElementById('add-selected'), window);
   assert.deepEqual(document.getElementById('models').value.split('\n'), ['a', 'b']);
 });
+
+test('модель убирается из выбранного провайдера и список обновляется', async () => {
+  const { document, window, calls } = buildPage();
+  await tick(100);
+  fire([...document.getElementById('providers').querySelectorAll('button.entry')][0], window);
+  const rows = [...document.getElementById('model-removal-list').querySelectorAll('.entry')];
+  assert.deepEqual(rows.map(row => row.textContent.replace('Убрать', '').trim()), ['a', 'b'], 'модели записи видны');
+
+  fire(rows[1].querySelector('button'), window);
+  for (let attempt = 0; attempt < 100 && !/убрана/.test(document.getElementById('notice').textContent); attempt += 1) await tick(20);
+  const call = calls.find(entry => entry.url.endsWith('/models/remove'));
+  assert.ok(call, 'маршрут вызван');
+  assert.equal(call.method, 'POST');
+  assert.deepEqual(call.body, { models: ['b'], revision: 'rev-1' }, 'уходит ровно один ID и ревизия файла');
+  assert.match(document.getElementById('notice').textContent, /убрана из tb-demo/);
+});
