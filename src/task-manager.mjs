@@ -2675,6 +2675,10 @@ export class TaskManager extends EventEmitter {
       // сравнивает её со своим курсором и не даёт старому GET откатить «лицо» хода
       // (фазу, стадию, статус), которую уже принесло SSE.
       snapshotSeq: Number(_snapshotSeq || 0),
+      // Идентификатор текущего прогона: по нему `/api/tasks/:id/runs` и журнал
+      // связывают запрос, команду и сессию (пункт 1.1/1.5 плана). Закрытый прогон
+      // остаётся в истории runs, а не в снимке задачи.
+      runId: this.runCoordinator ? this.runCoordinator.current(task.id) : null,
       runtime: this.#runtimeFacts(task),
       turnState: this.#turnState(task),
       // Ожидание провайдера существует только пока живёт процесс, который его

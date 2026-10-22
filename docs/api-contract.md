@@ -210,7 +210,16 @@ models.json изменён во время запроса, запись отме
 `id`, `title`, `prompt`, `projectId`, `status`, `createdAt`, `updatedAt`,
 `model: { provider, id }`, `requestedModel`, `thinkingLevel`, `workspacePath`,
 `queueReason`, `current`, `errorCode`, `error`, `files[]`, `compaction`, `lastUsage`,
-`metrics`, `speeds`, `outputFiles[]`, `nativeSource`, `applied`, `worktree`.
+`metrics`, `speeds`, `outputFiles[]`, `nativeSource`, `applied`, `worktree`,
+`runId`, `snapshotSeq`, `runtime`, `turnState`.
+
+`runId` — идентификатор текущего прогона (одного хода, включая ожидание
+подтверждения) или `null`, когда ход закончен. Прогон живёт в журнале
+`GET /api/tasks/:id/runs` (`id, kind, status, startedAt, finishedAt, data`) и после
+завершения остаётся там со статусом хода; повторное открытие закрытого прогона
+запрещено на уровне записи (`ON CONFLICT ... WHERE status NOT IN (terminal)`).
+Прогоны, не закрытые предыдущим процессом, при старте получают `FAILED` с
+`errorCode: UNKNOWN_AFTER_CRASH` — их исход неизвестен, и он не повторяется.
 
 `metrics` — числа последнего хода (PP/TG, размер промпта, TTFT), `speeds` — по всей
 сессии: `{ turns, ppMax, ppAvg, ppTurns, tgAvg, tgTurns }`. В средние входят только

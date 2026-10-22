@@ -16,6 +16,11 @@ export class RunCoordinator {
     return id;
   }
 
+  /** Текущий (незакрытый) запуск сессии — для корреляции в API и диагностике. */
+  current(taskId) {
+    return this.open.get(taskId) || null;
+  }
+
   recover() { return this.store.interruptRuns(new Date().toISOString()); }
 
   terminal(taskId, status, finishedAt) {
