@@ -1,10 +1,7 @@
 package ru.arny.taskbridge.ui.sessions
 
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -570,21 +567,31 @@ private fun ActiveSessionsHeader(count: Int) {
     }
 }
 
+/** Насколько тускнеет подсветка в самой дальней точке короткой вспышки. */
+private const val ATTENTION_FLASH_DIM = 0.45f
+
 /**
- * How strongly an alerted row is lit right now; 0 for rows without an unseen alert.
- * The pulse is what makes the row noticeable without moving the screen to it.
+ * Насколько ярко подсвечена строка с непрочитанным уведомлением; 0 — уведомления нет.
+ *
+ * Вспышка короткая: две волны за ~1.7 с, потом подсветка замирает на ярком конце.
+ * Бесконечная анимация здесь стоила дорого: пока уведомление не открыто, Compose
+ * перерисовывал всё окно каждый кадр (60 раз в секунду) без всякой надобности —
+ * непрочитанное видно и по неподвижной подсветке. Ключ эффекта — сама [Animatable]:
+ * опрос списка или рекомпозиция её не перезапускают, только новое уведомление
+ * (строка появляется заново) или снятие внимания.
  */
 @Composable
 internal fun attentionPulse(attention: Boolean): Float {
     if (!attention) return 0f
-    val transition = rememberInfiniteTransition(label = "attention")
-    val value by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(tween(durationMillis = 700, easing = LinearEasing), RepeatMode.Reverse),
-        label = "attentionPulse",
-    )
-    return value
+    val flash = remember { Animatable(ATTENTION_FLASH_DIM) }
+    LaunchedEffect(flash) {
+        repeat(2) {
+            flash.animateTo(1f, tween(durationMillis = 350, easing = LinearEasing))
+            flash.animateTo(ATTENTION_FLASH_DIM, tween(durationMillis = 350, easing = LinearEasing))
+        }
+        flash.animateTo(1f, tween(durationMillis = 250, easing = LinearEasing))
+    }
+    return flash.value
 }
 
 @Composable

@@ -42,16 +42,15 @@ import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 
-/** A small colored dot; pulses while the state is live. */
+/**
+ * A small colored dot. Static on purpose: a pulse would keep the whole window repainting
+ * 60 times a second while anything is running, and a working session is already readable
+ * from the colour (and from the pill text next to it).
+ */
 @Composable
 fun StatusDot(state: DisplayState, modifier: Modifier = Modifier, size: Int = 10) {
     val color = LocalStatusColors.current.of(state)
-    val alpha = if (state == DisplayState.WORKING || state == DisplayState.WAITING_USER) {
-        val transition = rememberInfiniteTransition(label = "pulse")
-        val value by transition.animateFloat(0.35f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "alpha")
-        value
-    } else 1f
-    Box(modifier.size(size.dp).alpha(alpha).clip(CircleShape).background(color))
+    Box(modifier.size(size.dp).clip(CircleShape).background(color))
 }
 
 /** "● Работает" — the state as a tinted pill. */
