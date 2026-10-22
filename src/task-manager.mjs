@@ -4857,6 +4857,10 @@ export class TaskManager extends EventEmitter {
     // even after Pi has stopped. The last completed snapshot remains available.
     // The turn ends cancelled: the in-flight marker is spent (see #deliverMessage).
     task.inFlightPrompt = null;
+    // Эта ветка ставит терминальный статус напрямую, минуя #setStatus, поэтому
+    // ожидание провайдера снимается здесь же: иначе остановленная сессия остаётся
+    // с «ждём провайдера» до следующего хода (пункт 1.2 плана).
+    await this.#clearProviderWait(task, 'cancelled', { announce: false });
     this.#terminalPublication.hold(task, this.#publicTask(task));
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
@@ -6453,6 +6457,12 @@ export class TaskManager extends EventEmitter {
   // --- provider wait (a retry Pi announces while the agent is still alive) ----
   // Логика — в provider-wait.mjs; здесь только привязка публикации событий задачи.
   async #noteProviderWait(task, wait) {
+    // Ход уже закрыт (STOP или отказ): объявление о повторе принадлежит прошлому
+    // ходу. Записав его снова, сессия показала бы «ждём провайдера» уже после
+    // остановки — воспроизведено на `fault-provider-wait` + STOP (пункт 1.2).
+    if (RUN_TERMINAL.has(task.status)) return;
+    const current = this.runtimes.get(task.id);
+    if (current?.cancelRequested || current?.retired) return;
     const failure = classifyEngineError(wait?.reason);
     const guidance = {
       MODEL_AUTH_INCOMPATIBLE: 'Модель несовместима с авторизацией ChatGPT. Выберите доступную модель провайдера openai-codex или измените способ авторизации.',

@@ -234,6 +234,32 @@ test('a provider wait is reported with its retry moment and stays one note per r
   assert.deepEqual(events.filter(event => event.type === 'UI_NOTIFY'), [], 'объявление о повторе по-прежнему не пузырь чата');
 });
 
+// Пункт 1.2 плана: STOP во время ожидания провайдера. Ожидание длится час, и
+// объявления о нём приходят повторно — после остановки они не должны ни вернуть
+// сессию в работу, ни оставить «ждём провайдера» на экране.
+test('STOP во время ожидания провайдера закрывает ход и снимает ожидание', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const task = await api('/api/tasks', { projectId: 'fixture', prompt: 'fault-provider-wait' });
+  await until(async () => (await api(`/api/tasks/${task.id}`)).providerWait);
+
+  await api(`/api/tasks/${task.id}/cancel`, {});
+  const stopped = await settle(api, task.id, { tries: 400 });
+  assert.equal(stopped.status, 'CANCELLED', stopped.error || '');
+  assert.equal(stopped.providerWait, null, 'ожидание принадлежало остановленному ходу');
+  assert.doesNotMatch(String(stopped.current || ''), /^Ждём провайдера/, 'стадия ожидания не остаётся на экране');
+
+  // Повторное объявление ожидания после STOP — не повод переоткрыть ход.
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  const after = await api(`/api/tasks/${task.id}`);
+  assert.equal(after.status, 'CANCELLED');
+  assert.equal(after.providerWait, null);
+  const events = await api(`/api/tasks/${task.id}/events?limit=0`);
+  assert.equal(events.filter(event => event.type === 'TASK_CANCELLED').length, 1, 'ровно одно терминальное событие');
+  assert.equal(events.filter(event => event.type === 'TASK_SUCCEEDED' || event.type === 'TASK_FAILED').length, 0);
+});
+
 // Тот же отказ, но так, как его объявляет живой Pi (2026-10-12, сессия
 // openai-codex/gpt-5.6-sol): один эпизод пришёл тремя кадрами и разными словами —
 // «<модель> network/timeout error for 0m 15s; waiting, then retrying. Error: fetch
