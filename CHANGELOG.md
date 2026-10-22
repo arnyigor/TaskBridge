@@ -8,6 +8,20 @@
 
 Агент выполняет ровно запрошенное, а найденное инструментом не исчезает вместе с ошибкой модели. Версия и номер сборки мобильных клиентов не менялись: API расширен аддитивно (`toolEvidence` в `TASK_FAILED`), KMP/web не тронуты.
 
+- **Follow Plan (FP-03): durable-цикл без собственного runner.**
+  `src/application/plan-follower.mjs` — конечный автомат
+  `IDLE→RUNNING_STEP→REVIEWING→(следующий шаг | пауза | COMPLETED)` поверх уже
+  существующей отправки в TaskManager: своего Pi-процесса, очереди и retry у него
+  нет. Один цикл на задачу, детерминированный `commandId` на цикл+шаг+эпоху
+  (повтор распознаёт ledger), dispatch intent сохраняется **до** отправки, поэтому
+  рестарт с отправленной командой даёт `PAUSED_REVIEW`/`PLAN_UNKNOWN_OUTCOME`, а
+  не повторное выполнение. Отсутствие checkpoint — ровно один контрольный ход,
+  затем пауза. Лимиты: 3 цикла без измеримого прогресса, 20 циклов, бюджеты
+  проверяются на каждом dispatch. STOP увеличивает durable-эпоху и отменяет
+  команду; поздний checkpoint/ACK с чужой эпохой игнорируется. Файл меняется только
+  по CAS: правка человека — `PLAN_REVISION_CONFLICT`, а не перезапись. Тесты:
+  `tests/plan-follower.test.mjs` (12 сценариев без модели).
+
 - **Follow Plan (FP-02): checkpoint и строгая проверка завершения.** Новый
   `pi-extension/taskbridge-follow-plan.js` регистрирует `taskbridge_plan_checkpoint`
   (решения `CONTINUE/REPLAN/COMPLETE/BLOCKED/NEED_INPUT/NO_PROGRESS`, evidence с

@@ -162,8 +162,12 @@ test('CONTINUE and REPLAN map to the next cycle instead of finishing', () => {
   assert.equal(cont.state, 'CONTINUE');
   assert.deepEqual(cont.openSteps, ['S-002']);
 
-  const empty = decideCheckpoint({ plan: plan(), checkpoint: checkpoint({ decision: 'CONTINUE' }), cycle });
-  assert.equal(empty.state, 'PAUSED_REVIEW', 'CONTINUE with nothing left contradicts the file');
+  // CONTINUE is judged against the file before the claims: the last step finished
+  // in this turn means the follower asks for a completion claim, not another step.
+  const last = decideCheckpoint({ plan: plan(), checkpoint: checkpoint({ decision: 'CONTINUE' }), cycle });
+  assert.equal(last.state, 'CONTINUE');
+  assert.deepEqual(last.openSteps, ['S-002']);
+  assert.equal(last.plan.steps[1].status, 'DONE', 'the claim is applied for the follower to see');
 
   const replan = decideCheckpoint({ plan: plan(), checkpoint: checkpoint({ decision: 'REPLAN', completedStepIds: [], evidence: [] }), cycle });
   assert.equal(replan.state, 'PAUSED_REVIEW');

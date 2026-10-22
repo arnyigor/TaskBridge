@@ -139,9 +139,10 @@ export function decideCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_POL
   }
 
   const after = withCompletedSteps(plan, inspection);
-  // Open work is judged after the checkpoint's claims were applied, otherwise a
-  // CONTINUE that finished the last step would contradict itself.
-  const open = after.steps.filter(step => step.status !== 'DONE' && step.status !== 'SKIPPED').map(step => step.id);
+  // Open work is judged against the file BEFORE this turn's claims: CONTINUE means
+  // "there is still work", and whether the last step is finished is the follower's
+  // question (it may need one completion claim instead of another step).
+  const open = plan.steps.filter(step => step.status !== 'DONE' && step.status !== 'SKIPPED').map(step => step.id);
   const reasons = [];
 
   switch (inspection.decision) {
