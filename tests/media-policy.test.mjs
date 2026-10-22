@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -302,4 +303,60 @@ test('открытая картинка больше бюджета 2 МБ вс�
   // Ссылка на месте: если payload всё же не пролезет по общему бюджету, модель
   // знает, как попросить картинку снова.
   assert.equal(parseMarker(projected.messages[0].content[0].text), sha);
+});
+
+// MEDIA-06H: имя файла — sha256 его содержимого, поэтому полузаписанный файл с
+// правильным именем выглядит как настоящий. Ни читать его модели, ни принимать
+// за готовый нельзя; когда байты под рукой (мы их и сохраняем) — перезаписать.
+test('оборванный архив не отдаётся модели, а называется повреждённым', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-media-corrupt-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = createFileStore(dir);
+  const png = Buffer.from(Array.from({ length: 8192 }, (_, index) => (index * 3) % 251));
+  const id = crypto.createHash('sha256').update(png).digest('hex');
+  await fs.writeFile(path.join(dir, `${id}.png`), png.subarray(0, 512));
+
+  assert.equal(await store.load(id), null, 'обрезанные байты не выдаются как картинка');
+  assert.equal(await store.verify(id), 'corrupt');
+  const host = fakePi();
+  process.env.TASKBRIDGE_MEDIA_ROOT = dir;
+  process.env.TASKBRIDGE_MEDIA_NOTIFY = '0';
+  t.after(() => { delete process.env.TASKBRIDGE_MEDIA_ROOT; delete process.env.TASKBRIDGE_MEDIA_NOTIFY; });
+  installMediaPolicy(host);
+  const opened = await host.tools.get('taskbridge_media_open').execute('call-corrupt', { id });
+  assert.equal(opened.isError, true);
+  assert.match(opened.content[0].text, /повреждён/, 'сказано, что файл повреждён, а не «не найден»');
+});
+
+test('повреждённый архив перезаписывается теми же байтами и снова открывается', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-media-repair-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = createFileStore(dir);
+  const png = Buffer.from(Array.from({ length: 4096 }, (_, index) => (index * 7) % 251));
+  const id = crypto.createHash('sha256').update(png).digest('hex');
+  await fs.writeFile(path.join(dir, `${id}.png`), Buffer.from('torn'));
+
+  const saved = await store.save(png.toString('base64'), 'image/png');
+  assert.equal(saved.sha, id);
+  assert.equal(saved.written, true);
+  assert.equal(saved.repaired, true);
+  assert.deepEqual(await fs.readdir(dir), [`${id}.png`], 'временных файлов не осталось и копий нет');
+  const opened = await store.load(id);
+  assert.deepEqual(Buffer.from(opened.data, 'base64'), png);
+  assert.equal(await store.verify(id), 'ok');
+});
+
+test('две сессии сохраняют одну картинку одновременно — файл один и целый', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-media-race-'));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const store = createFileStore(dir);
+  const png = Buffer.from(Array.from({ length: 32 * 1024 }, (_, index) => index % 251));
+  const [first, second] = await Promise.all([
+    store.save(png.toString('base64'), 'image/png'),
+    store.save(png.toString('base64'), 'image/png'),
+  ]);
+  assert.equal(first.sha, second.sha);
+  assert.deepEqual(await fs.readdir(dir), [`${first.sha}.png`]);
+  const opened = await store.load(first.sha);
+  assert.deepEqual(Buffer.from(opened.data, 'base64'), png);
 });

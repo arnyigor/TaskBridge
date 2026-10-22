@@ -125,8 +125,39 @@ export function shrinkSession(text, { keepImages = DEFAULT_KEEP_IMAGES } = {}) {
 const MB = 1024 * 1024;
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-');
 
+// Rename is the only moment an artifact becomes visible under its final name, but
+// on Windows another process holding the target open makes it fail with EPERM /
+// EBUSY for a moment — retry instead of failing a repair on a transient state.
+async function renameWithRetry(from, to, attempts = 5) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fs.rename(from, to);
+    } catch (error) {
+      const transient = ['EPERM', 'EBUSY', 'EACCES', 'EEXIST'].includes(error.code);
+      if (!transient || attempt >= attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, attempt * 10));
+    }
+  }
+}
+
+let tempCounter = 0;
+
+// 'ok' — the file exists and really hashes to the name it carries; 'missing' —
+// nothing there; 'corrupt' — something is there, but it is not those bytes.
+async function artifactState(file, sha) {
+  const existing = await fs.readFile(file).catch(() => null);
+  if (!existing) return 'missing';
+  return crypto.createHash('sha256').update(existing).digest('hex') === sha ? 'ok' : 'corrupt';
+}
+
 // The original image, once, on disk. Content-addressed: the same screenshot read
 // twice is stored once, and a second repair of the same session writes nothing.
+//
+// The name is the sha256 of the bytes, so a half-written file under that name
+// would look exactly like a good one — and the placeholder in the transcript
+// points the model at this path. Hence: write a temp file in the same directory,
+// rename it into place only when the write finished, and trust an existing name
+// only after hashing its content.
 export async function saveArtifact(dir, part, bytes) {
   const payload = imagePayload(part);
   if (!payload) return null;
@@ -134,9 +165,19 @@ export async function saveArtifact(dir, part, bytes) {
   const sha = crypto.createHash('sha256').update(buffer).digest('hex');
   const extension = EXTENSIONS[payload.mimeType] || 'bin';
   const file = path.join(dir, `${sha}.${extension}`);
-  const exists = await fs.access(file).then(() => true, () => false);
-  if (!exists) await fs.writeFile(file, buffer);
-  return { file, sha256: sha, bytes, mimeType: payload.mimeType, written: !exists };
+  const state = await artifactState(file, sha);
+  if (state === 'ok') return { file, sha256: sha, bytes, mimeType: payload.mimeType, written: false };
+  // A corrupt leftover is replaced: the source bytes are in hand right here.
+  tempCounter += 1;
+  const temp = path.join(dir, `.${sha}.${extension}.tmp-${process.pid}-${tempCounter}`);
+  try {
+    await fs.writeFile(temp, buffer);
+    await renameWithRetry(temp, file);
+  } catch (error) {
+    await fs.rm(temp, { force: true }).catch(() => {});
+    throw error;
+  }
+  return { file, sha256: sha, bytes, mimeType: payload.mimeType, written: true, repaired: state === 'corrupt' };
 }
 
 // A record of what the repair may not change: message ids, parent links, record

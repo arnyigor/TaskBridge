@@ -223,47 +223,73 @@ test('после восстановления архивируются толь�
   }
 });
 
-// MEDIA-06F: восстановление — это «сначала архив, потом одна замена файла».
-// Убитый посреди работы процесс не должен оставить полу-записанную историю.
-test('прерванный посреди архивации процесс оставляет оригинал читаемым', { timeout: 180000 }, async t => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shrink-kill-'));
+// MEDIA-06F (детерминированно): публикация архива — это rename, и только он делает
+// файл видимым под финальным именем. Дочерний процесс перехватывает именно этот
+// rename, сообщает READY_TO_COMMIT и висит на барьере; родитель убивает его
+// ровно в этот момент. Никаких гонок с SSD: состояние воспроизводится точно.
+test('убитый перед публикацией архива процесс не портит ни архив, ни историю', { timeout: 120000 }, async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'shrink-barrier-'));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const file = path.join(dir, 's.jsonl');
   const artifactDir = path.join(dir, 'media');
-  const IMAGES = 40;
+  const IMAGES = 4;
   const lines = [sessionHeader, userText('начало')];
-  for (let index = 0; index < IMAGES; index += 1) lines.push(toolResultWithImage(`img${index}`, 900 * 1024, `pic${index}`));
+  for (let index = 0; index < IMAGES; index += 1) lines.push(toolResultWithImage(`img${index}`, 200_000, `pic${index}`));
   const session = lines.join('\n');
   await fs.writeFile(file, session);
 
+  // Перехват живёт в тестовом процессе: fs/promises импортируется по умолчанию,
+  // значит это один и тот же объект, и подмена rename видна модулю репозитория.
   const runner = path.join(dir, 'repair.mjs');
   const moduleHref = new URL('../src/session-shrink.mjs', import.meta.url).href;
-  await fs.writeFile(runner, `import { shrinkSessionFile } from ${JSON.stringify(moduleHref)};\n`
-    + `await shrinkSessionFile(${JSON.stringify(file)}, { keepImages: 2, limitBytes: 1024, artifactDir: ${JSON.stringify(artifactDir)} });\n`);
+  await fs.writeFile(runner, [
+    "import { createRequire } from 'node:module';",
+    'const require = createRequire(import.meta.url);',
+    "const fsp = require('node:fs/promises');",
+    'const realRename = fsp.rename;',
+    'let parked = false;',
+    'fsp.rename = async (from, to) => {',
+    "  if (!parked && String(to).endsWith('.png')) {",
+    '    parked = true;',
+    "    process.stdout.write('READY_TO_COMMIT\\n');",
+    '    await new Promise(() => setInterval(() => {}, 1000));',
+    '  }',
+    '  return realRename(from, to);',
+    '};',
+    `const { shrinkSessionFile } = await import(${JSON.stringify(moduleHref)});`,
+    `await shrinkSessionFile(${JSON.stringify(file)}, { keepImages: 2, limitBytes: 1024, artifactDir: ${JSON.stringify(artifactDir)} });`,
+    ''
+  ].join('\n'));
 
-  const child = spawn(process.execPath, [runner], { stdio: 'ignore' });
+  const child = spawn(process.execPath, [runner], { stdio: ['ignore', 'pipe', 'ignore'] });
   t.after(() => { try { child.kill('SIGKILL'); } catch { /* уже мёртв */ } });
+  const ready = once(child.stdout, 'data').then(([chunk]) => String(chunk));
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('барьер не достигнут')), 60000));
+  assert.match(await Promise.race([ready, timeout]), /READY_TO_COMMIT/);
 
-  // Ждём, пока архивация действительно начнётся, и только тогда убиваем.
-  let archivedBeforeKill = 0;
-  for (let attempt = 0; attempt < 1500; attempt += 1) {
-    archivedBeforeKill = (await fs.readdir(artifactDir).catch(() => [])).length;
-    if (archivedBeforeKill >= 3) break;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  assert.ok(archivedBeforeKill >= 3, 'архивация успела начаться');
+  // В этот момент: первый архив лежит только как временный файл, истории не тронута.
+  const pending = (await fs.readdir(artifactDir)).filter(name => name.includes('.tmp-'));
+  assert.equal(pending.length, 1, 'публикация ждёт на барьере');
+  const published = (await fs.readdir(artifactDir)).filter(name => name.endsWith('.png'));
+  assert.deepEqual(published, [], 'под финальным именем ничего не появилось раньше времени');
+  assert.equal(await fs.readFile(file, 'utf8'), session, 'история не тронута');
+
   child.kill('SIGKILL');
   await once(child, 'exit');
-
-  // Оригинал не тронут: каждая строка по-прежнему разбирается как JSON.
   const after = await fs.readFile(file, 'utf8');
-  assert.equal(after, session, 'прерванный прогон не переписал историю');
-  const parsed = after.split('\n').filter(Boolean).map(line => { assert.doesNotThrow(() => JSON.parse(line)); return true; });
-  assert.equal(parsed.length, IMAGES + 2);
-  // Архивные файлы, которые успели лечь, целы и адресуются содержимым.
-  for (const name of await fs.readdir(artifactDir)) {
+  assert.equal(after, session, 'убитый процесс не переписал историю');
+  for (const line of after.split('\n').filter(Boolean)) assert.doesNotThrow(() => JSON.parse(line));
+
+  // Оборванный временный файл остался мусором, но он не выдаётся за архив:
+  // повторное восстановление проходит и публикует целые файлы.
+  const second = await shrinkSessionFile(file, { keepImages: 2, limitBytes: 1024, artifactDir });
+  assert.equal(second.changed, true, `повтор: ${second.reason}`);
+  assert.equal(second.dropped, 2);
+  const artifacts = (await fs.readdir(artifactDir)).filter(name => name.endsWith('.png'));
+  assert.equal(artifacts.length, 2);
+  for (const name of artifacts) {
     const bytes = await fs.readFile(path.join(artifactDir, name));
-    assert.equal(bytes.length, 900 * 1024, `${name} дописан целиком`);
-    assert.equal(name, `${crypto.createHash('sha256').update(bytes).digest('hex')}.png`);
+    assert.equal(bytes.length, 200_000, `${name} записан целиком`);
+    assert.equal(name, `${crypto.createHash('sha256').update(bytes).digest('hex')}.png`, 'имя совпадает с содержимым');
   }
 });

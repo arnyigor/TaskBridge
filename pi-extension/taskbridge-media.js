@@ -83,9 +83,41 @@ export function parseMarker(text) {
 
 // --- media store ------------------------------------------------------------
 
+const sha256 = buffer => crypto.createHash('sha256').update(buffer).digest('hex');
+
+// Rename is the only moment an artifact becomes visible under its final name, but
+// on Windows a target held open by another process makes it fail with EPERM /
+// EBUSY for a moment — retry instead of failing an archive write.
+async function renameWithRetry(from, to, attempts = 5) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fsp.rename(from, to);
+    } catch (error) {
+      const transient = ['EPERM', 'EBUSY', 'EACCES', 'EEXIST'].includes(error.code);
+      if (!transient || attempt >= attempts) throw error;
+      await new Promise(resolve => setTimeout(resolve, attempt * 10));
+    }
+  }
+}
+
+let tempCounter = 0;
+
+// 'ok' — the file exists and really hashes to the name it carries; 'missing' —
+// nothing there; 'corrupt' — something is there, but it is not those bytes.
+async function artifactState(target, sha) {
+  const existing = await fsp.readFile(target).catch(() => null);
+  if (!existing) return 'missing';
+  return sha256(existing) === sha ? 'ok' : 'corrupt';
+}
+
 // Content-addressed: the same screenshot read twice is written once. The file
 // name is the sha256 of the image bytes, so a reference in the transcript stays
 // valid even if the same picture arrives through another session.
+//
+// The name is trusted only after hashing the content: a half-written file with
+// the right name would otherwise be handed to the model as if it were the real
+// screenshot. New bytes go to a temp file in the same directory and are renamed
+// into place, so a killed process leaves either a complete artifact or none.
 export function createFileStore(root) {
   if (!root || !path.isAbsolute(root)) throw new Error('TASKBRIDGE_MEDIA_ROOT must be an absolute path');
   const file = (sha, mimeType) => path.join(root, `${sha}.${EXTENSIONS[mimeType] || 'bin'}`);
@@ -93,24 +125,45 @@ export function createFileStore(root) {
     root,
     async save(base64, mimeType) {
       const buffer = Buffer.from(base64, 'base64');
-      const sha = crypto.createHash('sha256').update(buffer).digest('hex');
+      const sha = sha256(buffer);
       const target = file(sha, mimeType);
-      const exists = await fsp.access(target).then(() => true, () => false);
-      if (!exists) {
-        await fsp.mkdir(root, { recursive: true });
-        await fsp.writeFile(target, buffer);
+      const state = await artifactState(target, sha);
+      if (state === 'ok') {
+        return { sha, bytes: buffer.length, mimeType, file: target, written: false };
       }
-      return { sha, bytes: buffer.length, mimeType, file: target, written: !exists };
+      // Missing, or a corrupt leftover: the source bytes are in hand right here.
+      await fsp.mkdir(root, { recursive: true });
+      tempCounter += 1;
+      const temp = path.join(root, `.${sha}.${EXTENSIONS[mimeType] || 'bin'}.tmp-${process.pid}-${tempCounter}`);
+      try {
+        await fsp.writeFile(temp, buffer);
+        await renameWithRetry(temp, target);
+      } catch (error) {
+        await fsp.rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
+      return { sha, bytes: buffer.length, mimeType, file: target, written: true, repaired: state === 'corrupt' };
     },
     async load(sha) {
       for (const [mimeType, extension] of Object.entries(EXTENSIONS)) {
         const target = path.join(root, `${sha}.${extension}`);
-        const exists = await fsp.access(target).then(() => true, () => false);
-        if (!exists) continue;
-        const buffer = await fsp.readFile(target);
+        const buffer = await fsp.readFile(target).catch(() => null);
+        if (!buffer) continue;
+        // A file whose content does not hash to its own name is not this picture.
+        if (sha256(buffer) !== sha) continue;
         return { type: 'image', data: buffer.toString('base64'), mimeType };
       }
       return null;
+    },
+    // Why load() returned nothing: 'corrupt' is worth distinguishing in the tool
+    // message — the operator can still re-read the image, but silence would look
+    // like the archive was never made.
+    async verify(sha) {
+      for (const extension of Object.values(EXTENSIONS)) {
+        const state = await artifactState(path.join(root, `${sha}.${extension}`), sha);
+        if (state !== 'missing') return state;
+      }
+      return 'missing';
     },
     async size(sha) {
       for (const extension of Object.values(EXTENSIONS)) {
@@ -412,8 +465,18 @@ export default function (pi) {
     },
     async execute(_toolCallId, params) {
       if (!store) return { content: [{ type: 'text', text: 'TaskBridge media store is disabled for this session.' }], isError: true };
-      const image = await store.load(String(params?.id || ''));
-      if (!image) return { content: [{ type: 'text', text: 'Скриншот не найден в локальном хранилище TaskBridge.' }], isError: true };
+      const id = String(params?.id || '');
+      const image = await store.load(id);
+      if (!image) {
+        // «Повреждён» и «не найден» — разные новости: во втором случае скриншот
+        // надо перечитать заново, в первом надо сначала починить файл
+        // (следующее сохранение тех же байт перезапишет его атомарно).
+        const state = await store.verify?.(id).catch(() => null);
+        const text = state === 'corrupt'
+          ? 'Архивный скриншот есть в хранилище, но его файл повреждён (содержимое не совпадает с sha256). Перечитайте изображение инструментом read — TaskBridge сохранит его заново.'
+          : 'Скриншот не найден в локальном хранилище TaskBridge.';
+        return { content: [{ type: 'text', text }], isError: true };
+      }
       return { content: [image] };
     }
   });
