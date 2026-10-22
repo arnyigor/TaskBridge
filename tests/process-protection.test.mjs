@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { startFixture } from './server-fixture.mjs';
 import { descendantsOf } from '../src/process-info.mjs';
-import { findProtection } from '../src/process-kill.mjs';
+import { findProtection, realDescendants } from '../src/process-kill.mjs';
 
 // PROC-02 (docs/TASKBRIDGE_RESOURCE_CLEANUP_PLAN.md): a tree kill must not be
 // able to reach a protected process through its parent.
@@ -107,4 +107,24 @@ test('tree kill still works when no descendant is protected', { timeout: 60000 }
     if (gone < 2) await new Promise(resolve => setTimeout(resolve, 250));
   }
   assert.equal(gone, 2, 'both parent and child must be gone after an allowed tree kill');
+});
+
+// Переиспользованный PPID: у осиротевшего процесса остаётся номер давно мёртвого
+// родителя, и ОС отдаёт этот номер новому процессу. Такой «потомок» не должен
+// запрещать законное убийство дерева (флейк на прогоне тестов 2026-10-22:
+// TaskBridge.exe оказался в потомках тестового node).
+test('потомок, стартовавший раньше родителя, к дереву не относится', () => {
+  const target = { pid: 100, startedAt: 1_000_000 };
+  const list = [
+    { pid: 100, parentPid: 1, startedAt: 1_000_000, name: 'node.exe' },
+    // Настоящий ребёнок: стартовал позже.
+    { pid: 101, parentPid: 100, startedAt: 1_000_500, name: 'node.exe' },
+    // Осиротевший чужой процесс с унаследованным PPID: стартовал задолго до цели.
+    { pid: 102, parentPid: 100, startedAt: 500_000, name: 'TaskBridge.exe' },
+    { pid: 103, parentPid: 102, startedAt: 500_100, name: 'TaskBridge.exe' },
+  ];
+  const tree = realDescendants(target, list).map(item => item.pid);
+  assert.deepEqual(tree, [101], 'в дереве только настоящий потомок');
+  // Неизвестное время старта не выкидывает запись: отказ безопаснее выстрела.
+  assert.deepEqual(realDescendants({ pid: 100, startedAt: null }, list).map(item => item.pid), [101, 102, 103]);
 });

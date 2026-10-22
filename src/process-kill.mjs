@@ -41,6 +41,24 @@ export function findProtection(target, selfPid = process.pid) {
   return null;
 }
 
+/**
+ * Потомки, которые действительно принадлежат цели. Осиротевший процесс хранит
+ * PPID давно мёртвого родителя, и этот номер ОС переиспользует для нового
+ * процесса — тогда чужой долгоживущий процесс выглядит «потомком» и запрещает
+ * законное убийство дерева (наблюдалось на прогоне тестов: TaskBridge.exe в
+ * потомках тестового node). Ребёнок не может стартовать раньше родителя, поэтому
+ * потомок с более ранним временем старта к дереву не относится. Неизвестное время
+ * старта оставляет запись в дереве: отказ лучше выстрела вслепую.
+ */
+export function realDescendants(target, list) {
+  const targetStartedAt = Number(target?.startedAt);
+  return descendantsOf(target.pid, list).filter(item => {
+    const startedAt = Number(item.startedAt);
+    if (!Number.isFinite(targetStartedAt) || !Number.isFinite(startedAt)) return true;
+    return startedAt >= targetStartedAt - 2000;
+  });
+}
+
 function promisifiedExec(file, args) {
   return new Promise((resolve, reject) => {
     execFile(file, args, { windowsHide: true, timeout: 10000 }, (error, stdout, stderr) => {
@@ -77,7 +95,7 @@ export async function killProcess({ pid, name } = {}) {
   }
   // taskkill /T kills the whole tree, so EVERY descendant is checked with the
   // same rules as the target (PROC-02): one protected child refuses the tree kill.
-  const tree = [target, ...descendantsOf(pidNum, list)];
+  const tree = [target, ...realDescendants(target, list)];
   for (const item of tree) {
     const reason = findProtection(item);
     if (reason) {
