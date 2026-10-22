@@ -120,10 +120,13 @@ fun SessionsScreen(
     var restarting by remember { mutableStateOf(false) }
     // Relative times ("5 мин") move on their own.
     var now by remember { mutableLongStateOf(graph.nowMillis()) }
-    val groups = state.groups(query, projectId)
-    val activeTasks = state.sorted.filter { displayStateOf(it).active }
-    val visibleTasks = groups.flatMap { it.sessions }
-    val visibleIds = visibleTasks.mapTo(mutableSetOf()) { it.id }
+    // Отбор и группировка считаются по данным списка, а не по каждому кадру/перерисовке:
+    // открытый диалог, поиск или переключение темы больше не заставляют заново сортировать
+    // все сессии и раскладывать их по папкам.
+    val groups = remember(state.tasks, state.projects, query, projectId) { state.groups(query, projectId) }
+    val activeTasks = remember(state.tasks) { state.sorted.filter { displayStateOf(it).active } }
+    val visibleTasks = remember(groups) { groups.flatMap { it.sessions } }
+    val visibleIds = remember(visibleTasks) { visibleTasks.mapTo(mutableSetOf()) { it.id } }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = graph.nowMillis() } }
     DisposableEffect(connection) {
         connection.sessions.start()
