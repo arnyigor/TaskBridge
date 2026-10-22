@@ -155,7 +155,11 @@ test('сорок крупных изображений: остаются две 
   for (const name of artifacts) {
     const bytes = await fs.readFile(path.join(mediaDir, name));
     assert.equal(bytes.length, (900 * 1024) / 4 * 3, `файл ${name} — это исходные байты картинки, а не пустышка`);
-    digests.set(crypto.createHash('sha256').update(bytes).digest('hex'), name);
+    const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+    // Имя файла — sha256 содержимого: по этому id модель открывает архив
+    // инструментом taskbridge_media_open (MEDIA-03), а не только по пути.
+    assert.equal(name, `${digest}.png`, 'имя архива адресуется содержимым');
+    digests.set(digest, name);
   }
   assert.equal(digests.size, IMAGES - 2, 'у каждого архива свой sha256');
   // Ссылки в истории ведут на существующие файлы и на разные: плейсхолдер — это

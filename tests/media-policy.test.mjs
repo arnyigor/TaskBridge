@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {
+import installMediaPolicy, {
   applyMediaPolicy,
   applyToolResultPolicy,
   createFileStore,
@@ -152,4 +152,69 @@ test('the file store is content-addressed: the same bytes are written once', asy
   assert.equal((await store.load(first.sha)).data, base64);
   assert.equal(await store.size(first.sha), Buffer.byteLength('same picture'));
   assert.equal(await store.load('d'.repeat(64)), null);
+});
+
+// Pi пускает расширение в себя двумя дверями: `on` (события) и `registerTool`
+// (инструменты). Этого достаточно, чтобы проверить инструмент без Pi-процесса.
+function fakePi() {
+  const hooks = new Map();
+  const tools = new Map();
+  return {
+    hooks,
+    tools,
+    on(name, handler) { hooks.set(name, [...(hooks.get(name) || []), handler]); },
+    registerTool(definition) { tools.set(definition.name, definition); }
+  };
+}
+
+// MEDIA-02/03/04: картинка уходит в архив, а модель может попросить её снова —
+// и в том же процессе, и после перезапуска (расширение и сервер перезапускаются,
+// а хранилище и ссылка в истории остаются те же).
+test('taskbridge_media_open возвращает архивный скриншот, в том числе после перезапуска', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-media-tool-'));
+  const previous = process.env.TASKBRIDGE_MEDIA_ROOT;
+  process.env.TASKBRIDGE_MEDIA_ROOT = path.join(dir, 'media');
+  process.env.TASKBRIDGE_MEDIA_NOTIFY = '0';
+  t.after(async () => {
+    if (previous === undefined) delete process.env.TASKBRIDGE_MEDIA_ROOT;
+    else process.env.TASKBRIDGE_MEDIA_ROOT = previous;
+    delete process.env.TASKBRIDGE_MEDIA_NOTIFY;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  // Разные байты — на случай, если в игру вступит адресация по содержимому.
+  const png = Buffer.from(Array.from({ length: 4096 }, (_, index) => index % 251));
+  const base64 = png.toString('base64');
+
+  const host = fakePi();
+  installMediaPolicy(host);
+  const [archive] = host.hooks.get('tool_result');
+  const archived = await archive({
+    content: [{ type: 'text', text: 'Read image file [image/png]' }, { type: 'image', data: base64, mimeType: 'image/png' }]
+  });
+  const text = archived.content.map(part => part.text || '').join(' ');
+  const id = parseMarker(text);
+  assert.ok(id, 'в истории осталась ссылка с sha256');
+  assert.ok(!text.includes(base64.slice(0, 64)), 'сами байты в истории не остаются');
+  assert.equal(archived.content.filter(part => part.type === 'image').length, 0);
+
+  // MEDIA-03: модель просит скриншот по id и получает изображение, а не текст.
+  const tool = host.tools.get('taskbridge_media_open');
+  assert.ok(tool, 'инструмент зарегистрирован');
+  const opened = await tool.execute('call-1', { id });
+  assert.equal(opened.content.length, 1);
+  assert.equal(opened.content[0].type, 'image');
+  assert.deepEqual(Buffer.from(opened.content[0].data, 'base64'), png, 'вернулись исходные байты');
+
+  // MEDIA-04: перезапуск (новый экземпляр расширения над тем же каталогом) не
+  // ломает ссылку — id, а не путь процесса, держит её живой.
+  const restarted = fakePi();
+  installMediaPolicy(restarted);
+  const again = await restarted.tools.get('taskbridge_media_open').execute('call-2', { id });
+  assert.deepEqual(Buffer.from(again.content[0].data, 'base64'), png, 'после перезапуска скриншот открывается');
+
+  // MEDIA-02, обратная сторона: чужой id — честная ошибка, а не пустая картинка.
+  const missing = await restarted.tools.get('taskbridge_media_open').execute('call-3', { id: 'a'.repeat(64) });
+  assert.equal(missing.isError, true);
+  assert.match(missing.content[0].text, /не найден/);
 });
