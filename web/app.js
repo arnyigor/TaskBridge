@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planCardModel, planEventNotice, planPathProblem, planRequestBody, toggleOffAction } from './follow-plan-view.mjs';
+import { planCardModel, planEventNotice, planFileGroups, planPathProblem, planRequestBody, toggleOffAction } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4133,6 +4133,10 @@ $('form').addEventListener('submit', async (e) => {
 function updatePlanToggle() {
   const button = $('planToggle');
   if (!button) return;
+  // With the mode disabled on the server the control is hidden, not shown as a
+  // button that always fails: an unavailable feature must not look available.
+  const enabled = planStatus ? planStatus.enabled !== false : true;
+  button.classList.toggle('hidden', !enabled);
   const active = Boolean(planStatus?.attached) && planMode;
   button.setAttribute('aria-pressed', String(active));
   button.title = planStatus?.attached
@@ -4228,12 +4232,62 @@ async function planSend(action, extra = {}) {
   return commandApi(path, planRequestBody(planStatus, extra));
 }
 
+// The plan file is picked from the project, not typed from memory: the list is
+// the Markdown files the server reports for this workspace. The text field stays
+// for a file the listing does not reach (deep folder, listing cap).
+async function openPlanDialog() {
+  const id = selectedTaskId;
+  if (!id) return;
+  if (planStatus?.enabled === false) return;
+  $('planPathError').textContent = '';
+  $('planPath').value = '';
+  $('planFiles').textContent = 'Загрузка списка…';
+  $('planDialog').classList.remove('hidden');
+  try {
+    const listing = await api(`/api/tasks/${encodeURIComponent(id)}/workspace-files`);
+    if (id !== selectedTaskId) return;
+    const groups = planFileGroups(listing);
+    const box = $('planFiles');
+    box.textContent = '';
+    // Which folder this is matters on a phone: the same file name can exist in
+    // two places, and the project folder is the only context the operator has.
+    $('planProjectPath').textContent = currentTask?.workspacePath
+      ? `Папка проекта: ${currentTask.workspacePath}`
+      : '';
+    if (!groups.length) {
+      box.textContent = 'В проекте нет Markdown-файлов — укажите путь вручную.';
+      $('planPath').focus();
+      return;
+    }
+    for (const group of groups) {
+      const section = document.createElement('div');
+      section.className = 'planFileGroup';
+      const heading = document.createElement('div');
+      heading.className = 'planFileFolder';
+      heading.textContent = group.folder ? `${group.folder}/` : 'корень проекта';
+      section.append(heading);
+      for (const file of group.files) {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'planFileChoice';
+        item.textContent = file.name;
+        item.title = `Подключить ${file.path}`;
+        item.dataset.path = file.path;
+        item.onclick = () => { $('planPath').value = file.path; $('planAttach').click(); };
+        section.append(item);
+      }
+      box.append(section);
+    }
+  } catch (error) {
+    $('planFiles').textContent = `Список не получен: ${error.message}`;
+    $('planPath').focus();
+  }
+}
+
 $('planToggle').onclick = async () => {
   if (!selectedTaskId) return;
   if (!planStatus?.attached) {
-    $('planPathError').textContent = '';
-    $('planDialog').classList.remove('hidden');
-    $('planPath').focus();
+    await openPlanDialog();
     return;
   }
   if (planMode) {

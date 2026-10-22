@@ -122,7 +122,39 @@ export function planPathProblem(value) {
   return null;
 }
 
-/** Тело запроса на запуск: ревизия едет с командой, чтобы CAS сработал. */
+/**
+ * Планы проекта для выбора: оператор не должен вбивать путь руками, но и файл,
+ * которого нет в листинге (слишком глубокая папка, лимит выдачи), должен
+ * оставаться доступным — поэтому список дополняет поле ввода, а не заменяет его.
+ */
+export function planFileChoices(listing, { limit = 200 } = {}) {
+  const entries = Array.isArray(listing?.entries) ? listing.entries : [];
+  return entries
+    .filter(entry => entry?.isFile !== false)
+    .filter(entry => /\.md$/i.test(String(entry?.path || '')))
+    // The name is derived from the path: a listing entry without `name` must not
+    // turn into an empty button.
+    .map(entry => ({ path: String(entry.path), name: String(entry.path).split('/').pop() }))
+    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .slice(0, limit);
+}
+
+/**
+ * Планы проекта по папкам: на телефоне список путей без папок не отвечает на
+ * вопрос «какой файл выбрать». Корень проекта идёт первым, дальше — по алфавиту.
+ */
+export function planFileGroups(listing) {
+  const groups = new Map();
+  for (const file of planFileChoices(listing)) {
+    const folder = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : '';
+    if (!groups.has(folder)) groups.set(folder, []);
+    groups.get(folder).push(file);
+  }
+  return [...groups.entries()]
+    .map(([folder, files]) => ({ folder, files }))
+    .sort((a, b) => (a.folder === '' ? -1 : b.folder === '' ? 1 : a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0));
+}
+
 export function planRequestBody(status, extra = {}) {
   return {
     ...(Number.isInteger(status?.revision) ? { expectedRevision: status.revision } : {}),

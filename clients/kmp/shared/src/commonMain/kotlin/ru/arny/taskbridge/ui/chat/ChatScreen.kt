@@ -524,6 +524,7 @@ fun ChatScreen(
                             scope = scope,
                             onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
                             onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
+                            projectPath = task?.workspacePath,
                         )
                         DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                         if (task != null && task.pendingPrompts.isNotEmpty()) {

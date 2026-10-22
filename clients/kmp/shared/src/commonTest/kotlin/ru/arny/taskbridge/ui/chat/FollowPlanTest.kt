@@ -3,6 +3,7 @@ package ru.arny.taskbridge.ui.chat
 import ru.arny.taskbridge.core.api.PlanFinding
 import ru.arny.taskbridge.core.api.PlanProgress
 import ru.arny.taskbridge.core.api.PlanStatus
+import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -90,6 +91,37 @@ class FollowPlanTest {
         assertTrue(model.visible)
         assertEquals("Стабилизировать историю", model.goal)
         assertEquals(6, model.actions.size)
+    }
+
+    @Test
+    fun `the plan is picked from the project, not typed from memory`() {
+        val entries = listOf(
+            WorkspaceFileEntry(name = "PLAN.md", path = "PLAN.md", isFile = true),
+            WorkspaceFileEntry(name = "docs", path = "docs", isFile = false),
+            WorkspaceFileEntry(name = "notes.txt", path = "notes.txt", isFile = true),
+            WorkspaceFileEntry(name = "IMPLEMENTATION_PLAN.MD", path = "docs/IMPLEMENTATION_PLAN.MD", isFile = true),
+        )
+        assertEquals(
+            listOf("PLAN.md", "docs/IMPLEMENTATION_PLAN.MD"),
+            planFileChoices(entries).map { it.path },
+        )
+        assertTrue(planFileChoices(null).isEmpty())
+        assertTrue(planFileChoices(entries, limit = 0).isEmpty())
+    }
+
+    @Test
+    fun `the picker groups plans by project folder, root first`() {
+        val entries = listOf(
+            WorkspaceFileEntry(name = "PLAN.md", path = "PLAN.md", isFile = true),
+            WorkspaceFileEntry(name = "DESIGN.md", path = "docs/DESIGN.md", isFile = true),
+            WorkspaceFileEntry(name = "PLAN-2.md", path = "docs/PLAN-2.md", isFile = true),
+            WorkspaceFileEntry(name = "index.js", path = "app/index.js", isFile = true),
+        )
+        val groups = planFileGroups(entries)
+        assertEquals(listOf("", "docs"), groups.map { it.folder })
+        assertEquals(listOf("PLAN.md"), groups[0].files.map { it.path })
+        assertEquals(listOf("docs/DESIGN.md", "docs/PLAN-2.md"), groups[1].files.map { it.path })
+        assertTrue(planFileGroups(null).isEmpty())
     }
 
     @Test

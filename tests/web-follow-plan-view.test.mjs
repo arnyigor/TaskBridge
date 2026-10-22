@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
-  planActions, planCardModel, planEventNotice, planHeadline, planPathProblem,
+  planActions, planCardModel, planEventNotice, planFileChoices, planFileGroups, planHeadline, planPathProblem,
   planRequestBody, planFindingsLine, toggleOffAction
 } from '../web/follow-plan-view.mjs';
 
@@ -78,6 +78,40 @@ test('the attach request needs a relative Markdown path inside the project', () 
   assert.match(planPathProblem('docs/PLAN.txt'), /Markdown/);
 });
 
+test('the plan is picked from the project, not typed from memory', () => {
+  const listing = {
+    entries: [
+      { name: 'PLAN.md', path: 'PLAN.md', isFile: true },
+      { name: 'docs', path: 'docs', isFile: false },
+      { name: 'notes.txt', path: 'notes.txt', isFile: true },
+      { name: 'docs/IMPLEMENTATION_PLAN.MD', path: 'docs/IMPLEMENTATION_PLAN.MD', isFile: true }
+    ]
+  };
+  assert.deepEqual(planFileChoices(listing), [
+    { path: 'PLAN.md', name: 'PLAN.md' },
+    { path: 'docs/IMPLEMENTATION_PLAN.MD', name: 'IMPLEMENTATION_PLAN.MD' }
+  ]);
+  assert.deepEqual(planFileChoices(null), []);
+  assert.equal(planFileChoices({ entries: [{ path: 'a.md' }] }, { limit: 0 }).length, 0);
+});
+
+test('the picker groups plans by project folder, root first', () => {
+  const listing = { entries: [
+    { path: 'docs/DESIGN.md', isFile: true },
+    { path: 'PLAN.md', isFile: true },
+    { path: 'docs/PLAN-2.md', isFile: true },
+    { path: 'app/index.js', isFile: true }
+  ] };
+  assert.deepEqual(planFileGroups(listing), [
+    { folder: '', files: [{ path: 'PLAN.md', name: 'PLAN.md' }] },
+    { folder: 'docs', files: [
+      { path: 'docs/DESIGN.md', name: 'DESIGN.md' },
+      { path: 'docs/PLAN-2.md', name: 'PLAN-2.md' }
+    ] }
+  ]);
+  assert.deepEqual(planFileGroups({ entries: [] }), []);
+});
+
 test('the command body carries the revision for CAS', () => {
   assert.deepEqual(planRequestBody(running, { commandId: 'c1' }), { expectedRevision: 7, commandId: 'c1' });
   assert.deepEqual(planRequestBody({ attached: false }, { commandId: 'c2' }), { commandId: 'c2' });
@@ -102,5 +136,6 @@ test('the composer has the switch and the card, and no «Plan Mode» wording', a
   // The buttons themselves are built by planActions (labels are asserted above, in
   // one place), the page only reserves the container for them.
   assert.match(html, /id="planActions"/);
-  assert.match(html, /id="planPath"/, 'the first switch-on asks for a file');
+  assert.match(html, /id="planPath"/, 'the first switch-on can name a file that is not in the listing');
+  assert.match(html, /id="planFiles"/, 'and the listing itself is rendered, so nothing has to be typed');
 });

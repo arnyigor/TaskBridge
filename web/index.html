@@ -396,6 +396,9 @@
           </div>
           <p class="muted small">Файл внутри проекта. Управляемый Markdown с шагами <code>S-001</code>: свободный
             текст импортируется только предпросмотром и не перезаписывается.</p>
+          <!-- Файл выбирается из проекта: путь руками — только для того, чего нет в списке. -->
+          <div id="planProjectPath" class="planProjectPath small muted"></div>
+          <div id="planFiles" class="planFiles">Загрузка списка…</div>
           <label class="planPathField">Путь: <input id="planPath" type="text" placeholder="docs/PLAN.md" /></label>
           <div id="planPathError" class="planPathError small" role="alert"></div>
           <div class="planDialogActions">

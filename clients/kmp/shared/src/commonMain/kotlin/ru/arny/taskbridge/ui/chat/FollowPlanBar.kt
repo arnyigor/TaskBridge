@@ -2,10 +2,15 @@ package ru.arny.taskbridge.ui.chat
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -30,6 +35,7 @@ import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.TaskBridgeApi
+import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 
 /**
  * Переключатель «По плану» и компактная карточка плана в композиторе (FP-05C).
@@ -41,6 +47,7 @@ import ru.arny.taskbridge.core.api.TaskBridgeApi
  * Выключение во время шага означает паузу на безопасной границе; STOP — отдельная
  * кнопка карточки.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun FollowPlanBar(
     api: TaskBridgeApi,
@@ -50,6 +57,7 @@ fun FollowPlanBar(
     scope: CoroutineScope,
     onOpenPlan: (String) -> Unit,
     onNotice: (String) -> Unit = {},
+    projectPath: String? = null,
 ) {
     var status by remember(taskId) { mutableStateOf<PlanStatus?>(null) }
     var mode by remember(taskId) { mutableStateOf(false) }
@@ -57,7 +65,22 @@ fun FollowPlanBar(
     var askPath by remember(taskId) { mutableStateOf(false) }
     var pathInput by remember(taskId) { mutableStateOf("") }
     var pathProblem by remember(taskId) { mutableStateOf<String?>(null) }
+    // The plan file is chosen from the project, not typed from memory.
+    var planGroups by remember(taskId) { mutableStateOf<List<PlanFileGroup>>(emptyList()) }
+    var filesLoading by remember(taskId) { mutableStateOf(false) }
+    var filesProblem by remember(taskId) { mutableStateOf<String?>(null) }
     val model = planCardModel(status)
+    val enabled = status?.enabled != false
+
+    LaunchedEffect(askPath) {
+        if (!askPath) return@LaunchedEffect
+        filesLoading = true
+        filesProblem = null
+        planGroups = runCatching { planFileGroups(api.workspaceFiles(taskId).entries) }
+            .onFailure { filesProblem = it.message ?: "Список файлов не получен" }
+            .getOrDefault(emptyList())
+        filesLoading = false
+    }
 
     // Re-read after every chat change: plan events are server facts, and the
     // version moves on any of them (PLAN_* arrive in the same stream).
@@ -82,6 +105,10 @@ fun FollowPlanBar(
             }
         }
     }
+
+    // A disabled feature must not look available: with followPlan.enabled=false the
+    // whole block is absent, not a button that always answers with an error.
+    if (status != null && !enabled) return
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -133,7 +160,13 @@ fun FollowPlanBar(
                     if (!line.isNullOrBlank()) {
                         Text(line, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                     }
-                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    // Six actions do not fit one phone row: «Открыть план» and
+                    // «Изменить план» were clipped off screen (Pixel 5, 2 columns).
+                    // A wrapping row keeps every control reachable.
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalArrangement = Arrangement.spacedBy(0.dp),
+                    ) {
                         for (action in model.actions) {
                             TextButton(onClick = {
                                 when (action.id) {
@@ -169,9 +202,56 @@ fun FollowPlanBar(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        "Файл внутри проекта. Управляемый Markdown с шагами S-001: свободный текст импортируется только предпросмотром.",
+                        "Выберите план в проекте. Управляемый Markdown с шагами S-001: свободный текст импортируется только предпросмотром.",
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    if (!projectPath.isNullOrBlank()) {
+                        // Which folder this is matters on a phone: the same file name can
+                        // exist twice, and the project folder is the only context.
+                        Text(projectPath, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (filesLoading) {
+                        Text("Загрузка списка…", style = MaterialTheme.typography.labelSmall)
+                    } else if (planGroups.isEmpty()) {
+                        Text(
+                            filesProblem ?: "В проекте нет Markdown-файлов — укажите путь вручную.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (filesProblem != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    } else {
+                        // The list is the main path; the field below stays for a file the
+                        // listing does not reach (deep folder, listing cap).
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
+                            for (group in planGroups) {
+                                item(key = "folder:${group.folder}") {
+                                    Text(
+                                        if (group.folder.isEmpty()) "корень проекта" else "${group.folder}/",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(top = 4.dp),
+                                    )
+                                }
+                                items(group.files, key = { it.path }) { entry ->
+                                    TextButton(onClick = {
+                                        val path = entry.path
+                                        scope.launch {
+                                            try {
+                                                status = api.attachPlan(taskId, path, newId())
+                                                mode = true
+                                                askPath = false
+                                            } catch (error: ApiException) {
+                                                pathProblem = error.error.message
+                                            } catch (error: Throwable) {
+                                                pathProblem = error.message ?: "Файл плана не подключён"
+                                            }
+                                        }
+                                    }, modifier = Modifier.fillMaxWidth()) {
+                                        Text(entry.name, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+                        }
+                    }
                     BasicTextField(
                         value = pathInput,
                         onValueChange = { pathInput = it; pathProblem = null },

@@ -1,6 +1,7 @@
 package ru.arny.taskbridge.ui.chat
 
 import ru.arny.taskbridge.core.api.PlanStatus
+import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 
 // Follow Plan в интерфейсе KMP (FP-05C): те же решения и те же подписи, что в web
 // (web/follow-plan-view.mjs). Решения живут здесь, а не в @Composable: ошибаются
@@ -105,6 +106,29 @@ fun planCardModel(status: PlanStatus?, enabled: Boolean = true): PlanCardModel {
 /** Выключение переключателя во время шага означает ПАУЗУ, а не STOP. */
 fun planToggleOffAction(status: PlanStatus?): String =
     if (status?.state in ACTIVE_STATES) "pause" else "none"
+
+/**
+ * Планы проекта для выбора: путь не набирают по памяти. Список дополняет ручной
+ * ввод, а не заменяет его — файла может не быть в выдаче (глубокая папка, лимит).
+ */
+fun planFileChoices(entries: List<WorkspaceFileEntry>?, limit: Int = 200): List<WorkspaceFileEntry> =
+    entries.orEmpty()
+        .filter { it.isFile }
+        .filter { it.path.lowercase().endsWith(".md") }
+        .sortedBy { it.path }
+        .take(limit)
+
+/**
+ * Планы проекта по папкам: на телефоне список путей без папок не отвечает на
+ * вопрос «какой файл выбрать». Корень проекта идёт первым, дальше — по алфавиту.
+ */
+data class PlanFileGroup(val folder: String, val files: List<WorkspaceFileEntry>)
+
+fun planFileGroups(entries: List<WorkspaceFileEntry>?): List<PlanFileGroup> =
+    planFileChoices(entries)
+        .groupBy { it.path.substringBeforeLast('/', "") }
+        .map { (folder, files) -> PlanFileGroup(folder, files) }
+        .sortedWith(compareBy({ it.folder.isNotEmpty() }, { it.folder }))
 
 /** Первое включение: путь к файлу плана внутри проекта. */
 fun planPathProblem(value: String): String? {
