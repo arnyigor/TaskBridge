@@ -88,6 +88,27 @@ CREATE TABLE IF NOT EXISTS work_item_sessions (
   PRIMARY KEY (work_item_id, session_id)
 );
 CREATE INDEX IF NOT EXISTS work_item_sessions_session ON work_item_sessions (session_id);
+-- Follow Plan (PLAN-FOLLOW-01, FP-01): runtime bookkeeping only. The plan's
+-- content, steps and statuses live in the Markdown file; a row here says which
+-- file this session follows, which cycle is active, what the last known revision
+-- and hash were, and how to recognise a delivery that STOP invalidated.
+CREATE TABLE IF NOT EXISTS plan_bindings (
+  task_id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  file_hash TEXT NOT NULL,
+  state TEXT NOT NULL,
+  cycle_id TEXT,
+  expected_revision INTEGER,
+  expected_hash TEXT,
+  dispatch_command_id TEXT,
+  dispatch_step_id TEXT,
+  lease_until INTEGER,
+  settled_seq INTEGER,
+  budget TEXT,
+  updated_at TEXT NOT NULL
+);
 -- Run recipes (MR-05): HOW to do a recurring piece of work — parameters, runtime,
 -- context, workspace, verification. WHEN it runs is a schedule (MR-06) and the fact
 -- that it ran is an invocation, so nothing about a concrete run lives here.
@@ -257,6 +278,73 @@ export class TaskStore {
     // Relay receipts outlive the recent-id cache and offline clients. Pruning
     // them would let an old commandId execute again after the local cache TTL.
     this.db.prepare("DELETE FROM commands WHERE done = 1 AND at < ? AND command_id NOT GLOB 'cloud-dispatch:*'").run(cutoff);
+  }
+
+  // --- Follow Plan binding ---------------------------------------------------
+  // Deliberately small: content and statuses are in the Markdown file. A restart
+  // must be able to answer "was a step dispatched, and did STOP land after it?" —
+  // that is the dispatch intent and the cancel epoch below.
+  getPlanBinding(taskId) {
+    const row = this.db.prepare('SELECT * FROM plan_bindings WHERE task_id = ?').get(String(taskId));
+    if (!row) return null;
+    return {
+      taskId: row.task_id,
+      planId: row.plan_id,
+      path: row.path,
+      revision: Number(row.revision),
+      hash: row.file_hash,
+      state: row.state,
+      cycleId: row.cycle_id || null,
+      expectedRevision: row.expected_revision == null ? null : Number(row.expected_revision),
+      expectedHash: row.expected_hash || null,
+      dispatchCommandId: row.dispatch_command_id || null,
+      dispatchStepId: row.dispatch_step_id || null,
+      leaseUntil: row.lease_until == null ? null : Number(row.lease_until),
+      settledSeq: row.settled_seq == null ? null : Number(row.settled_seq),
+      budget: row.budget ? JSON.parse(row.budget) : null,
+      updatedAt: row.updated_at
+    };
+  }
+
+  savePlanBinding(binding) {
+    this.db.prepare(`INSERT INTO plan_bindings (
+        task_id, plan_id, path, revision, file_hash, state, cycle_id,
+        expected_revision, expected_hash, dispatch_command_id, dispatch_step_id,
+        lease_until, settled_seq, budget, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id) DO UPDATE SET
+        plan_id=excluded.plan_id, path=excluded.path, revision=excluded.revision,
+        file_hash=excluded.file_hash, state=excluded.state, cycle_id=excluded.cycle_id,
+        expected_revision=excluded.expected_revision,
+        expected_hash=excluded.expected_hash, dispatch_command_id=excluded.dispatch_command_id,
+        dispatch_step_id=excluded.dispatch_step_id, lease_until=excluded.lease_until,
+        settled_seq=excluded.settled_seq, budget=excluded.budget, updated_at=excluded.updated_at`)
+      .run(String(binding.taskId), String(binding.planId), String(binding.path), Number(binding.revision),
+        String(binding.hash), String(binding.state), binding.cycleId ?? null,
+        binding.expectedRevision ?? null, binding.expectedHash ?? null,
+        binding.dispatchCommandId ?? null, binding.dispatchStepId ?? null,
+        binding.leaseUntil ?? null, binding.settledSeq ?? null,
+        binding.budget == null ? null : JSON.stringify(binding.budget),
+        String(binding.updatedAt || new Date().toISOString()));
+  }
+
+  deletePlanBinding(taskId) {
+    return this.db.prepare('DELETE FROM plan_bindings WHERE task_id = ?').run(String(taskId)).changes;
+  }
+
+  // STOP must invalidate everything issued before it, and the counter has to
+  // survive a restart: a late checkpoint carrying the old epoch is then
+  // recognisable as stale instead of looking like the current cycle. It lives in
+  // meta, not in the binding, so it exists even when nothing is attached yet.
+  bumpPlanCancelEpoch(taskId) {
+    const key = `plan_cancel_epoch:${String(taskId)}`;
+    const next = Number(this.#meta(key) || 0) + 1;
+    this.#setMeta(key, String(next));
+    return next;
+  }
+
+  planCancelEpoch(taskId) {
+    return Number(this.#meta(`plan_cancel_epoch:${String(taskId)}`) || 0);
   }
 
   // Run ledger (TZ stage 2): one prompt/repair/retry turn, with its own status

@@ -8,6 +8,22 @@
 
 Агент выполняет ровно запрошенное, а найденное инструментом не исчезает вместе с ошибкой модели. Версия и номер сборки мобильных клиентов не менялись: API расширен аддитивно (`toolEvidence` в `TASK_FAILED`), KMP/web не тронуты.
 
+- **Follow Plan (FP-01): управляемый формат плана и защита файла.**
+  `src/application/plan-file.mjs`: строгий разбор и детерминированная сериализация
+  одного Markdown-файла (front matter `taskbridge_plan/plan_id/revision/goal`,
+  шаги `### S-### | STATUS | P# | …` с критериями/проверкой/результатом,
+  раздел «Обнаруженные проблемы»), SHA-256 по нормализованному тексту (CRLF не
+  считается правкой), scope внутри workspace с realpath/symlink-проверкой,
+  compare-and-swap по ревизии **и** хэшу — правка человека даёт
+  `PLAN_REVISION_CONFLICT`, а не перезапись, атомарная запись temp+rename с
+  retry на Windows и проверкой записанных байт. Текст, который формат не
+  моделирует, отклоняется с перечнем (иначе он потерялся бы при записи); импорт
+  свободного Markdown — только предпросмотр, `[x]` из источника не считается
+  доказательством. `DONE` без результата запрещён. Runtime-состояние — в новой
+  таблице `plan_bindings` (привязка к файлу, ревизия/хэш, dispatch intent, lease,
+  settled seq) плюс durable счётчик STOP-эпохи в `meta`. Тесты:
+  `tests/plan-file.test.mjs`, `tests/plan-store.test.mjs`.
+
 - **Pi 1.4.0: RPC и Follow Plan-поверхность проверены на реальном Pi.** `compat-check.mjs`
   прошёл 8/8 (`get_state`, `prompt`, `set_model`, `steer`, `follow_up`, `compact`,
   `abort` — `aborted: true`, `isStreaming: false`, перезапуск сохранённой сессии).
