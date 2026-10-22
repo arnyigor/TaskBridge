@@ -11,11 +11,27 @@ if (process.argv.includes('--version')) {
 // Нужно, чтобы STOP гарантированно попадал в окно «работа снята с очереди, но ход
 // ещё не начался» (STAB-02A) — без таймеров и задержек в production коде.
 const gateDir = process.env.FAKE_PI_GATE_DIR;
+const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 if (gateDir && fs.existsSync(`${gateDir}/hold`)) {
   fs.writeFileSync(`${gateDir}/parked`, '1');
-  const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   const deadline = Date.now() + 120000;
   while (!fs.existsSync(`${gateDir}/release`) && Date.now() < deadline) sleepSync(20);
+}
+
+// Заслонка на конкретной RPC (STAB-02A): арм-файл `arm-<name>` задерживает ответ на
+// эту команду до `release-<name>`. В отличие от стартовой заслонки выше обработчик
+// остаётся живым: остальные кадры (в том числе abort) продолжают обрабатываться.
+// Так STOP попадает в окно «сообщение уже передаётся», а не убивает процесс.
+async function parkOn(name) {
+  if (!gateDir) return;
+  const arm = `${gateDir}/arm-${name}`;
+  if (!fs.existsSync(arm)) return;
+  fs.unlinkSync(arm);
+  fs.writeFileSync(`${gateDir}/parked-${name}`, '1');
+  const deadline = Date.now() + 60000;
+  while (!fs.existsSync(`${gateDir}/release-${name}`) && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
 }
 
 const sessionArg = process.argv.indexOf('--session');
@@ -432,7 +448,7 @@ async function runFault(fault, command, respond) {
   }
 }
 
-readline.createInterface({ input: process.stdin }).on('line', line => {
+readline.createInterface({ input: process.stdin }).on('line', async line => {
   const command = JSON.parse(line);
   const respond = (data = {}, success = true) => send({ type: 'response', id: command.id, command: command.type, success, data, ...(!success ? { error: 'Fixture rejected prompt' } : {}) });
   if (command.type === 'get_state') return respond(state());
@@ -464,6 +480,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   // 'nudge' is the extension command the delivery test drives; the fake does not run
   // commands — it only has to be honest about which ones exist.
   if (command.type === 'get_commands') {
+    await parkOn('commands');
     return respond({ commands: [{ name: 'nudge', source: 'command', description: 'Надзиратель bench-harness' }] });
   }
   // Каталог моделей, который можно менять на ходу: FAKE_PI_MODELS_FILE — JSON-список
@@ -536,6 +553,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     try {
       fs.appendFileSync('pi-deliveries.ndjson', JSON.stringify({ type: command.type, message: command.message }) + '\n');
     } catch { /* a fixture without a writable cwd must not fail the turn */ }
+    await parkOn('prompt');
     if (command.message.includes('reject')) return respond({}, false);
     const fault = faultOf(command.message);
     if (fault) return runFault(fault, command, respond);

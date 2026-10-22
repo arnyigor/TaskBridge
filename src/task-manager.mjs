@@ -2754,14 +2754,20 @@ export class TaskManager extends EventEmitter {
     if (!pending) throw Object.assign(new Error('Нет сообщения в очереди.'), { code: 'INPUT_INVALID' });
     task.pendingPrompts = rest;
     await this.store.save(this.#publicTask(task));
+    // Отмена, пришедшая после снятия текста с очереди, возвращает его только если
+    // ход не отменён: поздний сбой доставки после STOP не должен воскрешать
+    // CANCELLED обратно в QUEUED (STAB-02A).
+    const epochAtTake = task._cancelEpoch || 0;
     return {
       pending,
       restore: async () => {
+        if (this.#cancelledDuring(task, epochAtTake)) return false;
         const restored = [...(task.pendingPrompts || [])];
         restored.splice(Math.min(index, restored.length), 0, pending);
         task.pendingPrompts = restored;
         if (!this.queue.includes(task.id)) this.queue.unshift(task.id);
         await this.#markWaiting(task, 'QUEUED');
+        return true;
       }
     };
   }
@@ -2837,7 +2843,9 @@ export class TaskManager extends EventEmitter {
     } catch (error) {
       // Never die silently inside the pump: explain the retry and keep the text.
       await this.#event(task, 'QUEUE_RETRY', `Не удалось отправить из очереди: ${error.message}. Сообщение осталось в очереди.`).catch(() => {});
-      await restore();
+      const restored = await restore();
+      // Отменённое продолжение в очередь не возвращается (STAB-02A).
+      if (restored === false) await this.#releasePendingFiles(task.id, [pending]);
       return false;
     }
   }
@@ -5969,6 +5977,10 @@ export class TaskManager extends EventEmitter {
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
     // are persisted. A rejected RPC must not create a phantom user turn.
     await runtime.eventChain.catch(() => {});
+    // Последняя проверка перед захватом слота: STOP мог прийти, пока шла подготовка
+    // к отправке (список команд Pi, снимок workspace, запись DISPATCHING). Всё, что
+    // ниже, — уже настоящий ход, поэтому отменённый текст дальше не идёт (STAB-02A).
+    if (this.#cancelledDuring(task, epochAtStart)) return this.#publicTask(task);
     let release;
     const gate = new Promise(resolve => { release = resolve; });
     runtime.eventChain = runtime.eventChain.then(() => gate);
@@ -6004,6 +6016,17 @@ export class TaskManager extends EventEmitter {
       if (effectiveMode === 'prompt') await runtime.pi.prompt(message);
       else await runtime.pi.sendFollowUp(message, effectiveMode);
       accepted = true;
+      // Pi текст получил, но STOP пришёл, пока RPC был в пути: ход принадлежит
+      // отмене — он не объявляется пользовательским и не возвращает сессию в
+      // RUNNING (STAB-02A).
+      if (this.#cancelledDuring(task, epochAtStart)) {
+        task.inFlightPrompt = null;
+        if (!streaming) {
+          this.#resolveSettle(id);
+          this.#releaseSlot(id);
+        }
+        return this.#publicTask(task);
+      }
       task.error = task.errorCode = task._modelError = null;
       task.retryable = task.retryAfterMs = null;
       if (!staged.length) task.attachments = [...(task.attachments || []), ...attached];
