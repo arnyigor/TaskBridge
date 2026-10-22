@@ -325,8 +325,13 @@ export function applyChanges(plan, changes) {
           result: '',
           originFindingId: op.originFindingId || null
         };
+        // Insertion point is explicit in the file, so execution order needs no
+        // hidden rule: `before` puts a blocking defect ahead of the step it blocks.
+        const before = op.before ? plan.steps.findIndex(item => item.id === op.before) : -1;
         const after = op.after ? plan.steps.findIndex(item => item.id === op.after) : -1;
-        if (after >= 0) plan.steps.splice(after + 1, 0, step); else plan.steps.push(step);
+        if (before >= 0) plan.steps.splice(before, 0, step);
+        else if (after >= 0) plan.steps.splice(after + 1, 0, step);
+        else plan.steps.push(step);
         break;
       }
       case 'add_finding': {

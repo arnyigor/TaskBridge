@@ -19,6 +19,7 @@
 //     so an outside edit stops the cycle instead of being overwritten.
 
 import { decideCheckpoint, auditInstruction } from './plan-checkpoint.mjs';
+import { planRevision } from './plan-revision.mjs';
 
 export const FOLLOWER_STATES = Object.freeze(['IDLE', 'RUNNING_STEP', 'REVIEWING', 'PAUSED_REVIEW', 'PAUSED', 'COMPLETED']);
 export const DEFAULT_LIMITS = Object.freeze({
@@ -222,22 +223,44 @@ export class PlanFollower {
     const valid = verdict.inspection.problems.length === 0;
     const completed = valid ? verdict.inspection.completedSteps : [];
 
+    // Findings and proposals become edits of the SAME file, within the limits of
+    // plan-revision: P1 runs next, P0 waits for approval, P2/P3 stay records.
+    const revision = valid
+      ? planRevision({
+        plan: file.plan,
+        findings: verdict.inspection.findings,
+        proposals: Array.isArray(checkpoint.proposedChanges) ? checkpoint.proposedChanges : [],
+        currentStepId: binding.dispatchStepId
+      })
+      : { ops: [], added: [], findings: [], rejected: [], requiresApproval: [] };
+    if (revision.requiresApproval.length) {
+      // A P0 defect can change what the plan is; nothing is written until the
+      // operator approves it.
+      this.#save(taskId, { state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null });
+      return this.#result(taskId, 'PLAN_BLOCKED', `Нужно подтверждение: ${revision.requiresApproval.map(item => item.summary || item.stepId).join('; ')}`, {
+        requiresApproval: revision.requiresApproval, proposals: revision.ops
+      });
+    }
+
+    const ops = [
+      ...completed.map(stepId => ({
+        op: 'set_step_status',
+        stepId,
+        status: 'DONE',
+        result: (verdict.inspection.evidenceFor(stepId) || []).map(item => item.summary).join('; ') || 'подтверждено checkpoint'
+      })),
+      ...revision.ops
+    ];
+
     let applied = null;
-    if (valid && completed.length) {
+    if (valid && ops.length) {
       // Evidence summary is what the file records as the result; the run itself
       // stays in the transcript, and the file keeps only a reference-sized note.
       applied = await this.plans.update({
         path: binding.path,
         expectedRevision: file.plan.revision,
         expectedHash: file.hash,
-        changes: {
-          ops: completed.map(stepId => ({
-            op: 'set_step_status',
-            stepId,
-            status: 'DONE',
-            result: (verdict.inspection.evidenceFor(stepId) || []).map(item => item.summary).join('; ') || 'подтверждено checkpoint'
-          }))
-        }
+        changes: { ops }
       });
     }
     const plan = applied?.plan || file.plan;
@@ -248,12 +271,22 @@ export class PlanFollower {
       return this.#result(taskId, 'PLAN_COMPLETED', 'План завершён и подтверждён.', { revision: plan.revision });
     }
 
-    if (verdict.state !== 'CONTINUE') {
+    if (verdict.state === 'REPLAN' && (revision.ops.length || completed.length)) {
+      // A validated replan is the sanctioned way to change the same file; after it
+      // the cycle continues with the new first step, not with a new plan.
+      const step = nextOpenStep(plan);
+      if (step) return this.#dispatchStep({ taskId, plan, hash, step, budget: { ...budget, noProgress: 0 } });
+    }
+
+    if (verdict.state !== 'CONTINUE' && verdict.state !== 'REPLAN') {
       // REPLAN (FP-04), BLOCKED, NEED_INPUT, NO_PROGRESS and malformed data all
       // stop for the operator: no silent extra cycle. What the turn did finish is
       // already written down above.
       this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
-      return this.#result(taskId, 'PLAN_BLOCKED', verdict.reasons.join('; ') || `Пауза по решению ${verdict.decision}.`, { decision: verdict.decision });
+      return this.#result(taskId, 'PLAN_BLOCKED', verdict.reasons.join('; ') || `Пауза по решению ${verdict.decision}.`, {
+        decision: verdict.decision,
+        rejectedProposals: revision.rejected
+      });
     }
 
     // CONTINUE here means "the turn is validated and the plan still has work or a

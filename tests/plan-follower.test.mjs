@@ -335,6 +335,87 @@ test('a human edit during the cycle stops it instead of being overwritten', asyn
   assert.ok(plans.state.writes === 0, 'nothing was written over the human text');
 });
 
+test('a blocking P1 defect becomes the next dispatched step', async t => {
+  const { follower, plans, dispatched } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: start.commandId,
+    checkpoint: checkpoint({
+      completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-1', summary: 'воспроизведено' }],
+      findings: [{ id: 'F-002', priority: 'P1', blocking: true, summary: 'дубли событий при reconnect' }]
+    })
+  });
+
+  assert.equal(settled.code, 'DISPATCHED');
+  assert.equal(settled.stepId, 'S-003', 'the new blocking step runs before the rest');
+  assert.match(dispatched.at(-1).message, /S-003/);
+  const written = parsePlan(plans.state.text);
+  assert.deepEqual(written.steps.map(step => step.id), ['S-003', 'S-001', 'S-002'], 'a blocking defect is placed before the step it blocks');
+  assert.equal(written.steps[0].originFindingId, 'F-002');
+  assert.ok(written.findings.some(finding => finding.id === 'F-002'));
+});
+
+test('a P3 observation is recorded without expanding the work', async t => {
+  const { follower, plans, dispatched } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: start.commandId,
+    checkpoint: checkpoint({
+      completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-1', summary: 'воспроизведено' }],
+      findings: [{ id: 'F-002', priority: 'P3', summary: 'переименовать кнопку в панели' }]
+    })
+  });
+
+  assert.equal(settled.stepId, 'S-002', 'no new step is created for a cosmetic note');
+  const written = parsePlan(plans.state.text);
+  assert.deepEqual(written.steps.map(step => step.id), ['S-001', 'S-002']);
+  assert.ok(written.findings.some(finding => finding.id === 'F-002' && finding.priority === 'P3'));
+  assert.equal(dispatched.length, 2);
+});
+
+test('a P0 defect pauses the cycle for approval and writes nothing', async t => {
+  const { follower, plans, dispatched, store } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: start.commandId,
+    checkpoint: checkpoint({
+      completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-1', summary: 'воспроизведено' }],
+      findings: [{ id: 'F-002', priority: 'P0', blocking: true, summary: 'потеря данных при повторном импорте' }]
+    })
+  });
+
+  assert.equal(settled.code, 'PLAN_BLOCKED');
+  assert.match(settled.message, /Нужно подтверждение/);
+  assert.equal(settled.requiresApproval.length, 1);
+  assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
+  assert.equal(parsePlan(plans.state.text).steps[0].status, 'TODO', 'nothing is written before the approval');
+  assert.equal(dispatched.length, 1, 'no turn is started for an unapproved P0');
+});
+
+test('a REPLAN with a validated patch continues with the new step', async t => {
+  const { follower, plans, dispatched } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: start.commandId,
+    checkpoint: checkpoint({
+      decision: 'REPLAN',
+      proposedChanges: [{ op: 'insert_after', after: 'S-002', stepId: 'S-004', title: 'Исправить reconnect', priority: 'P1', criteria: 'нет дублей', verification: 'тест reconnect' }]
+    })
+  });
+
+  assert.equal(settled.code, 'DISPATCHED');
+  const written = parsePlan(plans.state.text);
+  assert.deepEqual(written.steps.map(step => step.id), ['S-001', 'S-002', 'S-004']);
+  assert.equal(dispatched.length, 2);
+});
+
 test('the same cycle and step produce the same command id', () => {
   const base = { taskId: 't-1', cycleId: 'c-3', stepId: 'S-004', epoch: 2 };
   assert.equal(stepCommandId(base), stepCommandId({ ...base }));
