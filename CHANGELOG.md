@@ -8,7 +8,20 @@
 
 Агент выполняет ровно запрошенное, а найденное инструментом не исчезает вместе с ошибкой модели. Версия и номер сборки мобильных клиентов не менялись: API расширен аддитивно (`toolEvidence` в `TASK_FAILED`), KMP/web не тронуты.
 
-- **Диапазон поддержки Pi расширен до 1.4.0.** На установленной 1.3.0 прогнана вся
+- **Pi 1.4.0: RPC и Follow Plan-поверхность проверены на реальном Pi.** `compat-check.mjs`
+  прошёл 8/8 (`get_state`, `prompt`, `set_model`, `steer`, `follow_up`, `compact`,
+  `abort` — `aborted: true`, `isStreaming: false`, перезапуск сохранённой сессии).
+  Новый стенд `experiments/pi-hooks/follow-plan-compat.mjs` подтвердил остальное:
+  extension-tool из `pi.registerTool()` модель вызывает, и аргументы приходят в кадре
+  `tool_execution_start` целиком (JSON-Schema-параметры, а не строка); `turn_end` и
+  `agent_before_settle` срабатывают; однократный `continue: true` даёт ровно один
+  дополнительный запрос и один `agent_settled`; `follow_up` во время хода — это
+  дополнительные ходы внутри того же рана, а `agent_end` приходит **до** финального
+  `agent_settled`. Поэтому граница цикла — `agent_settled`, а не `agent_end`.
+  Контракт и ограничения: `docs/follow-plan-pi-1.4.0-contract.md`. Диапазон
+  `SUPPORTED_PI` после этого прогона — `>=0.85.0 <1.5.0`.
+
+- **Диапазон поддержки Pi расширен (проверено на 1.3.0).** На установленной 1.3.0 прогнана вся
   RPC-поверхность, которой пользуется TaskBridge (`experiments/pi-hooks/compat-check.mjs`):
   `get_state`, `prompt`, `set_model`, `steer`, `follow_up`, `compact` (с реальным
   событием сжатия), `abort` (ход погашен, `isStreaming: false`) и перезапуск

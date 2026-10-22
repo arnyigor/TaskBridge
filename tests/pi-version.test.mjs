@@ -22,8 +22,14 @@ test('only the recorded range is supported, compared as numbers', () => {
   // сессии (STOP, смена модели, расширение before_agent_start, восстановление).
   assert.equal(isSupportedPiVersion('1.3.0'), true, 'the installed Pi on the operator machine');
   assert.equal(isSupportedPiVersion('1.3.9'), true, 'same minor line');
+  assert.equal(isSupportedPiVersion('1.5.0'), false, 'a new minor must be checked first');
   assert.equal(isSupportedPiVersion(SUPPORTED_PI.below), false);
-  assert.equal(isSupportedPiVersion('1.4.0'), false, 'a new minor must be checked first');
+  // 2026-10-22: на установленной 1.4.0 прогнаны compat-check.mjs (вся RPC-
+  // поверхность) и follow-plan-compat.mjs (registerTool, turn_end,
+  // agent_before_settle, agent_settled.aborted) — см.
+  // docs/follow-plan-pi-1.4.0-contract.md.
+  assert.equal(isSupportedPiVersion('1.4.0'), true, 'the installed Pi on the operator machine');
+  assert.equal(isSupportedPiVersion('1.4.9'), true, 'same minor line');
   assert.equal(isSupportedPiVersion('0.84.9'), false);
   assert.equal(isSupportedPiVersion('0.9.0'), false, '0.9 is older than 0.85, not newer');
   assert.equal(isSupportedPiVersion(null), false);
