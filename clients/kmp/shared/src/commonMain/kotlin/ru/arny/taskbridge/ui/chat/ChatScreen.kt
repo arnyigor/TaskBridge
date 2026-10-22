@@ -117,6 +117,7 @@ import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.common.StatusDot
+import ru.arny.taskbridge.ui.common.TypingPhase
 import ru.arny.taskbridge.ui.common.formatMoment
 import ru.arny.taskbridge.ui.common.humanDuration
 import ru.arny.taskbridge.ui.common.parseIsoMillis
@@ -416,6 +417,12 @@ fun ChatScreen(
                         onCancel = { selecting = false; selectedIds.clear() },
                     )
                 }
+                // Один таймер фаз «агент пишет» на ленту: точки читают его из LocalTypingPhase
+                // и не заводят собственных анимаций. Пока генерации нет, active = false
+                // и лишних кадров не запрашивается вовсе.
+                val generating = remember(state.chat.items) {
+                    state.chat.items.any { it is ChatItem.Assistant && it.active }
+                }
                 Box(Modifier.weight(1f).fillMaxWidth()) {
                     // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
                     // зависят обе стороны поведения — держать низ или не давать ленте
@@ -428,24 +435,26 @@ fun ChatScreen(
                             "Сессию не открыть",
                             describe((state.link as LinkState.Failed).error),
                         )
-                        else -> MessageList(
-                            graph = graph,
-                            session = session,
-                            state = state,
-                            listState = listState,
-                            following = following,
-                            historyLocked = historyLocked,
-                            onDialog = { dialog = it },
-                            onViewFile = { openFile(it) },
-                            onCopyMessage = { text ->
-                                platform.copyText(text)
-                                snackbar.currentSnackbarData?.dismiss()
-                                scope.launch { snackbar.showSnackbar("Сообщение скопировано") }
-                            },
-                            selectionMode = selecting,
-                            selectedIds = selectedIds,
-                            onToggleSelect = ::toggleSelected,
-                        )
+                        else -> TypingPhase(active = generating) {
+                            MessageList(
+                                graph = graph,
+                                session = session,
+                                state = state,
+                                listState = listState,
+                                following = following,
+                                historyLocked = historyLocked,
+                                onDialog = { dialog = it },
+                                onViewFile = { openFile(it) },
+                                onCopyMessage = { text ->
+                                    platform.copyText(text)
+                                    snackbar.currentSnackbarData?.dismiss()
+                                    scope.launch { snackbar.showSnackbar("Сообщение скопировано") }
+                                },
+                                selectionMode = selecting,
+                                selectedIds = selectedIds,
+                                onToggleSelect = ::toggleSelected,
+                            )
+                        }
                     }
                     // Reading older messages: the list stays put; new output only lights up the jump button.
                     val newest = state.chat.items.lastOrNull()

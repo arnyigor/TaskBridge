@@ -481,7 +481,7 @@ private fun ToolGroupRow(
         QuietRow(
             leading = {
                 when {
-                    group.running -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = colors.working)
+                    group.running -> Icon(AppIcons.Play, "Выполняется", Modifier.size(14.dp), tint = colors.working)
                     group.errors > 0 -> Icon(AppIcons.Alert, "Есть ошибки", Modifier.size(14.dp), tint = colors.failed)
                     else -> Icon(AppIcons.Check, null, Modifier.size(14.dp), tint = muted)
                 }
@@ -587,7 +587,7 @@ private fun ToolRow(
         QuietRow(
             leading = {
                 when {
-                    running -> CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = colors.working)
+                    running -> Icon(AppIcons.Play, "Выполняется", Modifier.size(14.dp), tint = colors.working)
                     error -> Icon(AppIcons.Alert, "Ошибка", Modifier.size(14.dp), tint = colors.failed)
                     tool.state == ToolState.INTERRUPTED -> Icon(AppIcons.Stop, "Прервано", Modifier.size(12.dp), tint = muted)
                     else -> Icon(AppIcons.Check, null, Modifier.size(14.dp), tint = muted)

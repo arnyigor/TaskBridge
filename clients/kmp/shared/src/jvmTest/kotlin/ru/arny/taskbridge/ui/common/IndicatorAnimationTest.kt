@@ -8,12 +8,15 @@ import androidx.compose.ui.ImageComposeScene
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.ui.sessions.attentionPulse
 import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.DurationUnit
@@ -36,6 +39,26 @@ class IndicatorAnimationTest {
 
     private fun ImageComposeScene.renderAt(millis: Long) {
         render(millis.toDuration(DurationUnit.MILLISECONDS))
+    }
+
+    /** Сколько раз картинка изменилась за [windowMillis] реального времени (шаг кадров — 16 мс). */
+    private fun ImageComposeScene.pictureChanges(windowMillis: Long): Int {
+        var previous: List<Long>? = null
+        var changes = 0
+        var millis = 0L
+        val until = System.currentTimeMillis() + windowMillis
+        while (System.currentTimeMillis() < until) {
+            val frame = render(millis.toDuration(DurationUnit.MILLISECONDS)).toComposeImageBitmap().toPixelMap()
+            val sample = ArrayList<Long>(frame.width * frame.height / 16 + 1)
+            for (y in 0 until frame.height step 4) {
+                for (x in 0 until frame.width step 4) sample.add(frame[x, y].value.toLong())
+            }
+            if (previous != null && previous != sample) changes++
+            previous = sample
+            millis += 16L
+            Thread.sleep(16)
+        }
+        return changes
     }
 
     @Test
@@ -100,6 +123,39 @@ class IndicatorAnimationTest {
         try {
             scene.renderAt(0)
             assertFalse(scene.hasInvalidations(), "без уведомления подсветка просто стоит")
+        } finally {
+            scene.close()
+        }
+    }
+
+    /**
+     * Точки «агент пишет» без генерации не рисуются вовсе: провайдер фаз с active = false
+     * не запускает таймер, поэтому ни одного лишнего кадра.
+     */
+    @Test
+    fun typingIndicatorInIdleRequestsNoFrames() {
+        val scene = scene { TypingPhase(active = false) { TypingIndicator() } }
+        try {
+            for (millis in 0L..1_000L step 16L) {
+                scene.renderAt(millis)
+                assertFalse(scene.hasInvalidations(), "без генерации точек нечего перерисовывать ($millis мс)")
+            }
+            assertEquals(0, scene.pictureChanges(windowMillis = 300), "и картинка не меняется")
+        } finally {
+            scene.close()
+        }
+    }
+
+    /**
+     * Во время генерации точки меняют фазу шагами, а не каждый кадр: картинка меняется
+     * около семи раз в секунду — по одному на шаг [TYPING_STEP_MILLIS], а не 60.
+     */
+    @Test
+    fun typingIndicatorStepsInsteadOfSixtyFramesPerSecond() {
+        val scene = scene { TypingPhase(active = true) { TypingIndicator() } }
+        try {
+            val changes = scene.pictureChanges(windowMillis = 1_000)
+            assertTrue(changes in 3..8, "шагов в секунду должно быть около 7 (не более 8), а было $changes")
         } finally {
             scene.close()
         }

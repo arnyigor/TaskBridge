@@ -1,10 +1,5 @@
 package ru.arny.taskbridge.ui.common
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,7 +23,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -39,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 
@@ -152,18 +154,45 @@ fun EmptyState(icon: ImageVector, title: String, text: String, modifier: Modifie
     }
 }
 
-/** Three dots that breathe in turn: the model is writing. */
+/** Шаг ступенчатой анимации набора: ~7 кадров в секунду вместо 60. */
+const val TYPING_STEP_MILLIS = 140L
+
+/**
+ * Общий источник фаз индикатора «агент пишет»: 0..2, без интерполяции между фазами.
+ *
+ * Точки не заводят собственных анимаций: пока [TypingPhase] получает `active = true`,
+ * один таймер на экран меняет фазу каждые [TYPING_STEP_MILLIS] мс. Compose Desktop
+ * перерисовывает всё окно на каждый кадр, а не только испорченную область, поэтому
+ * 60-кадровая анимация трёх точек стоила столько же, сколько вся лента чата.
+ */
+val LocalTypingPhase = compositionLocalOf { 0 }
+
+/** Включает общий таймер фаз на всё содержимое; [active] false — кадры не запрашиваются вообще. */
+@Composable
+fun TypingPhase(active: Boolean, content: @Composable () -> Unit) {
+    var phase by remember { mutableIntStateOf(0) }
+    if (active) {
+        LaunchedEffect(Unit) {
+            while (true) {
+                delay(TYPING_STEP_MILLIS)
+                phase = (phase + 1) % 3
+            }
+        }
+    }
+    CompositionLocalProvider(LocalTypingPhase provides phase, content = content)
+}
+
+/** Three dots that light up in turn: the model is writing. Stepped, not animated. */
 @Composable
 fun TypingIndicator(modifier: Modifier = Modifier) {
-    val transition = rememberInfiniteTransition(label = "typing")
+    val phase = LocalTypingPhase.current
     Row(modifier.padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
         repeat(3) { index ->
-            val alpha by transition.animateFloat(
-                initialValue = 0.25f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(tween(600, delayMillis = index * 180), RepeatMode.Reverse),
-                label = "dot$index",
-            )
+            val alpha = when ((phase + index) % 3) {
+                0 -> 1f
+                1 -> 0.6f
+                else -> 0.3f
+            }
             Box(Modifier.size(7.dp).alpha(alpha).clip(CircleShape).background(MaterialTheme.colorScheme.onSurfaceVariant))
         }
     }
