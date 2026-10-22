@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { openCommand, openLocalPath, scriptCommand, runLocalScript, shellCommand, runShellCommand } from '../src/open-local.mjs';
+import { openCommand, folderFocusCommand, openLocalPath, scriptCommand, runLocalScript, shellCommand, runShellCommand } from '../src/open-local.mjs';
 
 test('openCommand maps open/reveal to the right program on each platform', () => {
   const win = openCommand('C:\\work\\out.csv', { platform: 'win32' });
@@ -15,11 +17,46 @@ test('openCommand maps open/reveal to the right program on each platform', () =>
   assert.deepEqual(winReveal.args, ['/select,"C:\\work\\out.csv"'], 'quoted for Explorer, a path with spaces included');
   assert.equal(winReveal.verbatim, true, 'passed as is: node\'s own quoting sends Explorer to Documents');
 
+  // A folder goes through Explorer too: Start-Process from a hidden launcher made a
+  // hidden window and «папка открыта» was shown over nothing (2026-10-22).
+  const winFolder = openCommand('C:\\work\\out', { platform: 'win32', directory: true });
+  assert.equal(winFolder.command, 'explorer.exe');
+  assert.deepEqual(winFolder.args, ['"C:\\work\\out"']);
+  assert.equal(winFolder.verbatim, true);
+  assert.equal(winFolder.shown, true, 'the folder window is shown, not created hidden');
+
   assert.deepEqual(openCommand('/tmp/a.pdf', { platform: 'darwin' }), { command: 'open', args: ['/tmp/a.pdf'] });
   assert.deepEqual(openCommand('/tmp/a.pdf', { platform: 'darwin', reveal: true }), { command: 'open', args: ['-R', '/tmp/a.pdf'] });
 
   assert.deepEqual(openCommand('/tmp/a.pdf', { platform: 'linux' }), { command: 'xdg-open', args: ['/tmp/a.pdf'] });
   assert.deepEqual(openCommand('/tmp/a.pdf', { platform: 'linux', reveal: true }), { command: 'xdg-open', args: [path.dirname('/tmp/a.pdf')] });
+});
+
+test('a folder already on screen is focused instead of opened a second time', async () => {
+  // Every press of the chat's folder button added another window for the same folder (2026-10-22).
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-open-'));
+  try {
+    const focus = folderFocusCommand(dir);
+    assert.equal(focus.command, 'powershell.exe');
+    assert.equal(focus.env.TASKBRIDGE_OPEN_PATH, dir, 'the path travels by env, never by argv');
+    const script = Buffer.from(focus.args[focus.args.indexOf('-EncodedCommand') + 1], 'base64').toString('utf16le');
+    assert.match(script, /LocationURL/, 'asks the shell which folders already have a window');
+    assert.match(script, /SetForegroundWindow/, 'and brings that window to the front');
+
+    const focused = [];
+    const runFocused = async (command) => { focused.push(command); return { stdout: 'open' }; };
+    const plan = await openLocalPath(dir, { platform: 'win32', run: runFocused });
+    assert.deepEqual(focused, ['powershell.exe'], 'nothing else is launched when the window exists');
+    assert.equal(plan.focused, true);
+
+    const opened = [];
+    const runEmpty = async (command) => { opened.push(command); return { stdout: '' }; };
+    const plan2 = await openLocalPath(dir, { platform: 'win32', run: runEmpty });
+    assert.deepEqual(opened, ['powershell.exe', 'explorer.exe'], 'no window on screen: the folder is opened once');
+    assert.equal(plan2.command, 'explorer.exe');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 test('openLocalPath runs the planned command and surfaces a launcher failure', async () => {

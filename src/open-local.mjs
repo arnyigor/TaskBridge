@@ -16,13 +16,19 @@ const fail = (code, message) => Object.assign(new Error(message), { code });
 
 // The exact argv to run, per platform. Kept separate from execution so the
 // mapping can be asserted without launching anything.
-export function openCommand(target, { reveal = false, platform = process.platform } = {}) {
+export function openCommand(target, { reveal = false, platform = process.platform, directory = false } = {}) {
   if (platform === 'win32') {
     // Explorer wants /select,"path" as it is: node's own quoting of a path with
     // spaces ("/select,C:\a b") makes it open Documents instead. A Windows file
     // name cannot contain a quote, so wrapping it is safe. `shown`: Explorer is
     // a window, not a console — windowsHide opened the folder hidden.
     if (reveal) return { command: 'explorer.exe', args: [`/select,"${target}"`], verbatim: true, shown: true };
+    // A folder is opened by Explorer itself, for the same reason: the server
+    // spawns its launcher with `windowsHide`, the child inherits SW_HIDE and the
+    // folder window is created hidden — the button answered 200 («папка открыта»)
+    // while the operator saw nothing (2026-10-22). Explorer is the shell, so its
+    // window is shown. A file keeps Start-Process below.
+    if (directory) return { command: 'explorer.exe', args: [`"${target}"`], verbatim: true, shown: true };
     // Start-Process goes through ShellExecute, so the shell picks the program
     // registered for the file's extension (Notepad, Word, the image viewer, …).
     // The path travels through the environment to avoid any quoting/escaping.
@@ -38,11 +44,60 @@ export function openCommand(target, { reveal = false, platform = process.platfor
   return { command: 'xdg-open', args: [reveal ? path.dirname(target) : target] };
 }
 
+// One PowerShell call, passed base64-encoded so no quoting can mangle it (see
+// `folderFocusCommand`): a window already showing the folder is brought to the
+// front and the call answers «open»; otherwise it answers nothing extra and the
+// caller starts Explorer.
+const FOLDER_FOCUS_SCRIPT = `
+$sep = [string][char]92
+$url = ([uri]("file:///" + $env:TASKBRIDGE_OPEN_PATH.Replace($sep, '/'))).AbsoluteUri
+Add-Type -Namespace TaskBridge -Name Window -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetForegroundWindow(System.IntPtr hwnd); [DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hwnd, int cmd);'
+foreach ($w in (New-Object -ComObject Shell.Application).Windows()) {
+  if ($w.LocationURL -eq $url) {
+    $h = [IntPtr][int]$w.HWND
+    [void][TaskBridge.Window]::ShowWindow($h, 9)
+    [void][TaskBridge.Window]::SetForegroundWindow($h)
+    Write-Output 'open'
+    break
+  }
+}
+`;
+
+/** The quoting-free way to hand PowerShell a script: -EncodedCommand takes UTF-16LE base64. */
+export const encodedPowerShell = script => Buffer.from(script, 'utf16le').toString('base64');
+
+/**
+ * Bring the window that already shows [target] to the front, if there is one.
+ * Every press of the chat's folder button opened yet another window for the same
+ * folder (2026-10-22); Explorer has no command-line switch for «focus the window
+ * for this folder», so the shell is asked directly.
+ */
+export function folderFocusCommand(target) {
+  return {
+    command: 'powershell.exe',
+    args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedPowerShell(FOLDER_FOCUS_SCRIPT)],
+    env: { TASKBRIDGE_OPEN_PATH: target },
+    shown: false
+  };
+}
+
 // Launch it. The OS entry points all return as soon as the application is
 // started, so a short timeout only guards a hung launcher, not the app itself.
 // `run` is injectable so tests assert the call without opening real windows.
 export async function openLocalPath(target, { reveal = false, platform = process.platform, run = execute } = {}) {
-  const plan = openCommand(target, { reveal, platform });
+  // Whether the target is a folder decides the launcher on Windows. A path that
+  // cannot be stat'ed (deleted scratch file) is treated as a file.
+  const directory = await fs.stat(target).then(stats => stats.isDirectory()).catch(() => false);
+  // A folder that is already on screen is focused, not opened twice. A failure
+  // here must not cost the operator the window: the launcher below still runs.
+  if (platform === 'win32' && directory && !reveal) {
+    const focus = folderFocusCommand(target);
+    const focused = await run(focus.command, focus.args, { windowsHide: true, timeout: 15000, maxBuffer: 64 * 1024, env: { ...process.env, ...focus.env } })
+      .then(result => String(result?.stdout || '').includes('open'))
+      .catch(() => false);
+    if (focused) return { ...focus, focused: true };
+  }
+  const plan = openCommand(target, { reveal, platform, directory });
   try {
     await run(plan.command, plan.args, { windowsHide: !plan.shown, windowsVerbatimArguments: plan.verbatim === true, timeout: 8000, maxBuffer: 64 * 1024, env: { ...process.env, ...(plan.env || {}) } });
   } catch (error) {
