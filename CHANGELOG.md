@@ -8,6 +8,20 @@
 
 Агент выполняет ровно запрошенное, а найденное инструментом не исчезает вместе с ошибкой модели. Версия и номер сборки мобильных клиентов не менялись: API расширен аддитивно (`toolEvidence` в `TASK_FAILED`), KMP/web не тронуты.
 
+- **Follow Plan (FP-02): checkpoint и строгая проверка завершения.** Новый
+  `pi-extension/taskbridge-follow-plan.js` регистрирует `taskbridge_plan_checkpoint`
+  (решения `CONTINUE/REPLAN/COMPLETE/BLOCKED/NEED_INPUT/NO_PROGRESS`, evidence с
+  обязательной ссылкой для test/command/run/file) и только пишет полученное в
+  ndjson — вердикт выносит TaskBridge. `src/application/plan-checkpoint.mjs`:
+  `COMPLETE` принимается только при чистой проверке данных, подтверждении каждого
+  заявленного шага с перечитываемой ссылкой, отсутствии открытых блокирующих
+  проблем и `DONE` у всех шагов кроме `SKIPPED`; иначе — причины и `PAUSED_REVIEW`.
+  «Модель сказала COMPLETE» само по себе план не заканчивает. Принятие
+  подтверждения `manual` — явная политика (открытая развилка ТЗ §13.4), по
+  умолчанию — отказ. Тесты: `tests/plan-checkpoint.test.mjs`,
+  `tests/plan-checkpoint-tool.test.mjs`; production-расширение дополнительно
+  прогнано на живом Pi 1.4.0 стендом FP-00.
+
 - **Follow Plan (FP-01): управляемый формат плана и защита файла.**
   `src/application/plan-file.mjs`: строгий разбор и детерминированная сериализация
   одного Markdown-файла (front matter `taskbridge_plan/plan_id/revision/goal`,

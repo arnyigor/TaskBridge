@@ -28,6 +28,13 @@ node experiments/pi-hooks/follow-plan-compat.mjs  --model deepseek/deepseek-flas
 (RPC), журналы хуков `.local/fp-00/run3/hook-*.jsonl`. `.local/` в git не попадает —
 при воспроизведении цифры надо получить заново.
 
+Тот же стенд умеет проверять не только fixture, но и production-расширение
+(`--extension`). На `pi-extension/taskbridge-follow-plan.js` (FP-02) подтверждено:
+инструмент вызывается, аргументы приходят целиком (`evidence` с `ref`), STOP и
+очередь ведут себя так же — `.local/fp-02/prod-extension2/report.json`. Проверки
+журнала хуков (`A.hooks_reached`) и контрольного хода (`B`) относятся к fixture и
+для другого расширения помечаются как пропущенные.
+
 ## 2. Контракт checkpoint-инструмента
 
 Регистрация (`pi.registerTool`): `name`, `label`, `description`, `promptSnippet`,

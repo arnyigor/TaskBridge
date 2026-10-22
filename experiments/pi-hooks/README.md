@@ -60,3 +60,10 @@ node experiments/pi-hooks/follow-plan-compat.mjs --model deepseek/deepseek-flash
 ```
 
 Контракт и результаты — `docs/follow-plan-pi-1.4.0-contract.md`.
+
+Любое расширение проверяется тем же стендом через `--extension`; проверки журнала
+хуков и контрольного хода относятся только к fixture и в этом случае пропускаются:
+
+```bash
+MSYS_NO_PATHCONV=1 node experiments/pi-hooks/follow-plan-compat.mjs   --extension pi-extension/taskbridge-follow-plan.js --model deepseek/deepseek-flash --out .local/fp-02/prod
+```
