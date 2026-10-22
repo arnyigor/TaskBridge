@@ -85,6 +85,24 @@
     }
     if (!el('discovered').classList.contains('hidden')) renderDiscovered();
   };
+  // Сессии, у которых прямо сейчас выбрана эта модель: предупреждение перед
+  // удалением каталожной записи. Недоступный список — не повод блокировать
+  // действие, поэтому ошибка глушится вызывающим.
+  // Только живые статусы (те же, что считает живыми сам менеджер сессий):
+  // завершённая сессия своей моделью больше не пользуется, а следующий ход
+  // поднимет Pi заново. Провайдер сверяется вместе с ID: один и тот же
+  // `gpt-4o` бывает у двух записей, и предупреждение должно называть свои сессии.
+  const LIVE_STATUSES = ['QUEUED', 'PREPARING', 'PREFLIGHT', 'RUNNING', 'WAITING_USER', 'VERIFYING', 'CANCELLING'];
+  const activeSessionsUsing = async (providerId, modelId) => {
+    // /api/tasks отвечает массивом (краткие строки сессий), не объектом.
+    const tasks = await apiRoot('/tasks');
+    return (Array.isArray(tasks) ? tasks : [])
+      .filter(task => task?.model?.provider === providerId
+        && task?.model?.id === modelId
+        && LIVE_STATUSES.includes(task.status))
+      .map(task => `${task.id} (${task.status})`)
+      .slice(0, 5);
+  };
   // Список моделей выбранного провайдера с кнопкой «Убрать»: адрес, api и ключ
   // записи не меняются, правится только models (маршрут /models/remove).
   const renderModelRemoval = item => {
@@ -105,7 +123,13 @@
       remove.textContent = 'Убрать';
       remove.addEventListener('click', async () => {
         if (busy) return;
-        if (!confirm(`Убрать модель ${model.id} из ${item.id}? Файл models.json будет сохранён с резервной копией.`)) return;
+        // Удаление каталожной записи не должно незаметно менять модель живого Pi:
+        // сначала называем сессии, у которых эта модель выбрана сейчас (STAB-00).
+        const users = await activeSessionsUsing(item.id, model.id).catch(() => []);
+        const warning = users.length
+          ? `Модель сейчас выбрана в сессиях: ${users.join(', ')}. Работающая сессия не переключится сама — следующий ход может упасть с «модель не найдена». `
+          : '';
+        if (!confirm(`${warning}Убрать модель ${model.id} из ${item.id}? Файл models.json будет сохранён с резервной копией.`)) return;
         busy = true;
         try {
           const result = await api(`/${encodeURIComponent(item.id)}/models/remove`, {
