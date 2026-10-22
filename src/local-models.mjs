@@ -302,6 +302,17 @@ const STRATA_CACHED_PROMPT_MAX = 0.5;
  *    по ним видно, почему pp нет, без выдумывания скорости;
  *  - tg — скорость генерации (живая или из последнего запроса).
  */
+/**
+ * Фаза движка означает «читает промпт».
+ *
+ * Подстрока здесь не годится: `ready` тоже содержит `read`, и готовый сервер
+ * выглядел читающим (PP брался из live.prefill_tok_s_mean как «живая скорость
+ * чтения»). Фаза разбирается на слова — то же правило в KMP и в Web.
+ */
+export function enginePhaseReading(phase) {
+  return String(phase || '').toLowerCase().split(/[^a-zа-яё]+/u).includes('reading');
+}
+
 export function parseStrataMetrics(payload) {
   if (!payload || typeof payload !== 'object') return null;
   const engine = payload.engine || null;
@@ -345,7 +356,7 @@ export function parseStrataMetrics(payload) {
   // Берём живое число только во время чтения: у запроса из кеша беседы чтения
   // почти нет, движок уходит в `generating` сразу, и подменить кеш-артефакт
   // (см. STRATA_CACHED_PROMPT_MAX) живое значение не может.
-  const reading = typeof (live && live.phase) === 'string' && live.phase.toLowerCase().includes('read');
+  const reading = enginePhaseReading(live && live.phase);
   const livePp = num(live && live.prefill_tok_s_mean);
   let pp = null;
   if (reading && livePp !== null && livePp > 0) {

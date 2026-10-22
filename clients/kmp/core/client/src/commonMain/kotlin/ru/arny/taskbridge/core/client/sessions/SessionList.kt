@@ -191,6 +191,20 @@ class SessionList(
         job = null
     }
 
+        /**
+     * Свежая телеметрия движка (`/api/info`) без перезагрузки списка.
+     *
+     * Фаза модели («reading the prompt» у Strata), прогресс чтения промпта и PP/TG живут
+     * только в `/api/info`: в SSE их нет. Пока открыт чат, список опрашивается редко —
+     * единственная активная сессия уже обновляется через SSE, и `sessionPollIntervalMillis`
+     * даёт ей idle-интервал 30 с. Без этого вызова статус застывал на значении, снятом
+     * при открытии чата: 2026-10-22 Strata читала промпт, а TaskBridge писал «ожидается
+     * ответ агента» (STAB-STATUS-01).
+     */
+    suspend fun refreshInfo() {
+        runCatching { api.info() }.onSuccess { info -> _state.update { it.copy(info = info) } }
+    }
+
     fun refresh() {
         infoTick = 0
         _state.update { it.copy(refreshing = true) }

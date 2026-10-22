@@ -33,6 +33,11 @@ function makeReadingPrompt({ turns = [], models = [] } = {}) {
   const factory = new Function(
     'localStatus', 'newestTurn',
     [
+      // readingPrompt опирается на сопоставление строки движка и разбор фазы:
+      // берём и их из настоящего исходника, иначе стенд проверял бы не то.
+      extractFunction(appSource, 'normModelKey'),
+      extractFunction(appSource, 'localEngineRow'),
+      extractFunction(appSource, 'engineReadsPrompt'),
       extractFunction(appSource, 'readingPrompt'),
       'return readingPrompt;',
     ].join('\n'),
@@ -92,4 +97,26 @@ test('readingPrompt молчит, когда модель уже отвечае�
   // Пустой ход (текст ещё не пришёл) — строка чтения уместна.
   const empty = [{ id: 'assistant-5', role: 'assistant', text: '' }];
   assert.equal(makeReadingPrompt({ turns: empty, models: [row()] })(task), ` — модель читает промпт · 63% · ${partTotal(80000, 126088)}`);
+});
+
+test('readingPrompt находит Strata, хотя Pi и конфиг зовут её по-разному', () => {
+  // Наблюдение 2026-10-22 (Desktop): сессия Pi — provider=strata,
+  // id=qwen3.8-flash-next-iq3_s, строка в info.local.models —
+  // provider=strata-iq3s, id=qwen3.8-flash-next-iq3-s. Точного равенства нет.
+  const task = { model: { provider: 'strata', id: 'qwen3.8-flash-next-iq3_s' } };
+  assert.equal(makeReadingPrompt({ models: [row()] })(task), ` — модель читает промпт · 63% · ${partTotal(80000, 126088)}`);
+});
+
+test('readingPrompt не считает чтением фазу ready', () => {
+  // `ready` содержит `read`: готовый сервер показывался читающим промпт.
+  const task = { model: { provider: 'strata-iq3s', id: 'qwen3.8-flash-next-iq3-s' } };
+  assert.equal(makeReadingPrompt({ models: [row({ metrics: { available: true, source: 'strata', phase: 'ready' } })] })(task), '');
+  // Живой прогресс без фазы чтения — тоже не «читает промпт».
+  assert.equal(makeReadingPrompt({ models: [row({ metrics: { available: true, source: 'strata', phase: 'generating', progress: 0.4, promptRead: 4, promptTotal: 10 } })] })(task), '');
+});
+
+test('readingPrompt не угадывает между серверами с общим префиксом', () => {
+  const task = { model: { provider: 'strata', id: 'unknown-model' } };
+  const rows = [row(), row({ id: 'qwen3.8-big-q4', provider: 'strata-q4' })];
+  assert.equal(makeReadingPrompt({ models: rows })(task), '');
 });

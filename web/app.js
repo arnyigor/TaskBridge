@@ -2529,20 +2529,72 @@ function stuckSendTarget() {
   return lastTasks.find(task => task.id === id) || currentTask || { id, title: id };
 }
 
+// Ключ сравнения имён Pi и конфига TaskBridge: `strata` против `strata-iq3s`,
+// `qwen3.8-flash-next-iq3_s` против `...-iq3-s` — это одна и та же модель.
+function normModelKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[_\s]+/g, '-');
+}
+
+// Строка живого локального движка для этой сессии (та же логика, что в KMP
+// ChatScreen.externalModelRow): точный id → нормализованный id → точный
+// провайдер → семейство имён по границе дефиса. Неоднозначность — null:
+// показать чужой процент prefill хуже, чем не показать ничего.
+function localEngineRow(models, provider, modelId) {
+  const rows = Array.isArray(models) ? models : [];
+  if (!rows.length) return null;
+  const providerKey = normModelKey(provider);
+  const idKey = normModelKey(modelId);
+  if (modelId != null) {
+    const exact = rows.find(m => m.id === modelId);
+    if (exact) return exact;
+  }
+  if (idKey) {
+    const byId = rows.filter(m => normModelKey(m.id) === idKey);
+    if (byId.length === 1) return byId[0];
+    if (byId.length > 1) {
+      const same = byId.filter(m => providerKey && normModelKey(m.provider) === providerKey);
+      return same.length === 1 ? same[0] : null;
+    }
+  }
+  if (provider != null) {
+    const exactProvider = rows.filter(m => m.provider === provider);
+    if (exactProvider.length === 1) return exactProvider[0];
+  }
+  if (providerKey) {
+    const family = rows.filter(m => {
+      const key = normModelKey(m.provider);
+      if (!key) return false;
+      return key === providerKey || key.startsWith(`${providerKey}-`) || providerKey.startsWith(`${key}-`);
+    });
+    if (family.length === 1) return family[0];
+  }
+  return null;
+}
+
+// Фаза движка означает чтение промпта. Подстрока не годится: `ready` тоже
+// содержит `read`, и готовый сервер выглядел читающим.
+function engineReadsPrompt(phase) {
+  return String(phase || '').toLowerCase().split(/[^a-zа-яё]+/u).includes('reading');
+}
+
 // Модель читает промпт — фаза и прогресс чтения у внешнего локального сервера
 // (Strata): /metrics → live.phase / prompt_read / prompt_total, TaskBridge
-// вливает это в info.local.models. Строка ищется по провайдеру сессии — то же
-// правило, что в KMP ChatScreen. Показ только до первого токена ответа: как
-// только модель отвечает, факт чтения устарел и строка вводит в заблуждение.
+// вливает это в info.local.models. Строка ищется по нормализованным именам
+// (Pi и конфиг называют одну модель по-разному). Показ только до первого токена
+// ответа: как только модель отвечает, факт чтения устарел.
 function readingPrompt(task) {
-  const provider = task?.model?.provider;
-  const row = provider ? (localStatus?.models || []).find(m => m.provider === provider) : null;
+  const model = task?.model || task?.requestedModel;
+  const row = localEngineRow(localStatus?.models, model?.provider, model?.id);
   const metrics = row?.metrics;
   if (!metrics) return '';
-  const reading = typeof metrics.phase === 'string' && /read/i.test(metrics.phase);
+  const reading = engineReadsPrompt(metrics.phase);
   const ratio = typeof metrics.progress === 'number' && metrics.progress >= 0 && metrics.progress <= 1
     ? metrics.progress : null;
-  if (!reading && ratio === null) return '';
+  // Фаза — авторитетное слово движка: если он сам говорит `ready`/`generating`,
+  // то остаток prompt_read/progress от прошлого запроса чтением не является.
+  // Когда фазы нет вовсе, живой прогресс остаётся признаком чтения.
+  const hasPhase = typeof metrics.phase === 'string' && metrics.phase.trim() !== '';
+  if (!reading && (ratio === null || hasPhase)) return '';
   const turn = newestTurn();
   if (turn?.role === 'assistant' && String(turn.text || '').trim()) return '';
   const percent = ratio === null ? null : `${Math.round(ratio * 100)}%`;
@@ -6638,7 +6690,9 @@ function renderMachineLoad(info) {
   // ищет фазу чтения readingPrompt. Сессию выбираем по её провайдеру, а если его
   // нет (стенд, первая отрисовка) — по первой поднятой строке.
   const sessionProvider = typeof currentTask === 'object' && currentTask ? currentTask.model?.provider : null;
-  const sessionRow = (sessionProvider && localModels.find(m => m.provider === sessionProvider))
+  const sessionModelId = typeof currentTask === 'object' && currentTask
+    ? (currentTask.model?.id ?? currentTask.requestedModel?.id) : null;
+  const sessionRow = localEngineRow(localModels, sessionProvider, sessionModelId)
     || localModels.find(m => m.status === 'loaded' || m.status === 'sleeping')
     || null;
   const liveMetrics = metrics && metrics.available ? metrics : (sessionRow?.metrics ?? null);

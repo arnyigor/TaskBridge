@@ -88,6 +88,7 @@ import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.Approval
 import ru.arny.taskbridge.core.api.GenerationMetrics
+import ru.arny.taskbridge.core.api.LocalModelEntry
 import ru.arny.taskbridge.core.api.LocalModelMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
@@ -229,6 +230,21 @@ fun ChatScreen(
     val pickFiles = rememberFilePicker { picked -> files = files + picked }
 
     LaunchedEffect(connection) { connection.sessions.models().onSuccess { screenCatalog = it }.onFailure { /* chooser can retry */ } }
+    // Живая телеметрия движка приходит только из /api/info: в SSE её нет, а список
+    // при открытом чате опрашивается редко (единственная активная сессия покрыта SSE,
+    // интервал уходит в 30 с). Пока ход идёт, спрашиваем в темпе движка — это
+    // ровно то, без чего « Модель читает промпт · 40% » появлялся только по счастливой
+    // случайности (STAB-STATUS-01). После хода опрос прекращается сразу.
+    val engineStatus = state.task?.status
+    LaunchedEffect(connection, taskId, engineStatus) {
+        if (engineStatus !in ACTIVE_STATUSES) return@LaunchedEffect
+        while (true) {
+            if (shouldRefreshEngineInfo(activeTurn = true, inForeground = graph.platform.inForeground)) {
+                connection.sessions.refreshInfo()
+            }
+            delay(ENGINE_INFO_INTERVAL_MS)
+        }
+    }
     LaunchedEffect(connection, taskId, state.task?.runtime?.state) {
         quickActions = runCatching { connection.api.quickActions(taskId) }.getOrDefault(fallbackQuickActions()).ifEmpty { fallbackQuickActions() }
     }
@@ -1257,14 +1273,8 @@ private fun DeliveryDiagnostics(
     // Внешний локальный сервер (Strata) — та же машина, что и роутер, но другой
     // провайдер Pi. Его строка в info.local.models несёт живую телеметрию
     // (фаза, прогресс чтения промпта, скорости): без неё сессия на Strata не
-    // показывала чтение промпта вообще — условие ниже требовало равенства с
-    // провайдером роутера. Провайдер сессии ('strata') и сервер в конфиге
-    // ('strata-iq3s') тоже расходятся, поэтому строку ищем и по id модели —
-    // как liveEnginePrompt ниже.
-    val externalRow = info?.local?.models?.firstOrNull {
-        (it.provider != null && it.provider == sessionProvider) ||
-            (sessionModelId != null && it.id == sessionModelId)
-    }
+    // показывала чтение промпта вообще.
+    val externalRow = externalModelRow(info?.local?.models.orEmpty(), sessionProvider, sessionModelId)
     val externalMetrics = externalRow?.metrics
     val livePp = when {
         localProvider != null && sessionProvider == localProvider -> info.engine?.metrics?.pp?.takeIf { it.isFinite() && it > 0.0 }
@@ -1283,7 +1293,7 @@ private fun DeliveryDiagnostics(
     // Прогресс чтения промпта у внешнего сервера (Strata отдаёт prompt_read /
     // prompt_total): «читает промпт · 64% · 80K / 126K» вместо просто факта — по
     // одному проценту не видно, сколько уже прочитано и сколько осталось.
-    val readingPrompt = externalMetrics?.phase?.contains("read", ignoreCase = true) == true
+    val readingPrompt = engineReadingPrompt(externalMetrics?.phase)
     // Скорость чтения промпта по таймеру: опрос /api/info каждую секунду даёт
     // прирост promptRead — прирост между замерами / время = эффективный PP,
     // посчитанный клиентом. Strata сам PP у кеш-попаданий не отдаёт
@@ -1955,6 +1965,97 @@ internal fun answerReserveTokens(task: Task?): Long {
  */
 internal fun readsPromptNow(readingPrompt: Boolean, livePp: Double?, answerSilent: Boolean): Boolean =
     answerSilent && (readingPrompt || livePp != null)
+
+/**
+ * Как часто открытый чат перечитывает `/api/info`, пока ход активен.
+ *
+ * Стадия движка меняется по мере чтения промпта (Strata обновляет `/metrics`
+ * несколько раз в секунду), но чаще, чем раз в 3 с, экран её показывать не может:
+ * строка статуса — не лента. Меньше значило бы лишние запросы и тепло без пользы.
+ */
+internal const val ENGINE_INFO_INTERVAL_MS = 3_000L
+
+/**
+ * Стоит ли сейчас перечитывать `/api/info` ради телеметрии движка.
+ *
+ * Только активный ход и только видимый экран: в фоне телефон не должен держать
+ * лишний сетевой опрос (STAB-STATUS-01, STATUS-16), а после хода живые PP/TG и
+ * фаза уже ничего не значат.
+ */
+internal fun shouldRefreshEngineInfo(activeTurn: Boolean, inForeground: Boolean): Boolean =
+    activeTurn && inForeground
+
+/**
+ * Читает ли движок промпт сейчас — по фазе из `/metrics`.
+ *
+ * Подстрока здесь не годится: фаза `ready` тоже содержит `read`. Поэтому фаза
+ * разбирается на слова (разделители — всё, кроме букв), и «чтение» — это слово
+ * `reading`. То же правило применено на сервере (`parseStrataMetrics`) и в Web
+ * (`readingPrompt`).
+ */
+internal fun engineReadingPrompt(phase: String?): Boolean =
+    phase.orEmpty().lowercase().split(Regex("[^a-zа-яё]+")).any { it == "reading" }
+
+/**
+ * Ключ для сопоставления имён Pi с конфигом TaskBridge.
+ *
+ * Pi называет провайдера и модель по-своему (`strata` вместо `strata-iq3s`, `_`
+ * вместо `-` в id), поэтому точное равенство строк здесь не работает.
+ */
+private fun modelKey(value: String?): String =
+    value.orEmpty().trim().lowercase().replace('_', '-').replace(' ', '-')
+
+/**
+ * Строка живого локального движка, к которому относится эта сессия.
+ *
+ * Замер 2026-10-22 (Desktop, настоящая Strata): задача создана с
+ * provider=strata, id=qwen3.8-flash-next-iq3_s (так их называет Pi), а в
+ * info.local.models строка — provider=strata-iq3s, id=qwen3.8-flash-next-iq3-s
+ * (так они названы в конфиге TaskBridge). Сравнение по точному равенству не
+ * находило ни один из двух вариантов, `readingPrompt` и живой PP оставались
+ * null, и во время настоящего чтения промпта UI показывал «Сообщение передано ·
+ * ожидается ответ агента».
+ *
+ * Порядок поиска: точное совпадение обоих полей → нормализованное совпадение
+ * обоих → единственная строка с тем же (нормализованным) id → единственная
+ * строка с тем же провайдером. Несколько кандидатов — null: чужой процесс
+ * (другая модель того же сервера) хуже, чем отсутствие процентов и скорости.
+ */
+internal fun externalModelRow(rows: List<LocalModelEntry>, provider: String?, modelId: String?): LocalModelEntry? {
+    if (rows.isEmpty()) return null
+    val providerKey = modelKey(provider)
+    val idKey = modelKey(modelId)
+    rows.firstOrNull { it.provider == provider && it.id == modelId }?.let { return it }
+    if (idKey.isNotEmpty()) {
+        val byId = rows.filter { modelKey(it.id) == idKey }
+        if (byId.size == 1) return byId.single()
+        if (byId.size > 1) {
+            // Одинаковое имя модели у нескольких строк: решает только провайдер,
+            // и только если он один. Иначе — null, а не «первая попавшаяся».
+            return byId.filter { providerKey.isNotEmpty() && modelKey(it.provider) == providerKey }.singleOrNull()
+        }
+    }
+    // 3. Точное совпадение провайдера (только если такая строка одна).
+    if (provider != null) {
+        val exactProvider = rows.filter { it.provider == provider }
+        if (exactProvider.size == 1) return exactProvider.single()
+    }
+    if (providerKey.isNotEmpty()) {
+        // 4. Имена провайдеров расходятся: Pi зовёт сервер `strata`, в конфиге он
+        // `strata-iq3s`. Семейство — только по границе имени (дефис), и только
+        // когда такая строка одна: `strata-iq3s` и `strata-q4` — не «одно из двух».
+        val byProvider = rows.filter { isNameFamily(modelKey(it.provider), providerKey) }
+        if (byProvider.size == 1) return byProvider.single()
+    }
+    return null
+}
+
+/** `strata` ⊂ `strata-iq3s` — да; `strata` ⊂ `stratagem` — нет. */
+private fun isNameFamily(candidate: String, wanted: String): Boolean {
+    if (candidate.isEmpty() || wanted.isEmpty()) return false
+    if (candidate == wanted) return true
+    return candidate.startsWith("$wanted-") || wanted.startsWith("$candidate-")
+}
 
 /**
  * Текст панели «Диагностика» (и кнопки «Копировать»).

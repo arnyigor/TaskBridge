@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseStrataMetrics } from '../src/local-models.mjs';
+import { parseStrataMetrics, enginePhaseReading } from '../src/local-models.mjs';
 
 // Форма ответа снята с живого движка Strata 0.1.15 (GET /metrics).
 const idle = {
@@ -176,4 +176,26 @@ test('parseStrataMetrics не подменяет PP на кеш-артефакт
   assert.equal(m.pp, null);
   assert.equal(m.ppUnavailable, 'conversation-cache');
   assert.equal(m.tg, 36.0);
+});
+
+test('фаза ready не выдаётся за живое чтение промпта', () => {
+  // `ready` содержит `read`: подстрочный поиск брал prefill_tok_s_mean как
+  // «живую скорость чтения» готового сервера.
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3-s' },
+    live: { state: 'ready', phase: 'ready', prompt_read: 0, prompt_total: 0, prefill_tok_s_mean: 2336 },
+    requests: []
+  });
+  assert.equal(m.phase, 'ready');
+  assert.equal(m.pp, null, 'скорость чтения не берётся, когда движок не читает');
+});
+
+test('фаза loading model не даёт живой скорости чтения', () => {
+  const m = parseStrataMetrics({
+    engine: { model: 'qwen3.8-flash-next-iq3-s' },
+    live: { state: 'loading', phase: 'loading model', prompt_read: 0, prompt_total: 0, prefill_tok_s_mean: 1500 },
+    requests: []
+  });
+  assert.equal(m.pp, null);
+  assert.equal(enginePhaseReading('loading model'), false);
 });

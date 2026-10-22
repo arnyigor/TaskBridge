@@ -60,6 +60,9 @@ function makeRenderer() {
       // Строка о локальной модели зовёт ppUnavailableNote (объяснение, почему у
       // внешнего сервера нет PP); без неё вырезанная функция не соберётся.
       extractFunction(appSource, 'ppUnavailableNote'),
+      // Живая строка сессии ищет свою строку движка по нормализованным именам.
+      extractFunction(appSource, 'normModelKey'),
+      extractFunction(appSource, 'localEngineRow'),
       extractFunction(appSource, 'renderMachineLoad'),
       'return renderMachineLoad;',
     ].join('\n'),
