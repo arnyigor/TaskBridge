@@ -9,6 +9,7 @@ import installMediaPolicy, {
   createFileStore,
   imagePayload,
   parseMarker,
+  payloadImages,
   projectContext,
   redactStructured,
   referenceText,
@@ -217,4 +218,88 @@ test('taskbridge_media_open возвращает архивный скриншо
   const missing = await restarted.tools.get('taskbridge_media_open').execute('call-3', { id: 'a'.repeat(64) });
   assert.equal(missing.isError, true);
   assert.match(missing.content[0].text, /не найден/);
+});
+
+// Полная цепочка после открытия архива: инструмент вернул картинку → её снова
+// заархивировал tool_result → context вернул её модели. Без последнего шага
+// модель увидела бы только текстовую ссылку и картинку бы не получила.
+test('открытая через media_open картинка доходит до модели в том же запросе', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-media-chain-'));
+  const previous = process.env.TASKBRIDGE_MEDIA_ROOT;
+  process.env.TASKBRIDGE_MEDIA_ROOT = path.join(dir, 'media');
+  process.env.TASKBRIDGE_MEDIA_NOTIFY = '0';
+  t.after(async () => {
+    if (previous === undefined) delete process.env.TASKBRIDGE_MEDIA_ROOT;
+    else process.env.TASKBRIDGE_MEDIA_ROOT = previous;
+    delete process.env.TASKBRIDGE_MEDIA_NOTIFY;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  const png = Buffer.from(Array.from({ length: 2048 }, (_, index) => (index * 7) % 251));
+  const host = fakePi();
+  installMediaPolicy(host);
+  const store = createFileStore(process.env.TASKBRIDGE_MEDIA_ROOT);
+  const { sha } = await store.save(png.toString('base64'), 'image/png');
+
+  // 1. Модель просит архивный скриншот по известному id.
+  const opened = await host.tools.get('taskbridge_media_open').execute('call-open', { id: sha });
+  assert.equal(opened.content[0].type, 'image');
+
+  // 2. tool_result снова забирает байты в архив (иначе они вернутся в историю).
+  const [archive] = host.hooks.get('tool_result');
+  const archived = await archive({ content: opened.content });
+  assert.equal(archived.content.filter(part => part.type === 'image').length, 0, 'в истории снова только ссылка');
+  assert.equal(parseMarker(archived.content[0].text), sha, 'тот же самый скриншот');
+
+  // 3. context собирает запрос к модели: рядом со ссылкой должно быть изображение.
+  const [context] = host.hooks.get('context');
+  const projected = await context({ messages: [{ role: 'toolResult', content: archived.content }] });
+  const parts = projected.messages[0].content;
+  assert.deepEqual(parts.map(part => part.type), ['text', 'image'], 'модель видит ссылку и саму картинку');
+  assert.equal(parseMarker(parts[0].text), sha, 'ссылка остаётся: следующий ход снова найдёт по id');
+  assert.deepEqual(Buffer.from(parts[1].data, 'base64'), png, 'байты те же, что просили');
+
+  // 4. И в сериализованном payload картинка действительно есть.
+  const payload = { messages: [
+    { role: 'user', content: [{ type: 'text', text: 'посмотри на скриншот' }] },
+    ...projected.messages.map(message => ({ role: message.role, content: message.content }))
+  ] };
+  const trimmed = trimPayloadImages(structuredClone(payload), 40 * 1024 * 1024);
+  assert.equal(trimmed.dropped, 0, 'payload в бюджете');
+  assert.equal(payloadImages(payload).length, 1, 'картинка уходит провайдеру');
+});
+
+// Бюджет 2 МБ — не запрет: pickNewest всегда оставляет хотя бы одну картинку,
+// иначе модель не увидела бы ровно тот скриншот, который попросила.
+test('открытая картинка больше бюджета 2 МБ всё равно доходит до модели', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-media-big-'));
+  const previous = process.env.TASKBRIDGE_MEDIA_ROOT;
+  process.env.TASKBRIDGE_MEDIA_ROOT = path.join(dir, 'media');
+  process.env.TASKBRIDGE_MEDIA_NOTIFY = '0';
+  t.after(async () => {
+    if (previous === undefined) delete process.env.TASKBRIDGE_MEDIA_ROOT;
+    else process.env.TASKBRIDGE_MEDIA_ROOT = previous;
+    delete process.env.TASKBRIDGE_MEDIA_NOTIFY;
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  // 3 МБ сырых байт — это ~4 МБ base64, вдвое больше стандартного бюджета.
+  const big = Buffer.alloc(3 * 1024 * 1024, 7);
+  const host = fakePi();
+  installMediaPolicy(host);
+  const store = createFileStore(process.env.TASKBRIDGE_MEDIA_ROOT);
+  const { sha, bytes } = await store.save(big.toString('base64'), 'image/png');
+  assert.equal(bytes, big.length);
+
+  const opened = await host.tools.get('taskbridge_media_open').execute('call-open', { id: sha });
+  const [archive] = host.hooks.get('tool_result');
+  const archived = await archive({ content: opened.content });
+  const [context] = host.hooks.get('context');
+  const projected = await context({ messages: [{ role: 'toolResult', content: archived.content }] });
+  const image = projected.messages[0].content.find(part => part.type === 'image');
+  assert.ok(image, 'единственная картинка не выкидывается из-за бюджета');
+  assert.equal(Buffer.from(image.data, 'base64').length, big.length, 'байты не урезаны и не испорчены');
+  // Ссылка на месте: если payload всё же не пролезет по общему бюджету, модель
+  // знает, как попросить картинку снова.
+  assert.equal(parseMarker(projected.messages[0].content[0].text), sha);
 });
