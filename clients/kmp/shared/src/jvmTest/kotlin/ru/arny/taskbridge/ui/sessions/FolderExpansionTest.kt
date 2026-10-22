@@ -5,46 +5,40 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Клик по заголовку — единственный способ сложить папку сессий. Пока непрочитанное
- * уведомление перебивало выбор оператора, папка с новостью не закрывалась вовсе:
- * клик менял сохранённое значение, но на экране не происходило ничего.
+ * Папка сессий открывается только по решению оператора. Активная сессия внутри,
+ * выбранная сессия или непрочитанное уведомление папку больше не разворачивают:
+ * список разъезжался сам, пока оператор читал другие папки.
  */
 class FolderExpansionTest {
     @Test
-    fun foldedByHandFolderWithNewsStaysFolded() {
+    fun untouchedFolderStaysFolded() {
         assertFalse(
-            folderExpanded(handExpanded = false, alerted = true, autoOpen = true),
-            "клик оператора обязан складывать папку, даже если внутри ждёт непрочитанное уведомление",
+            folderExpanded(handExpanded = null),
+            "папка, которую оператор не трогал, не раскрывается сама",
+        )
+    }
+
+    @Test
+    fun foldedByHandFolderStaysFolded() {
+        assertFalse(
+            folderExpanded(handExpanded = false, openByNavigation = true),
+            "клик оператора обязан складывать папку даже внутри проекта, куда только что зашли",
         )
     }
 
     @Test
     fun openedByHandFolderStaysOpen() {
         assertTrue(
-            folderExpanded(handExpanded = true, alerted = false, autoOpen = false),
+            folderExpanded(handExpanded = true),
             "развёрнутая вручную папка не должна закрываться сама",
         )
     }
 
     @Test
-    fun untouchedFolderWithNewsOpens() {
+    fun drillDownOpensTheFolderTheOperatorChose() {
         assertTrue(
-            folderExpanded(handExpanded = null, alerted = true, autoOpen = false),
-            "новость не должна прятаться в папке, которую оператор не трогал",
-        )
-    }
-
-    @Test
-    fun untouchedQuietFolderFollowsDefault() {
-        assertTrue(folderExpanded(handExpanded = null, alerted = false, autoOpen = true))
-        assertFalse(folderExpanded(handExpanded = null, alerted = false, autoOpen = false))
-    }
-
-    @Test
-    fun handChoiceBeatsAutoOpen() {
-        assertFalse(
-            folderExpanded(handExpanded = false, alerted = false, autoOpen = true),
-            "активная сессия внутри не должна разворачивать сложенную вручную папку",
+            folderExpanded(handExpanded = null, openByNavigation = true),
+            "переход внутрь проекта — это выбор оператора показать его сессии",
         )
     }
 }

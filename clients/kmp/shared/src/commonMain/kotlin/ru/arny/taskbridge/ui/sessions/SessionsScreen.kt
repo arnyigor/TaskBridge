@@ -249,6 +249,8 @@ fun SessionsScreen(
                         now = now,
                         graph = graph,
                         attention = attention,
+                        folderName = { task -> state.folderName(task.projectId) },
+                        drilledDown = projectId != null,
                         onOpen = onOpen,
                         selecting = selecting,
                         selectedIds = selectedIds,
@@ -454,23 +456,19 @@ private fun olderThanDays(task: Task, days: Long, nowMillis: Long): Boolean {
 internal fun messageOf(error: Throwable): String = (error as? ApiException)?.let { describe(it.error) } ?: (error.message ?: "Ошибка")
 
 /**
- * Открыта ли папка сессий.
+ * Открыта ли папка сессий: только по решению оператора.
  *
- * Клик по заголовку — единственный способ сложить папку, поэтому явный выбор оператора
- * сильнее уведомления: пока непрочитанное уведомление перебивало выбор, папка с ним не
- * закрывалась вовсе — клик менял сохранённое значение, но на экране не происходило ничего
- * (а уведомление снимается только открытием чата, которого в сложенной папке не видно).
- * Роль уведомления в сложенной папке берёт на себя пульсирующий значок в заголовке.
+ * Раньше папка разворачивалась сама — если она одна, если внутри выбранная или активная
+ * сессия или непрочитанное уведомление. Список от этого разъезжался сам по себе: папки
+ * раскрывались, пока оператор читал другие, и экран уезжал из-под пальца. Теперь состояние
+ * папки меняет только клик по её заголовку (он же запоминается в настройках). О работе
+ * внутри сложенной папки сообщают счётчики в заголовке и пульсирующий значок новости.
  *
  * @param handExpanded выбор оператора (память экрана или настройки); null — папку не трогали.
- * @param alerted внутри есть уведомление, которое ещё не открывали.
- * @param autoOpen папка открыта бы сама: она одна, либо внутри выбранная или активная сессия.
+ * @param openByNavigation папка открыта самим переходом: оператор зашёл внутрь проекта с дашборда
+ *   (MR-01), то есть уже попросил показать именно его сессии. Клик по заголовку и здесь сильнее.
  */
-internal fun folderExpanded(handExpanded: Boolean?, alerted: Boolean, autoOpen: Boolean): Boolean = when {
-    handExpanded != null -> handExpanded
-    alerted -> true
-    else -> autoOpen
-}
+internal fun folderExpanded(handExpanded: Boolean?, openByNavigation: Boolean = false): Boolean = handExpanded ?: openByNavigation
 
 @Composable
 private fun SessionList(
@@ -481,6 +479,10 @@ private fun SessionList(
     now: Long,
     graph: AppGraph,
     attention: Set<String>,
+    /** Имя папки проекта: в активных сессиях оно в заголовке строки, а не первое сообщение. */
+    folderName: (Task) -> String,
+    /** Оператор зашёл внутрь одного проекта с дашборда: его папка открыта, пока её не сложили. */
+    drilledDown: Boolean,
     onOpen: (String) -> Unit,
     selecting: Boolean,
     selectedIds: Set<String>,
@@ -492,15 +494,14 @@ private fun SessionList(
     onSelectGroup: (SessionGroup) -> Unit,
     onSelectFinished: (SessionGroup) -> Unit,
 ) {
-    // A folder the user never touched opens itself when something in it needs
-    // attention (working, waiting, queued) or is open; a hand toggle is remembered
-    // and always wins, so the header tap is never a no-op. An unread alert in a
-    // folder that was never touched opens it; in a folded one the header pulses.
+    // Folders do not open on their own: activity, a selected session or an unread alert
+    // no longer unfolds a folder (the header counters and the pulsing news icon report it
+    // instead). Only the operator's own choice does — the screen's memory, the stored
+    // setting, or the drill-down into a project the operator just opened.
     val toggled = remember { mutableStateMapOf<String, Boolean>() }
     fun expanded(group: SessionGroup): Boolean = folderExpanded(
         handExpanded = toggled[group.projectId] ?: graph.settings.folderExpanded(group.projectId),
-        alerted = group.sessions.any { it.id in attention },
-        autoOpen = groups.size == 1 || group.sessions.any { it.id == selectedTaskId || displayStateOf(it).active },
+        openByNavigation = drilledDown,
     )
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 96.dp)) {
         if (!selecting && activeTasks.isNotEmpty()) {
@@ -510,6 +511,7 @@ private fun SessionList(
             items(activeTasks, key = { "active:${it.id}" }) { task ->
                 ActiveSessionRow(
                     task = task,
+                    folderName = folderName(task),
                     selected = task.id == selectedTaskId,
                     attention = task.id in attention,
                     now = now,
@@ -586,7 +588,7 @@ internal fun attentionPulse(attention: Boolean): Float {
 }
 
 @Composable
-private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, now: Long, onClick: () -> Unit) {
+private fun ActiveSessionRow(task: Task, folderName: String, selected: Boolean, attention: Boolean, now: Long, onClick: () -> Unit) {
     val state = displayStateOf(task)
     val accent = MaterialTheme.colorScheme.primary
     val alert = LocalStatusColors.current.waiting
@@ -616,7 +618,7 @@ private fun ActiveSessionRow(task: Task, selected: Boolean, attention: Boolean, 
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
             Text(
-                task.displayTitle,
+                folderName,
                 style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = if (selected) MaterialTheme.colorScheme.primary else Color.Unspecified,

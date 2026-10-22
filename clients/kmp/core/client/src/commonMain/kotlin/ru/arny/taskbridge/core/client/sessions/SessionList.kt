@@ -29,6 +29,18 @@ import ru.arny.taskbridge.core.api.UploadFile
 
 data class SessionGroup(val projectId: String, val title: String, val sessions: List<Task>)
 
+/** Сессии без проекта: своя папка в списке. */
+internal const val SCRATCH_TITLE = "Без проекта"
+
+/**
+ * Имя папки из того, что записано в реестре: последний сегмент пути.
+ * `G:\Android\Projects\Taskbridge` → `Taskbridge`, `/srv/app/taskbridge` → `taskbridge`.
+ */
+internal fun folderNameOf(label: String): String {
+    val trimmed = label.trim().trimEnd('/', '\\')
+    return trimmed.substringAfterLast('/').substringAfterLast('\\').ifBlank { trimmed }
+}
+
 data class SessionListState(
     val loading: Boolean = true,
     val tasks: List<Task> = emptyList(),
@@ -51,14 +63,23 @@ data class SessionListState(
     /** The dashboard's order: the server already pinned-first, archived in place. */
     val dashboardProjects: List<ProjectSummary> get() = overview?.projects.orEmpty()
 
+    /**
+     * Название папки сессии — только имя папки проекта, без пути.
+     * В реестре иногда записан полный путь, а в заголовке строки он не нужен.
+     */
+    fun folderName(projectId: String?): String {
+        val id = projectId ?: SCRATCH_PROJECT_ID
+        if (id == SCRATCH_PROJECT_ID) return SCRATCH_TITLE
+        return folderNameOf(projects.firstOrNull { it.id == id }?.displayName ?: id)
+    }
+
     fun groups(query: String = "", projectId: String? = null): List<SessionGroup> {
         val needle = query.trim().lowercase()
-        val names = projects.associate { it.id to it.displayName }
         return sorted
             .filter { projectId == null || (it.projectId ?: SCRATCH_PROJECT_ID) == projectId }
             .filter { needle.isEmpty() || it.displayTitle.lowercase().contains(needle) || it.prompt.orEmpty().lowercase().contains(needle) }
             .groupBy { it.projectId ?: SCRATCH_PROJECT_ID }
-            .map { (id, list) -> SessionGroup(id, if (id == SCRATCH_PROJECT_ID) "Без проекта" else names[id] ?: id, list) }
+            .map { (id, list) -> SessionGroup(id, folderName(id), list) }
             .sortedBy { group -> group.sessions.minOf { displayStateOf(it).order.coerceAtMost(3) } * 1_000 + (projects.indexOfFirst { it.id == group.projectId }.takeIf { it >= 0 } ?: 999) }
     }
 }

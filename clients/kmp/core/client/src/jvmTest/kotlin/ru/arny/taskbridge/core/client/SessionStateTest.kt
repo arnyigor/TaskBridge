@@ -9,6 +9,7 @@ import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.core.api.RuntimeInfo
 import ru.arny.taskbridge.core.client.sessions.activityOf
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
+import ru.arny.taskbridge.core.client.sessions.folderNameOf
 import ru.arny.taskbridge.core.client.settings.normalizeServerUrl
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -62,6 +63,22 @@ class SessionStateTest {
         assertEquals(listOf("new"), state.groups("задача new").flatMap { it.sessions }.map { it.id })
         assertEquals(1, state.waitingCount)
         assertEquals(1, state.workingCount)
+    }
+
+    /** Строка активной сессии называет папку проекта, а не первое сообщение и не путь. */
+    @Test
+    fun folderTitleIsTheFolderNameNotThePath() {
+        val state = SessionListState(
+            tasks = listOf(task("work", "RUNNING", project = "pf")),
+            projects = listOf(Project("pf", "G:\\Unreal\\01_Tests\\PFHPT2")),
+        )
+        assertEquals("PFHPT2", state.groups().single().title)
+        assertEquals("PFHPT2", state.folderName("pf"))
+        assertEquals("unregistered", state.folderName("unregistered"))
+        assertEquals("Без проекта", state.folderName(null))
+        assertEquals("taskbridge", folderNameOf("/srv/app/taskbridge"))
+        assertEquals("Taskbridge", folderNameOf("G:\\Android\\AndroidStudioProjects\\Taskbridge"))
+        assertEquals("Проект", folderNameOf("Проект"))
     }
 
     @Test
