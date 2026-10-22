@@ -1417,6 +1417,75 @@ data class MessageRequest(
     val clientId: String? = null,
 )
 
+// --- Follow Plan (PLAN-FOLLOW-01) -------------------------------------------
+// Один Markdown-файл — источник истины по содержанию и статусам шагов; сервер
+// держит только техсостояние цикла. Клиент ничего не решает сам: карточка
+// показывает то, что прислал сервер, и отправляет команды с ревизией.
+
+@Serializable
+data class PlanStep(
+    val id: String,
+    val status: String,
+    val priority: String? = null,
+    val title: String? = null,
+)
+
+@Serializable
+data class PlanFinding(
+    val id: String,
+    val priority: String? = null,
+    val state: String? = null,
+    val summary: String? = null,
+)
+
+@Serializable
+data class PlanProgress(
+    val done: Int = 0,
+    val total: Int = 0,
+)
+
+@Serializable
+data class PlanCheckpointSummary(
+    val at: String? = null,
+    val decision: String? = null,
+    val completed: List<String> = emptyList(),
+    val findings: Int = 0,
+    val evidence: Int = 0,
+    val rejectedEvidence: List<String> = emptyList(),
+)
+
+@Serializable
+data class PlanFileError(
+    val code: String? = null,
+    val message: String? = null,
+    val problems: List<String> = emptyList(),
+)
+
+/** GET /api/tasks/:id/plan — состояние режима «По плану» для этой сессии. */
+@Serializable
+data class PlanStatus(
+    val enabled: Boolean = false,
+    val taskId: String? = null,
+    val attached: Boolean = false,
+    /** NOT_ATTACHED, IDLE, RUNNING_STEP, REVIEWING, PAUSED_REVIEW, PAUSED, COMPLETED. */
+    val state: String = "NOT_ATTACHED",
+    val planId: String? = null,
+    val path: String? = null,
+    val revision: Int? = null,
+    val hash: String? = null,
+    val cycleId: String? = null,
+    val stepId: String? = null,
+    val updatedAt: String? = null,
+    val lastCheckpoint: PlanCheckpointSummary? = null,
+    val conflict: Boolean = false,
+    val title: String? = null,
+    val goal: String? = null,
+    val progress: PlanProgress? = null,
+    val steps: List<PlanStep> = emptyList(),
+    val findings: List<PlanFinding> = emptyList(),
+    val fileError: PlanFileError? = null,
+)
+
 /** The id of Scratch: a session without a project. */
 const val SCRATCH_PROJECT_ID = "__scratch__"
 

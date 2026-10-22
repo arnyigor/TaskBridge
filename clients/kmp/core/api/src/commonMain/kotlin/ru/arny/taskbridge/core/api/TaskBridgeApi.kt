@@ -763,6 +763,53 @@ class TaskBridgeApi(
      * отвечает на отмену быстро: жёсткий стоп убивает процессы сразу, обычный
      * ждёт ответа RPC не дольше 10 с (pi.abortTimeoutMs).
      */
+    // --- Follow Plan ---------------------------------------------------------
+
+    /** Состояние режима «По плану»: читается и при выключенном на сервере флаге. */
+    suspend fun plan(id: String): PlanStatus =
+        get("/api/tasks/${id.path()}/plan", PlanStatus.serializer())
+
+    /**
+     * Подключить существующий Markdown-файл проекта. Модель не вызывается: это
+     * только чтение и проверка файла.
+     */
+    suspend fun attachPlan(id: String, path: String, commandId: String): PlanStatus =
+        planCommand(id, "attach", commandId, buildJsonObject {
+            put("path", path)
+            put("clientId", connection.clientId)
+        })
+
+    suspend fun startPlan(id: String, expectedRevision: Int?, commandId: String): PlanStatus =
+        planCommand(id, "start", commandId, planBody(expectedRevision))
+
+    suspend fun pausePlan(id: String, commandId: String): PlanStatus =
+        planCommand(id, "pause", commandId, buildJsonObject { put("clientId", connection.clientId) })
+
+    suspend fun resumePlan(id: String, expectedRevision: Int?, commandId: String): PlanStatus =
+        planCommand(id, "resume", commandId, planBody(expectedRevision))
+
+    suspend fun stopPlan(id: String, commandId: String): PlanStatus =
+        planCommand(id, "stop", commandId, buildJsonObject { put("clientId", connection.clientId) })
+
+    /** Снять конфликт, приняв версию файла с диска (правка оператора не теряется). */
+    suspend fun reconcilePlan(id: String, expectedRevision: Int?, action: String, commandId: String): PlanStatus =
+        planCommand(id, "reconcile", commandId, buildJsonObject {
+            expectedRevision?.let { put("expectedRevision", it) }
+            put("clientId", connection.clientId)
+            put("action", action)
+        })
+
+    private fun planBody(expectedRevision: Int?) = buildJsonObject {
+        expectedRevision?.let { put("expectedRevision", it) }
+        put("clientId", connection.clientId)
+    }
+
+    private suspend fun planCommand(id: String, action: String, commandId: String, body: JsonObject): PlanStatus =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/$action", PlanStatus.serializer(), buildJsonObject {
+            body.forEach { (key, value) -> put(key, value) }
+            put("commandId", commandId)
+        })
+
     suspend fun cancel(id: String, commandId: String? = null, hard: Boolean = false): Task =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/cancel", Task.serializer(), buildJsonObject {
             commandId?.let { put("commandId", it) }

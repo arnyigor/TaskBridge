@@ -375,6 +375,35 @@
 
       <div id="approvalBanner" class="approvalBanner hidden" aria-live="polite"></div>
 
+      <!-- Компактная карточка плана: файл, прогресс, текущий шаг, находки и
+           действия. Полный план открывается в файле, а не вставляется в чат. -->
+      <div id="planCard" class="planCard hidden" role="status" aria-live="polite">
+        <div class="planCardHead">
+          <b id="planHeadline">План не подключён</b>
+          <span id="planGoal" class="muted small"></span>
+        </div>
+        <div id="planFindings" class="planFindings small"></div>
+        <div id="planNotice" class="planNotice small hidden"></div>
+        <div id="planActions" class="planActions"></div>
+      </div>
+
+      <!-- Первое включение переключателя: путь к файлу внутри проекта. -->
+      <div id="planDialog" class="authGate hidden">
+        <div class="authCard">
+          <div class="dialogHeader">
+            <h2>План для режима «По плану»</h2>
+            <button id="planDialogClose" type="button" class="iconButton" title="Закрыть" aria-label="Закрыть">✕</button>
+          </div>
+          <p class="muted small">Файл внутри проекта. Управляемый Markdown с шагами <code>S-001</code>: свободный
+            текст импортируется только предпросмотром и не перезаписывается.</p>
+          <label class="planPathField">Путь: <input id="planPath" type="text" placeholder="docs/PLAN.md" /></label>
+          <div id="planPathError" class="planPathError small" role="alert"></div>
+          <div class="planDialogActions">
+            <button id="planAttach" type="button">Подключить</button>
+          </div>
+        </div>
+      </div>
+
       <div class="composer-wrap">
         <div id="queuedPrompt" class="queuedPrompt hidden"></div>
         <!-- Live model + machine speeds: always visible while the task runs. -->
@@ -399,6 +428,11 @@
             <button id="clearPrompt" class="clearPrompt hidden" type="button" title="Очистить" aria-label="Очистить поле ввода">×</button>
           </div>
           <div class="composerActions">
+            <!-- Follow Plan (FP-05C): режим исполнения выбранного плана. Не «Plan
+                 Mode»: read-only планирование будет отдельным режимом. Включение
+                 само по себе не запускает модель — сначала файл, потом «Продолжить». -->
+            <button id="planToggle" class="planToggle" type="button" aria-pressed="false"
+              title="По плану: TaskBridge ведёт шаги из выбранного файла плана">По плану</button>
             <label class="fileIconButton" data-pc-only title="Прикрепить файлы" aria-label="Прикрепить файлы">
               <input id="files" type="file" multiple accept="*/*" />
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 0 1-7.78-7.78l9.19-9.19a3.67 3.67 0 0 1 5.19 5.19l-9.2 9.19a1.83 1.83 0 0 1-2.6-2.6l8.49-8.48"/></svg>

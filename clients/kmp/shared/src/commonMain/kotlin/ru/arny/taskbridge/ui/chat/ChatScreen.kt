@@ -513,6 +513,18 @@ fun ChatScreen(
                         }
                     },
                     top = {
+                        // Follow Plan (FP-05C): переключатель «По плану» и карточка
+                        // плана. Состояние серверное; version меняется на каждом
+                        // событии плана, поэтому карточка перечитывается сама.
+                        FollowPlanBar(
+                            api = connection.api,
+                            taskId = taskId,
+                            version = state.chat.version,
+                            newId = graph::newId,
+                            scope = scope,
+                            onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
+                            onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
+                        )
                         DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
                             QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })

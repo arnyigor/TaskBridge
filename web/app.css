@@ -2041,3 +2041,46 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .modelFav[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
 .modelFav:focus-visible, .modelProbe:focus-visible, .modelFavToggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .modelEmpty { margin: 6px 2px; }
+
+/* --- Follow Plan (FP-05C) ---------------------------------------------------
+   The switch sits next to the attach button; the card sits above the composer,
+   between the approval banner and the queue. Both are compact on purpose: the
+   plan itself opens in the file viewer, never inline in the chat. Every
+   font-size is in rem so the root UI scale reaches it. */
+.planToggle {
+  flex: 0 0 auto;
+  align-self: center;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.6875rem;
+  border-radius: 999px;
+  border: 1px solid var(--line, #2a3348);
+  background: transparent;
+  color: var(--muted, #94a3b8);
+}
+.planToggle[aria-pressed="true"] {
+  border-color: var(--accent, #4f8cff);
+  color: var(--accent, #4f8cff);
+  background: color-mix(in srgb, var(--accent, #4f8cff) 12%, transparent);
+}
+.planCard {
+  margin: 0.375rem 0;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--line, #2a3348);
+  border-radius: 10px;
+  background: var(--panel, #121826);
+  flex-direction: column;
+  gap: 0.25rem;
+}
+/* Display only when the card is really shown: .hidden has to win. */
+.planCard:not(.hidden) { display: flex; }
+.planCardHead { display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: baseline; }
+.planCardHead b { font-size: 0.75rem; }
+.planFindings { color: var(--muted, #94a3b8); }
+.planNotice { color: var(--warn, #fbbf24); }
+.planActions { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+.planActions button { padding: 0.1875rem 0.5rem; font-size: 0.6875rem; }
+.planActions button:disabled { opacity: 0.45; }
+.planPathField { display: flex; gap: 0.5rem; align-items: center; margin: 0.5rem 0; font-size: 0.75rem; }
+.planPathField input { flex: 1 1 auto; }
+.planPathError { color: var(--danger, #ef4444); min-height: 1em; }
+.planDialogActions { display: flex; justify-content: flex-end; gap: 0.5rem; }

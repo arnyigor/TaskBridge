@@ -5,6 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
+import { planCardModel, planEventNotice, planPathProblem, planRequestBody, toggleOffAction } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -24,6 +25,10 @@ const transport = selectTransport({
 marked.setOptions({ gfm: true, breaks: true });
 
 let selectedTaskId = null;
+// Follow Plan (FP-05C): the server owns the state, the page only mirrors it.
+let planStatus = null;
+let planMode = false;
+let planNotice = '';
 // Set from /api/auth. `serverIsLocal` means native open/reveal is possible —
 // this page runs on the machine itself, so a desktop application would actually
 // be the operator's. `canExecute` means running on the machine is possible —
@@ -2834,6 +2839,12 @@ async function selectTask(id) {
     if (version !== selectionVersion) return;
     syncSessionUrl(id);
     currentTask = t;
+    // A different session has a different plan (or none): never carry the old card.
+    planStatus = null;
+    planMode = false;
+    planNotice = '';
+    renderPlanCard();
+    loadPlanStatus();
     reachedHistoryStart = initial.reachedStart;
     oldestLoadedSeq = initial.events.length ? initial.events[0].seq : null;
     chatState = new ChatState(t, { seedInitial: initial.reachedStart });
@@ -2858,6 +2869,13 @@ async function selectTask(id) {
         if (chatState.apply(event)) {
           if (!textUpdateTimer) textUpdateTimer = setTimeout(() => { textUpdateTimer = null; if (version === selectionVersion) renderChat(); }, 80);
           if (event.type === 'STATUS' || event.type.startsWith('TASK_') || event.type === 'TURN_STATE') refreshTask();
+          // Every Follow Plan decision is a server fact: re-read it instead of
+          // reconstructing the card from event payloads.
+          if (event.type.startsWith('PLAN_')) {
+            const notice = planEventNotice(event);
+            if (notice) planNotice = notice;
+            loadPlanStatus();
+          }
         }
       },
       onStatus: value => { if (value === 'reconnecting' && version === selectionVersion) refreshTask(); }
@@ -4105,6 +4123,153 @@ $('form').addEventListener('submit', async (e) => {
     if (!isTouchDevice()) promptEl.focus();
   }
 });
+
+/* ---------------- Follow Plan («По плану», FP-05C) ----------------
+   The server owns the state (src/follow-plan-service.mjs); this page only mirrors
+   it. Turning the switch on asks for a file and attaches it — it never starts a
+   turn. Turning it off during a step pauses at the safe boundary; STOP stays a
+   separate, explicit button. */
+
+function updatePlanToggle() {
+  const button = $('planToggle');
+  if (!button) return;
+  const active = Boolean(planStatus?.attached) && planMode;
+  button.setAttribute('aria-pressed', String(active));
+  button.title = planStatus?.attached
+    ? `По плану: ${planStatus.path}`
+    : 'По плану: выберите файл плана в проекте';
+}
+
+function renderPlanCard() {
+  updatePlanToggle();
+  const card = $('planCard');
+  if (!card) return;
+  const model = planCardModel(planStatus, { enabled: planStatus?.enabled !== false });
+  card.classList.toggle('hidden', !model.visible);
+  if (!model.visible) return;
+  $('planHeadline').textContent = model.headline;
+  $('planGoal').textContent = model.goal || '';
+  $('planFindings').textContent = model.findings || '';
+  const notice = $('planNotice');
+  // The card explains the next thing to do: conflict and file errors outrank the
+  // last event, because they are the reason the buttons below are disabled.
+  const text = model.conflict || model.error || planNotice || '';
+  notice.textContent = text;
+  notice.classList.toggle('hidden', !text);
+  const actions = $('planActions');
+  actions.textContent = '';
+  for (const action of model.actions) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.label;
+    button.disabled = action.disabled;
+    button.title = action.title || '';
+    button.dataset.action = action.id;
+    button.onclick = () => runPlanAction(action.id, button);
+    actions.append(button);
+  }
+}
+
+async function loadPlanStatus() {
+  const id = selectedTaskId;
+  if (!id) return null;
+  try {
+    const status = await api(`/api/tasks/${encodeURIComponent(id)}/plan`);
+    if (id !== selectedTaskId) return null;
+    planStatus = status;
+    // The switch follows the server: an attached plan is the mode, a session
+    // without one is not (and its card stays out of the chat).
+    if (status.attached) planMode = true;
+    renderPlanCard();
+    return status;
+  } catch (error) {
+    planStatus = { attached: false, enabled: true, fileError: { message: error.message } };
+    renderPlanCard();
+    return null;
+  }
+}
+
+async function runPlanAction(action, button = null) {
+  const id = selectedTaskId;
+  if (!id) return;
+  if (action === 'open' || action === 'edit') {
+    if (!planStatus?.path) return;
+    const url = `/api/tasks/${encodeURIComponent(id)}/workspace-file?path=${encodeURIComponent(planStatus.path)}`;
+    openFileViewer({ url, name: planStatus.path, downloadUrl: `${url}&download=1` });
+    if (action === 'edit') planNotice = 'Правьте файл в проекте — карточка перечитает его версию';
+    return;
+  }
+  if (button) button.disabled = true;
+  try {
+    if (action === 'start') {
+      // After a pause the operator continues an existing cycle; a fresh plan is
+      // started. Both carry the revision the card shows (CAS).
+      const paused = ['PAUSED', 'PAUSED_REVIEW'].includes(planStatus?.state);
+      await planSend(paused ? 'resume' : 'start');
+    } else if (action === 'pause') {
+      await planSend('pause');
+    } else if (action === 'stop') {
+      await planSend('stop');
+    } else if (action === 'reconcile') {
+      await planSend('reconcile', { action: 'adopt_external' });
+    }
+    planNotice = '';
+  } catch (error) {
+    planNotice = error.message;
+  } finally {
+    if (button) button.disabled = false;
+    await loadPlanStatus();
+  }
+}
+
+async function planSend(action, extra = {}) {
+  const id = selectedTaskId;
+  const path = `/api/tasks/${encodeURIComponent(id)}/plan/${action}`;
+  return commandApi(path, planRequestBody(planStatus, extra));
+}
+
+$('planToggle').onclick = async () => {
+  if (!selectedTaskId) return;
+  if (!planStatus?.attached) {
+    $('planPathError').textContent = '';
+    $('planDialog').classList.remove('hidden');
+    $('planPath').focus();
+    return;
+  }
+  if (planMode) {
+    // Off means "no further steps", not "kill this one".
+    if (toggleOffAction(planStatus) === 'pause') {
+      try { await planSend('pause'); } catch (error) { planNotice = error.message; }
+    }
+    planMode = false;
+  } else {
+    planMode = true;
+  }
+  await loadPlanStatus();
+};
+
+$('planDialogClose').onclick = () => $('planDialog').classList.add('hidden');
+$('planAttach').onclick = async () => {
+  const id = selectedTaskId;
+  if (!id) return;
+  const value = $('planPath').value;
+  const problem = planPathProblem(value);
+  $('planPathError').textContent = problem || '';
+  if (problem) return;
+  const button = $('planAttach');
+  button.disabled = true;
+  try {
+    await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/attach`, { path: value.trim() });
+    planMode = true;
+    planNotice = '';
+    $('planDialog').classList.add('hidden');
+  } catch (error) {
+    $('planPathError').textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+  await loadPlanStatus();
+};
 
 $('newTaskButton').onclick = () => {
   $('controlsSpoiler').open = false;
