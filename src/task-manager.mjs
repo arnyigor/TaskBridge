@@ -2671,7 +2671,7 @@ export class TaskManager extends EventEmitter {
     // on the preceding snapshot until the terminal event has been persisted.
     const pendingTerminal = this.#terminalPublication.snapshot(task);
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
-    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _nativeLease, _uploadToken,
+    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
@@ -5571,6 +5571,11 @@ export class TaskManager extends EventEmitter {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    // Отмена считается и для хода, который сейчас публикует отказ: восстановление
+    // после 413 идёт цепочкой await'ов и обязано увидеть, что продолжение больше
+    // никому не нужно (MEDIA-10). Счётчик живёт в объекте задачи и сравнивается
+    // в ветке восстановления.
+    task._cancelEpoch = (task._cancelEpoch || 0) + 1;
     if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
     // Retire the runtime before touching Pi.  The abort response is not an
     // ownership boundary: Pi may acknowledge it while already queued frames
@@ -5907,6 +5912,10 @@ export class TaskManager extends EventEmitter {
       return this.#publicTask(task);
     }
     // Nothing is queued: start (or reuse) the session and deliver the prompt.
+    // Идентификатор попытки — до старта сессии: по нему preflight понимает, что
+    // предупреждение уже сказано именно в этой попытке (MEDIA-09F), а новое
+    // сообщение оператора начинает новую.
+    task._attemptId = crypto.randomUUID();
     if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
@@ -6480,12 +6489,11 @@ export class TaskManager extends EventEmitter {
     if (!result) return null;
     // Одно и то же предупреждение — один раз за попытку: preflight зовётся и на
     // старте сессии, и на самом 413, из-за чего оператор видел две одинаковые строки
-    // «уменьшать нечего» подряд (MEDIA-09F).
-    const note = `${result.status}|${result.message || ''}`;
-    // Ключ — статус, а не текст: в тексте есть размер файла, и он меняется между
-    // вызовами одной и той же попытки, из-за чего дубль не ловился (MEDIA-09F).
-    if (task._preflightNote === result.status) return result;
-    task._preflightNote = result.status;
+    // «уменьшать нечего» подряд (MEDIA-09F). Ключ — статус и начало попытки: новая
+    // независимая попытка (новое сообщение) о том же снова скажет.
+    const note = `${result.status}|${task._attemptId || ''}`;
+    if (task._preflightNote === note) return result;
+    task._preflightNote = note;
     if (result.status === 'repaired') {
       await this.#event(task, 'SESSION_SHRUNK', result.message, {
         beforeBytes: result.beforeBytes, afterBytes: result.afterBytes, dropped: result.dropped,
@@ -6518,6 +6526,11 @@ export class TaskManager extends EventEmitter {
       REQUEST_TOO_LARGE: 'Провайдер отклонил запрос по размеру: история сессии больше, чем он принимает за один запрос (около 50 МБ).',
     }[failure?.code];
     if (guidance && failure.retryable === false) {
+      // Отметка на случай STOP во время восстановления: вся ветка ниже — цепочка
+      // await'ов, и отмена может прийти в любое из окон. Признак сравнивается
+      // перед публикацией продолжения (MEDIA-10).
+      const cancelEpoch = task._cancelEpoch || 0;
+      const cancelledMeanwhile = () => (task._cancelEpoch || 0) !== cancelEpoch || task.status === 'CANCELLED';
       // The retry belongs to Pi/its extension. Retire that owned process before
       // publishing failure; merely hiding PROVIDER_WAIT would still send again.
       const runtime = this.runtimes.get(task.id);
@@ -6559,6 +6572,9 @@ export class TaskManager extends EventEmitter {
         // иначе каждый повтор снова упирается в тот же лимит (MEDIA-09B). Решение о
         // продолжении принимает ветка восстановления ниже.
         await this.#fail(task, error, task._turn ?? null, { requeuePrompt: failure.code !== 'REQUEST_TOO_LARGE' });
+        // STOP, пришедший, пока шёл preflight: ход отменён оператором, значит ни
+        // восстановление, ни продолжение ему больше не принадлежат (MEDIA-10).
+        if (cancelledMeanwhile()) return;
         if (withheld) {
           // Состояние неопределённого результата: история восстановлена, но что
           // именно успели сделать инструменты — знает только человек. Флаг виден
