@@ -114,6 +114,12 @@ function followPlanCheckpoint(message) {
   const heading = text.split('\n').some(line => line.startsWith(`### ${stepId[1]}`) && line.includes('slow'));
   if (heading) planSlow = true;
   const left = statuses.filter(step => step.id !== stepId[1] && step.status !== 'DONE' && step.status !== 'SKIPPED');
+  // `finding-P1` в заголовке шага: этот ход «находит» связанный дефект — так
+  // проверяется автоправка плана (FP-04/FP-05D) на уровне HTTP.
+  const finding = /finding-(P\d)/.exec(text.split('\n').find(line => line.startsWith(`### ${stepId[1]}`)) || '');
+  const findings = finding
+    ? [{ id: 'F-900', priority: finding[1], blocking: finding[1] === 'P0' || finding[1] === 'P1', summary: 'дефект, найденный в шаге' }]
+    : [];
   const evidence = runId
     ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]
     : [{ stepId: stepId[1], kind: 'file', ref: file[1], summary: 'fixture: шаг выполнен' }];
@@ -123,7 +129,8 @@ function followPlanCheckpoint(message) {
     cycleId: cycleId[1],
     decision: left.length ? 'CONTINUE' : 'COMPLETE',
     completedStepIds: [stepId[1]],
-    evidence
+    evidence,
+    findings
   };
 }
 
@@ -191,6 +198,9 @@ let tailAfterAbort = false;
 // A step whose heading says `slow` takes 10 s in the fixture: the STOP test needs
 // a turn that is still running when the operator presses the button.
 let planSlow = false;
+// Repeats `agent_settled` after the turn: the shape a reconnect or a duplicated
+// frame produces. The controller must not start another cycle from it.
+let planDoubleSettle = false;
 function faultOf(message) {
   const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|heavy-mixed|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
@@ -198,6 +208,7 @@ function faultOf(message) {
 function startTurn(message) {
   streaming = true;
   planSlow = false;
+  planDoubleSettle = false;
   turn += 1;
   send({ type: 'agent_start' });
   const user = { role: 'user', content: [{ type: 'text', text: message }] };
@@ -689,6 +700,12 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       if (checkpoint) {
         send({ type: 'tool_execution_start', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', args: checkpoint });
         send({ type: 'tool_execution_end', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', isError: false, result: { content: [{ type: 'text', text: 'Checkpoint received' }] } });
+      }
+      if (planDoubleSettle) {
+        setTimeout(() => {
+          send({ type: 'agent_settled' });
+          send({ type: 'agent_settled' });
+        }, 400);
       }
     }
     // A provider that answers with a JSON error envelope (as Pi forwards it

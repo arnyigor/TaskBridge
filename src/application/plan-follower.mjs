@@ -249,6 +249,12 @@ export class PlanFollower {
         status: 'DONE',
         result: (verdict.inspection.evidenceFor(stepId) || []).map(item => item.summary).join('; ') || 'подтверждено checkpoint'
       })),
+      // A step that exists because of a finding is the verification of that
+      // finding: leaving it OPEN would block the plan's COMPLETE for ever.
+      ...completed
+        .map(stepId => file.plan.steps.find(step => step.id === stepId)?.originFindingId)
+        .filter(Boolean)
+        .map(findingId => ({ op: 'set_finding_state', findingId, state: 'DONE' })),
       ...revision.ops
     ];
 

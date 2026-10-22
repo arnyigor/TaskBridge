@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
+import { parsePlan } from '../src/application/plan-file.mjs';
 
 const PLAN = `---
 taskbridge_plan: 1
@@ -201,4 +202,100 @@ test('with followPlan.enabled off the status is readable and control is refused'
   const deliveries = (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8').catch(() => ''))
     .trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
   assert.equal(deliveries.filter(entry => entry.message.includes('FOLLOW PLAN')).length, 0);
+});
+
+test('a blocking P1 defect found in a step is inserted next and fixed automatically', { timeout: 60000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN.replace('Первый шаг', 'Первый шаг finding-P1'), 'utf8');
+  const task = await createTask(api);
+  await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'cmd-attach' });
+  await post(api, `/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'cmd-start' });
+
+  const finished = await waitFor(async () => {
+    const status = await api(`/api/tasks/${task.id}/plan`);
+    return status.state === 'COMPLETED' ? status : null;
+  }, { timeout: 30000 });
+  assert.ok(finished, `план не завершился после автоправки: ${fixture.logs()}`);
+
+  const onDisk = parsePlan(await fs.readFile(path.join(root, 'PLAN.md'), 'utf8'));
+  const inserted = onDisk.steps.find(step => step.originFindingId === 'F-900');
+  assert.ok(inserted, 'the P1 defect became a concrete step with its origin');
+  assert.equal(inserted.priority, 'P1');
+  assert.equal(inserted.status, 'DONE');
+  assert.ok(onDisk.findings.some(finding => finding.id === 'F-900'));
+  // It runs before the step it blocks, and it is not reported twice.
+  const order = onDisk.steps.map(step => step.id);
+  assert.ok(order.indexOf(inserted.id) < order.indexOf('S-002'), order.join(','));
+  assert.equal(onDisk.steps.filter(step => step.originFindingId === 'F-900').length, 1);
+
+  const deliveries = (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8'))
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.message.includes('FOLLOW PLAN'));
+  assert.ok(deliveries.some(entry => entry.message.includes(inserted.id)), 'the inserted step got its own turn');
+});
+
+test('a P0 defect stops the automatic cycle for the operator', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN.replace('Первый шаг', 'Первый шаг finding-P0'), 'utf8');
+  const task = await createTask(api);
+  await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'cmd-attach' });
+  await post(api, `/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'cmd-start' });
+
+  const paused = await waitFor(async () => {
+    const status = await api(`/api/tasks/${task.id}/plan`);
+    return status.state === 'PAUSED_REVIEW' ? status : null;
+  }, { timeout: 20000 });
+  assert.ok(paused, `цикл не остановился на P0: ${fixture.logs()}`);
+
+  const onDisk = parsePlan(await fs.readFile(path.join(root, 'PLAN.md'), 'utf8'));
+  assert.equal(onDisk.steps.length, 2, 'nothing is inserted before the operator approves a P0');
+  assert.equal(onDisk.steps[0].status, 'TODO', 'the file is not touched either');
+  const deliveries = (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8'))
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.message.includes('FOLLOW PLAN'));
+  assert.equal(deliveries.length, 1, 'no second turn for an unapproved P0');
+});
+
+test('a P3 note is recorded and does not expand the work', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN.replace('Первый шаг', 'Первый шаг finding-P3'), 'utf8');
+  const task = await createTask(api);
+  await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'cmd-attach' });
+  await post(api, `/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'cmd-start' });
+
+  const finished = await waitFor(async () => {
+    const status = await api(`/api/tasks/${task.id}/plan`);
+    return status.state === 'COMPLETED' ? status : null;
+  }, { timeout: 30000 });
+  assert.ok(finished, `план не завершился: ${fixture.logs()}`);
+  const onDisk = parsePlan(await fs.readFile(path.join(root, 'PLAN.md'), 'utf8'));
+  assert.equal(onDisk.steps.length, 2, 'a cosmetic note adds no step');
+  assert.ok(onDisk.findings.some(finding => finding.id === 'F-900' && finding.priority === 'P3'));
+});
+
+test('a repeated settle (reconnect, duplicated frame) does not start another cycle', { timeout: 60000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  // The step heading asks the fixture to repeat `agent_settled` after the turn.
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN.replace('Первый шаг', 'Первый шаг double-settle'), 'utf8');
+  const task = await createTask(api);
+  await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'cmd-attach' });
+  await post(api, `/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'cmd-start' });
+
+  const finished = await waitFor(async () => {
+    const status = await api(`/api/tasks/${task.id}/plan`);
+    return status.state === 'COMPLETED' ? status : null;
+  }, { timeout: 30000 });
+  assert.ok(finished, `план не завершился: ${fixture.logs()}`);
+  await sleep(1200);
+
+  const deliveries = (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8'))
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.message.includes('FOLLOW PLAN'));
+  assert.equal(deliveries.length, 2, `repeated settles must not add turns: ${deliveries.length}`);
+  assert.equal((await api(`/api/tasks/${task.id}/plan`)).state, 'COMPLETED');
 });
