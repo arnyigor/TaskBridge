@@ -92,6 +92,41 @@ async function approvalGate(toolCallId, toolName, args) {
 // The answer arrives as several deltas a few ms apart, like a streamed
 // response: that is what lets TaskBridge measure TG from usage (output tokens
 // over the time the deltas actually spanned).
+// --- Follow Plan stand-in ---------------------------------------------------
+// Parses the FOLLOW PLAN instruction and builds the checkpoint a compliant model
+// would send. Returns null when the instruction is not a normal step (the audit
+// turn, for instance) or the plan cannot be read — the controller must then ask
+// once and pause, which the tests exercise separately.
+function followPlanCheckpoint(message) {
+  const file = /`([^`]+\.md)`/.exec(message);
+  const planId = /planId\s+(p-[\w-]+)/.exec(message);
+  const revision = /revision\s+(\d+)/.exec(message);
+  // «cycle c-1).» — the instruction ends the parenthesis, so the id is matched by
+  // its own shape rather than by "everything up to a space".
+  const cycleId = /cycle\s+(c-[\w-]+)/.exec(message);
+  const stepId = /Текущий шаг:\s*(S-\d+)/.exec(message);
+  const runId = /прогона[^:]*:\s*([0-9a-f-]{36})/i.exec(message);
+  if (!file || !planId || !revision || !cycleId || !stepId) return null;
+  let text;
+  try { text = fs.readFileSync(file[1], 'utf8'); } catch { return null; }
+  const statuses = [...text.matchAll(/^###\s+(S-\d+)\s*\|\s*([A-Z_]+)/gm)].map(match => ({ id: match[1], status: match[2] }));
+  if (!statuses.some(step => step.id === stepId[1])) return null;
+  const heading = text.split('\n').some(line => line.startsWith(`### ${stepId[1]}`) && line.includes('slow'));
+  if (heading) planSlow = true;
+  const left = statuses.filter(step => step.id !== stepId[1] && step.status !== 'DONE' && step.status !== 'SKIPPED');
+  const evidence = runId
+    ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]
+    : [{ stepId: stepId[1], kind: 'file', ref: file[1], summary: 'fixture: шаг выполнен' }];
+  return {
+    planId: planId[1],
+    revision: Number(revision[1]),
+    cycleId: cycleId[1],
+    decision: left.length ? 'CONTINUE' : 'COMPLETE',
+    completedStepIds: [stepId[1]],
+    evidence
+  };
+}
+
 function finish(text, fail = false, errorMessage = 'Fixture model error', thinking = null) {
   // `stream-many` answers are long: one delta per character, so a client can
   // (re)connect in the middle of a stream.
@@ -153,12 +188,16 @@ function finish(text, fail = false, errorMessage = 'Fixture model error', thinki
 //                 engine chunking slowly, where the pause IS generation time
 let deaf = false;
 let tailAfterAbort = false;
+// A step whose heading says `slow` takes 10 s in the fixture: the STOP test needs
+// a turn that is still running when the operator presses the button.
+let planSlow = false;
 function faultOf(message) {
   const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|heavy-mixed|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
   streaming = true;
+  planSlow = false;
   turn += 1;
   send({ type: 'agent_start' });
   const user = { role: 'user', content: [{ type: 'text', text: message }] };
@@ -638,12 +677,26 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       send({ type: 'tool_execution_start', toolCallId: `write-${turn}`, toolName: 'write', args: { path: 'result.png' } });
       send({ type: 'tool_execution_end', toolCallId: `write-${turn}`, toolName: 'write', isError: false, result: { content: [{ type: 'text', text: 'wrote result.png' }] } });
     }
+    // --- Follow Plan (FP-05) -------------------------------------------------
+    // The controller sends an instruction that names the plan file, the planId,
+    // the revision, the cycle and the current step (src/application/plan-follower.mjs).
+    // This stand-in acts like a model that does the step and then reports a
+    // checkpoint: it reads the plan from the workspace, marks the named step done
+    // and says COMPLETE only when nothing is left open. Evidence cites the run id
+    // the instruction names, which is exactly what the server verifies.
+    if (command.message.includes('FOLLOW PLAN')) {
+      const checkpoint = followPlanCheckpoint(command.message);
+      if (checkpoint) {
+        send({ type: 'tool_execution_start', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', args: checkpoint });
+        send({ type: 'tool_execution_end', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', isError: false, result: { content: [{ type: 'text', text: 'Checkpoint received' }] } });
+      }
+    }
     // A provider that answers with a JSON error envelope (as Pi forwards it
     // verbatim) is a separate case from a plain-text failure.
     const modelError = command.message.includes('model-error-json')
       ? '400: {"code":"422","error_type":"UNSUPPORTED_OPENAI_PARAMS","message":"The following parameters are not supported for this model: tools","param":"tools"}'
       : 'Fixture model error';
     const thinkingText = command.message.includes('think') ? 'Сначала взвешу варианты, потом отвечу.' : null;
-    pending = setTimeout(() => finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError, thinkingText), command.message.includes('slow') ? 10000 : 80);
+    pending = setTimeout(() => finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError, thinkingText), command.message.includes('slow') || planSlow ? 10000 : 80);
   }
 });

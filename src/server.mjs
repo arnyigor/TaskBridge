@@ -18,6 +18,7 @@ import { autoRestartDecision, autoRestartConfigured, nextRestartAt, normalizeAut
 import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager, briefTask } from './task-manager.mjs';
+import { FollowPlanService } from './follow-plan-service.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
 import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, realpathNamed, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
@@ -140,6 +141,15 @@ manager.turnInstructionsExtensionPath = path.join(rootDir, 'pi-extension', 'task
 // saved transcript (pi-extension/taskbridge-media.js).
 manager.mediaExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-media.js');
 await manager.init();
+// Follow Plan (PLAN-FOLLOW-01, FP-05A): a controller over the dispatch that
+// already exists. The flag stays off until the FP-06 acceptance; with it off the
+// control routes refuse and nothing generates on its own.
+const followPlan = new FollowPlanService({ manager, store, config });
+manager.setFollowPlanHooks({ turnSettled: input => followPlan.turnSettled(input) });
+if (followPlan.enabled) {
+  // Nothing is re-sent after a restart: a dispatched-but-unsettled cycle pauses.
+  followPlan.recoverAll().catch(error => console.error(`[TaskBridge] Follow Plan recovery failed: ${error.message}`));
+}
 // Router mode is meant to be always-on: the process is a cheap supervisor that
 // only loads models on demand. Start it eagerly so the model picker and the UI
 // can discover local models right away; a failure must not stop the server.
@@ -2018,6 +2028,56 @@ async function handleRequest(req, res) {
       if (req.method === 'DELETE') return json(res, 200, await manager.forgetRecap(id));
     }
 
+    // Follow Plan: status is readable with the flag off (the UI needs to know why
+    // the toggle is disabled); every mutating route is a commandId command and a
+    // CAS on the plan revision.
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|start|pause|resume|stop|reconcile))?$/);
+    if (planRoute) {
+      const planTaskId = decodeURIComponent(planRoute[1]);
+      const action = planRoute[2] || null;
+      if (!manager.getTask(planTaskId)) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
+      if (!action && req.method === 'GET') return json(res, 200, await followPlan.status(planTaskId));
+      const body = await readJson(req).catch(() => ({}));
+      const command = (fn) => manager.withCommandId(body.commandId, body.clientId, [action || 'patch', planTaskId, body], () => fn());
+      if (!action && req.method === 'PATCH') {
+        return json(res, 200, await command(() => followPlan.patch({
+          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
+          expectedHash: body.expectedHash || null, changes: body.changes,
+          commandId: body.commandId, clientId: body.clientId
+        })));
+      }
+      if (req.method !== 'POST') return errorJson(res, 404, Object.assign(new Error('Not found'), { code: 'NOT_FOUND' }));
+      if (action === 'attach') {
+        return json(res, 200, await command(() => followPlan.attach({
+          taskId: planTaskId, path: body.path, commandId: body.commandId, clientId: body.clientId
+        })));
+      }
+      if (action === 'start') {
+        return json(res, 200, await command(() => followPlan.start({
+          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
+          commandId: body.commandId, clientId: body.clientId
+        })));
+      }
+      if (action === 'pause') {
+        return json(res, 200, await command(() => followPlan.pause({ taskId: planTaskId, commandId: body.commandId, clientId: body.clientId })));
+      }
+      if (action === 'resume') {
+        return json(res, 200, await command(() => followPlan.resume({
+          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
+          commandId: body.commandId, clientId: body.clientId
+        })));
+      }
+      if (action === 'stop') {
+        return json(res, 200, await command(() => followPlan.stop({ taskId: planTaskId, commandId: body.commandId, clientId: body.clientId })));
+      }
+      if (action === 'reconcile') {
+        return json(res, 200, await command(() => followPlan.reconcile({
+          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null, action: body.action,
+          commandId: body.commandId, clientId: body.clientId
+        })));
+      }
+    }
+
     let match = pathname.match(/^\/api\/tasks\/([^/]+)$/);
     if (req.method === 'GET' && match) {
       const task = manager.getTask(match[1]);
@@ -2598,18 +2658,20 @@ async function handleRequest(req, res) {
     // it «the app hung up» and «the socket died» look identical in two logs.
     console.error(`[${req.headers['x-taskbridge-request-id'] || '-'}] ${error.message}`);
     const status = error.code === 'BODY_TOO_LARGE' ? 413
-      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'LOCAL_CONTEXT_UNSUPPORTED', 'SCRIPT_NOT_RUNNABLE'].includes(error.code) ? 400
+      : ['INPUT_INVALID', 'PROJECT_DIRTY', 'NOT_CONFIGURED', 'MODEL_NOT_FOUND', 'LOCAL_HTTP_ERROR', 'LOCAL_NOT_ROUTER', 'LOCAL_LOAD_FAILED', 'LOCAL_CONTEXT_UNSUPPORTED', 'SCRIPT_NOT_RUNNABLE', 'PLAN_INVALID'].includes(error.code) ? 400
       // CONFLICT / UNKNOWN_AFTER_CRASH / ACCEPTED come from the commandId journal.
       // They are answers about that command, not server faults: a 5xx would make
       // a retrying client treat them as an outage. ACCEPTED (still in flight) is
       // the one worth repeating later — the repeat returns the saved result.
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED'].includes(error.code) ? 409
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED',
+        // Follow Plan: these are answers about the plan, not server faults.
+        'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429
       // PROJECT_NOT_FOUND is a 404, not a 400: the request is well-formed, the
       // thing it names is not there (a work item must belong to a known project).
-      : ['NOT_FOUND', 'ENOENT', 'PROJECT_NOT_FOUND', 'SESSION_NOT_FOUND'].includes(error.code) ? 404
+      : ['NOT_FOUND', 'ENOENT', 'PROJECT_NOT_FOUND', 'SESSION_NOT_FOUND', 'PLAN_NOT_ATTACHED'].includes(error.code) ? 404
       : 500;
     errorJson(res, status, error);
   }

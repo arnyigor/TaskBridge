@@ -1,0 +1,261 @@
+// FP-05A: подключение PlanFollower к TaskBridge, без Pi и без HTTP.
+//
+// Подставной TaskManager даёт ровно те три точки, к которым обращается сервис:
+// отправка через существующий путь сообщений, отмена и журнал событий задачи.
+// Файл плана и SQLite — настоящие: проверяется именно то, что уйдёт в прод.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { TaskStore } from '../src/task-store.mjs';
+import { FollowPlanService } from '../src/follow-plan-service.mjs';
+import { parsePlan, planHash } from '../src/application/plan-file.mjs';
+
+const PLAN = `---
+taskbridge_plan: 1
+plan_id: p-api
+revision: 1
+goal: "FP-05: подключение"
+---
+
+# План: подключение
+
+## Шаги
+
+### S-001 | TODO | P1 | Первый
+**Критерии:** сделано.
+**Проверка:** run
+
+### S-002 | TODO | P1 | Второй
+**Критерии:** сделано.
+**Проверка:** run
+
+## Обнаруженные проблемы
+`;
+
+function fakeManager({ workspace, taskId = 't-1' }) {
+  const dispatched = [];
+  const cancelled = [];
+  const events = [];
+  let runId = null;
+  const task = () => ({ id: taskId, workspacePath: workspace, runId });
+  return {
+    dispatched, cancelled, events,
+    get task() { return task(); },
+    getTask: id => (String(id) === taskId ? task() : null),
+    listTasks: () => [{ id: taskId }],
+    message: async (id, text, _mode, _files, _token, opts = {}) => {
+      dispatched.push({ text, commandId: opts.commandId });
+      return { id };
+    },
+    cancel: async (id, opts) => { cancelled.push(opts); },
+    publishFollowPlanEvent: async (id, type, message, data) => { events.push({ type, message, data }); }
+  };
+}
+
+const setup = async (t, { enabled = true } = {}) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-service-'));
+  const workspace = path.join(root, 'workspace');
+  await fs.mkdir(workspace, { recursive: true });
+  await fs.writeFile(path.join(workspace, 'docs-PLAN.md'), PLAN, 'utf8');
+  const store = new TaskStore(root);
+  t.after(async () => {
+    store.close?.();
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+  const manager = fakeManager({ workspace });
+  const service = new FollowPlanService({ manager, store, config: { followPlan: { enabled } } });
+  return { root, workspace, store, manager, service, planPath: 'docs-PLAN.md' };
+};
+
+const readPlanFile = async (workspace, relPath) => parsePlan(await fs.readFile(path.join(workspace, relPath), 'utf8'));
+
+test('attach reads the file, spends no turn and reports progress', async t => {
+  const { service, manager, planPath } = await setup(t);
+  const status = await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  assert.equal(manager.dispatched.length, 0, 'attaching must not call the model');
+  assert.equal(status.attached, true);
+  assert.equal(status.state, 'IDLE');
+  assert.equal(status.revision, 1);
+  assert.deepEqual(status.progress, { done: 0, total: 2 });
+  assert.deepEqual(status.steps.map(step => step.id), ['S-001', 'S-002']);
+  assert.equal(manager.events.at(-1).type, 'PLAN_ATTACHED');
+});
+
+test('start dispatches through the existing message path with a command id', async t => {
+  const { service, manager, store, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  const status = await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+  assert.equal(manager.dispatched.length, 1);
+  assert.match(manager.dispatched[0].text, /FOLLOW PLAN/);
+  assert.match(manager.dispatched[0].text, /S-001/);
+  assert.equal(manager.dispatched[0].commandId, store.getPlanBinding('t-1').dispatchCommandId);
+  assert.equal(status.state, 'RUNNING_STEP');
+  assert.equal(status.stepId, 'S-001');
+  assert.equal(manager.events.at(-1).type, 'PLAN_STEP_STARTED');
+});
+
+test('a settled turn with a valid checkpoint records the step and continues', async t => {
+  const { service, manager, store, workspace, planPath } = await setup(t);
+  store.recordRun({ id: 'run-1', taskId: 't-1', sessionId: 't-1', kind: 'prompt', status: 'RUNNING', startedAt: new Date().toISOString() });
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+
+  const result = await service.turnSettled({
+    taskId: 't-1', commandId,
+    checkpoint: {
+      planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE',
+      completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-1', summary: 'шаг выполнен' }]
+    }
+  });
+  assert.equal(result.code, 'DISPATCHED');
+  assert.equal(result.stepId, 'S-002');
+  const written = await readPlanFile(workspace, planPath);
+  assert.equal(written.steps[0].status, 'DONE');
+  assert.equal(written.steps[0].result, 'шаг выполнен');
+  assert.equal(written.revision, 2);
+  assert.equal(manager.dispatched.length, 2);
+  assert.match(manager.dispatched[1].text, /revision 2/);
+  assert.ok(manager.events.some(event => event.type === 'PLAN_STEP_CHECKPOINT' && event.data.decision === 'CONTINUE'));
+});
+
+test('evidence pointing at a missing or foreign run is stripped, so COMPLETE is refused', async t => {
+  const { service, manager, store, workspace, planPath } = await setup(t);
+  store.recordRun({ id: 'run-foreign', taskId: 't-OTHER', sessionId: 't-OTHER', kind: 'prompt', status: 'RUNNING', startedAt: new Date().toISOString() });
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+
+  const result = await service.turnSettled({
+    taskId: 't-1', commandId,
+    checkpoint: {
+      planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'COMPLETE',
+      completedStepIds: ['S-001', 'S-002'],
+      evidence: [
+        { stepId: 'S-001', kind: 'run', ref: '00000000-0000-4000-8000-000000000000', summary: 'нет такого прогона' },
+        { stepId: 'S-002', kind: 'run', ref: 'run-foreign', summary: 'чужой прогон' }
+      ]
+    }
+  });
+  assert.equal(result.code, 'PLAN_BLOCKED');
+  const written = await readPlanFile(workspace, planPath);
+  assert.deepEqual(written.steps.map(step => step.status), ['TODO', 'TODO'], 'nothing was written on unverified evidence');
+  const checkpoint = manager.events.find(event => event.type === 'PLAN_STEP_CHECKPOINT');
+  assert.equal(checkpoint.data.evidenceProblems.length, 2);
+  assert.match(checkpoint.data.evidenceProblems.join('\n'), /не найден/);
+  assert.match(checkpoint.data.evidenceProblems.join('\n'), /другой сессии/);
+});
+
+test('a human edit during the cycle is a conflict, not an overwrite', async t => {
+  const { service, manager, store, workspace, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+  const edited = PLAN.replace('Второй', 'Второй (правка человека)');
+  await fs.writeFile(path.join(workspace, planPath), edited, 'utf8');
+
+  const result = await service.turnSettled({
+    taskId: 't-1', commandId,
+    checkpoint: { planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE', completedStepIds: [], evidence: [] }
+  });
+  assert.equal(result.code, 'PLAN_REVISION_CONFLICT');
+  assert.equal(await fs.readFile(path.join(workspace, planPath), 'utf8'), edited);
+  assert.ok(manager.events.some(event => event.type === 'PLAN_CONFLICT'));
+  assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
+});
+
+test('STOP bumps the epoch, cancels the command and no later settle starts a turn', async t => {
+  const { service, manager, store, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+
+  await service.stop({ taskId: 't-1', commandId: 'cmd-stop' });
+  assert.equal(store.planCancelEpoch('t-1'), 1);
+  assert.equal(manager.cancelled.length, 1);
+  assert.match(manager.cancelled[0].commandId, /:stop$/);
+
+  const late = await service.turnSettled({
+    taskId: 't-1', commandId,
+    checkpoint: { planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE', completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'file', ref: 'docs-PLAN.md', summary: 'x' }] }
+  });
+  assert.equal(late.code, 'IGNORED');
+  assert.equal(manager.dispatched.length, 1, 'a settle after STOP must not dispatch');
+});
+
+test('a restart with a dispatched command pauses instead of replaying it', async t => {
+  const { service, manager, store, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+
+  const results = await service.recoverAll();
+  assert.equal(results.length, 1);
+  assert.equal(results[0].code, 'PLAN_UNKNOWN_OUTCOME');
+  assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
+  assert.equal(manager.dispatched.length, 1, 'the possibly executed turn is not sent again');
+  assert.ok(manager.events.some(event => event.type === 'PLAN_PAUSED'));
+});
+
+test('two settles of one command do not start a second cycle', async t => {
+  const { service, manager, store, planPath } = await setup(t);
+  store.recordRun({ id: 'run-1', taskId: 't-1', sessionId: 't-1', kind: 'prompt', status: 'RUNNING', startedAt: new Date().toISOString() });
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+  const first = store.getPlanBinding('t-1').dispatchCommandId;
+  const checkpoint = {
+    planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE',
+    completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-1', summary: 'ok' }]
+  };
+  await service.turnSettled({ taskId: 't-1', commandId: first, checkpoint });
+  const after = manager.dispatched.length;
+  const repeat = await service.turnSettled({ taskId: 't-1', commandId: first, checkpoint });
+  assert.equal(repeat.code, 'IGNORED', 'the repeated frame belongs to a command that is no longer current');
+  assert.equal(manager.dispatched.length, after);
+});
+
+test('an operator edit through the API is a CAS write and a stale revision is refused', async t => {
+  const { service, manager, workspace, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+
+  const patched = await service.patch({
+    taskId: 't-1', expectedRevision: 1,
+    changes: { ops: [{ op: 'add_finding', findingId: 'F-001', priority: 'P2', summary: 'медленный лог' }] },
+    commandId: 'cmd-patch'
+  });
+  assert.equal(patched.revision, 2);
+  assert.ok(manager.events.some(event => event.type === 'PLAN_REVISED'));
+
+  await assert.rejects(service.patch({
+    taskId: 't-1', expectedRevision: 1,
+    changes: { ops: [{ op: 'add_finding', findingId: 'F-002', priority: 'P2', summary: 'ещё' }] },
+    commandId: 'cmd-patch-2'
+  }), error => error.code === 'PLAN_REVISION_CONFLICT');
+  const written = parsePlan(await fs.readFile(path.join(workspace, planPath), 'utf8'));
+  assert.deepEqual(written.findings.map(finding => finding.id), ['F-001']);
+});
+
+test('adopting the operator file clears a conflict without losing text', async t => {
+  const { service, store, workspace, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  const edited = PLAN.replace('goal: "FP-05: подключение"', 'goal: "FP-05: цель уточнена"');
+  await fs.writeFile(path.join(workspace, planPath), edited, 'utf8');
+
+  const before = await service.status('t-1');
+  assert.equal(before.conflict, true, 'the API shows that the file moved');
+
+  const adopted = await service.reconcile({ taskId: 't-1', action: 'adopt_external', commandId: 'cmd-adopt' });
+  assert.equal(adopted.conflict, false);
+  assert.equal(adopted.goal, 'FP-05: цель уточнена');
+  assert.equal(store.getPlanBinding('t-1').hash, planHash(edited));
+});
+
+test('with the flag off the status stays readable and control is refused', async t => {
+  const { service, manager, planPath } = await setup(t, { enabled: false });
+  const status = await service.status('t-1');
+  assert.equal(status.enabled, false);
+  assert.equal(status.attached, false);
+  await assert.rejects(service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd' }), error => error.code === 'FOLLOW_PLAN_DISABLED');
+  assert.equal(manager.dispatched.length, 0);
+});

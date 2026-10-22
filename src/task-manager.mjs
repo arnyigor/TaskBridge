@@ -139,6 +139,10 @@ const WorkItem = {
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
 // The command that produced a prompt, as recorded on its queue entry and its
 // USER_MESSAGE. Absent fields are left out rather than stored as null.
+// The Follow Plan checkpoint tool (pi-extension/taskbridge-follow-plan.js). Its
+// call is the machine-readable result of a cycle; see #handlePiEvent.
+const PLAN_CHECKPOINT_TOOL = 'taskbridge_plan_checkpoint';
+
 function originOf(commandId, clientId, deviceId) {
   const origin = {};
   if (commandId) origin.commandId = String(commandId);
@@ -4246,8 +4250,17 @@ export class TaskManager extends EventEmitter {
     // turn's tail is dropped; the raw frame is still on disk (line above).
     const stopped = runtime ?? this.runtimes.get(task.id);
     if (stopped?.cancelRequested === true) {
-      if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
+      if (frame.type === 'agent_settled') {
+        this.#resolveSettle(task.id);
+        this.#notifyPlanSettled(task, stopped);
+      }
       return;
+    }
+    // Follow Plan reads its checkpoint from the ordinary tool frame: the arguments
+    // are already validated by Pi against the tool's schema, so no second channel
+    // and no parsing of the assistant's prose is involved.
+    if (frame.type === 'tool_execution_start' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL) {
+      task._planCheckpoint = frame.args && typeof frame.args === 'object' ? frame.args : null;
     }
     // Живой кадр = фаза PROGRESS. Публикуется один раз на ход (дальше только
     // обновление _lastProgressAt в снимке), чтобы не дублировать кадры в ленту.
@@ -4397,7 +4410,10 @@ export class TaskManager extends EventEmitter {
       await this.store.pruneStreamingDeltas(task.id).catch(() => {});
     }
 
-    if (frame.type === 'agent_settled') this.#resolveSettle(task.id);
+    if (frame.type === 'agent_settled') {
+      this.#resolveSettle(task.id);
+      this.#notifyPlanSettled(task, runtime);
+    }
   }
 
   // Wall-clock window the model spent on one assistant message: its first delta
@@ -4509,6 +4525,9 @@ export class TaskManager extends EventEmitter {
     const turn = (runtime?.turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
+    // A checkpoint belongs to the turn that reported it; the next turn must not
+    // inherit it (the tool call for the new turn has not happened yet).
+    task._planCheckpoint = null;
     task._turnEvidence = [];
     // Инструменты, выполненные в этом ходу: решение о безопасном автоповторе
     // после 413 принимается только по счётчику текущего хода (MEDIA-09D).
@@ -5698,6 +5717,48 @@ export class TaskManager extends EventEmitter {
   // does not change the live command response shape.
   commandStatus(commandId) { return this.commandCoordinator.status(commandId); }
 
+  // --- Follow Plan (FP-05A) ------------------------------------------------
+  // The controller (src/follow-plan-service.mjs) hangs off these three seams and
+  // nothing else: it uses the ordinary message path, the ordinary event log and
+  // the settle boundary. TaskManager keeps owning Pi, the queue and STOP.
+  setFollowPlanHooks(hooks) {
+    this.followPlanHooks = hooks && typeof hooks.turnSettled === 'function' ? hooks : null;
+  }
+
+  async publishFollowPlanEvent(taskId, type, message, data = {}) {
+    const task = this.tasks.get(String(taskId));
+    if (!task) return false;
+    await this.#event(task, type, message, data, false);
+    return true;
+  }
+
+  // A control command must be idempotent like any other: the caller passes its
+  // commandId and the ledger replays or refuses a repeat.
+  async withCommandId(commandId, clientId, payload, fn) {
+    const id = String(commandId || '').trim();
+    if (!id) throw Object.assign(new Error('Команда Follow Plan требует commandId.'), { code: 'INPUT_INVALID' });
+    return this.#withCommand(id, clientId ? String(clientId) : null, () => this.#payloadHash(payload), fn);
+  }
+
+  // Called when Pi reaches a settled boundary: once per command, with whatever
+  // checkpoint the turn reported. Never awaited by the event chain — a dispatch
+  // of the next step must not hold up the frames of the finished one.
+  #notifyPlanSettled(task, runtime) {
+    const hooks = this.followPlanHooks;
+    const checkpoint = task._planCheckpoint || null;
+    task._planCheckpoint = null;
+    if (!hooks) return;
+    Promise.resolve(hooks.turnSettled({
+      taskId: task.id,
+      commandId: runtime?.commandId || null,
+      checkpoint,
+      aborted: runtime?.cancelRequested === true,
+      seq: task._turn ?? null
+    })).catch(error => {
+      this.#event(task, 'PLAN_PAUSED', `Follow Plan: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' }, false).catch(() => {});
+    });
+  }
+
 
   #payloadHash(...args) {
     return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
@@ -6033,6 +6094,10 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
       // announce:false = the message is already in history (regeneration), so a
       // second USER_MESSAGE would show the operator's own line twice.
+      // Which command owns this turn: the Follow Plan settle hook must ignore a
+      // repeated `agent_settled` of an older command instead of treating it as a
+      // turn that lost its checkpoint.
+      if (runtime) runtime.commandId = origin?.commandId || null;
       if (announce) {
         await this.#event(task, 'USER_MESSAGE', userText, {
           text: userText, mode: effectiveMode, files: attached,

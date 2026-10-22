@@ -8,6 +8,28 @@
 
 Агент выполняет ровно запрошенное, а найденное инструментом не исчезает вместе с ошибкой модели. Версия и номер сборки мобильных клиентов не менялись: API расширен аддитивно (`toolEvidence` в `TASK_FAILED`), KMP/web не тронуты.
 
+- **Follow Plan (FP-05A/05B): режим подключён к серверу.**
+  `src/follow-plan-service.mjs` связывает `PlanFollower` с обычной отправкой
+  сообщений (command ledger, очередь, provider wait, STOP) — второго runner'а,
+  своей очереди и своего retry нет. API: `GET …/plan` (статус читается и
+  при выключенном флаге), `POST …/plan/{attach,start,pause,resume,stop,reconcile}`,
+  `PATCH …/plan`; каждая изменяющая команда — через `commandId`, каждая запись
+  файла — CAS по `expectedRevision`/`expectedHash` (409
+  `PLAN_REVISION_CONFLICT`). События `PLAN_ATTACHED/STEP_STARTED/STEP_CHECKPOINT/
+  REVISED/PAUSED/COMPLETED/CONFLICT` идут в общий журнал задачи.
+  Checkpoint читается из обычного кадра `tool_execution_start` (никакого второго
+  канала и разбора прозы); evidence с `ref`-идентификатором прогона проверяется
+  по `runs` и по принадлежности этой же сессии — иначе подтверждение снимается и
+  `COMPLETE` отклоняется. Повторный `agent_settled` (reconnect, дубль кадра) не
+  запускает новый цикл: команда уже не текущая. Флаг `followPlan.enabled` по
+  умолчанию `false`; при включённом флаге после старта сервера незакрытый цикл
+  уходит в `PAUSED_REVIEW`, а не в повторный ход.
+  Проверено: `tests/follow-plan-service.test.mjs` (11) и
+  `tests/follow-plan-api.test.mjs` (5, настоящий сервер + SQLite + тестовый Pi):
+  два шага без сообщения оператора, повтор `commandId`, 409 на устаревшую
+  ревизию, STOP посреди шага без следующего хода, отказ при выключенном флаге.
+  Регрессия серверной секции — 286/286.
+
 - **Follow Plan (FP-04): контролируемая автоправка того же файла.**
   `src/application/plan-revision.mjs` разбирает findings/proposedChanges по
   приоритетам ТЗ §5: P1 (и блокирующий P0) становится конкретным шагом с
