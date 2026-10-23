@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planCardModel, planEventNotice, planFileGroups, planPathProblem, planRequestBody, planToggleState, toggleOffAction } from './follow-plan-view.mjs';
+import { planCardModel, planEventNotice, planFileGroups, planPathProblem, planRequestBody, planIconState, PLAN_ICON_TITLES, toggleOffAction } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4133,37 +4133,33 @@ $('form').addEventListener('submit', async (e) => {
 function updatePlanToggle() {
   const button = $('planToggle');
   if (!button) return;
-  const state = planToggleState(planStatus);
-  // Disabled on the server: the chip stays visible but not pressable, and says
-  // why. Hiding it made the feature look not shipped at all (real complaint from
-  // the pilot phone, 2026-10-23).
-  button.classList.toggle('hidden', !state.visible);
-  button.disabled = !state.enabled;
-  button.classList.toggle('planToggleOff', !state.enabled);
-  const active = Boolean(planStatus?.attached) && planMode && state.enabled;
-  button.setAttribute('aria-pressed', String(active));
-  button.title = !state.enabled
+  const state = planIconState(planStatus);
+  const existing = planStatus?.enabled === false;
+  // The icon is the whole indicator: colour says what the cycle is doing, the
+  // dialog says why. A switched-off mode stays visible but explains itself.
+  button.disabled = existing;
+  button.dataset.planState = existing ? 'off' : state;
+  button.setAttribute('aria-pressed', String(state !== 'off'));
+  button.title = existing
     ? 'По плану: режим выключен в конфигурации сервера (followPlan.enabled)'
-    : planStatus?.attached
-      ? `По плану: ${planStatus.path}`
-      : 'По плану: выберите файл плана в проекте';
-  // The selected plan is what turns the mode on: the icon carries that state.
-  button.setAttribute('aria-label', planStatus?.attached ? `По плану: ${planStatus.path}` : 'По плану: выбрать файл плана');
+    : `${PLAN_ICON_TITLES[state] || PLAN_ICON_TITLES.off}${planStatus?.path ? ` — ${planStatus.path}` : ''}`;
+  button.setAttribute('aria-label', button.title);
 }
 
-function renderPlanCard() {
+// The plan status is drawn inside the dialog (no card in the chat): the chat keeps
+// its space for the work itself.
+function renderPlanDialogStatus() {
   updatePlanToggle();
-  const card = $('planCard');
-  if (!card) return;
+  const block = $('planStatusBlock');
+  if (!block) return;
+  const open = !$('planDialog').classList.contains('hidden');
   const model = planCardModel(planStatus, { enabled: planStatus?.enabled !== false });
-  card.classList.toggle('hidden', !model.visible);
-  if (!model.visible) return;
+  block.classList.toggle('hidden', !open || !model.visible);
+  if (!open || !model.visible) return;
   $('planHeadline').textContent = model.headline;
   $('planGoal').textContent = model.goal || '';
   $('planFindings').textContent = model.findings || '';
   const notice = $('planNotice');
-  // The card explains the next thing to do: conflict and file errors outrank the
-  // last event, because they are the reason the buttons below are disabled.
   const text = model.conflict || model.error || planNotice || '';
   notice.textContent = text;
   notice.classList.toggle('hidden', !text);
@@ -4181,10 +4177,12 @@ function renderPlanCard() {
   }
 }
 
+const renderPlanCard = renderPlanDialogStatus;
+
 // The flag can be switched on the server while this page stays open (a restart
-// with followPlan.enabled=true). Without a re-read the chip stayed grey until the
-// operator picked another session — that is exactly what happened on the desktop
-// during the pilot (2026-10-23).
+// with followPlan.enabled=true). Without a re-read the icon stayed grey until the
+// operator picked another session — that is what happened on the desktop during
+// the pilot (2026-10-23).
 let planStatusTimer = null;
 
 function schedulePlanStatusRefresh() {
@@ -4269,6 +4267,7 @@ async function openPlanDialog() {
   $('planDetach').classList.toggle('hidden', !planStatus?.attached);
   $('planFiles').textContent = 'Загрузка списка…';
   $('planDialog').classList.remove('hidden');
+  renderPlanDialogStatus();
   try {
     const listing = await api(`/api/tasks/${encodeURIComponent(id)}/workspace-files`);
     if (id !== selectedTaskId) return;
@@ -4348,7 +4347,6 @@ async function detachPlan() {
   await loadPlanStatus();
 }
 
-$('planRemove').onclick = detachPlan;
 $('planDetach').onclick = detachPlan;
 
 $('planDialogClose').onclick = () => $('planDialog').classList.add('hidden');

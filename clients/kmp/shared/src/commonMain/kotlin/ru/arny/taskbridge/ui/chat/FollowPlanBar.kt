@@ -14,8 +14,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -104,8 +102,18 @@ fun FollowPlanIcon(
     newId: () -> String,
     scope: CoroutineScope,
     projectPath: String? = null,
+    onOpenPlan: (String) -> Unit = {},
+    onNotice: (String) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
+    // The icon is the whole indicator: colour says what the cycle is doing, the
+    // dialog says why. Nothing is drawn in the chat above the composer.
+    val iconTint = when (planIconState(state.status)) {
+        PlanIconState.RUNNING, PlanIconState.IDLE -> colors.primary
+        PlanIconState.ATTENTION -> colors.error
+        PlanIconState.COMPLETED -> colors.tertiary
+        PlanIconState.OFF -> colors.onSurfaceVariant
+    }
     IconButton(
         onClick = {
             state.pathProblem = null
@@ -116,9 +124,9 @@ fun FollowPlanIcon(
     ) {
         Icon(
             AppIcons.Plan,
-            state.status?.path?.let { "По плану: $it" } ?: "По плану: выбрать файл плана",
+            state.status?.path?.let { "${planIconTitle(state.status)} — $it" } ?: planIconTitle(state.status),
             Modifier.size(20.dp),
-            tint = if (state.attached) colors.primary else colors.onSurfaceVariant,
+            tint = iconTint,
         )
     }
 
@@ -128,6 +136,22 @@ fun FollowPlanIcon(
             title = { Text("План") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // Status first: the operator opened the icon to see where the plan is.
+                    val statusModel = planCardModel(state.status)
+                    if (statusModel.visible) {
+                        Text(statusModel.headline, style = MaterialTheme.typography.labelMedium)
+                        if (statusModel.goal.isNotBlank()) {
+                            Text(statusModel.goal, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
+                        if (statusModel.findings.isNotBlank()) {
+                            Text(statusModel.findings, style = MaterialTheme.typography.labelSmall, color = colors.tertiary)
+                        }
+                        val line = statusModel.conflict ?: statusModel.error ?: state.notice
+                        if (!line.isNullOrBlank()) {
+                            Text(line, style = MaterialTheme.typography.labelSmall, color = colors.error)
+                        }
+                        PlanActionsRow(state, api, newId, scope, onOpenPlan, onNotice)
+                    }
                     Text(
                         "Выберите Markdown-файл проекта: выбранный план включает режим следования. " +
                             "Шаги S-001 ведёт TaskBridge; свободный текст импортируется только предпросмотром.",
@@ -230,20 +254,22 @@ fun FollowPlanIcon(
     }
 }
 
-/** Компактная карточка плана над композитором: прогресс, шаг, находки, действия. */
+/**
+ * Действия плана внутри диалога. Шесть кнопок не помещаются в одну строку на
+ * телефоне: перенос оставляет все доступными (на Pixel 5 было видно три).
+ */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun FollowPlanCard(
+private fun PlanActionsRow(
     state: FollowPlanUiState,
     api: TaskBridgeApi,
     newId: () -> String,
     scope: CoroutineScope,
     onOpenPlan: (String) -> Unit,
-    onNotice: (String) -> Unit = {},
+    onNotice: (String) -> Unit,
 ) {
     val model = planCardModel(state.status)
     val status = state.status
-    val colors = MaterialTheme.colorScheme
 
     fun command(run: suspend () -> PlanStatus) {
         scope.launch {
@@ -251,7 +277,7 @@ fun FollowPlanCard(
                 state.apply(run())
             } catch (error: ApiException) {
                 // 409 PLAN_REVISION_CONFLICT arrives here: the operator changed the
-                // file, so the card must show that instead of pretending to run.
+                // file, so the dialog must show that instead of pretending to run.
                 state.notice = error.error.message
             } catch (error: Throwable) {
                 state.notice = error.message ?: "Команда плана не выполнена"
@@ -259,73 +285,30 @@ fun FollowPlanCard(
         }
     }
 
-    if (!model.visible) return
-
-    Card(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp),
-        colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant.copy(alpha = 0.5f)),
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    model.headline,
-                    style = MaterialTheme.typography.labelMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                // Выбранный план — это и есть режим: крестик заканчивает его, не
-                // убивая текущий ход.
-                IconButton(onClick = {
-                    scope.launch {
-                        try {
-                            state.apply(api.detachPlan(state.taskId, newId()))
-                        } catch (error: ApiException) {
-                            state.notice = error.error.message
+        for (action in model.actions) {
+            TextButton(onClick = {
+                when (action.id) {
+                    "start" -> {
+                        val paused = status?.state == "PAUSED" || status?.state == "PAUSED_REVIEW"
+                        command {
+                            if (paused) api.resumePlan(state.taskId, status?.revision, newId())
+                            else api.startPlan(state.taskId, status?.revision, newId())
                         }
                     }
-                }, modifier = Modifier.size(28.dp)) {
-                    Icon(AppIcons.Close, "Убрать план", Modifier.size(14.dp))
-                }
-            }
-            if (model.goal.isNotBlank()) {
-                Text(model.goal, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-            }
-            if (model.findings.isNotBlank()) {
-                Text(model.findings, style = MaterialTheme.typography.labelSmall, color = colors.tertiary)
-            }
-            val line = model.conflict ?: model.error ?: state.notice
-            if (!line.isNullOrBlank()) {
-                Text(line, style = MaterialTheme.typography.labelSmall, color = colors.error)
-            }
-            // Six actions do not fit one phone row; a wrapping row keeps every control
-            // reachable (Pixel 5 showed only three before this).
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                verticalArrangement = Arrangement.spacedBy(0.dp),
-            ) {
-                for (action in model.actions) {
-                    TextButton(onClick = {
-                        when (action.id) {
-                            "start" -> {
-                                val paused = status?.state == "PAUSED" || status?.state == "PAUSED_REVIEW"
-                                command {
-                                    if (paused) api.resumePlan(state.taskId, status?.revision, newId())
-                                    else api.startPlan(state.taskId, status?.revision, newId())
-                                }
-                            }
-                            "pause" -> command { api.pausePlan(state.taskId, newId()) }
-                            "stop" -> command { api.stopPlan(state.taskId, newId()) }
-                            "reconcile" -> command { api.reconcilePlan(state.taskId, status?.revision, "adopt_external", newId()) }
-                            "open", "edit" -> status?.path?.let { path ->
-                                onOpenPlan(path)
-                                if (action.id == "edit") onNotice("Правьте файл в проекте — карточка перечитает его версию")
-                            }
-                        }
-                    }, enabled = action.enabled) {
-                        Text(action.label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    "pause" -> command { api.pausePlan(state.taskId, newId()) }
+                    "stop" -> command { api.stopPlan(state.taskId, newId()) }
+                    "reconcile" -> command { api.reconcilePlan(state.taskId, status?.revision, "adopt_external", newId()) }
+                    "open", "edit" -> status?.path?.let { path ->
+                        onOpenPlan(path)
+                        if (action.id == "edit") onNotice("Правьте файл в проекте — диалог перечитает его версию")
                     }
                 }
+            }, enabled = action.enabled) {
+                Text(action.label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
             }
         }
     }

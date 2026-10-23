@@ -2048,23 +2048,27 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
    plan itself opens in the file viewer, never inline in the chat. Every
    font-size is in rem so the root UI scale reaches it. */
 .planToggle { position: relative; }
-.planToggle[aria-pressed="true"] {
+/* The icon carries the state in its colour; the details are in the dialog. */
+.planToggle[data-plan-state="idle"],
+.planToggle[data-plan-state="running"] {
   color: var(--accent, #4f8cff);
   border-color: var(--accent, #4f8cff);
   background: color-mix(in srgb, var(--accent, #4f8cff) 14%, transparent);
 }
-.planToggle:disabled { opacity: 0.45; cursor: default; }
-.planRemove {
-  margin-left: auto;
-  border: 0;
-  background: transparent;
-  color: var(--muted, #94a3b8);
-  font-size: 0.8125rem;
-  line-height: 1;
-  padding: 0.125rem 0.25rem;
-  cursor: pointer;
+.planToggle[data-plan-state="attention"] {
+  color: var(--warn, #fbbf24);
+  border-color: var(--warn, #fbbf24);
+  background: color-mix(in srgb, var(--warn, #fbbf24) 14%, transparent);
 }
-.planRemove:hover { color: var(--danger, #ef4444); }
+.planToggle[data-plan-state="completed"] {
+  color: var(--ok, #34d399);
+  border-color: var(--ok, #34d399);
+  background: color-mix(in srgb, var(--ok, #34d399) 12%, transparent);
+}
+.planToggle:disabled { opacity: 0.45; cursor: default; }
+.planStatusBlock { flex-direction: column; gap: 0.25rem; margin-bottom: 0.5rem; }
+/* Display only when the dialog is open: .hidden has to win. */
+.planStatusBlock:not(.hidden) { display: flex; }
 .planCard {
   margin: 0.375rem 0;
   padding: 0.5rem 0.625rem;

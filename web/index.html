@@ -375,26 +375,21 @@
 
       <div id="approvalBanner" class="approvalBanner hidden" aria-live="polite"></div>
 
-      <!-- Компактная карточка плана: файл, прогресс, текущий шаг, находки и
-           действия. Полный план открывается в файле, а не вставляется в чат. -->
-      <div id="planCard" class="planCard hidden" role="status" aria-live="polite">
-        <div class="planCardHead">
-          <b id="planHeadline">План не подключён</b>
-          <span id="planGoal" class="muted small"></span>
-          <button id="planRemove" class="planRemove" type="button" title="Убрать план (режим выключится)"
-            aria-label="Убрать план">✕</button>
-        </div>
-        <div id="planFindings" class="planFindings small"></div>
-        <div id="planNotice" class="planNotice small hidden"></div>
-        <div id="planActions" class="planActions"></div>
-      </div>
-
       <!-- Первое включение переключателя: путь к файлу внутри проекта. -->
       <div id="planDialog" class="authGate hidden">
         <div class="authCard">
           <div class="dialogHeader">
             <h2>План для режима «По плану»</h2>
             <button id="planDialogClose" type="button" class="iconButton" title="Закрыть" aria-label="Закрыть">✕</button>
+          </div>
+          <!-- Статус следования плану живёт здесь, а не в чате: чат — про работу,
+               план — про настройку режима. -->
+          <div id="planStatusBlock" class="planStatusBlock hidden">
+            <b id="planHeadline"></b>
+            <div id="planGoal" class="muted small"></div>
+            <div id="planFindings" class="small"></div>
+            <div id="planNotice" class="planNotice small hidden"></div>
+            <div id="planActions" class="planActions"></div>
           </div>
           <p class="muted small">Файл внутри проекта. Управляемый Markdown с шагами <code>S-001</code>: свободный
             текст импортируется только предпросмотром и не перезаписывается.</p>

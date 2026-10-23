@@ -123,6 +123,32 @@ export function planPathProblem(value) {
 }
 
 /**
+ * Что показывает сама иконка (карточки в чате больше нет). Состояние кодируется
+ * цветом, а подробности — в диалоге: чат не должен занимать место под планом.
+ */
+export function planIconState(status) {
+  if (!status || status.attached !== true) return 'off';
+  if (status.conflict || status.fileError) return 'attention';
+  switch (status.state) {
+    case 'RUNNING_STEP':
+    case 'REVIEWING': return 'running';
+    case 'PAUSED':
+    case 'PAUSED_REVIEW': return 'attention';
+    case 'COMPLETED': return 'completed';
+    case 'IDLE': return 'idle';
+    default: return 'idle';
+  }
+}
+
+export const PLAN_ICON_TITLES = Object.freeze({
+  off: 'По плану: выбрать файл плана',
+  idle: 'По плану: готов к запуску',
+  running: 'По плану: шаг выполняется',
+  attention: 'По плану: нужен разбор',
+  completed: 'По плану: план завершён'
+});
+
+/**
  * Планы проекта для выбора: оператор не должен вбивать путь руками, но и файл,
  * которого нет в листинге (слишком глубокая папка, лимит выдачи), должен
  * оставаться доступным — поэтому список дополняет поле ввода, а не заменяет его.

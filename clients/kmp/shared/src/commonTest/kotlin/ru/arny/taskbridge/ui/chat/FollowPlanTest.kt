@@ -110,6 +110,19 @@ class FollowPlanTest {
     }
 
     @Test
+    fun `the icon itself carries the state`() {
+        assertEquals(PlanIconState.OFF, planIconState(null))
+        assertEquals(PlanIconState.OFF, planIconState(PlanStatus(attached = false, enabled = true)))
+        assertEquals(PlanIconState.IDLE, planIconState(PlanStatus(attached = true, state = "IDLE")))
+        assertEquals(PlanIconState.RUNNING, planIconState(PlanStatus(attached = true, state = "RUNNING_STEP")))
+        assertEquals(PlanIconState.RUNNING, planIconState(PlanStatus(attached = true, state = "REVIEWING")))
+        assertEquals(PlanIconState.ATTENTION, planIconState(PlanStatus(attached = true, state = "PAUSED_REVIEW")))
+        assertEquals(PlanIconState.ATTENTION, planIconState(PlanStatus(attached = true, state = "IDLE", conflict = true)))
+        assertEquals(PlanIconState.COMPLETED, planIconState(PlanStatus(attached = true, state = "COMPLETED")))
+        assertEquals("По плану: шаг выполняется", planIconTitle(PlanStatus(attached = true, state = "RUNNING_STEP")))
+    }
+
+    @Test
     fun `a mode switched off on the server says so instead of disappearing`() {
         assertTrue(!planToggleEnabled(PlanStatus(enabled = false)))
         assertEquals("режим выключен на сервере", planToggleHint(PlanStatus(enabled = false)))

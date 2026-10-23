@@ -128,6 +128,31 @@ fun planToggleHint(status: PlanStatus?): String? =
     if (status != null && !planToggleEnabled(status)) "режим выключен на сервере" else null
 
 /**
+ * Что показывает сама иконка: карточки в чате больше нет, состояние кодируется
+ * цветом, подробности — в диалоге (чат не должен занимать место под планом).
+ */
+enum class PlanIconState { OFF, IDLE, RUNNING, ATTENTION, COMPLETED }
+
+fun planIconState(status: PlanStatus?): PlanIconState {
+    if (status?.attached != true) return PlanIconState.OFF
+    if (status.conflict || status.fileError != null) return PlanIconState.ATTENTION
+    return when (status.state) {
+        "RUNNING_STEP", "REVIEWING" -> PlanIconState.RUNNING
+        "PAUSED", "PAUSED_REVIEW" -> PlanIconState.ATTENTION
+        "COMPLETED" -> PlanIconState.COMPLETED
+        else -> PlanIconState.IDLE
+    }
+}
+
+fun planIconTitle(status: PlanStatus?): String = when (planIconState(status)) {
+    PlanIconState.OFF -> "По плану: выбрать файл плана"
+    PlanIconState.IDLE -> "По плану: готов к запуску"
+    PlanIconState.RUNNING -> "По плану: шаг выполняется"
+    PlanIconState.ATTENTION -> "По плану: нужен разбор"
+    PlanIconState.COMPLETED -> "По плану: план завершён"
+}
+
+/**
  * Планы проекта по папкам: на телефоне список путей без папок не отвечает на
  * вопрос «какой файл выбрать». Корень проекта идёт первым, дальше — по алфавиту.
  */

@@ -517,14 +517,6 @@ fun ChatScreen(
                     top = {
                         // Follow Plan: карточка плана над полем ввода; сама иконка
                         // режима живёт в ряду композитора (planButton).
-                        FollowPlanCard(
-                            state = planState,
-                            api = connection.api,
-                            newId = graph::newId,
-                            scope = scope,
-                            onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
-                            onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
-                        )
                         DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
                             QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
@@ -548,6 +540,8 @@ fun ChatScreen(
                             newId = graph::newId,
                             scope = scope,
                             projectPath = task?.workspacePath,
+                            onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
+                            onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
                         )
                     },
                     value = draft,

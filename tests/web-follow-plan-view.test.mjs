@@ -7,7 +7,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
-  planActions, planCardModel, planEventNotice, planFileChoices, planFileGroups, planHeadline, planPathProblem, planToggleState,
+  planActions, planCardModel, planEventNotice, planFileChoices, planFileGroups, planHeadline, planIconState,
+  PLAN_ICON_TITLES, planPathProblem, planToggleState,
   planRequestBody, planFindingsLine, toggleOffAction
 } from '../web/follow-plan-view.mjs';
 
@@ -16,6 +17,19 @@ const running = {
   revision: 7, progress: { done: 3, total: 7 }, goal: 'Стабилизировать историю',
   findings: [{ id: 'F-002', priority: 'P1', state: 'OPEN', summary: 'дубли при reconnect' }]
 };
+
+test('the icon itself carries the state', () => {
+  assert.equal(planIconState(null), 'off');
+  assert.equal(planIconState({ attached: false, enabled: true }), 'off');
+  assert.equal(planIconState({ attached: true, state: 'IDLE' }), 'idle');
+  assert.equal(planIconState({ attached: true, state: 'RUNNING_STEP' }), 'running');
+  assert.equal(planIconState({ attached: true, state: 'REVIEWING' }), 'running');
+  assert.equal(planIconState({ attached: true, state: 'PAUSED' }), 'attention');
+  assert.equal(planIconState({ attached: true, state: 'PAUSED_REVIEW' }), 'attention');
+  assert.equal(planIconState({ attached: true, state: 'IDLE', conflict: true }), 'attention');
+  assert.equal(planIconState({ attached: true, state: 'COMPLETED' }), 'completed');
+  assert.equal(PLAN_ICON_TITLES.off, 'По плану: выбрать файл плана');
+});
 
 test('a mode switched off on the server stays visible and says so', () => {
   // Hiding the chip made the pilot phone look like the feature never shipped.
@@ -144,9 +158,11 @@ test('the switch is an icon in the composer row, next to attach and the session 
   // not in a separate chip above the composer.
   const actions = html.slice(html.indexOf('class="composerActions"'));
   assert.ok(actions.indexOf('id="planToggle"') < actions.indexOf('id="files"'), 'the plan icon comes before the attachment input');
-  assert.match(html, /id="planRemove"/, 'a selected plan can be removed with a cross');
-  assert.match(html, /id="planDetach"/, 'and from the dialog');
-  assert.match(html, /id="planCard"/);
+  // No card in the chat any more: the chat keeps its space for the work, the icon
+  // carries the state and the dialog carries the details.
+  assert.equal(/id="planCard"/.test(html), false);
+  assert.match(html, /id="planStatusBlock"/, 'status lives in the dialog');
+  assert.match(html, /id="planDetach"/, 'a selected plan can be removed from the dialog');
   // The buttons themselves are built by planActions (labels are asserted above, in
   // one place), the page only reserves the container for them.
   assert.match(html, /id="planActions"/);
