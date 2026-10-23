@@ -2136,7 +2136,8 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .planStep-BLOCKED { color: var(--danger, #ef4444); }
 .planStep-SKIPPED { color: var(--muted, #94a3b8); text-decoration: line-through; }
 .planFindings { display: flex; flex-direction: column; gap: 0.125rem; max-height: 8rem; overflow: auto; }
-.planPicker { display: flex; flex-direction: column; gap: 0.5rem; }
+.planPicker { flex-direction: column; gap: 0.5rem; }
+.planPicker:not(.hidden) { display: flex; }
 .planPick { padding: 0.625rem 1rem; font-size: 0.875rem; }
 .planPathToggle { align-self: flex-start; }
 .planPathRow { gap: 0.5rem; }

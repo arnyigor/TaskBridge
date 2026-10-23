@@ -4179,6 +4179,7 @@ function renderPlanInspector() {
   if (!attached) {
     $('planPickError').textContent = planStatus?.fileError?.message || planNotice || '';
     $('planDetach').classList.add('hidden');
+    $('planMore').classList.add('hidden');
     return;
   }
 
@@ -4224,7 +4225,11 @@ function renderPlanInspector() {
 
   const actions = $('planActions');
   actions.textContent = '';
+  const moreActions = $('planMoreActions');
+  moreActions.textContent = '';
   const primary = planPrimaryAction(planStatus);
+  const contextual = ['RUNNING_STEP', 'REVIEWING'].includes(planStatus.state) ? 'stop' : 'edit';
+  $('planMore').classList.remove('hidden');
   for (const action of planActions(planStatus)) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -4234,7 +4239,8 @@ function renderPlanInspector() {
     button.title = action.title || '';
     button.dataset.action = action.id;
     button.onclick = () => runPlanAction(action.id, button);
-    actions.append(button);
+    if (action.id === primary.id || (action.id === contextual && !action.disabled)) actions.append(button);
+    else if (!action.disabled) moreActions.append(button);
   }
   $('planDetach').classList.toggle('hidden', false);
   $('planDetach').disabled = !(planStatus?.enabled !== false);
@@ -4372,6 +4378,7 @@ let planDraftTaskId = null;
 
 function renderPlanEditor() {
   $('planEditor').classList.toggle('hidden', planDraft === null);
+  $('planMore').classList.toggle('hidden', planDraft !== null || planStatus?.attached !== true);
   $('planStatusBlock').classList.toggle('hidden', planDraft !== null || planStatus?.attached !== true);
   $('planActions').classList.toggle('hidden', planDraft !== null || planStatus?.attached !== true);
   $('planPicker').classList.toggle('hidden', planDraft === null ? planStatus?.attached === true : true);

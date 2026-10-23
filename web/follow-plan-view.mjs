@@ -229,7 +229,7 @@ export function planPrimaryAction(status) {
     case 'RUNNING_STEP':
     case 'REVIEWING': return { id: 'pause', label: 'Пауза после шага' };
     case 'PAUSED': return { id: 'resume', label: 'Продолжить' };
-    case 'PAUSED_REVIEW': return { id: 'resume', label: 'Продолжить' };
+    case 'PAUSED_REVIEW': return { id: 'reconcile', label: 'Разобрать результат' };
     case 'COMPLETED': return { id: 'open', label: 'Открыть результат' };
     default: return { id: 'refresh', label: 'Проверить состояние' };
   }

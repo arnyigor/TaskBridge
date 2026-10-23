@@ -246,3 +246,9 @@ test('on a phone the session list is a drawer over the chat, not a block above i
   assert.ok(body, 'the list and its controls share one body, which the drawer scrolls');
   assert.ok(body.contains(document.getElementById('tasks')), 'the sessions live in that body');
 });
+
+test('the runtime-hidden plan picker cannot defeat the hidden class', async () => {
+  const css = await fs.readFile(new URL('../web/app.css', import.meta.url), 'utf8');
+  assert.doesNotMatch(css, /\.planPicker\s*\{[^}]*display\s*:/);
+  assert.match(css, /\.planPicker:not\(\.hidden\)\s*\{[^}]*display\s*:\s*flex/);
+});

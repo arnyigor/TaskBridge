@@ -193,7 +193,7 @@ test('one primary action per state, exactly as the table says', () => {
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'IDLE' }), { id: 'start', label: 'Начать выполнение' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'RUNNING_STEP' }), { id: 'pause', label: 'Пауза после шага' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'PAUSED' }), { id: 'resume', label: 'Продолжить' });
-  assert.deepEqual(planPrimaryAction({ attached: true, state: 'PAUSED_REVIEW' }), { id: 'resume', label: 'Продолжить' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'PAUSED_REVIEW' }), { id: 'reconcile', label: 'Разобрать результат' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'IDLE', conflict: true }), { id: 'reconcile', label: 'Обновить и сверить' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'COMPLETED' }), { id: 'open', label: 'Открыть результат' });
 });
@@ -274,4 +274,26 @@ test('resume is offered only after pause, and editing never races an active step
   assert.equal(actions('REVIEWING').reconcile.disabled, true);
   assert.match(planErrorText({ code: 'PLAN_API_UNAVAILABLE' }), /Обновите сервер/);
   assert.match(planErrorText({ code: 'PLAN_CONNECTION_LOST' }), /Соединение/);
+});
+
+
+test('all specified control-panel states have exactly one primary action', () => {
+  const cases = [
+    ['READY', { attached: true, state: 'IDLE' }, 'start'],
+    ['RUNNING', { attached: true, state: 'RUNNING_STEP' }, 'pause'],
+    ['PAUSE_REQUESTED', { attached: true, state: 'REVIEWING' }, 'pause'],
+    ['PAUSED', { attached: true, state: 'PAUSED' }, 'resume'],
+    ['PAUSED_REVIEW', { attached: true, state: 'PAUSED_REVIEW' }, 'reconcile'],
+    ['BLOCKED', { attached: true, state: 'PAUSED_REVIEW', fileError: { message: 'blocked' } }, 'reconcile'],
+    ['CONFLICT', { attached: true, state: 'IDLE', conflict: true }, 'reconcile'],
+    ['COMPLETED', { attached: true, state: 'COMPLETED' }, 'open'],
+    ['DISABLED', { attached: true, state: 'IDLE', enabled: false }, 'start'],
+  ];
+  for (const [name, status, primaryId] of cases) {
+    const primary = planPrimaryAction(status);
+    assert.equal(primary.id, primaryId, name);
+    const actions = planActions(status);
+    if (name === 'DISABLED') assert.ok(actions.every(action => action.disabled || action.id === 'open'));
+    if (name === 'RUNNING') assert.equal(actions.find(action => action.id === 'stop').disabled, false);
+  }
 });
