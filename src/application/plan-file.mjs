@@ -249,13 +249,16 @@ const RETRYABLE = new Set(['EPERM', 'EBUSY', 'EACCES', 'EAGAIN']);
  * editor has open fails with EPERM/EBUSY for a short while, hence the retry;
  * the written bytes are read back so a "successful" rename is not taken on trust.
  */
-export async function writePlanAtomic({ file, text, fsImpl = fs, attempts = 5, delayMs = 40, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
+export async function writePlanAtomic({ file, text, expectedHash = null, fsImpl = fs, attempts = 5, delayMs = 40, sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   const payload = normalizedText(text);
   const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
   await fsImpl.writeFile(tmp, payload, 'utf8');
   let lastError = null;
   for (let attempt = 0; attempt < attempts; attempt++) {
     try {
+      if (expectedHash && planHash(await fsImpl.readFile(file, 'utf8')) !== expectedHash) {
+        throw new PlanError('PLAN_REVISION_CONFLICT', 'Файл изменился перед заменой: внешняя версия сохранена.');
+      }
       await fsImpl.rename(tmp, file);
       lastError = null;
       break;
@@ -267,6 +270,7 @@ export async function writePlanAtomic({ file, text, fsImpl = fs, attempts = 5, d
   }
   if (lastError) {
     await fsImpl.rm(tmp, { force: true }).catch(() => {});
+    if (lastError.code === 'PLAN_REVISION_CONFLICT') throw lastError;
     throw new PlanError('PLAN_WRITE_FAILED', `Не удалось заменить файл плана: ${lastError.code || lastError.message}`, [String(lastError.code || lastError.message)]);
   }
   const written = normalizedText(await fsImpl.readFile(file, 'utf8'));
@@ -358,7 +362,29 @@ export function applyChanges(plan, changes) {
  * Compare-and-swap write. A human edit (different hash) or a stale revision is a
  * conflict, not something to overwrite: the file belongs to the operator too.
  */
-export async function updatePlan({ root, relPath, expectedRevision, expectedHash, changes, fsImpl = fs, maxBytes, sleep }) {
+const planWrites = new Map();
+
+/** Serialize CAS read/modify/write for one file within this server process. */
+export async function withPlanWriteLock(file, action) {
+  const absolute = path.resolve(file);
+  const key = process.platform === 'win32' ? absolute.toLowerCase() : absolute;
+  const previous = planWrites.get(key) || Promise.resolve();
+  let release;
+  const current = new Promise(resolve => { release = resolve; });
+  planWrites.set(key, current);
+  await previous;
+  try { return await action(); }
+  finally {
+    release();
+    if (planWrites.get(key) === current) planWrites.delete(key);
+  }
+}
+
+export async function updatePlan(input) {
+  return withPlanWriteLock(path.resolve(input.root, input.relPath), () => updatePlanLocked(input));
+}
+
+async function updatePlanLocked({ root, relPath, expectedRevision, expectedHash, changes, fsImpl = fs, maxBytes, sleep }) {
   const current = await readPlan({ root, relPath, fsImpl, maxBytes });
   if (expectedHash && current.hash !== expectedHash) {
     throw new PlanError('PLAN_REVISION_CONFLICT', 'Файл плана изменён снаружи: хэш не совпадает с ожидаемым.', [`expected ${expectedHash}`, `actual ${current.hash}`]);
@@ -369,7 +395,7 @@ export async function updatePlan({ root, relPath, expectedRevision, expectedHash
   const next = applyChanges(structuredClone(current.plan), changes);
   next.revision = current.plan.revision + 1;
   const text = serializePlan(next);
-  const { hash } = await writePlanAtomic({ file: current.realPath, text, fsImpl, sleep });
+  const { hash } = await writePlanAtomic({ file: current.realPath, text, expectedHash: current.hash, fsImpl, sleep });
   return { plan: next, text, hash, realPath: current.realPath };
 }
 

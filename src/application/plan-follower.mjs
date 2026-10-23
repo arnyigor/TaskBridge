@@ -124,6 +124,14 @@ export class PlanFollower {
     return { binding, plan: file.plan };
   }
 
+  #stillOpenable(taskId, before, epoch) {
+    const current = this.#binding(taskId);
+    return current && this.store.planCancelEpoch(taskId) === epoch
+      && current.path === before.path && current.planId === before.planId
+      && current.state === before.state && current.cycleId === before.cycleId && current.revision === before.revision
+      && current.hash === before.hash && current.dispatchCommandId === before.dispatchCommandId;
+  }
+
   /** Start (or resume) the first turn. The operator action is the only entry point. */
   async start({ taskId, commandId }) {
     const binding = this.#requireBinding(taskId);
@@ -131,7 +139,9 @@ export class PlanFollower {
     if (binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING') {
       return this.#result(taskId, 'PLAN_BUSY', 'Цикл уже выполняется: один активный цикл на задачу.');
     }
+    const epoch = this.store.planCancelEpoch(taskId);
     const file = await this.plans.read(binding.path);
+    if (!this.#stillOpenable(taskId, binding, epoch)) return this.#result(taskId, 'IGNORED', 'Состояние изменилось во время чтения плана.');
     if (file.hash !== binding.hash || file.plan.revision !== binding.revision) {
       // Attached file changed while idle: adopt it, but only as a new baseline.
       this.#save(taskId, { planId: file.plan.planId, revision: file.plan.revision, hash: file.hash });
@@ -446,7 +456,9 @@ export class PlanFollower {
     if (binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING') {
       return this.#result(taskId, 'PLAN_BUSY', 'Цикл уже выполняется.');
     }
+    const epoch = this.store.planCancelEpoch(taskId);
     const file = await this.plans.read(binding.path);
+    if (!this.#stillOpenable(taskId, binding, epoch)) return this.#result(taskId, 'IGNORED', 'Состояние изменилось во время чтения плана.');
     return this.#openCycle({ taskId, plan: file.plan, hash: file.hash, reason: 'resume' });
   }
 

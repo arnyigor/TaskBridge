@@ -16,8 +16,8 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { parsePlan, proposeImport, planHash, readPlan, serializePlan, updatePlan, writePlanAtomic, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
-import { PlanFollower } from './application/plan-follower.mjs';
+import { parsePlan, proposeImport, planHash, readPlan, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
+import { PlanFollower, resultForStep } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
   'PLAN_ATTACHED', 'PLAN_STEP_STARTED', 'PLAN_STEP_CHECKPOINT', 'PLAN_REVISED',
@@ -148,6 +148,20 @@ export class FollowPlanService {
     await this.manager.publishFollowPlanEvent?.(taskId, type, message, data).catch(() => {});
   }
 
+  #receiptKey(taskId, relPath, planId, stepId) {
+    return `plan_evidence:${planHash(JSON.stringify([String(taskId), relPath, planId, stepId]))}`;
+  }
+
+  #verification(taskId, relPath, planId, step) {
+    const stored = this.store.getMeta(this.#receiptKey(taskId, relPath, planId, step.id));
+    if (!stored) return 'MODEL_REPORTED';
+    try {
+      const receipt = JSON.parse(stored);
+      return receipt.fingerprint === planHash(JSON.stringify(step)) && receipt.level === 'SYSTEM_VERIFIED'
+        ? 'SYSTEM_VERIFIED' : 'MODEL_REPORTED';
+    } catch { return 'MODEL_REPORTED'; }
+  }
+
   // --- read ----------------------------------------------------------------
 
   async status(taskId) {
@@ -199,7 +213,9 @@ export class FollowPlanService {
         const match = /^\[(SYSTEM_VERIFIED|MANUAL_ACCEPTED|MODEL_REPORTED|UNVERIFIED)\]\s*(.*)$/s.exec(raw);
         return {
           id: step.id, status: step.status, priority: step.priority, title: step.title,
-          verification: match ? match[1] : (raw ? 'MODEL_REPORTED' : null),
+          // Markdown is a claim, not a trust store. Only a server receipt for
+          // this exact step (criteria, verification and result included) grants trust.
+          verification: raw ? this.#verification(task.id, binding.path, file.plan.planId, step) : null,
           result: (match ? match[2] : raw).slice(0, 240)
         };
       });
@@ -281,7 +297,15 @@ export class FollowPlanService {
    * expectedRevision/expectedHash. Завершённые шаги, их подтверждения и цель
    * защищены — их нельзя потерять незаметной правкой.
    */
-  async writeContent({ taskId, content, expectedRevision = null, expectedHash = null, allowGoalChange = false, commandId, clientId }) {
+  async writeContent(input) {
+    this.#assertEnabled();
+    const task = this.#task(input.taskId);
+    const binding = this.store.getPlanBinding(task.id);
+    if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    return withPlanWriteLock(path.resolve(task.workspacePath, binding.path), () => this.#writeContent(input));
+  }
+
+  async #writeContent({ taskId, content, expectedRevision = null, expectedHash = null, allowGoalChange = false, commandId, clientId }) {
     this.#assertEnabled();
     if (!Number.isInteger(expectedRevision) || !expectedHash) {
       throw reject('PLAN_REVISION_CONFLICT', 'Для сохранения нужны ревизия и хэш исходного черновика. Откройте файл заново.');
@@ -325,7 +349,7 @@ export class FollowPlanService {
     next.revision = file.plan.revision + 1;
     const text = serializePlan(next);
     const absolute = await safeTarget(task.workspacePath, binding.path, { write: true });
-    await writePlanAtomic({ file: absolute, text });
+    await writePlanAtomic({ file: absolute, text, expectedHash: file.hash });
     const hash = planHash(text);
     this.store.savePlanBinding({ ...binding, revision: next.revision, hash, updatedAt: new Date(this.now()).toISOString() });
     await this.#publish(task.id, 'PLAN_REVISED', `План отредактирован: revision ${next.revision}`, {
@@ -511,7 +535,9 @@ export class FollowPlanService {
     const task = this.#task(taskId);
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    const epoch = this.store.planCancelEpoch(task.id);
     const file = await this.#plans(task).read(binding.path);
+    if (epoch !== this.store.planCancelEpoch(task.id) || JSON.stringify(binding) !== JSON.stringify(this.store.getPlanBinding(task.id))) return this.status(task.id);
     if (expectedRevision != null && Number(expectedRevision) !== file.plan.revision) {
       await this.#publish(task.id, 'PLAN_CONFLICT', 'Ревизия плана изменилась', { expectedRevision, revision: file.plan.revision });
       throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`,
@@ -535,8 +561,10 @@ export class FollowPlanService {
     const task = this.#task(taskId);
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    const epoch = this.store.planCancelEpoch(task.id);
     if (expectedRevision != null) {
       const file = await this.#plans(task).read(binding.path);
+      if (epoch !== this.store.planCancelEpoch(task.id) || JSON.stringify(binding) !== JSON.stringify(this.store.getPlanBinding(task.id))) return this.status(task.id);
       if (Number(expectedRevision) !== file.plan.revision) {
         throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`);
       }
@@ -676,6 +704,25 @@ export class FollowPlanService {
       await this.#publish(task.id, 'PLAN_PAUSED', `Ошибка плана: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' });
       this.store.savePlanBinding({ ...binding, state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null, updatedAt: new Date(this.now()).toISOString() });
       return { code: error.code || 'INTERNAL_ERROR', message: error.message };
+    }
+    // Receipts are server runtime evidence, never imported from the Markdown.
+    // A failed checkpoint must not certify a previously completed step.
+    if (checked.checkpoint?.completedStepIds?.length) {
+      const file = await this.#plans(task).read(binding.path);
+      if (file.plan.revision > checked.checkpoint.revision) {
+        for (const stepId of checked.checkpoint.completedStepIds) {
+          const evidence = checked.checkpoint.evidence.filter(item => item.stepId === stepId);
+          const step = file.plan.steps.find(item => item.id === stepId);
+          if (step?.status === 'DONE' && evidence.length
+            && evidence.every(item => item.level === 'SYSTEM_VERIFIED')
+            && step.result === resultForStep(evidence)) {
+            this.store.setMeta(this.#receiptKey(task.id, binding.path, file.plan.planId, stepId), JSON.stringify({
+              level: 'SYSTEM_VERIFIED', fingerprint: planHash(JSON.stringify(step)),
+              runId: task.runId || null, commandId, toolCallIds: evidence.map(item => item.ref)
+            }));
+          }
+        }
+      }
     }
     if (commandId) this.settledTurns.set(task.id, commandId);
     if (result.code === 'DISPATCH_READY') {

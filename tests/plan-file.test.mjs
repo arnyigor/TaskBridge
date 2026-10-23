@@ -306,3 +306,22 @@ test('import is a preview: free-form text becomes managed steps, nothing is writ
   assert.equal(empty.content, null);
   assert.ok(empty.problems.some(line => /ни одного шага/.test(line)));
 });
+
+test('external edit after CAS read but before rename is retained', async t => {
+  const root = await tempRoot(t);
+  const file = path.join(root, 'PLAN.md');
+  await write(file, PLAN);
+  const external = PLAN.replace('revision: 3', 'revision: 4');
+  let injected = false;
+  const fsImpl = { ...fs, writeFile: async (...args) => {
+    await fs.writeFile(...args);
+    if (String(args[0]).endsWith('.tmp') && !injected) {
+      injected = true;
+      await fs.writeFile(file, external, 'utf8');
+    }
+  } };
+  await rejects(updatePlan({ root, relPath: 'PLAN.md', expectedRevision: 3,
+    expectedHash: planHash(PLAN), changes: { ops: [] }, fsImpl }), 'PLAN_REVISION_CONFLICT');
+  assert.equal(await fs.readFile(file, 'utf8'), external);
+  assert.equal((await fs.readdir(root)).filter(name => name.endsWith('.tmp')).length, 0);
+});

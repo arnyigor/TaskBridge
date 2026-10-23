@@ -425,3 +425,38 @@ test('the same cycle and step produce the same command id', () => {
   assert.equal(stepCommandId({ ...base, audit: true }), 'plan:t-1:c-3:S-004:audit:2');
   assert.deepEqual([...Object.keys(DEFAULT_LIMITS)].sort(), ['auditTurnsPerCycle', 'budgetMs', 'maxCycles', 'noProgressLimit']);
 });
+
+for (const operation of ['start', 'resume']) {
+  test(`concurrent ${operation} dispatches at most once after both reads entered`, async t => {
+    const { follower, plans, dispatched } = await setup(t);
+    const original = plans.read;
+    const release = [];
+    plans.read = async (...args) => { const value = await original(...args); await new Promise(resolve => release.push(resolve)); return value; };
+    const first = follower[operation]({ taskId: 't-1', commandId: 'client-a' });
+    const second = follower[operation]({ taskId: 't-1', commandId: 'client-b' });
+    // Both reads are deterministic microtasks, no wall-clock sleeps.
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(release.length, 2);
+    release.forEach(resolve => resolve());
+    await Promise.all([first, second]);
+    assert.equal(dispatched.length, 1);
+  });
+}
+
+for (const cancellation of ['stop', 'detach']) {
+  test(`resume cannot dispatch after ${cancellation} during its file read`, async t => {
+    const { follower, plans, dispatched, store } = await setup(t);
+    const original = plans.read;
+    let release;
+    let entered;
+    const reading = new Promise(resolve => { entered = resolve; });
+    plans.read = async (...args) => { const value = await original(...args); entered(); await new Promise(resolve => { release = resolve; }); return value; };
+    const resuming = follower.resume({ taskId: 't-1', commandId: 'resume-client' });
+    await reading;
+    if (cancellation === 'stop') await follower.stop({ taskId: 't-1' });
+    else store.deletePlanBinding('t-1');
+    release();
+    await Promise.allSettled([resuming]);
+    assert.equal(dispatched.length, 0);
+  });
+}
