@@ -159,7 +159,8 @@ fun planPrimaryAction(status: PlanStatus?): PlanPrimaryAction {
     return when (status.state) {
         "IDLE" -> PlanPrimaryAction("start", "Начать выполнение")
         "RUNNING_STEP", "REVIEWING" -> PlanPrimaryAction("pause", "Пауза после шага")
-        "PAUSED", "PAUSED_REVIEW" -> PlanPrimaryAction("resume", "Продолжить")
+        "PAUSED" -> PlanPrimaryAction("resume", "Продолжить")
+        "PAUSED_REVIEW" -> PlanPrimaryAction("reconcile", "Разобрать результат")
         "COMPLETED" -> PlanPrimaryAction("open", "Открыть результат")
         else -> PlanPrimaryAction("refresh", "Проверить состояние")
     }

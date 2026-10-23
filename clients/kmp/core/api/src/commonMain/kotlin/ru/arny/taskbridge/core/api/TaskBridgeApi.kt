@@ -879,6 +879,17 @@ class TaskBridgeApi(
             put("commandId", commandId)
         })
 
+    suspend fun planContent(id: String): PlanContent =
+        get("/api/tasks/${id.path()}/plan/content", PlanContent.serializer())
+
+    suspend fun savePlanContent(id: String, base: PlanContent, content: String, commandId: String): PlanStatus =
+        planCommand(id, "content", commandId, buildJsonObject {
+            put("content", content)
+            put("expectedRevision", base.revision)
+            put("expectedHash", base.hash)
+            put("clientId", connection.clientId)
+        })
+
     /** Убрать план: файл остаётся на месте, режим выключается. */
     suspend fun detachPlan(id: String, commandId: String): PlanStatus =
         planCommand(id, "detach", commandId, buildJsonObject { put("clientId", connection.clientId) })

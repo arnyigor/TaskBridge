@@ -1500,6 +1500,9 @@ data class MessageRequest(
 // показывает то, что прислал сервер, и отправляет команды с ревизией.
 
 @Serializable
+data class PlanContent(val path: String, val revision: Int, val hash: String, val content: String)
+
+@Serializable
 data class PlanStep(
     val id: String,
     val status: String,

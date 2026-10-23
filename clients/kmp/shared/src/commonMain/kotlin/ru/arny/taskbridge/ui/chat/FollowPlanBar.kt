@@ -1,6 +1,7 @@
 package ru.arny.taskbridge.ui.chat
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -12,6 +13,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -48,6 +51,15 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  * одно и то же и меняют одно и то же, поэтому состояние общее.
  */
 class FollowPlanUiState internal constructor(val taskId: String) {
+    // The base is captured when opened, never replaced by SSE status refreshes.
+    var editorBase by mutableStateOf<ru.arny.taskbridge.core.api.PlanContent?>(null)
+    var editorText by mutableStateOf("")
+    var editorError by mutableStateOf("")
+    var editorCurrent by mutableStateOf<String?>(null)
+    var editorSaving by mutableStateOf(false)
+    var editorDiscard by mutableStateOf(false)
+    var moreOpen by mutableStateOf(false)
+    var confirmDetach by mutableStateOf(false)
     var status by mutableStateOf<PlanStatus?>(null)
     var notice by mutableStateOf("")
     var askPlan by mutableStateOf(false)
@@ -160,6 +172,10 @@ fun FollowPlanIcon(
     }
 
     if (!state.askPlan) return
+    if (state.editorBase != null) {
+        FollowPlanEditor(state, api, newId, scope)
+        return
+    }
 
     AlertDialog(
         onDismissRequest = { state.askPlan = false },
@@ -286,18 +302,6 @@ fun FollowPlanIcon(
         },
         confirmButton = {
             Row {
-                if (state.attached) {
-                    TextButton(onClick = {
-                        state.askPlan = false
-                        scope.launch {
-                            try {
-                                state.apply(api.detachPlan(state.taskId, newId()))
-                            } catch (error: ApiException) {
-                                state.notice = planErrorText(error)
-                            }
-                        }
-                    }) { Text("Отключить план") }
-                }
                 TextButton(onClick = { state.askPlan = false }) { Text("Закрыть") }
             }
         },
@@ -396,30 +400,60 @@ private fun PlanActionsRow(
         }
     }
 
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(0.dp),
-    ) {
-        for (action in model.actions) {
-            TextButton(onClick = {
-                when (action.id) {
-                    "start" -> command { api.startPlan(state.taskId, status?.revision, newId()) }
-                    "resume" -> command { api.resumePlan(state.taskId, status?.revision, newId()) }
-                    "pause" -> command { api.pausePlan(state.taskId, newId()) }
-                    "stop" -> command { api.stopPlan(state.taskId, newId()) }
-                    "reconcile" -> command { api.reconcilePlan(state.taskId, status?.revision, "adopt_external", newId()) }
-                    "open", "edit" -> status?.path?.let { path ->
-                        onOpenPlan(path)
-                        if (action.id == "edit") onNotice("Правьте файл в проекте — диалог перечитает его версию")
-                    }
-                }
-            }, enabled = action.enabled) {
-                Text(
-                    if (action.id == primary.id) primary.label else action.label,
-                    style = MaterialTheme.typography.labelSmall,
-                    maxLines = 1,
-                )
+    fun runAction(actionId: String) {
+        when (actionId) {
+            "start" -> command { api.startPlan(state.taskId, status?.revision, newId()) }
+            "resume" -> command { api.resumePlan(state.taskId, status?.revision, newId()) }
+            "pause" -> command { api.pausePlan(state.taskId, newId()) }
+            "stop" -> command { api.stopPlan(state.taskId, newId()) }
+            "reconcile" -> command { api.reconcilePlan(state.taskId, status?.revision, "adopt_external", newId()) }
+            "edit" -> scope.launch {
+                try {
+                    val base = api.planContent(state.taskId)
+                    state.editorBase = base
+                    state.editorText = base.content
+                    state.editorError = ""
+                    state.editorCurrent = null
+                } catch (error: ApiException) { state.notice = planErrorText(error) }
+            }
+            "open" -> status?.path?.let(onOpenPlan)
+        }
+    }
+    val contextual = if (status?.state in setOf("RUNNING_STEP", "REVIEWING")) "stop" else "edit"
+    val main = model.actions.filter { it.id == primary.id || (it.id == contextual && it.enabled) }
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (action in main) {
+            TextButton(onClick = { runAction(action.id) }, enabled = action.enabled) {
+                Text(if (action.id == primary.id) primary.label else action.label, style = MaterialTheme.typography.labelSmall)
             }
         }
+        Box {
+            TextButton(onClick = { state.moreOpen = true }) { Text("Дополнительно") }
+            DropdownMenu(expanded = state.moreOpen, onDismissRequest = { state.moreOpen = false }) {
+                for (action in model.actions.filter { it.enabled && it.id !in main.map { a -> a.id } }) {
+                    DropdownMenuItem(text = { Text(action.label) }, onClick = {
+                        state.moreOpen = false
+                        runAction(action.id)
+                    })
+                }
+                DropdownMenuItem(text = { Text("Отключить план") }, enabled = state.enabled, onClick = {
+                    state.moreOpen = false
+                    state.confirmDetach = true
+                })
+            }
+        }
+    }
+    if (state.confirmDetach) {
+        AlertDialog(
+            onDismissRequest = { state.confirmDetach = false },
+            title = { Text("Отключить план? Файл останется на месте.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    state.confirmDetach = false
+                    command { api.detachPlan(state.taskId, newId()) }
+                }) { Text("Отключить") }
+            },
+            dismissButton = { TextButton(onClick = { state.confirmDetach = false }) { Text("Отмена") } },
+        )
     }
 }
