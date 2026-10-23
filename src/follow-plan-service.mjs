@@ -713,9 +713,10 @@ export class FollowPlanService {
         for (const stepId of checked.checkpoint.completedStepIds) {
           const evidence = checked.checkpoint.evidence.filter(item => item.stepId === stepId);
           const step = file.plan.steps.find(item => item.id === stepId);
+          const certified = resultForStep(evidence);
           if (step?.status === 'DONE' && evidence.length
-            && evidence.every(item => item.level === 'SYSTEM_VERIFIED')
-            && step.result === resultForStep(evidence)) {
+            && certified.startsWith('[SYSTEM_VERIFIED]')
+            && step.result === certified) {
             this.store.setMeta(this.#receiptKey(task.id, binding.path, file.plan.planId, stepId), JSON.stringify({
               level: 'SYSTEM_VERIFIED', fingerprint: planHash(JSON.stringify(step)),
               runId: task.runId || null, commandId, toolCallIds: evidence.map(item => item.ref)

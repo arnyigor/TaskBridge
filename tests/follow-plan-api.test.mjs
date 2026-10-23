@@ -102,6 +102,14 @@ test('the plan runs two steps without a message from the operator', { timeout: 6
   assert.match(onDisk, /### S-002 \| DONE \| P1/);
   assert.match(onDisk, /fixture: шаг выполнен/);
 
+  // Evidence trust comes from the SERVER: TaskManager saw the fixture's proof call
+  // end without an error, carried its id through hooks.turnSettled, and only then
+  // the file and the dialog may say «подтверждено системой» (FP-UX-02F wiring).
+  assert.match(onDisk, /\[SYSTEM_VERIFIED\]/, 'the real frame path produced a system level');
+  const status = await api(`/api/tasks/${task.id}/plan`);
+  assert.equal(status.steps[0].verification, 'SYSTEM_VERIFIED', 'server receipt matches the file');
+  assert.equal(status.steps[1].verification, 'SYSTEM_VERIFIED');
+
   // And the chat shows it: the step boundary and the completion are events of the task.
   const events = await api(`/api/tasks/${task.id}/events`);
   const types = events.map(event => event.type);

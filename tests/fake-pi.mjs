@@ -97,7 +97,7 @@ async function approvalGate(toolCallId, toolName, args) {
 // would send. Returns null when the instruction is not a normal step (the audit
 // turn, for instance) or the plan cannot be read — the controller must then ask
 // once and pause, which the tests exercise separately.
-function followPlanCheckpoint(message) {
+function followPlanCheckpoint(message, proofRef = null) {
   const file = /`([^`]+\.md)`/.exec(message);
   const planId = /planId\s+(p-[\w-]+)/.exec(message);
   const revision = /revision\s+(\d+)/.exec(message);
@@ -124,9 +124,13 @@ function followPlanCheckpoint(message) {
   const findings = finding
     ? [{ id: 'F-900', priority: finding[1], blocking: finding[1] === 'P0' || finding[1] === 'P1', summary: 'дефект, найденный в шаге' }]
     : [];
-  const evidence = runId
-    ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]
-    : [{ stepId: stepId[1], kind: 'file', ref: file[1], summary: 'fixture: шаг выполнен' }];
+  const evidence = [
+    ...(runId
+      ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]
+      : [{ stepId: stepId[1], kind: 'file', ref: file[1], summary: 'fixture: шаг выполнен' }]),
+    // …and the proof tool call actually emitted for this same turn.
+    ...(proofRef ? [{ stepId: stepId[1], kind: 'command', ref: proofRef, summary: 'fixture: инструмент отработал без ошибки' }] : [])
+  ];
   return {
     // The runner turns this into a failed tool end and drops the field.
     ...(headingLine.includes('checkpoint-error') ? { __failed: true } : {}),
@@ -702,8 +706,12 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     // and says COMPLETE only when nothing is left open. Evidence cites the run id
     // the instruction names, which is exactly what the server verifies.
     if (command.message.includes('FOLLOW PLAN')) {
-      const checkpoint = followPlanCheckpoint(command.message);
+      const checkpoint = followPlanCheckpoint(command.message, `proof-${turn}`);
       if (checkpoint) {
+        // The step's proof is a tool call of THIS turn: the production path has to
+        // carry its id and outcome from TaskManager all the way to the receipt.
+        send({ type: 'tool_execution_start', toolCallId: `proof-${turn}`, toolName: 'bash', args: { command: 'echo fixture-proof' } });
+        send({ type: 'tool_execution_end', toolCallId: `proof-${turn}`, toolName: 'bash', isError: false, result: { content: [{ type: 'text', text: 'fixture-proof' }] } });
         send({ type: 'tool_execution_start', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', args: checkpoint });
         // `checkpoint-error`: the tool itself fails, so the claim was never
         // delivered as a result and must not move the cycle (CP-02).
