@@ -217,6 +217,9 @@ fun planErrorText(code: String?, message: String?): String {
         "FOLLOW_PLAN_DISABLED" -> "Режим «По плану» выключен в конфигурации сервера (followPlan.enabled)."
         "PLAN_BLOCKED" -> "Выполнение остановлено: ${detail.ifBlank { "шаг заблокирован" }}"
         "PLAN_FILE_EXISTS" -> "В проекте уже есть такой файл с другим содержимым: подтвердите перезапись. $detail".trim()
+        "PLAN_ALREADY_ATTACHED" -> detail.ifBlank {
+            "Уже подключён другой план. Откройте его панель и отключите, если нужно заменить."
+        }.trim()
         "PLAN_NOT_ATTACHED" -> "План не подключён. $detail".trim()
         else -> detail.ifBlank { "Действие не выполнено." }
     }

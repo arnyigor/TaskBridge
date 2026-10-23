@@ -314,6 +314,9 @@ export function planErrorText(error) {
       return `Выполнение остановлено: ${detail || 'шаг заблокирован'}`;
     case 'PLAN_FILE_EXISTS':
       return `В проекте уже есть такой файл с другим содержимым. Подтвердите перезапись. ${detail}`.trim();
+    case 'PLAN_ALREADY_ATTACHED':
+      // Never detach for the operator: the running plan may still be needed.
+      return detail || 'Уже подключён другой план. Откройте его панель управления и отключите его, если нужно заменить.';
     case 'PLAN_NOT_ATTACHED':
       return `План не подключён. ${detail}`.trim();
     default:

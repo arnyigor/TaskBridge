@@ -643,8 +643,48 @@ test('UX-03: choosing a different file cannot replace the attached plan or write
   const { service, workspace, planPath, manager } = await setup(t);
   await service.attach({ taskId: 't-1', path: planPath, commandId: 'old-plan' });
   await assert.rejects(service.importPlan({ taskId: 't-1', name: 'NEW.md', contentBase64: base64(PLAN), commandId: 'new-plan' }),
-    error => error.code === 'PLAN_ALREADY_ATTACHED');
+    error => error.code === 'PLAN_ALREADY_ATTACHED' && error.message.includes(planPath) && error.attachedPath === planPath);
   assert.equal((await service.status('t-1')).path, planPath);
   assert.equal(await fs.stat(path.join(workspace, 'NEW.md')).then(() => true, () => false), false);
   assert.equal(manager.dispatched.length, 0, 'selection and attachment do not start Pi');
+});
+
+test('UX-03C: a client-supplied path is never trusted on its own', async t => {
+  const { service, workspace, planPath } = await setup(t);
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-outside-'));
+  t.after(() => fs.rm(outside, { recursive: true, force: true }));
+  await fs.writeFile(path.join(outside, 'PLAN.md'), PLAN, 'utf8');
+  const bs = String.fromCharCode(92);
+
+  // Absolute paths of any shape are refused before any filesystem access.
+  const forbidden = [
+    path.join(outside, 'PLAN.md'),
+    `C:${bs}Windows${bs}PLAN.md`,
+    `${bs}${bs}server${bs}share${bs}PLAN.md`,
+    '/etc/PLAN.md',
+    ''
+  ];
+  for (const bad of forbidden) {
+    await assert.rejects(service.importPlan({ taskId: 't-1', path: bad, commandId: `abs-${Math.random()}` }),
+      error => error.code === 'PLAN_INVALID', `accepted ${JSON.stringify(bad)}`);
+  }
+
+  // Traversal is refused too, and nothing is written next to the workspace.
+  await assert.rejects(service.importPlan({ taskId: 't-1', path: '../outside-PLAN.md', commandId: 'trav' }),
+    error => error.code === 'PLAN_INVALID');
+  assert.equal(await fs.stat(path.join(path.dirname(workspace), 'outside-PLAN.md')).then(() => true, () => false), false);
+
+  // A junction/symlink pointing out of the workspace is refused even though the
+  // path itself looks relative and innocent.
+  const link = path.join(workspace, 'linked');
+  const made = await fs.symlink(outside, link, 'junction').then(() => true, () => false);
+  if (made) {
+    await assert.rejects(service.importPlan({ taskId: 't-1', path: 'linked/PLAN.md', commandId: 'junction' }),
+      error => error.code === 'PLAN_INVALID');
+    await assert.rejects(service.attach({ taskId: 't-1', path: 'linked/PLAN.md', commandId: 'junction-attach' }),
+      error => error.code === 'PLAN_INVALID');
+  }
+  // The honest file still works — the checks refuse escapes, not everything.
+  const ok = await service.importPlan({ taskId: 't-1', path: planPath, commandId: 'ok' });
+  assert.equal(ok.status.attached, true);
 });

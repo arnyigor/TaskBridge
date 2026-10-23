@@ -4,6 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import {
   PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
@@ -334,4 +335,16 @@ test('the chosen file is described before anything is written, and a second file
   const broken = planSelectionView({ path: 'BAD.md', managed: false, problems: ['нет заголовка'], preview: { steps: [] } });
   assert.match(broken.format, /Формат: нет заголовка/);
   assert.equal(planSelectionView(null), null);
+});
+
+test('an already attached plan is named and never detached for the operator', () => {
+  const text = planErrorText({ code: 'PLAN_ALREADY_ATTACHED', message: 'Уже подключён план docs/PLAN.md.' });
+  assert.match(text, /docs\/PLAN\.md/);
+  const generic = planErrorText({ code: 'PLAN_ALREADY_ATTACHED' });
+  assert.match(generic, /отключите/i);
+  assert.equal(/detach|отключён автоматически/i.test(generic), false);
+  const source = fsSync.readFileSync(path.join(import.meta.dirname, '..', 'web', 'app.js'), 'utf8');
+  const handler = source.slice(source.indexOf("if (error.code === 'PLAN_ALREADY_ATTACHED')"), source.indexOf('if (error.code === \'PLAN_ALREADY_ATTACHED\')') + 120);
+  assert.match(handler, /loadPlanStatus\(\)/, 'the operator is shown the plan that is actually attached');
+  assert.doesNotMatch(handler, /detach/i, 'nothing is detached automatically');
 });

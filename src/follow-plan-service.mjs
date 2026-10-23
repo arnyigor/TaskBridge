@@ -444,7 +444,10 @@ export class FollowPlanService {
 
     const binding = this.store.getPlanBinding(task.id);
     if (binding?.path && binding.path !== target) {
-      throw reject('PLAN_ALREADY_ATTACHED', 'Сначала отключите текущий план. Выбор файла не заменяет активный план.');
+      // Name the plan that is already there: the operator decides, nothing is detached.
+      throw reject('PLAN_ALREADY_ATTACHED',
+        `Уже подключён план ${binding.path}. Отключите его в панели управления, если хотите выбрать другой файл.`,
+        { attachedPath: binding.path });
     }
     const inspection = this.#inspectText({ task, target, text });
     const absolute = await safeTarget(task.workspacePath, target, { write: true });

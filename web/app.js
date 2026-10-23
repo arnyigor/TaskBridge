@@ -4382,6 +4382,9 @@ async function inspectAndMaybeImport(payload) {
   } catch (error) {
     planNotice = planErrorText(error);
     $('planPickError').textContent = planNotice;
+    // Another client may have attached a plan while this dialog was open: show
+    // that plan's panel instead of leaving the operator with a bare sentence.
+    if (error.code === 'PLAN_ALREADY_ATTACHED') await loadPlanStatus();
     renderPlanCard();
   }
 }
