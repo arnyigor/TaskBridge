@@ -10,7 +10,7 @@ import {
   planActions, planCardModel, planCurrentStep, planErrorText, planEventNotice, planFileChoices, planFileGroups,
   planFindingsSummary, planHeadline, planIconState, planInspectionText, planMetaLine, planPrimaryAction,
   PLAN_ICON_TITLES, planPathProblem, planToggleState, verificationText,
-  planRequestBody, planFindingsLine, toggleOffAction
+  planRequestBody, planFindingsLine, toggleOffAction, planSelectionView
 } from '../web/follow-plan-view.mjs';
 
 const running = {
@@ -158,12 +158,14 @@ test('the dialog picks a file from the system picker or by an explicit project p
   assert.ok(actions.indexOf('id="planToggle"') < actions.indexOf('id="files"'), 'the plan icon sits in the composer row');
   // UI-02: no automatic listing of the project's Markdown files any more.
   assert.equal(/id="planFiles"/.test(html), false, 'nothing is scanned when the dialog opens');
-  assert.match(html, /id="planPickFile"[^>]*>Выбрать файл .md/);
+  // FP-UX-03: one system file picker and nothing else in the dialog.
+  assert.match(html, /id="planPickFile"[^>]*>Выбрать файл</);
   assert.match(html, /id="planFileInput"[^>]*accept="\.md,\.markdown/);
-  // The project browser is the primary way to choose a file that lives on the
-  // computer: a phone cannot reach it otherwise.
-  assert.match(html, /id="planBrowser"/);
+  assert.equal(/id="planBrowser"/.test(html), false, 'no folder listing in the dialog');
+  assert.equal(/planProjectPath/.test(html), false, 'no manual path field in the dialog');
   assert.equal(/planPathInput/.test(html), false, 'the manual path field was unclear and is gone');
+  assert.match(html, /id="planSelectedName"/, 'the chosen file is named before anything is written');
+  assert.match(html, /id="planSelectedPath"/, 'the server path is shown before anything is written');
   assert.match(html, /Подключение не запускает выполнение/);
   assert.match(html, /id="planStatusBlock"/, 'status lives in the dialog');
   assert.match(html, /id="planDetach"/, 'a selected plan can be detached from the dialog');
@@ -303,4 +305,33 @@ test('an open dialog re-reads status so an external edit cannot hide a conflict'
   const schedule = source.slice(source.indexOf('function schedulePlanStatusRefresh()'), source.indexOf('async function loadPlanStatus()'));
   assert.match(schedule, /const open = !\$\('planDialog'\)/);
   assert.match(schedule, /open \? 3000 : 10000/, 'the open panel polls; a closed one only follows stale/disabled status');
+});
+
+test('the chosen file is described before anything is written, and a second file needs a click', () => {
+  const managed = { path: 'docs/PLAN.md', managed: true, steps: 3, revision: 2, problems: [], alreadyAttached: false, replaces: null };
+  const fresh = planSelectionView(managed, { attached: false });
+  assert.equal(fresh.name, 'PLAN.md');
+  assert.equal(fresh.target, 'Файл в проекте: docs/PLAN.md');
+  assert.match(fresh.format, /управляемый план, 3 шаг/);
+  assert.equal(fresh.needsConfirm, true, 'the destination is shown before the explicit Connect click');
+
+  // An uploaded file lands in the project: say exactly where.
+  const uploaded = planSelectionView({ ...managed, path: 'PLAN.md' }, { uploaded: true, attached: false });
+  assert.equal(uploaded.target, 'Будет сохранён в проекте: PLAN.md');
+
+  // A second file never replaces the active plan on its own.
+  const replacement = planSelectionView({ ...managed, replaces: 'docs/PLAN.md' }, { attached: true });
+  assert.equal(replacement.needsConfirm, true);
+  assert.equal(replacement.confirmLabel, 'Заменить план');
+
+  // Free-form Markdown is a preview, not an automatic edit.
+  const freeForm = planSelectionView({ path: 'NOTES.md', managed: false, preview: { steps: [{ id: 'S-001' }] }, problems: [] }, { uploaded: true });
+  assert.equal(freeForm.needsConfirm, true);
+  assert.equal(freeForm.confirmLabel, 'Импортировать и подключить');
+  assert.match(freeForm.format, /обычный Markdown, шагов для импорта — 1/);
+
+  // A broken file is named by its first problem, not attached silently.
+  const broken = planSelectionView({ path: 'BAD.md', managed: false, problems: ['нет заголовка'], preview: { steps: [] } });
+  assert.match(broken.format, /Формат: нет заголовка/);
+  assert.equal(planSelectionView(null), null);
 });

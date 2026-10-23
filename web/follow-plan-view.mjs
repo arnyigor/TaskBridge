@@ -331,6 +331,35 @@ export function planInspectionText(inspection) {
   return `Обычный Markdown: будет импортировано шагов — ${steps}. Файл не изменяется до подтверждения.`;
 }
 
+/**
+ * Что показать сразу после выбора файла (FP-UX-03): имя, куда он попадёт на
+ * сервере, чем закончилась проверка формата и нужна ли отдельная кнопка.
+ * `uploaded` — файл пришёл с устройства, значит он будет записан в проект.
+ */
+export function planSelectionView(inspection, { uploaded = false, attached = false } = {}) {
+  if (!inspection) return null;
+  const name = String(inspection.path || '').split('/').pop() || '';
+  const problems = Array.isArray(inspection.problems) ? inspection.problems : [];
+  const managed = inspection.managed === true;
+  const previewSteps = inspection.preview?.steps?.length || 0;
+  const format = problems.length
+    ? `Формат: ${problems[0]}`
+    : managed
+      ? `Формат: управляемый план, ${inspection.steps} шаг(ов), revision ${inspection.revision}.`
+      : `Формат: обычный Markdown, шагов для импорта — ${previewSteps}.`;
+  const target = uploaded
+    ? `Будет сохранён в проекте: ${inspection.path}`
+    : `Файл в проекте: ${inspection.path}`;
+  // A second file never replaces the active plan on its own, and a free-form
+  // Markdown is converted only after an explicit confirmation.
+  const replaces = Boolean(inspection.replaces);
+  // Nothing is active: the first managed file connects at once. Anything that
+  // would change an active plan (or a free-form Markdown) waits for a click.
+  const needsConfirm = true; // Show destination and validate before the explicit Connect click.
+  const confirmLabel = replaces ? 'Заменить план' : managed ? 'Подключить' : 'Импортировать и подключить';
+  return { name, target, format, needsConfirm, confirmLabel, managed, replaces, problems };
+}
+
 const NOTICES = {
   PLAN_ATTACHED: 'План подключён',
   PLAN_STEP_STARTED: 'Шаг отправлен',

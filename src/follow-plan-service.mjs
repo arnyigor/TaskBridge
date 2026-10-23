@@ -442,6 +442,10 @@ export class FollowPlanService {
       text = file.text;
     }
 
+    const binding = this.store.getPlanBinding(task.id);
+    if (binding?.path && binding.path !== target) {
+      throw reject('PLAN_ALREADY_ATTACHED', 'Сначала отключите текущий план. Выбор файла не заменяет активный план.');
+    }
     const inspection = this.#inspectText({ task, target, text });
     const absolute = await safeTarget(task.workspacePath, target, { write: true });
     let toWrite = text;
@@ -465,14 +469,24 @@ export class FollowPlanService {
     // different project file without a second, explicit confirmation.
     const fromDevice = contentBase64 != null;
     const exists = await fs.stat(absolute).then(stat => stat.isFile(), () => false);
-    if (fromDevice && exists && !overwrite) {
-      const current = await fs.readFile(absolute, 'utf8').catch(() => '');
-      if (planHash(current) !== planHash(toWrite)) {
-        throw reject('PLAN_FILE_EXISTS', `Файл ${target} уже есть в проекте и отличается: подтвердите перезапись.`, [target]);
-      }
+    const current = exists ? await fs.readFile(absolute, 'utf8') : null;
+    const identical = current != null && planHash(current) === planHash(toWrite);
+    if (fromDevice && exists && !identical && !overwrite) {
+      throw reject('PLAN_FILE_EXISTS', `Файл ${target} уже есть в проекте и отличается: подтвердите перезапись.`, [target]);
     }
-    await fs.mkdir(path.dirname(absolute), { recursive: true });
-    await writePlanAtomic({ file: absolute, text: toWrite });
+    // A repeated selection of identical bytes does not rewrite the file or reset
+    // a running binding. It simply shows the existing control panel.
+    if (identical && binding?.path === target) {
+      return { status: await this.status(task.id), needsConfirmation: false };
+    }
+    // A managed file that already lives in the project is attached where it is:
+    // rewriting identical bytes would only bump its mtime (FP-UX-03). An upload
+    // and a converted free-form file do have to be written.
+    const alreadyManaged = contentBase64 == null && inspection.managed;
+    if (!alreadyManaged && !identical) {
+      await fs.mkdir(path.dirname(absolute), { recursive: true });
+      await writePlanAtomic({ file: absolute, text: toWrite, expectedHash: current == null ? null : planHash(current) });
+    }
     const attached = await this.attach({ taskId: task.id, path: target, commandId, clientId });
     if (imported) {
       await this.#publish(task.id, 'PLAN_REVISED', `Импортировано шагов: ${imported.steps}`, { path: target, ...imported, commandId, clientId });

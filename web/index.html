@@ -411,23 +411,15 @@
             <div id="planNotice" class="planNotice small hidden" role="alert"></div>
           </div>
 
-          <!-- Плана нет: выбор файла системным диалогом или явным путём. -->
+          <!-- Плана нет: один системный выбор файла и ничего больше (FP-UX-03).
+               Ни корня проекта, ни списка папок, ни поля ручного пути: браузер
+               и телефон показывают ровно то, что выбрал оператор. -->
           <div id="planPicker" class="planPicker">
             <p class="muted small">TaskBridge ведёт шаги одного Markdown-файла: после каждого хода
               проверяет файл и подтверждения и только потом отправляет следующий шаг.
               Подключение не запускает выполнение.</p>
-            <button id="planPickFile" type="button" class="primary planPick">Выбрать файл .md</button>
+            <button id="planPickFile" type="button" class="primary planPick">Выбрать файл</button>
             <input id="planFileInput" type="file" accept=".md,.markdown,text/markdown" class="hidden" />
-            <label for="planProjectPath" class="small">Путь к существующему файлу проекта</label>
-            <input id="planProjectPath" placeholder="docs/PLAN.md" />
-            <button id="planAttachPath" type="button" class="secondary">Подключить по пути</button>
-            <!-- С телефона файл на компьютере иначе не выбрать: ленивый браузер
-                 папки проекта по запросу (один каталог за раз, без сканирования).
-                 Это основной путь: план почти всегда уже лежит в проекте. -->
-            <div id="planBrowser" class="planBrowser hidden">
-              <div id="planBrowserPath" class="planBrowserPath small muted"></div>
-              <div id="planBrowserList" class="planBrowserList"></div>
-            </div>
             <div id="planPickError" class="planPathError small" role="alert"></div>
           </div>
 
@@ -449,6 +441,11 @@
 
           <!-- Предпросмотр импорта обычного Markdown: до подтверждения файл не меняется. -->
           <div id="planPreview" class="planPreview hidden">
+            <div id="planSelected" class="planSelected small">
+              <b id="planSelectedName"></b>
+              <div id="planSelectedPath" class="muted"></div>
+              <div id="planSelectedFormat" class="muted"></div>
+            </div>
             <div id="planPreviewText" class="small"></div>
             <div id="planPreviewError" class="planPathError small" role="alert"></div>
             <div class="planDialogActions">

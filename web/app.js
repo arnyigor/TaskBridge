@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planInspectionText, planMetaLine, planPathProblem, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText } from './follow-plan-view.mjs';
+import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planInspectionText, planMetaLine, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText, planSelectionView } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4174,7 +4174,9 @@ function renderPlanInspector() {
   block.classList.toggle('hidden', !attached);
   $('planActions').classList.toggle('hidden', !attached);
   picker.classList.toggle('hidden', attached);
-  preview.classList.toggle('hidden', !planInspection || planInspection.managed || attached);
+  // The selected-file card is driven by renderPlanSelection: it shows a managed
+  // file too, because a second file needs an explicit confirmation (FP-UX-03).
+  preview.classList.toggle('hidden', planInspection === null);
 
   if (!attached) {
     $('planPickError').textContent = planStatus?.fileError?.message || planNotice || '';
@@ -4297,7 +4299,6 @@ function openPlanDialog() {
   planPendingImport = null;
   planOverwrite = false;
   $('planPreviewConfirm').textContent = 'Импортировать и подключить';
-  $('planBrowser').classList.add('hidden');
   $('planPickError').textContent = '';
   $('planPreviewError').textContent = '';
   $('planFileInput').value = '';
@@ -4349,6 +4350,26 @@ function readFileAsBase64(file) {
   });
 }
 
+let planSelection = null;
+
+/** Имя, путь на сервере и вердикт формата — до любого изменения файла. */
+function renderPlanSelection() {
+  planSelection = planSelectionView(planInspection, {
+    uploaded: Boolean(planPendingImport?.contentBase64),
+    attached: planStatus?.attached === true
+  });
+  const card = $('planPreview');
+  card.classList.toggle('hidden', planSelection === null);
+  if (!planSelection) return;
+  $('planSelectedName').textContent = planSelection.name;
+  $('planSelectedPath').textContent = planSelection.target;
+  $('planSelectedFormat').textContent = planSelection.format;
+  $('planPreviewText').textContent = planSelection.managed ? '' : planInspectionText(planInspection);
+  $('planPreviewConfirm').textContent = planSelection.confirmLabel;
+  $('planPreviewConfirm').classList.toggle('hidden', planSelection.needsConfirm === false);
+  renderPlanCard();
+}
+
 async function inspectAndMaybeImport(payload) {
   $('planPickError').textContent = '';
   $('planPreviewError').textContent = '';
@@ -4356,17 +4377,8 @@ async function inspectAndMaybeImport(payload) {
     const inspection = await planInspect(payload);
     planInspection = inspection;
     planPendingImport = payload;
-    if (inspection.managed) {
-      const result = await planImport(payload);
-      planStatus = result.status;
-      planInspection = null;
-      planPendingImport = null;
-      planNotice = '';
-      renderPlanCard();
-      return;
-    }
-    $('planPreviewText').textContent = planInspectionText(inspection);
-    renderPlanCard();
+    planOverwrite = false;
+    renderPlanSelection();
   } catch (error) {
     planNotice = planErrorText(error);
     $('planPickError').textContent = planNotice;
@@ -4510,95 +4522,14 @@ $('planToggle').onclick = () => openPlanDialog();
 $('planDialogClose').onclick = closePlanDialog;
 $('planDialogDone').onclick = closePlanDialog;
 $('planDetach').onclick = detachPlan;
-$('planPickFile').onclick = () => $('planFileInput').click();
-$('planAttachPath').onclick = async () => {
-  const path = $('planProjectPath').value.trim();
-  const problem = planPathProblem(path);
-  if (problem) { $('planPickError').textContent = problem; return; }
-  await inspectAndMaybeImport({ path });
-};
+$('planPickFile').onclick = () => { $('planFileInput').value = ''; $('planFileInput').click(); };
 $('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
-// A lazy folder browser of the project: one directory per request, folders first,
-// only Markdown selectable. This is how a phone picks a file on the computer.
-let planBrowsePath = null;
-
-// What the running server can actually do (FP-UX-02G): a route this build does not
-// serve is «сервер старше приложения», not «файл не найден».
-let serverPlanCapabilities = null;
-
-async function loadPlanCapabilities() {
-  if (serverPlanCapabilities) return serverPlanCapabilities;
-  try {
-    const info = await api('/api/info');
-    serverPlanCapabilities = Array.isArray(info?.followPlan?.capabilities) ? info.followPlan.capabilities : [];
-  } catch (error) {
-    throw Object.assign(new Error(planErrorText({ code: 'PLAN_CONNECTION_LOST' })), { code: 'PLAN_CONNECTION_LOST', cause: error });
-  }
-  return serverPlanCapabilities;
-}
-
-async function openPlanBrowser(relPath = '') {
-  const id = selectedTaskId;
-  if (!id) return;
-  const capabilities = await loadPlanCapabilities();
-  if (!capabilities.includes('browse')) {
-    $('planBrowser').classList.remove('hidden');
-    $('planBrowserPath').textContent = '';
-    $('planBrowserList').textContent =
-      'Сервер этой сборки не умеет показывать файлы проекта (нет /plan/browse). Обновите сервер TaskBridge и перезапустите его.';
-    return;
-  }
-  const panel = $('planBrowser');
-  panel.classList.remove('hidden');
-  $('planBrowserList').textContent = 'Загрузка…';
-  planBrowsePath = relPath;
-  try {
-    const listing = await api(`/api/tasks/${encodeURIComponent(id)}/plan/browse?path=${encodeURIComponent(relPath)}`);
-    renderPlanBrowser(listing);
-  } catch (error) {
-    $('planBrowserList').textContent = planErrorText(error);
-  }
-}
-
-function renderPlanBrowser(listing) {
-  $('planBrowserPath').textContent = listing.path ? `/${listing.path}` : 'корень проекта';
-  const list = $('planBrowserList');
-  list.textContent = '';
-  if (listing.parent !== null && listing.parent !== undefined) {
-    const up = document.createElement('button');
-    up.type = 'button';
-    up.className = 'planBrowserRow';
-    up.textContent = '↑ наверх';
-    up.onclick = () => openPlanBrowser(listing.parent);
-    list.append(up);
-  }
-  if (!listing.entries.length) {
-    const empty = document.createElement('div');
-    empty.className = 'small muted';
-    empty.textContent = 'Здесь нет папок и .md-файлов.';
-    list.append(empty);
-  }
-  for (const entry of listing.entries) {
-    const row = document.createElement('button');
-    row.type = 'button';
-    row.className = 'planBrowserRow';
-    row.textContent = entry.isFile ? `📄 ${entry.name}` : `📁 ${entry.name}`;
-    row.onclick = () => {
-      if (entry.isFile) {
-        inspectAndMaybeImport({ path: entry.path });
-        $('planBrowser').classList.add('hidden');
-      } else {
-        openPlanBrowser(entry.path);
-      }
-    };
-    list.append(row);
-  }
-}
-
 $('planPreviewCancel').onclick = () => {
+  planOverwrite = false;
+  $('planFileInput').value = '';
   planInspection = null;
   planPendingImport = null;
-  renderPlanCard();
+  renderPlanSelection();
 };
 // The second click writes over a project file that already exists: never silently.
 let planOverwrite = false;

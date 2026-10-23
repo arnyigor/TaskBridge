@@ -613,3 +613,38 @@ test('simultaneous content saves on one CAS base have exactly one winner', async
   for (const result of saved.filter(item => item.status === 'rejected')) assert.equal(result.reason.code, 'PLAN_REVISION_CONFLICT');
   assert.equal((await readPlanFile(workspace, planPath)).revision, 2);
 });
+
+test('UX-03: a managed plan already in the project is attached in place, not rewritten', async t => {
+  const { service, workspace, planPath } = await setup(t);
+  const absolute = path.join(workspace, planPath);
+  const before = await fs.stat(absolute);
+  const result = await service.importPlan({ taskId: 't-1', path: planPath, commandId: 'inplace' });
+  assert.equal(result.needsConfirmation, false);
+  assert.equal(result.status.attached, true);
+  assert.equal(result.status.path, planPath, 'the canonical project path is used');
+  const after = await fs.stat(absolute);
+  assert.equal(after.mtimeMs, before.mtimeMs, 'an unchanged file is not copied or rewritten');
+  assert.equal(await fs.readFile(absolute, 'utf8'), PLAN);
+});
+
+test('UX-03: a repeat upload of identical bytes neither rewrites nor resets the active plan', async t => {
+  const { service, workspace, manager } = await setup(t);
+  const input = { taskId: 't-1', name: 'PICK.md', contentBase64: base64(PLAN) };
+  await service.importPlan({ ...input, commandId: 'pick-1' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'pick-start' });
+  const before = await fs.stat(path.join(workspace, 'PICK.md'));
+  const repeated = await service.importPlan({ ...input, commandId: 'pick-2' });
+  assert.equal(repeated.status.state, 'RUNNING_STEP');
+  assert.equal(manager.dispatched.length, 1);
+  assert.equal((await fs.stat(path.join(workspace, 'PICK.md'))).mtimeMs, before.mtimeMs);
+});
+
+test('UX-03: choosing a different file cannot replace the attached plan or write a new file', async t => {
+  const { service, workspace, planPath, manager } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'old-plan' });
+  await assert.rejects(service.importPlan({ taskId: 't-1', name: 'NEW.md', contentBase64: base64(PLAN), commandId: 'new-plan' }),
+    error => error.code === 'PLAN_ALREADY_ATTACHED');
+  assert.equal((await service.status('t-1')).path, planPath);
+  assert.equal(await fs.stat(path.join(workspace, 'NEW.md')).then(() => true, () => false), false);
+  assert.equal(manager.dispatched.length, 0, 'selection and attachment do not start Pi');
+});
