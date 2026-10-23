@@ -648,6 +648,71 @@ class TaskBridgeApi(
         call(HttpMethod.Post, "/api/providers/refresh", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),
             buildJsonObject { put("provider", provider) })
 
+    // --- Провайдеры Pi: страница «Провайдеры» (то же, что веб-UI /providers) ---
+    //
+    // Маршруты /api/provider-profiles* сервер отдаёт только через localhost
+    // (ORIGIN_FORBIDDEN): ключи живут в окружении процесса компьютера, и
+    // настраивать адрес, куда ходит Pi, должен только его владелец.
+    // /api/providers/check при этом доступен отовсюду — он read-only.
+
+    /** Подключения из models.json + ревизия файла; каждая правка обязана прийти со своей ревизией. */
+    suspend fun providerProfiles(): ProviderProfilesPage =
+        get("/api/provider-profiles", ProviderProfilesPage.serializer())
+
+    /** Создать или обновить управляемую запись `tb-*`. Вместо ключа — только имя переменной окружения. */
+    suspend fun saveProviderProfile(
+        revision: String,
+        id: String,
+        baseUrl: String,
+        keyEnv: String,
+        models: List<String>,
+    ): ProviderProfilesPage =
+        call(HttpMethod.Put, "/api/provider-profiles", ProviderProfilesPage.serializer(), buildJsonObject {
+            put("revision", revision)
+            put("id", id)
+            put("baseUrl", baseUrl)
+            put("keyEnv", keyEnv)
+            put("models", kotlinx.serialization.json.JsonArray(models.map { JsonPrimitive(it) }))
+        })
+
+    /**
+     * Убрать модели из записи провайдера. Правится ТОЛЬКО список моделей: адрес,
+     * api и ключ чужой записи сервер не меняет; перед записью он снимает копию
+     * models.json и сверяет ревизию.
+     */
+    suspend fun removeProviderModels(id: String, models: List<String>, revision: String): ProviderProfilesPage =
+        call(HttpMethod.Post, "/api/provider-profiles/${id.encodeURLPathPart()}/models/remove", ProviderProfilesPage.serializer(), buildJsonObject {
+            put("revision", revision)
+            put("models", kotlinx.serialization.json.JsonArray(models.map { JsonPrimitive(it) }))
+        })
+
+    /** Удалить управляемую запись `tb-*` (копия models.json остаётся рядом). */
+    suspend fun deleteProviderProfile(id: String, revision: String): ProviderProfilesPage =
+        call(HttpMethod.Delete, "/api/provider-profiles/${id.encodeURLPathPart()}", ProviderProfilesPage.serializer(), buildJsonObject {
+            put("revision", revision)
+        })
+
+    /**
+     * Проверка соединения с провайдером: один `GET /models`, без генерации. Работает
+     * и с `tb-*`, и с записями, которыми TaskBridge не владеет: адрес берётся из
+     * каталога Pi, а не из запроса.
+     */
+    suspend fun checkProviderConnection(provider: String, id: String? = null): ProviderCheck =
+        call(HttpMethod.Post, "/api/providers/check", ProviderCheck.serializer(), buildJsonObject {
+            put("provider", provider)
+            id?.let { put("id", it) }
+        })
+
+    /**
+     * Проверка несохранённого черновика до записи: соединение и каталог моделей
+     * для выбора. Черновик при этом в models.json не попадает.
+     */
+    suspend fun providerDraftCheck(baseUrl: String, keyEnv: String): ProviderDraftCheck =
+        call(HttpMethod.Post, "/api/provider-profiles/draft-check", ProviderDraftCheck.serializer(), buildJsonObject {
+            put("baseUrl", baseUrl)
+            put("keyEnv", keyEnv)
+        })
+
     suspend fun mcp(): McpStatus = get("/api/mcp", McpStatus.serializer())
 
     suspend fun setMcpMode(mode: String): McpStatus =

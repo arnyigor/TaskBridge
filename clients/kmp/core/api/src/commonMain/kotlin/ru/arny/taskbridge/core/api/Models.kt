@@ -331,6 +331,78 @@ data class ProviderStatus(
     val nextExpiresAt: String? = null,
 )
 
+/**
+ * Запись провайдера Pi (`~/.pi/agent/models.json`) из `/api/provider-profiles`.
+ * Сервер отдаёт белый список полей: адрес, режим авторизации и ID моделей.
+ * Сам API-ключ не отдаётся никогда — в ответе только ИМЯ переменной окружения.
+ */
+@Serializable
+data class ProviderProfile(
+    val id: String = "",
+    /** Правку сервер разрешает только записи, которую создал сам TaskBridge (ID `tb-*`). */
+    val managed: Boolean = false,
+    val baseUrl: String? = null,
+    val api: String? = null,
+    val keyEnv: String = "",
+    /** `keyless-local` | `configured` | `missing-env` | `configured-elsewhere` | `unknown` */
+    val auth: String = "",
+    val models: List<ProviderProfileModel> = emptyList(),
+    val modelCount: Int = 0,
+)
+
+@Serializable data class ProviderProfileModel(val id: String = "")
+
+/** Список подключений + ревизия models.json (sha256). Правка уходит только со своей ревизией. */
+@Serializable
+data class ProviderProfilesPage(
+    val revision: String = "",
+    val providers: List<ProviderProfile> = emptyList(),
+    val removed: List<String> = emptyList(),
+)
+
+/** Модель из `GET {baseUrl}/models` провайдера — то, что предлагает мастер подключения. */
+@Serializable
+data class DiscoveredModel(
+    val id: String = "",
+    val name: String? = null,
+    val contextWindow: Long? = null,
+    val maxTokens: Long? = null,
+    val reasoning: Boolean? = null,
+)
+
+/** Ответ `POST /api/provider-profiles/draft-check`: черновик ещё не записан. */
+@Serializable
+data class ProviderDraftCheck(
+    val ok: Boolean = false,
+    val status: String = "",
+    val code: String? = null,
+    val httpStatus: Int? = null,
+    val latencyMs: Long? = null,
+    val baseUrl: String? = null,
+    val note: String? = null,
+    val models: List<DiscoveredModel> = emptyList(),
+)
+
+/**
+ * Ответ `POST /api/providers/check`. Здесь `models` — ЧИСЛО моделей, а не список;
+ * каталог отдаёт только draft-check. `ms` — у проверки сохранённого `tb-*`-профиля.
+ */
+@Serializable
+data class ProviderCheck(
+    val provider: String? = null,
+    val id: String? = null,
+    val status: String = "",
+    val ok: Boolean = false,
+    val code: String? = null,
+    val httpStatus: Int? = null,
+    val latencyMs: Long? = null,
+    val ms: Long? = null,
+    val models: Int? = null,
+    val message: String? = null,
+    val note: String? = null,
+    val retryInMs: Long? = null,
+)
+
 @Serializable
 data class McpStatus(
     val mode: String = "inherit",
