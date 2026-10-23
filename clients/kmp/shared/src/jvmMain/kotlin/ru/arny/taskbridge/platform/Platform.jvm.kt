@@ -453,3 +453,31 @@ internal fun clipboardFiles(clipboard: Clipboard): List<UploadFile> = runCatchin
         else -> emptyList()
     }
 }.getOrDefault(emptyList())
+
+@Composable
+actual fun rememberPlanFilePicker(startDir: String?, onPicked: (UploadFile) -> Unit): () -> Unit = remember(startDir, onPicked) {
+    {
+        val dialog = FileDialog(null as Frame?, "Выбрать файл", FileDialog.LOAD).apply {
+            isMultipleMode = false
+            if (!startDir.isNullOrBlank() && File(startDir).isDirectory) directory = startDir
+            file = "*.md;*.markdown"
+            setFilenameFilter { _, name -> name.endsWith(".md", true) || name.endsWith(".markdown", true) }
+            isVisible = true
+        }
+        val selected = dialog.files.firstOrNull()
+        dialog.dispose()
+        if (selected != null && selected.isFile) {
+            onPicked(UploadFile(selected.name, "text/markdown", selected.readBytes(), selected.canonicalPath))
+        }
+    }
+}
+
+actual fun workspaceRelativePath(workspace: String?, sourcePath: String?): String? {
+    if (workspace.isNullOrBlank() || sourcePath.isNullOrBlank()) return null
+    return runCatching {
+        val root = File(workspace).toPath().toRealPath()
+        val selected = File(sourcePath).toPath().toRealPath()
+        if (!selected.startsWith(root) || selected == root) null
+        else root.relativize(selected).toString().replace(java.io.File.separatorChar, '/')
+    }.getOrNull()
+}

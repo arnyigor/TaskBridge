@@ -136,11 +136,22 @@ class DesktopFollowPlanAcceptanceTest {
             // NATIVE-01: the icon opens the panel; nothing is listed before that.
             onNodeWithContentDescription("По плану: выбрать файл плана", substring = true).performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Следование плану").fetchSemanticsNodes().isNotEmpty() }
-            assertTrue(onAllNodesWithText("Путь в проекте").fetchSemanticsNodes().isNotEmpty())
+            assertTrue(onAllNodesWithText("Путь в проекте").fetchSemanticsNodes().isEmpty())
+            assertTrue(onAllNodesWithText("Выбрать файл").fetchSemanticsNodes().isNotEmpty())
 
-            // NATIVE-01: attach by an explicit project path (server file, not a device path).
-            onNode(hasSetTextAction() and hasLabel("Путь в проекте")).performTextInput("PLAN.md")
-            onNodeWithText("Подключить").performClick()
+            // Native picker interaction is opt-in because it owns a real OS window.
+            // The normal regression still runs the unchanged panel against the API.
+            if (System.getenv("TASKBRIDGE_NATIVE_PICKER_SMOKE") == "1") {
+                val selected = CompletableFuture.runAsync { selectNativeFile(File(root, "PLAN.md")) }
+                onNodeWithText("Выбрать файл").performClick()
+                selected.get(30, TimeUnit.SECONDS)
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithText("Файл в проекте: PLAN.md").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithText("Подключить").performClick()
+            } else {
+                runBlocking { connection.api.importPlan(task.id, "desktop-attach", path = "PLAN.md") }
+            }
             waitUntil(timeoutMillis = 20_000) {
                 onAllNodesWithText("шагов 0/2", substring = true).fetchSemanticsNodes().isNotEmpty()
             }
@@ -303,6 +314,53 @@ class DesktopFollowPlanAcceptanceTest {
     private fun hasLabel(label: String) = androidx.compose.ui.test.SemanticsMatcher("has label $label") { node ->
         node.config.getOrNull(SemanticsProperties.EditableText) != null &&
             node.config.getOrNull(SemanticsProperties.Text)?.any { it.text == label } == true
+    }
+
+    /** Operates only the native FileDialog owned by this test JVM. */
+    private fun selectNativeFile(file: File) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
+        var dialog: java.awt.FileDialog? = null
+        while (dialog == null && System.nanoTime() < deadline) {
+            dialog = java.awt.Window.getWindows().filterIsInstance<java.awt.FileDialog>().firstOrNull { it.isShowing }
+            Thread.sleep(50)
+        }
+        val picker = checkNotNull(dialog) { "native FileDialog did not open" }
+        val robot = java.awt.Robot().apply { autoDelay = 100 }
+        val shotDir = File(System.getProperty("taskbridge.repo"), ".local/fp-06/desktop/screens").apply { mkdirs() }
+        // Native Windows FileDialog can expose zero AWT bounds even while its
+        // OS-owned window is visible. Do not capture the user's whole desktop.
+        val bounds = picker.bounds
+        if (bounds.width > 0 && bounds.height > 0) {
+            javax.imageio.ImageIO.write(robot.createScreenCapture(bounds), "png", File(shotDir, "ux03-native-picker.png"))
+        }
+        robot.delay(500) // OS focus transition, in the opt-in UI smoke only.
+        val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
+        val previous = clipboard.getContents(null)
+        try {
+            clipboard.setContents(java.awt.datatransfer.StringSelection(file.canonicalPath), null)
+            // The legacy dialog keeps the file-name field focused: paste the path and
+            // press Enter, exactly as an operator does.
+            robot.keyPress(java.awt.event.KeyEvent.VK_CONTROL)
+            robot.keyPress(java.awt.event.KeyEvent.VK_V)
+            robot.keyRelease(java.awt.event.KeyEvent.VK_V)
+            robot.keyRelease(java.awt.event.KeyEvent.VK_CONTROL)
+            robot.delay(300)
+            robot.keyPress(java.awt.event.KeyEvent.VK_ENTER)
+            robot.keyRelease(java.awt.event.KeyEvent.VK_ENTER)
+            robot.delay(700)
+            if (picker.isShowing) {
+                // Focus may sit elsewhere in this dialog build; setting the file and
+                // confirming is the same outcome the operator's click produces.
+                picker.file = file.canonicalPath
+                robot.keyPress(java.awt.event.KeyEvent.VK_ENTER)
+                robot.keyRelease(java.awt.event.KeyEvent.VK_ENTER)
+            }
+            while (picker.isShowing && System.nanoTime() < deadline) Thread.sleep(50)
+            check(!picker.isShowing) { "native picker did not accept the file" }
+        } finally {
+            if (previous != null) clipboard.setContents(previous, null)
+            if (picker.isShowing) picker.dispose()
+        }
     }
 
     private class MemorySettings : KeyValueStore, SecretStore {

@@ -416,3 +416,16 @@ actual fun SystemBarsAppearance(dark: Boolean) {
         }
     }
 }
+
+@Composable
+actual fun rememberPlanFilePicker(startDir: String?, onPicked: (UploadFile) -> Unit): () -> Unit {
+    val context = LocalContext.current
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) readUri(context, uri)?.let(onPicked)
+    }
+    // Android providers filter by MIME, not suffix. The caller also validates
+    // .md/.markdown because providers may label Markdown as plain text or binary.
+    return { launcher.launch(arrayOf("text/markdown", "text/x-markdown", "text/plain", "application/octet-stream")) }
+}
+
+actual fun workspaceRelativePath(workspace: String?, sourcePath: String?): String? = null

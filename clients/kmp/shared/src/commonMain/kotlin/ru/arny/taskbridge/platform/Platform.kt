@@ -163,3 +163,10 @@ expect fun dragDroppedFiles(event: DragAndDropEvent): List<UploadFile>
 
 /** Приём файлов, перетащенных в окно приложения; на телефоне — no-op. */
 expect fun Modifier.fileDropTarget(onFiles: (List<UploadFile>) -> Unit): Modifier
+
+/** One Markdown file, chosen by the system dialog. Cancellation calls nothing. */
+@Composable
+expect fun rememberPlanFilePicker(startDir: String? = null, onPicked: (UploadFile) -> Unit): () -> Unit
+
+/** Canonical local file inside the workspace (desktop only); never a phone URI. */
+expect fun workspaceRelativePath(workspace: String?, sourcePath: String?): String?

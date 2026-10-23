@@ -41,7 +41,8 @@ import ru.arny.taskbridge.core.api.PlanInspection
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.api.UploadFile
-import ru.arny.taskbridge.platform.rememberFilePicker
+import ru.arny.taskbridge.platform.rememberPlanFilePicker
+import ru.arny.taskbridge.platform.workspaceRelativePath
 import ru.arny.taskbridge.ui.theme.AppIcons
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -63,8 +64,6 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var status by mutableStateOf<PlanStatus?>(null)
     var notice by mutableStateOf("")
     var askPlan by mutableStateOf(false)
-    var pathInput by mutableStateOf("")
-    var pathRow by mutableStateOf(true)
     var inspection by mutableStateOf<PlanInspection?>(null)
     var pendingName by mutableStateOf<String?>(null)
     var pendingBase64 by mutableStateOf<String?>(null)
@@ -72,14 +71,15 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var overwrite by mutableStateOf(false)
     var stepsOpen by mutableStateOf(false)
     var findingsOpen by mutableStateOf(false)
-    // Ленивый браузер проекта: телефон выбирает файл, который лежит на компьютере.
-    var browseOpen by mutableStateOf(false)
-    var browsePath by mutableStateOf("")
-    var browseEntries by mutableStateOf<List<ru.arny.taskbridge.core.api.PlanBrowseEntry>>(emptyList())
-    var browseParent by mutableStateOf<String?>(null)
-    var browseError by mutableStateOf<String?>(null)
-    var capabilitiesLoaded by mutableStateOf(false)
-    var canBrowse by mutableStateOf(false)
+    /** Отмена выбора: ничего не подключено и ничего не записано. */
+    fun clearSelection() {
+        inspection = null
+        pendingName = null
+        pendingBase64 = null
+        pendingPath = null
+        overwrite = false
+        notice = ""
+    }
 
     val enabled: Boolean get() = planToggleEnabled(status)
     val hint: String? get() = planToggleHint(status)
@@ -131,16 +131,19 @@ fun FollowPlanIcon(
         PlanIconState.COMPLETED -> colors.tertiary
         PlanIconState.OFF -> colors.onSurfaceVariant
     }
-    // Системный выбор файла: на Android — Documents Picker (SAF), на десктопе —
-    // стандартный диалог. Список .md в проекте больше не сканируется.
-    val pickFile = rememberFilePicker(startDir = projectPath) { picked ->
-        val file: UploadFile? = picked.firstOrNull { it.name.endsWith(".md", true) || it.name.endsWith(".markdown", true) }
-        if (file == null) {
+    // Один системный выбор файла (FP-UX-03): на Android — Documents Picker, на
+    // десктопе — стандартный диалог. Файл внутри рабочего каталога подключается
+    // своим путём, без копирования; всё остальное уходит содержимым.
+    val pickFile = rememberPlanFilePicker(startDir = projectPath) { file ->
+        if (!file.name.endsWith(".md", true) && !file.name.endsWith(".markdown", true)) {
             state.notice = "План — это файл .md или .markdown."
-            return@rememberFilePicker
+            return@rememberPlanFilePicker
         }
+        state.clearSelection()
+        val inside = workspaceRelativePath(projectPath, file.sourcePath)
         scope.launch {
-            inspectThenImport(state, api, newId, name = file.name, base64 = encodeBase64(file.bytes))
+            if (inside != null) inspectThenImport(state, api, newId, path = inside)
+            else inspectThenImport(state, api, newId, name = file.name, base64 = encodeBase64(file.bytes))
         }
     }
 
@@ -151,17 +154,6 @@ fun FollowPlanIcon(
             delay(3_000)
             state.status = runCatching { api.plan(state.taskId) }.getOrNull() ?: state.status
         }
-    }
-    // The project listing loads when the dialog opens — one directory, by request.
-    LaunchedEffect(state.askPlan) {
-        if (!state.askPlan) return@LaunchedEffect
-        if (!state.capabilitiesLoaded) {
-            val capabilities = runCatching { api.info().followPlan?.capabilities }.getOrNull().orEmpty()
-            state.canBrowse = capabilities.contains("browse")
-            state.capabilitiesLoaded = true
-        }
-        // A server without the listing route is named as such, not as «Not found».
-        // Opening this dialog does not list project files.
     }
     IconButton(
         onClick = {
@@ -246,48 +238,29 @@ fun FollowPlanIcon(
                             "и подтверждения и только потом отправляет следующий шаг. Подключение не запускает выполнение.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    if (!projectPath.isNullOrBlank()) {
-                        // One line with an ellipsis: a wrapped drive path ate two rows of a phone dialog.
-                        Text(projectPath, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
                     state.hint?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
-
-                    Text("Файл серверного проекта — по относительному пути ниже", style = MaterialTheme.typography.labelMedium)
                     TextButton(onClick = { pickFile() }) {
-                        Text(
-                            if (platformKind == "android") "Файл на телефоне" else "Файл на компьютере",
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
-                    if (state.pathRow) {
-                        // A visible field, not a bare text area: on a phone an empty
-                        // BasicTextField looks like nothing happened.
-                        OutlinedTextField(
-                            value = state.pathInput,
-                            onValueChange = { state.pathInput = it },
-                            singleLine = true,
-                            label = { Text("Путь в проекте", style = MaterialTheme.typography.labelSmall) },
-                            placeholder = { Text("docs/PLAN.md", style = MaterialTheme.typography.bodySmall) },
-                            modifier = Modifier.fillMaxWidth().widthIn(min = 200.dp),
-                        )
-                        TextButton(
-                            onClick = {
-                                val path = state.pathInput.trim()
-                                val problem = planPathProblem(path)
-                                if (problem != null) {
-                                    state.notice = problem
-                                    return@TextButton
-                                }
-                                scope.launch { inspectThenImport(state, api, newId, path = path) }
-                            },
-                            enabled = state.pathInput.isNotBlank(),
-                        ) { Text("Подключить") }
+                        Text("Выбрать файл", style = MaterialTheme.typography.labelMedium)
                     }
                 }
 
-                // Предпросмотр импорта обычного Markdown: файл не меняется до согласия.
+                // Выбранный файл: имя, путь на сервере, вердикт формата — до записи.
                 state.inspection?.let { inspection ->
-                    if (!inspection.managed && !state.attached) {
+                    Text(inspection.path.orEmpty().substringAfterLast('/'), style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (state.pendingBase64 != null) "Будет сохранён в проекте: ${inspection.path}"
+                        else "Файл в проекте: ${inspection.path}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.onSurfaceVariant,
+                    )
+                    Text(
+                        if (inspection.managed) "Формат: управляемый план, ${inspection.steps ?: 0} шаг(ов), revision ${inspection.revision ?: 1}."
+                        else "Формат: обычный Markdown, шагов для импорта — ${inspection.preview?.steps?.size ?: 0}.",
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                state.inspection?.let { inspection ->
+                    if (state.pendingPath != null || state.pendingBase64 != null) {
                         Text(planInspectionText(inspection), style = MaterialTheme.typography.bodySmall)
                         Row {
                             TextButton(onClick = {
@@ -298,7 +271,7 @@ fun FollowPlanIcon(
                             TextButton(onClick = {
                                 scope.launch { importNow(state, api, newId) }
                             }) {
-                                Text(if (state.overwrite) "Перезаписать и подключить" else "Импортировать и подключить")
+                                Text(if (state.overwrite) "Перезаписать и подключить" else if (inspection.managed) "Подключить" else "Импортировать и подключить")
                             }
                         }
                     }
@@ -319,19 +292,6 @@ fun FollowPlanIcon(
 @OptIn(ExperimentalEncodingApi::class)
 private fun encodeBase64(bytes: ByteArray): String = Base64.encode(bytes)
 
-/** Один каталог проекта за запрос: так телефон видит файлы компьютера. */
-private suspend fun browse(state: FollowPlanUiState, api: TaskBridgeApi, path: String) {
-    state.browseError = null
-    try {
-        val listing = api.browsePlan(state.taskId, path)
-        state.browsePath = listing.path
-        state.browseParent = listing.parent
-        state.browseEntries = listing.entries
-    } catch (error: ApiException) {
-        state.browseError = planErrorText(error)
-    }
-}
-
 private suspend fun inspectThenImport(
     state: FollowPlanUiState,
     api: TaskBridgeApi,
@@ -347,9 +307,7 @@ private suspend fun inspectThenImport(
         state.pendingPath = path
         state.overwrite = false
         state.inspection = inspection
-        if (inspection.managed) {
-            importNow(state, api, newId)
-        }
+        // The operator sees the server destination and format verdict before writing.
     } catch (error: ApiException) {
         state.notice = planErrorText(error)
     }

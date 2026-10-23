@@ -66,7 +66,13 @@ class SimpleConnection(
 ) : Connection
 
 /** A file picked on the device, read into memory (limits come from /api/info). */
-class UploadFile(val name: String, val mimeType: String?, val bytes: ByteArray)
+class UploadFile(
+    val name: String,
+    val mimeType: String?,
+    val bytes: ByteArray,
+    /** Local absolute path on desktop; null when the file came from a content URI. */
+    val sourcePath: String? = null,
+)
 
 /** One item of a live session stream. */
 sealed interface StreamItem {
