@@ -4143,10 +4143,10 @@ function updatePlanToggle() {
   if (!button) return;
   const state = planIconState(planStatus);
   const off = planStatus?.enabled === false;
-  button.disabled = off;
+  button.disabled = off && !planStatus?.fileError;
   button.dataset.planState = off ? 'off' : state;
   // The status is never colour-only: the title and the label carry it in words.
-  const label = off
+  const label = planStatus?.fileError ? planStatus.fileError.message : off
     ? 'По плану: режим выключен в конфигурации сервера (followPlan.enabled)'
     : `${PLAN_ICON_TITLES[state] || PLAN_ICON_TITLES.off}${planStatus?.path ? ` — ${planStatus.path}` : ''}`;
   button.title = label;
@@ -4177,7 +4177,7 @@ function renderPlanInspector() {
   preview.classList.toggle('hidden', !planInspection || planInspection.managed || attached);
 
   if (!attached) {
-    $('planPickError').textContent = planNotice || '';
+    $('planPickError').textContent = planStatus?.fileError?.message || planNotice || '';
     $('planDetach').classList.add('hidden');
     return;
   }
@@ -4270,7 +4270,8 @@ async function loadPlanStatus() {
     return status;
   } catch (error) {
     if (id !== selectedTaskId) return null;
-    const code = error.status === 404 ? 'PLAN_API_UNAVAILABLE' : error.code || 'PLAN_CONNECTION_LOST';
+    const code = ['HTTP_404', 'NOT_FOUND'].includes(error.code) ? 'PLAN_API_UNAVAILABLE'
+      : /^(PLAN_|FOLLOW_PLAN_)/.test(error.code || '') ? error.code : 'PLAN_CONNECTION_LOST';
     planStatus = { ...planStatus, enabled: false, fileError: { code, message: planErrorText({ code, message: error.message }) } };
     planNotice = planStatus.fileError.message;
     schedulePlanStatusRefresh();
