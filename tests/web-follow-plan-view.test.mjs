@@ -9,7 +9,7 @@ import {
   PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
   planActions, planCardModel, planCurrentStep, planErrorText, planEventNotice, planFileChoices, planFileGroups,
   planFindingsSummary, planHeadline, planIconState, planInspectionText, planMetaLine, planPrimaryAction,
-  PLAN_ICON_TITLES, planPathProblem, planToggleState,
+  PLAN_ICON_TITLES, planPathProblem, planToggleState, verificationText,
   planRequestBody, planFindingsLine, toggleOffAction
 } from '../web/follow-plan-view.mjs';
 
@@ -91,7 +91,7 @@ test('a card without a plan stays out of the chat', () => {
   const model = planCardModel(running);
   assert.equal(model.visible, true);
   assert.equal(model.goal, 'Стабилизировать историю');
-  assert.equal(model.actions.length, 6);
+  assert.equal(model.actions.length, 7);
 });
 
 test('the attach request needs a relative Markdown path inside the project', () => {
@@ -176,6 +176,18 @@ test('the dialog picks a file from the system picker or by an explicit project p
   assert.equal(/workspace-files/.test(planSection), false, 'opening the dialog fetches no file list');
 });
 
+test('a file with every step done is finished, and nothing offers to start it', () => {
+  const finished = { attached: true, state: 'COMPLETED', enabled: true, revision: 3, steps: [], progress: { done: 2, total: 2 }, file: { open: 0, complete: true } };
+  assert.deepEqual(planPrimaryAction(finished), { id: 'open', label: 'Открыть результат' });
+  const start = planActions(finished).find(action => action.id === 'start');
+  assert.equal(start.disabled, true, 'no «Начать выполнение» on a finished plan');
+
+  // Re-attached file whose steps are all DONE reports open=0 even if the binding
+  // says IDLE: the state shown is the file's, not the cycle's.
+  const reattached = { attached: true, state: 'COMPLETED', enabled: true, file: { open: 0, complete: true } };
+  assert.equal(planActions(reattached).find(action => action.id === 'start').disabled, true);
+});
+
 test('one primary action per state, exactly as the table says', () => {
   assert.deepEqual(planPrimaryAction({ attached: false }), { id: 'pick', label: 'Выбрать файл .md' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'IDLE' }), { id: 'start', label: 'Начать выполнение' });
@@ -201,7 +213,17 @@ test('the dialog states where the plan is, in words', () => {
       { id: 'S-002', status: 'IN_PROGRESS', title: 'Второй', result: '' }
     ]
   });
-  assert.deepEqual(step, { id: 'S-002', title: 'Второй', status: 'IN_PROGRESS', result: '' });
+  assert.deepEqual(step, { id: 'S-002', title: 'Второй', status: 'IN_PROGRESS', result: '', verification: null });
+
+  // The level of proof is shown in words, never as a colour or a hidden prefix.
+  const verified = planCurrentStep({
+    attached: true, stepId: 'S-002',
+    steps: [{ id: 'S-002', status: 'DONE', title: 'Второй', result: 'тесты зелёные', verification: 'MODEL_REPORTED' }]
+  });
+  assert.equal(verified.verification, 'MODEL_REPORTED');
+  assert.equal(verificationText('MODEL_REPORTED'), 'заявлено моделью');
+  assert.equal(verificationText('SYSTEM_VERIFIED'), 'подтверждено системой');
+  assert.equal(verificationText(null), null);
 
   const findings = planFindingsSummary({
     findings: [
@@ -231,3 +253,25 @@ test('the inspection tells managed from free-form before anything is written', (
   assert.match(planInspectionText({ managed: false, preview: { steps: [] } }), /Файл не изменяется до подтверждения/);
 });
 
+
+
+test('editor keeps its CAS base separate from SSE state, and dialog never lists files on open', async () => {
+  const source = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'app.js'), 'utf8');
+  const opening = source.slice(source.indexOf('function openPlanDialog()'), source.indexOf('function closePlanDialog()'));
+  assert.doesNotMatch(opening, /openPlanBrowser\(/);
+  assert.match(source, /planDraftBase = \{ expectedRevision: file.revision, expectedHash: file.hash \}/);
+  assert.match(source, /\.\.\.planDraftBase/);
+  assert.match(source, /planDraft = \$\('planEditorText'\).value/);
+  assert.match(source, /planDraftDirty && !confirm/);
+});
+
+test('resume is offered only after pause, and editing never races an active step', () => {
+  const actions = state => Object.fromEntries(planActions({ attached: true, enabled: true, state }).map(a => [a.id, a]));
+  assert.equal(actions('PAUSED').resume.disabled, false);
+  assert.equal(actions('PAUSED').start.disabled, true);
+  assert.equal(actions('PAUSED_REVIEW').resume.disabled, true);
+  assert.equal(actions('RUNNING_STEP').edit.disabled, true);
+  assert.equal(actions('REVIEWING').reconcile.disabled, true);
+  assert.match(planErrorText({ code: 'PLAN_API_UNAVAILABLE' }), /Обновите сервер/);
+  assert.match(planErrorText({ code: 'PLAN_CONNECTION_LOST' }), /Соединение/);
+});

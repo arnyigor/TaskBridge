@@ -45,6 +45,7 @@ export function planFindingsLine(status) {
  * никогда не прячется за переключателем.
  */
 export function planActions(status, { enabled = true } = {}) {
+  enabled = enabled && status?.enabled !== false;
   const state = status?.state || 'NOT_ATTACHED';
   const attached = Boolean(status?.attached);
   const active = ACTIVE.has(state);
@@ -53,9 +54,13 @@ export function planActions(status, { enabled = true } = {}) {
     {
       id: 'start',
       label: state === 'COMPLETED' ? 'Завершён' : attached ? 'Продолжить' : 'Старт',
-      disabled: !enabled || !attached || active || state === 'COMPLETED' || Boolean(status?.conflict) || Boolean(status?.fileError),
+      // A finished file has nothing to start: the button must not offer it
+      // (reported: 2/2 DONE still showed «Начать выполнение»).
+      disabled: !enabled || !attached || active || state !== 'IDLE' || status?.file?.open === 0
+        || Boolean(status?.conflict) || Boolean(status?.fileError),
       title: !attached ? 'Сначала подключите файл плана' : active ? 'Шаг уже выполняется' : 'Отправить следующий шаг'
     },
+    { id: 'resume', label: 'Продолжить', disabled: !enabled || !attached || state !== 'PAUSED' || blocked, title: 'Продолжить после паузы' },
     {
       id: 'pause',
       label: 'Пауза после шага',
@@ -74,11 +79,11 @@ export function planActions(status, { enabled = true } = {}) {
       disabled: !attached,
       title: status?.path || 'Файл плана не подключён'
     },
-    { id: 'reconcile', label: 'Принять файл', disabled: !enabled || !attached || !blocked, title: 'Принять версию файла с диска и снять конфликт' },
+    { id: 'reconcile', label: 'Принять файл', disabled: !enabled || !attached || active || !blocked, title: 'Принять версию файла с диска и снять конфликт' },
     {
       id: 'edit',
       label: 'Изменить план',
-      disabled: !enabled || !attached,
+      disabled: !enabled || !attached || active,
       title: 'Править файл плана в проекте'
     }
   ];
@@ -247,6 +252,15 @@ export function planMetaLine(status) {
   return parts.join(' • ');
 }
 
+export const VERIFICATION_LABELS = Object.freeze({
+  SYSTEM_VERIFIED: 'подтверждено системой',
+  MANUAL_ACCEPTED: 'принято вручную',
+  MODEL_REPORTED: 'заявлено моделью',
+  UNVERIFIED: 'без подтверждения'
+});
+
+export const verificationText = level => VERIFICATION_LABELS[level] || null;
+
 /** Текущий шаг: название, статус и последнее подтверждённое подтверждение. */
 export function planCurrentStep(status) {
   const steps = Array.isArray(status?.steps) ? status.steps : [];
@@ -255,7 +269,12 @@ export function planCurrentStep(status) {
     || steps.find(step => step.status === 'TODO')
     || steps[steps.length - 1];
   if (!current) return null;
-  return { id: current.id, title: current.title || '', status: current.status, result: current.result || '' };
+  return {
+    id: current.id, title: current.title || '', status: current.status, result: current.result || '',
+    // How the result was established: a system fact, an operator's acceptance or
+    // the model's own word (FP-UX-02F).
+    verification: current.verification || null
+  };
 }
 
 /** Находки: сколько требующих решения и сколько просто записей. */
@@ -277,6 +296,10 @@ export function planErrorText(error) {
   const code = error?.code || null;
   const detail = String(error?.message || '').replace(/^[A-Z_]+:\s*/, '');
   switch (code) {
+    case 'PLAN_API_UNAVAILABLE':
+      return 'Сервер не поддерживает этот Follow Plan API. Обновите сервер и повторите подключение.';
+    case 'PLAN_CONNECTION_LOST':
+      return 'Соединение с сервером потеряно. Восстановите соединение и повторите действие; черновик сохранён.';
     case 'PLAN_INVALID':
       return `Файл не соответствует формату плана. ${detail}`.trim();
     case 'PLAN_REVISION_CONFLICT':

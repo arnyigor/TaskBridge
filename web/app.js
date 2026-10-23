@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planInspectionText, planMetaLine, planPathProblem, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES } from './follow-plan-view.mjs';
+import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planInspectionText, planMetaLine, planPathProblem, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4160,7 +4160,7 @@ function renderPlanSteps() {
   for (const step of planStatus?.steps || []) {
     const item = document.createElement('li');
     item.className = `planStep planStep-${String(step.status || '').toLowerCase()}`;
-    item.textContent = `${step.id} · ${step.title || ''}`;
+    item.textContent = [step.id, step.title || '', verificationText(step.verification)].filter(Boolean).join(' · ');
     item.title = step.result ? `${step.status}: ${step.result}` : String(step.status || '');
     list.append(item);
   }
@@ -4195,7 +4195,7 @@ function renderPlanInspector() {
   $('planCurrent').classList.toggle('hidden', !current);
   if (current) {
     $('planStepTitle').textContent = `${current.id} · ${current.title}`;
-    $('planStepStatus').textContent = current.status || '';
+    $('planStepStatus').textContent = [current.status, verificationText(current.verification)].filter(Boolean).join(' · ');
     $('planStepResult').textContent = current.result || '';
     $('planStepResult').classList.toggle('hidden', !current.result);
   }
@@ -4240,7 +4240,13 @@ function renderPlanInspector() {
   $('planDetach').disabled = !(planStatus?.enabled !== false);
 }
 
-const renderPlanCard = () => { updatePlanToggle(); if (!$('planDialog').classList.contains('hidden')) renderPlanInspector(); };
+const renderPlanCard = () => {
+  updatePlanToggle();
+  if (!$('planDialog').classList.contains('hidden')) {
+    renderPlanInspector();
+    renderPlanEditor();
+  }
+};
 
 function schedulePlanStatusRefresh() {
   if (planStatusTimer) { clearTimeout(planStatusTimer); planStatusTimer = null; }
@@ -4263,7 +4269,10 @@ async function loadPlanStatus() {
     renderPlanCard();
     return status;
   } catch (error) {
-    planStatus = { attached: false, enabled: true, fileError: { message: error.message } };
+    if (id !== selectedTaskId) return null;
+    const code = error.status === 404 ? 'PLAN_API_UNAVAILABLE' : error.code || 'PLAN_CONNECTION_LOST';
+    planStatus = { ...planStatus, enabled: false, fileError: { code, message: planErrorText({ code, message: error.message }) } };
+    planNotice = planStatus.fileError.message;
     schedulePlanStatusRefresh();
     renderPlanCard();
     return null;
@@ -4283,13 +4292,14 @@ function openPlanDialog() {
   $('planFileInput').value = '';
   $('planDialog').classList.remove('hidden');
   renderPlanCard();
-  if (!planStatus?.attached) openPlanBrowser('');
+  // Opening the dialog never lists project files; selection is explicit.
   const primary = planPrimaryAction(planStatus);
   const target = planStatus?.attached ? $(`#planActions button[data-action="${primary.id}"]`) : $('planPickFile');
   target?.focus?.();
 }
 
 function closePlanDialog() {
+  if (planDraftDirty && !confirm('Есть несохранённый текст. Закрыть окно? Черновик сохранится в этом окне.')) return;
   $('planDialog').classList.add('hidden');
 }
 
@@ -4353,12 +4363,102 @@ async function inspectAndMaybeImport(payload) {
   }
 }
 
+// --- editor (FP-UX-02C) ---------------------------------------------------
+let planDraft = null;
+let planDraftDirty = false;
+let planDraftBase = null;
+let planDraftTaskId = null;
+
+function renderPlanEditor() {
+  $('planEditor').classList.toggle('hidden', planDraft === null);
+  $('planStatusBlock').classList.toggle('hidden', planDraft !== null || planStatus?.attached !== true);
+  $('planActions').classList.toggle('hidden', planDraft !== null || planStatus?.attached !== true);
+  $('planPicker').classList.toggle('hidden', planDraft === null ? planStatus?.attached === true : true);
+  if (planDraft === null) return;
+  const text = $('planEditorText');
+  if (text.value !== planDraft) text.value = planDraft;
+  $('planEditorState').textContent = planDraftDirty
+    ? 'есть несохранённые изменения — они не пропадут при ошибке'
+    : `изменений нет · revision ${planStatus?.revision ?? '—'}`;
+}
+
+async function openPlanEditor() {
+  const id = selectedTaskId;
+  if (!id) return;
+  try {
+    const file = await api(`/api/tasks/${encodeURIComponent(id)}/plan/content`);
+    planDraftTaskId = id;
+    planDraftBase = { expectedRevision: file.revision, expectedHash: file.hash };
+    planDraft = file.content;
+    planDraftDirty = false;
+    planStatus = { ...planStatus, revision: file.revision, hash: file.hash };
+    $('planEditorError').textContent = '';
+    $('planEditorCurrentWrap').classList.add('hidden');
+    renderPlanEditor();
+  } catch (error) {
+    planNotice = planErrorText(error);
+    renderPlanCard();
+  }
+}
+
+function closePlanEditor() {
+  if (planDraftDirty && !confirm('Отменить несохранённые изменения?')) return;
+  planDraftBase = null;
+  planDraft = null;
+  planDraftDirty = false;
+  $('planEditorError').textContent = '';
+  renderPlanCard();
+}
+
+async function savePlanEditor() {
+  const id = selectedTaskId;
+  if (!id || planDraft === null) return;
+  if (id !== planDraftTaskId) {
+    $('planEditorError').textContent = 'Черновик принадлежит другой сессии. Вернитесь в неё перед сохранением.';
+    return;
+  }
+  const button = $('planEditorSave');
+  button.disabled = true;
+  try {
+    const status = await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/content`, {
+      content: $('planEditorText').value,
+      ...planDraftBase
+    });
+    planStatus = status;
+    $('planEditorError').textContent = '';
+    planDraftDirty = false;
+    closePlanEditor();
+  } catch (error) {
+    // The draft stays in the textarea: a failed save must not eat the operator's text.
+    $('planEditorError').textContent = planErrorText(error);
+    if (error.code === 'PLAN_REVISION_CONFLICT') {
+      try {
+        const current = await api(`/api/tasks/${encodeURIComponent(id)}/plan/content`);
+        $('planEditorCurrent').textContent = current.content;
+        $('planEditorCurrentWrap').classList.remove('hidden');
+      } catch { /* сравнение — подсказка, не условие сохранения */ }
+    }
+  } finally {
+    button.disabled = false;
+    renderPlanEditor();
+  }
+}
+
+$('planEditorCancel').onclick = closePlanEditor;
+$('planEditorSave').onclick = savePlanEditor;
+$('planEditorText').addEventListener('input', () => {
+  planDraft = $('planEditorText').value;
+  planDraftDirty = true;
+  renderPlanEditor();
+});
+
 async function runPlanAction(action, button = null) {
   const id = selectedTaskId;
   if (!id) return;
   if (action === 'pick') { $('planFileInput').click(); return; }
   if (action === 'refresh') { await loadPlanStatus(); return; }
-  if (action === 'open' || action === 'edit') {
+  if (action === 'edit') { await openPlanEditor(); return; }
+  if (action === 'open') {
     if (!planStatus?.path) return;
     const url = `/api/tasks/${encodeURIComponent(id)}/workspace-file?path=${encodeURIComponent(planStatus.path)}`;
     openFileViewer({ url, name: planStatus.path, downloadUrl: `${url}&download=1` });
@@ -4399,14 +4499,43 @@ $('planDialogClose').onclick = closePlanDialog;
 $('planDialogDone').onclick = closePlanDialog;
 $('planDetach').onclick = detachPlan;
 $('planPickFile').onclick = () => $('planFileInput').click();
+$('planAttachPath').onclick = async () => {
+  const path = $('planProjectPath').value.trim();
+  const problem = planPathProblem(path);
+  if (problem) { $('planPickError').textContent = problem; return; }
+  await inspectAndMaybeImport({ path });
+};
 $('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
 // A lazy folder browser of the project: one directory per request, folders first,
 // only Markdown selectable. This is how a phone picks a file on the computer.
 let planBrowsePath = null;
 
+// What the running server can actually do (FP-UX-02G): a route this build does not
+// serve is «сервер старше приложения», not «файл не найден».
+let serverPlanCapabilities = null;
+
+async function loadPlanCapabilities() {
+  if (serverPlanCapabilities) return serverPlanCapabilities;
+  try {
+    const info = await api('/api/info');
+    serverPlanCapabilities = Array.isArray(info?.followPlan?.capabilities) ? info.followPlan.capabilities : [];
+  } catch (error) {
+    throw Object.assign(new Error(planErrorText({ code: 'PLAN_CONNECTION_LOST' })), { code: 'PLAN_CONNECTION_LOST', cause: error });
+  }
+  return serverPlanCapabilities;
+}
+
 async function openPlanBrowser(relPath = '') {
   const id = selectedTaskId;
   if (!id) return;
+  const capabilities = await loadPlanCapabilities();
+  if (!capabilities.includes('browse')) {
+    $('planBrowser').classList.remove('hidden');
+    $('planBrowserPath').textContent = '';
+    $('planBrowserList').textContent =
+      'Сервер этой сборки не умеет показывать файлы проекта (нет /plan/browse). Обновите сервер TaskBridge и перезапустите его.';
+    return;
+  }
   const panel = $('planBrowser');
   panel.classList.remove('hidden');
   $('planBrowserList').textContent = 'Загрузка…';
