@@ -4257,11 +4257,15 @@ const renderPlanCard = () => {
 function schedulePlanStatusRefresh() {
   if (planStatusTimer) { clearTimeout(planStatusTimer); planStatusTimer = null; }
   const stale = !planStatus || planStatus.enabled === false;
-  if (!stale || !selectedTaskId) return;
+  const open = !$('planDialog')?.classList.contains('hidden');
+  if (!selectedTaskId || (!stale && !open)) return;
+  // While the panel is open it must show server-side changes that emit no event:
+  // a file edited outside TaskBridge turns into a conflict only on re-read, and
+  // an open dialog that never re-reads hides that (UX-CONFLICT in FP-UX-02).
   planStatusTimer = setTimeout(() => {
     planStatusTimer = null;
     loadPlanStatus();
-  }, 10000);
+  }, open ? 3000 : 10000);
 }
 
 async function loadPlanStatus() {

@@ -297,3 +297,10 @@ test('all specified control-panel states have exactly one primary action', () =>
     if (name === 'RUNNING') assert.equal(actions.find(action => action.id === 'stop').disabled, false);
   }
 });
+
+test('an open dialog re-reads status so an external edit cannot hide a conflict', async () => {
+  const source = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'app.js'), 'utf8');
+  const schedule = source.slice(source.indexOf('function schedulePlanStatusRefresh()'), source.indexOf('async function loadPlanStatus()'));
+  assert.match(schedule, /const open = !\$\('planDialog'\)/);
+  assert.match(schedule, /open \? 3000 : 10000/, 'the open panel polls; a closed one only follows stale/disabled status');
+});

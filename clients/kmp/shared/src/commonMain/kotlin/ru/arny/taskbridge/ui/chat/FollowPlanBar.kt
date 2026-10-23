@@ -144,6 +144,14 @@ fun FollowPlanIcon(
         }
     }
 
+    // While the panel is open, re-read it: an external file edit or another
+    // client's action emits no chat event, and an open dialog must still show it.
+    LaunchedEffect(state.askPlan) {
+        while (state.askPlan) {
+            delay(3_000)
+            state.status = runCatching { api.plan(state.taskId) }.getOrNull() ?: state.status
+        }
+    }
     // The project listing loads when the dialog opens — one directory, by request.
     LaunchedEffect(state.askPlan) {
         if (!state.askPlan) return@LaunchedEffect
