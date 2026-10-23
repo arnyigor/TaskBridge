@@ -2037,12 +2037,18 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|inspect|import|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|inspect|import|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
       if (!manager.getTask(planTaskId)) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
       if (!action && req.method === 'GET') return json(res, 200, await followPlan.status(planTaskId));
+      if (action === 'browse' && req.method === 'GET') {
+        // A read-only listing: one directory per request, no recursive scan, no
+        // commandId. It has to be answered before the POST-only guard below —
+        // otherwise the phone sees «Not found» (real report, 2026-10-23).
+        return json(res, 200, await followPlan.browse({ taskId: planTaskId, path: url.searchParams.get('path') || '' }));
+      }
       const body = await readJson(req).catch(() => ({}));
       const command = (fn) => manager.withCommandId(body.commandId, body.clientId, [action || 'patch', planTaskId, body], () => fn());
       if (!action && req.method === 'PATCH') {

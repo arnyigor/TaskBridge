@@ -160,8 +160,10 @@ test('the dialog picks a file from the system picker or by an explicit project p
   assert.equal(/id="planFiles"/.test(html), false, 'nothing is scanned when the dialog opens');
   assert.match(html, /id="planPickFile"[^>]*>Выбрать файл .md/);
   assert.match(html, /id="planFileInput"[^>]*accept="\.md,\.markdown/);
-  assert.match(html, /id="planPathToggle"/, 'and an explicit path for a file already in the project');
-  assert.match(html, /id="planPathInput"/);
+  // The project browser is the primary way to choose a file that lives on the
+  // computer: a phone cannot reach it otherwise.
+  assert.match(html, /id="planBrowser"/);
+  assert.equal(/planPathInput/.test(html), false, 'the manual path field was unclear and is gone');
   assert.match(html, /Подключение не запускает выполнение/);
   assert.match(html, /id="planStatusBlock"/, 'status lives in the dialog');
   assert.match(html, /id="planDetach"/, 'a selected plan can be detached from the dialog');

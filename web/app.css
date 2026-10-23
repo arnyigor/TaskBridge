@@ -2150,3 +2150,11 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
   .planDialogActions { flex-direction: column-reverse; }
   .planDialogActions button { width: 100%; }
 }
+
+/* Ленивый браузер проекта: один каталог за раз — так телефон выбирает файл,
+   который лежит на компьютере, не сканируя весь проект. */
+.planBrowser { border: 1px solid var(--line, #2a3348); border-radius: 8px; padding: 0.375rem; max-height: 40vh; overflow: auto; }
+.planBrowserPath { margin-bottom: 0.25rem; }
+.planBrowserList { display: flex; flex-direction: column; gap: 0.125rem; }
+.planBrowserRow { text-align: left; border: 1px solid transparent; background: transparent; color: inherit; border-radius: 6px; padding: 0.25rem 0.375rem; font-size: 0.8125rem; }
+.planBrowserRow:hover, .planBrowserRow:focus-visible { border-color: var(--accent, #4f8cff); }

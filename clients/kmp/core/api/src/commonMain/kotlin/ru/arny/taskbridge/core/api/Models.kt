@@ -1516,6 +1516,17 @@ data class PlanInspection(
     val preview: PlanPreview? = null,
 )
 
+/** Один элемент ленивого браузера проекта (GET /plan/browse). */
+@Serializable
+data class PlanBrowseEntry(val name: String, val path: String, val isFile: Boolean = false)
+
+@Serializable
+data class PlanBrowseListing(
+    val path: String = "",
+    val parent: String? = null,
+    val entries: List<PlanBrowseEntry> = emptyList(),
+)
+
 @Serializable
 data class PlanImportResult(
     val status: PlanStatus? = null,

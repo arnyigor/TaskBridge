@@ -142,7 +142,11 @@ expect fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit)
 
 /** Returns a function that opens the system file picker; picked files arrive read into memory. */
 @Composable
-expect fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit
+/**
+ * Системный выбор файлов. [startDir] — каталог, с которого начинать (десктоп:
+ * папка проекта вместо Downloads); Android открывает свой SAF, параметр не нужен.
+ */
+expect fun rememberFilePicker(startDir: String? = null, onPicked: (List<UploadFile>) -> Unit): () -> Unit
 
 /** Returns a function that reads the pictures (or copied files) in the clipboard; empty when it holds none. */
 @Composable

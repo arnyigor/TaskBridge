@@ -383,3 +383,27 @@ test('the picked file name cannot escape the workspace and must be Markdown', as
     taskId: 't-1', name: 'BROKEN.md', contentBase64: Buffer.from([0xff, 0xfe, 0x00]).toString('base64'), commandId: 'import-8'
   }), error => error.code === 'PLAN_INVALID');
 });
+
+// --- UI-02: ленивый браузер проекта (телефон выбирает файл на компьютере) ---
+
+test('browse lists one project directory at a time, folders and Markdown only', async t => {
+  const { service, workspace } = await setup(t);
+  await fs.mkdir(path.join(workspace, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(workspace, 'docs', 'PLAN.md'), PLAN, 'utf8');
+  await fs.writeFile(path.join(workspace, 'docs', 'notes.txt'), 'x', 'utf8');
+  await fs.mkdir(path.join(workspace, 'node_modules'), { recursive: true });
+  await fs.writeFile(path.join(workspace, 'node_modules', 'PLAN.md'), PLAN, 'utf8');
+
+  const root = await service.browse({ taskId: 't-1', path: '' });
+  assert.equal(root.path, '');
+  // The fixture's own plan file sits in the root and is a legal choice.
+  assert.deepEqual(root.entries.map(entry => `${entry.isFile ? 'f' : 'd'}:${entry.name}`), ['d:docs', 'f:docs-PLAN.md']);
+  assert.equal(root.entries.some(entry => entry.name === 'node_modules'), false, 'эти папки не листаются');
+
+  const docs = await service.browse({ taskId: 't-1', path: 'docs' });
+  assert.equal(docs.parent, '');
+  assert.deepEqual(docs.entries.map(entry => entry.name), ['PLAN.md'], 'в папке показываются только .md');
+
+  await assert.rejects(service.browse({ taskId: 't-1', path: '../' }), error => error.code === 'PLAN_INVALID');
+  await assert.rejects(service.browse({ taskId: 't-1', path: 'missing' }), error => error.code === 'PLAN_NOT_ATTACHED');
+});

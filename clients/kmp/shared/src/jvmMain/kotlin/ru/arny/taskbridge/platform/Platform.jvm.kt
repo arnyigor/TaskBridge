@@ -381,10 +381,12 @@ actual fun PlatformBackHandler(enabled: Boolean, onBack: () -> Unit) = Unit
 actual fun SystemBarsAppearance(dark: Boolean) = Unit
 
 @Composable
-actual fun rememberFilePicker(onPicked: (List<UploadFile>) -> Unit): () -> Unit = remember(onPicked) {
+actual fun rememberFilePicker(startDir: String?, onPicked: (List<UploadFile>) -> Unit): () -> Unit = remember(onPicked, startDir) {
     {
         val dialog = FileDialog(null as Frame?, "Выберите файлы", FileDialog.LOAD).apply {
             isMultipleMode = true
+            // The operator expects the project folder, not last month's Downloads.
+            if (!startDir.isNullOrBlank() && File(startDir).isDirectory) directory = startDir
             isVisible = true
         }
         val files = dialog.files.orEmpty().filter(File::isFile).map { file ->

@@ -30,6 +30,8 @@ const CONTROL_CLIENT = 'follow-plan';
 const notFound = () => Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
 
 const MAX_PLAN_BYTES = 1024 * 1024;
+// A plan is never inside these: listing them would be the project scan again.
+const BROWSE_SKIP = new Set(['node_modules', 'build', 'dist', 'out', 'target', '.git', 'vendor']);
 
 /** base64 → utf8 text, with a size guard and an honest error for a broken file. */
 function decodePlanContent(contentBase64) {
@@ -349,6 +351,47 @@ export class FollowPlanService {
       await this.#publish(task.id, 'PLAN_REVISED', `Импортировано шагов: ${imported.steps}`, { path: target, ...imported, commandId, clientId });
     }
     return { status: { ...attached, imported }, needsConfirmation: false };
+  }
+
+  /**
+   * Один каталог проекта по запросу: папки и .md-файлы. Именно по запросу —
+   * рекурсивного обхода нет, поэтому телефон может выбрать файл на компьютере,
+   * не сканируя весь проект.
+   */
+  async browse({ taskId, path: relPath = '' }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    if (!task.workspacePath) throw reject('SESSION_UNAVAILABLE', 'Рабочий каталог сессии ещё не создан.');
+    const root = await fs.realpath(task.workspacePath);
+    const raw = String(relPath || '').replace(/\\/g, '/');
+    // `..` is refused outright instead of being silently folded into the root:
+    // the answer must say the path is wrong, not pretend it was fine.
+    if (raw.split('/').includes('..')) throw reject('PLAN_INVALID', 'Путь не может выходить за пределы проекта.', [relPath]);
+    const rel = raw.replace(/^\.?\/*/, '').replace(/\/+$/, '');
+    const dir = await safeTarget(task.workspacePath, rel || '.');
+    const real = await fs.realpath(dir).catch(() => null);
+    if (!real) throw reject('PLAN_NOT_ATTACHED', `Каталог не найден: ${rel || '.'}`);
+    if (path.relative(root, real).startsWith('..')) {
+      throw reject('PLAN_INVALID', 'Каталог указывает за пределы проекта (symlink).', [rel]);
+    }
+    const entries = await fs.readdir(real, { withFileTypes: true }).catch(() => []);
+    const dirs = [];
+    const files = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      if (BROWSE_SKIP.has(entry.name)) continue;
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory() && !entry.isSymbolicLink()) dirs.push({ name: entry.name, path: childRel, isFile: false });
+      // Only Markdown can be a plan; showing everything would be the scan the
+      // operator asked to remove.
+      else if (entry.isFile() && /\.md$/i.test(entry.name)) files.push({ name: entry.name, path: childRel, isFile: true });
+    }
+    const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    return {
+      path: rel,
+      parent: rel ? (rel.includes('/') ? rel.slice(0, rel.lastIndexOf('/')) : '') : null,
+      entries: [...dirs.sort(byName), ...files.sort(byName)]
+    };
   }
 
   /** Безопасное имя файла плана: только .md/.markdown, без пути и мусора. */

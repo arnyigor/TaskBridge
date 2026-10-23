@@ -60,6 +60,12 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var overwrite by mutableStateOf(false)
     var stepsOpen by mutableStateOf(false)
     var findingsOpen by mutableStateOf(false)
+    // Ленивый браузер проекта: телефон выбирает файл, который лежит на компьютере.
+    var browseOpen by mutableStateOf(false)
+    var browsePath by mutableStateOf("")
+    var browseEntries by mutableStateOf<List<ru.arny.taskbridge.core.api.PlanBrowseEntry>>(emptyList())
+    var browseParent by mutableStateOf<String?>(null)
+    var browseError by mutableStateOf<String?>(null)
 
     val enabled: Boolean get() = planToggleEnabled(status)
     val hint: String? get() = planToggleHint(status)
@@ -102,6 +108,7 @@ fun FollowPlanIcon(
     projectPath: String? = null,
     onOpenPlan: (String) -> Unit = {},
     onNotice: (String) -> Unit = {},
+    platformKind: String = "desktop",
 ) {
     val colors = MaterialTheme.colorScheme
     val iconTint = when (planIconState(state.status)) {
@@ -112,7 +119,7 @@ fun FollowPlanIcon(
     }
     // Системный выбор файла: на Android — Documents Picker (SAF), на десктопе —
     // стандартный диалог. Список .md в проекте больше не сканируется.
-    val pickFile = rememberFilePicker { picked ->
+    val pickFile = rememberFilePicker(startDir = projectPath) { picked ->
         val file: UploadFile? = picked.firstOrNull { it.name.endsWith(".md", true) || it.name.endsWith(".markdown", true) }
         if (file == null) {
             state.notice = "План — это файл .md или .markdown."
@@ -123,6 +130,13 @@ fun FollowPlanIcon(
         }
     }
 
+    // The project listing loads when the dialog opens — one directory, by request.
+    LaunchedEffect(state.askPlan) {
+        if (state.askPlan && !state.attached) {
+            state.browseOpen = true
+            browse(state, api, "")
+        }
+    }
     IconButton(
         onClick = {
             state.notice = ""
@@ -207,8 +221,49 @@ fun FollowPlanIcon(
                         Text(projectPath, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     state.hint?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
-                    TextButton(onClick = { pickFile() }) { Text("Выбрать файл .md", style = MaterialTheme.typography.bodyMedium) }
-                    TextButton(onClick = { state.pathRow = !state.pathRow }) { Text("Указать путь в проекте") }
+
+                    // The project on the computer is the primary source: a phone cannot
+                    // reach those files any other way (that was the report: "невозможно
+                    // выбрать файл, который на компе").
+                    Text("План в проекте", style = MaterialTheme.typography.labelMedium)
+                    if (state.browseError != null) {
+                        Text(state.browseError.orEmpty(), style = MaterialTheme.typography.labelSmall, color = colors.error)
+                    } else {
+                        Text(
+                            if (state.browsePath.isBlank()) "корень проекта" else "/${state.browsePath}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = colors.onSurfaceVariant,
+                        )
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
+                            state.browseParent?.let { parent ->
+                                item(key = "up") {
+                                    TextButton(onClick = { scope.launch { browse(state, api, parent) } }) { Text("↑ наверх") }
+                                }
+                            }
+                            items(state.browseEntries, key = { it.path }) { entry ->
+                                TextButton(onClick = {
+                                    if (entry.isFile) {
+                                        scope.launch { inspectThenImport(state, api, newId, path = entry.path) }
+                                    } else {
+                                        scope.launch { browse(state, api, entry.path) }
+                                    }
+                                }, modifier = Modifier.fillMaxWidth()) {
+                                    Text(
+                                        (if (entry.isFile) "📄 " else "📁 ") + entry.name,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    TextButton(onClick = { pickFile() }) {
+                        Text(
+                            if (platformKind == "android") "Файл на телефоне" else "Файл на компьютере",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
                     if (state.pathRow) {
                         // A visible field, not a bare text area: on a phone an empty
                         // BasicTextField looks like nothing happened.
@@ -280,6 +335,19 @@ fun FollowPlanIcon(
 
 @OptIn(ExperimentalEncodingApi::class)
 private fun encodeBase64(bytes: ByteArray): String = Base64.encode(bytes)
+
+/** Один каталог проекта за запрос: так телефон видит файлы компьютера. */
+private suspend fun browse(state: FollowPlanUiState, api: TaskBridgeApi, path: String) {
+    state.browseError = null
+    try {
+        val listing = api.browsePlan(state.taskId, path)
+        state.browsePath = listing.path
+        state.browseParent = listing.parent
+        state.browseEntries = listing.entries
+    } catch (error: ApiException) {
+        state.browseError = planErrorText(error)
+    }
+}
 
 private suspend fun inspectThenImport(
     state: FollowPlanUiState,

@@ -4277,12 +4277,13 @@ function openPlanDialog() {
   planPendingImport = null;
   planOverwrite = false;
   $('planPreviewConfirm').textContent = 'Импортировать и подключить';
-  $('planPathRow').classList.add('hidden');
+  $('planBrowser').classList.add('hidden');
   $('planPickError').textContent = '';
   $('planPreviewError').textContent = '';
   $('planFileInput').value = '';
   $('planDialog').classList.remove('hidden');
   renderPlanCard();
+  if (!planStatus?.attached) openPlanBrowser('');
   const primary = planPrimaryAction(planStatus);
   const target = planStatus?.attached ? $(`#planActions button[data-action="${primary.id}"]`) : $('planPickFile');
   target?.focus?.();
@@ -4399,17 +4400,60 @@ $('planDialogDone').onclick = closePlanDialog;
 $('planDetach').onclick = detachPlan;
 $('planPickFile').onclick = () => $('planFileInput').click();
 $('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
-$('planPathToggle').onclick = () => {
-  $('planPathRow').classList.toggle('hidden');
-  if (!$('planPathRow').classList.contains('hidden')) $('planPathInput').focus();
-};
-$('planPathAttach').onclick = async () => {
-  const value = $('planPathInput').value.trim();
-  const problem = planPathProblem(value);
-  $('planPickError').textContent = problem || '';
-  if (problem) return;
-  await inspectAndMaybeImport({ path: value });
-};
+// A lazy folder browser of the project: one directory per request, folders first,
+// only Markdown selectable. This is how a phone picks a file on the computer.
+let planBrowsePath = null;
+
+async function openPlanBrowser(relPath = '') {
+  const id = selectedTaskId;
+  if (!id) return;
+  const panel = $('planBrowser');
+  panel.classList.remove('hidden');
+  $('planBrowserList').textContent = 'Загрузка…';
+  planBrowsePath = relPath;
+  try {
+    const listing = await api(`/api/tasks/${encodeURIComponent(id)}/plan/browse?path=${encodeURIComponent(relPath)}`);
+    renderPlanBrowser(listing);
+  } catch (error) {
+    $('planBrowserList').textContent = planErrorText(error);
+  }
+}
+
+function renderPlanBrowser(listing) {
+  $('planBrowserPath').textContent = listing.path ? `/${listing.path}` : 'корень проекта';
+  const list = $('planBrowserList');
+  list.textContent = '';
+  if (listing.parent !== null && listing.parent !== undefined) {
+    const up = document.createElement('button');
+    up.type = 'button';
+    up.className = 'planBrowserRow';
+    up.textContent = '↑ наверх';
+    up.onclick = () => openPlanBrowser(listing.parent);
+    list.append(up);
+  }
+  if (!listing.entries.length) {
+    const empty = document.createElement('div');
+    empty.className = 'small muted';
+    empty.textContent = 'Здесь нет папок и .md-файлов.';
+    list.append(empty);
+  }
+  for (const entry of listing.entries) {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'planBrowserRow';
+    row.textContent = entry.isFile ? `📄 ${entry.name}` : `📁 ${entry.name}`;
+    row.onclick = () => {
+      if (entry.isFile) {
+        inspectAndMaybeImport({ path: entry.path });
+        $('planBrowser').classList.add('hidden');
+      } else {
+        openPlanBrowser(entry.path);
+      }
+    };
+    list.append(row);
+  }
+}
+
 $('planPreviewCancel').onclick = () => {
   planInspection = null;
   planPendingImport = null;

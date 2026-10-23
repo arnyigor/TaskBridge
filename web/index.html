@@ -418,10 +418,12 @@
               Подключение не запускает выполнение.</p>
             <button id="planPickFile" type="button" class="primary planPick">Выбрать файл .md</button>
             <input id="planFileInput" type="file" accept=".md,.markdown,text/markdown" class="hidden" />
-            <button id="planPathToggle" type="button" class="link planPathToggle">Указать путь в проекте</button>
-            <div id="planPathRow" class="planPathRow hidden">
-              <input id="planPathInput" type="text" placeholder="docs/PLAN.md" aria-label="Путь к файлу плана в проекте" />
-              <button id="planPathAttach" type="button">Подключить</button>
+            <!-- С телефона файл на компьютере иначе не выбрать: ленивый браузер
+                 папки проекта по запросу (один каталог за раз, без сканирования).
+                 Это основной путь: план почти всегда уже лежит в проекте. -->
+            <div id="planBrowser" class="planBrowser hidden">
+              <div id="planBrowserPath" class="planBrowserPath small muted"></div>
+              <div id="planBrowserList" class="planBrowserList"></div>
             </div>
             <div id="planPickError" class="planPathError small" role="alert"></div>
           </div>

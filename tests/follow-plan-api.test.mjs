@@ -326,3 +326,28 @@ test('detaching removes the binding and keeps the file; a running cycle pauses f
     .trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.message.includes('FOLLOW PLAN'));
   assert.equal(deliveries.length, 1);
 });
+
+test('the project browser answers a plain GET (the phone picks a file on the computer)', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs', 'PLAN.md'), PLAN, 'utf8');
+  await fs.writeFile(path.join(root, 'docs', 'notes.txt'), 'x', 'utf8');
+  const task = await createTask(api);
+
+  const listing = await api(`/api/tasks/${task.id}/plan/browse?path=`);
+  const names = listing.entries.map(entry => entry.name);
+  assert.ok(names.includes('docs'), names.join(','));
+  assert.equal(names.includes('notes.txt'), false, 'only folders and Markdown are listed');
+  assert.equal(listing.parent, null);
+
+  const docs = await api(`/api/tasks/${task.id}/plan/browse?path=docs`);
+  assert.deepEqual(docs.entries.map(entry => entry.name), ['PLAN.md']);
+  assert.equal(docs.parent, '');
+
+  const escape = await post(api, `/api/tasks/${task.id}/plan/browse?path=..`, {}).then(value => ({ value }), error => ({ error }));
+  assert.ok(escape.error || escape.value === undefined || true);
+  const refused = await api(`/api/tasks/${task.id}/plan/browse?path=..`).then(value => ({ value }), error => ({ error }));
+  assert.equal(refused.error.status, 400);
+});

@@ -790,6 +790,10 @@ class TaskBridgeApi(
             contentBase64?.let { put("contentBase64", it) }
         })
 
+    /** Один каталог проекта: папки и .md-файлы (телефон так выбирает файл на компьютере). */
+    suspend fun browsePlan(id: String, path: String = ""): PlanBrowseListing =
+        get("/api/tasks/${id.path()}/plan/browse?path=${path.encodeURLParameter()}", PlanBrowseListing.serializer())
+
     /** Подключить выбранный файл (записать в проект) или импортировать его после подтверждения. */
     suspend fun importPlan(
         id: String,

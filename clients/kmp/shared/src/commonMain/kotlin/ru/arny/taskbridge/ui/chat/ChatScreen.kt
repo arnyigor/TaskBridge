@@ -540,6 +540,7 @@ fun ChatScreen(
                             newId = graph::newId,
                             scope = scope,
                             projectPath = task?.workspacePath,
+                            platformKind = platform.kind,
                             onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
                             onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
                         )
