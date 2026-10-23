@@ -30,6 +30,19 @@ internal fun FollowPlanEditor(
 ) {
     val base = state.editorBase ?: return
     val dirty = state.editorText != base.content
+    if (state.editorDiscard) {
+        AlertDialog(
+            onDismissRequest = { state.editorDiscard = false },
+            title = { Text("Отменить несохранённые изменения?") },
+            confirmButton = {
+                TextButton(onClick = { state.editorDiscard = false; state.editorBase = null }) { Text("Отменить изменения") }
+            },
+            dismissButton = {
+                TextButton(onClick = { state.editorDiscard = false }) { Text("Вернуться к правке") }
+            },
+        )
+        return
+    }
     fun close() {
         if (state.editorSaving) return
         if (dirty) state.editorDiscard = true else state.editorBase = null
@@ -91,16 +104,4 @@ internal fun FollowPlanEditor(
             TextButton(enabled = !state.editorSaving, onClick = { close() }) { Text("Отмена") }
         },
     )
-    if (state.editorDiscard) {
-        AlertDialog(
-            onDismissRequest = { state.editorDiscard = false },
-            title = { Text("Отменить несохранённые изменения?") },
-            confirmButton = {
-                TextButton(onClick = { state.editorDiscard = false; state.editorBase = null }) { Text("Отменить изменения") }
-            },
-            dismissButton = {
-                TextButton(onClick = { state.editorDiscard = false }) { Text("Вернуться к правке") }
-            },
-        )
-    }
 }
