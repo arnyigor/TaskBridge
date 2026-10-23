@@ -89,6 +89,16 @@ fun FollowPlanBar(
         if (status?.attached == true) mode = true
     }
 
+    // The flag can be enabled on the server while the screen stays open (a restart
+    // with followPlan.enabled=true). While it reads as off, re-check every 10 s so
+    // the chip stops being grey by itself instead of waiting for another session.
+    LaunchedEffect(taskId, status?.enabled) {
+        while (status?.enabled == false) {
+            kotlinx.coroutines.delay(10_000)
+            status = runCatching { api.plan(taskId) }.getOrNull() ?: status
+        }
+    }
+
     fun command(run: suspend () -> PlanStatus) {
         scope.launch {
             try {

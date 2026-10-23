@@ -4184,6 +4184,22 @@ function renderPlanCard() {
   }
 }
 
+// The flag can be switched on the server while this page stays open (a restart
+// with followPlan.enabled=true). Without a re-read the chip stayed grey until the
+// operator picked another session — that is exactly what happened on the desktop
+// during the pilot (2026-10-23).
+let planStatusTimer = null;
+
+function schedulePlanStatusRefresh() {
+  if (planStatusTimer) { clearTimeout(planStatusTimer); planStatusTimer = null; }
+  const stale = !planStatus || planStatus.enabled === false;
+  if (!stale || !selectedTaskId) return;
+  planStatusTimer = setTimeout(() => {
+    planStatusTimer = null;
+    loadPlanStatus();
+  }, 10000);
+}
+
 async function loadPlanStatus() {
   const id = selectedTaskId;
   if (!id) return null;
@@ -4191,6 +4207,7 @@ async function loadPlanStatus() {
     const status = await api(`/api/tasks/${encodeURIComponent(id)}/plan`);
     if (id !== selectedTaskId) return null;
     planStatus = status;
+    schedulePlanStatusRefresh();
     // The switch follows the server: an attached plan is the mode, a session
     // without one is not (and its card stays out of the chat).
     if (status.attached) planMode = true;
@@ -4198,6 +4215,7 @@ async function loadPlanStatus() {
     return status;
   } catch (error) {
     planStatus = { attached: false, enabled: true, fileError: { message: error.message } };
+    schedulePlanStatusRefresh();
     renderPlanCard();
     return null;
   }
@@ -4312,6 +4330,11 @@ $('planToggle').onclick = async () => {
   }
   await loadPlanStatus();
 };
+
+window.addEventListener('focus', () => { if (selectedTaskId) loadPlanStatus(); });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && selectedTaskId) loadPlanStatus();
+});
 
 $('planDialogClose').onclick = () => $('planDialog').classList.add('hidden');
 $('planAttach').onclick = async () => {
