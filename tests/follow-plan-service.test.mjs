@@ -120,7 +120,7 @@ test('a settled turn with a valid checkpoint records the step and continues', as
   assert.equal(committed.stepId, 'S-002');
   const written = await readPlanFile(workspace, planPath);
   assert.equal(written.steps[0].status, 'DONE');
-  assert.equal(written.steps[0].result, 'шаг выполнен');
+  assert.equal(written.steps[0].result, '[MODEL_REPORTED] шаг выполнен');
   assert.equal(written.revision, 2);
   assert.equal(manager.dispatched.length, 2);
   assert.match(manager.dispatched[1].text, /revision 2/);
@@ -462,3 +462,114 @@ test('UX-01: a file with every step DONE reads as completed, not as ready to sta
   const other = await service.attach({ taskId: 't-1', path: planPath, commandId: 'ux01-attach-2' });
   assert.equal(other.state, 'COMPLETED');
 });
+
+test('UX-12: a written-out command is reported evidence, a finished tool call is verified', async t => {
+  const { service, store, workspace, planPath } = await setup(t);
+  store.recordRun({ id: 'run-live', taskId: 't-1', sessionId: 't-1', kind: 'prompt', status: 'RUNNING', startedAt: new Date().toISOString() });
+  service.manager.getTask = id => (String(id) === 't-1' ? { id: 't-1', workspacePath: workspace, runId: 'run-live' } : null);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'f-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'f-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+
+  const prepared = await service.turnSettled({
+    taskId: 't-1', commandId,
+    checkpoint: {
+      planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE',
+      completedStepIds: ['S-001'],
+      evidence: [
+        // A sentence the model wrote: nothing in TaskBridge saw this command run.
+        { stepId: 'S-001', kind: 'command', ref: 'cat docs-PLAN.md', summary: 'вывод: ok' }
+      ]
+    },
+    toolCalls: [{ id: 'call-1', name: 'bash', isError: false }]
+  });
+  assert.equal(prepared.code, 'DISPATCH_READY');
+  const written = await readPlanFile(workspace, planPath);
+  assert.match(written.steps[0].result, /^\[MODEL_REPORTED\]/, 'a written command is not a verification');
+
+  // A tool call of this turn that finished without an error IS a system fact.
+  await service.turnCommitted({ taskId: 't-1' });
+  const next = store.getPlanBinding('t-1').dispatchCommandId;
+  const second = await service.turnSettled({
+    taskId: 't-1', commandId: next,
+    checkpoint: {
+      planId: 'p-api', revision: 2, cycleId: 'c-2', decision: 'COMPLETE',
+      completedStepIds: ['S-002'],
+      evidence: [{ stepId: 'S-002', kind: 'command', ref: 'call-2', summary: 'тест прошёл' }]
+    },
+    toolCalls: [{ id: 'call-2', name: 'bash', isError: false }]
+  });
+  assert.equal(second.code, 'PLAN_COMPLETED', 'both steps are done, so COMPLETE closes the plan');
+  const after = await readPlanFile(workspace, planPath);
+  assert.match(after.steps[1].result, /^\[SYSTEM_VERIFIED\]/);
+  const status = await service.status('t-1');
+  assert.equal(status.steps[1].verification, 'SYSTEM_VERIFIED');
+  assert.equal(status.steps[0].verification, 'MODEL_REPORTED');
+});
+
+// --- FP-UX-02C: правка содержимого того же файла -------------------------
+
+test('a valid edit is saved on the same file, the service owns the revision', async t => {
+  const { service, store, workspace, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'c-attach' });
+  const before = await service.status('t-1');
+  const edited = PLAN.replace('Первый', 'Первый (уточнено)').replace('revision: 1', 'revision: 99');
+
+  const after = await service.writeContent({
+    taskId: 't-1', content: edited, expectedRevision: before.revision, expectedHash: before.hash, commandId: 'c-edit'
+  });
+  assert.equal(after.revision, 2, 'the client revision line is ignored, the service bumps its own');
+  assert.match(await fs.readFile(path.join(workspace, planPath), 'utf8'), /уточнено/);
+  assert.deepEqual((await readPlanFile(workspace, planPath)).steps.map(step => step.id), ['S-001', 'S-002'], 'step ids stay');
+  const events = service.manager.events.map(event => event.type);
+  assert.ok(events.includes('PLAN_REVISED'));
+});
+
+test('an edit cannot silently drop a finished step, its evidence, the planId or the goal', async t => {
+  const { service, workspace, planPath } = await setup(t);
+  const done = PLAN
+    .replace('### S-001 | TODO', '### S-001 | DONE')
+    .replace('**Проверка:** run\n', '**Проверка:** run\n**Результат:** [SYSTEM_VERIFIED] тест прошёл\n');
+  await fs.writeFile(path.join(workspace, planPath), done, 'utf8');
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'c2-attach' });
+  const status = await service.status('t-1');
+  const edit = text => service.writeContent({ taskId: 't-1', content: text, expectedRevision: status.revision, expectedHash: status.hash, commandId: `c2-${Math.random()}` });
+
+  await assert.rejects(edit(done.replace('plan_id: p-api', 'plan_id: p-other')), error => error.code === 'PLAN_INVALID' && /planId/.test(error.message));
+  await assert.rejects(edit(done.replace('goal: "FP-05: подключение"', 'goal: "другая цель"')), error => error.code === 'PLAN_INVALID' && /цель/.test(error.message));
+  await assert.rejects(edit(done.replace('**Результат:** [SYSTEM_VERIFIED] тест прошёл\n', '')), error => error.code === 'PLAN_INVALID' && /подтверждени|без результата/.test(error.message));
+  await assert.rejects(edit(done.replace(/### S-002[\s\S]*?(?=## Обнаруженные)/, '')), error => error.code === 'PLAN_INVALID' && /удал/.test(error.message));
+  assert.equal((await readPlanFile(workspace, planPath)).steps.length, 2, 'the file is untouched by refused edits');
+});
+
+test('a stale revision on edit is a conflict and the file keeps the operator version', async t => {
+  const { service, workspace, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'c3-attach' });
+  const status = await service.status('t-1');
+  await fs.writeFile(path.join(workspace, planPath), PLAN.replace('Первый', 'Первый (руками)'), 'utf8');
+  await assert.rejects(service.writeContent({
+    taskId: 't-1', content: PLAN.replace('Первый', 'Первый (из приложения)'),
+    expectedRevision: status.revision, expectedHash: status.hash, commandId: 'c3-edit'
+  }), error => error.code === 'PLAN_REVISION_CONFLICT');
+  assert.match(await fs.readFile(path.join(workspace, planPath), 'utf8'), /руками/);
+});
+
+
+for (const [label, evidence, calls] of [
+  ['manual model claim', { kind: 'manual', ref: 'operator', level: 'MANUAL_ACCEPTED' }, []],
+  ['missing reference', { kind: 'command', level: 'SYSTEM_VERIFIED' }, []],
+  ['failed tool', { kind: 'command', ref: 'call-x' }, [{ id: 'call-x', name: 'bash', isError: true }]],
+  ['nonzero exit', { kind: 'command', ref: 'call-x' }, [{ id: 'call-x', name: 'bash', isError: false, exitCode: 1 }]],
+  ['unfinished tool', { kind: 'command', ref: 'call-x' }, [{ id: 'call-x', name: 'bash', isError: null }]],
+]) {
+  test(`evidence level cannot be forged: ${label}`, async t => {
+    const { service, store, workspace, planPath } = await setup(t);
+    await service.attach({ taskId: 't-1', path: planPath, commandId: 'a' });
+    await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 's' });
+    await service.turnSettled({ taskId: 't-1', commandId: store.getPlanBinding('t-1').dispatchCommandId,
+      checkpoint: { planId: 'p-api', revision: 1, cycleId: 'c', decision: 'CONTINUE', completedStepIds: ['S-001'],
+        evidence: [{ ...evidence, stepId: 'S-001', summary: 'claim' }] }, toolCalls: calls });
+    const file = await readPlanFile(workspace, planPath);
+    assert.doesNotMatch(file.steps[0].result || '', /SYSTEM_VERIFIED|MANUAL_ACCEPTED/);
+  });
+}

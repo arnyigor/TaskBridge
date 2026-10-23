@@ -138,7 +138,8 @@ test('a step settles, the file records it and the next step is dispatched', asyn
   assert.equal(settled.stepId, 'S-002');
   const written = parsePlan(plans.state.text);
   assert.equal(written.steps[0].status, 'DONE');
-  assert.equal(written.steps[0].result, 'тест падает как ожидалось');
+  // The file records how the result was established (FP-UX-02F).
+  assert.equal(written.steps[0].result, '[MODEL_REPORTED] тест падает как ожидалось');
   assert.equal(written.revision, 3);
   assert.equal(dispatched.length, 2);
   assert.match(dispatched[1].message, /S-002/);

@@ -1639,6 +1639,15 @@ async function handleRequest(req, res) {
         },
         apiVersion: API_VERSION,
         storeId: store.storeId,
+        // Which parts of the plan API this build actually serves. A client that
+        // knows its own list can say «сервер старше приложения», instead of
+        // showing a bare 404 from a route this server does not have (FP-UX-02G).
+        followPlan: {
+          enabled: followPlan.enabled,
+          capabilities: followPlan.enabled
+            ? ['status', 'attach', 'detach', 'browse', 'inspect', 'import', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile']
+            : []
+        },
         pi,
         addresses: !lanOpen ? [] : [
           ...lanAddresses(publicPort),
@@ -2039,12 +2048,15 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|inspect|import|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|inspect|import|content|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
       if (!manager.getTask(planTaskId)) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
       if (!action && req.method === 'GET') return json(res, 200, await followPlan.status(planTaskId));
+      if (action === 'content' && req.method === 'GET') {
+        return json(res, 200, await followPlan.content({ taskId: planTaskId }));
+      }
       if (action === 'browse' && req.method === 'GET') {
         // A read-only listing: one directory per request, no recursive scan, no
         // commandId. It has to be answered before the POST-only guard below —
@@ -2071,6 +2083,13 @@ async function handleRequest(req, res) {
         return json(res, 200, await followPlan.inspect({
           taskId: planTaskId, path: body.path ?? null, name: body.name ?? null, contentBase64: body.contentBase64 ?? null
         }));
+      }
+      if (action === 'content') {
+        return json(res, 200, await command(() => followPlan.writeContent({
+          taskId: planTaskId, content: body.content, expectedRevision: body.expectedRevision ?? null,
+          expectedHash: body.expectedHash || null, allowGoalChange: body.allowGoalChange === true,
+          commandId: body.commandId, clientId: body.clientId
+        })));
       }
       if (action === 'import') {
         return json(res, 200, await command(() => followPlan.importPlan({

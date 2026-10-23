@@ -31,6 +31,20 @@ export const DEFAULT_LIMITS = Object.freeze({
 
 const PRIORITY_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
 
+/**
+ * `[SYSTEM_VERIFIED] …` / `[MODEL_REPORTED] …` — the weakest level among the
+ * confirmed items, so the file itself records how the result was established.
+ */
+export function resultForStep(items = []) {
+  if (!items.length) return '[MODEL_REPORTED] подтверждено checkpoint';
+  const rank = { SYSTEM_VERIFIED: 0, MANUAL_ACCEPTED: 1, MODEL_REPORTED: 2 };
+  const level = items
+    .map(item => String(item.level || 'MODEL_REPORTED'))
+    .sort((a, b) => (rank[b] ?? 9) - (rank[a] ?? 9))[0];
+  const text = items.map(item => item.summary).filter(Boolean).join('; ');
+  return `[${level}] ${text || 'подтверждено checkpoint'}`;
+}
+
 /** The next step is the highest priority among open ones; the file order breaks ties. */
 export function nextOpenStep(plan) {
   const open = plan.steps
@@ -324,7 +338,9 @@ export class PlanFollower {
         op: 'set_step_status',
         stepId,
         status: 'DONE',
-        result: (verdict.inspection.evidenceFor(stepId) || []).map(item => item.summary).join('; ') || 'подтверждено checkpoint'
+        // The level travels into the file, so history says how the step was proven
+        // and a model sentence is never presented as an independent check.
+        result: resultForStep(verdict.inspection.evidenceFor(stepId)),
       })),
       // A step that exists because of a finding is the verification of that
       // finding: leaving it OPEN would block the plan's COMPLETE for ever.

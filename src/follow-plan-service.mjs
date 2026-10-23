@@ -192,10 +192,17 @@ export class FollowPlanService {
       };
       // The dialog shows the current step and, on demand, the whole list: the
       // confirmed result travels with it (trimmed — the full log is in the chat).
-      status.steps = steps.map(step => ({
-        id: step.id, status: step.status, priority: step.priority, title: step.title,
-        result: (step.result || '').slice(0, 240)
-      }));
+      status.steps = steps.map(step => {
+        // «Результат» carries the evidence level as a prefix: expose it apart from
+        // the text, so the dialog can say «подтверждено системой» vs «заявлено моделью».
+        const raw = String(step.result || '');
+        const match = /^\[(SYSTEM_VERIFIED|MANUAL_ACCEPTED|MODEL_REPORTED|UNVERIFIED)\]\s*(.*)$/s.exec(raw);
+        return {
+          id: step.id, status: step.status, priority: step.priority, title: step.title,
+          verification: match ? match[1] : (raw ? 'MODEL_REPORTED' : null),
+          result: (match ? match[2] : raw).slice(0, 240)
+        };
+      });
       status.findings = file.plan.findings.map(finding => ({ id: finding.id, priority: finding.priority, state: finding.state, summary: finding.summary }));
       status.conflict = file.hash !== binding.hash || file.plan.revision !== binding.revision;
       // The file has a state of its own, and it decides what the operator sees:
@@ -254,6 +261,75 @@ export class FollowPlanService {
     await this.#publish(task.id, 'PLAN_ATTACHED', `План подключён: ${relPath}`, {
       path: relPath, planId: attached.plan.planId, revision: attached.plan.revision,
       steps: attached.plan.steps.length, commandId, clientId
+    });
+    return this.status(task.id);
+  }
+
+  /** Содержимое привязанного файла для редактора: чтение, ничего не пишет. */
+  async content({ taskId }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    const binding = this.store.getPlanBinding(task.id);
+    if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    const file = await this.#plans(task).read(binding.path);
+    return { path: binding.path, revision: file.plan.revision, hash: file.hash, content: file.text };
+  }
+
+  /**
+   * Правка содержимого того же файла (FP-UX-02C). Ревизию двигает сервис, а не
+   * клиент: присланная строка `revision:` игнорируется, CAS идёт по
+   * expectedRevision/expectedHash. Завершённые шаги, их подтверждения и цель
+   * защищены — их нельзя потерять незаметной правкой.
+   */
+  async writeContent({ taskId, content, expectedRevision = null, expectedHash = null, allowGoalChange = false, commandId, clientId }) {
+    this.#assertEnabled();
+    if (!Number.isInteger(expectedRevision) || !expectedHash) {
+      throw reject('PLAN_REVISION_CONFLICT', 'Для сохранения нужны ревизия и хэш исходного черновика. Откройте файл заново.');
+    }
+    const task = this.#task(taskId);
+    const binding = this.store.getPlanBinding(task.id);
+    if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    if (['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) throw reject('PLAN_BLOCKED', 'Сначала приостановите выполнение плана.');
+    const file = await this.#plans(task).read(binding.path);
+    if (expectedHash && expectedHash !== file.hash) {
+      throw reject('PLAN_REVISION_CONFLICT', 'Файл плана изменён вне TaskBridge: сверьте версии.', [`expected ${expectedHash}`, `actual ${file.hash}`]);
+    }
+    if (expectedRevision != null && Number(expectedRevision) !== file.plan.revision) {
+      throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`);
+    }
+
+    let next;
+    try {
+      next = parsePlan(String(content ?? ''));
+    } catch (error) {
+      throw reject('PLAN_INVALID', `Правка не сохранена: ${error.message}`, error.problems || []);
+    }
+    const problems = [];
+    if (next.planId !== file.plan.planId) problems.push(`planId менять нельзя (${file.plan.planId} → ${next.planId})`);
+    if (!allowGoalChange && next.goal !== file.plan.goal) {
+      problems.push('цель плана меняется только отдельным подтверждением (allowGoalChange)');
+    }
+    for (const was of file.plan.steps) {
+      const now = next.steps.find(step => step.id === was.id);
+      if (!now) { problems.push(`шаг ${was.id} удалён: завершённые шаги не удаляются`); continue; }
+      if (was.status === 'DONE' && !String(now.result || '').trim()) {
+        problems.push(`шаг ${was.id}: подтверждение выполненного шага нельзя стереть`);
+      }
+      if (was.originFindingId && now.originFindingId !== was.originFindingId) {
+        problems.push(`шаг ${was.id}: происхождение (${was.originFindingId}) менять нельзя`);
+      }
+    }
+    if (problems.length) throw reject('PLAN_INVALID', `Правка не сохранена: ${problems[0]}`, problems);
+
+    // The service owns the revision counter; the content carries the rest.
+    next.revision = file.plan.revision + 1;
+    const text = serializePlan(next);
+    const absolute = await safeTarget(task.workspacePath, binding.path, { write: true });
+    await writePlanAtomic({ file: absolute, text });
+    const hash = planHash(text);
+    this.store.savePlanBinding({ ...binding, revision: next.revision, hash, updatedAt: new Date(this.now()).toISOString() });
+    await this.#publish(task.id, 'PLAN_REVISED', `План отредактирован: revision ${next.revision}`, {
+      revision: next.revision, hash, commandId, clientId
     });
     return this.status(task.id);
   }
@@ -556,7 +632,7 @@ export class FollowPlanService {
    * no longer matches), so an SSE reconnect or a duplicated frame cannot start
    * another cycle.
    */
-  async turnSettled({ taskId, commandId = null, checkpoint = null, aborted = false, seq = null }) {
+  async turnSettled({ taskId, commandId = null, checkpoint = null, aborted = false, seq = null, toolCalls = [] }) {
     const task = this.manager.getTask(String(taskId));
     if (!task) return { code: 'IGNORED', reason: 'task gone' };
     const binding = this.store.getPlanBinding(task.id);
@@ -572,7 +648,7 @@ export class FollowPlanService {
     if (commandId && this.settledTurns.get(task.id) === commandId) {
       return { code: 'IGNORED', reason: 'this turn already settled' };
     }
-    const checked = this.#checkEvidence({ taskId: task.id, checkpoint });
+    const checked = this.#checkEvidence({ taskId: task.id, checkpoint, toolCalls });
     if (checkpoint) {
       this.checkpoints.set(task.id, {
         at: new Date(this.now()).toISOString(), decision: checkpoint.decision || null,
@@ -664,8 +740,23 @@ export class FollowPlanService {
    * ref is stripped, so the checkpoint is refused for lack of proof instead of
    * being believed.
    */
-  #checkEvidence({ taskId, checkpoint }) {
+  #checkEvidence({ taskId, checkpoint, toolCalls = [] }) {
     if (!checkpoint || !Array.isArray(checkpoint.evidence)) return { checkpoint, problems: [] };
+    // What counts as proof (FP-UX-02F):
+    //   SYSTEM_VERIFIED  — a tool call of this very turn finished without an error,
+    //                      or a run of this session produced the result;
+    //   MANUAL_ACCEPTED  — the operator said so;
+    //   MODEL_REPORTED   — everything else, including a written-out command string.
+    const finished = new Map(toolCalls.map(call => [String(call.id), call]));
+    const levelOf = (item, runRef) => {
+      if (runRef) return 'SYSTEM_VERIFIED';
+      const call = finished.get(String(item?.ref || ''));
+      if (call) return call.name !== 'taskbridge_plan_checkpoint' && call.isError === false
+        && (call.exitCode == null || call.exitCode === 0) ? 'SYSTEM_VERIFIED' : 'MODEL_REPORTED';
+      // A model-supplied manual claim is not an operator acceptance.
+      if (String(item?.kind) === 'manual') return 'MODEL_REPORTED';
+      return 'MODEL_REPORTED';
+    };
     const problems = [];
     // The turn being settled is the only one that could have produced this
     // evidence: a run from an earlier turn of the same session proves nothing
@@ -673,20 +764,22 @@ export class FollowPlanService {
     const currentRun = this.store.getRun(String(this.manager.getTask(taskId)?.runId || ''));
     const evidence = checkpoint.evidence.map(item => {
       const ref = String(item?.ref || '').trim();
-      if (!ref) return item;
+      if (!ref) return { ...item, level: 'MODEL_REPORTED' };
       if (String(item?.kind) === 'run' || UUID.test(ref)) {
         const run = this.store.getRun(ref);
-        if (!run) { problems.push(`шаг ${item?.stepId}: run ${ref} не найден`); return { ...item, ref: '' }; }
+        if (!run) { problems.push(`шаг ${item?.stepId}: run ${ref} не найден`); return { ...item, ref: '', level: levelOf(item, false) }; }
         if (String(run.taskId) !== String(taskId)) {
           problems.push(`шаг ${item?.stepId}: run ${ref} принадлежит другой сессии`);
-          return { ...item, ref: '' };
+          return { ...item, ref: '', level: levelOf(item, false) };
         }
         if (currentRun && ref !== currentRun.id && String(run.startedAt || '') < String(currentRun.startedAt || '')) {
           problems.push(`шаг ${item?.stepId}: run ${ref} старше текущего хода — он не подтверждает этот шаг`);
-          return { ...item, ref: '' };
+          return { ...item, ref: '', level: levelOf(item, false) };
         }
+        // Run identity confirms provenance, not the model's result summary.
+        return { ...item, level: 'MODEL_REPORTED' };
       }
-      return item;
+      return { ...item, level: levelOf(item, false) };
     });
     return { checkpoint: { ...checkpoint, evidence }, problems };
   }

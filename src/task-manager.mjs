@@ -4272,6 +4272,17 @@ export class TaskManager extends EventEmitter {
     // Follow Plan reads its checkpoint from the ordinary tool frame: the arguments
     // are already validated by Pi against the tool's schema, so no second channel
     // and no parsing of the assistant's prose is involved.
+    // Evidence levels need to know whether a tool call of THIS turn finished well
+    // (FP-UX-02F): a tool result is a system fact, a sentence in the checkpoint is not.
+    if (frame.type === 'tool_execution_start') {
+      task._turnToolCalls = task._turnToolCalls || new Map();
+      task._turnToolCalls.set(String(frame.toolCallId || ''), { name: String(frame.toolName || 'tool'), isError: null });
+    }
+    if (frame.type === 'tool_execution_end' && task._turnToolCalls?.has(String(frame.toolCallId || ''))) {
+      const call = task._turnToolCalls.get(String(frame.toolCallId || ''));
+      call.isError = frame.isError === false ? false : true;
+      call.exitCode = frame.result?.details?.exitCode ?? frame.result?.exitCode ?? null;
+    }
     if (frame.type === 'tool_execution_start' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL) {
       task._planCheckpoint = frame.args && typeof frame.args === 'object' ? frame.args : null;
     }
@@ -4551,6 +4562,8 @@ export class TaskManager extends EventEmitter {
     // Инструменты, выполненные в этом ходу: решение о безопасном автоповторе
     // после 413 принимается только по счётчику текущего хода (MEDIA-09D).
     task._turnTools = 0;
+    // Follow Plan: tool calls of THIS turn, for the evidence level (FP-UX-02F).
+    task._turnToolCalls = new Map();
     // Шаг C-A: фаза хода начинается с диспетчеризации. Поле сбрасывается, а не
     // ставится в DISPATCHING: публикацию делает #turnStateEvent в точке отправки
     // (иначе дедупликация съела бы первое событие хода).
@@ -5769,10 +5782,14 @@ export class TaskManager extends EventEmitter {
     const checkpoint = task._planCheckpoint || null;
     task._planCheckpoint = null;
     if (!hooks) return;
+    // The table of this turn's tool calls travels with the settle: the controller
+    // uses it to tell a verified result from a reported one.
+    const toolCalls = [...(task._turnToolCalls || new Map())].map(([id, value]) => ({ id, name: value.name, isError: value.isError, exitCode: value.exitCode }));
     Promise.resolve(hooks.turnSettled({
       taskId: task.id,
       commandId: runtime?.commandId || null,
       checkpoint,
+      toolCalls,
       aborted: runtime?.cancelRequested === true,
       seq: task._turn ?? null
     })).catch(error => {
