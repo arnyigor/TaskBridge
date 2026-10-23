@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
-  planActions, planCardModel, planEventNotice, planFileChoices, planFileGroups, planHeadline, planPathProblem,
+  planActions, planCardModel, planEventNotice, planFileChoices, planFileGroups, planHeadline, planPathProblem, planToggleState,
   planRequestBody, planFindingsLine, toggleOffAction
 } from '../web/follow-plan-view.mjs';
 
@@ -16,6 +16,15 @@ const running = {
   revision: 7, progress: { done: 3, total: 7 }, goal: 'Стабилизировать историю',
   findings: [{ id: 'F-002', priority: 'P1', state: 'OPEN', summary: 'дубли при reconnect' }]
 };
+
+test('a mode switched off on the server stays visible and says so', () => {
+  // Hiding the chip made the pilot phone look like the feature never shipped.
+  assert.deepEqual(planToggleState({ enabled: false }), {
+    visible: true, enabled: false, hint: 'режим выключен в конфигурации сервера'
+  });
+  assert.deepEqual(planToggleState({ enabled: true }), { visible: true, enabled: true, hint: null });
+  assert.deepEqual(planToggleState(null), { visible: true, enabled: false, hint: null });
+});
 
 test('the switch is called «По плану», not «Plan Mode»', () => {
   assert.equal(PLAN_MODE_LABEL, 'По плану');

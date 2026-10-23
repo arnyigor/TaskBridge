@@ -2062,6 +2062,8 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
   color: var(--accent, #4f8cff);
   background: color-mix(in srgb, var(--accent, #4f8cff) 12%, transparent);
 }
+.planToggle:disabled { opacity: 0.5; cursor: default; }
+.planToggleHint { font-size: 0.625rem; color: var(--muted, #94a3b8); align-self: center; }
 .planCard {
   margin: 0.375rem 0;
   padding: 0.5rem 0.625rem;

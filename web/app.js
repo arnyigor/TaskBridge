@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planCardModel, planEventNotice, planFileGroups, planPathProblem, planRequestBody, toggleOffAction } from './follow-plan-view.mjs';
+import { planCardModel, planEventNotice, planFileGroups, planPathProblem, planRequestBody, planToggleState, toggleOffAction } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4133,15 +4133,25 @@ $('form').addEventListener('submit', async (e) => {
 function updatePlanToggle() {
   const button = $('planToggle');
   if (!button) return;
-  // With the mode disabled on the server the control is hidden, not shown as a
-  // button that always fails: an unavailable feature must not look available.
-  const enabled = planStatus ? planStatus.enabled !== false : true;
-  button.classList.toggle('hidden', !enabled);
-  const active = Boolean(planStatus?.attached) && planMode;
+  const state = planToggleState(planStatus);
+  // Disabled on the server: the chip stays visible but not pressable, and says
+  // why. Hiding it made the feature look not shipped at all (real complaint from
+  // the pilot phone, 2026-10-23).
+  button.classList.toggle('hidden', !state.visible);
+  button.disabled = !state.enabled;
+  button.classList.toggle('planToggleOff', !state.enabled);
+  const active = Boolean(planStatus?.attached) && planMode && state.enabled;
   button.setAttribute('aria-pressed', String(active));
-  button.title = planStatus?.attached
-    ? `По плану: ${planStatus.path}`
-    : 'По плану: выберите файл плана в проекте';
+  button.title = !state.enabled
+    ? 'По плану: режим выключен в конфигурации сервера (followPlan.enabled)'
+    : planStatus?.attached
+      ? `По плану: ${planStatus.path}`
+      : 'По плану: выберите файл плана в проекте';
+  const hint = $('planToggleHint');
+  if (hint) {
+    hint.textContent = state.hint || '';
+    hint.classList.toggle('hidden', !state.hint);
+  }
 }
 
 function renderPlanCard() {
@@ -4286,6 +4296,7 @@ async function openPlanDialog() {
 
 $('planToggle').onclick = async () => {
   if (!selectedTaskId) return;
+  if (planStatus?.enabled === false) return;
   if (!planStatus?.attached) {
     await openPlanDialog();
     return;

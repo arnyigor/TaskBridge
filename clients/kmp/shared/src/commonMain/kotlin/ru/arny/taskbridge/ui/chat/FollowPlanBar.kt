@@ -70,7 +70,7 @@ fun FollowPlanBar(
     var filesLoading by remember(taskId) { mutableStateOf(false) }
     var filesProblem by remember(taskId) { mutableStateOf<String?>(null) }
     val model = planCardModel(status)
-    val enabled = status?.enabled != false
+    val enabled = planToggleEnabled(status)
 
     LaunchedEffect(askPath) {
         if (!askPath) return@LaunchedEffect
@@ -106,13 +106,10 @@ fun FollowPlanBar(
         }
     }
 
-    // A disabled feature must not look available: with followPlan.enabled=false the
-    // whole block is absent, not a button that always answers with an error.
-    if (status != null && !enabled) return
-
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 2.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             AssistChip(
+                enabled = enabled,                // off on the server: visible, but not pressable
                 onClick = {
                     if (status?.attached != true) {
                         pathProblem = null
@@ -134,6 +131,10 @@ fun FollowPlanBar(
                     AssistChipDefaults.assistChipColors()
                 },
             )
+            // A mode switched off on the server says why instead of disappearing.
+            planToggleHint(status)?.let { hint ->
+                Text(hint, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             if (model.visible) {
                 Text(
                     text = model.headline,

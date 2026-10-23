@@ -110,6 +110,16 @@ class FollowPlanTest {
     }
 
     @Test
+    fun `a mode switched off on the server says so instead of disappearing`() {
+        assertTrue(!planToggleEnabled(PlanStatus(enabled = false)))
+        assertEquals("режим выключен на сервере", planToggleHint(PlanStatus(enabled = false)))
+        assertTrue(planToggleEnabled(PlanStatus(enabled = true)))
+        assertNull(planToggleHint(PlanStatus(enabled = true)))
+        assertTrue(!planToggleEnabled(null), "unknown state is not a licence to start a plan")
+        assertNull(planToggleHint(null))
+    }
+
+    @Test
     fun `the picker groups plans by project folder, root first`() {
         val entries = listOf(
             WorkspaceFileEntry(name = "PLAN.md", path = "PLAN.md", isFile = true),

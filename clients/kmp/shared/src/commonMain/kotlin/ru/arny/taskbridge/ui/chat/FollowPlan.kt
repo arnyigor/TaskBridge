@@ -119,6 +119,15 @@ fun planFileChoices(entries: List<WorkspaceFileEntry>?, limit: Int = 200): List<
         .take(limit)
 
 /**
+ * Переключатель показывает и выключенный на сервере режим: спрятанная функция
+ * выглядит как «её не сделали» — с этого началась приёмка на телефоне 2026-10-23.
+ */
+fun planToggleEnabled(status: PlanStatus?): Boolean = status?.enabled == true
+
+fun planToggleHint(status: PlanStatus?): String? =
+    if (status != null && !planToggleEnabled(status)) "режим выключен на сервере" else null
+
+/**
  * Планы проекта по папкам: на телефоне список путей без папок не отвечает на
  * вопрос «какой файл выбрать». Корень проекта идёт первым, дальше — по алфавиту.
  */

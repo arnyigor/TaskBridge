@@ -140,6 +140,20 @@ export function planFileChoices(listing, { limit = 200 } = {}) {
 }
 
 /**
+ * Состояние переключателя. Выключенный на сервере режим не исчезает молча: тогда
+ * человек видит «функции нет» и не понимает, что её надо включить в конфигурации.
+ */
+export function planToggleState(status) {
+  if (!status) return { visible: true, enabled: false, hint: null };
+  const enabled = status.enabled !== false;
+  return {
+    visible: true,
+    enabled,
+    hint: enabled ? null : 'режим выключен в конфигурации сервера'
+  };
+}
+
+/**
  * Планы проекта по папкам: на телефоне список путей без папок не отвечает на
  * вопрос «какой файл выбрать». Корень проекта идёт первым, дальше — по алфавиту.
  */
