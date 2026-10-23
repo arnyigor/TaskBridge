@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
@@ -52,7 +53,10 @@ internal fun FollowPlanEditor(
         title = { Text("Изменить план · revision ${base.revision}") },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
+                // With the soft keyboard open the dialog must still fit: the content
+                // shrinks above the IME instead of pushing the buttons off-screen
+                // (reproduced on Pixel 5 API 31, 2026-10-23).
+                modifier = Modifier.imePadding().verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(base.path, style = MaterialTheme.typography.labelSmall)
@@ -62,7 +66,7 @@ internal fun FollowPlanEditor(
                     onValueChange = { state.editorText = it },
                     enabled = !state.editorSaving,
                     label = { Text("Markdown плана на сервере") },
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp, max = 340.dp),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 220.dp),
                 )
                 if (state.editorError.isNotBlank()) {
                     Text(state.editorError, color = MaterialTheme.colorScheme.error)
