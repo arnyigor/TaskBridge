@@ -37,9 +37,14 @@ data class ApiInfo(
     val scheduler: SchedulerInfo? = null,
     val engine: LocalEngineInfo? = null,
     val local: LocalRuntimeInfo? = null,
+    /** Что этот сервер умеет в плановом API: старый сервер без `browse` честно называет себя старым. */
+    val followPlan: FollowPlanInfo? = null,
     /** RAM/CPU/GPU машины — то, по чему видно, что модель читается в память. */
     val system: SystemMetrics? = null,
 )
+
+@Serializable
+data class FollowPlanInfo(val enabled: Boolean = false, val capabilities: List<String> = emptyList())
 
 @Serializable
 data class LocalEngineInfo(
@@ -1512,6 +1517,15 @@ data class PlanFinding(
     val summary: String? = null,
 )
 
+/** Состояние файла плана, отдельно от состояния привязки и текущего цикла. */
+@Serializable
+data class PlanFileInfo(
+    val open: Int = 0,
+    val blocking: Int = 0,
+    val revision: Int? = null,
+    val complete: Boolean = false,
+)
+
 @Serializable
 data class PlanProgress(
     val done: Int = 0,
@@ -1558,6 +1572,8 @@ data class PlanStatus(
     val title: String? = null,
     val goal: String? = null,
     val progress: PlanProgress? = null,
+    /** Состояние самого файла: открытые шаги и блокирующие находки. */
+    val file: PlanFileInfo? = null,
     val steps: List<PlanStep> = emptyList(),
     val findings: List<PlanFinding> = emptyList(),
     val fileError: PlanFileError? = null,

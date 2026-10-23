@@ -90,7 +90,7 @@ class FollowPlanTest {
         val model = planCardModel(running)
         assertTrue(model.visible)
         assertEquals("Стабилизировать историю", model.goal)
-        assertEquals(6, model.actions.size)
+        assertEquals(7, model.actions.size)
     }
 
     @Test

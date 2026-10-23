@@ -75,18 +75,21 @@ fun planActions(status: PlanStatus?, enabled: Boolean = true): List<PlanAction> 
         PlanAction(
             id = "start",
             label = if (state == "COMPLETED") "Завершён" else if (attached) "Продолжить" else "Старт",
-            enabled = enabled && attached && !active && state != "COMPLETED" && status?.conflict != true && status?.fileError == null,
+            // A finished file has nothing to start: 2/2 DONE must not offer it.
+            enabled = enabled && status?.enabled != false && attached && !active && state == "IDLE" && status?.file?.open != 0
+                && status?.conflict != true && status?.fileError == null,
             hint = when {
                 !attached -> "Сначала подключите файл плана"
                 active -> "Шаг уже выполняется"
                 else -> "Отправить следующий шаг"
             },
         ),
+        PlanAction("resume", "Продолжить", enabled && status?.enabled != false && attached && state == "PAUSED" && !blocked, "Продолжить после паузы"),
         PlanAction("pause", "Пауза после шага", enabled && active, if (active) "Текущий шаг доиграет, следующий не будет отправлен" else "Пауза возможна только во время шага"),
         PlanAction("stop", "STOP сейчас", enabled && (active || state == "PAUSED_REVIEW"), "Остановить ход и оставить план на разбор"),
         PlanAction("open", "Открыть план", attached, status?.path ?: "Файл плана не подключён"),
-        PlanAction("reconcile", "Принять файл", enabled && attached && blocked, "Принять версию файла с диска и снять конфликт"),
-        PlanAction("edit", "Изменить план", enabled && attached, "Править файл плана в проекте"),
+        PlanAction("reconcile", "Принять файл", enabled && attached && !active && blocked, "Принять версию файла с диска и снять конфликт"),
+        PlanAction("edit", "Изменить план", enabled && attached && !active, "Править файл плана в проекте"),
     )
 }
 
