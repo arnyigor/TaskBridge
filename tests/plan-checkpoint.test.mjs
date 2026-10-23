@@ -169,9 +169,11 @@ test('CONTINUE and REPLAN map to the next cycle instead of finishing', () => {
   assert.deepEqual(last.openSteps, ['S-002']);
   assert.equal(last.plan.steps[1].status, 'DONE', 'the claim is applied for the follower to see');
 
+  // REPLAN without operations is «unresolved», not a verdict: the follower decides
+  // whether the plan needs a change at all (FP-PILOT-02B).
   const replan = decideCheckpoint({ plan: plan(), checkpoint: checkpoint({ decision: 'REPLAN', completedStepIds: [], evidence: [] }), cycle });
-  assert.equal(replan.state, 'PAUSED_REVIEW');
-  assert.match(replan.reasons.join('\n'), /REPLAN без предложенных изменений/);
+  assert.equal(replan.state, 'REPLAN_UNRESOLVED');
+  assert.deepEqual(replan.openSteps, ['S-002']);
 
   const replanWithProposal = decideCheckpoint({
     plan: plan(),

@@ -45,14 +45,20 @@ export function resultForStep(items = []) {
   return `[${level}] ${text || 'подтверждено checkpoint'}`;
 }
 
-/** The next step is the highest priority among open ones; the file order breaks ties. */
+/**
+ * The next step is the FIRST open step in file order (FP-PILOT-02A).
+ *
+ * Priority is not an ordering key: a P1 item no longer jumps ahead of earlier
+ * mandatory P2 items, which is what made the pilot run the final regression
+ * before its prerequisites. A blocking P1 that the controller inserts gets its
+ * turn because the insertion places it BEFORE the step it blocks — the file
+ * order then says everything. BLOCKED is returned, never skipped: a blocked step
+ * is not bypassed just because something further down looks easier.
+ */
 export function nextOpenStep(plan) {
   const open = plan.steps
-    .map((step, index) => ({ step, index }))
-    .filter(({ step }) => step.status === 'TODO' || step.status === 'IN_PROGRESS' || step.status === 'BLOCKED');
-  if (!open.length) return null;
-  open.sort((a, b) => (PRIORITY_ORDER[a.step.priority] ?? 9) - (PRIORITY_ORDER[b.step.priority] ?? 9) || a.index - b.index);
-  return open[0].step;
+    .filter(step => step.status === 'TODO' || step.status === 'IN_PROGRESS' || step.status === 'BLOCKED');
+  return open[0] || null;
 }
 
 /**
@@ -70,6 +76,7 @@ export function stepInstruction({ path, planId, revision, cycleId, stepId }) {
     `Прежде чем действовать, перечитай файл плана и сверь его с результатами прошлого хода.`,
     `Текущий шаг: ${stepId}. Не отмечай его выполненным без критериев проверки.`,
     'Если найден относящийся к делу дефект, которого нет в плане, зарегистрируй finding с доказательством и предложи минимальный шаг с приоритетом P0/P1/P2.',
+    'Незавершённый шаг, уже присутствующий в плане, не является новой находкой: выполни его, а не создавай новый. Если ошибка отдельная — укажи в finding.relatedStepIds, какие шаги она затрагивает и почему они её не покрывают.',
     'Не создавай второй план, не меняй цель и не расширяй объём работ.',
     'В конце хода вызови taskbridge_plan_checkpoint с решением CONTINUE, REPLAN, COMPLETE, BLOCKED или NEED_INPUT.'
   ].join(' ');
@@ -174,7 +181,7 @@ export class PlanFollower {
    * only when the previous turn's terminal event is committed — a finalization
    * failure must not leave a step already on its way (FP-UX-02E).
    */
-  #prepareDispatch({ taskId, plan, hash, step, audit = false, budget }) {
+  #prepareDispatch({ taskId, plan, hash, step, audit = false, budget, normalization = null }) {
     const binding = this.#requireBinding(taskId);
     const epoch = this.store.planCancelEpoch(taskId);
     const cycleId = audit ? (binding.cycleId || 'c-1') : `c-${Number(budget?.cycles || 0) + 1}`;
@@ -184,7 +191,9 @@ export class PlanFollower {
       cycles: audit ? Number(budget?.cycles || 0) : Number(budget?.cycles || 0) + 1,
       audits: audit ? Number(budget?.audits || 0) + 1 : 0
     };
-    const message = audit
+    const message = audit && !step.id
+      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId })
+      : audit
       ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id })
       : stepInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id });
     return {
@@ -197,7 +206,9 @@ export class PlanFollower {
       message,
       revision: plan.revision,
       hash,
-      budget: nextBudget
+      budget: nextBudget,
+      // Automatic normalisations are reported, never hidden (FP-PILOT-02B).
+      normalization
     };
   }
 
@@ -242,11 +253,12 @@ export class PlanFollower {
     });
     await this.dispatch({ taskId, commandId: pending.commandId, message: pending.message, stepId: pending.stepId });
     return this.#result(taskId, 'DISPATCHED', pending.audit ? 'Отправлен контрольный ход.' : `Отправлен шаг ${pending.stepId}.`, {
-      commandId: pending.commandId, stepId: pending.stepId, cycleId: pending.cycleId
+      commandId: pending.commandId, stepId: pending.stepId, cycleId: pending.cycleId,
+      ...(pending.normalization ? { normalization: pending.normalization } : {})
     });
   }
 
-  async #dispatchStep({ taskId, plan, hash, step, audit = false, budget }) {
+  async #dispatchStep({ taskId, plan, hash, step, audit = false, budget, normalization: input_normalization = null }) {
     const binding = this.#requireBinding(taskId);
     // The budget is checked at every dispatch, not only when a cycle is opened:
     // long cycles must stop at the limit too.
@@ -283,7 +295,11 @@ export class PlanFollower {
       ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id })
       : stepInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id });
     await this.dispatch({ taskId, commandId, message, stepId: step.id });
-    return this.#result(taskId, 'DISPATCHED', audit ? 'Отправлен контрольный ход.' : `Отправлен шаг ${step.id}.`, { commandId, stepId: step.id, cycleId });
+    return this.#result(taskId, 'DISPATCHED', audit ? 'Отправлен контрольный ход.' : `Отправлен шаг ${step.id}.`, {
+      commandId, stepId: step.id, cycleId,
+      // Automatic normalisations travel with the dispatch, never silently.
+      ...(input_normalization ? { normalization: input_normalization } : {})
+    });
   }
 
   /**
@@ -385,6 +401,33 @@ export class PlanFollower {
       // the cycle continues with the new first step, not with a new plan.
       const step = nextOpenStep(plan);
       if (step) return this.#hop({ taskId, plan, hash, step, budget: { ...budget, noProgress: 0 }, deferDispatch });
+    }
+
+    if (verdict.state === 'REPLAN_UNRESOLVED') {
+      // The model asked for a replan but sent no operations. Priority is not an
+      // ordering key any more, so «REPLAN» with an open step usually means «my
+      // order was wrong» — and the file order is already right. Two cases:
+      //   1. nothing new was found and the plan has the next step → continue;
+      //   2. the controller formed valid edits from the findings → apply them.
+      // A change the model wants but did not express cannot be guessed: with an
+      // open step the file order stands, with none the operator decides.
+      const findings = verdict.inspection.findings.length;
+      const normalized = findings === 0 || revision.ops.length > 0;
+      if (normalized) {
+        const step = nextOpenStep(plan);
+        if (step) {
+          return this.#hop({
+            taskId, plan, hash, step, budget: { ...budget, noProgress: 0 }, deferDispatch,
+            normalization: findings === 0
+              ? 'REPLAN без изменений: план уже содержит нужный шаг — продолжаем по файлу'
+              : 'REPLAN: изменения сформированы контроллером из находок'
+          });
+        }
+      }
+      // Nothing to run and nothing to change: the operator decides. The model
+      // cannot answer "REPLAN" into an empty queue a second time (FP-PILOT-02B).
+      this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
+      return this.#result(taskId, 'PLAN_BLOCKED', 'REPLAN без изменений, а открытых шагов нет — нужен разбор.', { decision: verdict.decision });
     }
 
     if (verdict.state !== 'CONTINUE' && verdict.state !== 'REPLAN') {

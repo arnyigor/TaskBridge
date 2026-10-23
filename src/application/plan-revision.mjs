@@ -91,8 +91,15 @@ export function planRevision({ plan, findings = [], proposals = [], currentStepI
     }
     knownSummaries.push(summary);
 
+    // A defect that names already-planned, still-open steps is the same work:
+    // record it, do not create a second step for it (FP-PILOT-02C).
+    const related = Array.isArray(finding.relatedStepIds) ? finding.relatedStepIds : [];
+    const coveredByPlan = related.length > 0 && related.every(id => {
+      const step = plan.steps.find(item => item.id === id);
+      return step && step.status !== 'DONE' && step.status !== 'SKIPPED';
+    });
     // P0/P1 become work; P2/P3 only become a record of what was noticed.
-    const asStep = BLOCKING.has(priority) && (finding.blocking === true || priority === 'P1');
+    const asStep = !coveredByPlan && BLOCKING.has(priority) && (finding.blocking === true || priority === 'P1');
     if (asStep && stepsAdded < policy.stepsPerCycle) {
       const stepId = takeStepId();
       const findingId = id || takeFindingId();
@@ -116,6 +123,16 @@ export function planRevision({ plan, findings = [], proposals = [], currentStepI
       added.push({ stepId, findingId, priority, summary });
       stepsAdded++;
       if (priority === 'P0') requiresApproval.push({ stepId, findingId, summary });
+      continue;
+    }
+    if (coveredByPlan) {
+      const findingId = id || takeFindingId();
+      if (!plan.findings.some(item => item.id === findingId) && !recordedFindings.some(item => item.findingId === findingId)) {
+        ops.push({ op: 'add_finding', findingId, priority, summary: `${summary} (относится к ${related.join(', ')})` });
+        recordedFindings.push({ findingId, priority, summary, relatedStepIds: related });
+        findingsAdded++;
+      }
+      rejected.push({ id: findingId, reason: `проблема относится к уже запланированным шагам ${related.join(', ')}`, summary });
       continue;
     }
     if (asStep && stepsAdded >= policy.stepsPerCycle) {

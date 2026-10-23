@@ -84,7 +84,10 @@ export function inspectCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_PO
     id: text(finding?.id),
     priority: text(finding?.priority),
     blocking: finding?.blocking === true,
-    summary: text(finding?.summary)
+    summary: text(finding?.summary),
+    // Which existing steps the defect belongs to: a defect covered by a step that
+    // is already in the plan must not create a second, duplicate step.
+    relatedStepIds: Array.isArray(finding?.relatedStepIds) ? finding.relatedStepIds.map(text).filter(Boolean) : []
   }));
   for (const finding of findings) {
     if (!FINDING_ID.test(finding.id)) problems.push(`неверный идентификатор проблемы «${finding.id}»`);
@@ -165,7 +168,9 @@ export function decideCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_POL
       return { ...base, accepted: false, state: open.length ? 'CONTINUE' : 'PAUSED_REVIEW', reasons: open.length ? [] : ['CONTINUE, но открытых шагов нет — решение противоречит файлу'], openSteps: open, plan: after };
     case 'REPLAN': {
       const proposal = Array.isArray(checkpoint.proposedChanges) ? checkpoint.proposedChanges : [];
-      if (!proposal.length) return { ...base, accepted: false, state: 'PAUSED_REVIEW', reasons: ['REPLAN без предложенных изменений'] };
+      // No operations is not automatically a stop: the follower first checks
+      // whether the plan actually needs a change (FP-PILOT-02B).
+      if (!proposal.length) return { ...base, accepted: false, state: 'REPLAN_UNRESOLVED', reasons: [], plan: after, openSteps: open };
       return { ...base, accepted: false, state: 'REPLAN', reasons: [], proposals: proposal, plan: after, openSteps: open };
     }
     case 'BLOCKED':

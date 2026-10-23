@@ -879,7 +879,10 @@ export class FollowPlanService {
     const data = { code: result.code, ...extra };
     switch (result.code) {
       case 'DISPATCHED':
-        await this.#publish(taskId, 'PLAN_STEP_STARTED', result.message, { ...data, stepId: result.stepId, cycleId: result.cycleId, commandId: result.commandId });
+        await this.#publish(taskId, 'PLAN_STEP_STARTED', result.message, {
+          ...data, stepId: result.stepId, cycleId: result.cycleId, commandId: result.commandId,
+          ...(result.normalization ? { normalization: result.normalization } : {})
+        });
         return;
       case 'PLAN_COMPLETED':
         await this.#publish(taskId, 'PLAN_COMPLETED', result.message, data);

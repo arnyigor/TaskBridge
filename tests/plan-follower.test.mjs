@@ -460,3 +460,118 @@ for (const cancellation of ['stop', 'detach']) {
     assert.equal(dispatched.length, 0);
   });
 }
+
+// --- FP-PILOT-02A: порядок шагов важнее приоритета ------------------------
+
+const orderedPlan = steps => [
+  '---',
+  'taskbridge_plan: 1',
+  'plan_id: p-order',
+  'revision: 2',
+  'goal: "FP-PILOT-02: порядок"',
+  '---', '', '# План: порядок', '', '## Шаги', ''
+]
+  .concat(...steps.map(step => [
+    `### ${step.id} | ${step.status || 'TODO'} | ${step.priority} | ${step.title}`,
+    '**Критерии:** сделано.',
+    '**Проверка:** run',
+    ...(step.status === 'DONE' ? ['**Результат:** [SYSTEM_VERIFIED] уже проверено'] : []),
+    ''
+  ]))
+  .concat(['## Обнаруженные проблемы', ''])
+  .join(String.fromCharCode(10));
+
+test('ORDER-01: an earlier mandatory P2 goes before a later P1', async t => {
+  const steps = [
+    { id: 'S-001', priority: 'P1', status: 'DONE', title: 'Первый' },
+    { id: 'S-005', priority: 'P2', title: 'Пустые строки' },
+    { id: 'S-006', priority: 'P2', title: 'Мусор' },
+    { id: 'S-007', priority: 'P1', title: 'Финальная регрессия' }
+  ];
+  const { follower, dispatched } = await setup(t, { initial: orderedPlan(steps) });
+  await follower.start({ taskId: 't-1', commandId: 'order-1' });
+  assert.match(dispatched[0].message, /Tекущий шаг: S-005|Текущий шаг: S-005/);
+  assert.equal(nextOpenStep(parsePlan(orderedPlan(steps))).id, 'S-005');
+});
+
+test('ORDER-02/03: an inserted blocking P1 runs next, then the original order returns', async t => {
+  const steps = [
+    { id: 'S-001', priority: 'P1', status: 'DONE', title: 'Первый' },
+    { id: 'S-002', priority: 'P1', title: 'Второй' },
+    { id: 'S-005', priority: 'P2', title: 'Пустые строки' },
+    { id: 'S-007', priority: 'P1', title: 'Финальная регрессия' }
+  ];
+  const { follower, dispatched, plans } = await setup(t, { initial: orderedPlan(steps) });
+  const started = await follower.start({ taskId: 't-1', commandId: 'order-2' });
+  assert.equal(started.stepId, 'S-002', 'the first open step in file order');
+
+  // A blocking P1 discovered while working on S-002 is inserted BEFORE it.
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({
+      planId: 'p-order',
+      decision: 'CONTINUE', completedStepIds: [],
+      findings: [{ id: 'F-500', priority: 'P1', blocking: true, summary: 'дефект второго шага' }]
+    })
+  });
+  const plan = parsePlan(plans.state.text);
+  const order = plan.steps.map(step => step.id);
+  const inserted = order.find(id => !['S-001', 'S-002', 'S-005', 'S-007'].includes(id));
+  assert.ok(inserted, `an inserted step exists: ${order}`);
+  assert.equal(order.indexOf(inserted), order.indexOf('S-002') - 1, `inserted P1 goes right before the blocked step: ${order}`);
+  assert.equal(nextOpenStep(plan).id, inserted, 'the inserted blocking step runs next');
+  assert.equal(settled.stepId, inserted, 'and it is what the controller dispatched');
+
+  // After the inserted step the plan returns to the original order, not to S-007.
+  const after = parsePlan(plans.state.text);
+  assert.equal(nextOpenStep({ steps: after.steps.filter(step => step.id !== inserted) }).id, 'S-002');
+});
+
+// --- FP-PILOT-02B: REPLAN без операций ------------------------------------
+
+test('REPLAN-01: REPLAN with nothing to change continues with the existing plan', async t => {
+  const { follower, plans } = await setup(t);
+  const started = await follower.start({ taskId: 't-1', commandId: 'replan-1' });
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({ planId: 'p-fp03', decision: 'REPLAN', completedStepIds: [], findings: [] })
+  });
+  assert.equal(settled.code, 'DISPATCHED', 'the file already has the next step');
+  assert.match(settled.normalization || '', /план уже содержит нужный шаг/);
+  assert.equal(parsePlan(plans.state.text).steps.length, 2, 'the plan was not rewritten');
+});
+
+test('REPLAN-02: findings that need no new step still continue, and the file keeps a record', async t => {
+  const { follower, plans } = await setup(t);
+  const started = await follower.start({ taskId: 't-1', commandId: 'replan-2' });
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({
+      planId: 'p-fp03', decision: 'REPLAN', completedStepIds: [],
+      // The defect belongs to a step that is already planned and still open.
+      findings: [{ id: 'F-900', priority: 'P1', blocking: true, summary: 'дефект второго шага', relatedStepIds: ['S-002'] }]
+    })
+  });
+  assert.equal(settled.code, 'DISPATCHED');
+  const plan = parsePlan(plans.state.text);
+  assert.equal(plan.steps.length, 2, 'no duplicate step was added');
+  assert.equal(plan.findings.length, 1, 'the defect is recorded');
+  assert.match(plan.findings[0].summary, /относится к S-002/);
+});
+
+test('REPLAN-05: a refused checkpoint leaves no partial edits in the file', async t => {
+  const { follower, plans } = await setup(t);
+  const started = await follower.start({ taskId: 't-1', commandId: 'replan-5' });
+  const before = plans.state.text;
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({
+      planId: 'p-fp03', decision: 'REPLAN', completedStepIds: ['S-001'],
+      // Evidence without a verifiable reference: the whole checkpoint is refused,
+      // so not even the completed step is written.
+      evidence: [{ stepId: 'S-001', kind: 'manual', summary: 'модель говорит, что сделала' }]
+    })
+  });
+  assert.equal(settled.code, 'PLAN_BLOCKED');
+  assert.equal(plans.state.text, before, 'nothing is written when the checkpoint is refused');
+});
