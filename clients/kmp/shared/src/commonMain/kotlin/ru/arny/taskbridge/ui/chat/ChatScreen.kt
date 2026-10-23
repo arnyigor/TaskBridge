@@ -168,6 +168,8 @@ fun ChatScreen(
 ) {
     val session = remember(taskId) { connection.chat(taskId) }
     val state by session.state.collectAsState()
+    // Follow Plan: одно состояние на иконку композитора и карточку над ним.
+    val planState = rememberFollowPlanState(connection.api, taskId, state.chat.version)
     val sessionListState by connection.sessions.state.collectAsState()
     val online by connection.online.collectAsState()
     val platform = graph.platform
@@ -513,18 +515,15 @@ fun ChatScreen(
                         }
                     },
                     top = {
-                        // Follow Plan (FP-05C): переключатель «По плану» и карточка
-                        // плана. Состояние серверное; version меняется на каждом
-                        // событии плана, поэтому карточка перечитывается сама.
-                        FollowPlanBar(
+                        // Follow Plan: карточка плана над полем ввода; сама иконка
+                        // режима живёт в ряду композитора (planButton).
+                        FollowPlanCard(
+                            state = planState,
                             api = connection.api,
-                            taskId = taskId,
-                            version = state.chat.version,
                             newId = graph::newId,
                             scope = scope,
                             onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
                             onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
-                            projectPath = task?.workspacePath,
                         )
                         DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
@@ -541,6 +540,15 @@ fun ChatScreen(
                                 onDismiss = { session.dismiss(message.commandId) },
                             )
                         }
+                    },
+                    planButton = {
+                        FollowPlanIcon(
+                            state = planState,
+                            api = connection.api,
+                            newId = graph::newId,
+                            scope = scope,
+                            projectPath = task?.workspacePath,
+                        )
                     },
                     value = draft,
                     onValueChange = { next ->

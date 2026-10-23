@@ -136,15 +136,20 @@ test('plan events become one short line, and only plan events do', () => {
   assert.deepEqual([...PLAN_EVENT_TYPES].sort(), ['PLAN_ATTACHED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_PAUSED', 'PLAN_REVISED', 'PLAN_STEP_CHECKPOINT', 'PLAN_STEP_STARTED']);
 });
 
-test('the composer has the switch and the card, and no «Plan Mode» wording', async () => {
+test('the switch is an icon in the composer row, next to attach and the session menu', async () => {
   const html = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'index.html'), 'utf8');
-  assert.match(html, /id="planToggle"/);
-  assert.match(html, />По плану</);
+  assert.match(html, /id="planToggle"[^>]*aria-label="По плану"/);
   assert.equal(/Plan Mode/.test(html), false);
+  // Same row as the attachment button: the plan icon lives where a file is picked,
+  // not in a separate chip above the composer.
+  const actions = html.slice(html.indexOf('class="composerActions"'));
+  assert.ok(actions.indexOf('id="planToggle"') < actions.indexOf('id="files"'), 'the plan icon comes before the attachment input');
+  assert.match(html, /id="planRemove"/, 'a selected plan can be removed with a cross');
+  assert.match(html, /id="planDetach"/, 'and from the dialog');
   assert.match(html, /id="planCard"/);
   // The buttons themselves are built by planActions (labels are asserted above, in
   // one place), the page only reserves the container for them.
   assert.match(html, /id="planActions"/);
-  assert.match(html, /id="planPath"/, 'the first switch-on can name a file that is not in the listing');
+  assert.match(html, /id="planPath"/, 'the dialog can name a file that is not in the listing');
   assert.match(html, /id="planFiles"/, 'and the listing itself is rendered, so nothing has to be typed');
 });

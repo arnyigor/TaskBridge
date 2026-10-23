@@ -779,6 +779,10 @@ class TaskBridgeApi(
             put("clientId", connection.clientId)
         })
 
+    /** Убрать план: файл остаётся на месте, режим выключается. */
+    suspend fun detachPlan(id: String, commandId: String): PlanStatus =
+        planCommand(id, "detach", commandId, buildJsonObject { put("clientId", connection.clientId) })
+
     suspend fun startPlan(id: String, expectedRevision: Int?, commandId: String): PlanStatus =
         planCommand(id, "start", commandId, planBody(expectedRevision))
 

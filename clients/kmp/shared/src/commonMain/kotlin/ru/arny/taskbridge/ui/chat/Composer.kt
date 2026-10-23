@@ -85,6 +85,8 @@ fun Composer(
     modifier: Modifier = Modifier,
     /** Above the input: the queue line, outbox problems. */
     top: @Composable () -> Unit = {},
+    /** Between the attachment and the actions icons: the plan toggle (Follow Plan). */
+    planButton: @Composable () -> Unit = {},
     /** Extra items of the actions menu (the session's model and context); call `close` on click. */
     moreItems: @Composable (close: () -> Unit) -> Unit = {},
 ) {
@@ -269,6 +271,7 @@ fun Composer(
                         IconButton(onClick = onAttach, enabled = enabled, modifier = Modifier.size(40.dp)) {
                             Icon(AppIcons.Attach, "Прикрепить файл", Modifier.size(20.dp))
                         }
+                        planButton()
                         Box {
                             IconButton(onClick = { actionsMenu = true }, enabled = enabled, modifier = Modifier.size(40.dp)) {
                                 Icon(AppIcons.Tool, "Действия и буфер обмена", Modifier.size(20.dp))

@@ -299,3 +299,30 @@ test('a repeated settle (reconnect, duplicated frame) does not start another cyc
   assert.equal(deliveries.length, 2, `repeated settles must not add turns: ${deliveries.length}`);
   assert.equal((await api(`/api/tasks/${task.id}/plan`)).state, 'COMPLETED');
 });
+
+test('detaching removes the binding and keeps the file; a running cycle pauses first', { timeout: 60000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN.replace('Первый шаг', 'Первый шаг slow'), 'utf8');
+  const task = await createTask(api);
+  await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'detach-attach' });
+  await post(api, `/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'detach-start' });
+  await waitFor(async () => (await api(`/api/tasks/${task.id}/plan`)).state === 'RUNNING_STEP');
+
+  const detached = await post(api, `/api/tasks/${task.id}/plan/detach`, { commandId: 'detach-detach' });
+  assert.equal(detached.attached, false);
+  assert.equal(detached.state, 'NOT_ATTACHED');
+  // The plan file is the operator's: detaching must not touch it.
+  assert.equal(await fs.readFile(path.join(root, 'PLAN.md'), 'utf8'),
+    PLAN.replace('Первый шаг', 'Первый шаг slow'));
+  const events = await api(`/api/tasks/${task.id}/events`);
+  assert.ok(events.some(event => event.type === 'PLAN_DETACHED'));
+  assert.ok(events.some(event => event.type === 'PLAN_PAUSED'), 'the running cycle was paused, not left dangling');
+
+  // And nothing dispatches after the detach.
+  await sleep(1500);
+  const deliveries = (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8'))
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.message.includes('FOLLOW PLAN'));
+  assert.equal(deliveries.length, 1);
+});

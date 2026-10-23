@@ -4147,11 +4147,8 @@ function updatePlanToggle() {
     : planStatus?.attached
       ? `По плану: ${planStatus.path}`
       : 'По плану: выберите файл плана в проекте';
-  const hint = $('planToggleHint');
-  if (hint) {
-    hint.textContent = state.hint || '';
-    hint.classList.toggle('hidden', !state.hint);
-  }
+  // The selected plan is what turns the mode on: the icon carries that state.
+  button.setAttribute('aria-label', planStatus?.attached ? `По плану: ${planStatus.path}` : 'По плану: выбрать файл плана');
 }
 
 function renderPlanCard() {
@@ -4268,7 +4265,8 @@ async function openPlanDialog() {
   if (!id) return;
   if (planStatus?.enabled === false) return;
   $('planPathError').textContent = '';
-  $('planPath').value = '';
+  $('planPath').value = planStatus?.path || '';
+  $('planDetach').classList.toggle('hidden', !planStatus?.attached);
   $('planFiles').textContent = 'Загрузка списка…';
   $('planDialog').classList.remove('hidden');
   try {
@@ -4335,6 +4333,23 @@ window.addEventListener('focus', () => { if (selectedTaskId) loadPlanStatus(); }
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && selectedTaskId) loadPlanStatus();
 });
+
+async function detachPlan() {
+  const id = selectedTaskId;
+  if (!id || !planStatus?.attached) return;
+  try {
+    await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/detach`, {});
+    planMode = false;
+    planNotice = '';
+  } catch (error) {
+    planNotice = error.message;
+  }
+  $('planDialog').classList.add('hidden');
+  await loadPlanStatus();
+}
+
+$('planRemove').onclick = detachPlan;
+$('planDetach').onclick = detachPlan;
 
 $('planDialogClose').onclick = () => $('planDialog').classList.add('hidden');
 $('planAttach').onclick = async () => {

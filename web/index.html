@@ -381,6 +381,8 @@
         <div class="planCardHead">
           <b id="planHeadline">План не подключён</b>
           <span id="planGoal" class="muted small"></span>
+          <button id="planRemove" class="planRemove" type="button" title="Убрать план (режим выключится)"
+            aria-label="Убрать план">✕</button>
         </div>
         <div id="planFindings" class="planFindings small"></div>
         <div id="planNotice" class="planNotice small hidden"></div>
@@ -402,6 +404,7 @@
           <label class="planPathField">Путь: <input id="planPath" type="text" placeholder="docs/PLAN.md" /></label>
           <div id="planPathError" class="planPathError small" role="alert"></div>
           <div class="planDialogActions">
+            <button id="planDetach" type="button" class="secondary hidden">Убрать план</button>
             <button id="planAttach" type="button">Подключить</button>
           </div>
         </div>
@@ -431,12 +434,13 @@
             <button id="clearPrompt" class="clearPrompt hidden" type="button" title="Очистить" aria-label="Очистить поле ввода">×</button>
           </div>
           <div class="composerActions">
-            <!-- Follow Plan (FP-05C): режим исполнения выбранного плана. Не «Plan
-                 Mode»: read-only планирование будет отдельным режимом. Включение
-                 само по себе не запускает модель — сначала файл, потом «Продолжить». -->
-            <button id="planToggle" class="planToggle" type="button" aria-pressed="false"
-              title="По плану: TaskBridge ведёт шаги из выбранного файла плана">По плану</button>
-            <span id="planToggleHint" class="planToggleHint small muted hidden"></span>
+            <!-- Follow Plan (FP-06E): иконка рядом с вложением и настройками сессии.
+                 Выбран файл — режим включён и карточка ведёт шаги; крестик в карточке
+                 или «Убрать план» в диалоге выключают его. -->
+            <button id="planToggle" class="fileIconButton planToggle" type="button" aria-pressed="false"
+              title="По плану: выбрать файл плана проекта" aria-label="По плану">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11M4 6h.01M4 12h.01M4 18h.01"/></svg>
+            </button>
             <label class="fileIconButton" data-pc-only title="Прикрепить файлы" aria-label="Прикрепить файлы">
               <input id="files" type="file" multiple accept="*/*" />
               <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a5.5 5.5 0 0 1-7.78-7.78l9.19-9.19a3.67 3.67 0 0 1 5.19 5.19l-9.2 9.19a1.83 1.83 0 0 1-2.6-2.6l8.49-8.48"/></svg>

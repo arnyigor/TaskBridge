@@ -2037,7 +2037,7 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
@@ -2057,6 +2057,9 @@ async function handleRequest(req, res) {
         return json(res, 200, await command(() => followPlan.attach({
           taskId: planTaskId, path: body.path, commandId: body.commandId, clientId: body.clientId
         })));
+      }
+      if (action === 'detach') {
+        return json(res, 200, await command(() => followPlan.detach({ taskId: planTaskId, commandId: body.commandId, clientId: body.clientId })));
       }
       if (action === 'start') {
         return json(res, 200, await command(() => followPlan.start({

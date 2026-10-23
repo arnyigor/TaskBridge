@@ -100,7 +100,8 @@ for (let i = 1; i <= 24; i++) {
 longPlan.push('## Обнаруженные проблемы');
 await fs.writeFile(path.join(workspace, 'LONG.md'), longPlan.join('\n'), 'utf8');
 
-let port = await freePort();
+const fixedPort = Number(process.argv[process.argv.indexOf('--port') + 1]) || 0;
+let port = fixedPort || await freePort();
 const config = {
   server: { host: '127.0.0.1', port, auth: { enabled: false } },
   pi: { command: 'pi', projectTrust: 'approve', persistSessions: true, turnInstructions: { mode: 'legacy' } },

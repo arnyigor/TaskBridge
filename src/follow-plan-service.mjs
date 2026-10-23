@@ -19,7 +19,7 @@ import { PlanFollower } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
   'PLAN_ATTACHED', 'PLAN_STEP_STARTED', 'PLAN_STEP_CHECKPOINT', 'PLAN_REVISED',
-  'PLAN_PAUSED', 'PLAN_COMPLETED', 'PLAN_CONFLICT'
+  'PLAN_PAUSED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_DETACHED'
 ]);
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -255,6 +255,27 @@ export class FollowPlanService {
   }
 
   /**
+   * Stop following a plan. The file itself stays where it is — detaching only
+   * removes the binding, so nothing the operator wrote is deleted. A cycle that is
+   * still running is paused first: otherwise the next settle would dispatch a step
+   * for a plan nobody follows any more.
+   */
+  async detach({ taskId, commandId, clientId }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    const binding = this.store.getPlanBinding(task.id);
+    if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    if (binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING') {
+      const paused = this.#follower(task).pause({ taskId: task.id });
+      await this.#report(task.id, paused, { commandId, clientId, reason: 'detach' });
+    }
+    this.store.deletePlanBinding(task.id);
+    this.checkpoints.delete(task.id);
+    await this.#publish(task.id, 'PLAN_DETACHED', `План отключён: ${binding.path}`, { path: binding.path, commandId, clientId });
+    return this.status(task.id);
+  }
+
+  /**
    * Resolving an ambiguous state. `adopt_external` accepts the operator's file
    * (the only way a conflict is cleared without losing text); `dismiss` returns to
    * idle without touching the file.
@@ -424,6 +445,7 @@ export class FollowPlanService {
       case 'PLAN_BUDGET_EXCEEDED':
         await this.#publish(taskId, 'PLAN_PAUSED', result.message, data);
         return;
+      case 'PAUSED':
       case 'PAUSED_REVIEW':
         await this.#publish(taskId, 'PLAN_PAUSED', result.message, data);
         return;

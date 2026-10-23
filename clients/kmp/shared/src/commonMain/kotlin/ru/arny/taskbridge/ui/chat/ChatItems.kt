@@ -481,7 +481,7 @@ private fun ToolGroupRow(
         QuietRow(
             leading = {
                 when {
-                    group.running -> Icon(AppIcons.Play, "Выполняется", Modifier.size(14.dp), tint = colors.working)
+                    group.running -> RunSpinner()
                     group.errors > 0 -> Icon(AppIcons.Alert, "Есть ошибки", Modifier.size(14.dp), tint = colors.failed)
                     else -> Icon(AppIcons.Check, null, Modifier.size(14.dp), tint = muted)
                 }
@@ -527,6 +527,19 @@ internal fun toolTarget(tool: ToolCall): String? {
     val label = tool.label?.takeIf { it.isNotBlank() } ?: return null
     val fileTool = tool.path != null || tool.name.lowercase() in setOf("read", "edit", "write")
     return if (fileTool) label.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\') else label.lineSequence().first()
+}
+
+/**
+ * Круглый индикатор выполнения инструмента (вместо треугольника): кольцо с
+ * вращением понятнее читается как «идёт работа», а не как кнопка «запустить».
+ */
+@Composable
+private fun RunSpinner(size: androidx.compose.ui.unit.Dp = 13.dp) {
+    CircularProgressIndicator(
+        modifier = Modifier.size(size),
+        strokeWidth = 1.6.dp,
+        color = LocalStatusColors.current.working,
+    )
 }
 
 @Composable
@@ -587,7 +600,7 @@ private fun ToolRow(
         QuietRow(
             leading = {
                 when {
-                    running -> Icon(AppIcons.Play, "Выполняется", Modifier.size(14.dp), tint = colors.working)
+                    running -> RunSpinner()
                     error -> Icon(AppIcons.Alert, "Ошибка", Modifier.size(14.dp), tint = colors.failed)
                     tool.state == ToolState.INTERRUPTED -> Icon(AppIcons.Stop, "Прервано", Modifier.size(12.dp), tint = muted)
                     else -> Icon(AppIcons.Check, null, Modifier.size(14.dp), tint = muted)
