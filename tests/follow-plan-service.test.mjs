@@ -290,3 +290,96 @@ test('CP-06: evidence from an older run of the same session does not confirm thi
   const written = await readPlanFile(workspace, planPath);
   assert.equal(written.steps[0].status, 'TODO');
 });
+
+// --- UI-02: выбор файла через системный диалог и явный путь ---------------
+
+const base64 = text => Buffer.from(text, 'utf8').toString('base64');
+
+test('inspect says what would happen without writing or attaching anything', async t => {
+  const { service, manager, store, workspace, planPath } = await setup(t);
+  const managed = await service.inspect({ taskId: 't-1', path: planPath });
+  assert.equal(managed.managed, true);
+  assert.equal(managed.steps, 2);
+  assert.equal(managed.revision, 1);
+  assert.equal(store.getPlanBinding('t-1'), null, 'inspect attaches nothing');
+  assert.equal(manager.dispatched.length, 0);
+
+  const freeForm = await service.inspect({
+    taskId: 't-1', name: 'MY_NOTES.md',
+    contentBase64: base64('# Мои заметки\n\n- [ ] Починить пагинацию\n- [ ] Проверить приёмку\n')
+  });
+  assert.equal(freeForm.managed, false);
+  assert.equal(freeForm.freeForm, true);
+  assert.deepEqual(freeForm.preview.steps.map(step => step.title), ['Починить пагинацию', 'Проверить приёмку']);
+  assert.equal(freeForm.path, 'MY_NOTES.md');
+
+  const broken = await service.inspect({ taskId: 't-1', name: 'PLAN.md', contentBase64: base64('---\ntaskbridge_plan: 1\n') });
+  assert.equal(broken.managed, false);
+  assert.ok(broken.problems.length > 0);
+  assert.equal(await fs.readdir(workspace).then(list => list.filter(name => name === 'MY_NOTES.md')).then(list => list.length), 0);
+});
+
+test('a file from the system picker is written inside the project and attached', async t => {
+  const { service, store, workspace } = await setup(t);
+  const result = await service.importPlan({
+    taskId: 't-1', name: 'PLAN.md', contentBase64: base64(PLAN), commandId: 'import-1'
+  });
+  assert.equal(result.needsConfirmation, false);
+  assert.equal(result.status.attached, true);
+  assert.equal(result.status.revision, 1);
+  const written = await readPlanFile(workspace, 'PLAN.md');
+  assert.equal(written.planId, 'p-api');
+  assert.equal(store.getPlanBinding('t-1').path, 'PLAN.md');
+});
+
+test('a free-form file is imported only after confirmation, and then converted', async t => {
+  const { service, store, workspace } = await setup(t);
+  const text = '# План\n\n- [ ] Шаг один\n- [x] Шаг два\n';
+  const preview = await service.importPlan({
+    taskId: 't-1', name: 'NOTES.md', contentBase64: base64(text), commandId: 'import-2'
+  });
+  assert.equal(preview.needsConfirmation, true);
+  assert.equal(preview.inspection.freeForm, true);
+  assert.equal(await fs.readFile(path.join(workspace, 'NOTES.md'), 'utf8').catch(() => null), null, 'nothing written before the confirmation');
+  assert.equal(store.getPlanBinding('t-1'), null);
+
+  const confirmed = await service.importPlan({
+    taskId: 't-1', name: 'NOTES.md', contentBase64: base64(text), confirmImport: true, commandId: 'import-3'
+  });
+  assert.equal(confirmed.needsConfirmation, false);
+  assert.equal(confirmed.status.attached, true);
+  const converted = await readPlanFile(workspace, 'NOTES.md');
+  assert.deepEqual(converted.steps.map(step => step.title), ['Шаг один', 'Шаг два']);
+  assert.equal(converted.steps[1].status, 'TODO', 'a ticked box in the source is not evidence');
+});
+
+test('an existing different file is not overwritten without confirmation', async t => {
+  const { service, workspace } = await setup(t);
+  await fs.writeFile(path.join(workspace, 'PLAN.md'), 'важный текст оператора\n', 'utf8');
+  await assert.rejects(service.importPlan({
+    taskId: 't-1', name: 'PLAN.md', contentBase64: base64(PLAN), commandId: 'import-4'
+  }), error => error.code === 'PLAN_FILE_EXISTS');
+  assert.equal(await fs.readFile(path.join(workspace, 'PLAN.md'), 'utf8'), 'важный текст оператора\n');
+
+  const forced = await service.importPlan({
+    taskId: 't-1', name: 'PLAN.md', contentBase64: base64(PLAN), overwrite: true, commandId: 'import-5'
+  });
+  assert.equal(forced.status.attached, true);
+});
+
+test('the picked file name cannot escape the workspace and must be Markdown', async t => {
+  const { service, workspace } = await setup(t);
+  const sneaky = await service.importPlan({
+    taskId: 't-1', name: '../../evil.md', contentBase64: base64(PLAN), commandId: 'import-6'
+  });
+  assert.equal(sneaky.status.path, 'evil.md', 'the path is reduced to a safe file name');
+  assert.equal(await fs.stat(path.join(path.dirname(workspace), 'evil.md')).then(() => true, () => false), false);
+
+  await assert.rejects(service.importPlan({
+    taskId: 't-1', name: 'PLAN.txt', contentBase64: base64(PLAN), commandId: 'import-7'
+  }), error => error.code === 'PLAN_INVALID');
+
+  await assert.rejects(service.importPlan({
+    taskId: 't-1', name: 'BROKEN.md', contentBase64: Buffer.from([0xff, 0xfe, 0x00]).toString('base64'), commandId: 'import-8'
+  }), error => error.code === 'PLAN_INVALID');
+});

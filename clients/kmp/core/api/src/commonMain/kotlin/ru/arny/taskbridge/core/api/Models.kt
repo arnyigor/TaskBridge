@@ -1428,6 +1428,8 @@ data class PlanStep(
     val status: String,
     val priority: String? = null,
     val title: String? = null,
+    /** Краткое подтверждение, записанное в файл (полный лог — в чате). */
+    val result: String? = null,
 )
 
 @Serializable
@@ -1474,7 +1476,10 @@ data class PlanStatus(
     val revision: Int? = null,
     val hash: String? = null,
     val cycleId: String? = null,
+    val cycleNumber: Int? = null,
     val stepId: String? = null,
+    /** Где сейчас сама Pi-сессия (DISPATCHING/PROGRESS/…), отдельно от состояния плана. */
+    val stage: String? = null,
     val updatedAt: String? = null,
     val lastCheckpoint: PlanCheckpointSummary? = null,
     val conflict: Boolean = false,
@@ -1484,6 +1489,38 @@ data class PlanStatus(
     val steps: List<PlanStep> = emptyList(),
     val findings: List<PlanFinding> = emptyList(),
     val fileError: PlanFileError? = null,
+)
+
+/** Ответ `plan/inspect`: управляемый план или предпросмотр импорта. */
+@Serializable
+data class PlanPreviewStep(val id: String, val title: String? = null, val status: String? = null)
+
+@Serializable
+data class PlanPreview(
+    val steps: List<PlanPreviewStep> = emptyList(),
+    val unmapped: List<String> = emptyList(),
+    val problems: List<String> = emptyList(),
+)
+
+@Serializable
+data class PlanInspection(
+    val path: String? = null,
+    val managed: Boolean = false,
+    val problems: List<String> = emptyList(),
+    val steps: Int = 0,
+    val revision: Int? = null,
+    val goal: String? = null,
+    val replaces: String? = null,
+    val alreadyAttached: Boolean = false,
+    val freeForm: Boolean = false,
+    val preview: PlanPreview? = null,
+)
+
+@Serializable
+data class PlanImportResult(
+    val status: PlanStatus? = null,
+    val needsConfirmation: Boolean = false,
+    val inspection: PlanInspection? = null,
 )
 
 /** The id of Scratch: a session without a project. */

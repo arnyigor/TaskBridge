@@ -12,11 +12,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,23 +34,32 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.ApiException
+import ru.arny.taskbridge.core.api.PlanInspection
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.TaskBridgeApi
+import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.theme.AppIcons
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
- * Состояние Follow Plan на экране чата: иконка в композиторе и карточка над ним
- * показывают одно и то же и меняют одно и то же, поэтому состояние общее.
+ * Состояние Follow Plan на экране чата: иконка в композиторе и диалог показывают
+ * одно и то же и меняют одно и то же, поэтому состояние общее.
  */
 class FollowPlanUiState internal constructor(val taskId: String) {
     var status by mutableStateOf<PlanStatus?>(null)
     var notice by mutableStateOf("")
-    var askPath by mutableStateOf(false)
+    var askPlan by mutableStateOf(false)
     var pathInput by mutableStateOf("")
-    var pathProblem by mutableStateOf<String?>(null)
-    var planGroups by mutableStateOf<List<PlanFileGroup>>(emptyList())
-    var filesLoading by mutableStateOf(false)
-    var filesProblem by mutableStateOf<String?>(null)
+    var pathRow by mutableStateOf(false)
+    var inspection by mutableStateOf<PlanInspection?>(null)
+    var pendingName by mutableStateOf<String?>(null)
+    var pendingBase64 by mutableStateOf<String?>(null)
+    var pendingPath by mutableStateOf<String?>(null)
+    var overwrite by mutableStateOf(false)
+    var stepsOpen by mutableStateOf(false)
+    var findingsOpen by mutableStateOf(false)
 
     val enabled: Boolean get() = planToggleEnabled(status)
     val hint: String? get() = planToggleHint(status)
@@ -59,27 +69,17 @@ class FollowPlanUiState internal constructor(val taskId: String) {
 @Composable
 fun rememberFollowPlanState(api: TaskBridgeApi, taskId: String, version: Long): FollowPlanUiState {
     val state = remember(taskId) { FollowPlanUiState(taskId) }
-    // Перечитывается на каждое событие чата: события плана — серверные факты и
-    // двигают version. Флаг может включиться на сервере, пока экран открыт.
+    // Перечитывается на каждое событие чата: события плана — серверные факты.
     LaunchedEffect(taskId, version) {
         state.status = runCatching { api.plan(taskId) }.getOrNull() ?: state.status
     }
     LaunchedEffect(taskId, state.status?.enabled) {
-        // Пока режим читается как выключенный, перечитываем раз в 10 с: иначе чип
-        // остаётся серым до смены сессии (так и случилось на приёмке 2026-10-23).
-        while (state.status?.enabled != true || state.status == null) {
+        // Пока режим читается как выключенный, перечитываем раз в 10 с: иначе
+        // иконка остаётся серой до смены сессии (приёмка 2026-10-23).
+        while (state.status?.enabled != true) {
             delay(10_000)
             state.status = runCatching { api.plan(taskId) }.getOrNull() ?: state.status
         }
-    }
-    LaunchedEffect(state.askPath) {
-        if (!state.askPath) return@LaunchedEffect
-        state.filesLoading = true
-        state.filesProblem = null
-        state.planGroups = runCatching { planFileGroups(api.workspaceFiles(taskId).entries) }
-            .onFailure { state.filesProblem = it.message ?: "Список файлов не получен" }
-            .getOrDefault(emptyList())
-        state.filesLoading = false
     }
     return state
 }
@@ -87,13 +87,11 @@ fun rememberFollowPlanState(api: TaskBridgeApi, taskId: String, version: Long): 
 private fun FollowPlanUiState.apply(next: PlanStatus) {
     status = next
     notice = ""
-    if (next.attached) pathInput = next.path.orEmpty()
 }
 
 /**
- * Иконка «По плану» в ряду композитора — рядом с вложением и настройками сессии.
- * Нажатие открывает выбор файла плана; выбранный файл и есть включённый режим,
- * убрать его можно крестиком в карточке или кнопкой в диалоге.
+ * Иконка «По плану» в ряду композитора. Нажатие открывает диалог: выбор файла,
+ * статус и управление. Цвет иконки — состояние, подсказка дублирует словами.
  */
 @Composable
 fun FollowPlanIcon(
@@ -106,157 +104,232 @@ fun FollowPlanIcon(
     onNotice: (String) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
-    // The icon is the whole indicator: colour says what the cycle is doing, the
-    // dialog says why. Nothing is drawn in the chat above the composer.
     val iconTint = when (planIconState(state.status)) {
         PlanIconState.RUNNING, PlanIconState.IDLE -> colors.primary
         PlanIconState.ATTENTION -> colors.error
         PlanIconState.COMPLETED -> colors.tertiary
         PlanIconState.OFF -> colors.onSurfaceVariant
     }
+    // Системный выбор файла: на Android — Documents Picker (SAF), на десктопе —
+    // стандартный диалог. Список .md в проекте больше не сканируется.
+    val pickFile = rememberFilePicker { picked ->
+        val file: UploadFile? = picked.firstOrNull { it.name.endsWith(".md", true) || it.name.endsWith(".markdown", true) }
+        if (file == null) {
+            state.notice = "План — это файл .md или .markdown."
+            return@rememberFilePicker
+        }
+        scope.launch {
+            inspectThenImport(state, api, newId, name = file.name, base64 = encodeBase64(file.bytes))
+        }
+    }
+
     IconButton(
         onClick = {
-            state.pathProblem = null
-            state.pathInput = state.status?.path.orEmpty()
-            state.askPath = true
+            state.notice = ""
+            state.inspection = null
+            state.askPlan = true
         },
         modifier = Modifier.size(40.dp),
     ) {
         Icon(
             AppIcons.Plan,
-            state.status?.path?.let { "${planIconTitle(state.status)} — $it" } ?: planIconTitle(state.status),
+            planIconTitle(state.status),
             Modifier.size(20.dp),
             tint = iconTint,
         )
     }
 
-    if (state.askPath) {
-        AlertDialog(
-            onDismissRequest = { state.askPath = false },
-            title = { Text("План") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    // Status first: the operator opened the icon to see where the plan is.
-                    val statusModel = planCardModel(state.status)
-                    if (statusModel.visible) {
-                        Text(statusModel.headline, style = MaterialTheme.typography.labelMedium)
-                        if (statusModel.goal.isNotBlank()) {
-                            Text(statusModel.goal, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                        }
-                        if (statusModel.findings.isNotBlank()) {
-                            Text(statusModel.findings, style = MaterialTheme.typography.labelSmall, color = colors.tertiary)
-                        }
-                        val line = statusModel.conflict ?: statusModel.error ?: state.notice
-                        if (!line.isNullOrBlank()) {
-                            Text(line, style = MaterialTheme.typography.labelSmall, color = colors.error)
-                        }
-                        PlanActionsRow(state, api, newId, scope, onOpenPlan, onNotice)
+    if (!state.askPlan) return
+
+    AlertDialog(
+        onDismissRequest = { state.askPlan = false },
+        title = { Text("Следование плану") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                val status = state.status
+                if (state.attached) {
+                    // Верхний блок: файл, состояние, ревизия, цикл, шаг, стадия.
+                    Text(status?.path?.substringAfterLast('/') ?: "PLAN.md", style = MaterialTheme.typography.titleSmall)
+                    Text(planMetaLine(status), style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                    val progress = status?.progress
+                    if (progress != null && progress.total > 0) {
+                        LinearProgressIndicator(
+                            progress = { progress.done.toFloat() / progress.total },
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 6.dp),
+                        )
                     }
+                    planCurrentStep(status)?.let { step ->
+                        Text("${step.id} · ${step.title}", style = MaterialTheme.typography.bodyMedium)
+                        Text(step.status, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+                        if (step.result.isNotBlank()) {
+                            Text(step.result, style = MaterialTheme.typography.labelSmall, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    // Полный список шагов свёрнут: в диалог не выливается весь план.
+                    TextButton(onClick = { state.stepsOpen = !state.stepsOpen }) {
+                        Text(if (state.stepsOpen) "Скрыть шаги" else "Все шаги (${status?.steps?.size ?: 0})")
+                    }
+                    if (state.stepsOpen) {
+                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
+                            items(status?.steps.orEmpty(), key = { it.id }) { step ->
+                                Text(
+                                    "${step.id} · ${step.title.orEmpty()} — ${step.status}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                    val findings = status?.findings.orEmpty().filter { it.state == "OPEN" }
+                    if (findings.isNotEmpty()) {
+                        val blocking = findings.count { it.priority == "P0" || it.priority == "P1" }
+                        TextButton(onClick = { state.findingsOpen = !state.findingsOpen }) {
+                            Text("Находки: требуют решения $blocking, записей ${findings.size - blocking}")
+                        }
+                        if (state.findingsOpen) {
+                            for (finding in findings) {
+                                Text("${finding.priority} · ${finding.summary.orEmpty()}", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                    val line = status?.fileError?.message ?: state.notice
+                    if (line.isNotBlank()) Text(planErrorText(null, line), style = MaterialTheme.typography.labelSmall, color = colors.error)
+                    PlanActionsRow(state, api, newId, scope, onOpenPlan, onNotice)
+                } else {
                     Text(
-                        "Выберите Markdown-файл проекта: выбранный план включает режим следования. " +
-                            "Шаги S-001 ведёт TaskBridge; свободный текст импортируется только предпросмотром.",
+                        "TaskBridge ведёт шаги одного Markdown-файла: после каждого хода проверяет файл " +
+                            "и подтверждения и только потом отправляет следующий шаг. Подключение не запускает выполнение.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    state.hint?.let {
-                        Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error)
-                    }
                     if (!projectPath.isNullOrBlank()) {
-                        Text(projectPath, style = MaterialTheme.typography.labelSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        // One line with an ellipsis: a wrapped drive path ate two rows of a phone dialog.
+                        Text(projectPath, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    if (state.filesLoading) {
-                        Text("Загрузка списка…", style = MaterialTheme.typography.labelSmall)
-                    } else if (state.planGroups.isEmpty()) {
-                        Text(
-                            state.filesProblem ?: "В проекте нет Markdown-файлов — укажите путь вручную.",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (state.filesProblem != null) colors.error else colors.onSurfaceVariant,
+                    state.hint?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
+                    TextButton(onClick = { pickFile() }) { Text("Выбрать файл .md", style = MaterialTheme.typography.bodyMedium) }
+                    TextButton(onClick = { state.pathRow = !state.pathRow }) { Text("Указать путь в проекте") }
+                    if (state.pathRow) {
+                        // A visible field, not a bare text area: on a phone an empty
+                        // BasicTextField looks like nothing happened.
+                        OutlinedTextField(
+                            value = state.pathInput,
+                            onValueChange = { state.pathInput = it },
+                            singleLine = true,
+                            label = { Text("Путь в проекте", style = MaterialTheme.typography.labelSmall) },
+                            placeholder = { Text("docs/PLAN.md", style = MaterialTheme.typography.bodySmall) },
+                            modifier = Modifier.fillMaxWidth().widthIn(min = 200.dp),
                         )
-                    } else {
-                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp)) {
-                            for (group in state.planGroups) {
-                                item(key = "folder:${group.folder}") {
-                                    Text(
-                                        if (group.folder.isEmpty()) "корень проекта" else "${group.folder}/",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = colors.onSurfaceVariant,
-                                        modifier = Modifier.padding(top = 4.dp),
-                                    )
+                        TextButton(
+                            onClick = {
+                                val path = state.pathInput.trim()
+                                val problem = planPathProblem(path)
+                                if (problem != null) {
+                                    state.notice = problem
+                                    return@TextButton
                                 }
-                                items(group.files, key = { it.path }) { entry ->
-                                    TextButton(onClick = {
-                                        scope.launch {
-                                            try {
-                                                state.apply(api.attachPlan(state.taskId, entry.path, newId()))
-                                                state.askPath = false
-                                            } catch (error: ApiException) {
-                                                state.pathProblem = error.error.message
-                                            } catch (error: Throwable) {
-                                                state.pathProblem = error.message ?: "Файл плана не подключён"
-                                            }
-                                        }
-                                    }, modifier = Modifier.fillMaxWidth()) {
-                                        Text(
-                                            (if (entry.path == state.status?.path) "✓ " else "") + entry.name,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                }
+                                scope.launch { inspectThenImport(state, api, newId, path = path) }
+                            },
+                            enabled = state.pathInput.isNotBlank(),
+                        ) { Text("Подключить") }
+                    }
+                }
+
+                // Предпросмотр импорта обычного Markdown: файл не меняется до согласия.
+                state.inspection?.let { inspection ->
+                    if (!inspection.managed && !state.attached) {
+                        Text(planInspectionText(inspection), style = MaterialTheme.typography.bodySmall)
+                        Row {
+                            TextButton(onClick = {
+                                state.inspection = null
+                                state.pendingBase64 = null
+                                state.pendingPath = null
+                            }) { Text("Отмена") }
+                            TextButton(onClick = {
+                                scope.launch { importNow(state, api, newId) }
+                            }) {
+                                Text(if (state.overwrite) "Перезаписать и подключить" else "Импортировать и подключить")
                             }
                         }
                     }
-                    BasicTextField(
-                        value = state.pathInput,
-                        onValueChange = { state.pathInput = it; state.pathProblem = null },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth().widthIn(min = 200.dp),
-                    )
-                    state.pathProblem?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
                 }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    val problem = planPathProblem(state.pathInput)
-                    state.pathProblem = problem
-                    if (problem != null) return@TextButton
-                    val path = state.pathInput.trim()
-                    scope.launch {
-                        try {
-                            state.apply(api.attachPlan(state.taskId, path, newId()))
-                            state.askPath = false
-                        } catch (error: ApiException) {
-                            state.pathProblem = error.error.message
-                        } catch (error: Throwable) {
-                            state.pathProblem = error.message ?: "Файл плана не подключён"
-                        }
-                    }
-                }) { Text("Подключить") }
-            },
-            dismissButton = {
-                Row {
-                    if (state.attached) {
-                        TextButton(onClick = {
-                            state.askPath = false
-                            scope.launch {
-                                try {
-                                    state.apply(api.detachPlan(state.taskId, newId()))
-                                } catch (error: ApiException) {
-                                    state.notice = error.error.message
-                                }
+                if (state.notice.isNotBlank() && !state.attached) {
+                    Text(state.notice, style = MaterialTheme.typography.labelSmall, color = colors.error)
+                }
+            }
+        },
+        confirmButton = {
+            Row {
+                if (state.attached) {
+                    TextButton(onClick = {
+                        state.askPlan = false
+                        scope.launch {
+                            try {
+                                state.apply(api.detachPlan(state.taskId, newId()))
+                            } catch (error: ApiException) {
+                                state.notice = planErrorText(error)
                             }
-                        }) { Text("Убрать план") }
-                    }
-                    TextButton(onClick = { state.askPath = false }) { Text("Отмена") }
+                        }
+                    }) { Text("Отключить план") }
                 }
-            },
+                TextButton(onClick = { state.askPlan = false }) { Text("Закрыть") }
+            }
+        },
+    )
+}
+
+@OptIn(ExperimentalEncodingApi::class)
+private fun encodeBase64(bytes: ByteArray): String = Base64.encode(bytes)
+
+private suspend fun inspectThenImport(
+    state: FollowPlanUiState,
+    api: TaskBridgeApi,
+    newId: () -> String,
+    name: String? = null,
+    base64: String? = null,
+    path: String? = null,
+) {
+    try {
+        val inspection = api.inspectPlan(state.taskId, path = path, name = name, contentBase64 = base64)
+        state.pendingName = name
+        state.pendingBase64 = base64
+        state.pendingPath = path
+        state.overwrite = false
+        state.inspection = inspection
+        if (inspection.managed) {
+            importNow(state, api, newId)
+        }
+    } catch (error: ApiException) {
+        state.notice = planErrorText(error)
+    }
+}
+
+private suspend fun importNow(state: FollowPlanUiState, api: TaskBridgeApi, newId: () -> String) {
+    try {
+        val result = api.importPlan(
+            id = state.taskId,
+            commandId = newId(),
+            path = state.pendingPath,
+            name = state.pendingName,
+            contentBase64 = state.pendingBase64,
+            confirmImport = true,
+            overwrite = state.overwrite,
         )
+        val next = result.status
+        if (next != null) state.apply(next)
+        state.inspection = null
+        state.pendingBase64 = null
+        state.pendingPath = null
+        state.overwrite = false
+    } catch (error: ApiException) {
+        state.notice = planErrorText(error)
+        if (planErrorCode(error) == "PLAN_FILE_EXISTS") state.overwrite = true
     }
 }
 
 /**
- * Действия плана внутри диалога. Шесть кнопок не помещаются в одну строку на
- * телефоне: перенос оставляет все доступными (на Pixel 5 было видно три).
+ * Действия плана: главное действие по состоянию, остальные — рядом. Шесть кнопок
+ * не помещаются в одну строку на телефоне, поэтому ряд переносится.
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -270,6 +343,7 @@ private fun PlanActionsRow(
 ) {
     val model = planCardModel(state.status)
     val status = state.status
+    val primary = planPrimaryAction(status)
 
     fun command(run: suspend () -> PlanStatus) {
         scope.launch {
@@ -278,9 +352,7 @@ private fun PlanActionsRow(
             } catch (error: ApiException) {
                 // 409 PLAN_REVISION_CONFLICT arrives here: the operator changed the
                 // file, so the dialog must show that instead of pretending to run.
-                state.notice = error.error.message
-            } catch (error: Throwable) {
-                state.notice = error.message ?: "Команда плана не выполнена"
+                state.notice = planErrorText(error)
             }
         }
     }
@@ -292,13 +364,7 @@ private fun PlanActionsRow(
         for (action in model.actions) {
             TextButton(onClick = {
                 when (action.id) {
-                    "start" -> {
-                        val paused = status?.state == "PAUSED" || status?.state == "PAUSED_REVIEW"
-                        command {
-                            if (paused) api.resumePlan(state.taskId, status?.revision, newId())
-                            else api.startPlan(state.taskId, status?.revision, newId())
-                        }
-                    }
+                    "start" -> command { api.startPlan(state.taskId, status?.revision, newId()) }
                     "pause" -> command { api.pausePlan(state.taskId, newId()) }
                     "stop" -> command { api.stopPlan(state.taskId, newId()) }
                     "reconcile" -> command { api.reconcilePlan(state.taskId, status?.revision, "adopt_external", newId()) }
@@ -308,7 +374,11 @@ private fun PlanActionsRow(
                     }
                 }
             }, enabled = action.enabled) {
-                Text(action.label, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                Text(
+                    if (action.id == primary.id) primary.label else action.label,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                )
             }
         }
     }

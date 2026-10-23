@@ -14,7 +14,9 @@
 // Turning the mode off (followPlan.enabled) leaves every route readable but makes
 // the mutating ones refuse: nothing silently starts generating.
 
-import { readPlan, updatePlan, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { parsePlan, proposeImport, planHash, readPlan, serializePlan, updatePlan, writePlanAtomic, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
 import { PlanFollower } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
@@ -26,6 +28,42 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CONTROL_CLIENT = 'follow-plan';
 
 const notFound = () => Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+
+const MAX_PLAN_BYTES = 1024 * 1024;
+
+/** base64 → utf8 text, with a size guard and an honest error for a broken file. */
+function decodePlanContent(contentBase64) {
+  const raw = String(contentBase64 || '').replace(/^data:[^;]+;base64,/, '');
+  const bytes = Buffer.from(raw, 'base64');
+  if (!bytes.length) throw reject('PLAN_INVALID', 'Файл плана пуст.');
+  if (bytes.length > MAX_PLAN_BYTES) throw reject('PLAN_INVALID', `Файл плана больше ${MAX_PLAN_BYTES} байт.`);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    throw reject('PLAN_INVALID', 'Файл плана не в UTF-8: перекодируйте его и попробуйте снова.');
+  }
+}
+
+/**
+ * Куда писать выбранный файл: только внутрь workspace, без `..`, абсолютных путей
+ * и выхода через symlink/junction.
+ */
+async function safeTarget(workspace, relPath, { write = false } = {}) {
+  if (!workspace) throw reject('SESSION_UNAVAILABLE', 'Рабочий каталог сессии ещё не создан.');
+  const root = await fs.realpath(workspace).catch(() => path.resolve(workspace));
+  const target = path.resolve(root, relPath);
+  const relative = path.relative(root, target);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw reject('PLAN_INVALID', 'Путь плана выходит за пределы рабочего каталога.', [relPath]);
+  }
+  if (write) {
+    const parent = await fs.realpath(path.dirname(target)).catch(() => null);
+    if (parent && path.relative(root, parent).startsWith('..')) {
+      throw reject('PLAN_INVALID', 'Каталог плана указывает за пределы проекта (symlink).', [relPath]);
+    }
+  }
+  return target;
+}
 const reject = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra });
 
 export class FollowPlanService {
@@ -115,7 +153,10 @@ export class FollowPlanService {
       revision: binding?.revision ?? null,
       hash: binding?.hash || null,
       cycleId: binding?.cycleId || null,
+      cycleNumber: Number(String(binding?.cycleId || '').replace(/^c-/, '')) || null,
       stepId: binding?.dispatchStepId || null,
+      // Where the session itself is (Pi turn), separate from the plan's own state.
+      stage: task.status === 'RUNNING' ? (task.turnState?.phase || 'RUNNING') : task.status,
       updatedAt: binding?.updatedAt || null,
       lastCheckpoint: this.checkpoints.get(task.id) || null,
       conflict: false,
@@ -138,7 +179,12 @@ export class FollowPlanService {
         done: steps.filter(step => step.status === 'DONE' || step.status === 'SKIPPED').length,
         total: steps.length
       };
-      status.steps = steps.map(step => ({ id: step.id, status: step.status, priority: step.priority, title: step.title }));
+      // The dialog shows the current step and, on demand, the whole list: the
+      // confirmed result travels with it (trimmed — the full log is in the chat).
+      status.steps = steps.map(step => ({
+        id: step.id, status: step.status, priority: step.priority, title: step.title,
+        result: (step.result || '').slice(0, 240)
+      }));
       status.findings = file.plan.findings.map(finding => ({ id: finding.id, priority: finding.priority, state: finding.state, summary: finding.summary }));
       status.conflict = file.hash !== binding.hash || file.plan.revision !== binding.revision;
     } catch (error) {
@@ -181,6 +227,137 @@ export class FollowPlanService {
       steps: attached.plan.steps.length, commandId, clientId
     });
     return this.status(task.id);
+  }
+
+  /**
+   * Что будет, если подключить этот файл: ничего не пишет и не привязывает.
+   * Нужно, чтобы показать формат, ошибки и импорт ДО согласия оператора.
+   */
+  async inspect({ taskId, path: relPath = null, name = null, contentBase64 = null }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    let target;
+    let text;
+    if (contentBase64 != null) {
+      target = this.#targetPath(relPath || name || '');
+      text = decodePlanContent(contentBase64);
+    } else {
+      target = this.#relativePath(task, relPath);
+      const file = await this.#plans(task).read(target);
+      text = file.text;
+    }
+    return this.#inspectText({ task, target, text });
+  }
+
+  #inspectText({ task, target, text }) {
+    let plan = null;
+    let problems = [];
+    try {
+      plan = parsePlan(text);
+    } catch (error) {
+      problems = error.problems || [error.message];
+    }
+    const binding = this.store.getPlanBinding(task.id);
+    if (plan) {
+      return {
+        path: target,
+        managed: true,
+        problems: [],
+        steps: plan.steps.length,
+        planId: plan.planId,
+        revision: plan.revision,
+        goal: plan.goal,
+        // Another plan of this session is replaced, not merged; the dialog says so
+        // before the operator agrees.
+        replaces: binding?.path && binding.path !== target ? binding.path : null,
+        alreadyAttached: binding?.path === target
+      };
+    }
+    // Free-form Markdown is imported as a preview only; the file stays untouched
+    // until the operator confirms.
+    const preview = proposeImport(text, { planId: this.#planIdFor(target) });
+    return {
+      path: target,
+      managed: false,
+      problems,
+      freeForm: true,
+      preview: {
+        steps: preview.plan.steps.map(step => ({ id: step.id, title: step.title, status: step.status })),
+        unmapped: preview.unmapped,
+        problems: preview.problems
+      }
+    };
+  }
+
+  #planIdFor(target) {
+    const slug = String(target).replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
+    return `p-${slug || 'plan'}`;
+  }
+
+  /**
+   * Подключить файл, выбранный в системном диалоге (base64), или уже лежащий в
+   * проекте (`path`). Управляемый план пишется как есть; свободный Markdown —
+   * только после `confirmImport`, и тогда он преобразуется в управляемый.
+   */
+  async importPlan({ taskId, path: relPath = null, name = null, contentBase64 = null, confirmImport = false, overwrite = false, commandId, clientId }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    let target;
+    let text;
+    if (contentBase64 != null) {
+      target = this.#targetPath(relPath || name || '');
+      text = decodePlanContent(contentBase64);
+    } else {
+      target = this.#relativePath(task, relPath);
+      const file = await this.#plans(task).read(target);
+      text = file.text;
+    }
+
+    const inspection = this.#inspectText({ task, target, text });
+    const absolute = await safeTarget(task.workspacePath, target, { write: true });
+    let toWrite = text;
+    let imported = null;
+    if (!inspection.managed) {
+      if (!confirmImport) {
+        // Preview first: the operator sees the steps that would be created and only
+        // then agrees to convert the file.
+        return { status: await this.status(task.id), needsConfirmation: true, inspection };
+      }
+      const preview = proposeImport(text, { planId: this.#planIdFor(target) });
+      if (!preview.content) {
+        throw reject('PLAN_INVALID', 'Из этого файла не получилось собрать план.', preview.problems);
+      }
+      toWrite = preview.content;
+      imported = { steps: preview.plan.steps.length, unmapped: preview.unmapped.length };
+    }
+
+    // A file that already lives in the project is converted in place — the operator
+    // just confirmed exactly that. A file from the device must not replace a
+    // different project file without a second, explicit confirmation.
+    const fromDevice = contentBase64 != null;
+    const exists = await fs.stat(absolute).then(stat => stat.isFile(), () => false);
+    if (fromDevice && exists && !overwrite) {
+      const current = await fs.readFile(absolute, 'utf8').catch(() => '');
+      if (planHash(current) !== planHash(toWrite)) {
+        throw reject('PLAN_FILE_EXISTS', `Файл ${target} уже есть в проекте и отличается: подтвердите перезапись.`, [target]);
+      }
+    }
+    await fs.mkdir(path.dirname(absolute), { recursive: true });
+    await writePlanAtomic({ file: absolute, text: toWrite });
+    const attached = await this.attach({ taskId: task.id, path: target, commandId, clientId });
+    if (imported) {
+      await this.#publish(task.id, 'PLAN_REVISED', `Импортировано шагов: ${imported.steps}`, { path: target, ...imported, commandId, clientId });
+    }
+    return { status: { ...attached, imported }, needsConfirmation: false };
+  }
+
+  /** Безопасное имя файла плана: только .md/.markdown, без пути и мусора. */
+  #targetPath(value) {
+    const raw = String(value || '').trim().replace(/\\/g, '/');
+    const base = raw.split('/').pop() || '';
+    const name = base.replace(/[^\w.\- ]+/g, '_');
+    if (!/\.md$/i.test(name)) throw reject('PLAN_INVALID', 'План — это файл .md или .markdown.');
+    return name;
   }
 
   async start({ taskId, expectedRevision, commandId, clientId }) {

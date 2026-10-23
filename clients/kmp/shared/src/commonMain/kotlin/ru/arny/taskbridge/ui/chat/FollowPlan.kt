@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.ui.chat
 
+import ru.arny.taskbridge.core.api.ApiError
+import ru.arny.taskbridge.core.api.ApiException
+import ru.arny.taskbridge.core.api.PlanInspection
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 
@@ -142,6 +145,97 @@ fun planIconState(status: PlanStatus?): PlanIconState {
         "COMPLETED" -> PlanIconState.COMPLETED
         else -> PlanIconState.IDLE
     }
+}
+
+/** Одна главная кнопка на состояние (UI-02 §6). */
+data class PlanPrimaryAction(val id: String, val label: String)
+
+fun planPrimaryAction(status: PlanStatus?): PlanPrimaryAction {
+    if (status?.conflict == true) return PlanPrimaryAction("reconcile", "Обновить и сверить")
+    if (status?.attached != true) return PlanPrimaryAction("pick", "Выбрать файл .md")
+    return when (status.state) {
+        "IDLE" -> PlanPrimaryAction("start", "Начать выполнение")
+        "RUNNING_STEP", "REVIEWING" -> PlanPrimaryAction("pause", "Пауза после шага")
+        "PAUSED", "PAUSED_REVIEW" -> PlanPrimaryAction("resume", "Продолжить")
+        "COMPLETED" -> PlanPrimaryAction("open", "Открыть результат")
+        else -> PlanPrimaryAction("refresh", "Проверить состояние")
+    }
+}
+
+/** Строка состояния: статус, ревизия, шаги, цикл, шаг, стадия — словами, не цветом. */
+fun planMetaLine(status: PlanStatus?): String {
+    if (status?.attached != true) return ""
+    val parts = mutableListOf<String>()
+    parts += PLAN_STATE_LABELS[status.state] ?: status.state
+    status.revision?.let { parts += "revision $it" }
+    status.progress?.let { parts += "шагов ${it.done}/${it.total}" }
+    status.cycleNumber?.let { parts += "цикл $it" }
+    status.stepId?.let { parts += "шаг $it" }
+    // Стадия сессии важна только пока план её ведёт: у idle-плана «ответ идёт»
+    // (чужой ход той же сессии) читается как неправда.
+    if (status.state == "RUNNING_STEP" || status.state == "REVIEWING") {
+        status.stage?.let { parts += (PLAN_STAGE_LABELS[it] ?: it) }
+    }
+    return parts.joinToString(" • ")
+}
+
+val PLAN_STAGE_LABELS: Map<String, String> = mapOf(
+    "RUNNING" to "Pi работает",
+    "DISPATCHING" to "Pi работает",
+    "ACKED" to "запрос принят",
+    "PROGRESS" to "ответ идёт",
+    "SETTLED" to "ход завершён",
+    "SUCCEEDED" to "готово",
+    "FAILED" to "ошибка хода",
+    "CANCELLED" to "отменено",
+)
+
+data class PlanCurrentStep(val id: String, val title: String, val status: String, val result: String)
+
+fun planCurrentStep(status: PlanStatus?): PlanCurrentStep? {
+    val steps = status?.steps.orEmpty()
+    val current = steps.firstOrNull { it.id == status?.stepId }
+        ?: steps.firstOrNull { it.status == "IN_PROGRESS" || it.status == "BLOCKED" }
+        ?: steps.firstOrNull { it.status == "TODO" }
+        ?: steps.lastOrNull()
+        ?: return null
+    return PlanCurrentStep(current.id, current.title.orEmpty(), current.status, current.result.orEmpty())
+}
+
+/** Ошибка — словами и с лечением, а не общее «не удалось выполнить действие». */
+fun planErrorText(code: String?, message: String?): String {
+    val detail = message.orEmpty().replace(Regex("^[A-Z_]+:[ ]*"), "")
+    return when (code) {
+        "PLAN_INVALID" -> "Файл не соответствует формату плана. $detail".trim()
+        "PLAN_REVISION_CONFLICT" -> "Файл плана изменён вне TaskBridge: сверьте версии и примите файл с диска. $detail".trim()
+        "PLAN_UNKNOWN_OUTCOME" -> "Неизвестно, чем закончился прошлый ход: автоматический повтор запрещён. Проверьте состояние. $detail".trim()
+        "PLAN_BUDGET_EXCEEDED" -> "Достигнут лимит циклов или времени — нужно ваше решение. $detail".trim()
+        "FOLLOW_PLAN_DISABLED" -> "Режим «По плану» выключен в конфигурации сервера (followPlan.enabled)."
+        "PLAN_BLOCKED" -> "Выполнение остановлено: ${detail.ifBlank { "шаг заблокирован" }}"
+        "PLAN_FILE_EXISTS" -> "В проекте уже есть такой файл с другим содержимым: подтвердите перезапись. $detail".trim()
+        "PLAN_NOT_ATTACHED" -> "План не подключён. $detail".trim()
+        else -> detail.ifBlank { "Действие не выполнено." }
+    }
+}
+
+/**
+ * Код ошибки из ответа сервера, насколько его сохраняет клиент: 409 приходит с
+ * кодом (PLAN_REVISION_CONFLICT/PLAN_FILE_EXISTS/…), для остальных остаётся
+ * серверная фраза — её и показываем, а не общее «не удалось».
+ */
+fun planErrorCode(error: ApiException): String? = when (val api = error.error) {
+    is ApiError.Busy -> api.code
+    is ApiError.Forbidden -> api.code
+    else -> null
+}
+
+fun planErrorText(error: ApiException): String =
+    planErrorText(planErrorCode(error), error.error.message)
+
+fun planInspectionText(inspection: PlanInspection?): String {
+    if (inspection == null) return ""
+    if (inspection.managed) return "Управляемый план: ${inspection.steps} шаг(ов), revision ${inspection.revision ?: 0}."
+    return "Обычный Markdown: будет импортировано шагов — ${inspection.preview?.steps?.size ?: 0}. Файл не изменяется до подтверждения."
 }
 
 fun planIconTitle(status: PlanStatus?): String = when (planIconState(status)) {

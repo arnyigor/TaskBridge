@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planCardModel, planEventNotice, planFileGroups, planPathProblem, planRequestBody, planIconState, PLAN_ICON_TITLES, toggleOffAction } from './follow-plan-view.mjs';
+import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planInspectionText, planMetaLine, planPathProblem, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4124,66 +4124,123 @@ $('form').addEventListener('submit', async (e) => {
   }
 });
 
-/* ---------------- Follow Plan («По плану», FP-05C) ----------------
-   The server owns the state (src/follow-plan-service.mjs); this page only mirrors
-   it. Turning the switch on asks for a file and attaches it — it never starts a
-   turn. Turning it off during a step pauses at the safe boundary; STOP stays a
-   separate, explicit button. */
-
-function updatePlanToggle() {
-  const button = $('planToggle');
-  if (!button) return;
-  const state = planIconState(planStatus);
-  const existing = planStatus?.enabled === false;
-  // The icon is the whole indicator: colour says what the cycle is doing, the
-  // dialog says why. A switched-off mode stays visible but explains itself.
-  button.disabled = existing;
-  button.dataset.planState = existing ? 'off' : state;
-  button.setAttribute('aria-pressed', String(state !== 'off'));
-  button.title = existing
-    ? 'По плану: режим выключен в конфигурации сервера (followPlan.enabled)'
-    : `${PLAN_ICON_TITLES[state] || PLAN_ICON_TITLES.off}${planStatus?.path ? ` — ${planStatus.path}` : ''}`;
-  button.setAttribute('aria-label', button.title);
-}
-
-// The plan status is drawn inside the dialog (no card in the chat): the chat keeps
-// its space for the work itself.
-function renderPlanDialogStatus() {
-  updatePlanToggle();
-  const block = $('planStatusBlock');
-  if (!block) return;
-  const open = !$('planDialog').classList.contains('hidden');
-  const model = planCardModel(planStatus, { enabled: planStatus?.enabled !== false });
-  block.classList.toggle('hidden', !open || !model.visible);
-  if (!open || !model.visible) return;
-  $('planHeadline').textContent = model.headline;
-  $('planGoal').textContent = model.goal || '';
-  $('planFindings').textContent = model.findings || '';
-  const notice = $('planNotice');
-  const text = model.conflict || model.error || planNotice || '';
-  notice.textContent = text;
-  notice.classList.toggle('hidden', !text);
-  const actions = $('planActions');
-  actions.textContent = '';
-  for (const action of model.actions) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.textContent = action.label;
-    button.disabled = action.disabled;
-    button.title = action.title || '';
-    button.dataset.action = action.id;
-    button.onclick = () => runPlanAction(action.id, button);
-    actions.append(button);
-  }
-}
-
-const renderPlanCard = renderPlanDialogStatus;
+/* ---------------- Follow Plan (UI-02) ----------------
+   The server owns the state (src/follow-plan-service.mjs). The chat has one icon;
+   everything else — picking a file, the status, the actions and the errors — is in
+   the dialog, so the conversation keeps its space. Nothing here scans the project:
+   the file comes from the system picker or from an explicit path. */
 
 // The flag can be switched on the server while this page stays open (a restart
 // with followPlan.enabled=true). Without a re-read the icon stayed grey until the
 // operator picked another session — that is what happened on the desktop during
 // the pilot (2026-10-23).
 let planStatusTimer = null;
+let planInspection = null;
+let planPendingImport = null;
+
+function updatePlanToggle() {
+  const button = $('planToggle');
+  if (!button) return;
+  const state = planIconState(planStatus);
+  const off = planStatus?.enabled === false;
+  button.disabled = off;
+  button.dataset.planState = off ? 'off' : state;
+  // The status is never colour-only: the title and the label carry it in words.
+  const label = off
+    ? 'По плану: режим выключен в конфигурации сервера (followPlan.enabled)'
+    : `${PLAN_ICON_TITLES[state] || PLAN_ICON_TITLES.off}${planStatus?.path ? ` — ${planStatus.path}` : ''}`;
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', String(planStatus?.attached === true));
+}
+
+function renderPlanSteps() {
+  const list = $('planSteps');
+  list.textContent = '';
+  for (const step of planStatus?.steps || []) {
+    const item = document.createElement('li');
+    item.className = `planStep planStep-${String(step.status || '').toLowerCase()}`;
+    item.textContent = `${step.id} · ${step.title || ''}`;
+    item.title = step.result ? `${step.status}: ${step.result}` : String(step.status || '');
+    list.append(item);
+  }
+}
+
+function renderPlanInspector() {
+  const block = $('planStatusBlock');
+  const picker = $('planPicker');
+  const preview = $('planPreview');
+  const attached = planStatus?.attached === true;
+  block.classList.toggle('hidden', !attached);
+  $('planActions').classList.toggle('hidden', !attached);
+  picker.classList.toggle('hidden', attached);
+  preview.classList.toggle('hidden', !planInspection || planInspection.managed || attached);
+
+  if (!attached) {
+    $('planPickError').textContent = planNotice || '';
+    $('planDetach').classList.add('hidden');
+    return;
+  }
+
+  const progress = planStatus.progress || { done: 0, total: 0 };
+  const percent = progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+  $('planFileName').textContent = (planStatus.path || 'PLAN.md').split('/').pop();
+  $('planFilePath').textContent = planStatus.path || '';
+  $('planMeta').textContent = planMetaLine(planStatus);
+  const bar = $('planProgressBar');
+  bar.style.width = `${percent}%`;
+  bar.parentElement.setAttribute('aria-valuenow', String(percent));
+
+  const current = planCurrentStep(planStatus);
+  $('planCurrent').classList.toggle('hidden', !current);
+  if (current) {
+    $('planStepTitle').textContent = `${current.id} · ${current.title}`;
+    $('planStepStatus').textContent = current.status || '';
+    $('planStepResult').textContent = current.result || '';
+    $('planStepResult').classList.toggle('hidden', !current.result);
+  }
+  renderPlanSteps();
+
+  const findings = planFindingsSummary(planStatus);
+  $('planFindingsSummary').textContent = findings.blocking || findings.notes
+    ? `Находки: требуют решения ${findings.blocking}, записей ${findings.notes}`
+    : 'Находок нет';
+  const box = $('planFindings');
+  box.textContent = '';
+  for (const finding of findings.items) {
+    const row = document.createElement('div');
+    row.textContent = `${finding.priority} · ${finding.summary}`;
+    box.append(row);
+  }
+  if (!findings.items.length) $('planFindingsDetails').open = false;
+
+  const notice = $('planNotice');
+  const text = planStatus.conflict
+    ? 'Файл плана изменён вне TaskBridge: сверьте версии и примите файл с диска.'
+    : planStatus.fileError ? planErrorText(planStatus.fileError)
+      : planNotice || '';
+  notice.textContent = text;
+  notice.classList.toggle('hidden', !text);
+
+  const actions = $('planActions');
+  actions.textContent = '';
+  const primary = planPrimaryAction(planStatus);
+  for (const action of planActions(planStatus)) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.id === primary.id ? primary.label : action.label;
+    button.className = action.id === primary.id ? 'primary' : '';
+    button.disabled = action.disabled;
+    button.title = action.title || '';
+    button.dataset.action = action.id;
+    button.onclick = () => runPlanAction(action.id, button);
+    actions.append(button);
+  }
+  $('planDetach').classList.toggle('hidden', false);
+  $('planDetach').disabled = !(planStatus?.enabled !== false);
+}
+
+const renderPlanCard = () => { updatePlanToggle(); if (!$('planDialog').classList.contains('hidden')) renderPlanInspector(); };
 
 function schedulePlanStatusRefresh() {
   if (planStatusTimer) { clearTimeout(planStatusTimer); planStatusTimer = null; }
@@ -4203,9 +4260,6 @@ async function loadPlanStatus() {
     if (id !== selectedTaskId) return null;
     planStatus = status;
     schedulePlanStatusRefresh();
-    // The switch follows the server: an attached plan is the mode, a session
-    // without one is not (and its card stays out of the chat).
-    if (status.attached) planMode = true;
     renderPlanCard();
     return status;
   } catch (error) {
@@ -4216,161 +4270,184 @@ async function loadPlanStatus() {
   }
 }
 
+function openPlanDialog() {
+  if (!selectedTaskId) return;
+  planNotice = '';
+  planInspection = null;
+  planPendingImport = null;
+  planOverwrite = false;
+  $('planPreviewConfirm').textContent = 'Импортировать и подключить';
+  $('planPathRow').classList.add('hidden');
+  $('planPickError').textContent = '';
+  $('planPreviewError').textContent = '';
+  $('planFileInput').value = '';
+  $('planDialog').classList.remove('hidden');
+  renderPlanCard();
+  const primary = planPrimaryAction(planStatus);
+  const target = planStatus?.attached ? $(`#planActions button[data-action="${primary.id}"]`) : $('planPickFile');
+  target?.focus?.();
+}
+
+function closePlanDialog() {
+  $('planDialog').classList.add('hidden');
+}
+
+async function planSend(action, extra = {}) {
+  const id = selectedTaskId;
+  return commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/${action}`, planRequestBody(planStatus, extra));
+}
+
+async function planInspect(payload) {
+  const id = selectedTaskId;
+  return api(`/api/tasks/${encodeURIComponent(id)}/plan/inspect`, { method: 'POST', body: payload });
+}
+
+async function planImport(payload) {
+  const id = selectedTaskId;
+  return commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/import`, { ...planRequestBody(planStatus), ...payload });
+}
+
+/** A file chosen in the system picker: preview first, then write into the project. */
+async function pickPlanFile(file) {
+  if (!file) return;
+  if (!/\.md$/i.test(file.name) && !/\.markdown$/i.test(file.name)) {
+    $('planPickError').textContent = 'План — это файл .md или .markdown.';
+    return;
+  }
+  const base64 = await readFileAsBase64(file);
+  await inspectAndMaybeImport({ name: file.name, contentBase64: base64 });
+}
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Файл не прочитан'));
+    reader.onload = () => resolve(String(reader.result || '').replace(/^data:[^;]+;base64,/, ''));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function inspectAndMaybeImport(payload) {
+  $('planPickError').textContent = '';
+  $('planPreviewError').textContent = '';
+  try {
+    const inspection = await planInspect(payload);
+    planInspection = inspection;
+    planPendingImport = payload;
+    if (inspection.managed) {
+      const result = await planImport(payload);
+      planStatus = result.status;
+      planInspection = null;
+      planPendingImport = null;
+      planNotice = '';
+      renderPlanCard();
+      return;
+    }
+    $('planPreviewText').textContent = planInspectionText(inspection);
+    renderPlanCard();
+  } catch (error) {
+    planNotice = planErrorText(error);
+    $('planPickError').textContent = planNotice;
+    renderPlanCard();
+  }
+}
+
 async function runPlanAction(action, button = null) {
   const id = selectedTaskId;
   if (!id) return;
+  if (action === 'pick') { $('planFileInput').click(); return; }
+  if (action === 'refresh') { await loadPlanStatus(); return; }
   if (action === 'open' || action === 'edit') {
     if (!planStatus?.path) return;
     const url = `/api/tasks/${encodeURIComponent(id)}/workspace-file?path=${encodeURIComponent(planStatus.path)}`;
     openFileViewer({ url, name: planStatus.path, downloadUrl: `${url}&download=1` });
-    if (action === 'edit') planNotice = 'Правьте файл в проекте — карточка перечитает его версию';
     return;
   }
+  if (action === 'stop' && !confirm('Остановить текущий ход? План останется подключённым и потребует разбора.')) return;
   if (button) button.disabled = true;
   try {
-    if (action === 'start') {
-      // After a pause the operator continues an existing cycle; a fresh plan is
-      // started. Both carry the revision the card shows (CAS).
-      const paused = ['PAUSED', 'PAUSED_REVIEW'].includes(planStatus?.state);
-      await planSend(paused ? 'resume' : 'start');
-    } else if (action === 'pause') {
-      await planSend('pause');
-    } else if (action === 'stop') {
-      await planSend('stop');
-    } else if (action === 'reconcile') {
-      await planSend('reconcile', { action: 'adopt_external' });
-    }
+    if (action === 'start') await planSend('start');
+    else if (action === 'resume') await planSend('resume');
+    else if (action === 'pause') await planSend('pause');
+    else if (action === 'stop') await planSend('stop');
+    else if (action === 'reconcile') await planSend('reconcile', { action: 'adopt_external' });
     planNotice = '';
   } catch (error) {
-    planNotice = error.message;
+    planNotice = planErrorText(error);
   } finally {
     if (button) button.disabled = false;
     await loadPlanStatus();
   }
 }
 
-async function planSend(action, extra = {}) {
+async function detachPlan() {
   const id = selectedTaskId;
-  const path = `/api/tasks/${encodeURIComponent(id)}/plan/${action}`;
-  return commandApi(path, planRequestBody(planStatus, extra));
-}
-
-// The plan file is picked from the project, not typed from memory: the list is
-// the Markdown files the server reports for this workspace. The text field stays
-// for a file the listing does not reach (deep folder, listing cap).
-async function openPlanDialog() {
-  const id = selectedTaskId;
-  if (!id) return;
-  if (planStatus?.enabled === false) return;
-  $('planPathError').textContent = '';
-  $('planPath').value = planStatus?.path || '';
-  $('planDetach').classList.toggle('hidden', !planStatus?.attached);
-  $('planFiles').textContent = 'Загрузка списка…';
-  $('planDialog').classList.remove('hidden');
-  renderPlanDialogStatus();
+  if (!id || !planStatus?.attached) return;
+  if (!confirm('Отключить план? Файл останется на месте, режим следования выключится.')) return;
   try {
-    const listing = await api(`/api/tasks/${encodeURIComponent(id)}/workspace-files`);
-    if (id !== selectedTaskId) return;
-    const groups = planFileGroups(listing);
-    const box = $('planFiles');
-    box.textContent = '';
-    // Which folder this is matters on a phone: the same file name can exist in
-    // two places, and the project folder is the only context the operator has.
-    $('planProjectPath').textContent = currentTask?.workspacePath
-      ? `Папка проекта: ${currentTask.workspacePath}`
-      : '';
-    if (!groups.length) {
-      box.textContent = 'В проекте нет Markdown-файлов — укажите путь вручную.';
-      $('planPath').focus();
-      return;
-    }
-    for (const group of groups) {
-      const section = document.createElement('div');
-      section.className = 'planFileGroup';
-      const heading = document.createElement('div');
-      heading.className = 'planFileFolder';
-      heading.textContent = group.folder ? `${group.folder}/` : 'корень проекта';
-      section.append(heading);
-      for (const file of group.files) {
-        const item = document.createElement('button');
-        item.type = 'button';
-        item.className = 'planFileChoice';
-        item.textContent = file.name;
-        item.title = `Подключить ${file.path}`;
-        item.dataset.path = file.path;
-        item.onclick = () => { $('planPath').value = file.path; $('planAttach').click(); };
-        section.append(item);
-      }
-      box.append(section);
-    }
+    await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/detach`, {});
+    planNotice = '';
   } catch (error) {
-    $('planFiles').textContent = `Список не получен: ${error.message}`;
-    $('planPath').focus();
-  }
-}
-
-$('planToggle').onclick = async () => {
-  if (!selectedTaskId) return;
-  if (planStatus?.enabled === false) return;
-  if (!planStatus?.attached) {
-    await openPlanDialog();
-    return;
-  }
-  if (planMode) {
-    // Off means "no further steps", not "kill this one".
-    if (toggleOffAction(planStatus) === 'pause') {
-      try { await planSend('pause'); } catch (error) { planNotice = error.message; }
-    }
-    planMode = false;
-  } else {
-    planMode = true;
+    planNotice = planErrorText(error);
   }
   await loadPlanStatus();
+}
+
+$('planToggle').onclick = () => openPlanDialog();
+$('planDialogClose').onclick = closePlanDialog;
+$('planDialogDone').onclick = closePlanDialog;
+$('planDetach').onclick = detachPlan;
+$('planPickFile').onclick = () => $('planFileInput').click();
+$('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
+$('planPathToggle').onclick = () => {
+  $('planPathRow').classList.toggle('hidden');
+  if (!$('planPathRow').classList.contains('hidden')) $('planPathInput').focus();
 };
+$('planPathAttach').onclick = async () => {
+  const value = $('planPathInput').value.trim();
+  const problem = planPathProblem(value);
+  $('planPickError').textContent = problem || '';
+  if (problem) return;
+  await inspectAndMaybeImport({ path: value });
+};
+$('planPreviewCancel').onclick = () => {
+  planInspection = null;
+  planPendingImport = null;
+  renderPlanCard();
+};
+// The second click writes over a project file that already exists: never silently.
+let planOverwrite = false;
+
+$('planPreviewConfirm').onclick = async () => {
+  if (!planPendingImport) return;
+  try {
+    const result = await planImport({ ...planPendingImport, confirmImport: true, overwrite: planOverwrite });
+    planStatus = result.status;
+    planNotice = '';
+  } catch (error) {
+    $('planPreviewError').textContent = planErrorText(error);
+    if (error.code === 'PLAN_FILE_EXISTS') {
+      planOverwrite = true;
+      $('planPreviewConfirm').textContent = 'Перезаписать и подключить';
+    }
+    return;
+  }
+  planInspection = null;
+  planPendingImport = null;
+  planOverwrite = false;
+  $('planPreviewConfirm').textContent = 'Импортировать и подключить';
+  renderPlanCard();
+};
+
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if (!$('planDialog').classList.contains('hidden')) closePlanDialog();
+});
 
 window.addEventListener('focus', () => { if (selectedTaskId) loadPlanStatus(); });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && selectedTaskId) loadPlanStatus();
 });
-
-async function detachPlan() {
-  const id = selectedTaskId;
-  if (!id || !planStatus?.attached) return;
-  try {
-    await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/detach`, {});
-    planMode = false;
-    planNotice = '';
-  } catch (error) {
-    planNotice = error.message;
-  }
-  $('planDialog').classList.add('hidden');
-  await loadPlanStatus();
-}
-
-$('planDetach').onclick = detachPlan;
-
-$('planDialogClose').onclick = () => $('planDialog').classList.add('hidden');
-$('planAttach').onclick = async () => {
-  const id = selectedTaskId;
-  if (!id) return;
-  const value = $('planPath').value;
-  const problem = planPathProblem(value);
-  $('planPathError').textContent = problem || '';
-  if (problem) return;
-  const button = $('planAttach');
-  button.disabled = true;
-  try {
-    await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/attach`, { path: value.trim() });
-    planMode = true;
-    planNotice = '';
-    $('planDialog').classList.add('hidden');
-  } catch (error) {
-    $('planPathError').textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-  await loadPlanStatus();
-};
 
 $('newTaskButton').onclick = () => {
   $('controlsSpoiler').open = false;

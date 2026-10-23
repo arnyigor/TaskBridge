@@ -375,33 +375,77 @@
 
       <div id="approvalBanner" class="approvalBanner hidden" aria-live="polite"></div>
 
-      <!-- Первое включение переключателя: путь к файлу внутри проекта. -->
+      <!-- Следование плану (UI-02): без сканирования проекта. Файл выбирается
+           системным диалогом или явным путём в проекте; подключение не запускает
+           выполнение, а управление собрано здесь, а не в чате. -->
       <div id="planDialog" class="authGate hidden">
-        <div class="authCard">
+        <div class="authCard planDialog" role="dialog" aria-modal="true" aria-labelledby="planDialogTitle">
           <div class="dialogHeader">
-            <h2>План для режима «По плану»</h2>
+            <h2 id="planDialogTitle">Следование плану</h2>
             <button id="planDialogClose" type="button" class="iconButton" title="Закрыть" aria-label="Закрыть">✕</button>
           </div>
-          <!-- Статус следования плану живёт здесь, а не в чате: чат — про работу,
-               план — про настройку режима. -->
+
+          <!-- План подключён: статус, шаги, находки и действия. -->
           <div id="planStatusBlock" class="planStatusBlock hidden">
-            <b id="planHeadline"></b>
-            <div id="planGoal" class="muted small"></div>
-            <div id="planFindings" class="small"></div>
-            <div id="planNotice" class="planNotice small hidden"></div>
-            <div id="planActions" class="planActions"></div>
+            <div class="planFileRow">
+              <b id="planFileName"></b>
+              <span id="planFilePath" class="muted small"></span>
+            </div>
+            <div id="planMeta" class="planMeta small muted"></div>
+            <div class="planProgress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="planProgressBar"></span>
+            </div>
+            <div id="planCurrent" class="planCurrent">
+              <b id="planStepTitle"></b>
+              <span id="planStepStatus" class="planStepStatus small"></span>
+              <div id="planStepResult" class="muted small"></div>
+            </div>
+            <details id="planStepsDetails" class="planDetails">
+              <summary>Все шаги</summary>
+              <ol id="planSteps" class="planSteps"></ol>
+            </details>
+            <details id="planFindingsDetails" class="planDetails">
+              <summary id="planFindingsSummary">Находки</summary>
+              <div id="planFindings" class="planFindings small"></div>
+            </details>
+            <div id="planNotice" class="planNotice small hidden" role="alert"></div>
           </div>
-          <p class="muted small">Файл внутри проекта. Управляемый Markdown с шагами <code>S-001</code>: свободный
-            текст импортируется только предпросмотром и не перезаписывается.</p>
-          <!-- Файл выбирается из проекта: путь руками — только для того, чего нет в списке. -->
-          <div id="planProjectPath" class="planProjectPath small muted"></div>
-          <div id="planFiles" class="planFiles">Загрузка списка…</div>
-          <label class="planPathField">Путь: <input id="planPath" type="text" placeholder="docs/PLAN.md" /></label>
-          <div id="planPathError" class="planPathError small" role="alert"></div>
-          <div class="planDialogActions">
-            <button id="planDetach" type="button" class="secondary hidden">Убрать план</button>
-            <button id="planAttach" type="button">Подключить</button>
+
+          <!-- Плана нет: выбор файла системным диалогом или явным путём. -->
+          <div id="planPicker" class="planPicker">
+            <p class="muted small">TaskBridge ведёт шаги одного Markdown-файла: после каждого хода
+              проверяет файл и подтверждения и только потом отправляет следующий шаг.
+              Подключение не запускает выполнение.</p>
+            <button id="planPickFile" type="button" class="primary planPick">Выбрать файл .md</button>
+            <input id="planFileInput" type="file" accept=".md,.markdown,text/markdown" class="hidden" />
+            <button id="planPathToggle" type="button" class="link planPathToggle">Указать путь в проекте</button>
+            <div id="planPathRow" class="planPathRow hidden">
+              <input id="planPathInput" type="text" placeholder="docs/PLAN.md" aria-label="Путь к файлу плана в проекте" />
+              <button id="planPathAttach" type="button">Подключить</button>
+            </div>
+            <div id="planPickError" class="planPathError small" role="alert"></div>
           </div>
+
+          <!-- Предпросмотр импорта обычного Markdown: до подтверждения файл не меняется. -->
+          <div id="planPreview" class="planPreview hidden">
+            <div id="planPreviewText" class="small"></div>
+            <div id="planPreviewError" class="planPathError small" role="alert"></div>
+            <div class="planDialogActions">
+              <button id="planPreviewCancel" type="button" class="secondary">Отмена</button>
+              <button id="planPreviewConfirm" type="button" class="primary">Импортировать и подключить</button>
+            </div>
+          </div>
+
+          <!-- Действия не уезжают за прокрутку: они всегда видны внизу карточки. -->
+          <div id="planFooter" class="planFooter">
+          <div id="planActions" class="planActions hidden"></div>
+          <div id="planDialogActions" class="planDialogActions">
+            <button id="planDetach" type="button" class="secondary hidden">Отключить план</button>
+            <button id="planDialogDone" type="button">Закрыть</button>
+          </div>
+          </div>
+        </div>
+      </div>
         </div>
       </div>
 

@@ -779,6 +779,37 @@ class TaskBridgeApi(
             put("clientId", connection.clientId)
         })
 
+    /**
+     * Предпросмотр: что будет, если подключить этот файл. Ничего не пишет.
+     * [contentBase64] — файл, выбранный системным диалогом; [path] — файл проекта.
+     */
+    suspend fun inspectPlan(id: String, path: String? = null, name: String? = null, contentBase64: String? = null): PlanInspection =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/inspect", PlanInspection.serializer(), buildJsonObject {
+            path?.let { put("path", it) }
+            name?.let { put("name", it) }
+            contentBase64?.let { put("contentBase64", it) }
+        })
+
+    /** Подключить выбранный файл (записать в проект) или импортировать его после подтверждения. */
+    suspend fun importPlan(
+        id: String,
+        commandId: String,
+        path: String? = null,
+        name: String? = null,
+        contentBase64: String? = null,
+        confirmImport: Boolean = false,
+        overwrite: Boolean = false,
+    ): PlanImportResult =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/import", PlanImportResult.serializer(), buildJsonObject {
+            path?.let { put("path", it) }
+            name?.let { put("name", it) }
+            contentBase64?.let { put("contentBase64", it) }
+            put("confirmImport", confirmImport)
+            put("overwrite", overwrite)
+            put("clientId", connection.clientId)
+            put("commandId", commandId)
+        })
+
     /** Убрать план: файл остаётся на месте, режим выключается. */
     suspend fun detachPlan(id: String, commandId: String): PlanStatus =
         planCommand(id, "detach", commandId, buildJsonObject { put("clientId", connection.clientId) })

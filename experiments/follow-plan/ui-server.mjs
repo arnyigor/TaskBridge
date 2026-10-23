@@ -21,6 +21,7 @@ const repo = path.resolve(here, '..', '..');
 const disabled = process.argv.includes('--disabled');
 const out = path.join(repo, '.local', 'fp-06', disabled ? 'ui-disabled' : 'ui');
 const stateFile = path.join(out, 'server.json');
+const SHOTS = path.join(out, 'screens');
 const command = process.argv[2] || 'start';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -78,12 +79,15 @@ goal: "Приёмка интерфейса: три небольших шага"
 `;
 
 await stopSaved();
-await fs.rm(out, { recursive: true, force: true }).catch(() => {});
-const root = path.join(out, 'app');
-const dataDir = path.join(out, 'data');
-const workspace = path.join(out, 'workspace');
-const agentDir = path.join(out, 'pi-agent');
-for (const dir of [root, dataDir, workspace, agentDir]) await fs.mkdir(dir, { recursive: true });
+// Внутри out — только рабочие каталоги стенда: скрипты приёмки и скриншоты
+// лежат рядом (out/screens), и перезапуск стенда их не удаляет.
+const stand = path.join(out, 'stand');
+const root = path.join(stand, 'app');
+const dataDir = path.join(stand, 'data');
+const workspace = path.join(stand, 'workspace');
+const agentDir = path.join(stand, 'pi-agent');
+await fs.rm(stand, { recursive: true, force: true }).catch(() => {});
+for (const dir of [root, dataDir, workspace, agentDir, SHOTS]) await fs.mkdir(dir, { recursive: true });
 await fs.cp(path.join(repo, 'src'), path.join(root, 'src'), { recursive: true });
 await fs.cp(path.join(repo, 'web'), path.join(root, 'web'), { recursive: true });
 await fs.cp(path.join(repo, 'pi-extension'), path.join(root, 'pi-extension'), { recursive: true });

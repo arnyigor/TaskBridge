@@ -2037,7 +2037,7 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|inspect|import|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
@@ -2056,6 +2056,19 @@ async function handleRequest(req, res) {
       if (action === 'attach') {
         return json(res, 200, await command(() => followPlan.attach({
           taskId: planTaskId, path: body.path, commandId: body.commandId, clientId: body.clientId
+        })));
+      }
+      if (action === 'inspect') {
+        // A preview, not a command: nothing is written, so no commandId is spent on it.
+        return json(res, 200, await followPlan.inspect({
+          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null, contentBase64: body.contentBase64 ?? null
+        }));
+      }
+      if (action === 'import') {
+        return json(res, 200, await command(() => followPlan.importPlan({
+          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null,
+          contentBase64: body.contentBase64 ?? null, confirmImport: body.confirmImport === true,
+          overwrite: body.overwrite === true, commandId: body.commandId, clientId: body.clientId
         })));
       }
       if (action === 'detach') {
@@ -2674,7 +2687,7 @@ async function handleRequest(req, res) {
       // the one worth repeating later — the repeat returns the saved result.
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED',
         // Follow Plan: these are answers about the plan, not server faults.
-        'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED'].includes(error.code) ? 409
+        'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED', 'PLAN_FILE_EXISTS'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429

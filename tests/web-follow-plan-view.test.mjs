@@ -7,7 +7,8 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import {
   PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
-  planActions, planCardModel, planEventNotice, planFileChoices, planFileGroups, planHeadline, planIconState,
+  planActions, planCardModel, planCurrentStep, planErrorText, planEventNotice, planFileChoices, planFileGroups,
+  planFindingsSummary, planHeadline, planIconState, planInspectionText, planMetaLine, planPrimaryAction,
   PLAN_ICON_TITLES, planPathProblem, planToggleState,
   planRequestBody, planFindingsLine, toggleOffAction
 } from '../web/follow-plan-view.mjs';
@@ -150,22 +151,81 @@ test('plan events become one short line, and only plan events do', () => {
   assert.deepEqual([...PLAN_EVENT_TYPES].sort(), ['PLAN_ATTACHED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_PAUSED', 'PLAN_REVISED', 'PLAN_STEP_CHECKPOINT', 'PLAN_STEP_STARTED']);
 });
 
-test('the switch is an icon in the composer row, next to attach and the session menu', async () => {
+test('the dialog picks a file from the system picker or by an explicit project path', async () => {
   const html = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'index.html'), 'utf8');
   assert.match(html, /id="planToggle"[^>]*aria-label="По плану"/);
-  assert.equal(/Plan Mode/.test(html), false);
-  // Same row as the attachment button: the plan icon lives where a file is picked,
-  // not in a separate chip above the composer.
   const actions = html.slice(html.indexOf('class="composerActions"'));
-  assert.ok(actions.indexOf('id="planToggle"') < actions.indexOf('id="files"'), 'the plan icon comes before the attachment input');
-  // No card in the chat any more: the chat keeps its space for the work, the icon
-  // carries the state and the dialog carries the details.
-  assert.equal(/id="planCard"/.test(html), false);
+  assert.ok(actions.indexOf('id="planToggle"') < actions.indexOf('id="files"'), 'the plan icon sits in the composer row');
+  // UI-02: no automatic listing of the project's Markdown files any more.
+  assert.equal(/id="planFiles"/.test(html), false, 'nothing is scanned when the dialog opens');
+  assert.match(html, /id="planPickFile"[^>]*>Выбрать файл .md/);
+  assert.match(html, /id="planFileInput"[^>]*accept="\.md,\.markdown/);
+  assert.match(html, /id="planPathToggle"/, 'and an explicit path for a file already in the project');
+  assert.match(html, /id="planPathInput"/);
+  assert.match(html, /Подключение не запускает выполнение/);
   assert.match(html, /id="planStatusBlock"/, 'status lives in the dialog');
-  assert.match(html, /id="planDetach"/, 'a selected plan can be removed from the dialog');
-  // The buttons themselves are built by planActions (labels are asserted above, in
-  // one place), the page only reserves the container for them.
-  assert.match(html, /id="planActions"/);
-  assert.match(html, /id="planPath"/, 'the dialog can name a file that is not in the listing');
-  assert.match(html, /id="planFiles"/, 'and the listing itself is rendered, so nothing has to be typed');
+  assert.match(html, /id="planDetach"/, 'a selected plan can be detached from the dialog');
+  assert.match(html, /id="planSteps"/, 'the whole step list is behind a disclosure');
+  assert.match(html, /id="planFindingsSummary"/);
+  assert.match(html, /Следование плану/);
+  assert.equal(/Plan Mode/.test(html), false);
+  const source = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'app.js'), 'utf8');
+  const planSection = source.slice(source.indexOf('/* ---------------- Follow Plan (UI-02)'), source.indexOf("$('newTaskButton').onclick"));
+  assert.equal(/workspace-files/.test(planSection), false, 'opening the dialog fetches no file list');
 });
+
+test('one primary action per state, exactly as the table says', () => {
+  assert.deepEqual(planPrimaryAction({ attached: false }), { id: 'pick', label: 'Выбрать файл .md' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'IDLE' }), { id: 'start', label: 'Начать выполнение' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'RUNNING_STEP' }), { id: 'pause', label: 'Пауза после шага' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'PAUSED' }), { id: 'resume', label: 'Продолжить' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'PAUSED_REVIEW' }), { id: 'resume', label: 'Продолжить' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'IDLE', conflict: true }), { id: 'reconcile', label: 'Обновить и сверить' });
+  assert.deepEqual(planPrimaryAction({ attached: true, state: 'COMPLETED' }), { id: 'open', label: 'Открыть результат' });
+});
+
+test('the dialog states where the plan is, in words', () => {
+  const line = planMetaLine({
+    attached: true, state: 'RUNNING_STEP', revision: 3, progress: { done: 1, total: 3 },
+    cycleNumber: 2, stepId: 'S-002', stage: 'PROGRESS'
+  });
+  assert.equal(line, 'выполняется шаг • revision 3 • шагов 1/3 • цикл 2 • шаг S-002 • ответ идёт');
+  assert.equal(planMetaLine({ attached: false }), '');
+
+  const step = planCurrentStep({
+    attached: true, stepId: 'S-002',
+    steps: [
+      { id: 'S-001', status: 'DONE', title: 'Первый', result: 'тесты зелёные' },
+      { id: 'S-002', status: 'IN_PROGRESS', title: 'Второй', result: '' }
+    ]
+  });
+  assert.deepEqual(step, { id: 'S-002', title: 'Второй', status: 'IN_PROGRESS', result: '' });
+
+  const findings = planFindingsSummary({
+    findings: [
+      { id: 'F-1', priority: 'P1', state: 'OPEN', summary: 'дубли' },
+      { id: 'F-2', priority: 'P3', state: 'OPEN', summary: 'кнопка' },
+      { id: 'F-3', priority: 'P0', state: 'DONE', summary: 'закрыто' }
+    ]
+  });
+  assert.equal(findings.blocking, 1);
+  assert.equal(findings.notes, 1);
+});
+
+test('errors name the problem and the fix, not a generic failure', () => {
+  assert.match(planErrorText({ code: 'PLAN_INVALID', message: 'шаг S-002: неизвестный статус' }), /формату плана/);
+  assert.match(planErrorText({ code: 'PLAN_REVISION_CONFLICT' }), /изменён вне TaskBridge/);
+  assert.match(planErrorText({ code: 'PLAN_UNKNOWN_OUTCOME' }), /автоматический повтор запрещён/);
+  assert.match(planErrorText({ code: 'PLAN_BUDGET_EXCEEDED' }), /лимит/);
+  assert.match(planErrorText({ code: 'FOLLOW_PLAN_DISABLED' }), /followPlan\.enabled/);
+  assert.match(planErrorText({ code: 'PLAN_FILE_EXISTS' }), /перезапись/);
+  assert.match(planErrorText({ code: 'PLAN_BLOCKED', message: 'шаг S-003' }), /шаг S-003/);
+  assert.equal(planErrorText('что-то пошло не так'), 'что-то пошло не так');
+});
+
+test('the inspection tells managed from free-form before anything is written', () => {
+  assert.match(planInspectionText({ managed: true, steps: 3, revision: 2 }), /Управляемый план: 3 шаг\(ов\), revision 2/);
+  assert.match(planInspectionText({ managed: false, preview: { steps: [{}, {}] } }), /будет импортировано шагов — 2/);
+  assert.match(planInspectionText({ managed: false, preview: { steps: [] } }), /Файл не изменяется до подтверждения/);
+});
+

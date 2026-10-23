@@ -110,6 +110,33 @@ class FollowPlanTest {
     }
 
     @Test
+    fun `UI-02 one primary action per state, and the dialog states the plan in words`() {
+        assertEquals("Выбрать файл .md", planPrimaryAction(PlanStatus(attached = false)).label)
+        assertEquals("Начать выполнение", planPrimaryAction(PlanStatus(attached = true, state = "IDLE")).label)
+        assertEquals("Пауза после шага", planPrimaryAction(PlanStatus(attached = true, state = "RUNNING_STEP")).label)
+        assertEquals("Продолжить", planPrimaryAction(PlanStatus(attached = true, state = "PAUSED")).label)
+        assertEquals("Обновить и сверить", planPrimaryAction(PlanStatus(attached = true, state = "IDLE", conflict = true)).label)
+        assertEquals("Открыть результат", planPrimaryAction(PlanStatus(attached = true, state = "COMPLETED")).label)
+
+        val meta = planMetaLine(
+            PlanStatus(
+                attached = true, state = "RUNNING_STEP", revision = 3, cycleNumber = 2,
+                stepId = "S-002", stage = "PROGRESS", progress = PlanProgress(done = 1, total = 3),
+            )
+        )
+        assertEquals("выполняется шаг • revision 3 • шагов 1/3 • цикл 2 • шаг S-002 • ответ идёт", meta)
+        assertEquals("", planMetaLine(PlanStatus(attached = false)))
+    }
+
+    @Test
+    fun `UI-02 errors are named, not generalised`() {
+        assertTrue(planErrorText("PLAN_REVISION_CONFLICT", "PLAN_REVISION_CONFLICT: файл изменён").contains("изменён вне TaskBridge"))
+        assertTrue(planErrorText("PLAN_UNKNOWN_OUTCOME", null).contains("автоматический повтор запрещён"))
+        assertTrue(planErrorText("FOLLOW_PLAN_DISABLED", null).contains("followPlan.enabled"))
+        assertTrue(planErrorText(null, "PLAN_INVALID: шаг S-002").let { it.contains("шаг S-002") && !it.startsWith("PLAN_INVALID") })
+    }
+
+    @Test
     fun `the icon itself carries the state`() {
         assertEquals(PlanIconState.OFF, planIconState(null))
         assertEquals(PlanIconState.OFF, planIconState(PlanStatus(attached = false, enabled = true)))

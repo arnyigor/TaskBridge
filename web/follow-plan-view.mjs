@@ -202,6 +202,112 @@ export function planRequestBody(status, extra = {}) {
   };
 }
 
+const STAGE_LABELS = Object.freeze({
+  RUNNING: 'Pi работает',
+  DISPATCHING: 'Pi работает',
+  ACKED: 'запрос принят',
+  PROGRESS: 'ответ идёт',
+  SETTLED: 'ход завершён',
+  PAUSED: 'пауза',
+  SUCCEEDED: 'готово',
+  FAILED: 'ошибка хода',
+  CANCELLED: 'отменено'
+});
+
+/** Одно главное действие на состояние (UI-02 §6). */
+export function planPrimaryAction(status) {
+  const state = status?.attached === true ? status.state : 'NOT_ATTACHED';
+  if (status?.conflict) return { id: 'reconcile', label: 'Обновить и сверить' };
+  switch (state) {
+    case 'NOT_ATTACHED': return { id: 'pick', label: 'Выбрать файл .md' };
+    case 'IDLE': return { id: 'start', label: 'Начать выполнение' };
+    case 'RUNNING_STEP':
+    case 'REVIEWING': return { id: 'pause', label: 'Пауза после шага' };
+    case 'PAUSED': return { id: 'resume', label: 'Продолжить' };
+    case 'PAUSED_REVIEW': return { id: 'resume', label: 'Продолжить' };
+    case 'COMPLETED': return { id: 'open', label: 'Открыть результат' };
+    default: return { id: 'refresh', label: 'Проверить состояние' };
+  }
+}
+
+/** Строка состояния в диалоге: статус, ревизия, шаги, цикл, шаг, стадия. */
+export function planMetaLine(status) {
+  if (!status || status.attached !== true) return '';
+  const parts = [];
+  parts.push(PLAN_STATE_LABELS[status.state] || status.state || '—');
+  if (Number.isInteger(status.revision)) parts.push(`revision ${status.revision}`);
+  if (status.progress) parts.push(`шагов ${status.progress.done}/${status.progress.total}`);
+  if (status.cycleNumber) parts.push(`цикл ${status.cycleNumber}`);
+  if (status.stepId) parts.push(`шаг ${status.stepId}`);
+  // The session stage matters only while this plan drives it: on an idle plan
+  // «ответ идёт» (another turn of the same session) reads like a lie.
+  if (status.stage && (status.state === 'RUNNING_STEP' || status.state === 'REVIEWING')) {
+    parts.push(STAGE_LABELS[status.stage] || String(status.stage));
+  }
+  return parts.join(' • ');
+}
+
+/** Текущий шаг: название, статус и последнее подтверждённое подтверждение. */
+export function planCurrentStep(status) {
+  const steps = Array.isArray(status?.steps) ? status.steps : [];
+  const current = steps.find(step => step.id === status?.stepId)
+    || steps.find(step => step.status === 'IN_PROGRESS' || step.status === 'BLOCKED')
+    || steps.find(step => step.status === 'TODO')
+    || steps[steps.length - 1];
+  if (!current) return null;
+  return { id: current.id, title: current.title || '', status: current.status, result: current.result || '' };
+}
+
+/** Находки: сколько требующих решения и сколько просто записей. */
+export function planFindingsSummary(status) {
+  const findings = Array.isArray(status?.findings) ? status.findings : [];
+  const open = findings.filter(finding => finding.state === 'OPEN');
+  return {
+    blocking: open.filter(finding => finding.priority === 'P0' || finding.priority === 'P1').length,
+    notes: open.filter(finding => finding.priority === 'P2' || finding.priority === 'P3').length,
+    items: open
+  };
+}
+
+/** Ошибка — словами и с лечением, а не общее «не удалось выполнить действие». */
+export function planErrorText(error) {
+  // A plain string is already the server's sentence: show it as it is, without the
+  // transport's "CODE: " prefix (the reason is named below anyway).
+  if (typeof error === 'string') return error.replace(/^[A-Z_]+:\s*/, '');
+  const code = error?.code || null;
+  const detail = String(error?.message || '').replace(/^[A-Z_]+:\s*/, '');
+  switch (code) {
+    case 'PLAN_INVALID':
+      return `Файл не соответствует формату плана. ${detail}`.trim();
+    case 'PLAN_REVISION_CONFLICT':
+      return `Файл плана изменён вне TaskBridge. Сверьте версии и примите файл с диска. ${detail}`.trim();
+    case 'PLAN_UNKNOWN_OUTCOME':
+      return `Неизвестно, чем закончился прошлый ход: автоматический повтор запрещён. Проверьте состояние. ${detail}`.trim();
+    case 'PLAN_BUDGET_EXCEEDED':
+      return `Достигнут лимит автоматических циклов или времени — нужно ваше решение. ${detail}`.trim();
+    case 'FOLLOW_PLAN_DISABLED':
+      return 'Режим «По плану» выключен в конфигурации сервера (followPlan.enabled).';
+    case 'PLAN_BLOCKED':
+      return `Выполнение остановлено: ${detail || 'шаг заблокирован'}`;
+    case 'PLAN_FILE_EXISTS':
+      return `В проекте уже есть такой файл с другим содержимым. Подтвердите перезапись. ${detail}`.trim();
+    case 'PLAN_NOT_ATTACHED':
+      return `План не подключён. ${detail}`.trim();
+    default:
+      return detail || 'Действие не выполнено.';
+  }
+}
+
+/** Что показывать после проверки выбранного файла. */
+export function planInspectionText(inspection) {
+  if (!inspection) return '';
+  if (inspection.managed) {
+    return `Управляемый план: ${inspection.steps} шаг(ов), revision ${inspection.revision}.`;
+  }
+  const steps = inspection.preview?.steps?.length || 0;
+  return `Обычный Markdown: будет импортировано шагов — ${steps}. Файл не изменяется до подтверждения.`;
+}
+
 const NOTICES = {
   PLAN_ATTACHED: 'План подключён',
   PLAN_STEP_STARTED: 'Шаг отправлен',
