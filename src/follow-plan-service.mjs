@@ -74,6 +74,14 @@ export class FollowPlanService {
     // Last checkpoint per task, for the card: it is a fact of THIS process (the
     // durable part is the file and the binding), so it is not persisted twice.
     this.checkpoints = new Map();
+    // The next hop is prepared at settle and sent only after the turn's terminal
+    // event is durable (FP-UX-02E). Runtime-only: a restart loses it and the cycle
+    // stays in REVIEWING, which recovery turns into «разбор», never a replay.
+    this.pendingDispatches = new Map();
+    // Which turn each task has already settled: a duplicated `agent_settled` of the
+    // same command must not be read as «a turn without a checkpoint» (that once sent
+    // an audit turn for a checkpoint that had already arrived).
+    this.settledTurns = new Map();
     this.limits = config.followPlan?.limits || {};
   }
 
@@ -166,6 +174,7 @@ export class FollowPlanService {
       goal: null,
       progress: null,
       steps: [],
+      file: null,
       findings: []
     };
     if (!binding?.path) return status;
@@ -189,6 +198,24 @@ export class FollowPlanService {
       }));
       status.findings = file.plan.findings.map(finding => ({ id: finding.id, priority: finding.priority, state: finding.state, summary: finding.summary }));
       status.conflict = file.hash !== binding.hash || file.plan.revision !== binding.revision;
+      // The file has a state of its own, and it decides what the operator sees:
+      // a plan whose steps are all DONE is finished even if the cycle is not
+      // running any more (re-attached file, restart). Reported apart from the
+      // binding and the running cycle, so the UI can tell them apart.
+      const blocking = file.plan.findings.filter(finding => finding.state === 'OPEN' && (finding.priority === 'P0' || finding.priority === 'P1'));
+      const open = file.plan.steps.filter(step => step.status === 'TODO' || step.status === 'IN_PROGRESS' || step.status === 'BLOCKED');
+      status.file = {
+        open: open.length,
+        blocking: blocking.length,
+        revision: file.plan.revision,
+        // «Выполнен» — это про файл, а не про то, что цикл где-то работает.
+        complete: open.length === 0 && blocking.length === 0 && file.plan.steps.length > 0
+      };
+      // Effective state for the dialog: an active cycle always wins, otherwise a
+      // finished file reads as finished, not as «готов к запуску».
+      const active = binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING' || binding.state === 'PAUSED';
+      if (!active && status.file.complete) status.state = 'COMPLETED';
+      else if (!active && binding.state === 'COMPLETED' && !status.file.complete) status.state = 'PAUSED_REVIEW';
     } catch (error) {
       // A file that no longer parses must be visible in the card, not hidden
       // behind a 500: the operator has to see what to fix.
@@ -447,6 +474,7 @@ export class FollowPlanService {
     // STOP stays available even with the flag off: an operator must always be
     // able to end a cycle that is already running.
     const task = this.#task(taskId);
+    this.pendingDispatches.delete(task.id);
     const result = await this.#follower(task).stop({ taskId: task.id });
     await this.#report(task.id, result, { commandId, clientId });
     return this.status(task.id);
@@ -489,6 +517,8 @@ export class FollowPlanService {
       const paused = this.#follower(task).pause({ taskId: task.id });
       await this.#report(task.id, paused, { commandId, clientId, reason: 'detach' });
     }
+    this.pendingDispatches.delete(task.id);
+    this.settledTurns.delete(task.id);
     this.store.deletePlanBinding(task.id);
     this.checkpoints.delete(task.id);
     await this.#publish(task.id, 'PLAN_DETACHED', `План отключён: ${binding.path}`, { path: binding.path, commandId, clientId });
@@ -538,6 +568,10 @@ export class FollowPlanService {
       await this.#publish(task.id, 'PLAN_PAUSED', 'Ход отменён: разбор результата', { reason: 'aborted', commandId });
       return { code: 'IGNORED', reason: 'aborted turn' };
     }
+    // One settle per command, before anything else is decided.
+    if (commandId && this.settledTurns.get(task.id) === commandId) {
+      return { code: 'IGNORED', reason: 'this turn already settled' };
+    }
     const checked = this.#checkEvidence({ taskId: task.id, checkpoint });
     if (checkpoint) {
       this.checkpoints.set(task.id, {
@@ -558,12 +592,44 @@ export class FollowPlanService {
     let result;
     try {
       result = await this.#follower(task).onSettled({
-        taskId: task.id, commandId, checkpoint: checked.checkpoint, seq: seq ?? task._turn ?? null
+        taskId: task.id, commandId, checkpoint: checked.checkpoint, seq: seq ?? task._turn ?? null,
+        deferDispatch: true
       });
     } catch (error) {
       // A failure to read/write the plan must pause the plan, not the server.
       await this.#publish(task.id, 'PLAN_PAUSED', `Ошибка плана: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' });
       this.store.savePlanBinding({ ...binding, state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null, updatedAt: new Date(this.now()).toISOString() });
+      return { code: error.code || 'INTERNAL_ERROR', message: error.message };
+    }
+    if (commandId) this.settledTurns.set(task.id, commandId);
+    if (result.code === 'DISPATCH_READY') {
+      this.pendingDispatches.set(task.id, result);
+      return result;
+    }
+    await this.#report(task.id, result, {});
+    return result;
+  }
+
+  /**
+   * The turn's terminal event is durable: now the prepared hop may go out. If the
+   * turn failed, cancelled or the plan was detached in between, nothing is sent.
+   */
+  async turnCommitted({ taskId }) {
+    const pending = this.pendingDispatches.get(String(taskId));
+    if (!pending) return { code: 'IGNORED', reason: 'no prepared hop' };
+    this.pendingDispatches.delete(String(taskId));
+    const task = this.manager.getTask(String(taskId));
+    if (!task) return { code: 'IGNORED', reason: 'task gone' };
+    const binding = this.store.getPlanBinding(task.id);
+    if (!binding?.path || !['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) {
+      return { code: 'IGNORED', reason: `state ${binding?.state || 'none'}` };
+    }
+    let result;
+    try {
+      result = await this.#follower(task).dispatchPending({ taskId: task.id, pending });
+    } catch (error) {
+      this.store.savePlanBinding({ ...binding, state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null, updatedAt: new Date(this.now()).toISOString() });
+      await this.#publish(task.id, 'PLAN_PAUSED', `Следующий шаг не отправлен: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' });
       return { code: error.code || 'INTERNAL_ERROR', message: error.message };
     }
     await this.#report(task.id, result, {});
@@ -576,6 +642,9 @@ export class FollowPlanService {
    * possible side effect.
    */
   async turnFailed({ taskId, commandId = null, reason = 'FAILED' }) {
+    // A hop prepared for a turn that never committed must not be sent later.
+    this.pendingDispatches.delete(String(taskId));
+    this.settledTurns.delete(String(taskId));
     const binding = this.store.getPlanBinding(String(taskId));
     if (!binding?.path) return { code: 'IGNORED', reason: 'plan not attached' };
     if (!['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) return { code: 'IGNORED', reason: `state ${binding.state}` };

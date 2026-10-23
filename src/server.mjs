@@ -150,7 +150,9 @@ const followPlan = new FollowPlanService({ manager, store, config });
 manager.setFollowPlanHooks({
   turnSettled: input => followPlan.turnSettled(input),
   // A failed turn (403/413/… or a cancelled one) settles nothing: the plan pauses.
-  turnFailed: input => followPlan.turnFailed(input)
+  turnFailed: input => followPlan.turnFailed(input),
+  // The next step is sent only after the previous turn's terminal event is durable.
+  turnCommitted: input => followPlan.turnCommitted(input)
 });
 if (followPlan.enabled) {
   // Nothing is re-sent after a restart: a dispatched-but-unsettled cycle pauses.

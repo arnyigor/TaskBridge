@@ -6162,6 +6162,9 @@ export class TaskManager extends EventEmitter {
         try {
           await settled;
           if (!runtime.cancelRequested && !['CANCELLED', 'FAILED'].includes(task.status)) await this.#verifyAndFinalize(task, { turn, baseline });
+          // Only now is the turn's terminal event durable: Follow Plan may send the
+          // next step. A failed finalize throws above and nothing is dispatched.
+          this.#notifyPlanCommitted(task);
         } catch (error) { await this.#fail(task, error); }
         finally {
           // A newer turn may already own the session: a follow-up accepted while
@@ -6459,6 +6462,15 @@ export class TaskManager extends EventEmitter {
     // A failed turn settles nothing: Follow Plan must pause for review instead of
     // believing its step is still running (RC-03, a permanent 413).
     this.#notifyPlanFailed(task, task.errorCode || 'FAILED');
+  }
+
+  // The turn is durably finished (TASK_SUCCEEDED written): the prepared next hop
+  // may go out. Never called on the failure path.
+  #notifyPlanCommitted(task) {
+    const hooks = this.followPlanHooks;
+    if (!hooks || typeof hooks.turnCommitted !== 'function') return;
+    Promise.resolve(hooks.turnCommitted({ taskId: task.id, commandId: this.runtimes.get(task.id)?.commandId || null }))
+      .catch(() => {});
   }
 
   // The cycle cannot continue after a turn that produced no result: the plan is

@@ -11,6 +11,7 @@ import path from 'node:path';
 import { TaskStore } from '../src/task-store.mjs';
 import { FollowPlanService } from '../src/follow-plan-service.mjs';
 import { parsePlan, planHash } from '../src/application/plan-file.mjs';
+import { planActions } from '../web/follow-plan-view.mjs';
 
 const PLAN = `---
 taskbridge_plan: 1
@@ -110,8 +111,13 @@ test('a settled turn with a valid checkpoint records the step and continues', as
       completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-1', summary: 'шаг выполнен' }]
     }
   });
-  assert.equal(result.code, 'DISPATCHED');
+  // The hop is prepared, not sent: the turn's terminal commit decides (FP-UX-02E).
+  assert.equal(result.code, 'DISPATCH_READY');
   assert.equal(result.stepId, 'S-002');
+  assert.equal(manager.dispatched.length, 1, 'ничего не отправлено до фиксации хода');
+  const committed = await service.turnCommitted({ taskId: 't-1' });
+  assert.equal(committed.code, 'DISPATCHED');
+  assert.equal(committed.stepId, 'S-002');
   const written = await readPlanFile(workspace, planPath);
   assert.equal(written.steps[0].status, 'DONE');
   assert.equal(written.steps[0].result, 'шаг выполнен');
@@ -209,6 +215,7 @@ test('two settles of one command do not start a second cycle', async t => {
     completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-1', summary: 'ok' }]
   };
   await service.turnSettled({ taskId: 't-1', commandId: first, checkpoint });
+  await service.turnCommitted({ taskId: 't-1' });
   const after = manager.dispatched.length;
   const repeat = await service.turnSettled({ taskId: 't-1', commandId: first, checkpoint });
   assert.equal(repeat.code, 'IGNORED', 'the repeated frame belongs to a command that is no longer current');
@@ -258,6 +265,29 @@ test('with the flag off the status stays readable and control is refused', async
   assert.equal(status.attached, false);
   await assert.rejects(service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd' }), error => error.code === 'FOLLOW_PLAN_DISABLED');
   assert.equal(manager.dispatched.length, 0);
+});
+
+test('UX-10/UX-11: the next step goes out only after the turn is committed, and a failure drops it', async t => {
+  const { service, manager, store, planPath } = await setup(t);
+  store.recordRun({ id: 'run-1', taskId: 't-1', sessionId: 't-1', kind: 'prompt', status: 'SUCCEEDED', startedAt: new Date().toISOString() });
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'e-attach' });
+  await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'e-start' });
+  const commandId = store.getPlanBinding('t-1').dispatchCommandId;
+  const checkpoint = {
+    planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE',
+    completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-1', summary: 'ok' }]
+  };
+
+  const prepared = await service.turnSettled({ taskId: 't-1', commandId, checkpoint });
+  assert.equal(prepared.code, 'DISPATCH_READY');
+  assert.equal(manager.dispatched.length, 1, 'the previous turn is not even durable yet');
+  assert.equal(store.getPlanBinding('t-1').state, 'REVIEWING', 'prepared hop is not a dispatch');
+
+  // The turn failed before its terminal event: the prepared hop dies with it.
+  await service.turnFailed({ taskId: 't-1', reason: 'FINALIZE_FAILED' });
+  const afterFailure = await service.turnCommitted({ taskId: 't-1' });
+  assert.equal(afterFailure.code, 'IGNORED');
+  assert.equal(manager.dispatched.length, 1, 'no step is sent when the turn did not commit');
 });
 
 test('CP-06: evidence from an older run of the same session does not confirm this step', async t => {
@@ -406,4 +436,29 @@ test('browse lists one project directory at a time, folders and Markdown only', 
 
   await assert.rejects(service.browse({ taskId: 't-1', path: '../' }), error => error.code === 'PLAN_INVALID');
   await assert.rejects(service.browse({ taskId: 't-1', path: 'missing' }), error => error.code === 'PLAN_NOT_ATTACHED');
+});
+
+test('UX-01: a file with every step DONE reads as completed, not as ready to start', async t => {
+  const { service, store, workspace, planPath } = await setup(t);
+  const done = PLAN
+    .replace('### S-001 | TODO', '### S-001 | DONE')
+    .replace('**Проверка:** run\n\n### S-002', '**Проверка:** run\n**Результат:** подтверждено\n\n### S-002')
+    .replace('### S-002 | TODO', '### S-002 | DONE')
+    .replace('**Проверка:** run\n\n## Обнаруженные', '**Проверка:** run\n**Результат:** подтверждено\n\n## Обнаруженные');
+  await fs.writeFile(path.join(workspace, planPath), done, 'utf8');
+
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'ux01-attach' });
+  const status = await service.status('t-1');
+  assert.equal(status.state, 'COMPLETED', 'the file is finished, whatever the binding says');
+  assert.equal(status.attached, true);
+  assert.equal(status.file.complete, true);
+  assert.equal(status.file.open, 0);
+  assert.equal(status.progress.done, 2);
+  // The actions the dialog shows must not offer a start on a finished file.
+  assert.equal(planActions(status).find(action => action.id === 'start').disabled, true);
+  assert.equal(store.getPlanBinding('t-1').state, 'IDLE', 'the binding itself is untouched by the display');
+
+  // Re-attaching the same finished file keeps the same reading (reopen/new task).
+  const other = await service.attach({ taskId: 't-1', path: planPath, commandId: 'ux01-attach-2' });
+  assert.equal(other.state, 'COMPLETED');
 });

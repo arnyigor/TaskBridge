@@ -145,6 +145,83 @@ export class PlanFollower {
     return this.#dispatchStep({ taskId, plan, hash, step, reason, budget: { ...budget, startedAt } });
   }
 
+  /**
+   * Prepare the next hop without sending it. The dispatch intent becomes durable
+   * only when the previous turn's terminal event is committed — a finalization
+   * failure must not leave a step already on its way (FP-UX-02E).
+   */
+  #prepareDispatch({ taskId, plan, hash, step, audit = false, budget }) {
+    const binding = this.#requireBinding(taskId);
+    const epoch = this.store.planCancelEpoch(taskId);
+    const cycleId = audit ? (binding.cycleId || 'c-1') : `c-${Number(budget?.cycles || 0) + 1}`;
+    const commandId = stepCommandId({ taskId, cycleId, stepId: step.id, epoch, audit });
+    const nextBudget = {
+      ...budget,
+      cycles: audit ? Number(budget?.cycles || 0) : Number(budget?.cycles || 0) + 1,
+      audits: audit ? Number(budget?.audits || 0) + 1 : 0
+    };
+    const message = audit
+      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id })
+      : stepInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id });
+    return {
+      taskId,
+      epoch,
+      cycleId,
+      commandId,
+      stepId: step.id,
+      audit,
+      message,
+      revision: plan.revision,
+      hash,
+      budget: nextBudget
+    };
+  }
+
+  async #hop(input) {
+    if (!input.deferDispatch) return this.#dispatchStep(input);
+    const pending = this.#prepareDispatch(input);
+    // Nothing is marked as dispatched yet: the commit of the previous turn is what
+    // makes this hop real, and until then a crash reads as «review», not «sent».
+    this.#save(input.taskId, {
+      state: 'REVIEWING',
+      cycleId: pending.cycleId,
+      dispatchStepId: pending.stepId,
+      expectedRevision: pending.revision,
+      expectedHash: pending.hash,
+      budget: pending.budget
+    });
+    return this.#result(input.taskId, 'DISPATCH_READY', 'Следующий шаг готов к отправке после фиксации хода.', pending);
+  }
+
+  /** Send what #prepareDispatch prepared, once the turn is durably finished. */
+  async dispatchPending({ taskId, pending }) {
+    const binding = this.#requireBinding(taskId);
+    if (Number(pending.epoch) !== this.store.planCancelEpoch(taskId)) {
+      // STOP landed between the settle and the commit: the prepared hop is stale.
+      return this.#result(taskId, 'IGNORED', 'Отмена пришла до отправки следующего шага.', { reason: 'epoch' });
+    }
+    if (pending.stepId && !pending.audit) {
+      const budget = pending.budget || {};
+      if (Number(budget.cycles || 0) > this.limits.maxCycles) {
+        this.#save(taskId, { state: 'PAUSED', dispatchCommandId: null, dispatchStepId: null, budget });
+        return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', `Достигнут предел ${this.limits.maxCycles} автоматических циклов.`);
+      }
+    }
+    this.#save(taskId, {
+      state: 'RUNNING_STEP',
+      cycleId: pending.cycleId,
+      dispatchCommandId: pending.commandId,
+      dispatchStepId: pending.stepId,
+      expectedRevision: pending.revision,
+      expectedHash: pending.hash,
+      budget: pending.budget
+    });
+    await this.dispatch({ taskId, commandId: pending.commandId, message: pending.message, stepId: pending.stepId });
+    return this.#result(taskId, 'DISPATCHED', pending.audit ? 'Отправлен контрольный ход.' : `Отправлен шаг ${pending.stepId}.`, {
+      commandId: pending.commandId, stepId: pending.stepId, cycleId: pending.cycleId
+    });
+  }
+
   async #dispatchStep({ taskId, plan, hash, step, audit = false, budget }) {
     const binding = this.#requireBinding(taskId);
     // The budget is checked at every dispatch, not only when a cycle is opened:
@@ -189,7 +266,7 @@ export class PlanFollower {
    * Called after Pi settled for this task. `checkpoint` is the parsed tool
    * argument or null when the turn ended without one.
    */
-  async onSettled({ taskId, commandId, checkpoint, seq = null }) {
+  async onSettled({ taskId, commandId, checkpoint, seq = null, deferDispatch = false }) {
     const binding = this.#requireBinding(taskId);
     if (binding.state === 'IDLE' || binding.state === 'PAUSED_REVIEW' || binding.state === 'PAUSED' || binding.state === 'COMPLETED') {
       return this.#result(taskId, 'IGNORED', 'Ход завершился вне активного цикла.');
@@ -205,7 +282,7 @@ export class PlanFollower {
       if (Number(budget.audits || 0) < this.limits.auditTurnsPerCycle) {
         const file = await this.plans.read(binding.path);
         const step = nextOpenStep(file.plan) || { id: binding.dispatchStepId };
-        return this.#dispatchStep({ taskId, plan: file.plan, hash: file.hash, step, audit: true, budget });
+        return this.#hop({ taskId, plan: file.plan, hash: file.hash, step, audit: true, budget, deferDispatch });
       }
       this.#save(taskId, { state: 'PAUSED', dispatchCommandId: null, dispatchStepId: null });
       return this.#result(taskId, 'PLAN_UNKNOWN_OUTCOME', 'Checkpoint не получен и после контрольного хода — пауза.');
@@ -281,7 +358,7 @@ export class PlanFollower {
       // A validated replan is the sanctioned way to change the same file; after it
       // the cycle continues with the new first step, not with a new plan.
       const step = nextOpenStep(plan);
-      if (step) return this.#dispatchStep({ taskId, plan, hash, step, budget: { ...budget, noProgress: 0 } });
+      if (step) return this.#hop({ taskId, plan, hash, step, budget: { ...budget, noProgress: 0 }, deferDispatch });
     }
 
     if (verdict.state !== 'CONTINUE' && verdict.state !== 'REPLAN') {
@@ -311,16 +388,16 @@ export class PlanFollower {
       // Every step is DONE but the model did not say COMPLETE: ask once, do not
       // assume completion from the absence of work.
       if (Number(budget.audits || 0) < this.limits.auditTurnsPerCycle) {
-        return this.#dispatchStep({
+        return this.#hop({
           taskId, plan, hash,
           step: { id: binding.dispatchStepId }, audit: true,
-          budget: { ...budget, noProgress }
+          budget: { ...budget, noProgress }, deferDispatch
         });
       }
       this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash });
       return this.#result(taskId, 'PLAN_BLOCKED', 'Все шаги закрыты, но COMPLETE не подтверждён.');
     }
-    return this.#dispatchStep({ taskId, plan, hash, step, budget: { ...budget, noProgress } });
+    return this.#hop({ taskId, plan, hash, step, budget: { ...budget, noProgress }, deferDispatch });
   }
 
   /** Pause at the next safe boundary — the running turn is not killed. */
