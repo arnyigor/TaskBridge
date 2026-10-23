@@ -37,7 +37,10 @@ export const CHECKPOINT_PARAMETERS = {
         properties: {
           stepId: { type: 'string' },
           kind: { type: 'string', enum: EVIDENCE_KINDS },
-          ref: { type: 'string', description: 'run id, file or command reference that can be re-read' },
+          // `ref` is what makes evidence checkable. For a test/command that ran in
+          // THIS turn it is the toolCallId of that call: TaskBridge matches it
+          // against the tool frames it saw and only then certifies the step.
+          ref: { type: 'string', description: 'toolCallId of the tool call that produced this result (or a run id / file path). Required for every kind except manual.' },
           summary: { type: 'string', description: 'what the result says, e.g. 29/29 pass' }
         },
         required: ['stepId', 'kind', 'summary'],
@@ -53,6 +56,9 @@ export const CHECKPOINT_PARAMETERS = {
           id: { type: 'string' },
           priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'] },
           blocking: { type: 'boolean' },
+          // A defect that is really «this existing step is not done yet» must name
+          // that step instead of asking for a duplicate step in the plan.
+          relatedStepIds: { type: 'array', items: { type: 'string' }, description: 'existing steps this defect belongs to' },
           summary: { type: 'string' }
         },
         required: ['id', 'priority', 'summary'],
