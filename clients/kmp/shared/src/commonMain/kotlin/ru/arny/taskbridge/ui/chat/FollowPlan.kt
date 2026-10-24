@@ -350,6 +350,21 @@ fun planScanEmptyText(result: PlanScanResult?, query: String = ""): String {
     return "По запросу «${query.trim()}» ничего не найдено — измените поиск или повторите сканирование."
 }
 
+/**
+ * Состояние области списка (FP-UX-05): у «сканирую», «ошибка», «не сканировали»,
+ * «ничего не найдено» и «есть результат» разные сообщения — перепутать их значит
+ * показать пустоту вместо причины.
+ */
+enum class PlanScanPhase { IDLE, LOADING, ERROR, EMPTY, READY }
+
+fun planScanPhase(scan: PlanScanResult?, busy: Boolean, error: String, rowCount: Int): PlanScanPhase = when {
+    busy -> PlanScanPhase.LOADING
+    error.isNotBlank() -> PlanScanPhase.ERROR
+    scan == null -> PlanScanPhase.IDLE
+    rowCount == 0 -> PlanScanPhase.EMPTY
+    else -> PlanScanPhase.READY
+}
+
 data class PlanVerdictView(
     val verdict: String,
     val label: String,

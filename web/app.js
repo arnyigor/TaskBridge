@@ -4262,7 +4262,9 @@ function renderPlanInspector() {
 function renderPlanScan() {
   const panel = $('planScanPanel');
   const list = $('planScanList');
-  panel.classList.toggle('hidden', planScan === null);
+  // FP-UX-05: выбранный файл заменяет список — карточка вердикта и её кнопки не
+  // уезжают вниз под результат поиска. «Отменить выбор» возвращает список.
+  panel.classList.toggle('hidden', planScan === null || planInspection !== null);
   if (planScan === null) {
     list.textContent = '';
     $('planScanStatus').textContent = '';
@@ -4489,6 +4491,8 @@ function renderPlanSelection() {
     $('planVerdictReasons').textContent = '';
     $('planPreviewDetails').classList.add('hidden');
     $('planAiReview').classList.add('hidden');
+    // После отмены выбора список возвращается (FP-UX-05).
+    renderPlanCard();
     return;
   }
   $('planSelectedName').textContent = planSelection.name;
@@ -4687,7 +4691,6 @@ async function detachPlan() {
 
 $('planToggle').onclick = () => openPlanDialog();
 $('planDialogClose').onclick = closePlanDialog;
-$('planDialogDone').onclick = closePlanDialog;
 $('planDetach').onclick = detachPlan;
 // Сканирование — только по нажатию (DISC-01/DISC-02): ни открытие окна, ни
 // события чата, ни ввод в поиске его не запускают.

@@ -11,6 +11,7 @@ import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -22,6 +23,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import ru.arny.taskbridge.core.api.CreateTaskRequest
 import ru.arny.taskbridge.core.api.PlanStatus
+import ru.arny.taskbridge.ui.chat.PLAN_PANEL_TAG
 import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.client.session.ChatPersistence
 import ru.arny.taskbridge.core.client.session.NoopChatPersistence
@@ -128,6 +130,13 @@ class DesktopFollowPlanAcceptanceTest {
                     Thread.sleep(250)
                 }
             }
+            // FP-UX-05: 30+ Markdown-файлов в проекте — список обязан остаться
+            // прокручиваемым и не растянуть панель.
+            File(root, "docs/notes").mkdirs()
+            repeat(31) { index ->
+                File(root, "docs/notes/note-${index.toString().padStart(2, '0')}.md")
+                    .writeText("# Заметка $index (30+ файлов)")
+            }
             setContent { App(app, openTaskId = task.id) }
             waitUntil(timeoutMillis = 30_000) {
                 onAllNodesWithText("Desktop follow plan", substring = true).fetchSemanticsNodes().isNotEmpty()
@@ -141,6 +150,23 @@ class DesktopFollowPlanAcceptanceTest {
             assertTrue(onAllNodesWithText("Сканировать проект").fetchSemanticsNodes().isNotEmpty())
             assertTrue(onAllNodesWithText("Открыть файл").fetchSemanticsNodes().isNotEmpty())
             assertTrue(onAllNodesWithText("План не подключён").fetchSemanticsNodes().isNotEmpty())
+            assertTrue(onAllNodesWithText("Поиск по имени и пути").fetchSemanticsNodes().isEmpty(),
+                "в стартовом состоянии нет поля поиска: оно принадлежит списку")
+
+            // FP-UX-05: компактный диалог, а не полоса на всё окно. Ширина — не больше
+            // 600 dp и заметно уже окна; обе основные кнопки одного размера.
+            shot("00-start")
+            val panel = onNodeWithTag(PLAN_PANEL_TAG).fetchSemanticsNode().boundsInRoot
+            val windowWidth = onAllNodes(androidx.compose.ui.test.isRoot())[0].fetchSemanticsNode().boundsInRoot.width
+            val maxWidthPx = 600f * density.density
+            assertTrue(panel.width <= maxWidthPx, "ширина панели ${panel.width}px > ${maxWidthPx}px (600 dp)")
+            assertTrue(panel.width <= windowWidth - 16f, "панель шире окна: ${panel.width} / $windowWidth")
+            val scanBounds = onNodeWithText("Сканировать проект").fetchSemanticsNode().boundsInRoot
+            val openBounds = onNodeWithText("Открыть файл").fetchSemanticsNode().boundsInRoot
+            val delta = kotlin.math.abs(scanBounds.width - openBounds.width)
+            assertTrue(delta <= 8f * density.density, "кнопки разной ширины: ${scanBounds.width} / ${openBounds.width}")
+            assertEquals(scanBounds.height, openBounds.height, 1f, "кнопки разной высоты")
+            assertTrue(onAllNodesWithText("Закрыть").fetchSemanticsNodes().size <= 1, "нижнего дубля «Закрыть» нет")
 
             // Native picker interaction is opt-in because it owns a real OS window.
             // The normal regression still runs the unchanged panel against the API.
@@ -160,6 +186,20 @@ class DesktopFollowPlanAcceptanceTest {
                     onAllNodesWithText("PLAN.md").fetchSemanticsNodes().isNotEmpty()
                 }
                 assertTrue(onAllNodesWithText("корень проекта", substring = true).fetchSemanticsNodes().isNotEmpty())
+                assertTrue(onAllNodesWithText("Поиск по имени и пути").fetchSemanticsNodes().isNotEmpty(),
+                    "после сканирования поиск на месте")
+                shot("00b-scan-list")
+                onAllNodesWithText("PLAN.md")[0].performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithText("Готов к подключению").fetchSemanticsNodes().isNotEmpty()
+                }
+                shot("00c-validation-card")
+                onNodeWithText("Назад к файлам").performClick()
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithText("Поиск по имени и пути").fetchSemanticsNodes().isNotEmpty()
+                }
+                assertTrue(onAllNodesWithText("Готов к подключению").fetchSemanticsNodes().isEmpty(),
+                    "«Назад к файлам» возвращает список")
                 onAllNodesWithText("PLAN.md")[0].performClick()
                 waitUntil(timeoutMillis = 15_000) {
                     onAllNodesWithText("Готов к подключению").fetchSemanticsNodes().isNotEmpty()

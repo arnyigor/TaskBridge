@@ -291,4 +291,17 @@ class FollowPlanTest {
         assertTrue(local?.text?.contains("локальная") == true)
         assertNull(planAiReviewView(null))
     }
+
+    // --- FP-UX-05: компактная панель ---
+
+    @Test
+    fun `the scan area names its state instead of showing emptiness`() {
+        val scan = PlanScanResult(files = listOf(PlanScanFile(name = "PLAN.md", path = "PLAN.md")), total = 1)
+        assertEquals(PlanScanPhase.IDLE, planScanPhase(null, false, "", 0))
+        assertEquals(PlanScanPhase.LOADING, planScanPhase(null, true, "", 0))
+        assertEquals(PlanScanPhase.LOADING, planScanPhase(scan, true, "", 1))
+        assertEquals(PlanScanPhase.ERROR, planScanPhase(null, false, "нет связи", 0))
+        assertEquals(PlanScanPhase.EMPTY, planScanPhase(scan, false, "", 0))
+        assertEquals(PlanScanPhase.READY, planScanPhase(scan, false, "", 1))
+    }
 }

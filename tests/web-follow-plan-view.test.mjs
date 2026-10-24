@@ -490,3 +490,27 @@ test('every element the plan dialog touches exists in the markup', async () => {
   const missing = [...used].filter(id => !ids.has(id));
   assert.deepEqual(missing, [], `в markup нет элементов: ${missing.join(', ')}`);
 });
+
+test('FP-UX-05: the panel is a compact dialog with two equal entry buttons', async () => {
+  const dir = path.join(import.meta.dirname, '..', 'web');
+  const css = await fs.readFile(path.join(dir, 'app.css'), 'utf8');
+  const html = await fs.readFile(path.join(dir, 'index.html'), 'utf8');
+  const source = await fs.readFile(path.join(dir, 'app.js'), 'utf8');
+
+  // Ширина: 540–560 px, а не «на всё окно»; крупный заголовок и основной текст 14 px.
+  const dialog = /\.planDialog\s*\{([^}]*)\}/.exec(css)?.[1] || '';
+  assert.match(dialog, /width:\s*min\(560px, 96vw\)/);
+  assert.match(dialog, /max-width:\s*min\(560px, 96vw\)/);
+  assert.match(css, /#planDialog \.dialogHeader h2\s*\{\s*font-size:\s*1\.25rem/);
+  assert.match(css, /\.planPicker > p\s*\{\s*font-size:\s*0\.875rem/);
+  assert.match(css, /\.planStartActions \.planPick\s*\{\s*flex:\s*1 1 0/);
+
+  // Дубля «Закрыть» внизу нет: закрытие — крестик в заголовке.
+  assert.equal(/id="planDialogDone"/.test(html), false);
+  assert.equal(/planDialogDone/.test(source), false);
+  assert.match(html, /id="planDialogClose"/);
+
+  // Список: поиск и строки — в области списка, отдельной навигации по папкам нет.
+  assert.match(html, /id="planSearch"/);
+  assert.equal(/id="planBrowser"/.test(html), false);
+});

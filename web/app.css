@@ -2118,7 +2118,9 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
    No card in the chat: one icon carries the state, this dialog carries the rest.
    Desktop keeps it narrow enough to read, a phone gets it full width and the step
    list scrolls on its own so the actions stay reachable. */
-.planDialog { max-width: min(520px, 96vw); max-height: 88vh; overflow: hidden; display: flex; flex-direction: column; gap: 0.5rem; }
+/* FP-UX-05: тот же компактный диалог, что и в KMP — 540–560 px, не на всю ширину. */
+.planDialog { width: min(560px, 96vw); max-width: min(560px, 96vw); max-height: 88vh; overflow: hidden; display: flex; flex-direction: column; gap: 0.5rem; }
+#planDialog .dialogHeader h2 { font-size: 1.25rem; }
 /* Only the status part scrolls; the actions stay pinned at the bottom. */
 #planStatusBlock { overflow: auto; min-height: 0; }
 .planFooter { display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid var(--line, #2a3348); padding-top: 0.5rem; flex: 0 0 auto; }
@@ -2137,6 +2139,8 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .planStep-SKIPPED { color: var(--muted, #94a3b8); text-decoration: line-through; }
 .planFindings { display: flex; flex-direction: column; gap: 0.125rem; max-height: 8rem; overflow: auto; }
 .planPicker { flex-direction: column; gap: 0.5rem; min-height: 0; }
+/* Основной текст панели — 14 px, а не мелкая подпись. */
+.planPicker > p { font-size: 0.875rem; line-height: 1.45; margin: 0; }
 /* min-height:0 + overflow: длинный список уступает место карточке выбора, а не
    выталкивает её кнопки за нижнюю границу окна. */
 .planPicker:not(.hidden) { display: flex; flex: 0 1 auto; overflow: auto; }
@@ -2146,7 +2150,7 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
    Строка списка — минимум 48 px (палец, а не мышь), имя с ellipsis, путь под ним.
    Список прокручивается внутри панели, нижние действия остаются на месте. */
 .planStartActions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.planStartActions .planPick { flex: 1 1 auto; }
+.planStartActions .planPick { flex: 1 1 0; min-width: 0; }
 .planScanPanel { flex-direction: column; gap: 0.375rem; min-height: 0; }
 .planScanPanel:not(.hidden) { display: flex; }
 .planScanHead { display: flex; gap: 0.375rem; align-items: center; }
@@ -2177,7 +2181,7 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 }
 .planScanEmpty { padding: 0.5rem; }
 /* Вердикт выбранного файла: словами, а не одним цветом (FP-UX-04D). */
-.planVerdict { font-weight: 600; }
+.planVerdict { font-weight: 600; font-size: 0.9375rem; }
 .planVerdict[data-verdict="VALID_MANAGED"] { color: var(--ok, #34d399); }
 .planVerdict[data-verdict="CONVERTIBLE"] { color: var(--warn, #fbbf24); }
 .planVerdict[data-verdict="NOT_A_PLAN"],

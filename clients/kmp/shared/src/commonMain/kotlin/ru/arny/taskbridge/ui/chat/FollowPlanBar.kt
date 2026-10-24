@@ -3,6 +3,8 @@ package ru.arny.taskbridge.ui.chat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -12,10 +14,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -26,6 +31,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,6 +44,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -60,6 +67,12 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  * Состояние Follow Plan на экране чата: иконка в композиторе и диалог показывают
  * одно и то же и меняют одно и то же, поэтому состояние общее.
  */
+/** Ширина панели: компактный диалог, а не горизонтальная полоса на всё окно. */
+private val PLAN_PANEL_MAX_WIDTH = 560.dp
+/** Ниже этой ширины две основные кнопки идут друг под другом. */
+private val PLAN_PANEL_NARROW_WIDTH = 420.dp
+const val PLAN_PANEL_TAG = "followPlanPanel"
+
 class FollowPlanUiState internal constructor(val taskId: String) {
     // The base is captured when opened, never replaced by SSE status refreshes.
     var editorBase by mutableStateOf<ru.arny.taskbridge.core.api.PlanContent?>(null)
@@ -75,6 +88,8 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var scan by mutableStateOf<ru.arny.taskbridge.core.api.PlanScanResult?>(null)
     var scanQuery by mutableStateOf("")
     var scanBusy by mutableStateOf(false)
+    /** Ошибка сканирования показывается в области списка, а не в общем notice. */
+    var scanError by mutableStateOf("")
     var aiReview by mutableStateOf<ru.arny.taskbridge.core.api.PlanAiReview?>(null)
     var aiError by mutableStateOf("")
     var aiBusy by mutableStateOf(false)
@@ -114,6 +129,7 @@ class FollowPlanUiState internal constructor(val taskId: String) {
         scan = null
         scanQuery = ""
         scanBusy = false
+        scanError = ""
     }
 
     val enabled: Boolean get() = planToggleEnabled(status)
@@ -158,6 +174,8 @@ fun FollowPlanIcon(
     onOpenPlan: (String) -> Unit = {},
     onNotice: (String) -> Unit = {},
     platformKind: String = "desktop",
+    /** Копирование пути проекта: через платформенный сервис, как весь остальной клиент. */
+    onCopy: (String) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
     val iconTint = when (planIconState(state.status)) {
@@ -213,35 +231,49 @@ fun FollowPlanIcon(
     }
 
     // Панель — свой Dialog, а не AlertDialog: на Android список внутри text-слота
-    // AlertDialog не получал нажатий (проверено на Pixel 5 API 31: файл выбирался
-    // не нажатием, а только через API). Здесь список живёт в ограниченной по высоте
-    // колонке, поэтому прокручивается сам и принимает касания, а заголовок и футер
-    // остаются на месте.
+    // AlertDialog не получал нажатий (проверено на Pixel 5 API 31).
+    //
+    // FP-UX-05: usePlatformDefaultWidth=false + fillMaxWidth растягивали панель на
+    // всё окно. Ширина ограничена 560 dp, высота — по содержимому и не больше 90%
+    // доступного места; imePadding снаружи, чтобы клавиатура не накрывала действия.
+    val scanListState = rememberLazyListState()
     Dialog(
         onDismissRequest = { state.askPlan = false },
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Surface(
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            modifier = Modifier
-                .padding(horizontal = 12.dp, vertical = 24.dp)
-                .fillMaxWidth()
-                .heightIn(max = 640.dp),
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize().imePadding(),
+            contentAlignment = Alignment.Center,
         ) {
-            Column {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Следование плану", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-                    IconButton(onClick = { state.askPlan = false }) { Icon(AppIcons.Close, "Закрыть") }
-                }
-                // insets клавиатуры: поле поиска не должно накрывать нижние действия.
-                Column(
-                    modifier = Modifier.weight(1f, fill = false).imePadding().padding(horizontal = 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
+            val panelWidth = minOf(maxWidth - 24.dp, PLAN_PANEL_MAX_WIDTH)
+            // На узком экране две основные кнопки идут друг под другом.
+            val narrow = panelWidth < PLAN_PANEL_NARROW_WIDTH
+            Surface(
+                shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier
+                    .testTag(PLAN_PANEL_TAG)
+                    .widthIn(max = panelWidth)
+                    .fillMaxWidth()
+                    .heightIn(max = maxHeight * 0.9f)
+                    .wrapContentHeight(),
+            ) {
+                Column {
+                    // Заголовок и закрытие зафиксированы; нижнего дубля «Закрыть» нет.
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 8.dp, top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Следование плану", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                        IconButton(onClick = { state.askPlan = false }) { Icon(AppIcons.Close, "Закрыть") }
+                    }
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .padding(horizontal = 24.dp)
+                            .padding(bottom = 20.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
                 val status = state.status
                 if (state.attached) {
                     // Верхний блок: файл, состояние, ревизия, цикл, шаг, стадия.
@@ -295,73 +327,75 @@ fun FollowPlanIcon(
                 } else {
                     // Стартовое состояние (FP-UX-04A): описание, проект, две кнопки и
                     // «План не подключён». Список файлов — только после нажатия.
-                    Text(
-                        "TaskBridge ведёт шаги одного Markdown-файла: после каждого хода проверяет файл " +
-                            "и подтверждения и только потом отправляет следующий шаг. Подключение не запускает выполнение.",
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                    Text(
-                        "Проект: ${planProjectName(projectPath)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = colors.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    state.hint?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = colors.error) }
-                    Text("План не подключён", style = MaterialTheme.typography.labelMedium)
-                    // Обе кнопки в одной строке: FlowRow на телефоне переносил их
-                    // друг под друга (проверено на Pixel 5 API 31). weight у главной
-                    // кнопки делит ширину, а не заставляет переносить.
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
+                    // Описание и статус — только в стартовом состоянии: в списке и в
+                    // карточке место нужно файлам и вердикту (FP-UX-05).
+                    if (state.scan == null && state.inspection == null) {
+                        Text(
+                            "TaskBridge ведёт шаги одного Markdown-файла: после каждого хода проверяет файл " +
+                                "и подтверждения и только потом отправляет следующий шаг. Подключение не запускает выполнение.",
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                        PlanProjectPathRow(projectPath, onCopy)
+                        state.hint?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = colors.error) }
+                        Text("План не подключён", style = MaterialTheme.typography.bodyMedium, color = colors.onSurfaceVariant)
+                    }
+                    // Две равнозначные по размеру кнопки: на узком экране — друг под
+                    // другом, на широком — в одной строке. Обе занимают ширину своей
+                    // строки, поэтому «Открыть файл» не выглядит мелкой ссылкой.
+                    val scanButton: @Composable (Modifier) -> Unit = { modifier ->
                         Button(
                             onClick = { scope.launch { runScan(state, api) } },
                             enabled = !state.scanBusy && state.inspection == null,
-                            modifier = Modifier.weight(1f),
-                            // Узкие боковые отступы и мелкий шрифт: иначе подпись
-                            // «Сканировать проект» обрезалась до «Сканировать п…».
+                            modifier = modifier.heightIn(min = 48.dp),
                             contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         ) {
                             Text(
                                 if (state.scanBusy) "Сканирую…" else "Сканировать проект",
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelLarge,
                                 maxLines = 1,
-                                softWrap = false,
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
-                        TextButton(
+                    }
+                    val openButton: @Composable (Modifier) -> Unit = { modifier ->
+                        OutlinedButton(
                             onClick = { pickFile() },
                             enabled = state.inspection == null,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                            modifier = modifier.heightIn(min = 48.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                         ) {
-                            Text(
-                                "Открыть файл",
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                softWrap = false,
-                            )
+                            Text("Открыть файл", style = MaterialTheme.typography.labelLarge, maxLines = 1)
+                        }
+                    }
+                    if (state.inspection != null) {
+                        // Карточка заменяет список и стартовые действия целиком.
+                    } else if (narrow) {
+                        Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            scanButton(Modifier.fillMaxWidth())
+                            openButton(Modifier.fillMaxWidth())
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            scanButton(Modifier.weight(1f))
+                            openButton(Modifier.weight(1f))
                         }
                     }
                     // Карточка выбора и список одновременно в панель не помещаются:
-                    // список уступает место вердикту (проверено на Pixel 5 API 31).
-                    if (state.inspection == null) PlanScanList(state, api, scope)
+                    // список уступает место вердикту, а «Назад к файлам» возвращает
+                    // к прежнему поиску и позиции прокрутки.
+                    if (state.inspection == null) PlanScanList(state, api, scope, scanListState)
                 }
 
                 // Выбранный файл: имя, путь на сервере и вердикт до записи (FP-UX-04D).
                 if (state.inspection != null) PlanSelectionCard(state, api, newId, scope)
                 if (state.notice.isNotBlank() && !state.attached) {
-                    Text(state.notice, style = MaterialTheme.typography.labelSmall, color = colors.error)
+                    Text(state.notice, style = MaterialTheme.typography.bodySmall, color = colors.error)
                 }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    TextButton(onClick = { state.askPlan = false }) { Text("Закрыть") }
+                    }
                 }
             }
         }
@@ -510,11 +544,12 @@ private suspend fun runScan(state: FollowPlanUiState, api: TaskBridgeApi) {
     if (state.scanBusy) return
     state.scanBusy = true
     state.notice = ""
+    state.scanError = ""
     try {
         state.scan = api.scanPlan(state.taskId, "")
     } catch (error: ApiException) {
         state.scan = null
-        state.notice = planErrorText(error)
+        state.scanError = planErrorText(error)
     } finally {
         state.scanBusy = false
     }
@@ -549,38 +584,69 @@ private suspend fun runAiReview(state: FollowPlanUiState, api: TaskBridgeApi) {
  * проект заново не обходится (DISC-05).
  */
 @Composable
-private fun PlanScanList(state: FollowPlanUiState, api: TaskBridgeApi, scope: CoroutineScope) {
-    val scan = state.scan ?: return
+private fun PlanScanList(
+    state: FollowPlanUiState,
+    api: TaskBridgeApi,
+    scope: CoroutineScope,
+    listState: LazyListState,
+) {
     val colors = MaterialTheme.colorScheme
+    // Состояния списка названы явно: «сканирую», «ничего не найдено», «ошибка» и
+    // «есть результат» — разные вещи, и путать их оператору незачем.
+    val scan = state.scan
+    val rows = scan?.let { planScanRows(it, state.scanQuery) }.orEmpty()
+    val phase = planScanPhase(scan, state.scanBusy, state.scanError, rows.size)
+    // Пока не сканировали, в панели нет ни поиска, ни списка: стартовое состояние
+    // остаётся стартовым (FP-UX-05).
+    if (phase == PlanScanPhase.IDLE) return
     OutlinedTextField(
         value = state.scanQuery,
         onValueChange = { state.scanQuery = it },
         singleLine = true,
-        label = { Text("Поиск по имени и пути", style = MaterialTheme.typography.labelSmall) },
+        label = { Text("Поиск по имени и пути", style = MaterialTheme.typography.bodySmall) },
         modifier = Modifier.fillMaxWidth(),
     )
-    val rows = planScanRows(scan, state.scanQuery)
+    when (phase) {
+        PlanScanPhase.LOADING -> {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth().heightIn(min = 4.dp))
+            Text("Сканирую проект…", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+            return
+        }
+        PlanScanPhase.ERROR -> {
+            Text(state.scanError, style = MaterialTheme.typography.bodySmall, color = colors.error)
+            TextButton(onClick = { scope.launch { runScan(state, api) } }) {
+                Text("Повторить", style = MaterialTheme.typography.labelLarge)
+            }
+            return
+        }
+        PlanScanPhase.IDLE -> return
+        PlanScanPhase.EMPTY, PlanScanPhase.READY -> Unit
+    }
+    if (scan == null) return
     Text(
         planScanStatusLine(scan, rows.size),
-        style = MaterialTheme.typography.labelSmall,
+        style = MaterialTheme.typography.bodySmall,
         color = colors.onSurfaceVariant,
     )
     if (rows.isEmpty()) {
         Text(
             planScanEmptyText(scan, state.scanQuery),
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = colors.onSurfaceVariant,
         )
         return
     }
-    // Строка не ниже 48 dp (палец, а не мышь), имя с ellipsis, относительный путь
-    // под ним. Список прокручивается внутри панели: нижние действия остаются видны.
-    Column(modifier = Modifier.fillMaxWidth().heightIn(max = 280.dp).verticalScroll(rememberScrollState())) {
-        for (row in rows) {
+    // LazyColumn с ограниченной высотой: список прокручивается сам, а заголовок и
+    // нижние действия панели остаются на месте. Строка 56 dp — палец, а не мышь.
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp),
+    ) {
+        items(rows, key = { it.path }) { row ->
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
+                    .heightIn(min = 56.dp)
                     .clickable { scope.launch { inspectThenImport(state, api, newId = { "" }, path = row.path) } }
                     .padding(vertical = 6.dp, horizontal = 4.dp),
                 verticalArrangement = Arrangement.Center,
@@ -595,11 +661,40 @@ private fun PlanScanList(state: FollowPlanUiState, api: TaskBridgeApi, scope: Co
                     listOf(row.folder.ifBlank { "корень проекта" }, row.hint)
                         .filter { it.isNotBlank() }
                         .joinToString(" • "),
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodySmall,
                     color = colors.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Строка проекта: длинный путь сокращается, полный копируется по крестику-кнопке.
+ * Собственного tooltip в common-коде нет, поэтому полный путь доступен именно
+ * копированием — это работает и на Desktop, и на Android.
+ */
+@Composable
+private fun PlanProjectPathRow(path: String?, onCopy: (String) -> Unit) {
+    val colors = MaterialTheme.colorScheme
+    val value = path?.trim().orEmpty()
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            if (value.isEmpty()) "Проект: —" else "Проект: $value",
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (value.isNotEmpty()) {
+            IconButton(
+                onClick = { onCopy(value) },
+                modifier = Modifier.size(32.dp),
+            ) {
+                Icon(AppIcons.Copy, "Скопировать путь проекта", Modifier.size(16.dp), tint = colors.onSurfaceVariant)
             }
         }
     }
@@ -616,6 +711,10 @@ private fun PlanSelectionCard(
     val inspection = state.inspection ?: return
     val colors = MaterialTheme.colorScheme
     val verdict = planVerdictView(inspection)
+    // «Назад к файлам» первым: возвращает список с прежним поиском и прокруткой.
+    TextButton(onClick = { state.inspection = null }, contentPadding = PaddingValues(0.dp)) {
+        Text("Назад к файлам", style = MaterialTheme.typography.labelLarge)
+    }
     Text(
         inspection.path.orEmpty().substringAfterLast('/'),
         style = MaterialTheme.typography.titleSmall,
@@ -625,7 +724,7 @@ private fun PlanSelectionCard(
     Text(
         if (state.pendingBase64 != null) "Будет сохранён в проекте: ${inspection.path}"
         else "Файл в проекте: ${inspection.path}",
-        style = MaterialTheme.typography.labelSmall,
+        style = MaterialTheme.typography.bodySmall,
         color = colors.onSurfaceVariant,
         maxLines = 2,
         overflow = TextOverflow.Ellipsis,
@@ -633,10 +732,11 @@ private fun PlanSelectionCard(
     if (verdict == null) return
     Text(
         verdict.label,
-        style = MaterialTheme.typography.labelMedium,
+        style = MaterialTheme.typography.bodyMedium,
+        // Цвета — токены темы: положительный вердикт не должен выглядеть тревогой.
         color = when (verdict.verdict) {
-            "VALID_MANAGED" -> colors.tertiary
-            "CONVERTIBLE" -> colors.primary
+            "VALID_MANAGED" -> colors.primary
+            "CONVERTIBLE" -> colors.tertiary
             else -> colors.error
         },
     )
@@ -646,14 +746,14 @@ private fun PlanSelectionCard(
         verdict.reasons.joinToString("; "),
     ).filter { it.isNotBlank() }.joinToString(" • ")
     if (detail.isNotBlank()) {
-        Text(detail, style = MaterialTheme.typography.labelSmall, color = colors.onSurfaceVariant)
+        Text(detail, style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
     }
     // Предпросмотр будущего управляемого файла: показывается, но не пишется.
     if (verdict.preview.isNotBlank()) {
         TextButton(onClick = { state.previewOpen = !state.previewOpen }) {
             Text(
                 if (state.previewOpen) "Скрыть предпросмотр" else "Предпросмотр управляемого файла",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelLarge,
             )
         }
         if (state.previewOpen) {
@@ -668,17 +768,17 @@ private fun PlanSelectionCard(
         TextButton(onClick = { scope.launch { runAiReview(state, api) } }, enabled = !state.aiBusy) {
             Text(
                 if (state.aiBusy) "Спрашиваю модель…" else "Проверить с помощью ИИ",
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelLarge,
             )
         }
     }
     if (state.aiError.isNotBlank()) {
-        Text(state.aiError, style = MaterialTheme.typography.labelSmall, color = colors.error)
+        Text(state.aiError, style = MaterialTheme.typography.bodySmall, color = colors.error)
     }
     planAiReviewView(state.aiReview)?.let { review ->
         Text(
             review.text,
-            style = MaterialTheme.typography.labelSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = colors.onSurfaceVariant,
             maxLines = 5,
             overflow = TextOverflow.Ellipsis,
@@ -687,23 +787,18 @@ private fun PlanSelectionCard(
     FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
         // «Отменить выбор» ничего не удаляет и не отключает.
         TextButton(onClick = { state.cancelSelection() }) {
-            Text("Отменить выбор", style = MaterialTheme.typography.labelSmall)
+            Text("Отменить выбор", style = MaterialTheme.typography.labelLarge)
         }
         if (verdict.canAttach) {
-            TextButton(onClick = { scope.launch { importNow(state, api, newId) } }) {
+            Button(
+                onClick = { scope.launch { importNow(state, api, newId) } },
+                modifier = Modifier.heightIn(min = 44.dp),
+            ) {
                 Text(
                     if (state.overwrite) "Перезаписать и подключить" else verdict.confirmLabel,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.labelLarge,
                 )
             }
         }
     }
-}
-
-/** «Название текущего проекта» для стартового экрана: последняя часть пути. */
-private fun planProjectName(path: String?): String {
-    val value = path?.trim().orEmpty()
-    if (value.isEmpty()) return "—"
-    val tail = value.split('/', 0x5C.toChar()).filter { it.isNotBlank() }.lastOrNull() ?: value
-    return tail.ifBlank { "—" }
 }

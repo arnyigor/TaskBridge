@@ -542,6 +542,7 @@ fun ChatScreen(
                             projectPath = task?.workspacePath,
                             platformKind = platform.kind,
                             onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
+                            onCopy = platform::copyText,
                             onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
                         )
                     },
