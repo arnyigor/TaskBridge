@@ -105,6 +105,23 @@ export const API_ROUTES = [
 
   // --- tasks: events and live stream ---------------------------------------
   { method: 'GET', path: '/api/tasks/:id/events', summary: 'events; ?after, ?limit, or ?tail/&before for turn-aligned pages' },
+  // --- Follow Plan: the session plan is server state, not client state -------
+  // Contract: docs/session-state-contract.md. Every mutating route is a commandId
+  // command and a CAS on the plan revision; reading routes need neither.
+  { method: 'GET', path: '/api/tasks/:id/plan', summary: 'plan binding: enabled, capabilities, attached, state, path, revision, hash, stepId, progress, findings, file, lastCheckpoint' },
+  { method: 'POST', path: '/api/tasks/:id/plan/attach', summary: 'attach an existing project file (path, optional expectedHash of the previewed text)' },
+  { method: 'POST', path: '/api/tasks/:id/plan/detach', summary: 'drop the binding; the file stays in the project' },
+  { method: 'POST', path: '/api/tasks/:id/plan/inspect', summary: 'read-only verdict for a chosen file (path or contentBase64): VALID_MANAGED / CONVERTIBLE / NOT_A_PLAN / INVALID, problems, preview, hash' },
+  { method: 'POST', path: '/api/tasks/:id/plan/scan', summary: 'read-only recursive search of the session workspace for .md/.markdown: files, classification hint, partial flag, limits' },
+  { method: 'POST', path: '/api/tasks/:id/plan/import', summary: 'write a file from a device or convert a free-form one after confirmation, then attach' },
+  { method: 'GET', path: '/api/tasks/:id/plan/content', summary: 'text of the attached file with revision and hash (editor base)' },
+  { method: 'POST', path: '/api/tasks/:id/plan/content', summary: 'save an edit with CAS on expectedRevision/expectedHash' },
+  { method: 'POST', path: '/api/tasks/:id/plan/start', summary: 'begin the cycle: dispatch the next open step and hand the turn to the model' },
+  { method: 'POST', path: '/api/tasks/:id/plan/pause', summary: 'pause on the safe boundary: the current step finishes, the next is not sent' },
+  { method: 'POST', path: '/api/tasks/:id/plan/resume', summary: 'continue after a pause' },
+  { method: 'POST', path: '/api/tasks/:id/plan/stop', summary: 'stop the cycle and leave the plan for review' },
+  { method: 'POST', path: '/api/tasks/:id/plan/reconcile', summary: 'resolve an ambiguous state: adopt_external or dismiss' },
+  { method: 'POST', path: '/api/tasks/:id/plan/ai-review', summary: 'one explicit question to the model about the chosen file; advice only, never a verdict' },
   { method: 'GET', path: '/api/tasks/:id/stream', summary: 'SSE live events, resumable via Last-Event-ID', sse: true },
   { method: 'GET', path: '/api/tasks/:id/state', summary: "Pi's get_state snapshot" },
   { method: 'GET', path: '/api/tasks/:id/runs', summary: 'run history of the session' },

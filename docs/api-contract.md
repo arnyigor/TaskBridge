@@ -383,6 +383,26 @@ Web показывает выжимки оператору и в LAN: это п�
 
 ## Маршруты
 
+### Follow Plan (план сессии)
+
+Состояние плана — **серверное**: чтение идёт через `GET /api/tasks/:id/plan`, а
+каждое изменение — команда с `commandId` и CAS по ревизии. Что клиент обязан
+считать истиной и что остаётся его локальным состоянием — в
+`docs/session-state-contract.md`.
+
+| Метод | Путь | Смысл |
+|---|---|---|
+| GET | `/api/tasks/:id/plan` | привязка: `enabled`, `capabilities`, `attached`, `state`, `path`, `revision`, `hash`, `stepId`, `progress`, `findings`, `file` |
+| POST | `/plan/attach` | подключить файл проекта (`path`, необязательный `expectedHash` предпросмотра) |
+| POST | `/plan/detach` | снять привязку; файл остаётся в проекте |
+| POST | `/plan/inspect` | вердикт выбранного файла без записи: `VALID_MANAGED`/`CONVERTIBLE`/`NOT_A_PLAN`/`INVALID` |
+| POST | `/plan/scan` | рекурсивный поиск `.md`/`.markdown` в workspace, `partial` при лимитах |
+| POST | `/plan/import` | записать файл с устройства или преобразовать свободный Markdown после подтверждения |
+| GET/POST | `/plan/content` | текст привязанного файла и его сохранение (CAS по `expectedRevision`/`expectedHash`) |
+| POST | `/plan/start`, `/plan/pause`, `/plan/resume`, `/plan/stop`, `/plan/reconcile` | управление циклом |
+| POST | `/plan/ai-review` | один вопрос модели о выбранном файле; совет, не вердикт |
+
+
 Полный список с методами и назначением — в `src/api-contract.mjs` (и в
 [README](../README.md#http-api) в человекочитаемом виде). Группы: статус и метрики,
 авторизация, проекты и файлы, сессии/модели, задачи (создание, управление,
