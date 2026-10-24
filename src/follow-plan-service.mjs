@@ -275,10 +275,22 @@ export class FollowPlanService {
 
   // --- control -------------------------------------------------------------
 
-  async attach({ taskId, path, commandId, clientId }) {
+  async attach({ taskId, path, commandId, clientId, expectedHash = null }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
     const relPath = this.#relativePath(task, path);
+    // The same guarantee as import: a confirmation belongs to the text the
+    // operator saw, so attach refuses a file edited after the preview instead of
+    // binding a verdict nobody confirmed. Clients that attach without a preview
+    // simply send no hash and keep the old behaviour.
+    if (expectedHash) {
+      const current = await this.#plans(task).text(relPath);
+      if (planHash(current.text) !== expectedHash) {
+        throw reject('PLAN_REVISION_CONFLICT',
+          `Файл ${relPath} изменился после проверки. Откройте его заново и подтвердите подключение заново.`,
+          [`expected ${expectedHash}`, `actual ${planHash(current.text)}`]);
+      }
+    }
     const follower = this.#follower(task);
     const attached = await follower.attach({ taskId: task.id, path: relPath });
     this.checkpoints.delete(task.id);

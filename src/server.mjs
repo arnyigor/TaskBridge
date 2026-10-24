@@ -2095,7 +2095,8 @@ async function handleRequest(req, res) {
       if (req.method !== 'POST') return errorJson(res, 404, Object.assign(new Error('Not found'), { code: 'NOT_FOUND' }));
       if (action === 'attach') {
         return json(res, 200, await command(() => followPlan.attach({
-          taskId: planTaskId, path: body.path, commandId: body.commandId, clientId: body.clientId
+          taskId: planTaskId, path: body.path, expectedHash: body.expectedHash || null,
+          commandId: body.commandId, clientId: body.clientId
         })));
       }
       if (action === 'inspect') {

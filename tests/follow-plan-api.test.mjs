@@ -484,3 +484,58 @@ test('FP-UX-04D: confirm is bound to the previewed text over HTTP', { timeout: 4
   assert.equal(await fs.readFile(path.join(root, 'docs', 'TODO.md'), 'utf8'), '# Другой документ\n');
   assert.equal((await api(`/api/tasks/${task.id}/plan`)).attached, false);
 });
+
+test('FP-UX-04D: the attach route itself refuses a file edited after the preview', { timeout: 40000 }, async t => {
+  // the preview card lives on /plan/inspect, but a client may attach straight
+  // from it: the hash has to be honoured on that path too, not only on import.
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN, 'utf8');
+  const task = await createTask(api);
+
+  const inspection = await post(api, `/api/tasks/${task.id}/plan/inspect`, { path: 'PLAN.md' });
+  assert.equal(inspection.verdict, 'VALID_MANAGED');
+  assert.ok(inspection.hash);
+
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN.replace('Первый шаг', 'Подменённый шаг'), 'utf8');
+  const stale = await post(api, `/api/tasks/${task.id}/plan/attach`, {
+    path: 'PLAN.md', expectedHash: inspection.hash, commandId: 'attach-stale'
+  }).then(value => ({ value }), error => ({ error }));
+  assert.equal(stale.error?.code, 'PLAN_REVISION_CONFLICT');
+  assert.equal((await api(`/api/tasks/${task.id}/plan`)).attached, false, 'привязки нет');
+
+  // A client that attaches without a preview sends no hash and is not refused.
+  const attached = await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'attach-plain' });
+  assert.equal(attached.attached, true);
+  assert.equal(attached.state, 'IDLE');
+});
+
+test('a file from the device keeps its content path: inspect → import with the shown hash', { timeout: 40000 }, async t => {
+  // The SAF / file-picker path (FP-UX-03/04C): the client sends bytes, not a path.
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  const task = await createTask(api);
+  const contentBase64 = Buffer.from(PLAN, 'utf8').toString('base64');
+
+  const inspection = await post(api, `/api/tasks/${task.id}/plan/inspect`, { name: 'pick.md', contentBase64 });
+  assert.equal(inspection.verdict, 'VALID_MANAGED');
+  assert.equal(inspection.path, 'pick.md');
+
+  // A confirmation carrying the hash of a different text is refused.
+  const stale = await post(api, `/api/tasks/${task.id}/plan/import`, {
+    name: 'pick.md', contentBase64, confirmImport: true, expectedHash: 'deadbeef', commandId: 'upload-stale'
+  }).then(value => ({ value }), error => ({ error }));
+  assert.equal(stale.error?.code, 'PLAN_REVISION_CONFLICT');
+  assert.equal((await api(`/api/tasks/${task.id}/plan`)).attached, false);
+
+  const attached = await post(api, `/api/tasks/${task.id}/plan/import`, {
+    name: 'pick.md', contentBase64, confirmImport: true, expectedHash: inspection.hash, commandId: 'upload-ok'
+  });
+  assert.equal(attached.status.attached, true);
+  assert.equal(attached.status.path, 'pick.md');
+  assert.equal(await fs.readFile(path.join(root, 'pick.md'), 'utf8'), PLAN.replace(/\r\n/g, '\n'));
+  const runs = (await api(`/api/tasks/${task.id}/runs`)).runs.length;
+  assert.equal(runs, 1, 'загрузка файла не запускает ход');
+});
