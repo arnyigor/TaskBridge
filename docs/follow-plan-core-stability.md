@@ -101,6 +101,36 @@
 `_planCheckpoint` между ходами в `TaskManager`, и поведение при чужом
 `commandId` на реальном пути.
 
+## CORE-02B — причина найдена и исправлена (2026-10-24)
+
+Живой сценарий воспроизведён на **полном пути** TaskManager → FollowPlanService →
+PlanFollower (тестовый Pi присылает те же кадры, что настоящий):
+
+```
+PLAN_STEP_STARTED S-001 (RUNNING_STEP)
+  → Pi: tool_execution_start taskbridge_plan_checkpoint  (checkpoint валиден)
+  → в сессию приходит сообщение «сейчас» (now:true, steering)
+  → runtime.commandId = команда ОБЫЧНОГО сообщения
+  → agent_settled планового хода
+  → PLAN_STEP_CHECKPOINT CONTINUE (опубликован)
+  → PLAN_CHECKPOINT_REJECTED / FOREIGN_COMMAND
+  → S-001 остаётся TODO, binding остаётся RUNNING_STEP (цикл зависает)
+```
+
+| Причина | Исправление |
+|---|---|
+| `TaskManager` передавал в `turnSettled` **текущий** `runtime.commandId`, а вклинившееся сообщение его перезаписывает | команда запоминается в момент захвата checkpoint (`_planCheckpointCommandId`) и передаётся в settle как команда хода-владельца; текущая используется только когда checkpoint нет |
+
+Тесты: `tests/follow-plan-run-ownership.test.mjs` — обычное сообщение в очередь
+(2 прогона), steering «сейчас» (2 прогона), «продолжай» при активном шаге: во всех
+шаг закрывается, `completionApplied=true`, `confirmedStepIds=[S-001]`, отклонений
+`FOREIGN_COMMAND` нет. До исправления steering-прогоны падали (шаг оставался
+`TODO`), то есть дефект был **воспроизведён и исправлен**, а не «не воспроизвёлся».
+
+Не сделано (честно): матрица LIVE-01…LIVE-08 на настоящем Pi 1.4.0 с реальным
+провайдером. Изолированный стенд с тестовым Pi её заменяет только частично:
+порядок кадров тот же, но поведение модели и тайминги другие.
+
 ## Правила для следующих шагов
 
 - Не менять FSM и CAS одновременно.

@@ -4314,12 +4314,18 @@ export class TaskManager extends EventEmitter {
     }
     if (frame.type === 'tool_execution_start' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL) {
       task._planCheckpoint = frame.args && typeof frame.args === 'object' ? frame.args : null;
+      // Чей это ход: settle обязан получить команду ТОГО хода, который прислал
+      // checkpoint. Вклинившееся сообщение перезаписывает runtime.commandId, и
+      // раньше checkpoint планового хода отклонялся как «другая команда»
+      // (воспроизведено на стенде: steering во время шага).
+      task._planCheckpointCommandId = (runtime ?? this.runtimes.get(task.id))?.commandId || null;
     }
     // A checkpoint whose tool ended with an error was never delivered to the
     // model as a result: Pi reports the failure, so the claim is not evidence and
     // the turn counts as "settled without a checkpoint" (CP-02).
     if (frame.type === 'tool_execution_end' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL && frame.isError === true) {
       task._planCheckpoint = null;
+      task._planCheckpointCommandId = null;
     }
     // Живой кадр = фаза PROGRESS. Публикуется один раз на ход (дальше только
     // обновление _lastProgressAt в снимке), чтобы не дублировать кадры в ленту.
@@ -5809,14 +5815,18 @@ export class TaskManager extends EventEmitter {
   #notifyPlanSettled(task, runtime) {
     const hooks = this.followPlanHooks;
     const checkpoint = task._planCheckpoint || null;
+    const ownerCommandId = task._planCheckpointCommandId || null;
     task._planCheckpoint = null;
+    task._planCheckpointCommandId = null;
     if (!hooks) return;
     // The table of this turn's tool calls travels with the settle: the controller
     // uses it to tell a verified result from a reported one.
     const toolCalls = [...(task._turnToolCalls || new Map())].map(([id, value]) => ({ id, name: value.name, isError: value.isError, exitCode: value.exitCode }));
     Promise.resolve(hooks.turnSettled({
       taskId: task.id,
-      commandId: runtime?.commandId || null,
+      // Команда хода-владельца checkpoint важнее текущей: поздний settle и
+      // вклинившееся сообщение не должны отбирать подтверждение у своего хода.
+      commandId: (checkpoint && ownerCommandId) || runtime?.commandId || null,
       checkpoint,
       toolCalls,
       aborted: runtime?.cancelRequested === true,
