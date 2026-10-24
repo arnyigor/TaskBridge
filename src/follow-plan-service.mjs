@@ -16,7 +16,9 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { parsePlan, proposeImport, planHash, readPlan, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
+import { parsePlan, proposeImport, classifyPlan, planHash, readPlan, readPlanText, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
+import { scanPlanFiles, SCAN_DEFAULTS } from './application/plan-scan.mjs';
+import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer } from './application/plan-ai-review.mjs';
 import { PlanFollower, resultForStep } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
@@ -69,8 +71,8 @@ async function safeTarget(workspace, relPath, { write = false } = {}) {
 const reject = (code, message, extra = {}) => Object.assign(new Error(message), { code, ...extra });
 
 export class FollowPlanService {
-  constructor({ manager, store, config = {}, now = () => Date.now() }) {
-    Object.assign(this, { manager, store, config, now });
+  constructor({ manager, store, config = {}, now = () => Date.now(), askModel = null }) {
+    Object.assign(this, { manager, store, config, now, askModel });
     // Last checkpoint per task, for the card: it is a fact of THIS process (the
     // durable part is the file and the binding), so it is not persisted twice.
     this.checkpoints = new Map();
@@ -82,6 +84,9 @@ export class FollowPlanService {
     // same command must not be read as «a turn without a checkpoint» (that once sent
     // an audit turn for a checkpoint that had already arrived).
     this.settledTurns = new Map();
+    // AI-проверка (FP-UX-04E) — редкое действие по нажатию: времена запросов
+    // держим в памяти процесса, чтобы кнопка не стала способом жечь токены.
+    this.aiReviewTimes = new Map();
     this.limits = config.followPlan?.limits || {};
   }
 
@@ -114,6 +119,9 @@ export class FollowPlanService {
     if (!root) throw reject('SESSION_UNAVAILABLE', 'Рабочий каталог сессии ещё не создан: сначала запустите задачу.');
     return {
       read: relPath => readPlan({ root, relPath, maxBytes: this.config.followPlan?.maxBytes || DEFAULT_MAX_BYTES }),
+      // Text of any Markdown document: the verdict «is this a plan» is decided
+      // after reading, not by parsePlan refusing an ordinary document.
+      text: relPath => readPlanText({ root, relPath, maxBytes: this.config.followPlan?.maxBytes || DEFAULT_MAX_BYTES }),
       update: input => updatePlan({ root, ...input })
     };
   }
@@ -359,6 +367,90 @@ export class FollowPlanService {
   }
 
   /**
+   * Markdown-файлы проекта по явному запросу оператора (FP-UX-04B). Ничего не
+   * пишет, не привязывает и не запускает: это чтение дерева workspace с
+   * ограничениями из plan-scan.mjs. Ни Pi, ни Run здесь не участвуют.
+   */
+  async scan({ taskId, query = '', limit = null } = {}) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    if (!task.workspacePath) throw reject('SESSION_UNAVAILABLE', 'Рабочий каталог сессии ещё не создан: сначала запустите задачу.');
+    const configured = this.config.followPlan?.scan || {};
+    const maxResults = Number.isInteger(limit) && limit > 0
+      ? Math.min(limit, configured.maxResults || SCAN_DEFAULTS.maxResults)
+      : configured.maxResults || SCAN_DEFAULTS.maxResults;
+    const result = await scanPlanFiles({
+      root: task.workspacePath,
+      query,
+      maxResults,
+      maxDepth: configured.maxDepth || SCAN_DEFAULTS.maxDepth,
+      maxDirs: configured.maxDirs || SCAN_DEFAULTS.maxDirs,
+      maxMs: configured.maxMs || SCAN_DEFAULTS.maxMs,
+      maxClassified: configured.maxClassified || SCAN_DEFAULTS.maxClassified
+    });
+    // Абсолютный серверный путь клиенту не отдаётся: интерфейсу нужно имя проекта,
+    // а не адрес на компьютере хоста.
+    return { ...result, enabled: this.enabled };
+  }
+
+  /**
+   * «Проверить с помощью ИИ» (FP-UX-04E): совет модели по выбранному файлу.
+   *
+   * Только по нажатию, без инструментов, без Run и без перезаписи содержимого.
+   * Структурный вердикт (`classifyPlan`) считается здесь же и возвращается рядом:
+   * модель его не заменяет, а его отсутствие/ошибка не мешает обычному
+   * подключению валидного плана.
+   */
+  async aiReview({ taskId, path: relPath = null, name = null, contentBase64 = null }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    if (typeof this.askModel !== 'function') {
+      throw reject('AI_UNAVAILABLE', 'Проверка с помощью ИИ недоступна: сервер не может запросить модель.');
+    }
+    const now = this.now();
+    const recent = (this.aiReviewTimes.get(task.id) || []).filter(at => now - at < 60_000);
+    if (recent.length >= AI_REVIEW_LIMITS.requestsPerMinute) {
+      throw reject('AI_RATE_LIMITED', 'Слишком часто: проверка ИИ — не больше трёх раз в минуту. Обычная проверка формата работает без ограничений.');
+    }
+    this.aiReviewTimes.set(task.id, [...recent, now]);
+
+    let target;
+    let text;
+    if (contentBase64 != null) {
+      target = this.#targetPath(relPath || name || '');
+      text = decodePlanContent(contentBase64);
+    } else {
+      target = this.#relativePath(task, relPath);
+      text = (await this.#plans(task).text(target)).text;
+    }
+    const classified = classifyPlan(text, { planId: this.#planIdFor(target) });
+    const capped = text.slice(0, AI_REVIEW_LIMITS.maxChars);
+    const truncated = capped.length < text.length;
+    const answer = await this.askModel({
+      taskId: task.id,
+      prompt: buildPlanReviewPrompt({ path: target, text: capped, truncated }),
+      maxTokens: AI_REVIEW_LIMITS.maxTokens,
+      timeoutMs: AI_REVIEW_LIMITS.timeoutMs
+    });
+    if (!answer?.ok) {
+      // Отказ модели — не ошибка плана: клиент показывает его отдельно и даёт
+      // подключить файл, если структурная проверка его приняла.
+      throw reject('AI_UNAVAILABLE', `Модель не ответила: ${answer?.message || answer?.code || 'неизвестная причина'}. Обычная проверка формата остаётся доступной.`);
+    }
+    const parsed = parsePlanReviewAnswer(answer.text);
+    if (!parsed.ok) throw reject('AI_UNAVAILABLE', `${parsed.message} Обычная проверка формата остаётся доступной.`);
+    return {
+      path: target,
+      truncated,
+      charsSent: capped.length,
+      structural: { verdict: classified.verdict, reason: classified.reason || '', problems: classified.problems || [] },
+      ai: { verdict: parsed.verdict, looksLikePlan: parsed.looksLikePlan, reasons: parsed.reasons },
+      model: { provider: answer.provider || null, id: answer.model || null, local: answer.local === true },
+      ms: answer.ms ?? null
+    };
+  }
+
+  /**
    * Что будет, если подключить этот файл: ничего не пишет и не привязывает.
    * Нужно, чтобы показать формат, ошибки и импорт ДО согласия оператора.
    */
@@ -372,50 +464,60 @@ export class FollowPlanService {
       text = decodePlanContent(contentBase64);
     } else {
       target = this.#relativePath(task, relPath);
-      const file = await this.#plans(task).read(target);
+      const file = await this.#plans(task).text(target);
       text = file.text;
     }
     return this.#inspectText({ task, target, text });
   }
 
   #inspectText({ task, target, text }) {
-    let plan = null;
-    let problems = [];
-    try {
-      plan = parsePlan(text);
-    } catch (error) {
-      problems = error.problems || [error.message];
-    }
+    // Вердикт (FP-UX-04D) считается в одном месте — plan-file.mjs — чтобы
+    // сканирование, проверка и импорт не расходились в правилах.
+    const classified = classifyPlan(text, { planId: this.#planIdFor(target), goal: '' });
     const binding = this.store.getPlanBinding(task.id);
-    if (plan) {
+    const common = {
+      path: target,
+      // Хэш показанного текста: подтверждение подключения сверяется с ним, чтобы
+      // внешняя правка между предпросмотром и attach обнаруживалась (VALID-06).
+      hash: planHash(text),
+      verdict: classified.verdict,
+      reason: classified.reason || '',
+      problems: classified.problems || [],
+      // Another plan of this session is replaced, not merged; the dialog says so
+      // before the operator agrees.
+      replaces: binding?.path && binding.path !== target ? binding.path : null,
+      alreadyAttached: binding?.path === target
+    };
+    if (classified.verdict === 'VALID_MANAGED') {
+      const plan = classified.plan;
       return {
-        path: target,
+        ...common,
         managed: true,
-        problems: [],
         steps: plan.steps.length,
         planId: plan.planId,
         revision: plan.revision,
-        goal: plan.goal,
-        // Another plan of this session is replaced, not merged; the dialog says so
-        // before the operator agrees.
-        replaces: binding?.path && binding.path !== target ? binding.path : null,
-        alreadyAttached: binding?.path === target
+        goal: plan.goal
       };
     }
-    // Free-form Markdown is imported as a preview only; the file stays untouched
-    // until the operator confirms.
-    const preview = proposeImport(text, { planId: this.#planIdFor(target) });
-    return {
-      path: target,
-      managed: false,
-      problems,
-      freeForm: true,
-      preview: {
-        steps: preview.plan.steps.map(step => ({ id: step.id, title: step.title, status: step.status })),
-        unmapped: preview.unmapped,
-        problems: preview.problems
-      }
-    };
+    if (classified.verdict === 'CONVERTIBLE') {
+      // Free-form Markdown is imported as a preview only; the file stays untouched
+      // until the operator confirms. `content` is the managed file the operator is
+      // about to agree to — nothing is written to disk before that click.
+      const preview = classified.preview;
+      return {
+        ...common,
+        managed: false,
+        freeForm: true,
+        preview: {
+          steps: preview.plan.steps.map(step => ({ id: step.id, title: step.title, status: step.status })),
+          unmapped: preview.unmapped,
+          problems: preview.problems,
+          content: preview.content
+        }
+      };
+    }
+    // NOT_A_PLAN / INVALID: нет ни одного шага — значит и импортировать нечего.
+    return { ...common, managed: false, freeForm: true, preview: null };
   }
 
   #planIdFor(target) {
@@ -428,7 +530,7 @@ export class FollowPlanService {
    * проекте (`path`). Управляемый план пишется как есть; свободный Markdown —
    * только после `confirmImport`, и тогда он преобразуется в управляемый.
    */
-  async importPlan({ taskId, path: relPath = null, name = null, contentBase64 = null, confirmImport = false, overwrite = false, commandId, clientId }) {
+  async importPlan({ taskId, path: relPath = null, name = null, contentBase64 = null, confirmImport = false, overwrite = false, expectedHash = null, commandId, clientId }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
     let target;
@@ -438,8 +540,15 @@ export class FollowPlanService {
       text = decodePlanContent(contentBase64);
     } else {
       target = this.#relativePath(task, relPath);
-      const file = await this.#plans(task).read(target);
+      const file = await this.#plans(task).text(target);
       text = file.text;
+    }
+    // The operator confirmed a specific text. If the file changed after that
+    // preview, attaching would silently apply a verdict for content nobody saw.
+    if (expectedHash && planHash(text) !== expectedHash) {
+      throw reject('PLAN_REVISION_CONFLICT',
+        `Файл ${target} изменился после проверки. Откройте его заново и подтвердите подключение заново.`,
+        [`expected ${expectedHash}`, `actual ${planHash(text)}`]);
     }
 
     const binding = this.store.getPlanBinding(task.id);
@@ -450,6 +559,11 @@ export class FollowPlanService {
         { attachedPath: binding.path });
     }
     const inspection = this.#inspectText({ task, target, text });
+    if (!inspection.managed && !inspection.preview) {
+      // A plain document is not a plan, and an unparsable managed file is not a
+      // conversion candidate: say so instead of silently attaching a README.
+      throw reject('PLAN_INVALID', `Файл не подходит как план: ${inspection.reason || inspection.problems[0] || 'нет шагов'}`, inspection.problems || []);
+    }
     const absolute = await safeTarget(task.workspacePath, target, { write: true });
     let toWrite = text;
     let imported = null;
@@ -628,6 +742,10 @@ export class FollowPlanService {
    * removes the binding, so nothing the operator wrote is deleted. A cycle that is
    * still running is paused first: otherwise the next settle would dispatch a step
    * for a plan nobody follows any more.
+   *
+   * «Удалить файл с сервера» (FP-UX-04F) намеренно не реализовано: файл плана —
+   * исходный файл проекта, а отключение привязки и удаление файла не одно и то же.
+   * Кнопки удаления в интерфейсе нет именно поэтому, а не по недосмотру.
    */
   async detach({ taskId, commandId, clientId }) {
     this.#assertEnabled();

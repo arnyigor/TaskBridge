@@ -244,6 +244,62 @@ export function streamError(text) {
 }
 
 /**
+ * Один короткий ответ модели без стрима и без инструментов (FP-UX-04E).
+ *
+ * Отдельно от `probeLatency`: та мерит TTFT на `ping` и обрывает поток, а здесь
+ * нужен именно текст ответа. Ничего не пишет, Run не создаёт и к Pi не обращается:
+ * это прямой запрос к адресу провайдера, который сервер уже знает.
+ */
+export async function completeOnce({
+  baseUrl, id, apiKey = null, prompt = '', maxTokens = 400,
+  timeoutMs = PROBE_DEFAULTS.timeoutMs * 3, fetchImpl = globalThis.fetch
+}) {
+  const started = Date.now();
+  try {
+    const response = await fetchImpl(chatCompletionsUrl(baseUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+      },
+      body: JSON.stringify({
+        model: id,
+        max_tokens: maxTokens,
+        temperature: 0,
+        stream: false,
+        messages: [{ role: 'user', content: String(prompt) }]
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+      // Никаких переходов по редиректу: адрес пришёл из конфигурации, но 302 на
+      // внутренний адрес превратил бы запрос в SSRF от имени сервера.
+      redirect: 'manual'
+    });
+    const ms = Date.now() - started;
+    if (response.status >= 300 && response.status < 400) {
+      return { ok: false, ms, httpStatus: response.status, code: 'REDIRECT' };
+    }
+    if (!response.ok) {
+      return {
+        ok: false, ms, httpStatus: response.status,
+        code: response.status === 401 ? 'AUTH' : response.status === 429 ? 'RATE_LIMITED'
+          : response.status === 404 ? 'MODEL_NOT_FOUND' : 'HTTP_ERROR'
+      };
+    }
+    const payload = await response.json().catch(() => null);
+    const text = String(payload?.choices?.[0]?.message?.content ?? '');
+    if (!text.trim()) return { ok: false, ms, code: 'EMPTY' };
+    return { ok: true, ms, text, httpStatus: response.status };
+  } catch (error) {
+    return {
+      ok: false,
+      ms: Date.now() - started,
+      code: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'TIMEOUT' : 'UNREACHABLE',
+      message: String(error?.message || error)
+    };
+  }
+}
+
+/**
  * Кулдаун проб: одна модель — не чаще, чем раз в [cooldownMs]. Живёт в памяти
  * процесса: после перезапуска сервера кулдаун не нужен, оператор ждёт осознанно.
  */

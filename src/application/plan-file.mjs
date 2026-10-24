@@ -220,7 +220,17 @@ const inside = (root, candidate) => {
 };
 
 /** Reads one plan inside the workspace. Symlinks and `..` are resolved before the scope check. */
-export async function readPlan({ root, relPath, maxBytes = DEFAULT_MAX_BYTES, fsImpl = fs }) {
+export async function readPlan(input) {
+  const file = await readPlanText(input);
+  return { ...file, plan: parsePlan(file.text) };
+}
+
+/**
+ * Тот же scope-контроль, но без разбора формата: для проверки выбранного файла
+ * нужен текст ЛЮБОГО Markdown-документа (решение «это план или нет» принимает
+ * classifyPlan), а readPlan отказывает уже на разборе и до вердикта не доходит.
+ */
+export async function readPlanText({ root, relPath, maxBytes = DEFAULT_MAX_BYTES, fsImpl = fs }) {
   if (!root) throw new Error('internal: root required');
   if (!relPath || path.isAbsolute(relPath)) throw new PlanError('PLAN_INVALID', 'Путь плана должен быть относительным путём внутри рабочего каталога.', ['абсолютный или пустой путь']);
   const target = path.resolve(root, relPath);
@@ -238,8 +248,7 @@ export async function readPlan({ root, relPath, maxBytes = DEFAULT_MAX_BYTES, fs
   if (!stat.isFile()) throw new PlanError('PLAN_INVALID', `План — не обычный файл: ${relPath}`, [relPath]);
   if (stat.size > maxBytes) throw new PlanError('PLAN_INVALID', `Файл плана больше ${maxBytes} байт.`, [`${stat.size} bytes`]);
   const text = normalizedText(await fsImpl.readFile(realPath, 'utf8'));
-  const plan = parsePlan(text);
-  return { relPath, realPath, text, hash: planHash(text), plan };
+  return { relPath, realPath, text, hash: planHash(text) };
 }
 
 const RETRYABLE = new Set(['EPERM', 'EBUSY', 'EACCES', 'EAGAIN']);
@@ -399,6 +408,18 @@ async function updatePlanLocked({ root, relPath, expectedRevision, expectedHash,
   return { plan: next, text, hash, realPath: current.realPath };
 }
 
+/** Объявлен ли в front matter управляемый формат (даже если файл не разбирается). */
+export function declaresManagedFormat(input) {
+  const lines = normalizedText(input).split('\n');
+  if (lines[0]?.trim() !== '---') return false;
+  // Сам факт маркера после открывающего `---` уже заявка на формат: файл с
+  // недописанным front matter — повреждённый план, а не «обычный Markdown».
+  return lines.slice(1).some(line => /^\s*taskbridge_plan\s*:/i.test(line));
+}
+
+/** Список шагов источника: именно `- [ ]`, а не нумерация и не заголовки. */
+export const hasCheckboxSteps = input => /^[-*+][ \t]*\[(?: |x|X)\][ \t]+\S/m.test(normalizedText(input));
+
 /** Import is a preview: the returned text is for review, the source file is untouched. */
 export function proposeImport(input, { planId = 'p-imported', goal = '' } = {}) {
   const lines = normalizedText(input).split('\n');
@@ -455,4 +476,69 @@ export function proposeImport(input, { planId = 'p-imported', goal = '' } = {}) 
   const plan = { schema: PLAN_SCHEMA_VERSION, planId, revision: 0, goal: goal || title || 'Импортированный план', title, steps, findings: [], extraFront: {} };
   problem(plan, problems);
   return { plan, content: steps.length ? serializePlan(plan) : null, problems, unmapped };
+}
+
+/**
+ * Вердикт выбранного файла (FP-UX-04D), отдельно от разбора и импорта: решает,
+ * показывать «готов к подключению», «нужно преобразование», «это не план» или
+ * «файл технически непригоден».
+ *
+ * Правила намеренно строгие в одну сторону: Markdown-документ с нумерованным
+ * списком, README и AGENTS.md не становятся планом от одного лишь списка.
+ * Шаги импорта — только чекбоксы `- [ ]`; заголовки `###` без списка планом не
+ * считаются (иначе руководитель проекта получал «план» из любого README).
+ *
+ * Ничего не пишет: `preview.content` — это будущий управляемый файл для показа,
+ * исходный текст остаётся как был до явного подтверждения.
+ */
+export const PLAN_VERDICTS = Object.freeze(['VALID_MANAGED', 'CONVERTIBLE', 'NOT_A_PLAN', 'INVALID']);
+
+export function classifyPlan(input, { planId = 'p-imported', goal = '' } = {}) {
+  const text = normalizedText(input);
+  if (!text.trim()) {
+    return {
+      verdict: 'INVALID',
+      plan: null,
+      preview: null,
+      problems: ['файл пуст'],
+      reason: 'Файл пуст: подключать нечего.'
+    };
+  }
+  try {
+    const plan = parsePlan(text);
+    return { verdict: 'VALID_MANAGED', plan, preview: null, problems: [], reason: 'Управляемый план taskbridge_plan: 1.' };
+  } catch (error) {
+    const problems = Array.isArray(error?.problems) ? [...error.problems] : [String(error?.message || error)];
+    if (declaresManagedFormat(text)) {
+      // Объявленный формат, который не разбирается, — это повреждённый план, а не
+      // «обычный Markdown»: преобразование спрятало бы настоящую причину.
+      return { verdict: 'INVALID', plan: null, preview: null, problems, reason: problems[0] };
+    }
+    if (!hasCheckboxSteps(text)) {
+      return {
+        verdict: 'NOT_A_PLAN',
+        plan: null,
+        preview: null,
+        problems: ['не найдено ни формата taskbridge_plan: 1, ни списка шагов вида «- [ ] …»'],
+        reason: 'Документ не похож на план: нет ни управляемого формата, ни списка шагов.'
+      };
+    }
+    const preview = proposeImport(text, { planId, goal });
+    if (!preview.content) {
+      return {
+        verdict: 'NOT_A_PLAN',
+        plan: null,
+        preview: null,
+        problems: preview.problems.length ? preview.problems : ['шагов для импорта нет'],
+        reason: 'Из файла не собирается ни одного шага.'
+      };
+    }
+    return {
+      verdict: 'CONVERTIBLE',
+      plan: preview.plan,
+      preview,
+      problems: [],
+      reason: 'Обычный Markdown со списком шагов: нужен предварительный импорт.'
+    };
+  }
 }

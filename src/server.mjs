@@ -146,7 +146,12 @@ await manager.init();
 // Follow Plan (PLAN-FOLLOW-01, FP-05A): a controller over the dispatch that
 // already exists. The flag stays off until the FP-06 acceptance; with it off the
 // control routes refuse and nothing generates on its own.
-const followPlan = new FollowPlanService({ manager, store, config });
+const followPlan = new FollowPlanService({
+  manager, store, config,
+  // Optional AI check (FP-UX-04E): a plain question to the session's model, no
+  // tools and no Run. Absent → the button reports «недоступно» and attach works.
+  askModel: typeof manager.askModelOnce === 'function' ? input => manager.askModelOnce(input) : null
+});
 manager.setFollowPlanHooks({
   turnSettled: input => followPlan.turnSettled(input),
   // A failed turn (403/413/… or a cancelled one) settles nothing: the plan pauses.
@@ -1645,7 +1650,7 @@ async function handleRequest(req, res) {
         followPlan: {
           enabled: followPlan.enabled,
           capabilities: followPlan.enabled
-            ? ['status', 'attach', 'detach', 'browse', 'inspect', 'import', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile']
+            ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
             : []
         },
         pi,
@@ -2048,7 +2053,7 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|inspect|import|content|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|scan|ai-review|inspect|import|content|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
@@ -2064,6 +2069,21 @@ async function handleRequest(req, res) {
         return json(res, 200, await followPlan.browse({ taskId: planTaskId, path: url.searchParams.get('path') || '' }));
       }
       const body = await readJson(req).catch(() => ({}));
+      if (action === 'scan' && req.method === 'POST') {
+        // Read-only search of the session workspace (FP-UX-04B): no commandId,
+        // no plan write, no Pi. Bounded by plan-scan.mjs, so a huge project
+        // answers with `partial: true` instead of hanging.
+        return json(res, 200, await followPlan.scan({
+          taskId: planTaskId, query: body.query ?? '', limit: body.limit ?? null
+        }));
+      }
+      if (action === 'ai-review' && req.method === 'POST') {
+        // Advisory only: no commandId, no plan write, no Run. The model is asked
+        // once, by an explicit click, and its answer never replaces the verdict.
+        return json(res, 200, await followPlan.aiReview({
+          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null, contentBase64: body.contentBase64 ?? null
+        }));
+      }
       const command = (fn) => manager.withCommandId(body.commandId, body.clientId, [action || 'patch', planTaskId, body], () => fn());
       if (!action && req.method === 'PATCH') {
         return json(res, 200, await command(() => followPlan.patch({
@@ -2095,7 +2115,8 @@ async function handleRequest(req, res) {
         return json(res, 200, await command(() => followPlan.importPlan({
           taskId: planTaskId, path: body.path ?? null, name: body.name ?? null,
           contentBase64: body.contentBase64 ?? null, confirmImport: body.confirmImport === true,
-          overwrite: body.overwrite === true, commandId: body.commandId, clientId: body.clientId
+          overwrite: body.overwrite === true, expectedHash: body.expectedHash || null,
+          commandId: body.commandId, clientId: body.clientId
         })));
       }
       if (action === 'detach') {

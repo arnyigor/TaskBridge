@@ -359,3 +359,128 @@ test('the project browser answers a plain GET (the phone picks a file on the com
   const refused = await api(`/api/tasks/${task.id}/plan/browse?path=..`).then(value => ({ value }), error => ({ error }));
   assert.equal(refused.error.status, 400);
 });
+
+test('FP-UX-04B: scanning the project over HTTP finds nested plans and never starts a turn', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.mkdir(path.join(root, 'docs', 'deep'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs', 'deep', 'PLAN.md'), PLAN, 'utf8');
+  await fs.writeFile(path.join(root, 'docs', 'TODO.md'), '# Задачи\n\n- [ ] Починить пагинацию\n', 'utf8');
+  await fs.writeFile(path.join(root, 'docs', 'README.md'), '# Проект\n\n1. Установить\n', 'utf8');
+  await fs.mkdir(path.join(root, 'node_modules', 'pkg'), { recursive: true });
+  await fs.writeFile(path.join(root, 'node_modules', 'pkg', 'PLAN.md'), PLAN, 'utf8');
+  const task = await createTask(api);
+
+  const scan = await post(api, `/api/tasks/${task.id}/plan/scan`, { query: '' });
+  const paths = scan.files.map(file => file.path).sort();
+  assert.deepEqual(paths, ['docs/README.md', 'docs/TODO.md', 'docs/deep/PLAN.md']);
+  assert.equal(scan.partial, false);
+  const byPath = new Map(scan.files.map(file => [file.path, file]));
+  assert.equal(byPath.get('docs/deep/PLAN.md').classification, 'VALID_MANAGED');
+  assert.equal(byPath.get('docs/TODO.md').classification, 'CONVERTIBLE');
+  assert.equal(byPath.get('docs/README.md').classification, null);
+
+  const filtered = await post(api, `/api/tasks/${task.id}/plan/scan`, { query: 'deep' });
+  assert.deepEqual(filtered.files.map(file => file.path), ['docs/deep/PLAN.md']);
+
+  // Scanning is not a plan action: the plan stays unattached and no FOLLOW PLAN
+  // instruction has been delivered.
+  const status = await api(`/api/tasks/${task.id}/plan`);
+  assert.equal(status.attached, false);
+  const deliveries = (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8').catch(() => ''))
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line)).filter(entry => entry.message.includes('FOLLOW PLAN'));
+  assert.equal(deliveries.length, 0);
+
+  // A GET is not the scan route: the answer is the plain 404, not a silent walk.
+  const asGet = await api(`/api/tasks/${task.id}/plan/scan`).then(value => ({ value }), error => ({ error }));
+  assert.equal(asGet.error?.status, 404);
+});
+
+test('FP-UX-04D: a project Markdown file is inspected in place and a README is refused', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs', 'PLAN.md'), PLAN, 'utf8');
+  await fs.writeFile(path.join(root, 'docs', 'TODO.md'), '# Задачи\n\n- [ ] Починить пагинацию\n', 'utf8');
+  await fs.writeFile(path.join(root, 'docs', 'README.md'), '# Проект\n\n1. Установить зависимости\n', 'utf8');
+  const task = await createTask(api);
+
+  const managed = await post(api, `/api/tasks/${task.id}/plan/inspect`, { path: 'docs/PLAN.md' });
+  assert.equal(managed.verdict, 'VALID_MANAGED');
+  assert.equal(managed.managed, true);
+
+  const convertible = await post(api, `/api/tasks/${task.id}/plan/inspect`, { path: 'docs/TODO.md' });
+  assert.equal(convertible.verdict, 'CONVERTIBLE');
+  assert.match(convertible.preview.content, /taskbridge_plan: 1/);
+  assert.equal(await fs.readFile(path.join(root, 'docs', 'TODO.md'), 'utf8'), '# Задачи\n\n- [ ] Починить пагинацию\n');
+
+  const notAPlan = await post(api, `/api/tasks/${task.id}/plan/inspect`, { path: 'docs/README.md' });
+  assert.equal(notAPlan.verdict, 'NOT_A_PLAN');
+
+  const refused = await post(api, `/api/tasks/${task.id}/plan/import`, { path: 'docs/README.md', commandId: 'readme-import' })
+    .then(value => ({ value }), error => ({ error }));
+  assert.equal(refused.error?.status, 400);
+  assert.match(String(refused.error?.message || ''), /не подходит как план/);
+  const empty = await api(`/api/tasks/${task.id}/plan`);
+  assert.equal(empty.attached, false, 'ничего не подключено');
+});
+
+test('FP-UX-04E: the AI check is an explicit route and its absence does not block the plan', { timeout: 40000 }, async t => {
+  // The fixture session has no model, so the server answers «модель недоступна» —
+  // exactly the case the requirement names: a valid plan still attaches.
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN, 'utf8');
+  const task = await createTask(api);
+
+  const review = await post(api, `/api/tasks/${task.id}/plan/ai-review`, { path: 'PLAN.md' })
+    .then(value => ({ value }), error => ({ error }));
+  assert.ok(review.error, 'без модели ответ — ошибка, а не выдуманный вердикт');
+  assert.equal(review.error?.code, 'AI_UNAVAILABLE');
+  assert.match(String(review.error?.message || ''), /Обычная проверка формата остаётся доступной/);
+
+  const attached = await post(api, `/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'attach-no-ai' });
+  assert.equal(attached.attached, true);
+});
+
+test('FP-UX-04E: the AI check creates no run and sends no prompt', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.writeFile(path.join(root, 'PLAN.md'), PLAN, 'utf8');
+  const task = await createTask(api);
+  const runsBefore = (await api(`/api/tasks/${task.id}/runs`)).runs?.length ?? 0;
+  const deliveries = async () => (await fs.readFile(path.join(root, 'pi-deliveries.ndjson'), 'utf8').catch(() => ''))
+    .trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+
+  await post(api, `/api/tasks/${task.id}/plan/ai-review`, { path: 'PLAN.md' }).catch(() => {});
+  await sleep(600);
+  const runsAfter = (await api(`/api/tasks/${task.id}/runs`)).runs?.length ?? 0;
+  assert.equal(runsAfter, runsBefore, 'ни одного нового Run');
+  assert.equal((await deliveries()).filter(entry => entry.message.includes('FOLLOW PLAN')).length, 0);
+  assert.equal((await api(`/api/tasks/${task.id}`)).status, 'SUCCEEDED', 'сессия осталась в прежнем состоянии');
+});
+
+test('FP-UX-04D: confirm is bound to the previewed text over HTTP', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  const original = '# Задачи\n\n- [ ] Починить пагинацию\n';
+  await fs.writeFile(path.join(root, 'docs', 'TODO.md'), original, 'utf8');
+  const task = await createTask(api);
+
+  const inspection = await post(api, `/api/tasks/${task.id}/plan/inspect`, { path: 'docs/TODO.md' });
+  assert.ok(inspection.hash, 'проверка отдаёт хэш показанного текста');
+
+  await fs.writeFile(path.join(root, 'docs', 'TODO.md'), '# Другой документ\n', 'utf8');
+  const stale = await post(api, `/api/tasks/${task.id}/plan/import`, {
+    path: 'docs/TODO.md', confirmImport: true, expectedHash: inspection.hash, commandId: 'stale-http'
+  }).then(value => ({ value }), error => ({ error }));
+  assert.equal(stale.error?.code, 'PLAN_REVISION_CONFLICT');
+  assert.equal(await fs.readFile(path.join(root, 'docs', 'TODO.md'), 'utf8'), '# Другой документ\n');
+  assert.equal((await api(`/api/tasks/${task.id}/plan`)).attached, false);
+});

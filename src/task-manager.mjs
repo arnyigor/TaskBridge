@@ -47,7 +47,7 @@ import { contextFingerprint, validateResume, describeChanges } from './resume/re
 import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions, INDEX_BUDGET_TOKENS, GLOBAL_BUDGET_TOKENS } from './memory/project-memory-provider.mjs';
 import { memoryMetrics } from './memory/memory-metrics.mjs';
 import { MERGE_THRESHOLD_DEFAULT, findMergeCandidates, mergeProposalText } from './memory/memory-consolidator.mjs';
-import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency, providerCheckStatus } from './model-probe.mjs';
+import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency, providerCheckStatus, completeOnce } from './model-probe.mjs';
 import { WakeChannel } from './wake-channel.mjs';
 import { apiKey as providerApiKey } from './provider-models.mjs';
 import { listProposals, createProposal, acceptProposal, rejectProposal, validateProposal, proposalCounts } from './memory/memory-proposals.mjs';
@@ -3274,6 +3274,35 @@ export class TaskManager extends EventEmitter {
    * Результат НЕ пишется в ModelLatency: там статистика настоящих ходов, и подмешивать
    * к ней пробу на «ping» значило бы врать в оценке «модель обычно отвечает за N с».
    */
+  /**
+   * Один ответ модели без инструментов и без Run (FP-UX-04E: проверка плана).
+   *
+   * Работает через того же провайдера, что и ход сессии, но это НЕ ход: очередь,
+   * command ledger и follow-plan-шаги не затрагиваются, а неудача возвращается как
+   * `ok: false` — обычное подключение валидного плана от неё не зависит.
+   */
+  async askModelOnce({ taskId = null, prompt = '', maxTokens = 400, timeoutMs = 30_000 } = {}) {
+    const task = taskId ? this.getTask(String(taskId)) : null;
+    if (taskId && !task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    const providerId = String(task?.model?.provider || '');
+    const modelId = String(task?.model?.id || '');
+    if (!providerId || !modelId) {
+      return { ok: false, code: 'MODEL_UNKNOWN', message: 'у сессии нет выбранной модели' };
+    }
+    const target = await this.#probeTarget(providerId, modelId);
+    if (!target.ok) return { ok: false, code: target.code, message: target.message };
+    const result = await completeOnce({
+      baseUrl: target.baseUrl, id: modelId, apiKey: target.apiKey, prompt, maxTokens, timeoutMs
+    });
+    // `local` — не догадка: цель найдена среди локальных серверов/роутера, значит
+    // текст не уходит наружу (это и показывается оператору).
+    const external = this.localServers.find(providerId);
+    const local = Boolean(external && external.model === modelId)
+      || Boolean(this.localServers.find(modelId))
+      || localProviderIds(this.config.localRuntime || {}, this.localServers.servers).has(providerId);
+    return { ...result, provider: providerId, model: modelId, local };
+  }
+
   async probeModel({ provider = null, id = null, mode = 'availability' } = {}) {
     const providerId = String(provider || '').trim();
     const modelId = String(id || '').trim();
