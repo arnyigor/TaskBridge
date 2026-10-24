@@ -39,7 +39,8 @@ const CHECKPOINT_REASON_TEXT = Object.freeze({
   NO_CHECKPOINT: 'ход завершился без checkpoint',
   APPROVAL_REQUIRED: 'нужно подтверждение оператора',
   APPLY_FAILED: 'запись в файл плана не удалась',
-  NOTHING_TO_APPLY: 'подтверждённых изменений нет'
+  NOTHING_TO_APPLY: 'подтверждённых изменений нет',
+  NOT_APPLIED: 'запрошенные шаги в файле не закрыты'
 });
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -197,6 +198,14 @@ export class FollowPlanService {
       outcome: result.outcome,
       reasonCode: result.reasonCode || null,
       planRevision: result.planRevision ?? null,
+      revisionBefore: result.revisionBefore ?? null,
+      revisionAfter: result.revisionAfter ?? null,
+      appliedStepIds: result.appliedStepIds || [],
+      appliedFindingIds: result.appliedFindingIds || [],
+      confirmedStepIds: result.confirmedStepIds || [],
+      completionApplied: result.completionApplied === true,
+      unconfirmedStepIds: result.unconfirmedStepIds || [],
+      problems: result.problems || [],
       dispatchCommandId: result.dispatchCommandId || null
     });
   }

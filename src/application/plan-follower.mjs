@@ -49,6 +49,7 @@ export const CHECKPOINT_REASONS = Object.freeze({
   APPROVAL_REQUIRED: 'нужно подтверждение оператора',
   APPLY_FAILED: 'запись в файл плана не удалась',
   NOTHING_TO_APPLY: 'подтверждённых изменений нет',
+  NOT_APPLIED: 'запрошенные шаги в файле не закрыты',
   DETACHED: 'план отключён'
 });
 
@@ -129,6 +130,8 @@ export class PlanFollower {
   constructor({ store, plans, dispatch, cancel = async () => {}, now = () => Date.now(), limits = {} }) {
     Object.assign(this, { store, plans, dispatch, cancel, now });
     this.limits = { ...DEFAULT_LIMITS, ...limits };
+    // Атрибуция записи: чья именно правка сделана этим settle (FP-FIX-01/05).
+    this.lastApply = null;
   }
 
   #binding(taskId) {
@@ -348,35 +351,71 @@ export class PlanFollower {
    */
   async onSettled(input) {
     const bindingBefore = this.store.getPlanBinding(input.taskId);
-    const revisionBefore = await this.#currentRevision(input.taskId);
+    const before = await this.#planSnapshot(input.taskId);
     const result = await this.#onSettledCore(input);
-    const revisionAfter = await this.#currentRevision(input.taskId);
+    const after = await this.#planSnapshot(input.taskId);
     const binding = this.store.getPlanBinding(input.taskId) || bindingBefore;
-    const applied = revisionBefore != null && revisionAfter != null && revisionAfter !== revisionBefore;
+    const checkpoint = input.checkpoint || null;
+
+    // Применение доказывается НЕ изменением ревизии: файл может уйти вперёд из-за
+    // finding или чужой записи, а закрытые шаги останутся прежними. Считаем ровно
+    // то, что стало по-другому в самом файле — но только по собственной записи:
+    // снимок «до/после» не отличает нашу запись от чужой, атрибуция нужна честная.
+    const own = this.lastApply && this.lastApply.taskId === input.taskId ? this.lastApply : null;
+    this.lastApply = null;
+    const appliedStepIds = own ? own.stepIds : [];
+    const appliedFindingIds = own ? own.findingIds : [];
+    const externalRevisionChange = !own && before?.revision != null && after?.revision != null
+      && after.revision !== before.revision;
+    const requested = Array.isArray(checkpoint?.completedStepIds) ? checkpoint.completedStepIds.map(String) : [];
+    const confirmedStepIds = requested.filter(stepId => appliedStepIds.includes(stepId));
     const rejectedCodes = new Set([
       'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_UNKNOWN_OUTCOME',
       'PLAN_BUDGET_EXCEEDED', 'PLAN_CONFLICT', 'PLAN_WRITE_FAILED'
     ]);
+    const changed = Boolean(own);
     const outcome = (result.outcome && result.outcome !== 'RECEIVED')
       ? result.outcome
-      : applied ? 'APPLIED' : rejectedCodes.has(result.code) ? 'REJECTED' : 'RECEIVED';
+      : changed ? 'APPLIED' : rejectedCodes.has(result.code) ? 'REJECTED' : 'RECEIVED';
+    const unconfirmed = requested.filter(stepId => !confirmedStepIds.includes(stepId));
     const reasonCode = result.reasonCode || (outcome === 'REJECTED'
       ? (result.code === 'IGNORED' ? 'STATE_INACTIVE' : result.code)
       : outcome === 'RECEIVED' ? 'NOTHING_TO_APPLY' : null);
     return {
       ...result,
-      ...this.#outcome(binding, input.checkpoint || null, outcome, reasonCode, {
-        planRevision: revisionAfter ?? result.planRevision ?? null,
-        ...(applied ? { appliedRevision: revisionAfter } : {})
+      ...this.#outcome(binding, checkpoint, outcome, reasonCode, {
+        planRevision: after?.revision ?? result.planRevision ?? null,
+        revisionBefore: before?.revision ?? null,
+        revisionAfter: after?.revision ?? null,
+        ...(externalRevisionChange ? { externalRevisionChange: true } : {}),
+        appliedStepIds,
+        appliedFindingIds,
+        confirmedStepIds,
+        // APPLIED — про запись файла вообще; состоялось ли завершение шага, отвечает
+        // этот флаг (FP-FIX-05/FP-FIX-01: ревизия этого не доказывает).
+        completionApplied: requested.length > 0 && confirmedStepIds.length === requested.length,
+        // Запрошенные, но не закрытые шаги: именно этот случай на живом прогоне
+        // выглядел как «checkpoint применён».
+        ...(unconfirmed.length ? { unconfirmedStepIds: unconfirmed, problems: [`не применены: ${unconfirmed.join(', ')}`] } : {})
       })
     };
   }
 
-  /** Ревизия файла плана сессии, или null, если файла ещё нет. */
-  async #currentRevision(taskId) {
+  /** Что в файле плана сейчас: ревизия, закрытые шаги и находки. */
+  async #planSnapshot(taskId) {
     const binding = this.store.getPlanBinding(taskId);
     if (!binding?.path) return null;
-    return this.plans.read(binding.path).then(file => file.plan.revision).catch(() => null);
+    try {
+      const file = await this.plans.read(binding.path);
+      return {
+        revision: file.plan.revision,
+        doneSteps: new Set(file.plan.steps.filter(step => step.status === 'DONE' || step.status === 'SKIPPED').map(step => step.id)),
+        doneFindings: new Set(file.plan.findings.filter(finding => finding.state === 'DONE').map(finding => finding.id)),
+        findingIds: new Set(file.plan.findings.map(finding => finding.id))
+      };
+    } catch {
+      return null;
+    }
   }
 
   async #onSettledCore({ taskId, commandId, checkpoint, seq = null, deferDispatch = false }) {
@@ -466,6 +505,16 @@ export class PlanFollower {
         expectedHash: file.hash,
         changes: { ops }
       });
+      // Что записала ИМЕННО эта операция: по этому признаку обёртка onSettled
+      // отличает своё применение от чужой записи в файл (FP-FIX-01/05).
+      this.lastApply = {
+        taskId,
+        revision: applied.plan.revision,
+        stepIds: completed,
+        findingIds: ops
+          .filter(op => op.op === 'add_finding' || (op.op === 'set_finding_state' && op.state === 'DONE'))
+          .map(op => op.findingId)
+      };
     }
     const plan = applied?.plan || file.plan;
     const hash = applied?.hash || file.hash;

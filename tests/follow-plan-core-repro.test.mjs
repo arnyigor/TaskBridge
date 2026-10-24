@@ -164,8 +164,12 @@ test('FP-FIX-05: применение и «нечего применять» р�
   const applied = await follower.onSettled({ taskId: 't-1', commandId: start.commandId, seq: 30, checkpoint: completion });
   assert.equal(applied.outcome, 'APPLIED');
   assert.equal(applied.reasonCode, null);
-  assert.equal(applied.appliedRevision, 2, 'файл ушёл на следующую ревизию');
-  assert.equal(applied.checkpointId, applied.checkpointId);
+  assert.equal(applied.revisionBefore, 1);
+  assert.equal(applied.revisionAfter, 2, 'файл ушёл на следующую ревизию');
+  assert.deepEqual(applied.appliedStepIds, ['S-001'], 'применение подтверждается закрытым шагом, а не ревизией');
+  assert.deepEqual(applied.confirmedStepIds, ['S-001']);
+  assert.deepEqual(applied.unconfirmedStepIds ?? [], []);
+  assert.ok(applied.checkpointId);
 
   const second = await follower.onSettled({
     taskId: 't-1',
@@ -204,4 +208,71 @@ test('checkpoint без подтверждённой ссылки шаг не з
     ['DISPATCH_READY', 'DISPATCHED', 'PLAN_BLOCKED', 'PAUSED_REVIEW'].includes(settled.code),
     `отказ виден в результате: ${settled.code}`
   );
+});
+
+test('APPLIED не выводится из смены ревизии: находка без закрытого шага — не завершение', async t => {
+  const { follower, plans } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  // Checkpoint приносит ТОЛЬКО находку: файл уходит на новую ревизию, шаг остаётся TODO.
+  const settled = await follower.onSettled({
+    taskId: 't-1',
+    commandId: start.commandId,
+    seq: 50,
+    checkpoint: checkpoint({
+      completedStepIds: [],
+      findings: [{ id: 'F-001', priority: 'P2', blocking: false, summary: 'найдено по ходу шага' }]
+    })
+  });
+
+  assert.equal(settled.revisionAfter, 2, 'файл записан');
+  assert.deepEqual(settled.appliedStepIds, [], 'ни один шаг не закрыт');
+  assert.deepEqual(settled.confirmedStepIds, []);
+  assert.deepEqual(settled.appliedFindingIds, ['F-001'], 'применённая находка названа');
+  assert.equal(parsePlan(plans.state.text).steps[0].status, 'TODO', 'шаг остался открытым');
+  // APPLIED относится к записи файла; завершение шага подтверждает отдельный флаг.
+  assert.equal(settled.outcome, 'APPLIED');
+  assert.equal(settled.completionApplied, false, 'завершения шага не было, хотя файл записан');
+});
+
+test('ДЕФЕКТ-РИСК: ревизия изменилась чужой записью — шаг не считается применённым', async t => {
+  const { follower, plans, store } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  // Между чтением «до» и чтением «после» файл правит кто-то ещё (контроллер/человек),
+  // а сам checkpoint невалиден: evidence без проверяемой ссылки.
+  const originalRead = plans.read.bind(plans);
+  let reads = 0;
+  plans.read = async () => {
+    reads += 1;
+    const snapshot = await originalRead();
+    if (reads === 2) {
+      // Чужая запись: файл уходит на следующую ревизию, шаг S-001 остаётся TODO.
+      const { parsePlan: parse, serializePlan: serialize } = await import('../src/application/plan-file.mjs');
+      const doc = parse(plans.state.text);
+      doc.findings.push({ id: 'F-900', priority: 'P2', state: 'OPEN', summary: 'внешняя находка' });
+      doc.revision += 1;
+      plans.state.text = serialize(doc);
+    }
+    return snapshot;
+  };
+
+  const settled = await follower.onSettled({
+    taskId: 't-1',
+    commandId: start.commandId,
+    seq: 51,
+    checkpoint: checkpoint({
+      completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'manual', summary: 'модель говорит, что сделала' }]
+    })
+  });
+
+  assert.equal(settled.revisionBefore, 1);
+  assert.equal(settled.revisionAfter, 2, 'ревизию поднял чужой запись, а не этот checkpoint');
+  assert.deepEqual(settled.appliedStepIds, [], 'закрытых шагов нет');
+  assert.deepEqual(settled.confirmedStepIds, [], 'S-001 не подтверждён');
+  assert.deepEqual(settled.unconfirmedStepIds, ['S-001'], 'неподтверждённый запрос назван');
+  assert.equal(settled.completionApplied, false, 'S-001 не применён');
+  assert.notEqual(settled.outcome, 'APPLIED', 'смена ревизии сама по себе — не APPLIED');
+  assert.equal(parsePlan(plans.state.text).steps[0].status, 'TODO');
 });

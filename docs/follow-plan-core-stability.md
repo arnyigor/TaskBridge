@@ -24,6 +24,30 @@
 | CORE-05 | Обычные сообщения во время шага | проверить политику: сообщение не отменяет цикл, ответ — на безопасной границе; отдельный тест на steering | settle с чужим `commandId` не ломает цикл (уже покрыто репро), + сквозной сценарий с реальным ходом | `fix(follow-plan): isolate chat from plan execution` | TODO (частично подтверждено) |
 | CORE-06 | Сквозная приёмка | три шага с реальным Pi, между шагами обычное сообщение, перезапуск, два клиента | 3/3 DONE, ровно один `PLAN_COMPLETED`, нет ручных «продолжай», Desktop и Android видят один прогресс | `test(follow-plan): verify lifecycle recovery` | TODO |
 
+## Проверка APPLIED после приёмки FP-FIX-05 (CORE-02, шаг 0)
+
+Замечание принято: смена ревизии не доказывает применение `completedStepIds` — на
+живом прогоне файл ушёл на revision 2 (F-001 и S-015), а S-001 остался `TODO`.
+
+Что изменено:
+
+- `APPLIED` теперь означает **собственную запись этого settle** (`lastApply`),
+  а не «ревизия изменилась»: чужая правка между чтениями даёт
+  `externalRevisionChange: true`, но не `APPLIED`.
+- Исход называет, что именно применено: `appliedStepIds`, `appliedFindingIds`,
+  `confirmedStepIds`, `unconfirmedStepIds`, `completionApplied`,
+  `revisionBefore`, `revisionAfter`.
+- `completionApplied` — единственный признак «шаг(и) действительно закрыты»;
+  UI и FSM обязаны опираться на него, а не на `APPLIED`.
+
+Тесты (в `tests/follow-plan-core-repro.test.mjs`):
+
+| Тест | Что доказывает |
+|---|---|
+| находка без закрытого шага | файл записан (rev 1→2), `completionApplied=false`, шаг остался `TODO` |
+| ревизия изменилась чужой записью | `appliedStepIds=[]`, `unconfirmedStepIds=['S-001']`, `externalRevisionChange`, `outcome != APPLIED` |
+| базовая линия | `appliedStepIds=['S-001']`, `confirmedStepIds=['S-001']`, `completionApplied=true` |
+
 ## Что уже сделано (CORE-00, CORE-01)
 
 - Воспроизведение: 4 теста, включая доказательство, что вклинившееся сообщение
