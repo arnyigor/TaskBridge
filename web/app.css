@@ -2121,7 +2121,7 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .planDialog { max-width: min(520px, 96vw); max-height: 88vh; overflow: hidden; display: flex; flex-direction: column; gap: 0.5rem; }
 /* Only the status part scrolls; the actions stay pinned at the bottom. */
 #planStatusBlock { overflow: auto; min-height: 0; }
-.planFooter { display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid var(--line, #2a3348); padding-top: 0.5rem; }
+.planFooter { display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid var(--line, #2a3348); padding-top: 0.5rem; flex: 0 0 auto; }
 .planFooter:empty { display: none; }
 .planFileRow { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: baseline; }
 .planFileRow b { font-size: 0.9375rem; }
@@ -2136,20 +2136,81 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .planStep-BLOCKED { color: var(--danger, #ef4444); }
 .planStep-SKIPPED { color: var(--muted, #94a3b8); text-decoration: line-through; }
 .planFindings { display: flex; flex-direction: column; gap: 0.125rem; max-height: 8rem; overflow: auto; }
-.planPicker { flex-direction: column; gap: 0.5rem; }
-.planPicker:not(.hidden) { display: flex; }
+.planPicker { flex-direction: column; gap: 0.5rem; min-height: 0; }
+/* min-height:0 + overflow: длинный список уступает место карточке выбора, а не
+   выталкивает её кнопки за нижнюю границу окна. */
+.planPicker:not(.hidden) { display: flex; flex: 0 1 auto; overflow: auto; }
 .planPick { padding: 0.625rem 1rem; font-size: 0.875rem; }
+
+/* FP-UX-04A: стартовое состояние и результат сканирования.
+   Строка списка — минимум 48 px (палец, а не мышь), имя с ellipsis, путь под ним.
+   Список прокручивается внутри панели, нижние действия остаются на месте. */
+.planStartActions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.planStartActions .planPick { flex: 1 1 auto; }
+.planScanPanel { flex-direction: column; gap: 0.375rem; min-height: 0; }
+.planScanPanel:not(.hidden) { display: flex; }
+.planScanHead { display: flex; gap: 0.375rem; align-items: center; }
+.planScanHead .planSearch { flex: 1 1 auto; min-width: 0; }
+.planScanHead button { flex: 0 0 auto; }
+.planScanList {
+  display: flex; flex-direction: column; gap: 0.125rem;
+  /* Список — не весь экран: под ним живут кнопки выбранного файла и футер
+     диалога, и они обязаны оставаться на виду (проверяется приёмкой). */
+  max-height: min(32vh, 15rem); overflow: auto; min-height: 0;
+  border: 1px solid var(--line, #2a3348); border-radius: 8px; padding: 0.1875rem;
+  overscroll-behavior: contain;
+}
+.planScanRow {
+  display: flex; flex-direction: column; align-items: stretch; gap: 0.0625rem;
+  text-align: left; background: transparent; color: inherit; border: 1px solid transparent;
+  border-radius: 6px; padding: 0.375rem 0.5rem;
+  min-height: 48px; justify-content: center; min-width: 0;
+}
+.planScanRow:hover, .planScanRow:focus-visible { border-color: var(--accent, #4f8cff); }
+.planScanName {
+  font-size: 0.875rem; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.planScanMeta {
+  font-size: 0.6875rem;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.planScanEmpty { padding: 0.5rem; }
+/* Вердикт выбранного файла: словами, а не одним цветом (FP-UX-04D). */
+.planVerdict { font-weight: 600; }
+.planVerdict[data-verdict="VALID_MANAGED"] { color: var(--ok, #34d399); }
+.planVerdict[data-verdict="CONVERTIBLE"] { color: var(--warn, #fbbf24); }
+.planVerdict[data-verdict="NOT_A_PLAN"],
+.planVerdict[data-verdict="INVALID"] { color: var(--danger, #ef4444); }
+.planVerdictReasons { color: var(--muted, #94a3b8); }
+.planAiReview { white-space: pre-line; color: var(--muted, #94a3b8); }
+.planAiReview-error { color: var(--danger, #ef4444); }
 .planPathToggle { align-self: flex-start; }
 .planPathRow { gap: 0.5rem; }
 .planPathRow:not(.hidden) { display: flex; }
 .planPathRow input { flex: 1 1 auto; }
-.planPreview { flex-direction: column; gap: 0.5rem; }
-.planPreview:not(.hidden) { display: flex; }
+.planPreview { flex-direction: column; gap: 0.5rem; min-height: 0; }
+.planPreview:not(.hidden) { display: flex; flex: 0 0 auto; }
 .planDialogActions { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: flex-end; }
 @media (max-width: 600px) {
-  .planDialog { max-width: 100vw; max-height: 92vh; }
+  /* Системные Insets и клавиатура: панель не заезжает под полосу жестов/вырез и
+     не прячет нижние действия, когда открыта клавиатура поиска (FP-UX-04A). */
+  #planDialog.authGate {
+    padding: max(8px, env(safe-area-inset-top, 0px)) 8px max(8px, env(safe-area-inset-bottom, 0px));
+    align-items: flex-start;
+  }
+  .planDialog {
+    max-width: 100vw;
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px) - 16px);
+  }
   .planDialogActions { flex-direction: column-reverse; }
   .planDialogActions button { width: 100%; }
+  /* Компактная панель на телефоне: список занимает остаток экрана, а не половину
+     окна с пустотой, и не уезжает под клавиатуру вместе с действиями. */
+  .planScanList { max-height: none; flex: 1 1 auto; }
+  .planScanRow { padding: 0.5rem; }
+  .planStartActions { flex-direction: column; }
+  .planStartActions .planPick { width: 100%; }
 }
 
 /* Ленивый браузер проекта: один каталог за раз — так телефон выбирает файл,

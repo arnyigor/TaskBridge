@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planInspectionText, planMetaLine, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText, planSelectionView } from './follow-plan-view.mjs';
+import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planMetaLine, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText, planSelectionView, planScanRows, planScanStatusLine, planScanEmptyText, planVerdictView, planAiReviewView, planAiErrorText } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4137,6 +4137,13 @@ $('form').addEventListener('submit', async (e) => {
 let planStatusTimer = null;
 let planInspection = null;
 let planPendingImport = null;
+// FP-UX-04: результат сканирования живёт до следующего нажатия. При открытии окна
+// его нет — список файлов не запрашивается сам по себе.
+let planScan = null;
+let planScanQuery = '';
+let planScanBusy = false;
+let planAiReview = null;
+let planAiError = null;
 
 function updatePlanToggle() {
   const button = $('planToggle');
@@ -4182,6 +4189,10 @@ function renderPlanInspector() {
     $('planPickError').textContent = planStatus?.fileError?.message || planNotice || '';
     $('planDetach').classList.add('hidden');
     $('planMore').classList.add('hidden');
+    $('planProjectName').textContent = projectName(currentTask?.projectId) || '—';
+    $('planNotAttached').classList.toggle('hidden', planInspection !== null);
+    $('planScanStart').disabled = planScanBusy;
+    $('planScanStart').textContent = planScanBusy ? 'Сканирую…' : 'Сканировать проект';
     return;
   }
 
@@ -4248,11 +4259,114 @@ function renderPlanInspector() {
   $('planDetach').disabled = !(planStatus?.enabled !== false);
 }
 
+function renderPlanScan() {
+  const panel = $('planScanPanel');
+  const list = $('planScanList');
+  panel.classList.toggle('hidden', planScan === null);
+  if (planScan === null) {
+    list.textContent = '';
+    $('planScanStatus').textContent = '';
+    return;
+  }
+  const rows = planScanRows(planScan, { query: planScanQuery });
+  $('planScanStatus').textContent = planScanStatusLine(planScan, rows.length);
+  list.textContent = '';
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'planScanEmpty small muted';
+    empty.textContent = planScanEmptyText(planScan, planScanQuery);
+    list.append(empty);
+    return;
+  }
+  for (const row of rows) {
+    // Строка списка — файл, а не папка: имя, относительный путь под ним и
+    // предварительная догадка о формате. Нажатие проверяет именно этот файл.
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'planScanRow';
+    button.dataset.path = row.path;
+    button.setAttribute('role', 'option');
+    const name = document.createElement('b');
+    name.className = 'planScanName';
+    name.textContent = row.name;
+    const meta = document.createElement('span');
+    meta.className = 'planScanMeta small muted';
+    meta.textContent = [row.folder || 'корень проекта', row.hint, row.size].filter(Boolean).join(' • ');
+    button.append(name, meta);
+    button.onclick = () => selectPlanFromScan(row.path);
+    list.append(button);
+  }
+}
+
+async function runPlanScan({ quiet = false } = {}) {
+  const id = selectedTaskId;
+  if (!id || planScanBusy) return;
+  planScanBusy = true;
+  renderPlanInspector();
+  if (!quiet) $('planPickError').textContent = '';
+  try {
+    const scan = await api(`/api/tasks/${encodeURIComponent(id)}/plan/scan`, { method: 'POST', body: { query: '' } });
+    if (id !== selectedTaskId) return;
+    planScan = scan;
+  } catch (error) {
+    if (id !== selectedTaskId) return;
+    planScan = null;
+    $('planPickError').textContent = planErrorText(error);
+  } finally {
+    planScanBusy = false;
+    renderPlanInspector();
+    renderPlanScan();
+  }
+}
+
+async function selectPlanFromScan(relPath) {
+  if (!relPath) return;
+  planScanQuery = $('planSearch')?.value || '';
+  await inspectAndMaybeImport({ path: relPath });
+}
+
+/** «Отменить выбор»: снять ещё не подключённый файл, ничего не удаляя на диске. */
+function cancelPlanSelection() {
+  planInspection = null;
+  planPendingImport = null;
+  planOverwrite = false;
+  planAiReview = null;
+  planAiError = null;
+  $('planFileInput').value = '';
+  $('planPreviewError').textContent = '';
+  $('planAiReview').classList.add('hidden');
+  renderPlanSelection();
+  renderPlanInspector();
+}
+
+async function runPlanAiReview() {
+  const id = selectedTaskId;
+  if (!id || !planPendingImport) return;
+  const button = $('planPreviewAi');
+  button.disabled = true;
+  planAiError = null;
+  $('planAiReview').classList.remove('hidden');
+  $('planAiReview').textContent = 'Спрашиваю модель…';
+  try {
+    // Только по нажатию: текст файла уходит модели один раз, без продолжения плана.
+    planAiReview = await api(`/api/tasks/${encodeURIComponent(id)}/plan/ai-review`, {
+      method: 'POST', body: { ...planPendingImport }
+    });
+  } catch (error) {
+    planAiReview = null;
+    planAiError = error;
+  } finally {
+    button.disabled = false;
+    renderPlanSelection();
+  }
+}
+
 const renderPlanCard = () => {
   updatePlanToggle();
   if (!$('planDialog').classList.contains('hidden')) {
     renderPlanInspector();
     renderPlanEditor();
+    renderPlanScan();
   }
 };
 
@@ -4298,15 +4412,24 @@ function openPlanDialog() {
   planInspection = null;
   planPendingImport = null;
   planOverwrite = false;
-  $('planPreviewConfirm').textContent = 'Импортировать и подключить';
+  // Opening the dialog never scans the project: the list appears only after
+  // «Сканировать проект», so a phone on a slow link is not billed for a walk it
+  // did not ask for (DISC-01).
+  planScan = null;
+  planScanQuery = '';
+  planScanBusy = false;
+  planAiReview = null;
+  planAiError = null;
+  $('planSearch').value = '';
+  $('planPreviewConfirm').textContent = 'Подключить';
   $('planPickError').textContent = '';
   $('planPreviewError').textContent = '';
+  $('planAiReview').classList.add('hidden');
   $('planFileInput').value = '';
   $('planDialog').classList.remove('hidden');
   renderPlanCard();
-  // Opening the dialog never lists project files; selection is explicit.
   const primary = planPrimaryAction(planStatus);
-  const target = planStatus?.attached ? $(`#planActions button[data-action="${primary.id}"]`) : $('planPickFile');
+  const target = planStatus?.attached ? $(`#planActions button[data-action="${primary.id}"]`) : $('planScanStart');
   target?.focus?.();
 }
 
@@ -4358,25 +4481,58 @@ function renderPlanSelection() {
     uploaded: Boolean(planPendingImport?.contentBase64),
     attached: planStatus?.attached === true
   });
+  const verdict = planVerdictView(planInspection);
   const card = $('planPreview');
   card.classList.toggle('hidden', planSelection === null);
-  if (!planSelection) return;
+  if (!planSelection) {
+    $('planSelectedVerdict').textContent = '';
+    $('planVerdictReasons').textContent = '';
+    $('planPreviewDetails').classList.add('hidden');
+    $('planAiReview').classList.add('hidden');
+    return;
+  }
   $('planSelectedName').textContent = planSelection.name;
   $('planSelectedPath').textContent = planSelection.target;
-  $('planSelectedFormat').textContent = planSelection.format;
-  $('planPreviewText').textContent = planSelection.managed ? '' : planInspectionText(planInspection);
-  $('planPreviewConfirm').textContent = planSelection.confirmLabel;
-  $('planPreviewConfirm').classList.toggle('hidden', planSelection.needsConfirm === false);
+  // Вердикт словами (FP-UX-04D): готов / нужен импорт / не план / непригоден.
+  $('planSelectedVerdict').textContent = verdict ? verdict.label : '';
+  $('planSelectedVerdict').dataset.verdict = verdict?.verdict || '';
+  $('planSelectedFormat').textContent = [
+    verdict?.hint,
+    verdict?.steps ? `шагов: ${verdict.steps}` : ''
+  ].filter(Boolean).join(' • ');
+  $('planVerdictReasons').textContent = (verdict?.reasons || []).join('; ');
+  // Предпросмотр будущего управляемого файла: показывается, но на диск не идёт.
+  $('planPreviewContent').textContent = verdict?.preview || '';
+  $('planPreviewDetails').classList.toggle('hidden', !verdict?.preview);
+  // Предпросмотр преобразования показывается сразу: оператор соглашается на
+  // конкретный текст, а не на слово «импортировать» (FP-UX-04D).
+  $('planPreviewDetails').open = Boolean(verdict?.preview);
+  $('planPreviewConfirm').textContent = verdict?.confirmLabel || 'Подключить';
+  $('planPreviewConfirm').classList.toggle('hidden', verdict?.canAttach === false);
+  $('planPreviewAi').classList.toggle('hidden', verdict?.canAttach === false);
+  $('planPreviewAi').disabled = false;
+  const review = planAiReviewView(planAiReview, planAiError);
+  $('planAiReview').classList.toggle('hidden', review === null);
+  if (review) {
+    $('planAiReview').textContent = review.text;
+    $('planAiReview').classList.toggle('planAiReview-error', review.ok === false);
+  }
   renderPlanCard();
 }
 
 async function inspectAndMaybeImport(payload) {
   $('planPickError').textContent = '';
   $('planPreviewError').textContent = '';
+  planAiReview = null;
+  planAiError = null;
+  // A new selection never carries the previous file's AI answer.
+  $('planAiReview').classList.add('hidden');
   try {
     const inspection = await planInspect(payload);
     planInspection = inspection;
-    planPendingImport = payload;
+    // Хэш показанного текста уходит обратно при подтверждении: если файл изменился
+    // между предпросмотром и attach, сервер откажет, а не применит старый вердикт.
+    planPendingImport = { ...payload, expectedHash: inspection.hash || null };
     planOverwrite = false;
     renderPlanSelection();
   } catch (error) {
@@ -4511,10 +4667,18 @@ async function runPlanAction(action, button = null) {
 async function detachPlan() {
   const id = selectedTaskId;
   if (!id || !planStatus?.attached) return;
-  if (!confirm('Отключить план? Файл останется на месте, режим следования выключится.')) return;
+  // «Отключить следование» — не «удалить»: файл остаётся в проекте, и это сказано
+  // в вопросе, а не выясняется после.
+  if (!confirm('Отключить следование плану? Файл останется в проекте, привязка снимется.')) return;
   try {
     await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/detach`, {});
     planNotice = '';
+    // After a confirmed detach the dialog returns to its start state.
+    planInspection = null;
+    planPendingImport = null;
+    planAiReview = null;
+    planAiError = null;
+    renderPlanSelection();
   } catch (error) {
     planNotice = planErrorText(error);
   }
@@ -4525,15 +4689,18 @@ $('planToggle').onclick = () => openPlanDialog();
 $('planDialogClose').onclick = closePlanDialog;
 $('planDialogDone').onclick = closePlanDialog;
 $('planDetach').onclick = detachPlan;
+// Сканирование — только по нажатию (DISC-01/DISC-02): ни открытие окна, ни
+// события чата, ни ввод в поиске его не запускают.
+$('planScanStart').onclick = () => runPlanScan();
+$('planRescan').onclick = () => runPlanScan();
+$('planSearch').oninput = () => {
+  planScanQuery = $('planSearch').value;
+  renderPlanScan();
+};
 $('planPickFile').onclick = () => { $('planFileInput').value = ''; $('planFileInput').click(); };
 $('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
-$('planPreviewCancel').onclick = () => {
-  planOverwrite = false;
-  $('planFileInput').value = '';
-  planInspection = null;
-  planPendingImport = null;
-  renderPlanSelection();
-};
+$('planPreviewAi').onclick = () => runPlanAiReview();
+$('planPreviewCancel').onclick = () => cancelPlanSelection();
 // The second click writes over a project file that already exists: never silently.
 let planOverwrite = false;
 
@@ -4554,7 +4721,11 @@ $('planPreviewConfirm').onclick = async () => {
   planInspection = null;
   planPendingImport = null;
   planOverwrite = false;
-  $('planPreviewConfirm').textContent = 'Импортировать и подключить';
+  planAiReview = null;
+  planAiError = null;
+  $('planAiReview').classList.add('hidden');
+  $('planPreviewConfirm').textContent = 'Подключить';
+  renderPlanSelection();
   renderPlanCard();
 };
 

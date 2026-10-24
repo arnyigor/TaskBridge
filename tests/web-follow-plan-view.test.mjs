@@ -11,7 +11,8 @@ import {
   planActions, planCardModel, planCurrentStep, planErrorText, planEventNotice, planFileChoices, planFileGroups,
   planFindingsSummary, planHeadline, planIconState, planInspectionText, planMetaLine, planPrimaryAction,
   PLAN_ICON_TITLES, planPathProblem, planToggleState, verificationText,
-  planRequestBody, planFindingsLine, toggleOffAction, planSelectionView
+  planRequestBody, planFindingsLine, toggleOffAction, planSelectionView,
+  planScanRows, planScanStatusLine, planScanEmptyText, planVerdictView, planAiReviewView, planAiErrorText
 } from '../web/follow-plan-view.mjs';
 
 const running = {
@@ -157,10 +158,12 @@ test('the dialog picks a file from the system picker or by an explicit project p
   assert.match(html, /id="planToggle"[^>]*aria-label="По плану"/);
   const actions = html.slice(html.indexOf('class="composerActions"'));
   assert.ok(actions.indexOf('id="planToggle"') < actions.indexOf('id="files"'), 'the plan icon sits in the composer row');
-  // UI-02: no automatic listing of the project's Markdown files any more.
+  // UI-02/FP-UX-04A: nothing is listed when the dialog opens; the scan is a click.
   assert.equal(/id="planFiles"/.test(html), false, 'nothing is scanned when the dialog opens');
-  // FP-UX-03: one system file picker and nothing else in the dialog.
-  assert.match(html, /id="planPickFile"[^>]*>Выбрать файл</);
+  assert.match(html, /id="planScanStart"[^>]*>Сканировать проект</);
+  assert.match(html, /id="planScanPanel"[^>]*class="planScanPanel hidden"/, 'the result list starts hidden');
+  // FP-UX-03/04C: the system file picker is still there, next to the scan.
+  assert.match(html, /id="planPickFile"[^>]*>Открыть файл</);
   assert.match(html, /id="planFileInput"[^>]*accept="\.md,\.markdown/);
   assert.equal(/id="planBrowser"/.test(html), false, 'no folder listing in the dialog');
   assert.equal(/planProjectPath/.test(html), false, 'no manual path field in the dialog');
@@ -192,7 +195,7 @@ test('a file with every step done is finished, and nothing offers to start it', 
 });
 
 test('one primary action per state, exactly as the table says', () => {
-  assert.deepEqual(planPrimaryAction({ attached: false }), { id: 'pick', label: 'Выбрать файл .md' });
+  assert.deepEqual(planPrimaryAction({ attached: false }), { id: 'scan', label: 'Сканировать проект' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'IDLE' }), { id: 'start', label: 'Начать выполнение' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'RUNNING_STEP' }), { id: 'pause', label: 'Пауза после шага' });
   assert.deepEqual(planPrimaryAction({ attached: true, state: 'PAUSED' }), { id: 'resume', label: 'Продолжить' });
@@ -347,4 +350,143 @@ test('an already attached plan is named and never detached for the operator', ()
   const handler = source.slice(source.indexOf("if (error.code === 'PLAN_ALREADY_ATTACHED')"), source.indexOf('if (error.code === \'PLAN_ALREADY_ATTACHED\')') + 120);
   assert.match(handler, /loadPlanStatus\(\)/, 'the operator is shown the plan that is actually attached');
   assert.doesNotMatch(handler, /detach/i, 'nothing is detached automatically');
+});
+
+// --- FP-UX-04: сканирование, вердикт и ИИ в интерфейсе ----------------------
+
+test('the scan list shows files with a relative path, never folders', () => {
+  const scan = {
+    files: [
+      { name: 'PLAN.md', path: 'PLAN.md', size: 2048, classification: 'VALID_MANAGED' },
+      { name: 'TODO.md', path: 'docs/TODO.md', size: 900, classification: 'CONVERTIBLE' },
+      { name: 'readme.md', path: 'docs/deep/readme.md', size: 10, classification: null }
+    ],
+    total: 3, partial: false, skippedLinks: []
+  };
+  const rows = planScanRows(scan);
+  assert.deepEqual(rows.map(row => row.name), ['PLAN.md', 'TODO.md', 'readme.md']);
+  assert.deepEqual(rows.map(row => row.folder), ['', 'docs', 'docs/deep']);
+  assert.equal(rows[0].hint, 'управляемый план');
+  assert.equal(rows[1].hint, 'нужен импорт');
+  assert.equal(rows[2].hint, '');
+  assert.equal(rows[0].size, '2 КБ');
+});
+
+test('DISC-05: the search filters the loaded list locally, without a new scan', () => {
+  const scan = { files: [
+    { name: 'PLAN.md', path: 'PLAN.md' },
+    { name: 'release-notes.md', path: 'docs/release-notes.md' }
+  ], total: 2 };
+  assert.deepEqual(planScanRows(scan, { query: 'RELEASE' }).map(row => row.path), ['docs/release-notes.md']);
+  assert.deepEqual(planScanRows(scan, { query: 'docs/' }).map(row => row.path), ['docs/release-notes.md']);
+  assert.deepEqual(planScanRows(scan, { query: '' }).map(row => row.path), ['PLAN.md', 'docs/release-notes.md']);
+  assert.deepEqual(planScanRows(scan, { query: 'нет такого' }), []);
+  // Ничего не сканировали — это не «ничего не найдено».
+  assert.match(planScanEmptyText(null), /не сканировались/);
+  assert.match(planScanEmptyText({ files: [] }), /не найдено ни одного Markdown/);
+  assert.match(planScanEmptyText(scan, 'нет такого'), /ничего не найдено/);
+});
+
+test('a partial scan says so instead of pretending to be complete', () => {
+  const line = planScanStatusLine({ total: 40, partial: true, skippedLinks: [{ path: 'link' }] }, 12);
+  assert.match(line, /найдено файлов: 40/);
+  assert.match(line, /показано 12/);
+  assert.match(line, /неполный/);
+  assert.match(line, /ссылок пропущено: 1/);
+  assert.equal(planScanStatusLine({ total: 2, partial: false, skippedLinks: [] }, 2), 'найдено файлов: 2');
+  assert.equal(planScanStatusLine(null, 0), '');
+});
+
+test('VALID-01…04: the verdict decides what the operator may press', () => {
+  const managed = planVerdictView({ verdict: 'VALID_MANAGED', managed: true, steps: 2, revision: 1 });
+  assert.equal(managed.label, 'Готов к подключению');
+  assert.equal(managed.canAttach, true);
+  assert.equal(managed.confirmLabel, 'Подключить');
+  assert.equal(managed.preview, '');
+
+  const convertible = planVerdictView({
+    verdict: 'CONVERTIBLE', managed: false,
+    preview: { steps: [{ id: 'S-001' }], content: '---\ntaskbridge_plan: 1\n', problems: [] }
+  });
+  assert.equal(convertible.label, 'Требует преобразования');
+  assert.equal(convertible.canAttach, true);
+  assert.equal(convertible.confirmLabel, 'Импортировать и подключить');
+  // Предпросмотр будущего файла показывается, но не пишется.
+  assert.match(convertible.preview, /taskbridge_plan: 1/);
+
+  const notAPlan = planVerdictView({ verdict: 'NOT_A_PLAN', problems: ['нет списка шагов'], preview: null });
+  assert.equal(notAPlan.label, 'Это не план');
+  assert.equal(notAPlan.canAttach, false);
+  assert.deepEqual(notAPlan.reasons, ['нет списка шагов']);
+
+  const invalid = planVerdictView({ verdict: 'INVALID', problems: ['файл пуст'] });
+  assert.equal(invalid.label, 'Файл непригоден');
+  assert.equal(invalid.canAttach, false);
+
+  // Старые ответы сервера без verdict не ломают экран.
+  assert.equal(planVerdictView({ managed: true, steps: 1 }).verdict, 'VALID_MANAGED');
+  assert.equal(planVerdictView(null), null);
+});
+
+test('AI-02: the AI answer is advice with its model named, never the verdict', () => {
+  const review = planAiReviewView({
+    ai: { verdict: 'NOT_PLAN', reasons: ['нет критериев выполнения'] },
+    structural: { verdict: 'VALID_MANAGED' },
+    model: { provider: 'openai', id: 'gpt-4o', local: false },
+    truncated: true
+  });
+  assert.match(review.text, /модель считает, что это не план/);
+  assert.match(review.text, /нет критериев выполнения/);
+  assert.match(review.text, /облачный провайдер/);
+  assert.match(review.text, /только начало файла/);
+  assert.equal(review.structural, 'VALID_MANAGED', 'структурный вердикт остаётся главным');
+
+  const local = planAiReviewView({ ai: { verdict: 'PLAN', reasons: [] }, model: { provider: 'llama', id: 'qwen', local: true } });
+  assert.match(local.text, /локальная/);
+
+  const failure = planAiReviewView(null, { code: 'AI_UNAVAILABLE', message: 'Модель не ответила: TIMEOUT.' });
+  assert.equal(failure.ok, false);
+  assert.match(failure.text, /Модель не ответила/);
+  assert.match(planAiErrorText({ code: 'AI_RATE_LIMITED', message: 'Слишком часто.' }), /Слишком часто/);
+  assert.match(planAiErrorText({ code: 'AI_UNAVAILABLE' }), /обычная проверка формата/);
+});
+
+test('DISC-01/DISC-02/UX-01: the dialog scans only on a click and returns to the start state', () => {
+  const source = fsSync.readFileSync(path.join(import.meta.dirname, '..', 'web', 'app.js'), 'utf8');
+  const open = source.slice(source.indexOf('function openPlanDialog()'), source.indexOf('function closePlanDialog()'));
+  assert.doesNotMatch(open, /plan\/scan/, 'opening the dialog never scans');
+  assert.match(open, /planScan = null/, 'no stale results from a previous opening');
+  // Один обработчик = одно сканирование: кнопка ведёт прямо в runPlanScan, а
+  // повторный поиск — отдельная кнопка «Повторить».
+  const startHandler = source.slice(source.indexOf("$('planScanStart').onclick"), source.indexOf("$('planRescan').onclick"));
+  assert.match(startHandler, /runPlanScan\(\)/);
+  assert.equal((startHandler.match(/runPlanScan/g) || []).length, 1);
+  const rescanHandler = source.slice(source.indexOf("$('planRescan').onclick"), source.indexOf("$('planSearch').oninput"));
+  assert.match(rescanHandler, /runPlanScan\(\)/);
+  // Никакого сканирования по таймеру или на каждом событии чата.
+  const planSection = source.slice(source.indexOf('/* ---------------- Follow Plan (UI-02)'), source.indexOf("$('newTaskButton').onclick"));
+  assert.equal(/setInterval/.test(planSection), false, 'no periodic scan');
+  // Поиск фильтрует уже полученный список, а не запускает сканирование.
+  const search = source.slice(source.indexOf("$('planSearch').oninput"), source.indexOf("$('planSearch').oninput") + 200);
+  assert.match(search, /renderPlanScan\(\)/);
+  assert.doesNotMatch(search, /plan\/scan/);
+  // «Отменить выбор» ничего не удаляет и не отключает.
+  const cancel = source.slice(source.indexOf('function cancelPlanSelection()'), source.indexOf('function cancelPlanSelection()') + 500);
+  assert.doesNotMatch(cancel, /detach|DELETE|remove/i);
+  // Отключение и отмена — разные действия с разными подписями.
+  const detach = source.slice(source.indexOf('async function detachPlan()'), source.indexOf('async function detachPlan()') + 400);
+  assert.match(detach, /Отключить следование плану\? Файл останется в проекте/);
+});
+
+test('every element the plan dialog touches exists in the markup', async () => {
+  // Дешёвая, но настоящая проверка проводки: опечатка в id не ловится ни одним
+  // доменным тестом, а в браузере выглядит как «кнопка ничего не делает».
+  const html = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'index.html'), 'utf8');
+  const ids = new Set([...html.matchAll(/id="([^"]+)"/g)].map(match => match[1]));
+  const source = await fs.readFile(path.join(import.meta.dirname, '..', 'web', 'app.js'), 'utf8');
+  const section = source.slice(source.indexOf('/* ---------------- Follow Plan (UI-02)'), source.indexOf("$('newTaskButton').onclick"));
+  const used = new Set([...section.matchAll(/\$\('([^']+)'\)/g)].map(match => match[1]));
+  assert.ok(used.size > 10, `плановая секция найдена: ${used.size} id`);
+  const missing = [...used].filter(id => !ids.has(id));
+  assert.deepEqual(missing, [], `в markup нет элементов: ${missing.join(', ')}`);
 });

@@ -375,8 +375,8 @@
 
       <div id="approvalBanner" class="approvalBanner hidden" aria-live="polite"></div>
 
-      <!-- Следование плану (UI-02): без сканирования проекта. Файл выбирается
-           системным диалогом или явным путём в проекте; подключение не запускает
+      <!-- Следование плану (UI-02, FP-UX-04): сканирование проекта — только по
+           кнопке. Системный выбор файла остаётся рядом; подключение не запускает
            выполнение, а управление собрано здесь, а не в чате. -->
       <div id="planDialog" class="authGate hidden">
         <div class="authCard planDialog" role="dialog" aria-modal="true" aria-labelledby="planDialogTitle">
@@ -411,15 +411,30 @@
             <div id="planNotice" class="planNotice small hidden" role="alert"></div>
           </div>
 
-          <!-- Плана нет: один системный выбор файла и ничего больше (FP-UX-03).
-               Ни корня проекта, ни списка папок, ни поля ручного пути: браузер
-               и телефон показывают ровно то, что выбрал оператор. -->
+          <!-- Плана нет: стартовое состояние (FP-UX-04A). Ничего не сканируется при
+               открытии окна: «Сканировать проект» — отдельное действие, системный
+               выбор файла остаётся рядом. Ни папок, ни прошлых результатов. -->
           <div id="planPicker" class="planPicker">
             <p class="muted small">TaskBridge ведёт шаги одного Markdown-файла: после каждого хода
               проверяет файл и подтверждения и только потом отправляет следующий шаг.
               Подключение не запускает выполнение.</p>
-            <button id="planPickFile" type="button" class="primary planPick">Выбрать файл</button>
-            <input id="planFileInput" type="file" accept=".md,.markdown,text/markdown" class="hidden" />
+            <div class="planProjectLine small muted">Проект: <b id="planProjectName">—</b></div>
+            <div class="planStartActions">
+              <button id="planScanStart" type="button" class="primary planPick">Сканировать проект</button>
+              <button id="planPickFile" type="button" class="secondary planPick">Открыть файл</button>
+              <input id="planFileInput" type="file" accept=".md,.markdown,text/markdown" class="hidden" />
+            </div>
+            <div id="planNotAttached" class="small muted">План не подключён</div>
+            <!-- Результат сканирования: плоский список файлов с поиском. -->
+            <div id="planScanPanel" class="planScanPanel hidden">
+              <div class="planScanHead">
+                <input id="planSearch" type="search" class="planSearch" autocomplete="off"
+                       placeholder="Поиск по имени и пути" aria-label="Поиск плана по имени и пути" />
+                <button id="planRescan" type="button" class="secondary" title="Повторить поиск по проекту">Повторить</button>
+              </div>
+              <div id="planScanStatus" class="small muted" role="status" aria-live="polite"></div>
+              <div id="planScanList" class="planScanList" role="listbox" aria-label="Markdown-файлы проекта"></div>
+            </div>
             <div id="planPickError" class="planPathError small" role="alert"></div>
           </div>
 
@@ -439,18 +454,26 @@
             </div>
           </div>
 
-          <!-- Предпросмотр импорта обычного Markdown: до подтверждения файл не меняется. -->
+          <!-- Предпросмотр выбранного файла: вердикт, назначение и (для обычного
+               Markdown) будущий управляемый файл. До подтверждения файл не меняется. -->
           <div id="planPreview" class="planPreview hidden">
             <div id="planSelected" class="planSelected small">
               <b id="planSelectedName"></b>
               <div id="planSelectedPath" class="muted"></div>
+              <div id="planSelectedVerdict" class="planVerdict"></div>
               <div id="planSelectedFormat" class="muted"></div>
             </div>
-            <div id="planPreviewText" class="small"></div>
+            <div id="planVerdictReasons" class="planVerdictReasons small"></div>
+            <details id="planPreviewDetails" class="planDetails hidden">
+              <summary>Предпросмотр управляемого файла</summary>
+              <pre id="planPreviewContent" class="planEditorCurrent"></pre>
+            </details>
+            <div id="planAiReview" class="planAiReview small hidden"></div>
             <div id="planPreviewError" class="planPathError small" role="alert"></div>
             <div class="planDialogActions">
-              <button id="planPreviewCancel" type="button" class="secondary">Отмена</button>
-              <button id="planPreviewConfirm" type="button" class="primary">Импортировать и подключить</button>
+              <button id="planPreviewCancel" type="button" class="secondary">Отменить выбор</button>
+              <button id="planPreviewAi" type="button" class="secondary">Проверить с помощью ИИ</button>
+              <button id="planPreviewConfirm" type="button" class="primary">Подключить</button>
             </div>
           </div>
 
@@ -461,7 +484,7 @@
             <details id="planMore" class="planDetails hidden">
               <summary>Дополнительно</summary>
               <div id="planMoreActions" class="planActions"></div>
-              <button id="planDetach" type="button" class="secondary hidden">Отключить план</button>
+              <button id="planDetach" type="button" class="secondary hidden">Отключить следование</button>
             </details>
             <button id="planDialogDone" type="button">Закрыть</button>
           </div>

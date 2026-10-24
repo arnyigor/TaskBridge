@@ -224,7 +224,9 @@ export function planPrimaryAction(status) {
   const state = status?.attached === true ? status.state : 'NOT_ATTACHED';
   if (status?.conflict) return { id: 'reconcile', label: 'Обновить и сверить' };
   switch (state) {
-    case 'NOT_ATTACHED': return { id: 'pick', label: 'Выбрать файл .md' };
+    // FP-UX-04A: стартовое состояние предлагает поиск по проекту первым,
+    // системный выбор файла остаётся вторым и никуда не делся.
+    case 'NOT_ATTACHED': return { id: 'scan', label: 'Сканировать проект' };
     case 'IDLE': return { id: 'start', label: 'Начать выполнение' };
     case 'RUNNING_STEP':
     case 'REVIEWING': return { id: 'pause', label: 'Пауза после шага' };
@@ -383,3 +385,128 @@ export function planEventNotice(event) {
 
 /** События, после которых серверное состояние карточки надо перечитать. */
 export const PLAN_EVENT_TYPES = Object.freeze(Object.keys(NOTICES));
+
+/* ---------------- FP-UX-04: сканирование, вердикт, ИИ ---------------- */
+
+export const PLAN_VERDICT_LABELS = Object.freeze({
+  VALID_MANAGED: 'Готов к подключению',
+  CONVERTIBLE: 'Требует преобразования',
+  NOT_A_PLAN: 'Это не план',
+  INVALID: 'Файл непригоден'
+});
+
+/** Подписи предварительной классификации в списке найденных файлов. */
+export const PLAN_SCAN_HINTS = Object.freeze({
+  VALID_MANAGED: 'управляемый план',
+  CONVERTIBLE: 'нужен импорт'
+});
+
+/**
+ * Что показать в списке найденного. Размер и дата — только чтобы отличить
+ * «сегодняшний черновик» от архивного файла, поэтому формат короткий.
+ */
+export function planScanRows(scan, { query = '', limit = 200 } = {}) {
+  const files = Array.isArray(scan?.files) ? scan.files : [];
+  const needle = String(query || '').trim().toLowerCase();
+  // Фильтр считаем на клиенте по уже полученному списку: каждое нажатие клавиши
+  // не должно быть новым сканированием проекта.
+  const shown = needle
+    ? files.filter(file => `${file.path || ''} ${file.name || ''}`.toLowerCase().includes(needle))
+    : files;
+  return shown.slice(0, limit).map(file => {
+    const relative = String(file.path || '');
+    const name = String(file.name || relative.split('/').pop() || '');
+    const folder = relative.includes('/') ? relative.slice(0, relative.lastIndexOf('/')) : '';
+    return {
+      path: relative,
+      name,
+      folder,
+      hint: PLAN_SCAN_HINTS[file.classification] || '',
+      size: Number.isFinite(file.size) ? `${Math.max(1, Math.round(file.size / 1024))} КБ` : ''
+    };
+  });
+}
+
+/** Строка под полем поиска: сколько показано, полный ли это результат. */
+export function planScanStatusLine(scan, shownCount) {
+  if (!scan) return '';
+  const total = Number.isFinite(scan.total) ? scan.total : (scan.files?.length || 0);
+  const parts = [`найдено файлов: ${total}`];
+  if (shownCount !== total) parts.push(`показано ${shownCount}`);
+  if (scan.partial) parts.push('результат неполный: достигнут лимит глубины, количества или времени');
+  if (Array.isArray(scan.skippedLinks) && scan.skippedLinks.length) {
+    parts.push(`ссылок пропущено: ${scan.skippedLinks.length}`);
+  }
+  return parts.join(' • ');
+}
+
+/** Пустое состояние списка: «ничего не найдено» — не то же, что «не сканировали». */
+export function planScanEmptyText(scan, query = '') {
+  if (!scan) return 'Файлы проекта не сканировались.';
+  const count = Array.isArray(scan.files) ? scan.files.length : 0;
+  if (!count) return 'В проекте не найдено ни одного Markdown-файла (.md или .markdown).';
+  return `По запросу «${String(query).trim()}» ничего не найдено — измените поиск или повторите сканирование.`;
+}
+
+/**
+ * Вердикт выбранного файла словами и с решением: подключать, преобразовывать или
+ * отказать. Решение принимает сервер (`classifyPlan`), здесь только формулировка.
+ */
+export function planVerdictView(inspection) {
+  if (!inspection) return null;
+  const verdict = inspection.verdict
+    || (inspection.managed ? 'VALID_MANAGED' : inspection.preview ? 'CONVERTIBLE' : 'NOT_A_PLAN');
+  const reasons = [
+    ...(inspection.problems || []),
+    ...((inspection.preview?.problems) || [])
+  ].filter(Boolean).slice(0, 4);
+  const steps = inspection.managed ? (inspection.steps || 0) : (inspection.preview?.steps?.length || 0);
+  const hint = String(inspection.reason || '').trim();
+  return {
+    verdict,
+    label: PLAN_VERDICT_LABELS[verdict] || verdict,
+    hint,
+    reasons,
+    steps,
+    // Подключать можно только то, что прошло структурную проверку. «Это не план»
+    // и «файл непригоден» — отказ, а не повод попробовать всё равно.
+    canAttach: verdict === 'VALID_MANAGED' || verdict === 'CONVERTIBLE',
+    confirmLabel: verdict === 'CONVERTIBLE' ? 'Импортировать и подключить'
+      : inspection.replaces ? 'Заменить план' : 'Подключить',
+    // Предпросмотр будущего управляемого файла: показывается, но не пишется.
+    preview: verdict === 'CONVERTIBLE' ? (inspection.preview?.content || '') : ''
+  };
+}
+
+/** Что сделает «Проверить с помощью ИИ» и чем это не является. */
+export function planAiReviewView(review, error = null) {
+  if (error) return { ok: false, text: planErrorText(error) };
+  if (!review) return null;
+  const model = review.model || {};
+  const verdict = review.ai?.verdict || 'UNCLEAR';
+  const label = verdict === 'PLAN' ? 'модель считает, что это план'
+    : verdict === 'NOT_PLAN' ? 'модель считает, что это не план'
+      : 'модель не уверена';
+  const reasons = (review.ai?.reasons || []).filter(Boolean);
+  // Конфиденциальность: куда ушёл текст — часть ответа, а не мелкий шрифт.
+  const where = model.id
+    ? `Спрошена модель ${model.provider ? `${model.provider}/` : ''}${model.id}${model.local ? ' (локальная, текст не покидал машину)' : ' (облачный провайдер: текст ушёл наружу)'}`
+    : '';
+  return {
+    ok: true,
+    verdict,
+    text: [label, ...reasons.map(reason => `— ${reason}`), where, review.truncated ? 'в модель ушло только начало файла' : '']
+      .filter(Boolean).join('\n'),
+    // Совет не заменяет структурную проверку: вердикт сервера показывается рядом.
+    structural: review.structural?.verdict || null
+  };
+}
+
+/** Ошибки ИИ-проверки не должны звучать как ошибки плана. */
+export function planAiErrorText(error) {
+  const code = error?.code || null;
+  const detail = String(error?.message || '').replace(/^[A-Z_]+:\s*/, '');
+  if (code === 'AI_RATE_LIMITED') return detail || 'Проверка ИИ не чаще трёх раз в минуту.';
+  if (code === 'AI_UNAVAILABLE') return detail || 'Модель недоступна — обычная проверка формата работает без неё.';
+  return planErrorText(error);
+}
