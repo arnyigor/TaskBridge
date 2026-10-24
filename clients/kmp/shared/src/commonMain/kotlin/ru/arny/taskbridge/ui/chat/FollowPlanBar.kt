@@ -483,7 +483,7 @@ private fun PlanActionsRow(
                         runAction(action.id)
                     })
                 }
-                DropdownMenuItem(text = { Text("Отключить план") }, enabled = state.enabled, onClick = {
+                DropdownMenuItem(text = { Text("Отключить следование") }, enabled = state.enabled, onClick = {
                     state.moreOpen = false
                     state.confirmDetach = true
                 })
@@ -493,7 +493,7 @@ private fun PlanActionsRow(
     if (state.confirmDetach) {
         AlertDialog(
             onDismissRequest = { state.confirmDetach = false },
-            title = { Text("Отключить план? Файл останется на месте.") },
+            title = { Text("Отключить следование? Файл останется в проекте.") },
             confirmButton = {
                 TextButton(onClick = {
                     state.confirmDetach = false

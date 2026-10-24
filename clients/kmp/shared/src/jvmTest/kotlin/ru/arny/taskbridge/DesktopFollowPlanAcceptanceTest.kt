@@ -177,8 +177,8 @@ class DesktopFollowPlanAcceptanceTest {
             // FP-UX-04F: «Отключить следование» снимает привязку, файл остаётся на месте,
             // и панель возвращается к стартовому состоянию с двумя кнопками.
             onNodeWithText("Дополнительно").performClick()
-            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить план").fetchSemanticsNodes().isNotEmpty() }
-            onNodeWithText("Отключить план").performClick()
+            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить следование").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("Отключить следование").performClick()
             waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithText("Отключить").performClick()
             waitUntil(timeoutMillis = 15_000) {
@@ -248,15 +248,15 @@ class DesktopFollowPlanAcceptanceTest {
             shot("03-paused-review")
             // NATIVE-07: rare and dangerous actions live in «Дополнительно», not in the row.
             assertTrue(
-                onAllNodesWithText("Отключить план").fetchSemanticsNodes().isEmpty(),
+                onAllNodesWithText("Отключить следование").fetchSemanticsNodes().isEmpty(),
                 "detach must not sit in the always-visible row"
             )
             onNodeWithText("Дополнительно").performClick()
-            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить план").fetchSemanticsNodes().isNotEmpty() }
+            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить следование").fetchSemanticsNodes().isNotEmpty() }
             // The menu is a dismissable overlay: the next click has to close it
             // before the panel's own buttons accept input again.
             onNodeWithText("Дополнительно").performClick()
-            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить план").fetchSemanticsNodes().isEmpty() }
+            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить следование").fetchSemanticsNodes().isEmpty() }
 
             shot("04-menu-open")
             // NATIVE-02/03: the editor reads the server file and saves through CAS.
@@ -366,6 +366,11 @@ class DesktopFollowPlanAcceptanceTest {
         if (bounds.width > 0 && bounds.height > 0) {
             javax.imageio.ImageIO.write(robot.createScreenCapture(bounds), "png", File(shotDir, "ux03-native-picker.png"))
         }
+        // The dialog belongs to the OS and may sit behind the test window: bring it
+        // forward before typing, otherwise the keystrokes go to another window and the
+        // smoke fails at a step that has nothing to do with the product code.
+        picker.toFront()
+        picker.requestFocus()
         robot.delay(500) // OS focus transition, in the opt-in UI smoke only.
         val clipboard = java.awt.Toolkit.getDefaultToolkit().systemClipboard
         val previous = clipboard.getContents(null)
