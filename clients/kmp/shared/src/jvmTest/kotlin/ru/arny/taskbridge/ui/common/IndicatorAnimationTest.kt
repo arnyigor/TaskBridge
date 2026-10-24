@@ -147,15 +147,16 @@ class IndicatorAnimationTest {
     }
 
     /**
-     * Во время генерации точки меняют фазу шагами, а не каждый кадр: картинка меняется
-     * около семи раз в секунду — по одному на шаг [TYPING_STEP_MILLIS], а не 60.
+     * Во время генерации точки меняют фазу шагами, а не каждый кадр: при шаге
+     * [TYPING_STEP_MILLIS] = 280 мс картинка меняется около 3.6 раз в секунду — по одному
+     * на шаг, а не 60. Быстрее прежнего порога (7 шагов/с до FP-UX-05-правки) быть не должно.
      */
     @Test
     fun typingIndicatorStepsInsteadOfSixtyFramesPerSecond() {
         val scene = scene { TypingPhase(active = true) { TypingIndicator() } }
         try {
             val changes = scene.pictureChanges(windowMillis = 1_000)
-            assertTrue(changes in 3..8, "шагов в секунду должно быть около 7 (не более 8), а было $changes")
+            assertTrue(changes in 2..5, "шагов в секунду должно быть около 3–4 (не более 5), а было $changes")
         } finally {
             scene.close()
         }

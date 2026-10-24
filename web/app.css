@@ -1060,10 +1060,15 @@ body:not(.machine-exec) .codeActions > .codeRunBtn { display: none; }
   width: 6px; height: 6px;
   border-radius: 50%;
   background: var(--muted);
-  animation: blink 1.2s infinite ease-in-out;
+  /* Тот же темп, что в KMP: шаг фазы 280 мс, полный цикл трёх точек 840 мс. */
+  animation: blink .84s infinite ease-in-out;
 }
-.typing i:nth-child(2) { animation-delay: .18s; }
-.typing i:nth-child(3) { animation-delay: .36s; }
+.typing i:nth-child(2) { animation-delay: .28s; }
+.typing i:nth-child(3) { animation-delay: .56s; }
+/* Статичные точки для тех, кто просил меньше движения: тот же индикатор, без мигания. */
+@media (prefers-reduced-motion: reduce) {
+  .typing i { animation: none; opacity: .6; }
+}
 @keyframes blink { 0%, 70%, 100% { opacity: .25; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
 
 /* ---------- composer ---------- */
