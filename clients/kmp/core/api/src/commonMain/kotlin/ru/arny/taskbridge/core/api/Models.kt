@@ -1591,6 +1591,8 @@ data class PlanPreview(
     val steps: List<PlanPreviewStep> = emptyList(),
     val unmapped: List<String> = emptyList(),
     val problems: List<String> = emptyList(),
+    /** Будущий управляемый файл для показа: на диск он до подтверждения не идёт. */
+    val content: String = "",
 )
 
 @Serializable
@@ -1605,7 +1607,62 @@ data class PlanInspection(
     val alreadyAttached: Boolean = false,
     val freeForm: Boolean = false,
     val preview: PlanPreview? = null,
+    /**
+     * Вердикт сервера (FP-UX-04D): VALID_MANAGED, CONVERTIBLE, NOT_A_PLAN, INVALID.
+     * Пустая строка у сервера постарше — клиент выводит вердикт из managed/preview.
+     */
+    val verdict: String = "",
+    val reason: String? = null,
+    /** Хэш показанного текста: подтверждение сверяется с ним (внешняя правка). */
+    val hash: String? = null,
 )
+
+/** Один найденный Markdown-файл проекта (POST /plan/scan). */
+@Serializable
+data class PlanScanFile(
+    val name: String = "",
+    val path: String = "",
+    val size: Long = 0,
+    val modifiedAt: String? = null,
+    /** Предварительная догадка по голове файла: VALID_MANAGED, CONVERTIBLE или null. */
+    val classification: String? = null,
+)
+
+/**
+ * Результат сканирования проекта. `partial` означает, что сработал лимит глубины,
+ * количества или времени: список неполный, и это сказано словами, а не умолчано.
+ */
+@Serializable
+data class PlanScanResult(
+    val path: String = "",
+    val query: String = "",
+    val files: List<PlanScanFile> = emptyList(),
+    val total: Int = 0,
+    val partial: Boolean = false,
+    val elapsedMs: Long = 0,
+    val enabled: Boolean = true,
+)
+
+/** Совет модели по выбранному файлу (POST /plan/ai-review): не вердикт, а мнение. */
+@Serializable
+data class PlanAiReview(
+    val path: String? = null,
+    val truncated: Boolean = false,
+    val charsSent: Int = 0,
+    val structural: PlanAiStructural? = null,
+    val ai: PlanAiVerdict? = null,
+    val model: PlanAiModel? = null,
+    val ms: Long? = null,
+)
+
+@Serializable
+data class PlanAiStructural(val verdict: String = "", val reason: String? = null, val problems: List<String> = emptyList())
+
+@Serializable
+data class PlanAiVerdict(val verdict: String = "UNCLEAR", val looksLikePlan: Boolean? = null, val reasons: List<String> = emptyList())
+
+@Serializable
+data class PlanAiModel(val provider: String? = null, val id: String? = null, val local: Boolean = false)
 
 /** Один элемент ленивого браузера проекта (GET /plan/browse). */
 @Serializable

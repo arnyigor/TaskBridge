@@ -861,6 +861,24 @@ class TaskBridgeApi(
             contentBase64?.let { put("contentBase64", it) }
         })
 
+    /**
+     * Сканирование проекта на Markdown-файлы (FP-UX-04B). Только по нажатию: окно
+     * не сканирует само, и на каждое изменение строки поиска запроса нет — фильтр
+     * применяется к уже полученному списку.
+     */
+    suspend fun scanPlan(id: String, query: String = ""): PlanScanResult =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/scan", PlanScanResult.serializer(), buildJsonObject {
+            put("query", query)
+        })
+
+    /** «Проверить с помощью ИИ»: один запрос модели без инструментов и без Run. */
+    suspend fun aiReviewPlan(id: String, path: String? = null, name: String? = null, contentBase64: String? = null): PlanAiReview =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/ai-review", PlanAiReview.serializer(), buildJsonObject {
+            path?.let { put("path", it) }
+            name?.let { put("name", it) }
+            contentBase64?.let { put("contentBase64", it) }
+        })
+
     /** Один каталог проекта: папки и .md-файлы (телефон так выбирает файл на компьютере). */
     suspend fun browsePlan(id: String, path: String = ""): PlanBrowseListing =
         get("/api/tasks/${id.path()}/plan/browse?path=${path.encodeURLParameter()}", PlanBrowseListing.serializer())
@@ -874,6 +892,7 @@ class TaskBridgeApi(
         contentBase64: String? = null,
         confirmImport: Boolean = false,
         overwrite: Boolean = false,
+        expectedHash: String? = null,
     ): PlanImportResult =
         call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/import", PlanImportResult.serializer(), buildJsonObject {
             path?.let { put("path", it) }
@@ -881,6 +900,8 @@ class TaskBridgeApi(
             contentBase64?.let { put("contentBase64", it) }
             put("confirmImport", confirmImport)
             put("overwrite", overwrite)
+            // Подтверждение относится к показанному тексту: сервер сверит хэш.
+            expectedHash?.let { put("expectedHash", it) }
             put("clientId", connection.clientId)
             put("commandId", commandId)
         })

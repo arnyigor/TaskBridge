@@ -137,20 +137,34 @@ class DesktopFollowPlanAcceptanceTest {
             onNodeWithContentDescription("По плану: выбрать файл плана", substring = true).performClick()
             waitUntil(timeoutMillis = 10_000) { onAllNodesWithText("Следование плану").fetchSemanticsNodes().isNotEmpty() }
             assertTrue(onAllNodesWithText("Путь в проекте").fetchSemanticsNodes().isEmpty())
-            assertTrue(onAllNodesWithText("Выбрать файл").fetchSemanticsNodes().isNotEmpty())
+            // FP-UX-04A: the start state offers the project scan and the system picker.
+            assertTrue(onAllNodesWithText("Сканировать проект").fetchSemanticsNodes().isNotEmpty())
+            assertTrue(onAllNodesWithText("Открыть файл").fetchSemanticsNodes().isNotEmpty())
+            assertTrue(onAllNodesWithText("План не подключён").fetchSemanticsNodes().isNotEmpty())
 
             // Native picker interaction is opt-in because it owns a real OS window.
             // The normal regression still runs the unchanged panel against the API.
             if (System.getenv("TASKBRIDGE_NATIVE_PICKER_SMOKE") == "1") {
                 val selected = CompletableFuture.runAsync { selectNativeFile(File(root, "PLAN.md")) }
-                onNodeWithText("Выбрать файл").performClick()
+                onNodeWithText("Открыть файл").performClick()
                 selected.get(30, TimeUnit.SECONDS)
                 waitUntil(timeoutMillis = 15_000) {
                     onAllNodesWithText("Файл в проекте: PLAN.md").fetchSemanticsNodes().isNotEmpty()
                 }
                 onNodeWithText("Подключить").performClick()
             } else {
-                runBlocking { connection.api.importPlan(task.id, "desktop-attach", path = "PLAN.md") }
+                // FP-UX-04A/B: the project scan runs on a click, lists files (not
+                // folders), and one click on a file shows the verdict before attach.
+                onNodeWithText("Сканировать проект").performClick()
+                waitUntil(timeoutMillis = 20_000) {
+                    onAllNodesWithText("PLAN.md").fetchSemanticsNodes().isNotEmpty()
+                }
+                assertTrue(onAllNodesWithText("корень проекта", substring = true).fetchSemanticsNodes().isNotEmpty())
+                onAllNodesWithText("PLAN.md")[0].performClick()
+                waitUntil(timeoutMillis = 15_000) {
+                    onAllNodesWithText("Готов к подключению").fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithText("Подключить").performClick()
             }
             waitUntil(timeoutMillis = 20_000) {
                 onAllNodesWithText("шагов 0/2", substring = true).fetchSemanticsNodes().isNotEmpty()
@@ -159,6 +173,25 @@ class DesktopFollowPlanAcceptanceTest {
             val attached = runBlocking { connection.api.plan(task.id) }
             assertEquals(true, attached.attached)
             assertEquals("PLAN.md", attached.path)
+
+            // FP-UX-04F: «Отключить следование» снимает привязку, файл остаётся на месте,
+            // и панель возвращается к стартовому состоянию с двумя кнопками.
+            onNodeWithText("Дополнительно").performClick()
+            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить план").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("Отключить план").performClick()
+            waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Отключить").fetchSemanticsNodes().isNotEmpty() }
+            onNodeWithText("Отключить").performClick()
+            waitUntil(timeoutMillis = 15_000) {
+                onAllNodesWithText("Сканировать проект").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertEquals(false, runBlocking { connection.api.plan(task.id).attached })
+            assertTrue(File(root, "PLAN.md").exists(), "детальный файл не удалён при detached")
+
+            // План подключается заново: остальные проверки NATIVE ходят по нему.
+            runBlocking { connection.api.importPlan(task.id, "desktop-reattach", path = "PLAN.md") }
+            waitUntil(timeoutMillis = 20_000) {
+                onAllNodesWithText("шагов 0/2", substring = true).fetchSemanticsNodes().isNotEmpty()
+            }
 
             // NATIVE-06: the step list collapses and expands.
             onNodeWithText("Все шаги (2)").performClick()

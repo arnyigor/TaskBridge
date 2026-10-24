@@ -2,7 +2,9 @@ package ru.arny.taskbridge.ui.chat
 
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
+import ru.arny.taskbridge.core.api.PlanAiReview
 import ru.arny.taskbridge.core.api.PlanInspection
+import ru.arny.taskbridge.core.api.PlanScanResult
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 
@@ -155,7 +157,9 @@ data class PlanPrimaryAction(val id: String, val label: String)
 
 fun planPrimaryAction(status: PlanStatus?): PlanPrimaryAction {
     if (status?.conflict == true) return PlanPrimaryAction("reconcile", "Обновить и сверить")
-    if (status?.attached != true) return PlanPrimaryAction("pick", "Выбрать файл .md")
+    // FP-UX-04A: стартовое состояние предлагает поиск по проекту первым; системный
+    // выбор файла остаётся вторым и никуда не исчез.
+    if (status?.attached != true) return PlanPrimaryAction("scan", "Сканировать проект")
     return when (status.state) {
         "IDLE" -> PlanPrimaryAction("start", "Начать выполнение")
         "RUNNING_STEP", "REVIEWING" -> PlanPrimaryAction("pause", "Пауза после шага")
@@ -239,6 +243,16 @@ fun planErrorCode(error: ApiException): String? = when (val api = error.error) {
 fun planErrorText(error: ApiException): String =
     planErrorText(planErrorCode(error), error.error.message)
 
+/**
+ * Ошибки ИИ-проверки не должны звучать как ошибки плана: «модель недоступна»
+ * оставляет возможность подключить валидный файл обычным путём (FP-UX-04E).
+ */
+fun planAiErrorText(error: ApiException): String = when (planErrorCode(error)) {
+    "AI_RATE_LIMITED" -> error.error.message.ifBlank { "Проверка ИИ — не чаще трёх раз в минуту." }
+    "AI_UNAVAILABLE" -> error.error.message.ifBlank { "Модель недоступна — обычная проверка формата работает без неё." }
+    else -> planErrorText(error)
+}
+
 fun planInspectionText(inspection: PlanInspection?): String {
     if (inspection == null) return ""
     if (inspection.managed) return "Управляемый план: ${inspection.steps} шаг(ов), revision ${inspection.revision ?: 0}."
@@ -274,4 +288,130 @@ fun planPathProblem(value: String): String? {
     }
     if (!text.lowercase().endsWith(".md")) return "План — это Markdown-файл (*.md)"
     return null
+}
+
+// --- FP-UX-04: сканирование, вердикт и ИИ -----------------------------------
+
+val PLAN_VERDICT_LABELS: Map<String, String> = mapOf(
+    "VALID_MANAGED" to "Готов к подключению",
+    "CONVERTIBLE" to "Требует преобразования",
+    "NOT_A_PLAN" to "Это не план",
+    "INVALID" to "Файл непригоден",
+)
+
+/** Подписи предварительной догадки в списке найденных файлов. */
+val PLAN_SCAN_HINTS: Map<String, String> = mapOf(
+    "VALID_MANAGED" to "управляемый план",
+    "CONVERTIBLE" to "нужен импорт",
+)
+
+data class PlanScanRow(
+    val path: String,
+    val name: String,
+    val folder: String,
+    val hint: String,
+)
+
+/**
+ * Строки списка найденного. Фильтр по имени и пути считается на клиенте по уже
+ * полученному результату: каждое нажатие клавиши не должно быть новым обходом
+ * проекта на сервере.
+ */
+fun planScanRows(result: PlanScanResult?, query: String = "", limit: Int = 200): List<PlanScanRow> {
+    val files = result?.files.orEmpty()
+    val needle = query.trim().lowercase()
+    val shown = if (needle.isEmpty()) files else files.filter {
+        "${it.path} ${it.name}".lowercase().contains(needle)
+    }
+    return shown.take(limit).map { file ->
+        PlanScanRow(
+            path = file.path,
+            name = file.name.ifBlank { file.path.substringAfterLast('/') },
+            folder = file.path.substringBeforeLast('/', ""),
+            hint = file.classification?.let { PLAN_SCAN_HINTS[it] } ?: "",
+        )
+    }
+}
+
+/** «найдено файлов: 40 • показано 12 • результат неполный». */
+fun planScanStatusLine(result: PlanScanResult?, shownCount: Int): String {
+    if (result == null) return ""
+    val total = if (result.total > 0) result.total else result.files.size
+    val parts = mutableListOf("найдено файлов: $total")
+    if (shownCount != total) parts += "показано $shownCount"
+    if (result.partial) parts += "результат неполный: достигнут лимит глубины, количества или времени"
+    return parts.joinToString(" • ")
+}
+
+/** Пустое состояние: «не сканировали» — не то же, что «ничего не найдено». */
+fun planScanEmptyText(result: PlanScanResult?, query: String = ""): String {
+    if (result == null) return "Файлы проекта не сканировались."
+    if (result.files.isEmpty()) return "В проекте не найдено ни одного Markdown-файла (.md или .markdown)."
+    return "По запросу «${query.trim()}» ничего не найдено — измените поиск или повторите сканирование."
+}
+
+data class PlanVerdictView(
+    val verdict: String,
+    val label: String,
+    val hint: String,
+    val reasons: List<String>,
+    val steps: Int,
+    /** Подключать можно только то, что прошло структурную проверку. */
+    val canAttach: Boolean,
+    val confirmLabel: String,
+    /** Предпросмотр будущего управляемого файла: показывается, но не пишется. */
+    val preview: String,
+)
+
+fun planVerdictView(inspection: PlanInspection?): PlanVerdictView? {
+    if (inspection == null) return null
+    val verdict = inspection.verdict.ifBlank {
+        when {
+            inspection.managed -> "VALID_MANAGED"
+            inspection.preview != null -> "CONVERTIBLE"
+            else -> "NOT_A_PLAN"
+        }
+    }
+    val reasons = (inspection.problems + inspection.preview?.problems.orEmpty()).filter { it.isNotBlank() }.take(4)
+    val steps = if (inspection.managed) inspection.steps else inspection.preview?.steps?.size ?: 0
+    return PlanVerdictView(
+        verdict = verdict,
+        label = PLAN_VERDICT_LABELS[verdict] ?: verdict,
+        hint = inspection.reason.orEmpty(),
+        reasons = reasons,
+        steps = steps,
+        canAttach = verdict == "VALID_MANAGED" || verdict == "CONVERTIBLE",
+        confirmLabel = when {
+            verdict == "CONVERTIBLE" -> "Импортировать и подключить"
+            inspection.replaces != null -> "Заменить план"
+            else -> "Подключить"
+        },
+        preview = if (verdict == "CONVERTIBLE") inspection.preview?.content.orEmpty() else "",
+    )
+}
+
+data class PlanAiReviewView(val verdict: String, val text: String, val structural: String?)
+
+/**
+ * Совет модели словами и с названием модели: куда ушёл текст файла — часть ответа,
+ * а не мелкий шрифт. Структурный вердикт сервера показывается рядом и остаётся
+ * главным: модель его не заменяет.
+ */
+fun planAiReviewView(review: PlanAiReview?): PlanAiReviewView? {
+    if (review == null) return null
+    val verdict = review.ai?.verdict ?: "UNCLEAR"
+    val label = when (verdict) {
+        "PLAN" -> "модель считает, что это план"
+        "NOT_PLAN" -> "модель считает, что это не план"
+        else -> "модель не уверена"
+    }
+    val lines = mutableListOf(label)
+    review.ai?.reasons.orEmpty().filter { it.isNotBlank() }.forEach { lines += "— $it" }
+    val model = review.model
+    if (model?.id != null) {
+        val where = if (model.local) "локальная, текст не покидал машину" else "облачный провайдер: текст ушёл наружу"
+        lines += "Спрошена модель ${model.provider?.let { "$it/" } ?: ""}${model.id} ($where)"
+    }
+    if (review.truncated) lines += "в модель ушло только начало файла"
+    return PlanAiReviewView(verdict, lines.joinToString("\n"), review.structural?.verdict)
 }

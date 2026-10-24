@@ -1,7 +1,16 @@
 package ru.arny.taskbridge.ui.chat
 
+import ru.arny.taskbridge.core.api.PlanAiModel
+import ru.arny.taskbridge.core.api.PlanAiReview
+import ru.arny.taskbridge.core.api.PlanAiStructural
+import ru.arny.taskbridge.core.api.PlanAiVerdict
 import ru.arny.taskbridge.core.api.PlanFinding
+import ru.arny.taskbridge.core.api.PlanInspection
+import ru.arny.taskbridge.core.api.PlanPreview
+import ru.arny.taskbridge.core.api.PlanPreviewStep
 import ru.arny.taskbridge.core.api.PlanProgress
+import ru.arny.taskbridge.core.api.PlanScanFile
+import ru.arny.taskbridge.core.api.PlanScanResult
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
 import kotlin.test.Test
@@ -111,7 +120,8 @@ class FollowPlanTest {
 
     @Test
     fun `UI-02 one primary action per state, and the dialog states the plan in words`() {
-        assertEquals("Выбрать файл .md", planPrimaryAction(PlanStatus(attached = false)).label)
+        // FP-UX-04A: стартовое состояние предлагает сканирование проекта.
+        assertEquals("Сканировать проект", planPrimaryAction(PlanStatus(attached = false)).label)
         assertEquals("Начать выполнение", planPrimaryAction(PlanStatus(attached = true, state = "IDLE")).label)
         assertEquals("Пауза после шага", planPrimaryAction(PlanStatus(attached = true, state = "RUNNING_STEP")).label)
         assertEquals("Продолжить", planPrimaryAction(PlanStatus(attached = true, state = "PAUSED")).label)
@@ -181,5 +191,104 @@ class FollowPlanTest {
         assertTrue(planPathProblem("C:\\work\\PLAN.md")!!.contains("относительным"))
         assertTrue(planPathProblem("/etc/PLAN.md")!!.contains("относительным"))
         assertTrue(planPathProblem("docs/PLAN.txt")!!.contains("Markdown"))
+    }
+
+    // --- FP-UX-04: сканирование, вердикт и ИИ ---
+
+    @Test
+    fun `DISC-03 DISC-04 the scan list holds files with a relative path`() {
+        val scan = PlanScanResult(
+            files = listOf(
+                PlanScanFile(name = "PLAN.md", path = "PLAN.md", size = 2048, classification = "VALID_MANAGED"),
+                PlanScanFile(name = "TODO.md", path = "docs/TODO.md", size = 900, classification = "CONVERTIBLE"),
+                PlanScanFile(name = "readme.md", path = "docs/deep/readme.md", size = 10),
+            ),
+            total = 3,
+        )
+        val rows = planScanRows(scan)
+        assertEquals(listOf("PLAN.md", "TODO.md", "readme.md"), rows.map { it.name })
+        assertEquals(listOf("", "docs", "docs/deep"), rows.map { it.folder })
+        assertEquals("управляемый план", rows[0].hint)
+        assertEquals("нужен импорт", rows[1].hint)
+        assertEquals("", rows[2].hint)
+    }
+
+    @Test
+    fun `DISC-05 the search filters the loaded list instead of rescanning`() {
+        val scan = PlanScanResult(
+            files = listOf(
+                PlanScanFile(name = "PLAN.md", path = "PLAN.md"),
+                PlanScanFile(name = "release-notes.md", path = "docs/release-notes.md"),
+            ),
+            total = 2,
+        )
+        assertEquals(listOf("docs/release-notes.md"), planScanRows(scan, "RELEASE").map { it.path })
+        assertEquals(listOf("docs/release-notes.md"), planScanRows(scan, "docs/").map { it.path })
+        assertEquals(2, planScanRows(scan, "").size)
+        assertTrue(planScanRows(scan, "нет такого").isEmpty())
+        assertEquals("Файлы проекта не сканировались.", planScanEmptyText(null))
+        assertTrue(planScanEmptyText(PlanScanResult()).contains("не найдено ни одного Markdown"))
+        assertTrue(planScanEmptyText(scan, "нет такого").contains("ничего не найдено"))
+    }
+
+    @Test
+    fun `a partial scan says so instead of pretending to be complete`() {
+        val line = planScanStatusLine(PlanScanResult(total = 40, partial = true), 12)
+        assertTrue(line.contains("найдено файлов: 40"), line)
+        assertTrue(line.contains("показано 12"), line)
+        assertTrue(line.contains("неполный"), line)
+        assertEquals("найдено файлов: 2", planScanStatusLine(PlanScanResult(total = 2), 2))
+        assertEquals("", planScanStatusLine(null, 0))
+    }
+
+    @Test
+    fun `VALID the verdict decides what may be attached`() {
+        val managed = planVerdictView(PlanInspection(path = "PLAN.md", managed = true, steps = 2, revision = 1, verdict = "VALID_MANAGED"))
+        assertEquals("Готов к подключению", managed?.label)
+        assertEquals(true, managed?.canAttach)
+        assertEquals("Подключить", managed?.confirmLabel)
+        assertEquals("", managed?.preview)
+
+        val convertible = planVerdictView(
+            PlanInspection(
+                path = "docs/TODO.md",
+                verdict = "CONVERTIBLE",
+                preview = PlanPreview(
+                    steps = listOf(PlanPreviewStep(id = "S-001")),
+                    content = "taskbridge_plan: 1",
+                ),
+            ),
+        )
+        assertTrue(convertible?.preview?.contains("taskbridge_plan: 1") == true)
+
+        val notAPlan = planVerdictView(PlanInspection(path = "README.md", verdict = "NOT_A_PLAN", problems = listOf("нет списка шагов")))
+        assertEquals("Это не план", notAPlan?.label)
+        assertEquals(false, notAPlan?.canAttach)
+        assertEquals(listOf("нет списка шагов"), notAPlan?.reasons)
+
+        assertEquals("Файл непригоден", planVerdictView(PlanInspection(verdict = "INVALID"))?.label)
+        // Ответ сервера постарше без verdict не ломает экран.
+        assertEquals("VALID_MANAGED", planVerdictView(PlanInspection(managed = true, steps = 1))?.verdict)
+        assertNull(planVerdictView(null))
+    }
+
+    @Test
+    fun `AI-02 the AI answer is advice with its model named`() {
+        val review = planAiReviewView(
+            PlanAiReview(
+                ai = PlanAiVerdict(verdict = "NOT_PLAN", reasons = listOf("нет критериев выполнения")),
+                structural = PlanAiStructural(verdict = "VALID_MANAGED"),
+                model = PlanAiModel(provider = "openai", id = "gpt-4o", local = false),
+                truncated = true,
+            )
+        )
+        assertTrue(review?.text?.contains("модель считает, что это не план") == true)
+        assertTrue(review?.text?.contains("нет критериев выполнения") == true)
+        assertTrue(review?.text?.contains("облачный провайдер") == true)
+        assertTrue(review?.text?.contains("только начало файла") == true)
+        assertEquals("VALID_MANAGED", review?.structural)
+        val local = planAiReviewView(PlanAiReview(ai = PlanAiVerdict(verdict = "PLAN"), model = PlanAiModel(provider = "llama", id = "qwen", local = true)))
+        assertTrue(local?.text?.contains("локальная") == true)
+        assertNull(planAiReviewView(null))
     }
 }
