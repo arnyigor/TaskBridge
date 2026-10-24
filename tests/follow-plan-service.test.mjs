@@ -84,6 +84,31 @@ test('attach reads the file, spends no turn and reports progress', async t => {
   assert.equal(manager.events.at(-1).type, 'PLAN_ATTACHED');
 });
 
+test('FP-FIX-05: the service publishes how a checkpoint ended, not just that it arrived', async t => {
+  const { service, manager, store, workspace, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });
+  const started = await service.start({ taskId: 't-1', expectedRevision: 1, commandId: 'cmd-start' });
+
+  // Ход завершается, когда цикл уже на разборе: checkpoint получен, применять некуда.
+  store.savePlanBinding({ ...store.getPlanBinding('t-1'), state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null });
+  await service.turnSettled({
+    taskId: 't-1',
+    commandId: started ? store.getPlanBinding('t-1').dispatchCommandId : 'plan:c',
+    checkpoint: { planId: 'p-api', revision: 1, cycleId: 'c-1', decision: 'CONTINUE', completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'test', ref: 'call-1', summary: 'тесты зелёные' }] },
+    toolCalls: [{ id: 'call-1', name: 'bash', isError: false, exitCode: 0 }]
+  });
+
+  const rejected = manager.events.find(event => event.type === 'PLAN_CHECKPOINT_REJECTED');
+  assert.ok(rejected, 'отказ опубликован отдельным событием');
+  assert.equal(rejected.data.outcome, 'REJECTED');
+  assert.equal(rejected.data.reasonCode, 'STATE_INACTIVE');
+  assert.ok(rejected.data.checkpointId, 'checkpoint назван идентификатором');
+  assert.match(rejected.message, /не применён/);
+  // Файл не переписан: шаг остался открытым, пока цикл не активен.
+  assert.equal((await readPlanFile(workspace, planPath)).steps[0].status, 'TODO');
+});
+
 test('start dispatches through the existing message path with a command id', async t => {
   const { service, manager, store, planPath } = await setup(t);
   await service.attach({ taskId: 't-1', path: planPath, commandId: 'cmd-attach' });

@@ -368,7 +368,11 @@ export function planSelectionView(inspection, { uploaded = false, attached = fal
 const NOTICES = {
   PLAN_ATTACHED: 'План подключён',
   PLAN_STEP_STARTED: 'Шаг отправлен',
-  PLAN_STEP_CHECKPOINT: 'Контрольная проверка',
+  // «Checkpoint получен» — не «шаг закрыт»: исход приходит отдельным событием.
+  PLAN_STEP_CHECKPOINT: 'Checkpoint получен',
+  PLAN_CHECKPOINT_APPLIED: 'Checkpoint применён',
+  PLAN_CHECKPOINT_RECEIVED: 'Checkpoint принят без изменений',
+  PLAN_CHECKPOINT_REJECTED: 'Checkpoint не применён',
   PLAN_REVISED: 'План обновлён',
   PLAN_PAUSED: 'Цикл на паузе',
   PLAN_COMPLETED: 'План завершён',

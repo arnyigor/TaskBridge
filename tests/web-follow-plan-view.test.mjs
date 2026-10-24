@@ -150,7 +150,7 @@ test('plan events become one short line, and only plan events do', () => {
   assert.equal(planEventNotice({ type: 'PLAN_PAUSED', message: '' }), 'Цикл на паузе');
   assert.equal(planEventNotice({ type: 'USER_MESSAGE', message: 'привет' }), null);
   assert.equal(planEventNotice(null), null);
-  assert.deepEqual([...PLAN_EVENT_TYPES].sort(), ['PLAN_ATTACHED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_PAUSED', 'PLAN_REVISED', 'PLAN_STEP_CHECKPOINT', 'PLAN_STEP_STARTED']);
+  assert.deepEqual([...PLAN_EVENT_TYPES].sort(), ['PLAN_ATTACHED', 'PLAN_CHECKPOINT_APPLIED', 'PLAN_CHECKPOINT_RECEIVED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_PAUSED', 'PLAN_REVISED', 'PLAN_STEP_CHECKPOINT', 'PLAN_STEP_STARTED']);
 });
 
 test('the dialog picks a file from the system picker or by an explicit project path', async () => {

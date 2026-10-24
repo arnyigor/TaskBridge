@@ -19,12 +19,28 @@ import path from 'node:path';
 import { parsePlan, proposeImport, classifyPlan, planHash, readPlan, readPlanText, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
 import { scanPlanFiles, SCAN_DEFAULTS } from './application/plan-scan.mjs';
 import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer } from './application/plan-ai-review.mjs';
-import { PlanFollower, resultForStep } from './application/plan-follower.mjs';
+import { PlanFollower, resultForStep, checkpointIdentity } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
   'PLAN_ATTACHED', 'PLAN_STEP_STARTED', 'PLAN_STEP_CHECKPOINT', 'PLAN_REVISED',
-  'PLAN_PAUSED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_DETACHED'
+  'PLAN_PAUSED', 'PLAN_COMPLETED', 'PLAN_CONFLICT', 'PLAN_DETACHED',
+  // FP-FIX-05: исход применения checkpoint. Опубликованное раньше
+  // PLAN_STEP_CHECKPOINT означает «получен», а не «применён», и его имя оставлено
+  // как есть ради совместимости клиентов.
+  'PLAN_CHECKPOINT_APPLIED', 'PLAN_CHECKPOINT_RECEIVED', 'PLAN_CHECKPOINT_REJECTED'
 ]);
+
+/** Текст причины для оператора: код — для машин, фраза — для человека. */
+const CHECKPOINT_REASON_TEXT = Object.freeze({
+  STATE_INACTIVE: 'цикл не активен',
+  FOREIGN_COMMAND: 'подтверждение относится к другой команде',
+  REVISION_CONFLICT: 'файл плана изменён во время цикла',
+  INVALID_CHECKPOINT: 'checkpoint не прошёл проверку',
+  NO_CHECKPOINT: 'ход завершился без checkpoint',
+  APPROVAL_REQUIRED: 'нужно подтверждение оператора',
+  APPLY_FAILED: 'запись в файл плана не удалась',
+  NOTHING_TO_APPLY: 'подтверждённых изменений нет'
+});
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CONTROL_CLIENT = 'follow-plan';
@@ -154,6 +170,35 @@ export class FollowPlanService {
 
   async #publish(taskId, type, message, data = {}) {
     await this.manager.publishFollowPlanEvent?.(taskId, type, message, data).catch(() => {});
+  }
+
+  /**
+   * Исход применения checkpoint отдельным событием (FP-FIX-05): APPLIED — запись
+   * в файл состоялась, RECEIVED — принят без изменений, REJECTED — не применён с
+   * причиной. Без этого «Checkpoint: CONTINUE» читался как успех.
+   */
+  async #publishCheckpointOutcome(task, result) {
+    if (!result?.outcome) return;
+    const event = result.outcome === 'APPLIED' ? 'PLAN_CHECKPOINT_APPLIED'
+      : result.outcome === 'RECEIVED' ? 'PLAN_CHECKPOINT_RECEIVED'
+        : 'PLAN_CHECKPOINT_REJECTED';
+    const reason = result.reasonCode ? (CHECKPOINT_REASON_TEXT[result.reasonCode] || result.reasonCode) : '';
+    const where = result.stepId ? `шаг ${result.stepId}` : 'шаг не назван';
+    const message = event === 'PLAN_CHECKPOINT_APPLIED'
+      ? `Checkpoint применён: ${where}, revision ${result.planRevision ?? '—'}`
+      : event === 'PLAN_CHECKPOINT_RECEIVED'
+        ? `Checkpoint принят без изменений: ${reason || where}`
+        : `Checkpoint не применён: ${reason || result.code || 'без причины'}`;
+    await this.#publish(task.id, event, message, {
+      checkpointId: result.checkpointId || null,
+      runId: task.runId || null,
+      cycleId: result.cycleId || null,
+      stepId: result.stepId || null,
+      outcome: result.outcome,
+      reasonCode: result.reasonCode || null,
+      planRevision: result.planRevision ?? null,
+      dispatchCommandId: result.dispatchCommandId || null
+    });
   }
 
   #receiptKey(taskId, relPath, planId, stepId) {
@@ -813,7 +858,20 @@ export class FollowPlanService {
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) return { code: 'IGNORED', reason: 'plan not attached' };
     if (binding.state !== 'RUNNING_STEP' && binding.state !== 'REVIEWING') {
-      return { code: 'IGNORED', reason: `state ${binding.state}` };
+      // FP-FIX-05: «ход завершился вне цикла» — это отклонённый checkpoint, а не
+      // тишина: оператор должен видеть, что шаг не закрыт и почему.
+      const rejected = {
+        outcome: 'REJECTED',
+        reasonCode: 'STATE_INACTIVE',
+        checkpointId: checkpointIdentity(binding, checkpoint),
+        cycleId: binding.cycleId || null,
+        stepId: binding.dispatchStepId || null,
+        planRevision: binding.revision ?? null,
+        state: binding.state,
+        code: 'IGNORED'
+      };
+      await this.#publishCheckpointOutcome(task, rejected);
+      return { code: 'IGNORED', reason: `state ${binding.state}`, ...rejected };
     }
     if (aborted) {
       await this.#publish(task.id, 'PLAN_PAUSED', 'Ход отменён: разбор результата', { reason: 'aborted', commandId });
@@ -846,6 +904,7 @@ export class FollowPlanService {
         taskId: task.id, commandId, checkpoint: checked.checkpoint, seq: seq ?? task._turn ?? null,
         deferDispatch: true
       });
+      await this.#publishCheckpointOutcome(task, result);
     } catch (error) {
       // A failure to read/write the plan must pause the plan, not the server.
       await this.#publish(task.id, 'PLAN_PAUSED', `Ошибка плана: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' });

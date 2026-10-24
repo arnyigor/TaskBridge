@@ -19,6 +19,7 @@
 //     so an outside edit stops the cycle instead of being overwritten.
 
 import { decideCheckpoint, auditInstruction } from './plan-checkpoint.mjs';
+import { planHash } from './plan-file.mjs';
 import { planRevision } from './plan-revision.mjs';
 
 export const FOLLOWER_STATES = Object.freeze(['IDLE', 'RUNNING_STEP', 'REVIEWING', 'PAUSED_REVIEW', 'PAUSED', 'COMPLETED']);
@@ -30,6 +31,38 @@ export const DEFAULT_LIMITS = Object.freeze({
 });
 
 const PRIORITY_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
+
+/**
+ * FP-FIX-05: у checkpoint есть видимый исход. `CHECKPOINT_RECEIVED` — получен и
+ * ещё не применён, `CHECKPOINT_APPLIED` — записан в файл, `CHECKPOINT_REJECTED` —
+ * не применён с названной причиной. Раньше все три случая выглядели одинаково:
+ * событие «Checkpoint: CONTINUE» и тишина.
+ */
+export const CHECKPOINT_OUTCOMES = Object.freeze(['RECEIVED', 'APPLIED', 'REJECTED']);
+
+export const CHECKPOINT_REASONS = Object.freeze({
+  STATE_INACTIVE: 'цикл не активен: состояние не допускает применения',
+  FOREIGN_COMMAND: 'подтверждение относится к другой команде',
+  REVISION_CONFLICT: 'файл плана изменён во время цикла',
+  INVALID_CHECKPOINT: 'checkpoint не прошёл проверку',
+  NO_CHECKPOINT: 'ход завершился без checkpoint',
+  APPROVAL_REQUIRED: 'нужно подтверждение оператора',
+  APPLY_FAILED: 'запись в файл плана не удалась',
+  NOTHING_TO_APPLY: 'подтверждённых изменений нет',
+  DETACHED: 'план отключён'
+});
+
+/** Стабильный идентификатор checkpoint: без часов, чтобы дубликат был узнаваем. */
+export const checkpointIdentity = (binding, checkpoint) => checkpoint
+  ? `cp-${planHash(JSON.stringify([
+      binding?.cycleId || '',
+      binding?.dispatchStepId || '',
+      String(checkpoint.decision || ''),
+      Array.isArray(checkpoint.completedStepIds) ? checkpoint.completedStepIds : [],
+      Array.isArray(checkpoint.findings) ? checkpoint.findings.length : 0
+    ])).slice(0, 12)}`
+  : null;
+
 
 /**
  * `[SYSTEM_VERIFIED] …` / `[MODEL_REPORTED] …` — the strongest level among the
@@ -307,14 +340,56 @@ export class PlanFollower {
    * Called after Pi settled for this task. `checkpoint` is the parsed tool
    * argument or null when the turn ended without one.
    */
-  async onSettled({ taskId, commandId, checkpoint, seq = null, deferDispatch = false }) {
+  /**
+   * FP-FIX-05: обёртка вокруг ядра settle. Исход применения checkpoint считается
+   * здесь по фактической ревизии файла (изменилась — APPLIED, нет — RECEIVED или
+   * REJECTED с причиной), поэтому клиенту не нужно угадывать по коду ответа, был
+   * ли шаг действительно записан. Ядро ниже не меняет своего поведения.
+   */
+  async onSettled(input) {
+    const bindingBefore = this.store.getPlanBinding(input.taskId);
+    const revisionBefore = await this.#currentRevision(input.taskId);
+    const result = await this.#onSettledCore(input);
+    const revisionAfter = await this.#currentRevision(input.taskId);
+    const binding = this.store.getPlanBinding(input.taskId) || bindingBefore;
+    const applied = revisionBefore != null && revisionAfter != null && revisionAfter !== revisionBefore;
+    const rejectedCodes = new Set([
+      'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_UNKNOWN_OUTCOME',
+      'PLAN_BUDGET_EXCEEDED', 'PLAN_CONFLICT', 'PLAN_WRITE_FAILED'
+    ]);
+    const outcome = (result.outcome && result.outcome !== 'RECEIVED')
+      ? result.outcome
+      : applied ? 'APPLIED' : rejectedCodes.has(result.code) ? 'REJECTED' : 'RECEIVED';
+    const reasonCode = result.reasonCode || (outcome === 'REJECTED'
+      ? (result.code === 'IGNORED' ? 'STATE_INACTIVE' : result.code)
+      : outcome === 'RECEIVED' ? 'NOTHING_TO_APPLY' : null);
+    return {
+      ...result,
+      ...this.#outcome(binding, input.checkpoint || null, outcome, reasonCode, {
+        planRevision: revisionAfter ?? result.planRevision ?? null,
+        ...(applied ? { appliedRevision: revisionAfter } : {})
+      })
+    };
+  }
+
+  /** Ревизия файла плана сессии, или null, если файла ещё нет. */
+  async #currentRevision(taskId) {
+    const binding = this.store.getPlanBinding(taskId);
+    if (!binding?.path) return null;
+    return this.plans.read(binding.path).then(file => file.plan.revision).catch(() => null);
+  }
+
+  async #onSettledCore({ taskId, commandId, checkpoint, seq = null, deferDispatch = false }) {
     const binding = this.#requireBinding(taskId);
     if (binding.state === 'IDLE' || binding.state === 'PAUSED_REVIEW' || binding.state === 'PAUSED' || binding.state === 'COMPLETED') {
-      return this.#result(taskId, 'IGNORED', 'Ход завершился вне активного цикла.');
+      // Не молчание: применение отклонено, и причина названа вместе с состоянием.
+      return this.#result(taskId, 'IGNORED', `Ход завершился вне активного цикла (${binding.state}).`,
+        this.#outcome(binding, checkpoint, 'REJECTED', 'STATE_INACTIVE', { state: binding.state }));
     }
     if (commandId && binding.dispatchCommandId && commandId !== binding.dispatchCommandId) {
       // A late ACK from an earlier command must not move the current cycle.
-      return this.#result(taskId, 'IGNORED', 'Подтверждение относится к другой команде.');
+      return this.#result(taskId, 'IGNORED', 'Подтверждение относится к другой команде.',
+        this.#outcome(binding, checkpoint, 'REJECTED', 'FOREIGN_COMMAND', { dispatchCommandId: binding.dispatchCommandId || null }));
     }
     this.#save(taskId, { state: 'REVIEWING', settledSeq: seq });
     const budget = binding.budget || {};
@@ -326,13 +401,15 @@ export class PlanFollower {
         return this.#hop({ taskId, plan: file.plan, hash: file.hash, step, audit: true, budget, deferDispatch });
       }
       this.#save(taskId, { state: 'PAUSED', dispatchCommandId: null, dispatchStepId: null });
-      return this.#result(taskId, 'PLAN_UNKNOWN_OUTCOME', 'Checkpoint не получен и после контрольного хода — пауза.');
+      return this.#result(taskId, 'PLAN_UNKNOWN_OUTCOME', 'Checkpoint не получен и после контрольного хода — пауза.',
+        this.#outcome(binding, null, 'REJECTED', 'NO_CHECKPOINT'));
     }
 
     const file = await this.plans.read(binding.path);
     if (file.hash !== binding.expectedHash || file.plan.revision !== binding.expectedRevision) {
       this.#save(taskId, { state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null });
-      return this.#result(taskId, 'PLAN_REVISION_CONFLICT', 'Файл плана изменён во время цикла: нужно согласование, а не перезапись.');
+      return this.#result(taskId, 'PLAN_REVISION_CONFLICT', 'Файл плана изменён во время цикла: нужно согласование, а не перезапись.',
+        this.#outcome(binding, checkpoint, 'REJECTED', 'REVISION_CONFLICT', { planRevision: file.plan.revision }));
     }
 
     const verdict = decideCheckpoint({ plan: file.plan, checkpoint, cycle: { cycleId: binding.cycleId, revision: file.plan.revision } });
@@ -355,9 +432,10 @@ export class PlanFollower {
       // A P0 defect can change what the plan is; nothing is written until the
       // operator approves it.
       this.#save(taskId, { state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null });
-      return this.#result(taskId, 'PLAN_BLOCKED', `Нужно подтверждение: ${revision.requiresApproval.map(item => item.summary || item.stepId).join('; ')}`, {
-        requiresApproval: revision.requiresApproval, proposals: revision.ops
-      });
+      return this.#result(taskId, 'PLAN_BLOCKED', `Нужно подтверждение: ${revision.requiresApproval.map(item => item.summary || item.stepId).join('; ')}`,
+        this.#outcome(binding, checkpoint, 'REJECTED', 'APPROVAL_REQUIRED', {
+          requiresApproval: revision.requiresApproval, proposals: revision.ops
+        }));
     }
 
     const ops = [
@@ -542,5 +620,21 @@ export class PlanFollower {
 
   #result(taskId, code, message, extra = {}) {
     return { taskId, code, message, ...extra };
+  }
+
+  /**
+   * Поля исхода checkpoint, которые уходят и клиенту, и в событие: без них
+   * «принят» и «применён» неразличимы (FP-FIX-05).
+   */
+  #outcome(binding, checkpoint, outcome, reasonCode, extra = {}) {
+    return {
+      outcome,
+      reasonCode: reasonCode || null,
+      checkpointId: checkpointIdentity(binding, checkpoint),
+      cycleId: binding?.cycleId || null,
+      stepId: binding?.dispatchStepId || null,
+      planRevision: extra.planRevision ?? binding?.expectedRevision ?? null,
+      ...extra
+    };
   }
 }

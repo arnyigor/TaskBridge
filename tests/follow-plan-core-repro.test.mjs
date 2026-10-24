@@ -135,7 +135,7 @@ test('вклинившееся сообщение checkpoint не съедает
   assert.equal(plans.state.writes, 1);
 });
 
-test('ДЕФЕКТ FP-FIX-05: в неактивном состоянии checkpoint отбрасывается без диагностики', async t => {
+test('FP-FIX-05: отказ применения виден с причиной, а файл не трогается', async t => {
   const { follower, plans, store } = await setup(t);
   const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
   // Цикл уже на разборе (так было на живом прогоне: PAUSED_REVIEW с 08:29Z).
@@ -144,14 +144,46 @@ test('ДЕФЕКТ FP-FIX-05: в неактивном состоянии checkpo
 
   const settled = await follower.onSettled({ taskId: 't-1', commandId: start.commandId, seq: 13, checkpoint: completion });
 
-  // Текущее поведение: IGNORED с общей фразой, файл не меняется, и никакого
-  // события/кода, по которому оператор понял бы, что завершение потеряно.
-  assert.equal(settled.code, 'IGNORED');
-  assert.equal(settled.message, 'Ход завершился вне активного цикла.');
-  assert.equal(parsePlan(plans.state.text).steps[0].status, 'TODO', 'завершение не применено');
+  // Исход называет и решение, и причину: молчаливого IGNORED больше нет.
+  assert.equal(settled.outcome, 'REJECTED');
+  assert.equal(settled.reasonCode, 'STATE_INACTIVE');
+  assert.equal(settled.state, 'PAUSED_REVIEW');
+  assert.ok(settled.checkpointId, 'у checkpoint есть идентификатор');
+  assert.equal(settled.cycleId, binding.cycleId);
+  assert.equal(settled.stepId, null, 'шаг уже снят с dispatch — причину называет состояние');
+  assert.match(settled.message, /PAUSED_REVIEW/);
+  // И ничего не записано произвольно.
+  assert.equal(parsePlan(plans.state.text).steps[0].status, 'TODO');
   assert.equal(plans.state.writes, 0);
-  // После FP-FIX-05 ожидается видимый исход: CHECKPOINT_REJECTED с причиной
-  // (состояние binding, cycleId, stepId) — а не общий IGNORED.
+});
+
+test('FP-FIX-05: применение и «нечего применять» различаются исходом', async t => {
+  const { follower } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  const applied = await follower.onSettled({ taskId: 't-1', commandId: start.commandId, seq: 30, checkpoint: completion });
+  assert.equal(applied.outcome, 'APPLIED');
+  assert.equal(applied.reasonCode, null);
+  assert.equal(applied.appliedRevision, 2, 'файл ушёл на следующую ревизию');
+  assert.equal(applied.checkpointId, applied.checkpointId);
+
+  const second = await follower.onSettled({
+    taskId: 't-1',
+    commandId: applied.commandId,
+    seq: 31,
+    checkpoint: checkpoint({ revision: 2, cycleId: applied.cycleId, completedStepIds: [], decision: 'CONTINUE' })
+  });
+  assert.equal(second.outcome, 'RECEIVED', 'checkpoint принят, но подтверждённых изменений нет');
+  assert.equal(second.reasonCode, 'NOTHING_TO_APPLY');
+});
+
+test('FP-FIX-05: чужой commandId отклоняется с названной причиной', async t => {
+  const { follower } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+  const foreign = await follower.onSettled({ taskId: 't-1', commandId: 'chat-message-command', seq: 40, checkpoint: completion });
+  assert.equal(foreign.outcome, 'REJECTED');
+  assert.equal(foreign.reasonCode, 'FOREIGN_COMMAND');
+  assert.equal(foreign.dispatchCommandId, start.commandId);
 });
 
 test('checkpoint без подтверждённой ссылки шаг не закрывает и это не молчание', async t => {
