@@ -75,7 +75,7 @@
 
 | ID | Сценарий | Статус | Как проверено |
 |---|---|---|---|
-| NATIVE-01 | Выбор файла и подключение плана явным путём проекта | PASS | поле «Путь в проекте» + «Подключить» → `attached=true`, `path=PLAN.md` |
+| NATIVE-01 | Выбор файла и подключение плана | PASS | «Сканировать проект» → строка `PLAN.md` → вердикт «Готов к подключению» → «Подключить» → `attached=true`, `path=PLAN.md`; ручного поля пути в панели нет (FP-UX-03) |
 | NATIVE-02 | Просмотр файла плана | PASS | панель показывает файл, ревизию, прогресс, шаг |
 | NATIVE-03 | Правка, сохранение, CAS-конфликт | PASS | конфликт после внешней правки; «Отменить изменения»; adopt → сохранение, revision ≥ 2 |
 | NATIVE-04 | Состояние RUNNING | PASS | шаг `slow` в фикстуре: `RUNNING_STEP`, кнопка «Пауза после шага» |
@@ -114,3 +114,82 @@ Windows не предоставляет файлового compare-and-swap. В�
 `.local/fp-06/FP-UX-02-final-report.md` (раздел «Решение GO/NO-GO»):
 Desktop и Web приёмка пройдена, Android — с явно перечисленными NOT_TESTED
 (системный picker, конфликт на устройстве, SSE reconnect, Resume/STOP через UI).
+
+---
+
+## FP-UX-04 — выбор плана со сканированием проекта (DISC / VALID / AI / UX)
+
+Источник требований: `docs/FP-UX-04-PLAN.md`. Сканирование — отдельный маршрут
+`POST /api/tasks/:id/plan/scan` (`src/application/plan-scan.mjs`), вердикт файла —
+`classifyPlan` (`src/application/plan-file.mjs`), проверка ИИ —
+`POST /api/tasks/:id/plan/ai-review` (`src/application/plan-ai-review.mjs`).
+
+| ID | Сценарий | Статус | Артефакт |
+|---|---|---|---|
+| DISC-01 | Открытие диалога не запускает сканирование | PASS (web, android, desktop) | `web-follow-plan-view.test.mjs` (`openPlanDialog` без запроса); Chromium: ноль запросов `/plan/scan` до нажатия; Android: список появляется только по кнопке |
+| DISC-02 | Одно нажатие — один поиск | PASS | `web-follow-plan-view.test.mjs` (обработчик `planScanStart` → один `runPlanScan`), `runScan` с защитой `scanBusy` |
+| DISC-03 | Находятся вложенные Markdown-файлы | PASS | `plan-discovery.test.mjs`, `follow-plan-api.test.mjs` |
+| DISC-04 | Список содержит файлы, а не папки | PASS | `plan-discovery.test.mjs`, `planScanRows` |
+| DISC-05 | Поиск фильтрует имя и относительный путь | PASS | `plan-discovery.test.mjs` (сервер), `planScanRows` (клиент, без повторного сканирования) |
+| DISC-06 | Служебные каталоги не тормозят проект | PASS | `plan-discovery.test.mjs` (`node_modules`/`build`/`dist`/`.git`/`.local`/`.gradle`) |
+| DISC-07 | Symlink/junction наружу не обходится | PASS | `plan-discovery.test.mjs` (junction на Windows) |
+| DISC-08 | Повторный поиск обновляет результаты | PASS | `plan-discovery.test.mjs` |
+| VALID-01 | Корректный управляемый PLAN.md | PASS | `plan-discovery.test.mjs`, `follow-plan-api.test.mjs` |
+| VALID-02 | README/AGENTS не подключаются без структуры | PASS | `plan-discovery.test.mjs` (вердикт и отказ импорта) |
+| VALID-03 | Неуправляемый TODO получает предложение преобразования | PASS | `plan-discovery.test.mjs` (предпросмотр содержимого, файл не изменён) |
+| VALID-04 | Пустой и повреждённый файл отклоняются | PASS | `plan-discovery.test.mjs` |
+| VALID-05 | Ошибка преобразования не уничтожает исходный текст | PASS | `plan-discovery.test.mjs` |
+| VALID-06 | Внешняя правка между preview и attach обнаруживается | PASS | `plan-discovery.test.mjs`, `follow-plan-api.test.mjs`: `inspect` отдаёт хэш, `import` отвечает `PLAN_REVISION_CONFLICT` и файл не перезаписывает |
+| AI-01 | ИИ-проверка не запускается автоматически | PASS | `plan-discovery.test.mjs` (сканирование, проверка и attach модель не спрашивают) |
+| AI-02 | Отказ модели не блокирует валидный план | PASS | `plan-discovery.test.mjs`, `follow-plan-api.test.mjs` (фикстура без модели) |
+| UX-01 | Отмена выбора возвращает стартовый экран | PASS (web, android) | `cancelPlanSelection` ничего не удаляет; Chromium и Pixel 5: после отмены видны обе кнопки и «План не подключён» |
+| UX-02 | Detach возвращает стартовый экран, файл сохранён | PASS (web, android, desktop) | Chromium и Pixel 5: `attached=false`, файл 729 байт на месте; desktop-тест: detach и повторное подключение |
+| UX-03 | STOP при активном плане не допускает автопродолжение | PASS (прежние тесты) | `plan-follower.test.mjs`, `follow-plan-service.test.mjs` |
+| UX-04 | Desktop native picker работает как прежде | PARTIAL | desktop-приёмка проходит через сканирование; нативный picker — только при `TASKBRIDGE_NATIVE_PICKER_SMOKE=1` (не запускался) |
+| UX-05 | Android SAF работает как прежде | PARTIAL | DocumentsUI открывается по «Открыть файл» и показывает `.md`; выбор конкретного файла в этом прогоне не завершался |
+| UX-06 | Web picker и серверное сканирование — разные источники | PASS | web: `input type=file` → base64; список — `POST /plan/scan`; KMP: SAF/FileDialog → путь внутри workspace либо содержимое |
+
+### Результаты приёмки FP-UX-04 (2026-10-24)
+
+- **Web, Chromium** (изолированный сервер, песочница `.local/fp-ux-04/stand.mjs`):
+  26/26 проверок — обе кнопки, ноль запросов scan до нажатия, плоский список из 24
+  файлов, фильтр по имени и пути без нового сканирования, вердикты
+  `CONVERTIBLE`/`NOT_A_PLAN`/`VALID_MANAGED`, подключение без хода Pi
+  (`runs 1 → 1`), detach с сохранением файла, системный выбор файла открывается.
+- **Android, Pixel 5 API 31** (эмулятор, adb + uiautomator, debug APK): панель
+  компактная, обе кнопки в одной строке, 24 файла в прокручиваемом списке, поиск с
+  открытой клавиатурой, выбор `docs/PLAN.md`, подключение (шаги 0/2, `runs 1 → 1`),
+  фон → возврат без потери состояния, detach и возврат к двум кнопкам, «Открыть
+  файл» открывает DocumentsUI, «Отменить выбор» возвращает стартовое состояние.
+- **Desktop, production Compose UI** (`DesktopFollowPlanAcceptanceTest`): сканирование,
+  выбор вложенного `docs/PLAN.md`, подключение, detach с сохранением файла,
+  повторное подключение — тест проходит.
+
+Найдено и исправлено в ходе приёмки (не «по аналогии», а воспроизведено):
+
+1. **Android: карточка выбора была недостижима.** Внутри `AlertDialog` список и
+   карточка вердикта не помещались, карточка рисовалась ниже видимой области —
+   кнопки «Подключить» на телефоне не существовало. Панель переведена на
+   `Dialog` + `Surface` с фиксированным заголовком/футером, карточка заменяет
+   список на время выбора.
+2. **Android: две кнопки старта переносились и обрезались** («Сканировать п…»).
+   `FlowRow` заменён на `Row` с `weight` и компактными отступами.
+3. **Web: кнопки карточки выбора уезжали за нижнюю границу окна** (список занимал
+   весь диалог). Панель выбора сжимается и прокручивается, карточка и футер —
+   фиксированные; проверяется координатами кнопки в Chromium.
+4. **Внешняя правка между предпросмотром и attach не обнаруживалась**: сервер
+   применял вердикт к уже другому тексту. `inspect` теперь возвращает хэш
+   показанного текста, `import` сверяет его и отвечает `PLAN_REVISION_CONFLICT`.
+
+Полный регрессионный gate после изменений: `npm test` — 1625 тестов, 0 падений;
+KMP `:shared:jvmTest` — 293 теста, 0 падений.
+
+**Остаточные ограничения (не PASS):**
+
+- UX-04 (нативный системный выбор файла на Desktop): desktop-приёмка идёт через
+  сканирование; нативный диалог запускается только с
+  `TASKBRIDGE_NATIVE_PICKER_SMOKE=1` и в этом прогоне не проверялся.
+- UX-05 (Android SAF): выбор файла в DocumentsUI открывается и показывает `.md`,
+  но выбор конкретного файла в этом прогоне не завершался — PARTIAL.
+- «Удалить файл с сервера» (FP-UX-04F) намеренно отсутствует: файл плана —
+  исходный файл проекта, и отдельной кнопки удаления в интерфейсе нет.
