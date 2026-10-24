@@ -368,6 +368,21 @@ export class PlanFollower {
     const externalRevisionChange = !own && before?.revision != null && after?.revision != null
       && after.revision !== before.revision;
     const requested = Array.isArray(checkpoint?.completedStepIds) ? checkpoint.completedStepIds.map(String) : [];
+    // Если применения не было, а завершение запрашивалось — назвать причину отказа
+    // проверки (planId/revision/cycleId/evidence), а не молчать: именно этот случай
+    // на живом прогоне выглядел как «checkpoint принят».
+    let validationProblems = [];
+    if (!own && requested.length && after) {
+      try {
+        const file = await this.plans.read(binding.path);
+        const verdict = decideCheckpoint({
+          plan: file.plan,
+          checkpoint,
+          cycle: { cycleId: binding.cycleId, revision: file.plan.revision }
+        });
+        validationProblems = verdict.inspection.problems || [];
+      } catch { /* диагностика не должна ломать settle */ }
+    }
     const confirmedStepIds = requested.filter(stepId => appliedStepIds.includes(stepId));
     const rejectedCodes = new Set([
       'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_UNKNOWN_OUTCOME',
@@ -396,7 +411,15 @@ export class PlanFollower {
         completionApplied: requested.length > 0 && confirmedStepIds.length === requested.length,
         // Запрошенные, но не закрытые шаги: именно этот случай на живом прогоне
         // выглядел как «checkpoint применён».
-        ...(unconfirmed.length ? { unconfirmedStepIds: unconfirmed, problems: [`не применены: ${unconfirmed.join(', ')}`] } : {})
+        ...(unconfirmed.length
+          ? {
+            unconfirmedStepIds: unconfirmed,
+            problems: [
+              ...validationProblems,
+              ...(validationProblems.length ? [] : [`не применены: ${unconfirmed.join(', ')}`])
+            ]
+          }
+          : {})
       })
     };
   }

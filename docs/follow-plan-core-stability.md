@@ -70,6 +70,37 @@
 | адресные: follower/checkpoint/service/api/web/recovery/lifecycle | 144/144 |
 | полный `npm test` | 1639 тестов, 1635 pass, 4 skipped, **0 fail** |
 
+## CORE-02A — результат (2026-10-24)
+
+Цель: воспроизвести потерю `completedStepIds` в активном `RUNNING_STEP` через
+полный путь обработки (`FollowPlanService.turnSettled` → follower), а не прямым
+вызовом.
+
+| Сценарий | Результат |
+|---|---|
+| `RUNNING_STEP` + валидный `CONTINUE` с `completedStepIds` | **PASS**: шаг `DONE`, `completionApplied=true`, `confirmedStepIds=[S-001]`, следующий S-002, событие `PLAN_CHECKPOINT_APPLIED` |
+| finding + завершение шага | **PASS**: обе операции в файле, `appliedFindingIds=[F-001]` |
+| finding без завершения | **PASS**: finding записан, шаг `TODO`, шаг не перескочил на S-002 |
+| STOP → поздний settle | **PASS**: шаг не засчитан, отправок нет, STOP сохраняет приоритет |
+| законный `BLOCKED` → `PAUSED_REVIEW` | **PASS**: пауза остаётся, из неё ничего не отправляется |
+| повторный settle того же хода | **PASS**: файл не переписан |
+| внешний CAS-конфликт | **PASS**: `PLAN_REVISION_CONFLICT`/`REVISION_CONFLICT`, файл не перезаписан |
+| `turnFailed` → поздний settle | **PASS**: `REJECTED/STATE_INACTIVE`, шаг не засчитан, скрытого dispatch нет |
+| рестарт после подтверждённого шага | **PASS**: шаг остаётся `DONE`, `PAUSED_REVIEW` без повтора S-001 |
+| отказ валидации (чужой `cycleId`) | **PASS**: отказ назван словами (`cycleId…`), шаг не засчитан |
+
+Вывод: **в текущем коде потеря завершения в активном `RUNNING_STEP` не
+воспроизводится** — счастливый путь работает. Значит живой инцидент объясняется
+чем-то, чего в этом прогоне нет; чтобы это не осталось тайной, добавлена
+публикация причин отказа валидации (`problems`) в том же исходе checkpoint'а —
+раньше отказ `inspectCheckpoint` был невидим (в событии были только
+`evidenceProblems`).
+
+Открытые кандидаты, которые ещё не проверены (и не требуют изменения FSM):
+различие `runId`/`commandId` в момент settle на живом сервере, очистка
+`_planCheckpoint` между ходами в `TaskManager`, и поведение при чужом
+`commandId` на реальном пути.
+
 ## Правила для следующих шагов
 
 - Не менять FSM и CAS одновременно.
