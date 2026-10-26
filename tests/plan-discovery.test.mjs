@@ -57,6 +57,13 @@ const setup = async t => {
   return { root, workspace, store, manager, service };
 };
 
+
+/** Закрыть store и убрать временный каталог (эти тесты не используют t.after). */
+function cleanupStore(store, root) {
+  store.close?.();
+  fs.rm(root, { recursive: true, force: true }).catch(() => {});
+}
+
 const write = async (file, text = '# документ\n') => {
   await fs.mkdir(path.dirname(file), { recursive: true });
   await fs.writeFile(file, text, 'utf8');
@@ -537,4 +544,91 @@ test('the AI check neither sends a turn nor runs a tool', async t => {
   const status = await service.status('t-1');
   assert.equal(status.attached, false);
   assert.equal(status.state, 'NOT_ATTACHED');
+});
+
+test('ИИ-сборка плана: модель получает ТЗ формата, ответ вычищается и проверяется', async () => {
+  const { buildPlanDraftPrompt, extractManagedPlan } = await import('../src/application/plan-ai-review.mjs');
+  const prompt = buildPlanDraftPrompt({ path: 'docs/NOTES.md', text: 'сделать пагинацию', truncated: true, hint: 'два шага' });
+  assert.match(prompt, /taskbridge_plan: 1/);
+  assert.match(prompt, /### S-001 \| TODO \| P1 \|/);
+  assert.match(prompt, /Инструментов у тебя нет/);
+  assert.match(prompt, /Пожелание оператора: два шага/);
+  assert.match(prompt, /показано начало документа/);
+
+  // Модель почти всегда добавляет «Вот план:» и заборы — их снимаем.
+  const answer = 'Вот план:\n```markdown\n---\ntaskbridge_plan: 1\n---\n\n## Шаги\n```';
+  assert.equal(extractManagedPlan(answer), '---\ntaskbridge_plan: 1\n---\n\n## Шаги\n');
+  assert.equal(extractManagedPlan('```\n---\ntaskbridge_plan: 1\n---\n```'), '---\ntaskbridge_plan: 1\n---\n');
+});
+
+test('ИИ-сборка плана: невалидный ответ модели не пишется и назван причиной', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-draft-'));
+  const workspace = path.join(root, 'workspace');
+  await fs.mkdir(workspace, { recursive: true });
+  await fs.writeFile(path.join(workspace, 'NOTES.md'), '# Заметки\n\nсделать пагинацию\n', 'utf8');
+  const store = new TaskStore(root);
+  t.after(() => cleanupStore(store, root));
+  const service = new FollowPlanService({
+    manager: {
+      getTask: id => (String(id) === 't-1' ? { id: 't-1', workspacePath: workspace, runId: null } : null),
+      listTasks: () => [{ id: 't-1' }],
+      message: async () => ({ id: 'x' }),
+      cancel: async () => {},
+      publishFollowPlanEvent: async () => {}
+    },
+    store,
+    config: { followPlan: { enabled: true } },
+    askModel: async () => ({ ok: true, text: 'Вот план:\n### S-1 | TODO | P9 | без формата', provider: 'p', model: 'm', local: true })
+  });
+  await assert.rejects(
+    service.aiDraft({ taskId: 't-1', path: 'NOTES.md' }),
+    error => error.code === 'AI_INVALID_PLAN' && /не является планом/.test(error.message)
+  );
+  assert.equal(await fs.readFile(path.join(workspace, 'NOTES.md'), 'utf8'), '# Заметки\n\nсделать пагинацию\n', 'файл не изменён');
+});
+
+test('ИИ-сборка плана: валидный ответ модели возвращается, но файл не пишется', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-draft2-'));
+  const workspace = path.join(root, 'workspace');
+  await fs.mkdir(workspace, { recursive: true });
+  await fs.writeFile(path.join(workspace, 'NOTES.md'), '# Заметки\n\nсделать пагинацию\n', 'utf8');
+  const store = new TaskStore(root);
+  t.after(() => cleanupStore(store, root));
+  const model = '```markdown\n' + `---
+taskbridge_plan: 1
+plan_id: p-draft
+revision: 1
+goal: "Починить пагинацию"
+---
+
+# План: пагинация
+
+## Шаги
+
+### S-001 | TODO | P1 | Починить пагинацию
+**Критерии:** страницы переключаются.
+**Проверка:** node --test tests/pagination.test.mjs
+
+## Обнаруженные проблемы
+` + '\n```';
+  let asked = null;
+  const service = new FollowPlanService({
+    manager: {
+      getTask: id => (String(id) === 't-1' ? { id: 't-1', workspacePath: workspace, runId: null } : null),
+      listTasks: () => [{ id: 't-1' }],
+      message: async () => ({ id: 'x' }),
+      cancel: async () => {},
+      publishFollowPlanEvent: async () => {}
+    },
+    store,
+    config: { followPlan: { enabled: true } },
+    askModel: async input => { asked = input; return { ok: true, text: model, provider: 'p', model: 'm', local: true }; }
+  });
+  const draft = await service.aiDraft({ taskId: 't-1', path: 'NOTES.md' });
+  assert.equal(draft.verdict, 'VALID_MANAGED');
+  assert.equal(draft.steps, 1);
+  assert.match(draft.text, /^---\ntaskbridge_plan: 1/);
+  assert.equal(asked.maxTokens, 2000);
+  // Ничего не записано: сохранение — отдельное действие оператора.
+  assert.equal(await fs.readFile(path.join(workspace, 'NOTES.md'), 'utf8'), '# Заметки\n\nсделать пагинацию\n');
 });

@@ -1683,6 +1683,23 @@ data class PlanFileText(
     val hash: String = "",
 )
 
+/**
+ * Черновик управляемого плана, собранный моделью из свободного текста
+ * (POST /plan/ai-draft). Сервер ничего не пишет: текст показывается оператору.
+ */
+@Serializable
+data class PlanAiDraft(
+    val path: String = "",
+    val text: String = "",
+    val verdict: String = "",
+    val steps: Int = 0,
+    val goal: String? = null,
+    val truncated: Boolean = false,
+    val charsSent: Int = 0,
+    val model: PlanAiModel? = null,
+    val ms: Long? = null,
+)
+
 /** Результат сохранения исправленного плана (POST /plan/save-file). */
 @Serializable
 data class PlanSavedFile(

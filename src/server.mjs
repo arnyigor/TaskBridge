@@ -1650,7 +1650,7 @@ async function handleRequest(req, res) {
         followPlan: {
           enabled: followPlan.enabled,
           capabilities: followPlan.enabled
-            ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'read-file', 'save-file', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
+            ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'read-file', 'save-file', 'ai-draft', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
             : []
         },
         pi,
@@ -2053,7 +2053,7 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|scan|ai-review|inspect|import|read-file|save-file|content|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|scan|ai-review|ai-draft|inspect|import|read-file|save-file|content|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
@@ -2082,6 +2082,13 @@ async function handleRequest(req, res) {
         // answers with `partial: true` instead of hanging.
         return json(res, 200, await followPlan.scan({
           taskId: planTaskId, query: body.query ?? '', limit: body.limit ?? null
+        }));
+      }
+      if (action === 'ai-draft' && req.method === 'POST') {
+        // Модель собирает управляемый план из свободного текста; ничего не пишется.
+        return json(res, 200, await followPlan.aiDraft({
+          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null,
+          contentBase64: body.contentBase64 ?? null, hint: body.hint ?? ''
         }));
       }
       if (action === 'ai-review' && req.method === 'POST') {

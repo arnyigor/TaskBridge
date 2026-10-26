@@ -907,6 +907,15 @@ class TaskBridgeApi(
             put("commandId", commandId)
         })
 
+    /** Модель переписывает свободный текст в управляемый план; сервер ничего не пишет. */
+    suspend fun aiDraftPlan(id: String, path: String? = null, name: String? = null, contentBase64: String? = null, hint: String = ""): PlanAiDraft =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/ai-draft", PlanAiDraft.serializer(), buildJsonObject {
+            path?.let { put("path", it) }
+            name?.let { put("name", it) }
+            contentBase64?.let { put("contentBase64", it) }
+            put("hint", hint)
+        })
+
     /** Один каталог проекта: папки и .md-файлы (телефон так выбирает файл на компьютере). */
     suspend fun browsePlan(id: String, path: String = ""): PlanBrowseListing =
         get("/api/tasks/${id.path()}/plan/browse?path=${path.encodeURLParameter()}", PlanBrowseListing.serializer())

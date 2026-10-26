@@ -4371,6 +4371,31 @@ function closePlanRepair() {
   $('planRepairError').textContent = '';
 }
 
+/**
+ * «Собрать план с помощью ИИ»: модель переписывает свободный текст в управляемый
+ * план. Ничего не пишется — результат кладётся в редактор, сохраняет оператор.
+ */
+async function runPlanDraftAi() {
+  const id = selectedTaskId;
+  if (!id || !planRepairBase?.path) return;
+  const button = $('planRepairAi');
+  button.disabled = true;
+  $('planRepairError').textContent = 'Собираю план…';
+  try {
+    const draft = await api(`/api/tasks/${encodeURIComponent(id)}/plan/ai-draft`, {
+      method: 'POST', body: { path: planRepairBase.path }
+    });
+    $('planRepairText').value = draft.text;
+    const model = draft.model?.id ? ` (${draft.model.provider ? `${draft.model.provider}/` : ''}${draft.model.id}${draft.model.local ? ', локальная' : ''})` : '';
+    $('planRepairState').textContent = `Готово: ${draft.steps} шаг(ов), revision 1${model}. Проверьте текст и нажмите «Сохранить как план».`;
+    $('planRepairError').textContent = '';
+  } catch (error) {
+    $('planRepairError').textContent = planErrorText(error);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 /** Сохранить исправленный текст: только taskbridge_plan:1, CAS по хэшу. */
 async function savePlanRepair() {
   const id = selectedTaskId;
@@ -4766,6 +4791,8 @@ $('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
 $('planPreviewAi').onclick = () => runPlanAiReview();
 $('planRepairOpen').onclick = () => openPlanRepair();
 $('planRepairCancel').onclick = () => closePlanRepair();
+let planRepairAiBound = true;
+$('planRepairAi').onclick = () => runPlanDraftAi();
 $('planRepairSave').onclick = () => savePlanRepair();
 $('planPreviewCancel').onclick = () => cancelPlanSelection();
 // The second click writes over a project file that already exists: never silently.

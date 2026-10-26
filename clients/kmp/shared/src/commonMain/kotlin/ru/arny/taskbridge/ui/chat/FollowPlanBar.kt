@@ -101,6 +101,7 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var repairError by mutableStateOf("")
     var repairOverwrite by mutableStateOf(false)
     var repairSaving by mutableStateOf(false)
+    var repairNotice by mutableStateOf("")
     var status by mutableStateOf<PlanStatus?>(null)
     var notice by mutableStateOf("")
     var askPlan by mutableStateOf(false)
@@ -130,6 +131,7 @@ class FollowPlanUiState internal constructor(val taskId: String) {
 
     /** Отмена правки формата: ничего не записано. */
     fun cancelRepair() {
+        repairNotice = ""
         repairPath = null
         repairBaseHash = null
         repairText = ""
@@ -586,6 +588,28 @@ private suspend fun openRepair(state: FollowPlanUiState, api: TaskBridgeApi, pat
     }
 }
 
+/** «Собрать план с помощью ИИ»: результат кладётся в редактор, сохраняет оператор. */
+private suspend fun runDraftAi(state: FollowPlanUiState, api: TaskBridgeApi) {
+    val path = state.repairPath ?: return
+    state.repairSaving = true
+    state.repairError = "Собираю план…"
+    try {
+        val draft = api.aiDraftPlan(state.taskId, path = path)
+        state.repairText = draft.text
+        val model = draft.model?.id?.let { id ->
+            val provider = draft.model?.provider?.let { "$it/" } ?: ""
+            val local = if (draft.model?.local == true) ", локальная" else ""
+            " ($provider$id$local)"
+        } ?: ""
+        state.repairError = ""
+        state.repairNotice = "Готово: ${draft.steps} шаг(ов)$model. Проверьте текст и нажмите «Сохранить как план»."
+    } catch (error: ApiException) {
+        state.repairError = planErrorText(error)
+    } finally {
+        state.repairSaving = false
+    }
+}
+
 /** Сохранить исправленный текст: сервер принимает только валидный managed-план. */
 private suspend fun saveRepair(state: FollowPlanUiState, api: TaskBridgeApi, newId: () -> String) {
     val path = state.repairPath ?: return
@@ -835,11 +859,17 @@ private fun PlanSelectionCard(
             textStyle = MaterialTheme.typography.bodySmall,
             label = { Text("Текст плана", style = MaterialTheme.typography.bodySmall) },
         )
+        if (state.repairNotice.isNotBlank()) {
+            Text(state.repairNotice, style = MaterialTheme.typography.bodySmall, color = colors.primary)
+        }
         if (state.repairError.isNotBlank()) {
             Text(state.repairError, style = MaterialTheme.typography.bodySmall, color = colors.error)
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             TextButton(onClick = { state.cancelRepair() }) { Text("Отмена", style = MaterialTheme.typography.labelLarge) }
+            TextButton(onClick = { scope.launch { runDraftAi(state, api) } }, enabled = !state.repairSaving) {
+                Text("Собрать план с помощью ИИ", style = MaterialTheme.typography.labelLarge)
+            }
             Button(
                 onClick = { scope.launch { saveRepair(state, api, newId) } },
                 enabled = !state.repairSaving,

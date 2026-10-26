@@ -572,3 +572,21 @@ test('«Исправить формат»: read-file и save-file работаю
   assert.equal(attached.status.attached, true);
   assert.equal(attached.status.path, 'docs/NOTES.md');
 });
+
+test('«Собрать план с помощью ИИ»: маршрут отвечает отказом без модели и ничего не пишет', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs', 'NOTES.md'), '# Заметки\n\nсделать пагинацию\n', 'utf8');
+  const task = await createTask(api);
+
+  // У фикстуры нет модели: маршрут обязан ответить AI_UNAVAILABLE, а не упасть.
+  const draft = await post(api, `/api/tasks/${task.id}/plan/ai-draft`, { path: 'docs/NOTES.md' })
+    .then(value => ({ value }), error => ({ error }));
+  assert.ok(draft.error, 'без модели — отказ');
+  assert.equal(draft.error?.code, 'AI_UNAVAILABLE');
+  // Исходник не тронут, план не подключён.
+  assert.equal(await fs.readFile(path.join(root, 'docs', 'NOTES.md'), 'utf8'), '# Заметки\n\nсделать пагинацию\n');
+  assert.equal((await api(`/api/tasks/${task.id}/plan`)).attached, false);
+});

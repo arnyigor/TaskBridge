@@ -124,6 +124,7 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/tasks/:id/plan/stop', summary: 'stop the cycle and leave the plan for review' },
   { method: 'POST', path: '/api/tasks/:id/plan/reconcile', summary: 'resolve an ambiguous state: adopt_external or dismiss' },
   { method: 'POST', path: '/api/tasks/:id/plan/ai-review', summary: 'one explicit question to the model about the chosen file; advice only, never a verdict' },
+  { method: 'POST', path: '/api/tasks/:id/plan/ai-draft', summary: 'the model rewrites the chosen text as a taskbridge_plan: 1 file; returns the draft, writes nothing' },
   { method: 'GET', path: '/api/tasks/:id/stream', summary: 'SSE live events, resumable via Last-Event-ID', sse: true },
   { method: 'GET', path: '/api/tasks/:id/state', summary: "Pi's get_state snapshot" },
   { method: 'GET', path: '/api/tasks/:id/runs', summary: 'run history of the session' },

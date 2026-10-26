@@ -18,7 +18,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parsePlan, proposeImport, classifyPlan, planHash, readPlan, readPlanText, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
 import { scanPlanFiles, SCAN_DEFAULTS } from './application/plan-scan.mjs';
-import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer } from './application/plan-ai-review.mjs';
+import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer, buildPlanDraftPrompt, extractManagedPlan } from './application/plan-ai-review.mjs';
 import { PlanFollower, resultForStep, checkpointIdentity } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
@@ -516,6 +516,64 @@ export class FollowPlanService {
       charsSent: capped.length,
       structural: { verdict: classified.verdict, reason: classified.reason || '', problems: classified.problems || [] },
       ai: { verdict: parsed.verdict, looksLikePlan: parsed.looksLikePlan, reasons: parsed.reasons },
+      model: { provider: answer.provider || null, id: answer.model || null, local: answer.local === true },
+      ms: answer.ms ?? null
+    };
+  }
+
+  /**
+   * «Собрать план с помощью ИИ»: модель превращает свободный текст в файл
+   * `taskbridge_plan: 1`. Ничего не пишет — оператор видит результат в редакторе и
+   * сам нажимает «Сохранить как план» (там CAS и проверка формата).
+   */
+  async aiDraft({ taskId, path: relPath = null, name = null, contentBase64 = null, hint = '' }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    if (typeof this.askModel !== 'function') {
+      throw reject('AI_UNAVAILABLE', 'Сборка плана с помощью ИИ недоступна: сервер не может запросить модель.');
+    }
+    const now = this.now();
+    const recent = (this.aiReviewTimes.get(task.id) || []).filter(at => now - at < 60_000);
+    if (recent.length >= AI_REVIEW_LIMITS.requestsPerMinute) {
+      throw reject('AI_RATE_LIMITED', 'Слишком часто: обращения к модели — не больше трёх раз в минуту.');
+    }
+    this.aiReviewTimes.set(task.id, [...recent, now]);
+
+    let target;
+    let text;
+    if (contentBase64 != null) {
+      target = this.#targetPath(relPath || name || '');
+      text = decodePlanContent(contentBase64);
+    } else {
+      target = this.#relativePath(task, relPath);
+      text = (await this.#plans(task).text(target)).text;
+    }
+    const capped = text.slice(0, AI_REVIEW_LIMITS.maxChars);
+    const truncated = capped.length < text.length;
+    const answer = await this.askModel({
+      taskId: task.id,
+      prompt: buildPlanDraftPrompt({ path: target, text: capped, truncated, hint: String(hint || '').slice(0, 500) }),
+      maxTokens: 2000,
+      timeoutMs: AI_REVIEW_LIMITS.timeoutMs
+    });
+    if (!answer?.ok) {
+      throw reject('AI_UNAVAILABLE', `Модель не ответила: ${answer?.message || answer?.code || 'неизвестная причина'}.`);
+    }
+    const draft = extractManagedPlan(answer.text);
+    const classified = classifyPlan(draft, { planId: this.#planIdFor(target) });
+    if (classified.verdict !== 'VALID_MANAGED') {
+      throw reject('AI_INVALID_PLAN',
+        `Модель вернула текст, который не является планом: ${classified.reason || (classified.problems || [])[0] || 'формат не распознан'}`,
+        classified.problems || []);
+    }
+    return {
+      path: target,
+      text: draft,
+      verdict: classified.verdict,
+      steps: classified.plan.steps.length,
+      goal: classified.plan.goal,
+      truncated,
+      charsSent: capped.length,
       model: { provider: answer.provider || null, id: answer.model || null, local: answer.local === true },
       ms: answer.ms ?? null
     };
