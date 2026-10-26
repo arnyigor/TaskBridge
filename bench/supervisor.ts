@@ -620,7 +620,15 @@ export default function activate(pi: ExtensionAPI) {
     } catch { /* телеметрия не должна ломать прогон */ }
   };
 
+  // Служебный steering по умолчанию ЗАПРЕЩЁН. sendUserMessage с deliverAs:'steer'
+  // подмешивает в диалог сообщение, которого пользователь не отправлял, и модель
+  // принимает его за указание (аудит 2026-10-26: 62 инъекции в 18 сессиях TaskBridge;
+  // медиана задачи «правка константы» 120.5 с против 10.6 с без инъекций).
+  // Журнал, счётчики, гейты и блокировки от этого флага не зависят.
+  // Для изолированного эксперимента: BENCH_ALLOW_STEER=1.
+  const ALLOW_STEER = process.env.BENCH_ALLOW_STEER === '1';
   const say = (text: string) => {
+    if (!ALLOW_STEER) return;
     try { pi.sendUserMessage(text, { deliverAs: 'steer' }); } catch { /* сессия закрыта */ }
   };
 
@@ -873,7 +881,10 @@ export default function activate(pi: ExtensionAPI) {
     if (nudges > 0 && steps - lastNudgeStep < cooldown) return;
     nudges += 1;
     lastNudgeStep = steps;
-    record(kind, { stale, cooldown });
+    // delivered: попытка напоминания и его доставка — разные факты. При
+    // BENCH_ALLOW_STEER=0 say() молчит, и анализатор не должен считать такую
+    // запись отправленным напоминанием (аудит 2026-10-26).
+    record(kind, { stale, cooldown, delivered: ALLOW_STEER });
     say(text);
   };
 
