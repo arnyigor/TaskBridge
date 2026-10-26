@@ -114,6 +114,8 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/tasks/:id/plan/inspect', summary: 'read-only verdict for a chosen file (path or contentBase64): VALID_MANAGED / CONVERTIBLE / NOT_A_PLAN / INVALID, problems, preview, hash' },
   { method: 'POST', path: '/api/tasks/:id/plan/scan', summary: 'read-only recursive search of the session workspace for .md/.markdown: files, classification hint, partial flag, limits' },
   { method: 'POST', path: '/api/tasks/:id/plan/import', summary: 'write a file from a device or convert a free-form one after confirmation, then attach' },
+  { method: 'GET', path: '/api/tasks/:id/plan/read-file', summary: 'read-only text and hash of a chosen project file (?path=), so a wrong format can be fixed before attaching' },
+  { method: 'POST', path: '/api/tasks/:id/plan/save-file', summary: 'save an edited text as a managed plan (path, content, optional expectedHash, overwrite); refuses anything that is not taskbridge_plan: 1' },
   { method: 'GET', path: '/api/tasks/:id/plan/content', summary: 'text of the attached file with revision and hash (editor base)' },
   { method: 'POST', path: '/api/tasks/:id/plan/content', summary: 'save an edit with CAS on expectedRevision/expectedHash' },
   { method: 'POST', path: '/api/tasks/:id/plan/start', summary: 'begin the cycle: dispatch the next open step and hand the turn to the model' },

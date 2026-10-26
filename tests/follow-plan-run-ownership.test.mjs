@@ -91,7 +91,11 @@ for (const [label, body] of [
       assert.ok(settled, 'план либо зафиксировал шаг, либо встал на разбор');
 
       const written = await planOf(root);
-      const applied = await planEvents(api, taskId, 'PLAN_CHECKPOINT_APPLIED');
+      // Файл пишется до публикации события: ждём событие, а не проверяем сразу.
+      const applied = await waitFor(async () => {
+        const list = await planEvents(api, taskId, 'PLAN_CHECKPOINT_APPLIED');
+        return list.length ? list : null;
+      }, { timeout: 15000 }) || [];
       const rejected = await planEvents(api, taskId, 'PLAN_CHECKPOINT_REJECTED');
       if (written.steps[0].status !== 'DONE') {
         assert.fail(

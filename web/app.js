@@ -4144,6 +4144,9 @@ let planScanQuery = '';
 let planScanBusy = false;
 let planAiReview = null;
 let planAiError = null;
+// Правка формата выбранного файла: база CAS и признак «пишем поверх».
+let planRepairBase = null;
+let planRepairOverwrite = false;
 
 function updatePlanToggle() {
   const button = $('planToggle');
@@ -4329,6 +4332,7 @@ async function selectPlanFromScan(relPath) {
 
 /** «Отменить выбор»: снять ещё не подключённый файл, ничего не удаляя на диске. */
 function cancelPlanSelection() {
+  closePlanRepair();
   planInspection = null;
   planPendingImport = null;
   planOverwrite = false;
@@ -4339,6 +4343,61 @@ function cancelPlanSelection() {
   $('planAiReview').classList.add('hidden');
   renderPlanSelection();
   renderPlanInspector();
+}
+
+/** Открыть правку формата выбранного файла: текст читается с сервера. */
+async function openPlanRepair() {
+  const id = selectedTaskId;
+  if (!id || !planPendingImport?.path) return;
+  $('planRepairError').textContent = '';
+  try {
+    const file = await api(`/api/tasks/${encodeURIComponent(id)}/plan/read-file?path=${encodeURIComponent(planPendingImport.path)}`);
+    planRepairBase = { path: file.path, hash: file.hash };
+    planRepairOverwrite = false;
+    $('planRepairText').value = file.text;
+    $('planRepairState').textContent = `Файл: ${file.path} — сохраняется только корректный управляемый план`;
+    $('planRepair').classList.remove('hidden');
+    $('planRepairText').focus();
+  } catch (error) {
+    $('planRepairError').textContent = planErrorText(error);
+    $('planRepair').classList.remove('hidden');
+  }
+}
+
+function closePlanRepair() {
+  planRepairBase = null;
+  planRepairOverwrite = false;
+  $('planRepair').classList.add('hidden');
+  $('planRepairError').textContent = '';
+}
+
+/** Сохранить исправленный текст: только taskbridge_plan:1, CAS по хэшу. */
+async function savePlanRepair() {
+  const id = selectedTaskId;
+  if (!id || !planRepairBase) return;
+  const button = $('planRepairSave');
+  button.disabled = true;
+  $('planRepairError').textContent = '';
+  try {
+    const saved = await commandApi(`/api/tasks/${encodeURIComponent(id)}/plan/save-file`, {
+      path: planRepairBase.path,
+      content: $('planRepairText').value,
+      expectedHash: planRepairBase.hash,
+      overwrite: planRepairOverwrite
+    });
+    closePlanRepair();
+    // Файл исправлен — перечитываем вердикт той же карточкой выбора.
+    await inspectAndMaybeImport({ path: saved.path });
+  } catch (error) {
+    if (error.code === 'PLAN_FILE_EXISTS') {
+      planRepairOverwrite = true;
+      $('planRepairError').textContent = `${planErrorText(error)} Нажмите «Сохранить» ещё раз, чтобы перезаписать.`;
+      return;
+    }
+    $('planRepairError').textContent = planErrorText(error);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function runPlanAiReview() {
@@ -4513,6 +4572,8 @@ function renderPlanSelection() {
   $('planPreviewDetails').open = Boolean(verdict?.preview);
   $('planPreviewConfirm').textContent = verdict?.confirmLabel || 'Подключить';
   $('planPreviewConfirm').classList.toggle('hidden', verdict?.canAttach === false);
+  // Файл не план или непригоден — предлагаем исправить формат здесь же.
+  $('planRepairOpenRow').classList.toggle('hidden', verdict?.canAttach !== false);
   $('planPreviewAi').classList.toggle('hidden', verdict?.canAttach === false);
   $('planPreviewAi').disabled = false;
   const review = planAiReviewView(planAiReview, planAiError);
@@ -4703,6 +4764,9 @@ $('planSearch').oninput = () => {
 $('planPickFile').onclick = () => { $('planFileInput').value = ''; $('planFileInput').click(); };
 $('planFileInput').onchange = event => pickPlanFile(event.target.files?.[0]);
 $('planPreviewAi').onclick = () => runPlanAiReview();
+$('planRepairOpen').onclick = () => openPlanRepair();
+$('planRepairCancel').onclick = () => closePlanRepair();
+$('planRepairSave').onclick = () => savePlanRepair();
 $('planPreviewCancel').onclick = () => cancelPlanSelection();
 // The second click writes over a project file that already exists: never silently.
 let planOverwrite = false;

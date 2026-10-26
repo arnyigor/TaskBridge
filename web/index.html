@@ -464,6 +464,20 @@
               <div id="planSelectedFormat" class="muted"></div>
             </div>
             <div id="planVerdictReasons" class="planVerdictReasons small"></div>
+            <!-- «Исправить формат»: файл не план — его можно поправить здесь же,
+                 не выходя из диалога; пишется только валидный управляемый план. -->
+            <div id="planRepairOpenRow" class="planRepairRow hidden">
+              <button id="planRepairOpen" type="button" class="secondary">Исправить формат</button>
+            </div>
+            <div id="planRepair" class="planRepair hidden">
+              <div id="planRepairState" class="small muted"></div>
+              <textarea id="planRepairText" spellcheck="false" aria-label="Текст файла для исправления формата"></textarea>
+              <div id="planRepairError" class="planPathError small" role="alert"></div>
+              <div class="planDialogActions">
+                <button id="planRepairCancel" type="button" class="secondary">Отмена</button>
+                <button id="planRepairSave" type="button" class="primary">Сохранить как план</button>
+              </div>
+            </div>
             <details id="planPreviewDetails" class="planDetails hidden">
               <summary>Предпросмотр управляемого файла</summary>
               <pre id="planPreviewContent" class="planEditorCurrent"></pre>

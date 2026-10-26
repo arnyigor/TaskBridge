@@ -514,3 +514,30 @@ test('FP-UX-05: the panel is a compact dialog with two equal entry buttons', asy
   assert.match(html, /id="planSearch"/);
   assert.equal(/id="planBrowser"/.test(html), false);
 });
+
+test('«Исправить формат» есть в диалоге и пишет только валидный план', async () => {
+  const dir = path.join(import.meta.dirname, '..', 'web');
+  const html = await fs.readFile(path.join(dir, 'index.html'), 'utf8');
+  const source = await fs.readFile(path.join(dir, 'app.js'), 'utf8');
+  // Кнопка живёт в карточке выбора и показывается только когда файл не готов.
+  assert.match(html, /id="planRepairOpen"[^>]*>Исправить формат</);
+  assert.match(html, /id="planRepairText"[^>]*aria-label="Текст файла для исправления формата"/);
+  assert.match(html, /id="planRepairSave"[^>]*>Сохранить как план</);
+  assert.match(source, /\$\('planRepairOpenRow'\)\.classList\.toggle\('hidden', verdict\?\.canAttach !== false\)/,
+    'кнопка видна только для NOT_A_PLAN/INVALID');
+  // Чтение — read-only маршрут, сохранение — команда с CAS по хэшу.
+  assert.match(source, /\/plan\/read-file\?path=/);
+  assert.match(source, /\/plan\/save-file/);
+  assert.match(source, /expectedHash: planRepairBase\.hash/);
+  assert.match(source, /overwrite: planRepairOverwrite/);
+  assert.doesNotMatch(source, /planRepair[\s\S]{0,400}plan\/import[\s\S]{0,80}confirmImport: true, overwrite: true\b.*planRepair/,
+    'правка не подменяет подтверждение импорта');
+});
+
+test('«Исправить формат» не показан для готового плана', async () => {
+  // Чистое решение карточки: canAttach=false ⇒ кнопка есть, canAttach=true ⇒ нет.
+  const notAPlan = planVerdictView({ verdict: 'NOT_A_PLAN', problems: ['нет шагов'] });
+  const managed = planVerdictView({ verdict: 'VALID_MANAGED', managed: true, steps: 2, revision: 1 });
+  assert.equal(notAPlan.canAttach, false);
+  assert.equal(managed.canAttach, true);
+});

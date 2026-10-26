@@ -2193,6 +2193,17 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .planVerdict[data-verdict="INVALID"] { color: var(--danger, #ef4444); }
 .planVerdictReasons { color: var(--muted, #94a3b8); }
 .planAiReview { white-space: pre-line; color: var(--muted, #94a3b8); }
+/* Правка формата прямо в диалоге: тот же компактный вид, что у редактора плана. */
+.planRepairRow { flex-direction: row; justify-content: flex-end; }
+.planRepairRow:not(.hidden) { display: flex; }
+.planRepair { flex-direction: column; gap: 0.5rem; min-height: 0; }
+.planRepair:not(.hidden) { display: flex; }
+.planRepair textarea {
+  width: 100%; min-height: 8rem; max-height: 40vh; resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8125rem; line-height: 1.45;
+  background: var(--surface2, #111726); color: inherit; border: 1px solid var(--line, #2a3348); border-radius: 8px; padding: 0.5rem;
+}
+.planRepairProblems { color: var(--danger, #ef4444); }
 .planAiReview-error { color: var(--danger, #ef4444); }
 .planPathToggle { align-self: flex-start; }
 .planPathRow { gap: 0.5rem; }

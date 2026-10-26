@@ -325,3 +325,40 @@ test('CORE-02B: settle своего хода без checkpoint по-прежне
   assert.equal(paused.includes('FOREIGN_SETTLE_NO_CHECKPOINT'), false);
   assert.equal((await readPlan(workspace)).steps[0].status, 'TODO');
 });
+
+test('CORE-02B: checkpoint, пришедший после steering, принадлежит выданному шагу', async t => {
+  const { service, store, manager, workspace } = await setup(t);
+  await started(service, store);
+  const binding = store.getPlanBinding('t-1');
+  const dispatchCommandId = binding.dispatchCommandId;
+
+  // Живой сценарий LIVE-03 (второй прогон): steering слил ходы, checkpoint пришёл
+  // уже с командой чата, но называет текущий цикл и ревизию.
+  const result = await service.turnSettled({
+    ...settleArgs(store, { completedStepIds: ['S-001'] }),
+    commandId: 'chat-message-command'
+  });
+
+  assert.equal(result.outcome, 'APPLIED', `checkpoint должен применяться: ${result.reasonCode || result.message}`);
+  assert.equal(result.completionApplied, true);
+  assert.deepEqual(result.confirmedStepIds, ['S-001']);
+  const file = await readPlan(workspace);
+  assert.equal(file.steps[0].status, 'DONE', 'шаг закрыт, несмотря на steering');
+  assert.equal(store.getPlanBinding('t-1').dispatchStepId, 'S-002', 'следующий шаг подготовлен');
+  assert.equal(manager.events.filter(event => event.type === 'PLAN_CHECKPOINT_REJECTED').length, 0,
+    'ложного FOREIGN_COMMAND нет');
+});
+
+test('CORE-02B: checkpoint чужого цикла не принимается как свой', async t => {
+  const { service, store, workspace } = await setup(t);
+  await started(service, store);
+  const args = settleArgs(store, { completedStepIds: ['S-001'] });
+  args.commandId = 'chat-message-command';
+  args.checkpoint.cycleId = 'c-99';
+
+  const result = await service.turnSettled(args);
+
+  assert.equal(result.outcome, 'REJECTED');
+  assert.equal(result.reasonCode, 'FOREIGN_COMMAND');
+  assert.equal((await readPlan(workspace)).steps[0].status, 'TODO', 'чужой цикл не закрывает шаг');
+});

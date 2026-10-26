@@ -2053,7 +2053,7 @@ async function handleRequest(req, res) {
     // Follow Plan: status is readable with the flag off (the UI needs to know why
     // the toggle is disabled); every mutating route is a commandId command and a
     // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|scan|ai-review|inspect|import|content|start|pause|resume|stop|reconcile))?$/);
+    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|scan|ai-review|inspect|import|read-file|save-file|content|start|pause|resume|stop|reconcile))?$/);
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
@@ -2061,6 +2061,13 @@ async function handleRequest(req, res) {
       if (!action && req.method === 'GET') return json(res, 200, await followPlan.status(planTaskId));
       if (action === 'content' && req.method === 'GET') {
         return json(res, 200, await followPlan.content({ taskId: planTaskId }));
+      }
+      if (action === 'read-file' && req.method === 'GET') {
+        // Только чтение выбранного файла проекта: нужно, чтобы оператор мог
+        // исправить формат до подключения, не выходя из диалога.
+        return json(res, 200, await followPlan.readFile({
+          taskId: planTaskId, path: url.searchParams.get('path') || ''
+        }));
       }
       if (action === 'browse' && req.method === 'GET') {
         // A read-only listing: one directory per request, no recursive scan, no
@@ -2076,6 +2083,14 @@ async function handleRequest(req, res) {
         return json(res, 200, await followPlan.scan({
           taskId: planTaskId, query: body.query ?? '', limit: body.limit ?? null
         }));
+      }
+      if (action === 'save-file') {
+        // Правка формата: пишет только валидный управляемый план, CAS по хэшу.
+        return json(res, 200, await command(() => followPlan.saveFile({
+          taskId: planTaskId, path: body.path, content: body.content,
+          expectedHash: body.expectedHash || null, overwrite: body.overwrite === true,
+          commandId: body.commandId, clientId: body.clientId
+        })));
       }
       if (action === 'ai-review' && req.method === 'POST') {
         // Advisory only: no commandId, no plan write, no Run. The model is asked

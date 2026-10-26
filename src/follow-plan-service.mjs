@@ -521,6 +521,57 @@ export class FollowPlanService {
     };
   }
 
+  /** Текст выбранного файла проекта: только чтение, для правки формата. */
+  async readFile({ taskId, path: relPath }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    const target = this.#relativePath(task, relPath);
+    const file = await this.#plans(task).text(target);
+    return { path: target, text: file.text, hash: file.hash };
+  }
+
+  /**
+   * «Исправить формат»: сохранить отредактированный текст как план в проекте.
+   * Пишется только валидный управляемый план — иначе оператор увидит, что именно
+   * не так, а исходник останется нетронутым. CAS по хэшу и запрет молчаливой
+   * перезаписи другого файла повторяют правила import/attach.
+   */
+  async saveFile({ taskId, path: relPath, content, expectedHash = null, overwrite = false }) {
+    this.#assertEnabled();
+    const task = this.#task(taskId);
+    const target = this.#relativePath(task, relPath);
+    if (!/\.(md|markdown)$/i.test(target)) throw reject('PLAN_INVALID', 'План — это файл .md или .markdown.');
+    const text = String(content ?? '');
+    const classified = classifyPlan(text, { planId: this.#planIdFor(target) });
+    if (classified.verdict !== 'VALID_MANAGED') {
+      throw reject('PLAN_INVALID',
+        `Сохранение отклонено: ${classified.reason || 'файл не соответствует формату плана.'}`,
+        classified.problems || []);
+    }
+    const absolute = await safeTarget(task.workspacePath, target, { write: true });
+    const existing = await fs.readFile(absolute, 'utf8').catch(() => null);
+    if (existing != null) {
+      const currentHash = planHash(existing);
+      if (expectedHash && currentHash !== expectedHash) {
+        throw reject('PLAN_REVISION_CONFLICT',
+          `Файл ${target} изменён после открытия. Откройте его заново и повторите правку.`,
+          [`expected ${expectedHash}`, `actual ${currentHash}`]);
+      }
+      if (!overwrite && planHash(text) !== currentHash) {
+        throw reject('PLAN_FILE_EXISTS', `Файл ${target} уже есть в проекте: подтвердите перезапись.`, [target]);
+      }
+    }
+    await fs.mkdir(path.dirname(absolute), { recursive: true });
+    const written = await writePlanAtomic({
+      file: absolute, text,
+      expectedHash: existing == null ? null : planHash(existing)
+    });
+    return {
+      path: target, hash: written.hash, revision: classified.plan.revision,
+      verdict: classified.verdict, steps: classified.plan.steps.length
+    };
+  }
+
   /**
    * Что будет, если подключить этот файл: ничего не пишет и не привязывает.
    * Нужно, чтобы показать формат, ошибки и импорт ДО согласия оператора.
