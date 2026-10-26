@@ -304,4 +304,17 @@ class FollowPlanTest {
         assertEquals(PlanScanPhase.EMPTY, planScanPhase(scan, false, "", 0))
         assertEquals(PlanScanPhase.READY, planScanPhase(scan, false, "", 1))
     }
+
+    @Test
+    fun `исправить формат предлагается только для не-плана`() {
+        // Кнопка живёт там же, где нет подключения: NOT_A_PLAN и INVALID.
+        val notAPlan = planVerdictView(PlanInspection(path = "README.md", verdict = "NOT_A_PLAN", problems = listOf("нет шагов")))
+        val invalid = planVerdictView(PlanInspection(path = "BAD.md", verdict = "INVALID", problems = listOf("файл пуст")))
+        val managed = planVerdictView(PlanInspection(path = "PLAN.md", managed = true, steps = 2, revision = 1, verdict = "VALID_MANAGED"))
+        val convertible = planVerdictView(PlanInspection(path = "TODO.md", verdict = "CONVERTIBLE", preview = PlanPreview(steps = listOf(PlanPreviewStep(id = "S-001")))))
+        assertEquals(false, notAPlan?.canAttach)
+        assertEquals(false, invalid?.canAttach)
+        assertEquals(true, managed?.canAttach)
+        assertEquals(true, convertible?.canAttach)
+    }
 }

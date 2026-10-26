@@ -879,6 +879,34 @@ class TaskBridgeApi(
             contentBase64?.let { put("contentBase64", it) }
         })
 
+    /**
+     * Текст выбранного файла проекта — только чтение, чтобы исправить формат до
+     * подключения (возможность сервера: `read-file`).
+     */
+    suspend fun readPlanFile(id: String, path: String): PlanFileText =
+        get("/api/tasks/${id.path()}/plan/read-file?path=${path.encodeURLParameter()}", PlanFileText.serializer())
+
+    /**
+     * Сохранить исправленный текст как план. Сервер принимает только валидный
+     * `taskbridge_plan: 1`: иначе — PLAN_INVALID с причинами, а исходник цел.
+     */
+    suspend fun savePlanFile(
+        id: String,
+        commandId: String,
+        path: String,
+        content: String,
+        expectedHash: String?,
+        overwrite: Boolean = false,
+    ): PlanSavedFile =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/plan/save-file", PlanSavedFile.serializer(), buildJsonObject {
+            put("path", path)
+            put("content", content)
+            expectedHash?.let { put("expectedHash", it) }
+            put("overwrite", overwrite)
+            put("clientId", connection.clientId)
+            put("commandId", commandId)
+        })
+
     /** Один каталог проекта: папки и .md-файлы (телефон так выбирает файл на компьютере). */
     suspend fun browsePlan(id: String, path: String = ""): PlanBrowseListing =
         get("/api/tasks/${id.path()}/plan/browse?path=${path.encodeURLParameter()}", PlanBrowseListing.serializer())

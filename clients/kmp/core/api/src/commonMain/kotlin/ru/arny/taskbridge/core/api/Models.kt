@@ -1675,6 +1675,25 @@ data class PlanBrowseListing(
     val entries: List<PlanBrowseEntry> = emptyList(),
 )
 
+/** Текст выбранного файла проекта для правки формата (GET /plan/read-file). */
+@Serializable
+data class PlanFileText(
+    val path: String = "",
+    val text: String = "",
+    val hash: String = "",
+)
+
+/** Результат сохранения исправленного плана (POST /plan/save-file). */
+@Serializable
+data class PlanSavedFile(
+    val path: String = "",
+    val hash: String = "",
+    val revision: Int = 0,
+    /** VALID_MANAGED — сервер принял текст как управляемый план. */
+    val verdict: String = "",
+    val steps: Int = 0,
+)
+
 @Serializable
 data class PlanImportResult(
     val status: PlanStatus? = null,

@@ -94,6 +94,13 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var aiError by mutableStateOf("")
     var aiBusy by mutableStateOf(false)
     var previewOpen by mutableStateOf(false)
+    // «Исправить формат»: база CAS (path+hash), текст и признак перезаписи.
+    var repairPath by mutableStateOf<String?>(null)
+    var repairBaseHash by mutableStateOf<String?>(null)
+    var repairText by mutableStateOf("")
+    var repairError by mutableStateOf("")
+    var repairOverwrite by mutableStateOf(false)
+    var repairSaving by mutableStateOf(false)
     var status by mutableStateOf<PlanStatus?>(null)
     var notice by mutableStateOf("")
     var askPlan by mutableStateOf(false)
@@ -118,6 +125,16 @@ class FollowPlanUiState internal constructor(val taskId: String) {
         aiReview = null
         aiError = ""
         previewOpen = false
+        cancelRepair()
+    }
+
+    /** Отмена правки формата: ничего не записано. */
+    fun cancelRepair() {
+        repairPath = null
+        repairBaseHash = null
+        repairText = ""
+        repairError = ""
+        repairOverwrite = false
     }
 
     /** «Отменить выбор»: снять ещё не подключённый файл, ничего не удаляя на диске. */
@@ -555,6 +572,49 @@ private suspend fun runScan(state: FollowPlanUiState, api: TaskBridgeApi) {
     }
 }
 
+/** Открыть текст выбранного файла для правки формата (только чтение). */
+private suspend fun openRepair(state: FollowPlanUiState, api: TaskBridgeApi, path: String) {
+    state.repairError = ""
+    try {
+        val file = api.readPlanFile(state.taskId, path)
+        state.repairPath = file.path
+        state.repairBaseHash = file.hash
+        state.repairText = file.text
+        state.repairOverwrite = false
+    } catch (error: ApiException) {
+        state.repairError = planErrorText(error)
+    }
+}
+
+/** Сохранить исправленный текст: сервер принимает только валидный managed-план. */
+private suspend fun saveRepair(state: FollowPlanUiState, api: TaskBridgeApi, newId: () -> String) {
+    val path = state.repairPath ?: return
+    state.repairSaving = true
+    state.repairError = ""
+    try {
+        val saved = api.savePlanFile(
+            id = state.taskId,
+            commandId = newId(),
+            path = path,
+            content = state.repairText,
+            expectedHash = state.repairBaseHash,
+            overwrite = state.repairOverwrite,
+        )
+        state.cancelRepair()
+        // Файл исправлен — перечитываем вердикт тем же путём, что при выборе.
+        inspectThenImport(state, api, newId, path = saved.path)
+    } catch (error: ApiException) {
+        if (planErrorCode(error) == "PLAN_FILE_EXISTS") {
+            state.repairOverwrite = true
+            state.repairError = "${planErrorText(error)} Нажмите «Сохранить» ещё раз, чтобы перезаписать."
+        } else {
+            state.repairError = planErrorText(error)
+        }
+    } finally {
+        state.repairSaving = false
+    }
+}
+
 /**
  * «Проверить с помощью ИИ»: только по нажатию, без запуска плана и без Run.
  * Ошибка модели показывается рядом и не мешает подключить валидный план.
@@ -761,6 +821,35 @@ private fun PlanSelectionCard(
                 items(verdict.preview.lines(), key = { it.hashCode() }) { line ->
                     Text(line, style = MaterialTheme.typography.labelSmall)
                 }
+            }
+        }
+    }
+    // Файл не план или непригоден — предлагаем поправить формат здесь же.
+    if (!verdict.canAttach) {
+        TextButton(onClick = { scope.launch { openRepair(state, api, inspection.path.orEmpty()) } }, contentPadding = PaddingValues(0.dp)) {
+            Text("Исправить формат", style = MaterialTheme.typography.labelLarge)
+        }
+    }
+    if (state.repairPath != null) {
+        Text("Файл: ${state.repairPath} — сохраняется только корректный управляемый план", style = MaterialTheme.typography.bodySmall, color = colors.onSurfaceVariant)
+        OutlinedTextField(
+            value = state.repairText,
+            onValueChange = { state.repairText = it; state.repairError = "" },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp, max = 240.dp),
+            textStyle = MaterialTheme.typography.bodySmall,
+            label = { Text("Текст плана", style = MaterialTheme.typography.bodySmall) },
+        )
+        if (state.repairError.isNotBlank()) {
+            Text(state.repairError, style = MaterialTheme.typography.bodySmall, color = colors.error)
+        }
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            TextButton(onClick = { state.cancelRepair() }) { Text("Отмена", style = MaterialTheme.typography.labelLarge) }
+            Button(
+                onClick = { scope.launch { saveRepair(state, api, newId) } },
+                enabled = !state.repairSaving,
+                modifier = Modifier.heightIn(min = 44.dp),
+            ) {
+                Text(if (state.repairSaving) "Сохраняю…" else "Сохранить как план", style = MaterialTheme.typography.labelLarge)
             }
         }
     }
