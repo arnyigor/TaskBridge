@@ -632,3 +632,34 @@ goal: "Починить пагинацию"
   // Ничего не записано: сохранение — отдельное действие оператора.
   assert.equal(await fs.readFile(path.join(workspace, 'NOTES.md'), 'utf8'), '# Заметки\n\nсделать пагинацию\n');
 });
+
+test('пустой ответ модели из-за лимита токенов повторяется, а не показывается как EMPTY', async () => {
+  const { completeOnce } = await import('../src/model-probe.mjs');
+  const budgets = [];
+  const fake = async (url, init) => {
+    const body = JSON.parse(init.body);
+    budgets.push(body.max_tokens);
+    const truncated = budgets.length === 1;
+    return {
+      ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { content: truncated ? '' : '---\ntaskbridge_plan: 1\n' }, finish_reason: truncated ? 'length' : 'stop' }] })
+    };
+  };
+  // Живой случай 2026-10-26: reasoning съел лимит, content пустой, «Модель не ответила: EMPTY».
+  const result = await completeOnce({ baseUrl: 'http://x/v1', id: 'm', prompt: 'p', maxTokens: 2000, fetchImpl: fake });
+  assert.deepEqual(budgets, [2000, 4000], 'одна повторная попытка с удвоенным лимитом');
+  assert.equal(result.ok, true);
+  assert.match(result.text, /taskbridge_plan: 1/);
+
+  // Если и повтор пуст — честный EMPTY с признаком len, а не тишина.
+  const alwaysEmpty = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: '' }, finish_reason: 'length' }] }) });
+  const failed = await completeOnce({ baseUrl: 'http://x/v1', id: 'm', prompt: 'p', maxTokens: 100, fetchImpl: alwaysEmpty });
+  assert.equal(failed.ok, false);
+  assert.equal(failed.code, 'EMPTY');
+  assert.equal(failed.truncated, true);
+
+  // Ответ массивом частей тоже читается.
+  const parts = async () => ({ ok: true, status: 200, json: async () => ({ choices: [{ message: { content: [{ type: 'text', text: 'abc' }, 'def'] } }] }) });
+  const fromParts = await completeOnce({ baseUrl: 'http://x/v1', id: 'm', prompt: 'p', fetchImpl: parts });
+  assert.equal(fromParts.text, 'abcdef');
+});

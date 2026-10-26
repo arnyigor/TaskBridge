@@ -44,6 +44,24 @@ const CHECKPOINT_REASON_TEXT = Object.freeze({
 });
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Отказ модели человеческими словами: «Модель не ответила: EMPTY» оператору ничего
+ * не объясняет, а причина у каждого кода своя.
+ */
+const AI_FAILURE_TEXT = Object.freeze({
+  EMPTY: 'модель вернула пустой ответ: лимит токенов израсходован рассуждением — попробуйте ещё раз',
+  TIMEOUT: 'провайдер не ответил за отведённое время',
+  UNREACHABLE: 'провайдер недоступен',
+  AUTH: 'провайдер отклонил ключ',
+  RATE_LIMITED: 'провайдер ограничил частоту запросов',
+  MODEL_NOT_FOUND: 'провайдер не знает такую модель',
+  MODEL_UNKNOWN: 'у сессии не выбрана модель',
+  NO_KEY: 'у провайдера нет ключа в окружении',
+  NO_ENDPOINT: 'у провайдера не настроен адрес',
+  REDIRECT: 'провайдер отвечает перенаправлением',
+  HTTP_ERROR: 'провайдер ответил ошибкой'
+});
+const aiFailure = answer => AI_FAILURE_TEXT[answer?.code] || answer?.message || answer?.code || 'неизвестная причина';
 const CONTROL_CLIENT = 'follow-plan';
 
 const notFound = () => Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
@@ -500,13 +518,14 @@ export class FollowPlanService {
     const answer = await this.askModel({
       taskId: task.id,
       prompt: buildPlanReviewPrompt({ path: target, text: capped, truncated }),
-      maxTokens: AI_REVIEW_LIMITS.maxTokens,
+      // Рассуждающие модели тратят лимит на reasoning: 400 токенов давали пустой ответ.
+      maxTokens: Math.max(AI_REVIEW_LIMITS.maxTokens, 800),
       timeoutMs: AI_REVIEW_LIMITS.timeoutMs
     });
     if (!answer?.ok) {
       // Отказ модели — не ошибка плана: клиент показывает его отдельно и даёт
       // подключить файл, если структурная проверка его приняла.
-      throw reject('AI_UNAVAILABLE', `Модель не ответила: ${answer?.message || answer?.code || 'неизвестная причина'}. Обычная проверка формата остаётся доступной.`);
+      throw reject('AI_UNAVAILABLE', `Модель не ответила: ${aiFailure(answer)}. Обычная проверка формата остаётся доступной.`);
     }
     const parsed = parsePlanReviewAnswer(answer.text);
     if (!parsed.ok) throw reject('AI_UNAVAILABLE', `${parsed.message} Обычная проверка формата остаётся доступной.`);
@@ -557,7 +576,7 @@ export class FollowPlanService {
       timeoutMs: AI_REVIEW_LIMITS.timeoutMs
     });
     if (!answer?.ok) {
-      throw reject('AI_UNAVAILABLE', `Модель не ответила: ${answer?.message || answer?.code || 'неизвестная причина'}.`);
+      throw reject('AI_UNAVAILABLE', `Модель не ответила: ${aiFailure(answer)}.`);
     }
     const draft = extractManagedPlan(answer.text);
     const classified = classifyPlan(draft, { planId: this.#planIdFor(target) });

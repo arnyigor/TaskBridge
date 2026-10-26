@@ -250,12 +250,26 @@ export function streamError(text) {
  * нужен именно текст ответа. Ничего не пишет, Run не создаёт и к Pi не обращается:
  * это прямой запрос к адресу провайдера, который сервер уже знает.
  */
+/** Текст ответа в любом из ходовых форматов: строка или массив частей. */
+function messageText(message) {
+  const content = message?.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(part => (typeof part === 'string' ? part : String(part?.text ?? ''))).join('');
+  }
+  return '';
+}
+
 export async function completeOnce({
   baseUrl, id, apiKey = null, prompt = '', maxTokens = 400,
-  timeoutMs = PROBE_DEFAULTS.timeoutMs * 3, fetchImpl = globalThis.fetch
+  timeoutMs = PROBE_DEFAULTS.timeoutMs * 3, fetchImpl = globalThis.fetch,
+  // Пустой `content` при `finish_reason: length` — это не отказ провайдера, а
+  // рассуждение, съевшее лимит (живой случай 2026-10-26: «Модель не ответила: EMPTY»).
+  // Одна повторная попытка с удвоенным лимитом дешевле, чем ручной пересказ текста.
+  retryOnLength = true
 }) {
   const started = Date.now();
-  try {
+  const attempt = async budget => {
     const response = await fetchImpl(chatCompletionsUrl(baseUrl), {
       method: 'POST',
       headers: {
@@ -264,7 +278,7 @@ export async function completeOnce({
       },
       body: JSON.stringify({
         model: id,
-        max_tokens: maxTokens,
+        max_tokens: budget,
         temperature: 0,
         stream: false,
         messages: [{ role: 'user', content: String(prompt) }]
@@ -286,9 +300,23 @@ export async function completeOnce({
       };
     }
     const payload = await response.json().catch(() => null);
-    const text = String(payload?.choices?.[0]?.message?.content ?? '');
-    if (!text.trim()) return { ok: false, ms, code: 'EMPTY' };
-    return { ok: true, ms, text, httpStatus: response.status };
+    const choice = payload?.choices?.[0] || {};
+    const text = messageText(choice.message);
+    const finishReason = choice.finish_reason || choice.finishReason || null;
+    if (!text.trim()) {
+      return {
+        ok: false, ms, httpStatus: response.status, code: 'EMPTY', finishReason,
+        maxTokens: budget, truncated: finishReason === 'length'
+      };
+    }
+    return { ok: true, ms, text, httpStatus: response.status, finishReason, maxTokens: budget };
+  };
+  try {
+    const first = await attempt(maxTokens);
+    if (!first.ok && first.code === 'EMPTY' && first.truncated && retryOnLength) {
+      return await attempt(Math.min(maxTokens * 2, 8192));
+    }
+    return first;
   } catch (error) {
     return {
       ok: false,
