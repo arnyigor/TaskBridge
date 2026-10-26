@@ -1650,7 +1650,7 @@ async function handleRequest(req, res) {
         followPlan: {
           enabled: followPlan.enabled,
           capabilities: followPlan.enabled
-            ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
+            ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'read-file', 'save-file', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
             : []
         },
         pi,
