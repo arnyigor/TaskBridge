@@ -283,3 +283,45 @@ test('CORE-02A: причина отказа валидации называет�
   assert.deepEqual(result.unconfirmedStepIds, ['S-001']);
   assert.ok((result.problems || []).some(problem => /cycleId/.test(problem)), `причина названа: ${JSON.stringify(result.problems)}`);
 });
+
+test('CORE-02B: чужой settle без checkpoint не оставляет цикл в RUNNING_STEP', async t => {
+  const { service, store, manager, workspace } = await setup(t);
+  await started(service, store);
+  const dispatchCommandId = store.getPlanBinding('t-1').dispatchCommandId;
+
+  // Живой сценарий LIVE-03: сообщение «сейчас» заменило ход, checkpoint планового
+  // шага не пришёл, а settle принёс чужую команду.
+  const result = await service.turnSettled({
+    taskId: 't-1',
+    commandId: 'chat-message-command',
+    checkpoint: null,
+    toolCalls: []
+  });
+
+  assert.equal(result.code, 'PAUSED_REVIEW');
+  const binding = store.getPlanBinding('t-1');
+  assert.equal(binding.state, 'PAUSED_REVIEW', 'цикл не висит в RUNNING_STEP');
+  assert.equal(binding.dispatchCommandId, null);
+  const paused = manager.events.find(event => event.type === 'PLAN_PAUSED');
+  assert.ok(paused, 'пауза опубликована');
+  assert.equal(paused.data.code, 'FOREIGN_SETTLE_NO_CHECKPOINT');
+  assert.equal(paused.data.dispatchCommandId, dispatchCommandId);
+  assert.equal((await readPlan(workspace)).steps[0].status, 'TODO', 'шаг не засчитан');
+
+  // Из PAUSED_REVIEW ничего не отправляется само.
+  const sentBefore = dispatchedAfterStart(manager).length;
+  await service.turnCommitted({ taskId: 't-1' });
+  assert.equal(dispatchedAfterStart(manager).length, sentBefore, 'скрытого dispatch нет');
+});
+
+test('CORE-02B: settle своего хода без checkpoint по-прежнему идёт по правилам follower', async t => {
+  const { service, store, manager, workspace } = await setup(t);
+  await started(service, store);
+  // Своя команда, но checkpoint не пришёл: follower делает контрольный ход/паузу,
+  // а не «чужой settle».
+  const result = await service.turnSettled({ taskId: 't-1', commandId: store.getPlanBinding('t-1').dispatchCommandId, checkpoint: null, toolCalls: [] });
+  assert.notEqual(result.reason, 'FOREIGN_SETTLE_NO_CHECKPOINT');
+  const paused = manager.events.filter(event => event.type === 'PLAN_PAUSED').map(event => event.data?.code);
+  assert.equal(paused.includes('FOREIGN_SETTLE_NO_CHECKPOINT'), false);
+  assert.equal((await readPlan(workspace)).steps[0].status, 'TODO');
+});

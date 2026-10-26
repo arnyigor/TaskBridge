@@ -131,6 +131,41 @@ PLAN_STEP_STARTED S-001 (RUNNING_STEP)
 провайдером. Изолированный стенд с тестовым Pi её заменяет только частично:
 порядок кадров тот же, но поведение модели и тайминги другие.
 
+## Живая приёмка (26.10.2026) и второй дефект
+
+Стенд: изолированный сервер, настоящий Pi 1.4.0, модель `deepseek/deepseek-flash`,
+план из трёх шагов (`calc.mjs` + тесты), артефакты в `.local/fp-live/`.
+
+| Сценарий | Результат |
+|---|---|
+| LIVE-01: три шага без сообщений | **PASS** — 3/3 `DONE`, один `PLAN_COMPLETED`, 3 checkpoint (CONTINUE, CONTINUE, COMPLETE), все `PLAN_CHECKPOINT_APPLIED` с `confirmed=[S-001]/[S-002]/[S-003]` |
+| LIVE-02: сообщение между шагами | **PASS** — 3/3 `DONE`, сообщение обработано |
+| LIVE-03: сообщение «сейчас» (steering) во время шага | **FAIL → исправлено** (см. ниже) |
+
+### Второй дефект (нашёлся только на живом Pi)
+
+```
+03:54:37 PLAN_STEP_STARTED S-001 (RUNNING_STEP)
+03:54:40 USER_MESSAGE mode=steer        (turn 2)
+03:54:44 PLAN_CHECKPOINT_REJECTED       reasonCode=FOREIGN_COMMAND, checkpointId=null
+03:54:45 TASK_SUCCEEDED
+→ тишина: binding остаётся RUNNING_STEP, все шаги TODO
+```
+
+Steering заменяет ход: Pi заканчивает ответ, checkpoint планового шага **не
+приходит вовсе**, а settle приносит чужую команду. Прежний код только отклонял
+такой settle — цикл зависал навсегда (ни паузы, ни разбора, ни следующего шага).
+
+Исправление: чужой settle без checkpoint при активном цикле теперь **явная
+пауза** `PAUSED_REVIEW` с причиной `FOREIGN_SETTLE_NO_CHECKPOINT` (шаг, цикл и
+обе команды в событии). Шаг не засчитывается, скрытого dispatch нет, оператор
+видит «нужен разбор». Settle **своего** хода без checkpoint идёт прежним путём
+follower'а (контрольный ход / пауза).
+
+Тесты: `tests/follow-plan-lifecycle.test.mjs` — два новых случая (чужой settle без
+checkpoint → пауза; свой settle без checkpoint → прежнее поведение), 12/12.
+Полный `npm test` — 1658 тестов, 0 падений (лог `.local/fp-sync/npm-test-6.log`).
+
 ## Правила для следующих шагов
 
 - Не менять FSM и CAS одновременно.

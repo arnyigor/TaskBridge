@@ -890,6 +890,31 @@ export class FollowPlanService {
     if (commandId && this.settledTurns.get(task.id) === commandId) {
       return { code: 'IGNORED', reason: 'this turn already settled' };
     }
+    // Живой прогон LIVE-03 (2026-10-26): сообщение «сейчас» во время шага
+    // заменяет ход, Pi заканчивает ответ, checkpoint планового шага не приходит, а
+    // settle приносит чужую команду. Раньше такой settle только отклонялся, и цикл
+    // навсегда оставался в RUNNING_STEP: ни паузы, ни разбора, ни следующего шага.
+    // Теперь это явная пауза с причиной — шаг не засчитывается, решение за оператором.
+    if (!checkpoint && commandId && binding.dispatchCommandId && commandId !== binding.dispatchCommandId) {
+      this.pendingDispatches.delete(task.id);
+      this.store.savePlanBinding({
+        ...binding,
+        state: 'PAUSED_REVIEW',
+        dispatchCommandId: null,
+        dispatchStepId: null,
+        updatedAt: new Date(this.now()).toISOString()
+      });
+      await this.#publish(task.id, 'PLAN_PAUSED',
+        'Плановый ход завершился без checkpoint: шаг не засчитан, нужен разбор.',
+        {
+          code: 'FOREIGN_SETTLE_NO_CHECKPOINT',
+          stepId: binding.dispatchStepId || null,
+          cycleId: binding.cycleId || null,
+          commandId,
+          dispatchCommandId: binding.dispatchCommandId
+        });
+      return { code: 'PAUSED_REVIEW', reason: 'FOREIGN_SETTLE_NO_CHECKPOINT', stepId: binding.dispatchStepId || null };
+    }
     const checked = this.#checkEvidence({ taskId: task.id, checkpoint, toolCalls });
     if (checkpoint) {
       this.checkpoints.set(task.id, {
