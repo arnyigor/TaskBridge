@@ -2084,14 +2084,6 @@ async function handleRequest(req, res) {
           taskId: planTaskId, query: body.query ?? '', limit: body.limit ?? null
         }));
       }
-      if (action === 'save-file') {
-        // Правка формата: пишет только валидный управляемый план, CAS по хэшу.
-        return json(res, 200, await command(() => followPlan.saveFile({
-          taskId: planTaskId, path: body.path, content: body.content,
-          expectedHash: body.expectedHash || null, overwrite: body.overwrite === true,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
       if (action === 'ai-review' && req.method === 'POST') {
         // Advisory only: no commandId, no plan write, no Run. The model is asked
         // once, by an explicit click, and its answer never replaces the verdict.
@@ -2100,6 +2092,14 @@ async function handleRequest(req, res) {
         }));
       }
       const command = (fn) => manager.withCommandId(body.commandId, body.clientId, [action || 'patch', planTaskId, body], () => fn());
+      if (action === 'save-file') {
+        // Правка формата: пишет только валидный управляемый план, CAS по хэшу.
+        return json(res, 200, await command(() => followPlan.saveFile({
+          taskId: planTaskId, path: body.path, content: body.content,
+          expectedHash: body.expectedHash || null, overwrite: body.overwrite === true,
+          commandId: body.commandId, clientId: body.clientId
+        })));
+      }
       if (!action && req.method === 'PATCH') {
         return json(res, 200, await command(() => followPlan.patch({
           taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,

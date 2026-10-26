@@ -539,3 +539,36 @@ test('a file from the device keeps its content path: inspect → import with the
   const runs = (await api(`/api/tasks/${task.id}/runs`)).runs.length;
   assert.equal(runs, 1, 'загрузка файла не запускает ход');
 });
+
+test('«Исправить формат»: read-file и save-file работают по HTTP (без TDZ и без записи мусора)', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+  t.after(() => fixture.close());
+  const { api, root } = fixture;
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs', 'NOTES.md'), '# Просто заметки\n', 'utf8');
+  const task = await createTask(api);
+
+  const read = await api(`/api/tasks/${task.id}/plan/read-file?path=docs/NOTES.md`);
+  assert.equal(read.text, '# Просто заметки\n');
+  assert.ok(read.hash);
+
+  // Невалидный текст: сервер обязан ответить понятной ошибкой, а не 500/TDZ.
+  const broken = await post(api, `/api/tasks/${task.id}/plan/save-file`, {
+    path: 'docs/NOTES.md', content: '# Всё ещё заметки\n', expectedHash: read.hash, overwrite: true, commandId: 'save-broken'
+  }).then(value => ({ value }), error => ({ error }));
+  assert.equal(broken.error?.status, 400, `ожидался отказ валидации, получено: ${JSON.stringify(broken)}`);
+  assert.match(String(broken.error?.message || ''), /Сохранение отклонено/);
+  assert.equal(await fs.readFile(path.join(root, 'docs', 'NOTES.md'), 'utf8'), '# Просто заметки\n');
+
+  // Валидный текст сохраняется и затем подключается обычным путём.
+  const saved = await post(api, `/api/tasks/${task.id}/plan/save-file`, {
+    path: 'docs/NOTES.md', content: PLAN, expectedHash: read.hash, overwrite: true, commandId: 'save-fixed'
+  });
+  assert.equal(saved.verdict, 'VALID_MANAGED');
+  assert.equal(saved.steps, 2);
+  const attached = await post(api, `/api/tasks/${task.id}/plan/import`, {
+    path: 'docs/NOTES.md', expectedHash: saved.hash, confirmImport: false, commandId: 'attach-fixed'
+  });
+  assert.equal(attached.status.attached, true);
+  assert.equal(attached.status.path, 'docs/NOTES.md');
+});
