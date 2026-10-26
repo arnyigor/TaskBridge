@@ -817,11 +817,7 @@ private fun PlanSelectionCard(
             )
         }
         if (state.previewOpen) {
-            LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 160.dp)) {
-                items(verdict.preview.lines(), key = { it.hashCode() }) { line ->
-                    Text(line, style = MaterialTheme.typography.labelSmall)
-                }
-            }
+            PlanPreviewList(verdict.preview)
         }
     }
     // Файл не план или непригоден — предлагаем поправить формат здесь же.
@@ -888,6 +884,21 @@ private fun PlanSelectionCard(
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
+        }
+    }
+}
+
+/**
+ * Предпросмотр будущего управляемого файла. Ключ элемента — позиция строки, а не
+ * значение: свободный план почти всегда содержит повторяющиеся строки (пустые,
+ * одинаковые пункты), и ключ по hashCode ронял LazyColumn с
+ * «Key ... was already used» (краш на живом клиенте, 2026-10-26).
+ */
+@Composable
+internal fun PlanPreviewList(text: String) {
+    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 160.dp)) {
+        items(text.lines()) { line ->
+            Text(line, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
