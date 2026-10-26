@@ -184,7 +184,11 @@ export class FollowPlanService {
       : result.outcome === 'RECEIVED' ? 'PLAN_CHECKPOINT_RECEIVED'
         : 'PLAN_CHECKPOINT_REJECTED';
     const reason = result.reasonCode ? (CHECKPOINT_REASON_TEXT[result.reasonCode] || result.reasonCode) : '';
-    const where = result.stepId ? `шаг ${result.stepId}` : 'шаг не назван';
+    // Называем ЗАКРЫТЫЕ шаги, а не dispatchStepId: после подготовки следующего хода
+    // dispatchStepId уже указывает вперёд и вводил в заблуждение («шаг S-002», хотя
+    // закрыт S-001).
+    const closed = Array.isArray(result.appliedStepIds) ? result.appliedStepIds : [];
+    const where = closed.length ? `шаг ${closed.join(', ')}` : result.stepId ? `шаг ${result.stepId}` : 'шаг не назван';
     const message = event === 'PLAN_CHECKPOINT_APPLIED'
       ? `Checkpoint применён: ${where}, revision ${result.planRevision ?? '—'}`
       : event === 'PLAN_CHECKPOINT_RECEIVED'
@@ -201,6 +205,7 @@ export class FollowPlanService {
       revisionBefore: result.revisionBefore ?? null,
       revisionAfter: result.revisionAfter ?? null,
       appliedStepIds: result.appliedStepIds || [],
+      closedStepIds: result.appliedStepIds || [],
       appliedFindingIds: result.appliedFindingIds || [],
       confirmedStepIds: result.confirmedStepIds || [],
       completionApplied: result.completionApplied === true,
@@ -915,6 +920,16 @@ export class FollowPlanService {
         });
       return { code: 'PAUSED_REVIEW', reason: 'FOREIGN_SETTLE_NO_CHECKPOINT', stepId: binding.dispatchStepId || null };
     }
+    // Вклинившееся сообщение сливает чат-ход с плановым: Pi продолжает тот же ход и
+    // присылает checkpoint уже после steering, поэтому settle приходит с командой
+    // чата (LIVE-03, 2026-10-26). Если checkpoint называет текущий цикл и ревизию,
+    // он принадлежит выданному шагу — принимаем подтверждение у него, а не у чата.
+    let settleCommandId = commandId;
+    if (checkpoint && commandId && binding.dispatchCommandId && commandId !== binding.dispatchCommandId
+      && String(checkpoint.cycleId || '') === String(binding.cycleId || '')
+      && Number(checkpoint.revision) === Number(binding.expectedRevision)) {
+      settleCommandId = binding.dispatchCommandId;
+    }
     const checked = this.#checkEvidence({ taskId: task.id, checkpoint, toolCalls });
     if (checkpoint) {
       this.checkpoints.set(task.id, {
@@ -935,7 +950,7 @@ export class FollowPlanService {
     let result;
     try {
       result = await this.#follower(task).onSettled({
-        taskId: task.id, commandId, checkpoint: checked.checkpoint, seq: seq ?? task._turn ?? null,
+        taskId: task.id, commandId: settleCommandId, checkpoint: checked.checkpoint, seq: seq ?? task._turn ?? null,
         deferDispatch: true
       });
       await this.#publishCheckpointOutcome(task, result);
