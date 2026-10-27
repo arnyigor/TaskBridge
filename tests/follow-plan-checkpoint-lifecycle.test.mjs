@@ -185,3 +185,48 @@ test('CP-08: STOP at the settle boundary produces neither audit nor next step', 
   assert.equal((await deliveries(root)).length, 1, 'no audit turn and no next step after STOP');
   assert.equal((await planOf(root)).steps[0].status, 'TODO');
 });
+
+const IMPORTED = PLAN
+  .replace('Первый шаг', 'Первый шаг manual-only')
+  .replace('**Проверка:** read\n\n### S-002', '**Проверка:** импортировано: способ проверки не задан\n\n### S-002');
+
+test('CP-09: план без способа проверки закрывается описанием сверки', { timeout: 60000 }, async t => {
+  // Живой прогон 2026-10-27: импортированный план, у шага «способ проверки не
+  // задан», модель прислала manual — и цикл встал навсегда, потому что ссылку
+  // требовать не с чего. Теперь такой шаг закрывается, но помечается manual.
+  const fixture = await fixtureWithPlan(t, IMPORTED);
+  const { api, root } = fixture;
+  const task = await createTask(api);
+  await api(`/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'cp09-attach' });
+  await api(`/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'cp09-start' });
+
+  const done = await waitFor(async () => {
+    const written = await planOf(root).catch(() => null);
+    return written?.steps?.[0]?.status === 'DONE' ? written : null;
+  });
+  assert.ok(done, `шаг должен закрыться: ${fixture.logs()}`);
+  assert.match(done.steps[0].result, /сверено вручную/, 'в файле остаётся описание сверки');
+});
+
+test('CP-10: отказ проверки чекпоинта называется своим кодом, а не «заблокировано»', { timeout: 60000 }, async t => {
+  // Тот же manual, но у шага ЕСТЬ способ проверки: ссылки нет — отказ, и в
+  // событиях это отказ проверки, а не решение модели BLOCKED.
+  const fixture = await fixtureWithPlan(t, PLAN.replace('Первый шаг', 'Первый шаг manual-only'));
+  const { api, root } = fixture;
+  const task = await createTask(api);
+  await api(`/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'cp10-attach' });
+  await api(`/api/tasks/${task.id}/plan/start`, { expectedRevision: 1, commandId: 'cp10-start' });
+
+  const paused = await waitFor(async () => {
+    const value = await api(`/api/tasks/${task.id}/plan`);
+    return value.state === 'PAUSED_REVIEW' ? value : null;
+  });
+  assert.ok(paused, `цикл должен встать на разбор: ${fixture.logs()}`);
+  assert.equal((await planOf(root)).steps[0].status, 'TODO', 'шаг не закрыт');
+  const events = await api(`/api/tasks/${task.id}/events?limit=200`);
+  const rejected = events.filter(event => event.type === 'PLAN_CHECKPOINT_REJECTED').at(-1);
+  assert.ok(rejected, 'есть событие отказа проверки');
+  assert.match(JSON.stringify(rejected.data.problems), /способ проверки/);
+  const pause = events.filter(event => event.type === 'PLAN_PAUSED').at(-1);
+  assert.equal(pause?.data?.code, 'PLAN_CHECKPOINT_REJECTED', 'пауза названа отказом проверки');
+});

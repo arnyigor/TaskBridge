@@ -88,13 +88,18 @@ test('"the model says it is verified" is a claim, not a verification', () => {
   };
   const refused = decideCheckpoint({ plan: plan(), checkpoint: manual, cycle });
   assert.equal(refused.accepted, false);
-  assert.match(refused.reasons.join('\n'), /заявление, а не проверка/);
+  // Смысл прежний — заявление не проверка; формулировка говорит ещё и что
+  // именно требуется прислать, потому что «без ссылки» этого не объясняло.
+  assert.match(refused.reasons.join('\n'), /без проверяемой ссылки/);
 
   // §13.4 is not settled: acceptance of a manual check is an explicit policy,
   // so both branches stay observable instead of being decided in the dark.
   const accepted = decideCheckpoint({ plan: plan(), checkpoint: manual, cycle, policy: { manualEvidenceAccepted: true, blockingFindingsStopCompletion: true } });
   assert.equal(accepted.accepted, true);
-  assert.deepEqual(accepted.inspection.unverifiedStepIds, ['S-002']);
+  // Шаг закрыт по описанию сверки — это отдельный список, а не «без подтверждения»:
+  // unverified значит «отказано за неимением доказательства» (см. manualAcceptedStepIds).
+  assert.deepEqual(accepted.inspection.manualAcceptedStepIds, ['S-002']);
+  assert.deepEqual(accepted.inspection.unverifiedStepIds, []);
 });
 
 test('an open blocking finding stops completion, P2 does not', () => {

@@ -31,12 +31,27 @@ export const DEFAULT_POLICY = Object.freeze({
 const text = value => String(value ?? '').trim();
 
 /**
+ * Даёт ли план для шага конкретный способ проверки. Импорт документов пишет
+ * «способ проверки не задан» — такой шаг нельзя проверить машинно, и требовать
+ * ссылку бессмысленно.
+ */
+export function hasNoCheckMethod(step) {
+  const method = text(step?.verification);
+  if (!method) return true;
+  if (/способ проверки не задан/i.test(method)) return true;
+  return /^(—|-|нет|manual|n\/a|не задан[аоы]?)$/i.test(method);
+}
+
+/**
  * Structural inspection: everything wrong with this checkpoint as data, apart
  * from whether it should complete the plan.
  */
 export function inspectCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_POLICY }) {
   const problems = [];
   const unverified = [];
+  // Шаги, закрытые описанием сверки: в плане нет способа проверки, значит и
+  // требовать ref не с чего — но и выдавать это за машинную проверку нельзя.
+  const manualAccepted = [];
   const value = checkpoint && typeof checkpoint === 'object' ? checkpoint : null;
   if (!value) return { problems: ['checkpoint не передан или не является объектом'], completedSteps: [], findings: [], unverifiedStepIds: [] };
 
@@ -74,10 +89,23 @@ export function inspectCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_PO
     const items = evidenceByStep.get(id) || [];
     if (!items.length) { problems.push(`шаг ${id} отмечен выполненным без подтверждения`); continue; }
     const verified = items.some(item => text(item.kind) !== 'manual' && text(item.ref));
-    if (!verified) {
-      unverified.push(id);
-      if (!policy.manualEvidenceAccepted) problems.push(`шаг ${id}: подтверждение без проверяемой ссылки — это заявление, а не проверка`);
+    if (verified) continue;
+    // Живой прогон 2026-10-27: план импортирован из документа, у шага
+    // «**Проверка:** импортировано: способ проверки не задан», и модель честно
+    // прислала manual с описанием сверки. Отказ означал тупик: выполнить такой шаг
+    // нельзя ничем, проверки в плане нет. Поэтому manual принимается там, где план
+    // сам не даёт способа проверки; где даёт — по-прежнему нужен ref.
+    const step = plan.steps.find(item => item.id === id);
+    // Ссылку прощаем только чистому manual: если модель ссылалась на прогон или
+    // файл, а ссылка не подтвердилась (чужая, старая, удалённая), это не «сверено
+    // вручную», а непроверенное заявление — такой шаг не закрывается.
+    const pureManual = items.every(item => text(item.kind) === 'manual');
+    if (pureManual && (hasNoCheckMethod(step) || policy.manualEvidenceAccepted)) {
+      manualAccepted.push(id);
+      continue;
     }
+    unverified.push(id);
+    problems.push(`шаг ${id}: у шага есть способ проверки, но подтверждение без проверяемой ссылки — пришли ref на toolCallId этого хода`);
   }
 
   const findings = (Array.isArray(value.findings) ? value.findings : []).map(finding => ({
@@ -96,7 +124,7 @@ export function inspectCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_PO
   }
 
   return {
-    problems, completedSteps: completed, findings, unverifiedStepIds: unverified,
+    problems, completedSteps: completed, findings, unverifiedStepIds: unverified, manualAcceptedStepIds: manualAccepted,
     decision: text(value.decision), nextStepId: text(value.nextStepId) || null,
     evidenceFor: id => evidenceByStep.get(id) || []
   };

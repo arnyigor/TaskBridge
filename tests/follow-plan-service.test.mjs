@@ -170,7 +170,8 @@ test('evidence pointing at a missing or foreign run is stripped, so COMPLETE is 
       ]
     }
   });
-  assert.equal(result.code, 'PLAN_BLOCKED');
+  // Отказ проверки — свой код: ссылки не подтвердились, шаг не закрыт.
+  assert.equal(result.code, 'PLAN_CHECKPOINT_REJECTED');
   const written = await readPlanFile(workspace, planPath);
   assert.deepEqual(written.steps.map(step => step.status), ['TODO', 'TODO'], 'nothing was written on unverified evidence');
   const checkpoint = manager.events.find(event => event.type === 'PLAN_STEP_CHECKPOINT');
@@ -336,7 +337,9 @@ test('CP-06: evidence from an older run of the same session does not confirm thi
       completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'run', ref: 'run-old', summary: 'старый прогон' }]
     }
   });
-  assert.equal(result.code, 'PLAN_BLOCKED');
+  // Отказ проверки называется своим кодом: «заблокировано» — это решение модели,
+  // а здесь шаг не закрыт валидацией (живой прогон 2026-10-27).
+  assert.equal(result.code, 'PLAN_CHECKPOINT_REJECTED');
   // The controller's own reason is reported with the checkpoint event; the
   // verdict sees the stripped ref and refuses for lack of proof.
   const checkpoint = service.manager.events.find(event => event.type === 'PLAN_STEP_CHECKPOINT');

@@ -117,7 +117,8 @@ export function stepInstruction({ path, planId, revision, cycleId, stepId }) {
     `Файл плана \`${path}\` принадлежит контроллеру: не редактируй и не переписывай его — `
       + 'статусы шагов, находки и изменения плана передаются только через taskbridge_plan_checkpoint; '
       + 'правка файла напрямую останавливает цикл.',
-    'В evidence поле ref — это toolCallId того вызова инструмента в этом ходу, который дал результат (для manual ref не нужен): без него подтверждение не принимается.',
+    'В evidence поле ref — это toolCallId того вызова инструмента в этом ходу, который дал результат: без него подтверждение не принимается.',
+    'Если у шага нет способа проверки (в плане написано «способ проверки не задан»), допустимо kind=manual с описанием, что именно сверено: требовать ссылку не с чего.',
     'В конце хода вызови taskbridge_plan_checkpoint с решением CONTINUE, REPLAN, COMPLETE, BLOCKED или NEED_INPUT.'
   ].join(' ');
 }
@@ -390,7 +391,7 @@ export class PlanFollower {
     }
     const confirmedStepIds = requested.filter(stepId => appliedStepIds.includes(stepId));
     const rejectedCodes = new Set([
-      'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_UNKNOWN_OUTCOME',
+      'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_UNKNOWN_OUTCOME',
       'PLAN_BUDGET_EXCEEDED', 'PLAN_CONFLICT', 'PLAN_WRITE_FAILED'
     ]);
     const changed = Boolean(own);
@@ -584,6 +585,15 @@ export class PlanFollower {
       // cannot answer "REPLAN" into an empty queue a second time (FP-PILOT-02B).
       this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
       return this.#result(taskId, 'PLAN_BLOCKED', 'REPLAN без изменений, а открытых шагов нет — нужен разбор.', { decision: verdict.decision });
+    }
+
+    if (!valid) {
+      // Проверка чекпоинта не пройдена — это не «модель сказала BLOCKED», а отказ
+      // валидации: оператору нужен отдельный код, иначе причину не отличить.
+      this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
+      return this.#result(taskId, 'PLAN_CHECKPOINT_REJECTED',
+        verdict.reasons.join('; ') || 'Проверка чекпоинта не пройдена: шаг не закрыт.',
+        { decision: verdict.decision, problems: verdict.reasons });
     }
 
     if (verdict.state !== 'CONTINUE' && verdict.state !== 'REPLAN') {

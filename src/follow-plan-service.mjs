@@ -1263,6 +1263,7 @@ export class FollowPlanService {
       case 'PLAN_REVISION_CONFLICT':
         await this.#publish(taskId, 'PLAN_CONFLICT', result.message, data);
         return;
+      case 'PLAN_CHECKPOINT_REJECTED':
       case 'PLAN_BLOCKED':
       case 'PLAN_UNKNOWN_OUTCOME':
       case 'PLAN_BUDGET_EXCEEDED':

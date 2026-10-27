@@ -124,6 +124,19 @@ function followPlanCheckpoint(message, proofRef = null) {
   const findings = finding
     ? [{ id: 'F-900', priority: finding[1], blocking: finding[1] === 'P0' || finding[1] === 'P1', summary: 'дефект, найденный в шаге' }]
     : [];
+  // `manual-only` в заголовке шага: модель присылает только описание сверки —
+  // так проверяется правило «manual допустим там, где план не даёт проверки».
+  if (headingLine.includes('manual-only')) {
+    return {
+      planId: planId[1],
+      revision: Number(revision[1]),
+      cycleId: cycleId[1],
+      decision: left.length ? 'CONTINUE' : 'COMPLETE',
+      completedStepIds: [stepId[1]],
+      evidence: [{ stepId: stepId[1], kind: 'manual', summary: 'fixture: сверено вручную по документам' }],
+      findings: []
+    };
+  }
   const evidence = [
     ...(runId
       ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]

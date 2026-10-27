@@ -225,7 +225,9 @@ test('an invalid checkpoint pauses the cycle instead of being interpreted', asyn
     checkpoint: checkpoint({ revision: 1, completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-1', summary: 'ok' }] })
   });
   assert.equal(stale.decision, 'CONTINUE');
-  assert.equal(stale.code, 'PLAN_BLOCKED');
+  // Отказ валидации называется своим кодом (живой прогон 2026-10-27): «заблокировано»
+  // — это решение модели, а здесь чекпоинт не прошёл проверку.
+  assert.equal(stale.code, 'PLAN_CHECKPOINT_REJECTED');
   assert.match(stale.message, /revision 1 не совпадает/);
   assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
   assert.equal(parsePlan(plans.state.text).revision, 2, 'the file was not touched');
@@ -572,6 +574,6 @@ test('REPLAN-05: a refused checkpoint leaves no partial edits in the file', asyn
       evidence: [{ stepId: 'S-001', kind: 'manual', summary: 'модель говорит, что сделала' }]
     })
   });
-  assert.equal(settled.code, 'PLAN_BLOCKED');
+  assert.equal(settled.code, 'PLAN_CHECKPOINT_REJECTED');
   assert.equal(plans.state.text, before, 'nothing is written when the checkpoint is refused');
 });

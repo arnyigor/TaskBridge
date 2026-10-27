@@ -205,7 +205,7 @@ test('checkpoint без подтверждённой ссылки шаг не з
   });
   assert.equal(parsePlan(plans.state.text).steps[0].status, 'TODO', 'заявление модели не закрывает шаг');
   assert.ok(
-    ['DISPATCH_READY', 'DISPATCHED', 'PLAN_BLOCKED', 'PAUSED_REVIEW'].includes(settled.code),
+    ['DISPATCH_READY', 'DISPATCHED', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PAUSED_REVIEW'].includes(settled.code),
     `отказ виден в результате: ${settled.code}`
   );
 });
