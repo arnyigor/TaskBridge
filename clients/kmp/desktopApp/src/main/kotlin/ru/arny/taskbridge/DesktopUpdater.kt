@@ -10,10 +10,12 @@ import kotlin.io.path.isDirectory
  * Applies a staged portable build over the running installation and restarts.
  *
  * Windows keeps TaskBridge.exe, the bundled runtime and icudtl.dat locked while
- * the process is alive, so those files cannot be replaced in place — that is
- * why `:desktopApp:portable` fails when the app is running. The swap is done by
- * a detached cmd script: it waits for this PID to exit, mirrors the staging
- * directory over the install directory and starts the new exe.
+ * the process is alive, so those files cannot be replaced in place. The swap is
+ * done by a detached PowerShell script: it retries the mirror copy until the
+ * launcher is gone, verifies the result, starts the new exe and only then
+ * deletes the staging directory. Everything it does is written to update.log
+ * next to the app — the first version waited on process ids, hung forever and
+ * left an app that «не стартует» with no trace of why (live report 2026-10-28).
  *
  * Layout it expects (see :desktopApp:portable):
  *   <dist>/TaskBridge/TaskBridge.exe   <- running install
@@ -39,37 +41,104 @@ object DesktopUpdater {
     fun applyAndRestart(installDir: Path, staged: Path): Boolean {
         val exe = installDir.resolve("TaskBridge.exe")
         if (!exe.exists()) return false
-        val current = ProcessHandle.current()
-        val exePath = exe.toAbsolutePath().normalize()
-        val waitPids = listOfNotNull(
-            current.pid(),
-            current.parent().orElse(null)
-                ?.takeIf { parent ->
-                    parent.info().command().orElse(null)?.let { command ->
-                        runCatching { Paths.get(command).toAbsolutePath().normalize() == exePath }.getOrDefault(false)
-                    } == true
-                }
-                ?.pid(),
-        ).distinct().joinToString(",")
-        val script = Files.createTempFile("taskbridge-update-", ".cmd")
-        Files.writeString(
-            script,
-            """
-            @echo off
-            setlocal
-            rem Wait for the app launcher pair to release TaskBridge.exe / icudtl.dat / runtime.
-            powershell -NoProfile -Command "Wait-Process -Id $waitPids -ErrorAction SilentlyContinue"
-            powershell -NoProfile -Command "Start-Sleep -Milliseconds 300"
-            robocopy "${staged.toAbsolutePath()}" "${installDir.toAbsolutePath()}" /MIR /NFL /NDL /NJH /NJS /NP >nul
-            start "" "${exe.toAbsolutePath()}"
-            rmdir /s /q "${staged.toAbsolutePath()}"
-            del "%~f0"
-            """.trimIndent() + "\r\n",
-        )
+        val log = installDir.resolve("update.log")
+        val script = Files.createTempFile("taskbridge-update-", ".ps1")
+        Files.writeString(script, SCRIPT)
         return runCatching {
-            ProcessBuilder("cmd.exe", "/c", script.toAbsolutePath().toString())
+            ProcessBuilder(
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-File", script.toAbsolutePath().toString(),
+                "-Source", staged.toAbsolutePath().toString(),
+                "-Target", installDir.toAbsolutePath().toString(),
+                "-Log", log.toAbsolutePath().toString(),
+                "-CallerPid", ProcessHandle.current().pid().toString(),
+            )
                 .directory(installDir.toFile())
+                .redirectErrorStream(true)
                 .start()
         }.isSuccess
     }
+
+    /**
+     * Ждём не «процесс с таким-то pid», а освобождение самого файла: номер процесса
+     * после выхода приложения может достаться другому, и ожидание по pid висело
+     * вечно (живой отчёт 2026-10-28: два зависших скрипта обновления, staging на
+     * месте, приложение так и не перезапустилось).
+     */
+    private val SCRIPT = """
+        param([string]${'$'}Source, [string]${'$'}Target, [string]${'$'}Log, [string]${'$'}CallerPid)
+
+        ${'$'}ErrorActionPreference = 'Continue'
+        function Write-Log([string]${'$'}text) {
+            ${'$'}line = "{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), ${'$'}text
+            Add-Content -LiteralPath ${'$'}Log -Value ${'$'}line -Encoding utf8
+        }
+        function Unlocked([string]${'$'}path) {
+            try {
+                ${'$'}stream = [System.IO.File]::Open(${'$'}path, 'Open', 'Write', 'None')
+                ${'$'}stream.Close()
+                return ${'$'}true
+            } catch { return ${'$'}false }
+        }
+
+        Write-Log "update started: source=${'$'}Source target=${'$'}Target caller=${'$'}CallerPid"
+        ${'$'}exe = Join-Path ${'$'}Target 'TaskBridge.exe'
+        ${'$'}stagedExe = Join-Path ${'$'}Source 'TaskBridge.exe'
+        if (-not (Test-Path -LiteralPath ${'$'}stagedExe)) { Write-Log 'FAIL: staging has no TaskBridge.exe'; exit 2 }
+
+        # 1. Ждём, пока приложение отпустит exe: копирование поверх занятого файла
+        #    оставляет половину старой сборки — именно это и выглядело как «exe не стартует».
+        ${'$'}waited = 0
+        # Цель может быть пустой (первая установка) — тогда ждать нечего.
+        while ((Test-Path -LiteralPath ${'$'}exe) -and -not (Unlocked ${'$'}exe) -and ${'$'}waited -lt 120) {
+            Start-Sleep -Milliseconds 500
+            ${'$'}waited += 0.5
+        }
+        if ((Test-Path -LiteralPath ${'$'}exe) -and -not (Unlocked ${'$'}exe)) { Write-Log "FAIL: exe still locked after ${'$'}waited s"; exit 3 }
+        Write-Log "lock released after ${'$'}waited s"
+
+        # 2. Зеркалим сборку до победного: robocopy возвращает 8+, когда файл занят.
+        ${'$'}attempt = 0
+        do {
+            ${'$'}attempt++
+            robocopy ${'$'}Source ${'$'}Target /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+            ${'$'}code = ${'$'}LASTEXITCODE
+            if (${'$'}code -ge 8) { Write-Log "copy attempt ${'$'}attempt failed (robocopy ${'$'}code)"; Start-Sleep -Milliseconds 700 }
+        } while (${'$'}code -ge 8 -and ${'$'}attempt -lt 10)
+        if (${'$'}code -ge 8) { Write-Log "FAIL: copy failed after ${'$'}attempt attempts (robocopy ${'$'}code)"; exit 4 }
+        Write-Log "copy ok (robocopy ${'$'}code) after ${'$'}attempt attempt(s)"
+
+        # 3. Проверяем, что в каталоге действительно новая сборка, а не её обломки.
+        if (-not (Test-Path -LiteralPath ${'$'}exe)) { Write-Log 'FAIL: TaskBridge.exe missing after copy'; exit 5 }
+        ${'$'}srcTime = (Get-Item -LiteralPath ${'$'}stagedExe).LastWriteTimeUtc
+        ${'$'}dstTime = (Get-Item -LiteralPath ${'$'}exe).LastWriteTimeUtc
+        if (${'$'}dstTime -lt ${'$'}srcTime) { Write-Log "FAIL: installed exe is older (${'$'}dstTime < ${'$'}srcTime)"; exit 6 }
+
+        # 4. Запускаем и убеждаемся, что процесс живёт.
+        # stderr приложения — единственное, что объясняет мгновенный выход: без него
+        # «exe не стартует» остаётся догадкой (живой отчёт 2026-10-28).
+        ${'$'}appLog = Join-Path ${'$'}Target 'app-start.log'
+        try {
+            ${'$'}proc = Start-Process -FilePath ${'$'}exe -WorkingDirectory ${'$'}Target -PassThru `
+                -RedirectStandardError ${'$'}appLog -RedirectStandardOutput (Join-Path ${'$'}Target 'app-out.log')
+        } catch {
+            Write-Log "FAIL: start threw: ${'$'}(${'$'}_.Exception.Message)"; exit 7
+        }
+        Start-Sleep -Seconds 4
+        ${'$'}proc.Refresh()
+        if (${'$'}proc.HasExited) {
+            ${'$'}stderr = try { (Get-Content -LiteralPath ${'$'}appLog -Raw -ErrorAction Stop).Trim() } catch { '' }
+            if (${'$'}stderr) { Write-Log "app stderr: ${'$'}stderr" }
+            Write-Log "FAIL: new process exited with code ${'$'}(${'$'}proc.ExitCode)"; exit 8
+        }
+        Write-Log "started pid ${'$'}(${'$'}proc.Id)"
+
+        # 5. Staging убираем только после успешного запуска: иначе повтор невозможен.
+        try { Remove-Item -LiteralPath ${'$'}Source -Recurse -Force -ErrorAction Stop; Write-Log 'staging removed' }
+        catch { Write-Log "WARN: staging not removed: ${'$'}(${'$'}_.Exception.Message)" }
+        try { Remove-Item -LiteralPath ${'$'}PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
+        Write-Log 'update finished'
+    """.trimIndent() + "\r\n"
 }
