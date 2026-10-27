@@ -206,6 +206,8 @@ class FollowPlanTest {
             total = 3,
         )
         val rows = planScanRows(scan)
+        // Порядок: сначала то, что уже похоже на план, затем файлы папок раньше корня
+        // (видимая часть списка на телефоне — ~5 строк, отчёт 2026-10-26).
         assertEquals(listOf("PLAN.md", "TODO.md", "readme.md"), rows.map { it.name })
         assertEquals(listOf("", "docs", "docs/deep"), rows.map { it.folder })
         assertEquals("управляемый план", rows[0].hint)

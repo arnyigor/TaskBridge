@@ -4,6 +4,7 @@ import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.PlanAiReview
 import ru.arny.taskbridge.core.api.PlanInspection
+import ru.arny.taskbridge.core.api.PlanScanFile
 import ru.arny.taskbridge.core.api.PlanScanResult
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
@@ -323,7 +324,24 @@ fun planScanRows(result: PlanScanResult?, query: String = "", limit: Int = 200):
     val shown = if (needle.isEmpty()) files else files.filter {
         "${it.path} ${it.name}".lowercase().contains(needle)
     }
-    return shown.take(limit).map { file ->
+    // Порядок строк (живой отчёт 2026-10-26: «во внутренних папках файлов нет»).
+    // На телефоне список виден на ~5 строк, а при алфавитном порядке их занимал
+    // корень проекта — AGENTS.md, README.md и т.п., — а файлы папок оставались ниже
+    // сгиба. Сначала идут те, что уже похожи на план (догадка по голове файла),
+    // затем файлы папок раньше файлов корня, затем по пути: полезное видно сразу,
+    // без прокрутки.
+    fun rank(file: PlanScanFile): Int = when (file.classification) {
+        "VALID_MANAGED" -> 0
+        "CONVERTIBLE" -> 1
+        else -> 2
+    }
+    val ordered = shown.sortedWith(
+        compareBy<PlanScanFile> { rank(it) }
+            .thenBy { if (it.path.contains('/')) 0 else 1 }
+            .thenBy { it.path.substringBeforeLast('/', "") }
+            .thenBy { it.path }
+    )
+    return ordered.take(limit).map { file ->
         PlanScanRow(
             path = file.path,
             name = file.name.ifBlank { file.path.substringAfterLast('/') },
