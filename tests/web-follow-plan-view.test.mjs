@@ -7,7 +7,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import {
-  PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES,
+  PLAN_MODE_LABEL, PLAN_STATE_LABELS, PLAN_EVENT_TYPES, planStepMark, planStepsSummary,
   planActions, planCardModel, planCurrentStep, planErrorText, planEventNotice, planFileChoices, planFileGroups,
   planFindingsSummary, planHeadline, planIconState, planInspectionText, planMetaLine, planPrimaryAction,
   PLAN_ICON_TITLES, planPathProblem, planToggleState, verificationText,
@@ -29,7 +29,10 @@ test('the icon itself carries the state', () => {
   assert.equal(planIconState({ attached: true, state: 'REVIEWING' }), 'running');
   assert.equal(planIconState({ attached: true, state: 'PAUSED' }), 'attention');
   assert.equal(planIconState({ attached: true, state: 'PAUSED_REVIEW' }), 'attention');
-  assert.equal(planIconState({ attached: true, state: 'IDLE', conflict: true }), 'attention');
+  // Конфликт и ошибка файла — красный (поломка); разбор посреди цикла — жёлтый:
+  // план шёл, 4 из 73, а иконка горела красным (живой отчёт 2026-10-28).
+  assert.equal(planIconState({ attached: true, state: 'IDLE', conflict: true }), 'error');
+  assert.equal(planIconState({ attached: true, state: 'RUNNING_STEP', fileError: { message: 'нет доступа' } }), 'error');
   assert.equal(planIconState({ attached: true, state: 'COMPLETED' }), 'completed');
   assert.equal(PLAN_ICON_TITLES.off, 'По плану: выбрать файл плана');
 });
@@ -540,4 +543,24 @@ test('«Исправить формат» не показан для готов�
   const managed = planVerdictView({ verdict: 'VALID_MANAGED', managed: true, steps: 2, revision: 1 });
   assert.equal(notAPlan.canAttach, false);
   assert.equal(managed.canAttach, true);
+});
+
+test('список шагов показывает, что сделано и что выполняется сейчас', () => {
+  const steps = [
+    { id: 'S-001', status: 'DONE', title: 'Известное' },
+    { id: 'S-002', status: 'DONE', title: 'Сверка' },
+    { id: 'S-003', status: 'IN_PROGRESS', title: 'Смоук' },
+    { id: 'S-004', status: 'TODO', title: 'Реестр' },
+    { id: 'S-005', status: 'SKIPPED', title: 'Лишний' },
+    { id: 'S-006', status: 'BLOCKED', title: 'Заблокирован' }
+  ];
+  assert.equal(planStepMark(steps[0], 'S-003'), '✓');
+  assert.equal(planStepMark(steps[2], 'S-003'), '●');
+  assert.equal(planStepMark(steps[3], 'S-003'), '○');
+  assert.equal(planStepMark(steps[4], 'S-003'), '»');
+  assert.equal(planStepMark(steps[5], 'S-003'), '!');
+  // Шаг, который сервер назвал текущим, помечен даже если статус ещё TODO.
+  assert.equal(planStepMark({ id: 'S-009', status: 'TODO' }, 'S-009'), '●');
+  assert.equal(planStepsSummary({ steps, stepId: 'S-003' }), 'закрыто 2 из 6 · сейчас S-003');
+  assert.equal(planStepsSummary({ steps: [] }), '');
 });

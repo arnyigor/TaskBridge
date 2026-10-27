@@ -5,6 +5,7 @@ import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.PlanAiReview
 import ru.arny.taskbridge.core.api.PlanInspection
 import ru.arny.taskbridge.core.api.PlanScanFile
+import ru.arny.taskbridge.core.api.PlanStep
 import ru.arny.taskbridge.core.api.PlanScanResult
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
@@ -140,11 +141,14 @@ fun planToggleHint(status: PlanStatus?): String? =
  * Что показывает сама иконка: карточки в чате больше нет, состояние кодируется
  * цветом, подробности — в диалоге (чат не должен занимать место под планом).
  */
-enum class PlanIconState { OFF, IDLE, RUNNING, ATTENTION, COMPLETED }
+enum class PlanIconState { OFF, IDLE, RUNNING, ATTENTION, ERROR, COMPLETED }
 
 fun planIconState(status: PlanStatus?): PlanIconState {
     if (status?.attached != true) return PlanIconState.OFF
-    if (status.conflict || status.fileError != null) return PlanIconState.ATTENTION
+    // Конфликт и ошибка файла — поломка (красный). Разбор посреди рабочего цикла —
+    // это не поломка (жёлтый): план шёл, 4 из 73, а иконка горела красным
+    // (живой отчёт 2026-10-28).
+    if (status.conflict || status.fileError != null) return PlanIconState.ERROR
     return when (status.state) {
         "RUNNING_STEP", "REVIEWING" -> PlanIconState.RUNNING
         "PAUSED", "PAUSED_REVIEW" -> PlanIconState.ATTENTION
@@ -152,6 +156,32 @@ fun planIconState(status: PlanStatus?): PlanIconState {
         else -> PlanIconState.IDLE
     }
 }
+
+/**
+ * Значок строки шага: состояние видно с одного взгляда, а не вычитывается из слова
+ * в конце строки. `currentStepId` — шаг, который сервер назвал текущим.
+ */
+fun planStepMark(step: PlanStep, currentStepId: String? = null): String = when {
+    step.status == "DONE" -> "✓"
+    step.status == "SKIPPED" -> "»"
+    step.status == "BLOCKED" -> "!"
+    step.status == "IN_PROGRESS" -> "●"
+    currentStepId != null && step.id == currentStepId -> "●"
+    else -> "○"
+}
+
+/** Заголовок списка: «закрыто 4 из 73 · сейчас S-005». */
+fun planStepsSummary(status: PlanStatus?): String {
+    val steps = status?.steps.orEmpty()
+    if (steps.isEmpty()) return ""
+    val done = steps.count { it.status == "DONE" }
+    val current = status?.stepId?.takeIf { it.isNotBlank() }?.let { " · сейчас $it" } ?: ""
+    return "закрыто $done из ${steps.size}$current"
+}
+
+/** Цвет подписи статуса шага: done — зелёный, текущий — акцент, блокировка — красный. */
+fun planStepIsCurrent(step: PlanStep, currentStepId: String?): Boolean =
+    step.status == "IN_PROGRESS" || (currentStepId != null && step.id == currentStepId)
 
 /** Одна главная кнопка на состояние (UI-02 §6). */
 data class PlanPrimaryAction(val id: String, val label: String)
@@ -264,7 +294,8 @@ fun planIconTitle(status: PlanStatus?): String = when (planIconState(status)) {
     PlanIconState.OFF -> "По плану: выбрать файл плана"
     PlanIconState.IDLE -> "По плану: готов к запуску"
     PlanIconState.RUNNING -> "По плану: шаг выполняется"
-    PlanIconState.ATTENTION -> "По плану: нужен разбор"
+    PlanIconState.ATTENTION -> "По плану: шаг ждёт разбора"
+    PlanIconState.ERROR -> "По плану: ошибка файла плана"
     PlanIconState.COMPLETED -> "По плану: план завершён"
 }
 

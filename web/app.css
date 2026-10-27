@@ -2065,6 +2065,11 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
   border-color: var(--warn, #fbbf24);
   background: color-mix(in srgb, var(--warn, #fbbf24) 14%, transparent);
 }
+.planToggle[data-plan-state="error"] {
+  color: var(--danger, #ef4444);
+  border-color: var(--danger, #ef4444);
+  background: color-mix(in srgb, var(--danger, #ef4444) 14%, transparent);
+}
 .planToggle[data-plan-state="completed"] {
   color: var(--ok, #34d399);
   border-color: var(--ok, #34d399);
@@ -2140,8 +2145,12 @@ code.codeLines > span.line.rangeHit { background: rgba(120, 170, 255, 0.14); }
 .planDetails > summary { cursor: pointer; font-size: 0.75rem; color: var(--muted, #94a3b8); }
 .planSteps { margin: 0.25rem 0 0; padding-left: 1.25rem; max-height: 12rem; overflow: auto; font-size: 0.75rem; }
 .planStep-DONE { color: var(--ok, #34d399); }
+.planStep-IN_PROGRESS { color: var(--accent, #4f8cff); font-weight: 600; }
 .planStep-BLOCKED { color: var(--danger, #ef4444); }
 .planStep-SKIPPED { color: var(--muted, #94a3b8); text-decoration: line-through; }
+.planStep { padding: 0.1rem 0; }
+/* Текущий шаг заметен и без цвета: подложка и жирный номер шага. */
+.planStep-current { background: color-mix(in srgb, var(--accent, #4f8cff) 12%, transparent); border-radius: 0.25rem; padding-left: 0.2rem; }
 .planFindings { display: flex; flex-direction: column; gap: 0.125rem; max-height: 8rem; overflow: auto; }
 .planPicker { flex-direction: column; gap: 0.5rem; min-height: 0; }
 /* Основной текст панели — 14 px, а не мелкая подпись. */

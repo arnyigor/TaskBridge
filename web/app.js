@@ -5,7 +5,7 @@ import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient, newCommandId } from './command-client.mjs';
-import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planMetaLine, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText, planSelectionView, planScanRows, planScanStatusLine, planScanEmptyText, planVerdictView, planAiReviewView, planAiErrorText } from './follow-plan-view.mjs';
+import { planActions, planCurrentStep, planErrorText, planEventNotice, planFindingsSummary, planIconState, planMetaLine, planPrimaryAction, planRequestBody, PLAN_ICON_TITLES, verificationText, planSelectionView, planScanRows, planScanStatusLine, planScanEmptyText, planVerdictView, planAiReviewView, planAiErrorText, planStepMark, planStepsSummary } from './follow-plan-view.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -4167,13 +4167,18 @@ function updatePlanToggle() {
 function renderPlanSteps() {
   const list = $('planSteps');
   list.textContent = '';
+  const currentId = planStatus?.stepId || null;
   for (const step of planStatus?.steps || []) {
     const item = document.createElement('li');
-    item.className = `planStep planStep-${String(step.status || '').toLowerCase()}`;
-    item.textContent = [step.id, step.title || '', verificationText(step.verification)].filter(Boolean).join(' · ');
-    item.title = step.result ? `${step.status}: ${step.result}` : String(step.status || '');
+    const running = Boolean(currentId) && step.id === currentId;
+    item.className = `planStep planStep-${String(step.status || '').toLowerCase()}${running ? ' planStep-current' : ''}`;
+    // Значок впереди: ✓ сделано, ● выполняется, ○ впереди, » пропущено, ! заблокировано.
+    item.textContent = `${planStepMark(step, currentId)} ${step.id} · ${step.title || ''}`;
+    item.title = [step.status, step.result, verificationText(step.verification)].filter(Boolean).join(' · ');
     list.append(item);
   }
+  const summary = $('planStepsSummary');
+  if (summary) summary.textContent = planStepsSummary(planStatus);
 }
 
 function renderPlanInspector() {

@@ -133,7 +133,10 @@ export function planPathProblem(value) {
  */
 export function planIconState(status) {
   if (!status || status.attached !== true) return 'off';
-  if (status.conflict || status.fileError) return 'attention';
+  // Ошибка файла и конфликт — это поломка, а не «нужен разбор»: красный цвет
+  // должен значить «сломано». Разбор посреди рабочего цикла — жёлтый (живой
+  // отчёт 2026-10-28: план шёл, 4 из 73, а иконка горела красным).
+  if (status.conflict || status.fileError) return 'error';
   switch (status.state) {
     case 'RUNNING_STEP':
     case 'REVIEWING': return 'running';
@@ -149,9 +152,32 @@ export const PLAN_ICON_TITLES = Object.freeze({
   off: 'По плану: выбрать файл плана',
   idle: 'По плану: готов к запуску',
   running: 'По плану: шаг выполняется',
-  attention: 'По плану: нужен разбор',
+  attention: 'По плану: шаг ждёт разбора',
+  error: 'По плану: ошибка файла плана',
   completed: 'По плану: план завершён'
 });
+
+/**
+ * Значок строки шага: состояние видно с одного взгляда, а не вычитывается из
+ * слова в конце строки. `current` — шаг, который выполняется прямо сейчас.
+ */
+export function planStepMark(step, currentStepId = null) {
+  const status = String(step?.status || '');
+  if (status === 'DONE') return '✓';
+  if (status === 'SKIPPED') return '»';
+  if (status === 'BLOCKED') return '!';
+  if (status === 'IN_PROGRESS' || (currentStepId && step?.id === currentStepId)) return '●';
+  return '○';
+}
+
+/** Заголовок списка шагов: «закрыто 4 из 73 · сейчас S-005». */
+export function planStepsSummary(status) {
+  const total = (status?.steps || []).length;
+  const done = (status?.steps || []).filter(step => step.status === 'DONE').length;
+  if (!total) return '';
+  const current = status?.stepId ? ` · сейчас ${status.stepId}` : '';
+  return `закрыто ${done} из ${total}${current}`;
+}
 
 /**
  * Планы проекта для выбора: оператор не должен вбивать путь руками, но и файл,

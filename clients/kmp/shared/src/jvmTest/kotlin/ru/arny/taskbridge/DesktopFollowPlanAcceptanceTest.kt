@@ -234,7 +234,8 @@ class DesktopFollowPlanAcceptanceTest {
             }
 
             // NATIVE-06: the step list collapses and expands.
-            onNodeWithText("Все шаги (2)").performClick()
+            // Подпись списка теперь называет прогресс: «Шаги: закрыто 0 из 2».
+            onNodeWithText("Шаги: закрыто 0 из 2").performClick()
             waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Скрыть шаги").fetchSemanticsNodes().isNotEmpty() }
             onNodeWithText("Скрыть шаги").performClick()
 
@@ -345,7 +346,8 @@ class DesktopFollowPlanAcceptanceTest {
             assertTrue((runBlocking { connection.api.plan(task.id) }.revision ?: 0) >= 2)
 
             // NATIVE-06 (long plan): 32 steps are reachable through the disclosure.
-            onNodeWithText("Все шаги (2)").performClick()
+            // Подпись списка теперь называет прогресс: «Шаги: закрыто 0 из 2».
+            onNodeWithText("Шаги: закрыто 0 из 2").performClick()
             waitUntil(timeoutMillis = 5_000) { onAllNodesWithText("Скрыть шаги").fetchSemanticsNodes().isNotEmpty() }
         } finally {
             graph?.disconnect()

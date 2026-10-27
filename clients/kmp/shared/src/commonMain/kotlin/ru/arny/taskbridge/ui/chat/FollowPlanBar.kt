@@ -14,8 +14,12 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -44,6 +48,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -197,10 +202,16 @@ fun FollowPlanIcon(
     onCopy: (String) -> Unit = {},
 ) {
     val colors = MaterialTheme.colorScheme
+    // Цвет — состояние: синий «идёт», жёлтый «ждёт разбора», зелёный «готово»,
+    // красный только у настоящей поломки. Красный на разборе посреди цикла читался
+    // как «всё сломалось», хотя план шёл (живой отчёт 2026-10-28).
+    val planAttention = Color(0xFFE0A030)
+    val planDone = Color(0xFF3FA05A)
     val iconTint = when (planIconState(state.status)) {
         PlanIconState.RUNNING, PlanIconState.IDLE -> colors.primary
-        PlanIconState.ATTENTION -> colors.error
-        PlanIconState.COMPLETED -> colors.tertiary
+        PlanIconState.ATTENTION -> planAttention
+        PlanIconState.ERROR -> colors.error
+        PlanIconState.COMPLETED -> planDone
         PlanIconState.OFF -> colors.onSurfaceVariant
     }
     // Один системный выбор файла (FP-UX-03): на Android — Documents Picker, на
@@ -314,17 +325,76 @@ fun FollowPlanIcon(
                     }
                     // Полный список шагов свёрнут: в диалог не выливается весь план.
                     TextButton(onClick = { state.stepsOpen = !state.stepsOpen }) {
-                        Text(if (state.stepsOpen) "Скрыть шаги" else "Все шаги (${status?.steps?.size ?: 0})")
+                        val summary = planStepsSummary(status)
+                        Text(
+                            when {
+                                state.stepsOpen -> "Скрыть шаги"
+                                summary.isNotBlank() -> "Шаги: $summary"
+                                else -> "Все шаги (${status?.steps?.size ?: 0})"
+                            }
+                        )
                     }
                     if (state.stepsOpen) {
-                        LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp)) {
-                            items(status?.steps.orEmpty(), key = { it.id }) { step ->
-                                Text(
-                                    "${step.id} · ${step.title.orEmpty()} — ${step.status}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
+                        // Список отвечает на вопрос «что уже сделано, что делается»:
+                        // значок, номер и заголовок, статус справа, текущий шаг
+                        // подсвечен и прокручен в видимую часть (живой отчёт 2026-10-28:
+                        // из плоского текста это было не прочитать).
+                        val steps = status?.steps.orEmpty()
+                        val currentId = status?.stepId?.takeIf { it.isNotBlank() }
+                        val currentIndex = steps.indexOfFirst { it.id == currentId }
+                        val stepsState = rememberLazyListState()
+                        LaunchedEffect(currentId, state.stepsOpen) {
+                            if (currentIndex > 0) stepsState.scrollToItem(currentIndex)
+                        }
+                        val stepDone = Color(0xFF3FA05A)
+                        val stepAttention = Color(0xFFE0A030)
+                        LazyColumn(
+                            state = stepsState,
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp),
+                        ) {
+                            items(steps, key = { it.id }) { step ->
+                                val current = planStepIsCurrent(step, currentId)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(
+                                            if (current) colors.primary.copy(alpha = 0.12f) else Color.Transparent,
+                                            RoundedCornerShape(6.dp),
+                                        )
+                                        .padding(vertical = 3.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        planStepMark(step, currentId),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = when {
+                                            step.status == "DONE" -> stepDone
+                                            step.status == "BLOCKED" -> colors.error
+                                            step.status == "SKIPPED" -> colors.onSurfaceVariant
+                                            current -> colors.primary
+                                            else -> colors.onSurfaceVariant
+                                        },
+                                        modifier = Modifier.width(18.dp),
+                                    )
+                                    Text(
+                                        "${step.id} · ${step.title.orEmpty()}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = if (current) FontWeight.SemiBold else null,
+                                        color = if (step.status == "DONE") colors.onSurfaceVariant else colors.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    if (current) {
+                                        Text(
+                                            "выполняется",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = colors.primary,
+                                        )
+                                    } else if (step.status == "BLOCKED") {
+                                        Text("заблокирован", style = MaterialTheme.typography.labelSmall, color = stepAttention)
+                                    }
+                                }
                             }
                         }
                     }

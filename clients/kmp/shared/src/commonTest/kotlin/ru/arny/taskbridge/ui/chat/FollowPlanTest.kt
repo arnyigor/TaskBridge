@@ -154,7 +154,8 @@ class FollowPlanTest {
         assertEquals(PlanIconState.RUNNING, planIconState(PlanStatus(attached = true, state = "RUNNING_STEP")))
         assertEquals(PlanIconState.RUNNING, planIconState(PlanStatus(attached = true, state = "REVIEWING")))
         assertEquals(PlanIconState.ATTENTION, planIconState(PlanStatus(attached = true, state = "PAUSED_REVIEW")))
-        assertEquals(PlanIconState.ATTENTION, planIconState(PlanStatus(attached = true, state = "IDLE", conflict = true)))
+        // Конфликт — поломка (красный), разбор посреди цикла — жёлтый (2026-10-28).
+        assertEquals(PlanIconState.ERROR, planIconState(PlanStatus(attached = true, state = "IDLE", conflict = true)))
         assertEquals(PlanIconState.COMPLETED, planIconState(PlanStatus(attached = true, state = "COMPLETED")))
         assertEquals("По плану: шаг выполняется", planIconTitle(PlanStatus(attached = true, state = "RUNNING_STEP")))
     }
@@ -318,5 +319,59 @@ class FollowPlanTest {
         assertEquals(false, invalid?.canAttach)
         assertEquals(true, managed?.canAttach)
         assertEquals(true, convertible?.canAttach)
+    }
+}
+
+/**
+ * Живой отчёт 2026-10-28: план шёл (4 из 73), а иконка горела красным, и из списка
+ * шагов нельзя было понять, что уже сделано и что делается сейчас.
+ */
+class PlanListAndIconTest {
+
+    private fun step(id: String, status: String, title: String = "шаг $id") =
+        ru.arny.taskbridge.core.api.PlanStep(id = id, status = status, title = title)
+
+    @Test
+    fun `красный цвет только у поломки, разбор посреди цикла — жёлтый`() {
+        val running = ru.arny.taskbridge.core.api.PlanStatus(attached = true, state = "RUNNING_STEP")
+        assertEquals(PlanIconState.RUNNING, planIconState(running))
+        assertEquals(
+            PlanIconState.ATTENTION,
+            planIconState(ru.arny.taskbridge.core.api.PlanStatus(attached = true, state = "PAUSED_REVIEW")),
+        )
+        assertEquals(
+            PlanIconState.ERROR,
+            planIconState(ru.arny.taskbridge.core.api.PlanStatus(attached = true, state = "PAUSED_REVIEW", conflict = true)),
+        )
+        assertEquals(
+            PlanIconState.COMPLETED,
+            planIconState(ru.arny.taskbridge.core.api.PlanStatus(attached = true, state = "COMPLETED")),
+        )
+        assertEquals(PlanIconState.OFF, planIconState(null))
+    }
+
+    @Test
+    fun `список шагов помечает сделанное и текущее`() {
+        assertEquals("✓", planStepMark(step("S-001", "DONE"), "S-003"))
+        assertEquals("●", planStepMark(step("S-003", "IN_PROGRESS"), "S-003"))
+        assertEquals("○", planStepMark(step("S-004", "TODO"), "S-003"))
+        assertEquals("»", planStepMark(step("S-005", "SKIPPED"), "S-003"))
+        assertEquals("!", planStepMark(step("S-006", "BLOCKED"), "S-003"))
+        // Шаг, названный сервером текущим, помечен даже при статусе TODO.
+        assertEquals("●", planStepMark(step("S-009", "TODO"), "S-009"))
+        assertTrue(planStepIsCurrent(step("S-003", "TODO"), "S-003"))
+        assertTrue(!planStepIsCurrent(step("S-004", "TODO"), "S-003"))
+    }
+
+    @Test
+    fun `заголовок списка называет прогресс и текущий шаг`() {
+        val status = ru.arny.taskbridge.core.api.PlanStatus(
+            attached = true,
+            state = "PAUSED_REVIEW",
+            stepId = "S-003",
+            steps = listOf(step("S-001", "DONE"), step("S-002", "DONE"), step("S-003", "TODO")),
+        )
+        assertEquals("закрыто 2 из 3 · сейчас S-003", planStepsSummary(status))
+        assertEquals("", planStepsSummary(null))
     }
 }
