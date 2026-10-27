@@ -27,13 +27,23 @@ export const PLAN_FILE_EXTENSION = /\.(md|markdown)$/i;
 export const SCAN_SKIP = new Set([
   '.git', '.gradle', '.idea', '.local', '.pi', '.taskbridge-input', '.vscode',
   'node_modules', 'build', 'dist', 'out', 'target', 'vendor', 'coverage',
-  '__pycache__', 'venv', '.venv', 'data'
+  '__pycache__', 'venv', '.venv', 'data',
+  // Движки и IDE держат рядом с документацией десятки тысяч служебных каталогов:
+  // у Unreal это Binaries/Intermediate/DerivedDataCache/Saved (живой проект
+  // 2026-10-27 — 2025 каталогов до первого файла), у Unity — Library/obj/Logs.
+  'binaries', 'intermediate', 'deriveddatacache', 'saved', 'library', 'obj',
+  'logs', 'temp', '.vs', '.next', '.nuxt', '.terraform'
 ]);
+
+/** Каталоги-варианты: Saved_HEDeviceState, Saved_HEMiniHorror и т.п. */
+export const SCAN_SKIP_PREFIX = ['saved_', 'deriveddatacache_'];
 
 export const SCAN_DEFAULTS = Object.freeze({
   maxDepth: 8,
   maxResults: 500,
-  maxDirs: 2000,
+  // Запас на большие проекты: обход в ширину прошёл 2272 каталога за 700 мс
+  // (живой Unreal-проект), а предел по времени остаётся главным ограничителем.
+  maxDirs: 4000,
   maxMs: 1500,
   // Голова файла для предварительной классификации. Вердикт даёт только inspect
   // выбранного файла: одна голова не доказывает, что план исполним.
@@ -46,6 +56,12 @@ const scanError = (code, message) => Object.assign(new Error(message), { code })
 const insideRoot = (root, candidate) => {
   const relative = path.relative(root, candidate);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+};
+
+const skipDir = name => {
+  const lower = String(name).toLowerCase();
+  if (SCAN_SKIP.has(lower)) return true;
+  return SCAN_SKIP_PREFIX.some(prefix => lower.startsWith(prefix));
 };
 
 const pathKey = value => (process.platform === 'win32' ? String(value).toLowerCase() : String(value));
@@ -115,6 +131,12 @@ export async function scanPlanFiles({
   let dirs = 0;
   const timeUp = () => now() - startedAt > maxMs;
 
+  // Обход в ширину, а не в глубину. Разница решающая: у проекта с тяжёлым
+  // каталогом (Unreal Content — 2669 подкаталогов) обход в глубину съедал весь
+  // бюджет каталогов, так и не дойдя до соседнего Docs с документацией. В ширину
+  // сначала читаются все каталоги одного уровня, поэтому документация первого
+  // уровня видна всегда, каким бы тяжёлым ни был сосед.
+  const queue = [{ dir: base, rel: '', depth: 0 }];
   const walk = async (dir, relBase, depth) => {
     dirs += 1;
     if (dirs > maxDirs) { limited.dirs = true; return; }
@@ -128,7 +150,7 @@ export async function scanPlanFiles({
       if (files.length >= maxResults) { limited.results = true; return; }
       if (timeUp()) { limited.time = true; return; }
       const name = String(entry.name);
-      if (name.startsWith('.') || SCAN_SKIP.has(name.toLowerCase())) continue;
+      if (name.startsWith('.') || skipDir(name)) continue;
       const childRel = relBase ? `${relBase}/${name}` : name;
       const absolute = path.join(dir, name);
       // Ссылка (и junction, который Node отдаёт как симлинк) в обход не идёт:
@@ -154,7 +176,7 @@ export async function scanPlanFiles({
           continue;
         }
         seen.add(pathKey(real));
-        await walk(absolute, childRel, depth + 1);
+        queue.push({ dir: absolute, rel: childRel, depth: depth + 1 });
         continue;
       }
       if (!entry.isFile() || !PLAN_FILE_EXTENSION.test(name)) continue;
@@ -170,7 +192,14 @@ export async function scanPlanFiles({
     }
   };
 
-  await walk(base, '', 0);
+  while (queue.length > 0) {
+    // Останавливаться надо с названной причиной: иначе обход прерывается «молча»
+    // и ответ притворяется полным (тест про лимиты это и проверяет).
+    if (files.length >= maxResults) { limited.results = true; break; }
+    if (timeUp()) { limited.time = true; break; }
+    const next = queue.shift();
+    await walk(next.dir, next.rel, next.depth);
+  }
 
   const needle = String(query || '').trim().toLowerCase();
   const matched = needle

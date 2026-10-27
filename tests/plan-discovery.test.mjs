@@ -663,3 +663,36 @@ test('пустой ответ модели из-за лимита токенов
   const fromParts = await completeOnce({ baseUrl: 'http://x/v1', id: 'm', prompt: 'p', fetchImpl: parts });
   assert.equal(fromParts.text, 'abcdef');
 });
+
+test('обход в ширину: тяжёлый соседний каталог не съедает бюджет и не прячет документацию', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-bfs-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  // Тяжёлый каталог первым по алфавиту — как Unreal Content (2669 подкаталогов),
+  // из-за которого обход в глубину возвращал один файл корня (живой отчёт 2026-10-27).
+  for (let index = 0; index < 40; index += 1) {
+    await fs.mkdir(path.join(root, 'aaa-heavy', `sub-${index}`), { recursive: true });
+    await fs.writeFile(path.join(root, 'aaa-heavy', `sub-${index}`, 'note.txt'), 'x', 'utf8');
+  }
+  await fs.mkdir(path.join(root, 'docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'docs', 'PLAN.md'), PLAN, 'utf8');
+  await fs.writeFile(path.join(root, 'AGENTS.md'), '# правила\n', 'utf8');
+
+  const scan = await scanPlanFiles({ root, maxDirs: 10 });
+  assert.deepEqual(scan.files.map(file => file.path), ['AGENTS.md', 'docs/PLAN.md']);
+  assert.equal(scan.limited.dirs, true, 'бюджет каталогов всё равно честно исчерпан');
+});
+
+test('служебные каталоги движков не обходятся: Saved, Intermediate, Binaries, DerivedDataCache', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-skip-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const name of ['Saved', 'Saved_HEDeviceState', 'Intermediate', 'Binaries', 'DerivedDataCache', 'Library', 'obj']) {
+    await fs.mkdir(path.join(root, name), { recursive: true });
+    await fs.writeFile(path.join(root, name, 'PLAN.md'), PLAN, 'utf8');
+  }
+  await fs.mkdir(path.join(root, 'Docs'), { recursive: true });
+  await fs.writeFile(path.join(root, 'Docs', 'REAL.md'), PLAN, 'utf8');
+
+  const scan = await scanPlanFiles({ root });
+  assert.deepEqual(scan.files.map(file => file.path), ['Docs/REAL.md']);
+  assert.equal(scan.scanned.dirs, 2, 'обойдены только корень и Docs');
+});
