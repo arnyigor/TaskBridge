@@ -3468,6 +3468,7 @@ export class TaskManager extends EventEmitter {
       const args = piOneShotArgs({ provider, model, promptFile });
       return await new Promise(resolve => {
         let out = '';
+        let err = '';
         let settled = false;
         const finish = value => {
           if (settled) return;
@@ -3480,7 +3481,7 @@ export class TaskManager extends EventEmitter {
           finish({ ok: false, code: 'TIMEOUT', ms: Date.now() - started, message: 'модель не ответила за отведённое время' });
         }, budget);
         proc.stdout.on('data', chunk => { out += chunk; });
-        proc.stderr.on('data', () => {});
+        proc.stderr.on('data', chunk => { err += chunk; });
         proc.on('error', error => {
           clearTimeout(timer);
           finish({ ok: false, code: 'UNREACHABLE', ms: Date.now() - started, message: String(error?.message || error) });
@@ -3488,8 +3489,19 @@ export class TaskManager extends EventEmitter {
         proc.on('close', code => {
           clearTimeout(timer);
           const text = out.trim();
-          if (text) finish({ ok: true, text, ms: Date.now() - started });
-          else finish({ ok: false, code: code === 0 ? 'EMPTY' : 'HTTP_ERROR', ms: Date.now() - started, exitCode: code });
+          if (text) {
+            finish({ ok: true, text, ms: Date.now() - started });
+            return;
+          }
+          // Хвост stderr — единственное, что объясняет мгновенный отказ Pi.
+          const tail = err.split(/[\r\n]+/).filter(Boolean).slice(-2).join(' ').slice(0, 300);
+          finish({
+            ok: false,
+            code: code === 0 ? 'EMPTY' : 'HTTP_ERROR',
+            ms: Date.now() - started,
+            exitCode: code,
+            message: tail || undefined
+          });
         });
       });
     } finally {

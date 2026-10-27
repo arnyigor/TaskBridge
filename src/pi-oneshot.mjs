@@ -19,6 +19,9 @@ export const PI_ONESHOT_FLAGS = Object.freeze([
 /** Сообщение короткое и без пробелов: всё задание уходит файлом, см. ниже. */
 export const PI_ONESHOT_MESSAGE = 'Выполни.';
 
+/** Исполняемый файл: на Windows PATH приводит к pi.cmd, и запускать надо через shell. */
+export const PI_ONESHOT_BIN = 'pi';
+
 /**
  * Аргументы запуска. Текст задания передаётся файлом (`--append-system-prompt`), а не
  * аргументом: документ содержит кавычки и переводы строк, и командная строка Windows
@@ -37,7 +40,11 @@ const quote = value => `"${String(value).replace(/"/g, '""')}"`;
  * Node склеивает их через пробел без экранирования.
  */
 export function spawnPi(argv, options = {}) {
-  const line = argv.map(item => quote(item)).join(' ');
+  // Сам исполняемый файл добавляется здесь, а не вызывающим кодом: без него
+  // командная строка начиналась с флага, cmd отвечал «--print не является
+  // внутренней командой», и это выглядело как отказ провайдера (живой прогон
+  // 2026-10-27, ответ за 251 мс).
+  const line = [PI_ONESHOT_BIN, ...argv].map(item => quote(item)).join(' ');
   return spawn(line, {
     shell: true,
     windowsHide: true,

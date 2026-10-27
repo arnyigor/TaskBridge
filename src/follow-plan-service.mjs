@@ -61,7 +61,12 @@ const AI_FAILURE_TEXT = Object.freeze({
   REDIRECT: 'провайдер отвечает перенаправлением',
   HTTP_ERROR: 'провайдер ответил ошибкой'
 });
-const aiFailure = answer => AI_FAILURE_TEXT[answer?.code] || answer?.message || answer?.code || 'неизвестная причина';
+const aiFailure = answer => {
+  // У HTTP_ERROR/UNREACHABLE ценнее собственный текст отказа (хвост stderr Pi),
+  // у остальных кодов — человеческая формулировка выше.
+  if (['HTTP_ERROR', 'UNREACHABLE'].includes(answer?.code) && answer?.message) return answer.message;
+  return AI_FAILURE_TEXT[answer?.code] || answer?.message || answer?.code || 'неизвестная причина';
+};
 const CONTROL_CLIENT = 'follow-plan';
 
 const notFound = () => Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
