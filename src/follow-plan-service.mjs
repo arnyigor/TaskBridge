@@ -18,7 +18,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parsePlan, proposeImport, classifyPlan, planHash, readPlan, readPlanText, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
 import { scanPlanFiles, SCAN_DEFAULTS } from './application/plan-scan.mjs';
-import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer, buildPlanDraftPrompt, extractManagedPlan } from './application/plan-ai-review.mjs';
+import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer, buildPlanDraftPrompt, extractManagedPlan, normalizeDraftIssues } from './application/plan-ai-review.mjs';
 import { PlanFollower, resultForStep, checkpointIdentity } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
@@ -57,7 +57,7 @@ const AI_FAILURE_TEXT = Object.freeze({
   MODEL_NOT_FOUND: 'провайдер не знает такую модель',
   MODEL_UNKNOWN: 'у сессии не выбрана модель',
   NO_KEY: 'у провайдера нет ключа в окружении',
-  NO_ENDPOINT: 'у провайдера не настроен адрес',
+  NO_ENDPOINT: 'у сессии модель по подписке (без адреса API), а локальной модели не нашлось — соберите план в чате и вставьте текст',
   REDIRECT: 'провайдер отвечает перенаправлением',
   HTTP_ERROR: 'провайдер ответил ошибкой'
 });
@@ -573,12 +573,14 @@ export class FollowPlanService {
       taskId: task.id,
       prompt: buildPlanDraftPrompt({ path: target, text: capped, truncated, hint: String(hint || '').slice(0, 500) }),
       maxTokens: 2000,
-      timeoutMs: AI_REVIEW_LIMITS.timeoutMs
+      // Подписочная модель отвечает через `pi --print`: это отдельный процесс,
+      // десятки секунд на запуск и генерацию. 30 секунд обзора здесь не хватает.
+      timeoutMs: Math.max(AI_REVIEW_LIMITS.timeoutMs, 150_000)
     });
     if (!answer?.ok) {
       throw reject('AI_UNAVAILABLE', `Модель не ответила: ${aiFailure(answer)}.`);
     }
-    const draft = extractManagedPlan(answer.text);
+    const draft = normalizeDraftIssues(extractManagedPlan(answer.text));
     const classified = classifyPlan(draft, { planId: this.#planIdFor(target) });
     if (classified.verdict !== 'VALID_MANAGED') {
       throw reject('AI_INVALID_PLAN',

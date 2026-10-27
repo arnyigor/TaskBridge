@@ -696,3 +696,47 @@ test('служебные каталоги движков не обходятся
   assert.deepEqual(scan.files.map(file => file.path), ['Docs/REAL.md']);
   assert.equal(scan.scanned.dirs, 2, 'обойдены только корень и Docs');
 });
+
+test('подписочная модель: один ответ через Pi без инструментов и без сессии', async () => {
+  const { piOneShotArgs, PI_ONESHOT_FLAGS } = await import('../src/pi-oneshot.mjs');
+  const args = piOneShotArgs({ provider: 'openai-codex', model: 'gpt-6.1-sol', promptFile: 'C:/tmp/prompt.txt' });
+  // Подписка работает только через сам Pi, и он не должен получить ни инструментов,
+  // ни доступа к проекту: иначе «собери план» превращается в правку файлов.
+  for (const flag of ['--print', '--no-session', '--no-tools', '--no-mcp', '--no-extensions', '--no-context-files']) {
+    assert.ok(PI_ONESHOT_FLAGS.includes(flag), `флаг ${flag} обязателен`);
+  }
+  assert.ok(args.includes('openai-codex/gpt-6.1-sol'));
+  assert.equal(args[args.indexOf('--append-system-prompt') + 1], 'C:/tmp/prompt.txt', 'задание уходит файлом');
+  assert.equal(args[args.length - 1], 'Выполни.', 'сообщение без пробелов');
+});
+
+test('свободный текст в «Обнаруженных проблемах» становится записью F-###, а не отказом', async () => {
+  const { normalizeDraftIssues } = await import('../src/application/plan-ai-review.mjs');
+  const { classifyPlan } = await import('../src/application/plan-file.mjs');
+  const draft = `---
+taskbridge_plan: 1
+plan_id: p-issues
+revision: 1
+goal: "Проверка раздела проблем"
+---
+
+# План
+
+## Шаги
+
+### S-001 | TODO | P1 | Шаг
+**Критерии:** сделано.
+**Проверка:** run
+
+## Обнаруженные проблемы
+
+- F-001 | P1 | OPEN | уже в формате
+Источник показан частично и обрывается.
+`;
+  const fixed = normalizeDraftIssues(draft);
+  assert.match(fixed, /^- F-001 \| P1 \| OPEN \| уже в формате$/m, 'существующая запись не тронута');
+  assert.match(fixed, /^- F-002 \| P3 \| OPEN \| Источник показан частично и обрывается\.$/m);
+  assert.equal(classifyPlan(fixed, { planId: 'p-issues' }).verdict, 'VALID_MANAGED');
+  // Без раздела проблем текст не переписывается.
+  assert.equal(normalizeDraftIssues('# просто текст\n'), '# просто текст\n');
+});

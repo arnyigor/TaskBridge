@@ -7,8 +7,10 @@ import { CommandCoordinator } from './application/command-coordinator.mjs';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { PiRpcSession } from './pi-rpc.mjs';
+import { piOneShotArgs, spawnPi } from './pi-oneshot.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
@@ -3290,10 +3292,38 @@ export class TaskManager extends EventEmitter {
       return { ok: false, code: 'MODEL_UNKNOWN', message: 'у сессии нет выбранной модели' };
     }
     const target = await this.#probeTarget(providerId, modelId);
-    if (!target.ok) return { ok: false, code: target.code, message: target.message };
+    // Подписочные провайдеры (ChatGPT/Codex и подобные) работают через OAuth Pi и
+    // адреса chat-completions не имеют: в чате модель отвечает, а отдельный вопрос
+    // упирается в «у провайдера нет адреса» (живой отчёт 2026-10-27). Тогда берём
+    // локальную модель — только loopback, чтобы текст не ушёл в облако мимо
+    // выбранного оператором провайдера, — и честно называем её в ответе.
+    let chosen = target.ok
+      ? { baseUrl: target.baseUrl, apiKey: target.apiKey, provider: providerId, model: modelId, local: null }
+      : null;
+    if (!chosen) {
+      // Первый путь для подписки — Pi в режиме --print: та же модель и тот же
+      // доступ, что в чате, только без инструментов и без сессии. Проверено на
+      // живом проекте: план из 7 шагов собран моделью openai-codex/gpt-6.1-sol.
+      const oneShot = await this.#piOneShot({ provider: providerId, model: modelId, prompt, timeoutMs });
+      if (oneShot.ok) {
+        return { ...oneShot, provider: providerId, model: modelId, local: false, viaPi: true, fellBackFrom: `${providerId}/${modelId}` };
+      }
+      const fallback = await this.#localFallbackTarget();
+      if (!fallback) {
+        return {
+          ok: false, code: target.code, message: target.message,
+          subscription: target.code === 'NO_ENDPOINT' || target.code === 'MODEL_UNKNOWN',
+          piCode: oneShot.code
+        };
+      }
+      chosen = { ...fallback, local: true, fellBackFrom: `${providerId}/${modelId}` };
+    }
     const result = await completeOnce({
-      baseUrl: target.baseUrl, id: modelId, apiKey: target.apiKey, prompt, maxTokens, timeoutMs
+      baseUrl: chosen.baseUrl, id: chosen.model, apiKey: chosen.apiKey, prompt, maxTokens, timeoutMs
     });
+    if (chosen.fellBackFrom) {
+      return { ...result, provider: chosen.provider, model: chosen.model, local: true, fellBackFrom: chosen.fellBackFrom };
+    }
     // `local` — не догадка: цель найдена среди локальных серверов/роутера, значит
     // текст не уходит наружу (это и показывается оператору).
     const external = this.localServers.find(providerId);
@@ -3396,6 +3426,77 @@ export class TaskManager extends EventEmitter {
    * llama.cpp-роутер (с его ключом) или провайдер из Pi-каталога. Отказ вместо
    * догадки: нет адреса или ключа — код NO_ENDPOINT/NO_KEY.
    */
+  /**
+   * Локальная модель на замену подписочной: только loopback-адреса и только
+   * провайдер с непустым каталогом (иначе неизвестно, что просить). Облачные
+   * провайдеры здесь не рассматриваются намеренно.
+   */
+  async #localFallbackTarget() {
+    let doc;
+    try {
+      doc = JSON.parse(await fs.readFile(path.join(piAgentDir(process.env), 'models.json'), 'utf8'));
+    } catch {
+      return null;
+    }
+    for (const [id, entry] of Object.entries(doc?.providers || {})) {
+      const baseUrl = String(entry?.baseUrl || '');
+      if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(baseUrl)) continue;
+      const model = (Array.isArray(entry.models) ? entry.models : [])
+        .map(item => String(item?.id || ''))
+        .find(Boolean);
+      if (!model) continue;
+      return { provider: id, model, baseUrl, apiKey: providerApiKey(entry.apiKey, process.env) };
+    }
+    return null;
+  }
+
+  /**
+   * Один ответ модели без сессии и без инструментов: `pi --print`. Нужен для
+   * подписочных провайдеров (OAuth), у которых нет адреса chat-completions, — в чате
+   * такая модель отвечает, а прямой HTTP-запрос к ней невозможен.
+   *
+   * Задание уходит файлом в --append-system-prompt, а не аргументом: текст плана
+   * содержит кавычки и переводы строк, и командная строка Windows их не переживает.
+   */
+  async #piOneShot({ provider, model, prompt, timeoutMs = 120_000 }) {
+    const started = Date.now();
+    const budget = Math.max(timeoutMs, 120_000);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-oneshot-'));
+    const promptFile = path.join(dir, 'prompt.txt');
+    await fs.writeFile(promptFile, String(prompt || ''), 'utf8');
+    try {
+      const args = piOneShotArgs({ provider, model, promptFile });
+      return await new Promise(resolve => {
+        let out = '';
+        let settled = false;
+        const finish = value => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        const proc = spawnPi(args, { cwd: dir });
+        const timer = setTimeout(() => {
+          try { proc.kill(); } catch {}
+          finish({ ok: false, code: 'TIMEOUT', ms: Date.now() - started, message: 'модель не ответила за отведённое время' });
+        }, budget);
+        proc.stdout.on('data', chunk => { out += chunk; });
+        proc.stderr.on('data', () => {});
+        proc.on('error', error => {
+          clearTimeout(timer);
+          finish({ ok: false, code: 'UNREACHABLE', ms: Date.now() - started, message: String(error?.message || error) });
+        });
+        proc.on('close', code => {
+          clearTimeout(timer);
+          const text = out.trim();
+          if (text) finish({ ok: true, text, ms: Date.now() - started });
+          else finish({ ok: false, code: code === 0 ? 'EMPTY' : 'HTTP_ERROR', ms: Date.now() - started, exitCode: code });
+        });
+      });
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
   async #probeTarget(providerId, modelId = null) {
     // Strata и другие externalServers — НЕ llama.cpp router: у каждого свой port.
     // Ищем и по provider, и по model, как в телеметрии рабочего хода.

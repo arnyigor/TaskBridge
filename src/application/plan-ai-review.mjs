@@ -106,7 +106,8 @@ export const PLAN_DRAFT_PROMPT = [
   'Правила: шаги только из текста, нумерация S-001, S-002, … по порядку; статус шага TODO;',
   'приоритет P0…P3; критерии обязательны у каждого шага; не выдумывай факты и файлы;',
   'если в тексте нет работы, но есть заметки — сделай один шаг с честными критериями;',
-  'раздел «Обнаруженные проблемы» оставь пустым, если проблем нет.'
+  'раздел «Обнаруженные проблемы»: либо пусто, либо строки строго вида',
+  '- F-001 | P1 | OPEN | <что не так>; свободный текст в этом разделе недопустим.'
 ].join('\n');
 
 export function buildPlanDraftPrompt({ path: relPath = '', text = '', truncated = false, hint = '' } = {}) {
@@ -132,4 +133,33 @@ export function extractManagedPlan(raw) {
   const start = text.indexOf('---');
   if (start > 0) text = text.slice(start).trim();
   return text.endsWith('\n') ? text : `${text}\n`;
+}
+
+/**
+ * Свободный текст в разделе «Обнаруженные проблемы» — частая вольность модели: по
+ * сути это замечание, но формат требует `- F-001 | P1 | OPEN | …`, и строгая проверка
+ * отвергала весь план целиком (живой прогон 2026-10-27 на реальном проекте). Текст
+ * оператора не выбрасывается: он становится записью F-### с приоритетом P3.
+ */
+export function normalizeDraftIssues(text) {
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  const header = lines.findIndex(line => /^##\s+Обнаруженные проблемы\s*$/.test(line.trim()));
+  if (header < 0) return String(text || '');
+  let lastNumber = 0;
+  for (const line of lines.slice(header + 1)) {
+    const match = /^\s*-\s*F-(\d+)\s*\|/.exec(line);
+    if (match) lastNumber = Math.max(lastNumber, Number(match[1]));
+  }
+  const fixed = lines.map((line, index) => {
+    if (index <= header) return line;
+    const trimmed = line.trim();
+    if (!trimmed) return line;
+    if (/^-\s*F-\d+\s*\|/.test(trimmed)) return line;
+    if (trimmed.startsWith('#')) return line;
+    lastNumber += 1;
+    const body = trimmed.replace(/^[-*]\s*/, '').replace(/\s+/g, ' ').trim();
+    if (!body) return line;
+    return `- F-${String(lastNumber).padStart(3, '0')} | P3 | OPEN | ${body}`;
+  });
+  return fixed.join('\n');
 }
