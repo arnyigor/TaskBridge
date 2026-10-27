@@ -88,6 +88,16 @@ object DesktopUpdater {
         ${'$'}stagedExe = Join-Path ${'$'}Source 'TaskBridge.exe'
         if (-not (Test-Path -LiteralPath ${'$'}stagedExe)) { Write-Log 'FAIL: staging has no TaskBridge.exe'; exit 2 }
 
+        # 0. Остатки приложения: лаунчер выходит раньше своего JVM, и файлы остаются
+        #    занятыми. Останавливаем только процессы ЭТОГО exe — по имени образа
+        #    убивать нельзя, рядом живут сервер и сессии.
+        ${'$'}leftover = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { ${'$'}_.Path -eq ${'$'}exe })
+        foreach (${'$'}item in ${'$'}leftover) {
+            Write-Log "stopping leftover app process ${'$'}(${'$'}item.Id)"
+            try { ${'$'}item.Kill() } catch { Write-Log "WARN: kill ${'$'}(${'$'}item.Id) failed: ${'$'}(${'$'}_.Exception.Message)" }
+        }
+        if (${'$'}leftover.Count -gt 0) { Start-Sleep -Milliseconds 800 }
+
         # 1. Ждём, пока приложение отпустит exe: копирование поверх занятого файла
         #    оставляет половину старой сборки — именно это и выглядело как «exe не стартует».
         ${'$'}waited = 0
