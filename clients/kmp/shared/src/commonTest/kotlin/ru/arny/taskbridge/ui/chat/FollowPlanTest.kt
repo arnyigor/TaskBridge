@@ -375,3 +375,18 @@ class PlanListAndIconTest {
         assertEquals("", planStepsSummary(null))
     }
 }
+
+/** Живой отчёт 2026-10-28: инструкция плана подписана «из браузера», хотя её не
+ *  печатал ни один клиент. */
+class MessageSourceLabelTest {
+
+    @Test
+    fun `сообщение контроллера плана подписано как «по плану»`() {
+        assertEquals("по плану", ru.arny.taskbridge.ui.common.sourceLabel("follow-plan", "desktop-1"))
+        // Неизвестный отправитель — не повод называть его браузером.
+        assertEquals("из другого клиента", ru.arny.taskbridge.ui.common.sourceLabel("weird-7", "desktop-1"))
+        assertEquals("с Android", ru.arny.taskbridge.ui.common.sourceLabel("android-738f0587", "desktop-1"))
+        assertEquals(null, ru.arny.taskbridge.ui.common.sourceLabel("desktop-1", "desktop-1"))
+        assertEquals(null, ru.arny.taskbridge.ui.common.sourceLabel(null, "desktop-1"))
+    }
+}

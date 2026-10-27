@@ -100,5 +100,9 @@ fun sourceLabel(clientId: String?, ownClientId: String): String? = when {
     clientId.startsWith("desktop") -> "с Desktop"
     clientId.startsWith("cli") -> "из терминала"
     clientId.startsWith("cloud") -> "через облако"
-    else -> "из браузера"
+    // Сообщение контроллера Follow Plan: его не печатал ни один клиент, и «из
+    // браузера» здесь было просто неправдой (живой отчёт 2026-10-28 — Desktop
+    // подписал инструкцию плана как пришедшую из браузера).
+    clientId.startsWith("follow-plan") -> "по плану"
+    else -> "из другого клиента"
 }
