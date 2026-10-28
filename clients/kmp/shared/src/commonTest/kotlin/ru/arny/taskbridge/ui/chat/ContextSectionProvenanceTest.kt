@@ -105,3 +105,18 @@ class ContextCompositionLinesTest {
         assertNull(contextExcludedLine(report(unavailable)))
     }
 }
+
+/** Живой вопрос 2026-10-29: «сжалась, но занимает 482К» — направление чисел должно быть названо. */
+class CompactionChangeLineTest {
+    @Test
+    fun theLineNamesBothSides() {
+        val line = compactionChangeLine(482_700, 36_107)
+        assertEquals("было 482K → ≈36K ток.", line)
+    }
+
+    @Test
+    fun halfAKnownPairIsNotRenderedAsZero() {
+        assertNull(compactionChangeLine(null, 36_107))
+        assertNull(compactionChangeLine(482_700, null))
+    }
+}

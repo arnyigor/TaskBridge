@@ -499,6 +499,24 @@ test('DOM: an estimate after compaction is labelled, and a stale measurement say
   assert.match(text, /Исключено из контекста .*: 7 сообщ\./);
 });
 
+test('DOM: the compaction row says which side is before and which is after', async () => {
+  const app = await ui();
+  // Живой случай 2026-10-29: «1 · 482700→36107» читалось как «сессия занимает 482К».
+  app.renderTaskDetails({
+    ...task(),
+    status: 'RUNNING',
+    compaction: { count: 1, last: { reason: 'manual', tokensBefore: 482700, estimatedTokensAfter: 36107 } },
+  });
+  const row = app.document.getElementById('compaction');
+  assert.equal(row.textContent, '1 · до 482 700 → ≈36 107 ток.');
+  assert.match(row.title, /перед сжатием/);
+  assert.match(row.title, /Текущий размер/);
+
+  // Нечего измерять — строка не выдумывает числа.
+  app.renderTaskDetails({ ...task(), status: 'RUNNING', compaction: { count: 2, last: null } });
+  assert.equal(app.document.getElementById('compaction').textContent, '2');
+});
+
 test('DOM: context panel shows current compaction explicitly', async () => {
   const app = await ui();
   app.renderTaskDetails({ ...task(), status: 'RUNNING', runtime: { state: 'WORKING', activity: 'compacting' } });

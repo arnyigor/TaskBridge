@@ -33,3 +33,25 @@ Modelled in `SessionComposition` / `CompositionActive` / `CompositionTotals` / `
 Verification: `:shared:jvmTest` — **330 PASS**, including `ContextCompositionLinesTest` (5 PASS: kept counts, large character counts labelled as characters, summary line, excluded-only-when-present, and an unavailable composition rendering nothing instead of zeros) and `ContextSectionProvenanceTest` (3 PASS). `:desktopApp:compileKotlin` and `:androidApp:compileDebugKotlin` succeed; `npm test` — **1736 PASS, 0 FAIL, 4 SKIP**; `npm run check` — PASS.
 
 Still open: the rebuilt composition screen (CTX-04), on-demand summary text, `context_edit`/checkpoint semantics, and CTX-01/CTX-05 on real sessions.
+
+## The number that looked like the current size
+
+Live report, 2026-10-29: the operator read the task card as "the session compacted but still takes 482K". That number was `tokensBefore` — the **measured** size *before* the compaction, printed as `1 · 482700→36107` with no units and no direction. The session's actual state at that moment was `usage.tokens = 53 345` of a 1 048 576 window (5.1%), and the compaction's own estimate was `estimatedTokensAfter = 36 107`.
+
+The row now reads `1 · до 482 700 → ≈36 107 ток.`, with a tooltip stating that the right-hand side is Pi's estimate and that the current measured size lives in the context panel. Compose shows `Последнее сжатие: было 482K → ≈36K ток. · ручное`.
+
+Where the 482 700 tokens came from (same session file, 1 326 messages):
+
+| Part | Characters | ≈Tokens (chars/4) | Share |
+|---|---|---|---|
+| tool results | 941 046 | 235 261 | 59.7 % |
+| tool-call arguments | 478 023 | 119 505 | 30.3 % |
+| assistant thinking | 132 505 | 33 126 | 8.4 % |
+| assistant text | 22 118 | 5 529 | 1.4 % |
+| user text | 2 305 | 576 | 0.1 % |
+
+A single tool result reached 266 025 bytes and another 242 052; by tool, call arguments were 314 `bash` (186 945 chars), 38 `write` (146 975), 75 `edit` (123 474). So the growth is technical payload — full command output and whole-file bodies passed to `write`/`edit` — not conversation. The compaction summary itself is 10 598 characters, and the context that survived it is 114 entries (≈96 165 characters ≈ 24 K tokens by the same estimate), which is why the practical size dropped to Pi's 53 K measurement.
+
+Verification: `tests/chat.test.mjs` — 161 tests, 1 skip, **160 PASS**, including a new DOM test that fixes the row's text and tooltip and checks that a task without a known pair shows just the count instead of zeros. `:shared:jvmTest` — **332 PASS** (new `CompactionChangeLineTest`, 2 PASS), `:androidApp:compileDebugKotlin` and `:desktopApp:compileKotlin` succeed. `npm test` — **1744 PASS, 0 FAIL, 4 SKIP**; `npm run check` — PASS.
+
+Limit: the 24 K figure is a `chars/4` projection of the session file, not Pi's own `buildSessionContext()`. It is the same projection CTX-02 exposes, and it stays deliberately separate from the measured 53 K.

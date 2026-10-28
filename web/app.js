@@ -2806,7 +2806,21 @@ function renderTaskDetails(t) {
   renderContext(t);
   renderOutputFiles(t.outputFiles || []);
   const c = t.compaction || {};
-  $('compaction').textContent = c.last ? `${c.count} · ${c.last.tokensBefore ?? '?'}→${c.last.estimatedTokensAfter ?? '?'}` : String(c.count || 0);
+  // Живой вопрос оператора 2026-10-29: «сессия сжалась, но занимает 482К». В строке
+  // стояло `1 · 482700→36107` без единиц и без направления — большое число читалось
+  // как текущий размер. Слева теперь измерение ДО сжатия, справа оценка ПОСЛЕ;
+  // текущий измеренный размер живёт в панели «Откуда контекст».
+  if (c.last) {
+    const parts = [];
+    if (c.last.tokensBefore != null) parts.push(`до ${Number(c.last.tokensBefore).toLocaleString('ru-RU')}`);
+    if (c.last.estimatedTokensAfter != null) parts.push(`≈${Number(c.last.estimatedTokensAfter).toLocaleString('ru-RU')}`);
+    $('compaction').textContent = `${c.count || 0}${parts.length ? ` · ${parts.join(' → ')} ток.` : ''}`;
+    $('compaction').title = 'Сжатий: ' + (c.count || 0)
+      + '. «До» — измеренный размер контекста перед сжатием, «≈» — оценка Pi на размер после. Текущий размер — в панели «Откуда контекст».';
+  } else {
+    $('compaction').textContent = String(c.count || 0);
+    $('compaction').title = 'Сжатий: ' + (c.count || 0) + '. Текущий размер — в панели «Откуда контекст».';
+  }
   updateStopButton();
   renderActivity(t);
   $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;

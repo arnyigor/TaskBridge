@@ -2272,8 +2272,7 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     // Сжатие уже прошло: факт и его результат из task.compaction.last — иначе
     // в диагностике видно только «сжатий: N» без того, что именно произошло.
     val lastCompaction = task?.compaction?.last?.let { last ->
-        val change = if (last.tokensBefore != null && last.estimatedTokensAfter != null)
-            "${tokenCount(last.tokensBefore)} → ${tokenCount(last.estimatedTokensAfter)} ток." else null
+        val change = compactionChangeLine(last.tokensBefore, last.estimatedTokensAfter)
         listOfNotNull(change, last.reason?.let(::compactionReasonLabel)).joinToString(" · ")
             .takeIf { it.isNotEmpty() }
             ?.let { "Последнее сжатие: $it · ${last.at?.substringBefore('.')?.replace('T', ' ') ?: "—"}" }
@@ -2297,6 +2296,16 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
 private fun speedTurns(turns: Int): String = if (turns > 0) " (ходов: $turns)" else ""
 
 /** Причина сжатия из кадра Pi: две известные по имени, остальное — как пришло. */
+/**
+ * «было 482K → ≈36K ток.»: слева ИЗМЕРЕНИЕ Pi перед сжатием, справа его ОЦЕНКА после.
+ * Без подписей строка «482700→36107» читалась оператором как текущий размер сессии
+ * (живой вопрос 2026-10-29); текущий размер показывает отдельная строка контекста.
+ */
+internal fun compactionChangeLine(tokensBefore: Long?, estimatedTokensAfter: Long?): String? {
+    if (tokensBefore == null || estimatedTokensAfter == null) return null
+    return "было ${tokenCount(tokensBefore)} → ≈${tokenCount(estimatedTokensAfter)} ток."
+}
+
 private fun compactionReasonLabel(reason: String): String = when (reason) {
     "threshold" -> "порог автосжатия"
     "overflow" -> "история превысила окно"
