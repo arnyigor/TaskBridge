@@ -10,13 +10,16 @@ async function fixture(run) {
   const root = await fs.mkdtemp(path.join(local, 'strata-sync-test-'));
   try {
     await fs.mkdir(path.join(root, 'scripts'));
+    await fs.mkdir(path.join(root, 'src'));
     await fs.mkdir(path.join(root, 'agent'));
     await fs.copyFile('scripts/strata-providers.mjs', path.join(root, 'scripts/strata-providers.mjs'));
+    // The script resolves config.json through src/config.mjs (TASKBRIDGE_CONFIG_DIR).
+    await fs.copyFile('src/config.mjs', path.join(root, 'src/config.mjs'));
     const models = { providers: { strata: { baseUrl: 'http://127.0.0.1:9000/v1', models: [{ id: 'old', name: 'Old' }] } } };
     const modelsPath = path.join(root, 'agent/models.json');
     await fs.writeFile(modelsPath, JSON.stringify(models));
     const execute = () => spawnSync(process.execPath, [path.join(root, 'scripts/strata-providers.mjs')], {
-      env: { ...process.env, PI_AGENT_DIR: path.join(root, 'agent') }, encoding: 'utf8'
+      env: { ...process.env, PI_AGENT_DIR: path.join(root, 'agent'), TASKBRIDGE_CONFIG_DIR: '' }, encoding: 'utf8'
     });
     await run({ root, modelsPath, models, execute });
   } finally { await fs.rm(root, { recursive: true, force: true }); }

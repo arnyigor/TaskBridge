@@ -99,3 +99,22 @@ Three hermetic CLI regressions copy only the backup script and TaskStore into a 
 `node --test --test-force-exit tests/backup.test.mjs tests/store.test.mjs`: **16 PASS, 0 FAIL, 0 SKIP**. Logs: `.local/stabilization-baseline/backup-cli-before.log` / `backup-cli-after.log`.
 
 This fixes only the backup portion of DIST-02; external configuration paths, read-only program files, update separation, full restore/migration and retention-policy acceptance remain open. The real user's backup command/database was not used to verify this change.
+
+## DIST-02 follow-up — explicit configuration directory
+
+`src/config.mjs` now exports `configDir(rootDir, env)`: `TASKBRIDGE_CONFIG_DIR` when set and non-blank (resolved), otherwise the program root as before. `loadConfig`/`saveConfig` accept an optional env and create the target directory on first write. `loadConfig` still reads `config.example.json` from the program root, so the shipped template does not have to be copied. `scripts/strata-providers.mjs` and `scripts/cloud-local.mjs` read/write the same location instead of a hard-coded `<root>/config.json`.
+
+Proof before/after, using the HEAD version of `src/config.mjs` in a copied program tree:
+
+- Before: `TASKBRIDGE_CONFIG_DIR` was ignored, `config.json` was created inside the program directory, the operator's settings file was unused and the server listened on the example port 8787.
+- After: settings are read from the configured directory, a new project is saved there, nothing is written into the program tree and session data lands in `TASKBRIDGE_DATA_DIR`.
+
+Tests:
+
+- `node --test --test-force-exit tests/config-dir.test.mjs`: **4 PASS** (historical layout, explicit directory, blank value treated as unset, real server started from a program tree without settings).
+- `node --test --test-force-exit tests/strata-providers.test.mjs`: **2 PASS** after the fixture copies `src/config.mjs` and clears an inherited `TASKBRIDGE_CONFIG_DIR`.
+- Full `npm test`: **1719 PASS, 0 FAIL, 4 SKIP** (1723 tests). `npm run check`: PASS.
+
+The hermetic tests delete `TASKBRIDGE_*`/`PI_*` variables inherited from a live session; without that, the child tried to bind the operator server's `TASKBRIDGE_PORT` (no bind succeeded, no data changed).
+
+Still open for DIST-02: proving a genuinely write-protected program directory (the tests assert that nothing is written, not that the OS forbids it), GUI/launcher propagation of the new variable, default user-profile locations for an installed build, and update/migration acceptance.

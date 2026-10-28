@@ -19,6 +19,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { configDir } from '../src/config.mjs';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const DRY = process.argv.includes('--dry-run');
@@ -31,7 +32,8 @@ function readJson(file) {
 }
 
 function externalDiscovery() {
-  const cfg = readJson(path.join(ROOT, 'config.json')) || {};
+  // The server may keep its settings outside the program directory.
+  const cfg = readJson(path.join(configDir(ROOT), 'config.json')) || {};
   return (cfg.localRuntime && cfg.localRuntime.externalDiscovery) || {};
 }
 

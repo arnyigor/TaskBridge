@@ -30,6 +30,7 @@ import path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { generateCredentials } from '../cloud/lib/credentials.mjs';
+import { configDir } from '../src/config.mjs';
 import crypto from 'node:crypto';
 import { createEnvelope, serializeEnvelope, parseEnvelope } from '../src/cloud/protocol.mjs';
 import { issueDeviceToken } from '../src/cloud/device-token.mjs';
@@ -46,7 +47,8 @@ const TUNNEL_LOG = path.join(stateDir, 'tunnel.log');
 const CLOUDFLARED_LOG = path.join(stateDir, 'cloudflared.log');
 const VERIFY_REPORT = path.join(stateDir, 'verify.md');
 const LINK_FILE = path.join(stateDir, 'pair-link.txt');
-const CONFIG_FILE = path.join(root, 'config.json');
+// The server may keep its settings outside the program directory (DIST-02).
+const CONFIG_FILE = path.join(configDir(root), 'config.json');
 
 const DEFAULT_PORT = 8788;
 const DEFAULT_LOCAL_PORT = 8787;
