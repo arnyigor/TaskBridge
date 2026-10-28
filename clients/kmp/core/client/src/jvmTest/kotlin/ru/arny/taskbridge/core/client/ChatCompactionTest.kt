@@ -116,6 +116,150 @@ class ChatCompactionTest {
         assertTrue(snapshot.items.filterIsInstance<ChatItem.Assistant>().none { it.active })
     }
 
+    private fun pi(seq: Long, json: String) = TaskEvent(taskId = "a", seq = seq, type = "PI_EVENT", data = buildJsonObject { put("pi", TaskBridgeJson.parseToJsonElement(json)) })
+
+    @Test
+    fun everyPageCutReconstructsTheSameCompactSnapshot() {
+        val f = fixture("auto")
+        val whole = ChatReducer(f.task)
+        f.events.forEach { whole.apply(it) }
+        for (cut in 1 until f.events.size) {
+            val tail = ChatReducer(f.task, seedInitial = false)
+            f.events.drop(cut).forEach { tail.apply(it) }
+            tail.revealWindowStart(f.events[cut].seq)
+            val cursor = tail.cursor
+            tail.prependOlder(f.task, f.events.take(cut), reachedStart = true)
+            assertEquals(whole.snapshot().items, tail.snapshot().items, "cut $cut")
+            assertEquals("assistant-initial", tail.snapshot().newestAnswerId)
+            assertEquals(cursor, tail.cursor)
+        }
+        val tail = ChatReducer(f.task, seedInitial = false)
+        f.events.drop(15).forEach { tail.apply(it) }
+        tail.revealWindowStart(f.events[15].seq)
+        tail.prependOlder(f.task, f.events.subList(7, 15), reachedStart = false)
+        tail.prependOlder(f.task, f.events.take(7), reachedStart = true)
+        assertEquals(whole.snapshot().items, tail.snapshot().items, "three pages")
+    }
+
+    @Test
+    fun backfillRetainsLateCompletionAfterSteer() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(pi(2, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"A"}}"""))
+        reducer.apply(TaskEvent(taskId = "a", seq = 3, type = "USER_MESSAGE", message = "steer", data = buildJsonObject { put("mode", "steer") }))
+        reducer.apply(pi(4, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"AB"}]}}"""))
+        reducer.revealWindowStart(2)
+        reducer.prependOlder(task, listOf(pi(1, """{"type":"message_start","message":{"role":"assistant"}}""")), reachedStart = true)
+        val original = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().first { it.canonicalId == "assistant-initial" }
+        assertEquals("AB", original.text)
+    }
+
+    @Test
+    fun backfillDoesNotReviveASnapshotCancelledAnswer() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(pi(2, """{"type":"message_start","message":{"role":"assistant"}}"""))
+        reducer.apply(pi(3, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"A"}}"""))
+        reducer.revealWindowStart(2)
+        reducer.syncTask(task.copy(status = "CANCELLED"))
+        reducer.prependOlder(task, listOf(pi(1, """{"type":"agent_start"}""")), reachedStart = true)
+        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().single()
+        assertFalse(answer.active)
+        assertTrue(answer.final)
+        assertEquals("CANCELLED", answer.status)
+    }
+
+    @Test
+    fun anOpenMessageReconcilesItsEndAfterBackfill() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(pi(4, """{"type":"message_start","message":{"role":"assistant"}}"""))
+        reducer.apply(pi(5, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"after"}}"""))
+        reducer.revealWindowStart(4)
+        reducer.prependOlder(task, listOf(
+            pi(1, """{"type":"message_start","message":{"role":"assistant"}}"""),
+            pi(2, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"before"}}"""),
+            pi(3, """{"type":"compaction_end","result":{"summary":"summary"}}"""),
+        ), reachedStart = true)
+        reducer.apply(pi(6, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"after!"}]}}"""))
+        val snapshot = reducer.snapshot()
+        assertEquals(listOf("before", "after!"), snapshot.items.filterIsInstance<ChatItem.Assistant>().map { it.text })
+        assertEquals("assistant-initial", snapshot.newestAnswerId)
+        assertTrue(snapshot.items.filterIsInstance<ChatItem.Assistant>().none { it.partial })
+    }
+
+    @Test
+    fun lateAbortedOrphanUsesTheReconstructedPrefixNotTheNewAnswer() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(pi(4, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"A"}}"""))
+        reducer.apply(TaskEvent(taskId = "a", seq = 5, type = "USER_MESSAGE", message = "steer", data = buildJsonObject { put("mode", "steer") }))
+        reducer.apply(pi(6, """{"type":"message_start","message":{"role":"assistant"}}"""))
+        reducer.apply(pi(7, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"N"}}"""))
+        reducer.revealWindowStart(4)
+        reducer.prependOlder(task, listOf(
+            pi(1, """{"type":"message_start","message":{"role":"assistant"}}"""),
+            pi(2, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"P"}]}}"""),
+            pi(3, """{"type":"message_start","message":{"role":"assistant"}}"""),
+        ), reachedStart = true)
+        reducer.apply(pi(8, """{"type":"message_end","message":{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"A"}]}}"""))
+        val answers = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>()
+        assertEquals(listOf("P\n\nA", "N"), answers.map { it.text })
+        assertEquals("assistant-5", reducer.snapshot().newestAnswerId)
+    }
+
+    @Test
+    fun overlappingBackfillDoesNotMisrouteTheLateOrphan() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        val delta = pi(4, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"A"}}""")
+        val steer = TaskEvent(taskId = "a", seq = 5, type = "USER_MESSAGE", message = "steer", data = buildJsonObject { put("mode", "steer") })
+        reducer.apply(delta)
+        reducer.apply(steer)
+        reducer.apply(pi(6, """{"type":"message_start","message":{"role":"assistant"}}"""))
+        reducer.apply(pi(7, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"N"}}"""))
+        reducer.revealWindowStart(4)
+        reducer.prependOlder(task, listOf(
+            pi(1, """{"type":"message_start","message":{"role":"assistant"}}"""),
+            pi(2, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"P"}]}}"""),
+            pi(3, """{"type":"message_start","message":{"role":"assistant"}}"""), delta, steer,
+        ), reachedStart = true)
+        reducer.apply(pi(8, """{"type":"message_end","message":{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"AB"}]}}"""))
+        assertEquals(listOf("P\n\nAB", "N"), reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().map { it.text })
+    }
+
+    @Test
+    fun aNewerTurnsToolCanFinishAfterTheOlderPrefixArrives() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(pi(2, """{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"A"}}"""))
+        reducer.apply(TaskEvent(taskId = "a", seq = 3, type = "USER_MESSAGE", message = "steer", data = buildJsonObject { put("mode", "steer") }))
+        reducer.apply(pi(4, """{"type":"message_start","message":{"role":"assistant"}}"""))
+        reducer.apply(pi(5, """{"type":"tool_execution_start","toolCallId":"t","toolName":"read","args":{"path":"sample.txt"}}"""))
+        reducer.revealWindowStart(2)
+        reducer.prependOlder(task, listOf(pi(1, """{"type":"message_start","message":{"role":"assistant"}}""")), reachedStart = true)
+        reducer.apply(pi(6, """{"type":"tool_execution_end","toolCallId":"t","toolName":"read"}"""))
+        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last()
+        assertEquals("assistant-3", answer.id)
+        assertEquals(ru.arny.taskbridge.core.client.chat.ToolState.DONE, answer.tools.single().state)
+    }
+
+    @Test
+    fun completedToolsAndProgressSurviveBackfillAfterSteer() {
+        val task = Task(id = "a", status = "RUNNING")
+        val reducer = ChatReducer(task, seedInitial = false)
+        reducer.apply(pi(2, """{"type":"tool_execution_start","toolCallId":"s","toolName":"subagent","args":{"agent":"worker","task":"public test"}}"""))
+        reducer.apply(TaskEvent(taskId = "a", seq = 3, type = "USER_MESSAGE", message = "steer", data = buildJsonObject { put("mode", "steer") }))
+        reducer.apply(pi(4, """{"type":"tool_execution_end","toolCallId":"s","toolName":"subagent","result":{"details":{"results":[{"agent":"worker","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}]}}}"""))
+        reducer.revealWindowStart(2)
+        val before = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().first().tools.single()
+        reducer.prependOlder(task, listOf(pi(1, """{"type":"message_start","message":{"role":"assistant"}}""")), reachedStart = true)
+        val after = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().first().tools.single()
+        assertEquals(before, after)
+        assertTrue(after.progress.orEmpty().contains("done"))
+        assertEquals("assistant-3", reducer.snapshot().newestAnswerId)
+    }
+
     @Test
     fun fullMessageEndReplacesDeltasWithoutRepeatingText() {
         val reducer = ChatReducer(Task(id = "a", status = "RUNNING"))

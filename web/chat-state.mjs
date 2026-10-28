@@ -130,6 +130,7 @@ export class ChatState {
   constructor(task, { seedInitial = true } = {}) {
     this.taskId = task.id;
     this.cursor = 0;
+    this.oldestSeq = null;
     this.turns = [];
     this.tools = new Map();
     this.notes = new Set();
@@ -168,8 +169,10 @@ export class ChatState {
   // Keep the live sink identity/cursor. If the first exchange was cut by size,
   // reconstruct its prefix in scratch before updating that same sink object.
   prependOlder(task, events, reachedStart) {
+    const olderEvents = events.filter(event => this.oldestSeq === null || event.seq < this.oldestSeq);
+    if (!olderEvents.length && !reachedStart) return [];
     const scratch = new ChatState(task, { seedInitial: reachedStart });
-    for (const event of events) scratch.apply(event);
+    for (const event of olderEvents) scratch.apply(event);
     const previousWindow = this.windowStart;
     if (previousWindow) {
       const joined = scratch.current;
@@ -224,7 +227,7 @@ export class ChatState {
     // the rest of the same turn, so it becomes a partial turn of its own.
     const partial = scratch.windowStart;
     if (partial && !turns.includes(partial) && (partial.text || partial.thinking || partial.tools.length)) {
-      partial.id = `assistant-partial-${events[0].seq}`;
+      partial.id = `assistant-partial-${olderEvents[0]?.seq ?? this.oldestSeq ?? 0}`;
       partial.partial = true;
       // A settle that never arrives in this page must not leave a typing
       // animation or a running chip in a historical turn.
@@ -238,6 +241,7 @@ export class ChatState {
     const known = new Set(this.turns.map(t => t.id));
     const fresh = turns.filter(t => !known.has(t.id));
     this.turns.unshift(...fresh);
+    if (olderEvents.length) this.oldestSeq = olderEvents.reduce((min, event) => Math.min(min, event.seq), this.oldestSeq ?? Infinity);
     for (const seq of scratch.notes) this.notes.add(seq);
     for (const [id, tool] of scratch.tools) if (!this.tools.has(id)) this.tools.set(id, tool);
     for (const [key, entry] of scratch.variants) if (!this.variants.has(key)) this.variants.set(key, entry);
@@ -531,7 +535,10 @@ export class ChatState {
   apply(event) {
     if (event.taskId && event.taskId !== this.taskId) return false;
     if (event.seq <= this.cursor) return false;
-    if (Number.isSafeInteger(event.seq)) this.cursor = event.seq;
+    if (Number.isSafeInteger(event.seq)) {
+      this.cursor = event.seq;
+      if (this.oldestSeq === null) this.oldestSeq = event.seq;
+    }
     const frame = event.data?.pi;
     const window = this.windowStart;
     if (window && (this.windowRecording || this.current === window || this.messageTurn === window || this.executionTurn === window || this.orphanMessage?.turn === window || window.tools.some(tool => tool.id === frame?.toolCallId))) {

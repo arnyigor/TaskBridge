@@ -109,6 +109,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         private set
 
     private var turns = mutableListOf<Turn>()
+    private var oldestSeq: Long? = null
     private val tools = mutableMapOf<String, Tool>()
     private val notes = mutableSetOf<Long>()
     private val noteTexts = mutableSetOf<String>()
@@ -119,6 +120,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var orphanMessage: Orphan? = null
     private var executionTurn: Turn? = null
     private var windowStart: Turn? = null
+    private var windowEvents = mutableListOf<TaskEvent>()
+    private var windowRecording = !seedInitial
     private var textPrefix = ""
     private var thinkingPrefix = ""
     private var textSeparator = ""
@@ -158,21 +161,85 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     /**
      * Replays an older, settled batch in a scratch reducer and puts its turns
-     * in front. Never touches the live tail (current, messageTurn, cursor).
+     * in front. A size-cut exchange is reconstructed in scratch, retaining the
+     * live tail's cursor and routing state instead of creating a second answer.
      */
     fun prependOlder(task: Task, events: List<TaskEvent>, reachedStart: Boolean) {
+        val before = oldestSeq
+        val olderEvents = events.filter { before == null || it.seq < before }
+        if (olderEvents.isEmpty() && !reachedStart) return
         val scratch = ChatReducer(task, seedInitial = reachedStart)
-        for (event in events) scratch.apply(event)
+        for (event in olderEvents) scratch.apply(event)
+        val previousWindow = windowStart
+        if (previousWindow != null) {
+            val joined = scratch.current
+            val wasCurrent = current === previousWindow
+            val wasMessage = messageTurn === previousWindow
+            for (event in windowEvents) scratch.apply(event)
+            val liveNotes = turns.filter { it.role == Role.NOTE }.associateBy { it.id }
+            val retainedTools = turns.filter { it !== previousWindow }.flatMap { it.tools }.associateBy { it.id }
+            for ((id, tool) in scratch.tools.toMap()) {
+                val retained = retainedTools[id]
+                if (retained != null) {
+                    scratch.tools[id] = retained
+                } else {
+                    val live = tools[id] ?: continue
+                    scratch.tools[id] = Tool(tool.id, tool.name, tool.label, tool.state,
+                        tool.imagePath ?: live.imagePath, live.progress ?: tool.progress, live.changePreview ?: tool.changePreview)
+                }
+            }
+            val rebuiltTools = joined.tools.map { scratch.tools[it.id] ?: it }
+            joined.tools.clear()
+            joined.tools.addAll(rebuiltTools)
+            val boundaries = joined.compactionBoundaries.map { b ->
+                CompactionBoundary(b.seq, b.text, b.thinking, b.tools, b.notes.map { liveNotes[it.id] ?: it })
+            }
+            joined.compactionBoundaries.clear()
+            joined.compactionBoundaries.addAll(boundaries)
+            // syncTask can settle an answer without an event in the replay log.
+            if (previousWindow.final) {
+                joined.active = false
+                joined.final = true
+                joined.status = previousWindow.status
+                joined.error = previousWindow.error ?: joined.error
+                joined.endedAt = previousWindow.endedAt ?: joined.endedAt
+                joined.stopReason = previousWindow.stopReason ?: joined.stopReason
+                joined.superseded = previousWindow.superseded
+                for (tool in joined.tools) if (tool.state == "run") tool.state = "interrupted"
+            }
+            scratch.turns = scratch.turns.map { liveNotes[it.id] ?: it }.toMutableList()
+            if (wasCurrent) current = joined
+            if (wasCurrent || wasMessage) {
+                textPrefix = scratch.textPrefix
+                thinkingPrefix = scratch.thinkingPrefix
+                textSeparator = scratch.textSeparator
+                separatorApplied = scratch.separatorApplied
+                messageOpen = scratch.messageOpen
+                messageTurn = scratch.messageTurn
+            }
+            if (executionTurn === previousWindow) executionTurn = joined
+            if (orphanMessage?.turn === previousWindow) {
+                val rebuilt = scratch.orphanMessage?.takeIf { it.turn === joined }
+                val old = orphanMessage!!
+                orphanMessage = Orphan(joined, rebuilt?.textPrefix ?: old.textPrefix, rebuilt?.thinkingPrefix ?: old.thinkingPrefix, rebuilt?.textSeparator ?: old.textSeparator)
+            }
+            turns.remove(previousWindow)
+            windowStart = scratch.windowStart
+            windowEvents = if (windowStart != null) scratch.windowEvents else mutableListOf()
+            windowRecording = windowRecording && scratch.windowRecording
+        }
         val older = scratch.turns.toMutableList()
         val partial = scratch.windowStart
         if (partial != null && partial !in older && (partial.text.isNotEmpty() || partial.thinking.isNotEmpty() || partial.tools.isNotEmpty())) {
             // A page cut by size opens mid-turn; that content is real, so it
             // becomes a partial turn of its own instead of vanishing.
-            partial.id = "assistant-partial-${events.firstOrNull()?.seq ?: 0}"
+            partial.id = "assistant-partial-${olderEvents.firstOrNull()?.seq ?: oldestSeq ?: 0}"
             partial.partial = true
-            partial.active = false
-            partial.final = true
-            for (tool in partial.tools) if (tool.state == "run") tool.state = "interrupted"
+            if (partial !== current) {
+                partial.active = false
+                partial.final = true
+                for (tool in partial.tools) if (tool.state == "run") tool.state = "interrupted"
+            }
             older.add(0, partial)
         }
         fun noteSeq(turn: Turn): Long? = turn.id.takeIf { it.startsWith("note-") }?.removePrefix("note-")?.toLongOrNull()
@@ -193,9 +260,16 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val known = turns.mapTo(mutableSetOf()) { it.id }
         val fresh = visibleOlder.filter { known.add(it.id) }
         turns.addAll(0, fresh)
+        oldestSeq = listOfNotNull(oldestSeq, olderEvents.minOfOrNull { it.seq }).minOrNull()
         if (mcpNotice == null) mcpNotice = scratch.mcpNotice
-        for ((id, tool) in scratch.tools) tools.getOrPut(id) { tool }
+        for ((id, tool) in scratch.tools) {
+            if (previousWindow != null || id !in tools) tools[id] = tool
+        }
         for ((key, entry) in scratch.variants) variants.getOrPut(key) { entry }
+        piUsersSeen += scratch.piUsersSeen
+        if (piUserTurn == null) piUserTurn = scratch.piUserTurn?.let { user -> turns.firstOrNull { it.id == user.id } }
+        if (compactionStartNote == null) compactionStartNote = scratch.compactionStartNote?.let { note -> turns.firstOrNull { it.id == note.id } }
+        initialPromptAccepted = initialPromptAccepted || scratch.initialPromptAccepted
         version++
     }
 
@@ -404,7 +478,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (event.taskId != null && event.taskId != taskId) return false
         if (event.seq <= cursor) return false
         cursor = event.seq
+        if (oldestSeq == null) oldestSeq = event.seq
         version++
+        val window = windowStart
+        if (window != null && (windowRecording || current === window || messageTurn === window || executionTurn === window || orphanMessage?.turn === window || window.tools.any { it.id == event.piFrame?.str("toolCallId") })) {
+            windowReplayEvent(event)?.let { windowEvents += it }
+            if (event.type == "USER_MESSAGE") windowRecording = false
+        }
         val data = event.data
         when (event.type) {
             "USER_MESSAGE" -> onUserMessage(event)
@@ -878,6 +958,38 @@ private fun editChangePreview(args: JsonObject): String? {
         }
     }
     return blocks.takeIf { it.isNotEmpty() }?.joinToString("\n\n")?.take(CHANGE_PREVIEW_LIMIT)
+}
+
+// Only replay data consumed by the reducer; never retain tool bodies or the
+// full-conversation echoes just to recover an unknown history prefix.
+private fun windowReplayEvent(event: TaskEvent): TaskEvent? {
+    val frame = event.piFrame ?: return event
+    val type = frame.str("type")
+    val light = when (type) {
+        "agent_end", "turn_end", "tool_execution_update" -> return null
+        "message_start", "message_end" -> {
+            val message = frame.obj("message") ?: return null
+            val role = message.str("role")
+            if (role != "assistant" && !(type == "message_start" && role == "user")) return null
+            val content = (message["content"] as? JsonArray)?.filter { part ->
+                (part as? JsonObject)?.str("type") in listOf("text", "thinking")
+            }
+            val saved = message.filterKeys { it in setOf("role", "stopReason", "errorMessage") }.toMutableMap()
+            if (content != null && (type == "message_end" || role == "user")) saved["content"] = JsonArray(content)
+            JsonObject(mapOf("type" to frame.getValue("type"), "message" to JsonObject(saved)))
+        }
+        "message_update" -> JsonObject(mapOf(
+            "type" to frame.getValue("type"),
+            "assistantMessageEvent" to JsonObject(frame.obj("assistantMessageEvent").orEmpty().filterKeys { it == "type" || it == "delta" }),
+        ))
+        "tool_execution_start", "tool_execution_end" -> {
+            val fields = frame.filterKeys { it in setOf("type", "toolCallId", "toolName", "isError") }.toMutableMap()
+            frame.obj("args")?.let { args -> fields["args"] = JsonObject(args.filterKeys { it in setOf("command", "path", "file_path", "filePath") }) }
+            JsonObject(fields)
+        }
+        else -> frame
+    }
+    return event.copy(data = JsonObject(event.data + ("pi" to light)))
 }
 
 private fun successfulCompaction(frame: JsonObject): Boolean = frame.obj("result") != null && frame.str("errorMessage").isNullOrEmpty() && frame.bool("aborted") != true && frame.bool("cancelled") != true

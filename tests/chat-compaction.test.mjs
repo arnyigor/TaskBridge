@@ -228,6 +228,33 @@ test('backfill cannot revive an answer settled by the task snapshot', () => {
   assert.equal(state.current.status, 'CANCELLED');
 });
 
+test('overlapping pages cannot rebind an aborted orphan to the newer response', () => {
+  const state = new ChatState(task, { seedInitial: false });
+  const delta = frame(4, text('A'));
+  const steer = { seq: 5, type: 'USER_MESSAGE', message: 'steer', data: { mode: 'steer' } };
+  [delta, steer, frame(6, { type: 'message_start', message: { role: 'assistant' } }), frame(7, text('N'))].forEach(e => state.apply(e));
+  state.revealWindowStart(4);
+  state.prependOlder(task, [
+    frame(1, { type: 'message_start', message: { role: 'assistant' } }),
+    frame(2, { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'P' }] } }),
+    frame(3, { type: 'message_start', message: { role: 'assistant' } }), delta, steer,
+  ], true);
+  state.apply(frame(8, { type: 'message_end', message: { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'AB' }] } }));
+  assert.deepEqual(state.turns.filter(t => t.role === 'assistant').map(t => t.text), ['P\n\nAB', 'N']);
+});
+
+test('a newer tool remains indexed on its visible answer after backfill', () => {
+  const state = new ChatState(task, { seedInitial: false });
+  state.apply(frame(2, text('A')));
+  state.apply({ seq: 3, type: 'USER_MESSAGE', message: 'steer', data: { mode: 'steer' } });
+  state.apply(frame(4, { type: 'message_start', message: { role: 'assistant' } }));
+  state.apply(frame(5, { type: 'tool_execution_start', toolName: 'read', toolCallId: 't' }));
+  state.prependOlder(task, [frame(1, { type: 'message_start', message: { role: 'assistant' } })], true);
+  state.apply(frame(6, { type: 'tool_execution_end', toolName: 'read', toolCallId: 't' }));
+  assert.equal(state.current.tools[0].state, 'done');
+  assert.equal(state.current.tools[0], state.tools.get('t'));
+});
+
 test('compaction during steering stays with the original message sink', () => {
   const state = new ChatState(task);
   state.apply(frame(1, { type: 'message_start', message: { role: 'assistant' } }));
