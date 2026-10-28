@@ -277,6 +277,58 @@ class ChatCompactionTest {
     }
 
     @Test
+    fun largeToolHistoriesKeepSegmentStateAndCanonicalIdentity() {
+        for (count in listOf(1_000, 10_000)) {
+            val task = Task(id = "a", status = "RUNNING")
+            val events = mutableListOf<TaskEvent>()
+            fun add(json: String) { events += pi(events.size + 1L, json) }
+            add("""{"type":"message_start","message":{"role":"assistant"}}""")
+            add("""{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"before"}}""")
+            var cut = 0
+            for (i in 0 until count) {
+                if (i == count / 2) {
+                    add("""{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"before"}]}}""")
+                    add("""{"type":"compaction_end","result":{"summary":"Public summary"}}""")
+                    cut = events.size
+                    add("""{"type":"message_start","message":{"role":"assistant"}}""")
+                    add("""{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"after"}}""")
+                }
+                add("""{"type":"tool_execution_start","toolCallId":"t-$i","toolName":"read","args":{"path":"sample.txt"}}""")
+                add("""{"type":"tool_execution_end","toolCallId":"t-$i","toolName":"read","isError":false}""")
+            }
+            add("""{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"after"}]}}""")
+            add("""{"type":"agent_settled"}""")
+            val whole = ChatReducer(task)
+            val start = System.nanoTime()
+            var maxSnapshotNs = 0L
+            for (event in events) {
+                whole.apply(event)
+                if (event.seq % 250 == 0L) {
+                    val snapshotStart = System.nanoTime()
+                    whole.snapshot()
+                    maxSnapshotNs = maxOf(maxSnapshotNs, System.nanoTime() - snapshotStart)
+                }
+            }
+            val applyMs = (System.nanoTime() - start) / 1_000_000.0
+            val answers = whole.snapshot().items.filterIsInstance<ChatItem.Assistant>()
+            assertEquals(listOf("before", "after"), answers.map { it.text })
+            assertEquals(listOf(count / 2, count / 2), answers.map { it.tools.size })
+            assertTrue(answers.all { !it.active && it.tools.all { tool -> tool.state == ru.arny.taskbridge.core.client.chat.ToolState.DONE } })
+            assertEquals(count, answers.flatMap { it.tools }.map { it.id }.toSet().size)
+            val tail = ChatReducer(task, seedInitial = false)
+            events.drop(cut).forEach { tail.apply(it) }
+            tail.revealWindowStart(events[cut].seq)
+            val backfillStart = System.nanoTime()
+            tail.prependOlder(task, events.take(cut), reachedStart = true)
+            val backfillMs = (System.nanoTime() - backfillStart) / 1_000_000.0
+            assertEquals(whole.snapshot().items, tail.snapshot().items)
+            assertEquals("assistant-initial", tail.snapshot().newestAnswerId)
+            events.forEach { assertFalse(tail.apply(it)) }
+            println("C14 KMP tools=$count events=${events.size} applyAndSnapshotsMs=$applyMs maxSnapshotMs=${maxSnapshotNs / 1_000_000.0} backfillMs=$backfillMs")
+        }
+    }
+
+    @Test
     fun failedOrCancelledCompactDoesNotSplitOrClaimSuccess() {
         for (error in listOf("\"errorMessage\":\"failed\"", "\"aborted\":true", "\"cancelled\":true")) {
             val reducer = ChatReducer(Task(id = "a", status = "RUNNING"))
