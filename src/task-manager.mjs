@@ -6909,6 +6909,14 @@ export class TaskManager extends EventEmitter {
       const error = Object.assign(new Error(
         `${guidance} Автоматический повтор остановлен. ${wait.reason}${remedy}`
       ), { code: failure.code });
+      // Флаг неопределённого результата выставляется ДО публикации терминального
+      // состояния: иначе клиент, увидевший FAILED, ещё не видит unknownResult, а
+      // падение процесса в этот промежуток теряло бы факт навсегда (нагрузочный
+      // прогон 2026-10-29 поймал именно это окно).
+      if (withheld) {
+        task.mediaRecovery = true;
+        task.unknownResult = true;
+      }
       try {
         // Отказ по размеру — окончательный: возвращать сообщение в очередь нельзя,
         // иначе каждый повтор снова упирается в тот же лимит (MEDIA-09B). Решение о
@@ -6919,10 +6927,8 @@ export class TaskManager extends EventEmitter {
         if (cancelledMeanwhile()) return;
         if (withheld) {
           // Состояние неопределённого результата: история восстановлена, но что
-          // именно успели сделать инструменты — знает только человек. Флаг виден
-          // в снимке сессии, событие — в ленте.
-          task.mediaRecovery = true;
-          task.unknownResult = true;
+          // именно успели сделать инструменты — знает только человек. Флаг уже
+          // сохранён вместе с FAILED выше, здесь публикуется событие в ленте.
           await this.#event(task, 'RECOVERY_WITHHELD',
             `Инструментов в отказавшем ходе: ${turnTools}. Результат мог измениться, поэтому автоматическое продолжение не запущено.`,
             { tools: turnTools, dropped: repaired.dropped ?? null }, false);
