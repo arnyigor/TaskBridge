@@ -71,13 +71,16 @@ val repositoryRoot: File = generateSequence(rootProject.projectDir) { it.parentF
     .firstOrNull { File(it, "scripts/start-lan.mjs").isFile }
     ?: error("рядом с clients/kmp нет корня TaskBridge (scripts/start-lan.mjs)")
 
-tasks.register<Sync>("standalonePortable") {
+// The copy itself is done by scripts/build-server-bundle.mjs: it also records a
+// release manifest with a SHA256 per file, refuses to ship config.json/data/logs
+// and keeps the include list in one place instead of duplicating it here.
+tasks.register<Exec>("standalonePortable") {
     dependsOn("portable")
-    into(rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge/server"))
-    from(repositoryRoot) {
-        include("scripts/**", "src/**", "web/**", "pi-extension/**", "package.json", "config.example.json")
-        exclude("**/node_modules/**", "**/*.log")
-    }
+    workingDir = repositoryRoot
+    commandLine(
+        "node", "scripts/build-server-bundle.mjs",
+        "--out", rootProject.layout.projectDirectory.dir("dist/.staging/TaskBridge/server").asFile.absolutePath,
+    )
     // Verify after the copy: the gate looks for the repository above `app/`, so the
     // standalone layout has to be checked with the bundled server in place.
     finalizedBy("verifyPortableRoot")
