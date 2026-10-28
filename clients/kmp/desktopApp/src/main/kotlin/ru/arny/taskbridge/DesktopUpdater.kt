@@ -1,5 +1,6 @@
 package ru.arny.taskbridge
 
+import ru.arny.taskbridge.platform.UpdateMirror
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -54,6 +55,9 @@ object DesktopUpdater {
                 "-Target", installDir.toAbsolutePath().toString(),
                 "-Log", log.toAbsolutePath().toString(),
                 "-CallerPid", ProcessHandle.current().pid().toString(),
+                // Настройки и данные оператора не входят в зеркало обновления.
+                "-ExcludeDirs", UpdateMirror.excludedDirSpec(),
+                "-ExcludeFiles", UpdateMirror.excludedFileSpec(),
             )
                 .directory(installDir.toFile())
                 .redirectErrorStream(true)
@@ -68,7 +72,7 @@ object DesktopUpdater {
      * месте, приложение так и не перезапустилось).
      */
     private val SCRIPT = """
-        param([string]${'$'}Source, [string]${'$'}Target, [string]${'$'}Log, [string]${'$'}CallerPid)
+        param([string]${'$'}Source, [string]${'$'}Target, [string]${'$'}Log, [string]${'$'}CallerPid, [string]${'$'}ExcludeDirs, [string]${'$'}ExcludeFiles)
 
         ${'$'}ErrorActionPreference = 'Continue'
         function Write-Log([string]${'$'}text) {
@@ -84,6 +88,12 @@ object DesktopUpdater {
         }
 
         Write-Log "update started: source=${'$'}Source target=${'$'}Target caller=${'$'}CallerPid"
+        # /MIR удаляет в цели всё, чего нет в источнике, поэтому настройки и данные
+        # оператора исключаются и из копирования, и из удаления.
+        ${'$'}excludeArgs = @()
+        foreach (${'$'}dir in (${'$'}ExcludeDirs -split ';' | Where-Object { ${'$'}_.Trim() })) { ${'$'}excludeArgs += '/XD'; ${'$'}excludeArgs += ${'$'}dir }
+        foreach (${'$'}file in (${'$'}ExcludeFiles -split ';' | Where-Object { ${'$'}_.Trim() })) { ${'$'}excludeArgs += '/XF'; ${'$'}excludeArgs += ${'$'}file }
+        if (${'$'}excludeArgs.Count -gt 0) { Write-Log ("preserving: " + (${'$'}excludeArgs -join ' ')) }
         ${'$'}exe = Join-Path ${'$'}Target 'TaskBridge.exe'
         ${'$'}stagedExe = Join-Path ${'$'}Source 'TaskBridge.exe'
         if (-not (Test-Path -LiteralPath ${'$'}stagedExe)) { Write-Log 'FAIL: staging has no TaskBridge.exe'; exit 2 }
@@ -113,7 +123,7 @@ object DesktopUpdater {
         ${'$'}attempt = 0
         do {
             ${'$'}attempt++
-            robocopy ${'$'}Source ${'$'}Target /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
+            robocopy ${'$'}Source ${'$'}Target /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS /NP ${'$'}excludeArgs | Out-Null
             ${'$'}code = ${'$'}LASTEXITCODE
             if (${'$'}code -ge 8) { Write-Log "copy attempt ${'$'}attempt failed (robocopy ${'$'}code)"; Start-Sleep -Milliseconds 700 }
         } while (${'$'}code -ge 8 -and ${'$'}attempt -lt 10)
