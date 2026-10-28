@@ -469,7 +469,7 @@ test('DOM: an estimate after compaction is labelled, and a stale measurement say
     },
     stale: {
       taskId: 'a', totalTokens: 160000, contextWindow: 200000, sources: [], measuredTokens: 0, unaccountedTokens: 160000,
-      usage: { tokens: 160000, source: 'pi', measuredAt: '2026-10-28T09:59:00.000Z', stale: true, unavailableReason: null },
+      usage: { tokens: 160000, source: 'pi', measuredAt: '2026-10-28T09:59:00.000Z', stale: true, unavailableReason: null, percent: 80.00000000001 },
       postCompaction: { tokens: 78800, source: 'pi-estimate', measuredAt: '2026-10-28T10:00:00.000Z' },
       limit: { tokens: null, exceeded: false },
       session: {
@@ -492,6 +492,10 @@ test('DOM: an estimate after compaction is labelled, and a stale measurement say
   await app.loadContextReport();
   text = app.document.getElementById('contextSources').textContent;
   assert.match(text, /Всего в запросе: 160[\s ]000/);
+  // Доля окна печатается одним знаком: «160000 / 200000» не должно выглядеть как
+  // 80.00000000000001% (живой экран 2026-10-29 показывал 7.807445526123047%).
+  assert.match(text, /· 80%/);
+  assert.doesNotMatch(text, /\d\.\d{3,}%/);
   assert.match(text, /Последнее измерение — до последнего сжатия/);
   assert.match(text, /≈78[\s ]800 \(оценка Pi\)/);
   assert.match(text, /В контексте после сжатия: 4 сообщ\./);

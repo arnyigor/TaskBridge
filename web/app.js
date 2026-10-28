@@ -1495,7 +1495,9 @@ function renderContextReport(report) {
     const pct = report.usage?.percent;
     lines.push(`Всего в запросе: ${report.totalTokens.toLocaleString('ru-RU')} токенов`
       + (windowSize ? ` из ${windowSize.toLocaleString('ru-RU')}` : '')
-      + (pct != null ? ` · ${pct}%` : ''));
+      // Процент — доля окна, а не точное измерение: 7.807445526123047% в панели
+      // читается как ошибка рендера (живой экран 2026-10-29).
+      + (pct != null ? ` · ${Math.round(pct * 10) / 10}%` : ''));
   } else {
     // CTX-03: у отсутствия измерения есть причина, и она важнее общего «нет числа»:
     // «сессия не активна» и «Pi ещё не ответил» — разные состояния.

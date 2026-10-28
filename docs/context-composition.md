@@ -55,3 +55,12 @@ A single tool result reached 266 025 bytes and another 242 052; by tool, call ar
 Verification: `tests/chat.test.mjs` — 161 tests, 1 skip, **160 PASS**, including a new DOM test that fixes the row's text and tooltip and checks that a task without a known pair shows just the count instead of zeros. `:shared:jvmTest` — **332 PASS** (new `CompactionChangeLineTest`, 2 PASS), `:androidApp:compileDebugKotlin` and `:desktopApp:compileKotlin` succeed. `npm test` — **1744 PASS, 0 FAIL, 4 SKIP**; `npm run check` — PASS.
 
 Limit: the 24 K figure is a `chars/4` projection of the session file, not Pi's own `buildSessionContext()`. It is the same projection CTX-02 exposes, and it stays deliberately separate from the measured 53 K.
+
+## Live acceptance on the installed build
+
+After the operator applied the staged update (`clients/kmp/dist/TaskBridge`, `TaskBridge.exe` at 01:44, `shared-jvm-72bafb8f…jar`), the running server was checked without touching it:
+
+- `GET /api/tasks/<id>/context` on the internal port now returns `session: {available: true, method: 'session-file-projection', …}` with real numbers — `active.kept = 248 сообщ. · 119 947 симв. · 116 результатов инструментов`, `compaction.summaryChars = 10 598`, `history.excludedMessages = 1 216 · 1 047 157 симв.` The endpoint is not just unit-tested any more.
+- A headless Chromium opened the installed web UI, selected the running task and read the panel: `Compaction 1 · до 482 700 → ≈36 107 ток.` with the direction tooltip, and the panel lines `Всего в запросе: 84 617 токенов из 1 048 576 · 8.1 %`, `Контекст после сжатия: ≈36 107 (оценка Pi)`, `В контексте после сжатия: …`, `Сводка сжатия: …`, `Исключено из контекста …`. No page errors.
+
+That run also exposed a rendering defect the tests had missed: the share of the window printed as `7.807445526123047 %`. It is now rounded to one decimal (`Math.round(pct * 10) / 10`), and the DOM test asserts `· 80%` for a `percent: 80.00000000001` report and refuses three-or-more decimals anywhere in the panel. Re-checked live afterwards: `· 8.1 %`.
