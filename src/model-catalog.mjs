@@ -1,3 +1,4 @@
+import { resolvePiCommand } from './pi-command.mjs';
 import { PiRpcSession } from './pi-rpc.mjs';
 
 // Pi resolves providers, credentials and model availability itself, and only
@@ -160,7 +161,7 @@ export class ModelCatalog {
 
   async #probe() {
     const pi = new PiRpcSession({
-      command: this.config.pi?.command || 'pi',
+      command: resolvePiCommand({ config: this.config }).command,
       args: this.config.pi?.args || [],
       cwd: this.config.cwd || process.cwd(),
       env: this.env,

@@ -50,6 +50,7 @@ import { readSystemMetrics } from './system-metrics.mjs';
 import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenAiCodexStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
 import { PiVersionProbe } from './pi-version.mjs';
+import { resolvePiCommand, piRuntimeState } from './pi-command.mjs';
 import { API_VERSION } from './api-contract.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -128,7 +129,9 @@ const store = new TaskStore(dataRoot, {
 const manager = new TaskManager(config, dataRoot, store);
 // Which Pi we drive, checked once at startup (B0). Reported by /api/info; an
 // unsupported or missing Pi is a warning, never a startup failure.
-const piVersion = new PiVersionProbe({ command: config.pi?.command || 'pi', env: config.pi?.env || null });
+// Тот же выбор команды, что и у сессий: иначе /api/info проверял бы не тот Pi.
+const piCommand = resolvePiCommand({ config });
+const piVersion = new PiVersionProbe({ command: piCommand.command, env: config.pi?.env || null });
 piVersion.refresh().catch(() => {});
 // The Pi approval extension needs a loopback endpoint and its absolute path.
 manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
@@ -1653,7 +1656,9 @@ async function handleRequest(req, res) {
             ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'read-file', 'save-file', 'ai-draft', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
             : []
         },
-        pi,
+        // «Pi отсутствует» и «Pi несовместим» — разные состояния: по одному
+        // version нельзя понять, чего именно не хватает.
+        pi: { ...pi, source: piCommand.source, state: piRuntimeState(pi) },
         addresses: !lanOpen ? [] : [
           ...lanAddresses(publicPort),
           ...(httpsConfig.enabled && !tlsDisabled ? lanAddresses(Number(httpsConfig.port || 8443), 'https') : [])

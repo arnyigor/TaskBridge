@@ -9,6 +9,7 @@ import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { resolvePiCommand } from './pi-command.mjs';
 import { PiRpcSession } from './pi-rpc.mjs';
 import { piOneShotArgs, spawnPi } from './pi-oneshot.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
@@ -3173,7 +3174,7 @@ export class TaskManager extends EventEmitter {
       }
     }
     const pi = new PiRpcSession({
-      command: this.config.pi?.command || 'pi',
+      command: resolvePiCommand({ config: this.config }).command,
       args,
       cwd: task.workspacePath,
       sessionDir,
