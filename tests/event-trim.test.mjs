@@ -15,6 +15,24 @@ test('deltas between a closed message_start/message_end are dropped', () => {
   assert.deepEqual(result.map(e => e.seq), [1, 4]);
 });
 
+for (const type of ['compaction_end', 'auto_compaction_end']) {
+  test(`${type} inside a message retains boundary deltas but not unrelated ones`, () => {
+    const events = [
+      pi(1, { type: 'message_start' }),
+      pi(2, { type: 'message_update' }),
+      pi(3, { type, result: { summary: 'summary' } }),
+      pi(4, { type: 'message_update' }),
+      pi(5, { type: 'message_end' }),
+      pi(6, { type: 'message_start' }),
+      pi(7, { type: 'message_update' }),
+      pi(8, { type: 'message_end' }),
+    ];
+    assert.deepEqual(trimStreamingDeltas(events).map(e => e.seq), [1, 2, 3, 4, 5, 6, 8]);
+    const failed = events.map(e => e.seq === 3 ? pi(3, { type, errorMessage: 'failed' }) : e);
+    assert.deepEqual(trimStreamingDeltas(failed).map(e => e.seq), [1, 3, 5, 6, 8]);
+  });
+}
+
 test('deltas for a still-open message (no closing message_end in this batch) are kept', () => {
   const events = [
     pi(1, { type: 'message_start', message: { role: 'assistant' } }),

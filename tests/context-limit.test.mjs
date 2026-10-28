@@ -102,6 +102,11 @@ test('a context limit is stored per session and compacts the history when exceed
   }
   assert.equal(compacted.compaction.count, 1, 'сжатие состоит и считается само, пусть и не в том же кадре');
   assert.equal(compacted.compaction.last.summary, 'Сжатая сводка предыдущего контекста');
+  const afterCompact = await api(`/api/tasks/${id}/events?limit=0`);
+  const boundary = afterCompact.find(event => ['compaction_end', 'auto_compaction_end'].includes(event.data?.pi?.type) && event.data.pi.result);
+  assert.ok(boundary, 'successful compaction frame is persisted');
+  assert.equal(afterCompact.filter(event => event.data?.pi?.type === 'agent_start').length, 1, 'limit compaction does not start another agent run');
+  assert.equal(afterCompact.filter(event => event.type === 'USER_MESSAGE').length, events.filter(event => event.type === 'USER_MESSAGE').length);
   assert.equal((await api(`/api/tasks/${id}/context`)).limit.tokens, 40000);
 
   // Clearing the limit is explicit: null means "no limit".

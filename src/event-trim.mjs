@@ -53,13 +53,15 @@ export function lightenEvent(event) {
 // text is never lost.
 export function trimStreamingDeltas(events) {
   let openSince = -1;
+  let hasCompaction = false;
   const closedRanges = [];
   for (let i = 0; i < events.length; i++) {
     const frame = events[i].data?.pi;
     if (!frame) continue;
-    if (frame.type === 'message_start') openSince = i;
+    if (frame.type === 'message_start') { openSince = i; hasCompaction = false; }
+    else if (openSince >= 0 && ['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result && !frame.errorMessage && !frame.aborted && !frame.cancelled) hasCompaction = true;
     else if (frame.type === 'message_end') {
-      if (openSince >= 0) closedRanges.push([openSince, i]);
+      if (openSince >= 0 && !hasCompaction) closedRanges.push([openSince, i]);
       openSince = -1;
     }
   }

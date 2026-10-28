@@ -86,6 +86,20 @@ test('superseded streaming deltas are pruned, in-progress ones are kept', async 
   assert.deepEqual((await store.readEvents('a', 0)).map(e => e.data.pi.type), ['message_start', 'message_end', 'message_update']);
 });
 
+test('pruning preserves streamed message deltas around a compaction boundary', async t => {
+  const { open } = await fixture(t);
+  const store = open();
+  await store.create({ id: 'a' });
+  const add = pi => store.appendEvent('a', { type: 'PI_EVENT', data: { pi } });
+  await add({ type: 'message_start', message: { role: 'assistant' } });
+  await add({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'before' } });
+  await add({ type: 'compaction_end', result: { summary: 'summary' } });
+  await add({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'after' } });
+  await add({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'beforeafter' }] } });
+  assert.equal(await store.pruneStreamingDeltas('a'), 0);
+  assert.deepEqual((await store.readEvents('a', 0)).map(e => e.data.pi.type), ['message_start', 'message_update', 'compaction_end', 'message_update', 'message_end']);
+});
+
 test('deleting a task cascades events and the foreign key blocks orphan writes', async t => {
   const { open } = await fixture(t);
   const first = open();

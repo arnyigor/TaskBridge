@@ -1152,11 +1152,39 @@ export class TaskStore {
         AND json_extract(payload, '$.data.pi.type') = 'message_end'
     `).get(id).seq);
     if (!lastEnd) return 0;
+    // A compact inside an open message makes its deltas the only record of
+    // where that message crossed the boundary. Keep all deltas for that message.
     const info = this.db.prepare(`
-      DELETE FROM events WHERE task_id = ? AND seq < ?
+      WITH boundaries AS MATERIALIZED (
+        SELECT boundary.seq,
+          (SELECT MAX(start.seq) FROM events AS start
+           WHERE start.task_id = boundary.task_id AND start.seq < boundary.seq
+             AND json_extract(start.payload, '$.type') = 'PI_EVENT'
+             AND json_extract(start.payload, '$.data.pi.type') IN ('message_start', 'message_end')) AS previous,
+          (SELECT MIN(finish.seq) FROM events AS finish
+           WHERE finish.task_id = boundary.task_id AND finish.seq > boundary.seq
+             AND json_extract(finish.payload, '$.type') = 'PI_EVENT'
+             AND json_extract(finish.payload, '$.data.pi.type') IN ('message_start', 'message_end')) AS next
+        FROM events AS boundary
+        WHERE boundary.task_id = ?
+          AND json_extract(boundary.payload, '$.type') = 'PI_EVENT'
+          AND json_extract(boundary.payload, '$.data.pi.type') IN ('compaction_end', 'auto_compaction_end')
+          AND json_type(boundary.payload, '$.data.pi.result') = 'object'
+          AND COALESCE(json_extract(boundary.payload, '$.data.pi.errorMessage'), '') = ''
+          AND COALESCE(json_extract(boundary.payload, '$.data.pi.aborted'), 0) = 0
+          AND COALESCE(json_extract(boundary.payload, '$.data.pi.cancelled'), 0) = 0
+      ), protected AS MATERIALIZED (
+        SELECT b.previous AS first_seq, b.next AS last_seq FROM boundaries b
+        JOIN events start ON start.task_id = ? AND start.seq = b.previous
+        JOIN events finish ON finish.task_id = start.task_id AND finish.seq = b.next
+        WHERE json_extract(start.payload, '$.data.pi.type') = 'message_start'
+          AND json_extract(finish.payload, '$.data.pi.type') = 'message_end'
+      )
+      DELETE FROM events AS delta WHERE task_id = ? AND seq < ?
         AND json_extract(payload, '$.type') = 'PI_EVENT'
         AND json_extract(payload, '$.data.pi.type') = 'message_update'
-    `).run(id, lastEnd);
+        AND NOT EXISTS (SELECT 1 FROM protected WHERE delta.seq > first_seq AND delta.seq < last_seq)
+    `).run(id, id, id, lastEnd);
     return Number(info.changes || 0);
   }
 }
