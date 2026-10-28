@@ -23,3 +23,13 @@
 - `context_edit` and system-checkpoint semantics are still not modelled: the composition is a file projection, and the payload says so. Against a live Pi session this could differ.
 - The full composition screen (CTX-04), on-demand summary text, and the KMP presentation of these fields are not implemented yet; KMP keeps showing the existing context section.
 - `CTX-01` (the real 51K/78.8K discrepancy) and `CTX-05` (compaction effectiveness on three real histories) remain open.
+
+## Follow-up: KMP parity
+
+The Compose context sheet now shows the same three facts as the web: messages and characters kept in the active context, the summary size with `tokensBefore`, and how much history was excluded but still lies in the session file. Sizes are formatted by a dedicated `charCount` (characters), never by `tokenCount` — "250K симв." and "250K ток." are different quantities.
+
+Modelled in `SessionComposition` / `CompositionActive` / `CompositionTotals` / `CompositionCompaction` / `CompositionHistory`; `SessionContextReport.session` is nullable, so an older server simply shows nothing.
+
+Verification: `:shared:jvmTest` — **330 PASS**, including `ContextCompositionLinesTest` (5 PASS: kept counts, large character counts labelled as characters, summary line, excluded-only-when-present, and an unavailable composition rendering nothing instead of zeros) and `ContextSectionProvenanceTest` (3 PASS). `:desktopApp:compileKotlin` and `:androidApp:compileDebugKotlin` succeed; `npm test` — **1736 PASS, 0 FAIL, 4 SKIP**; `npm run check` — PASS.
+
+Still open: the rebuilt composition screen (CTX-04), on-demand summary text, `context_edit`/checkpoint semantics, and CTX-01/CTX-05 on real sessions.

@@ -1345,6 +1345,53 @@ data class SessionContextReport(
     val compaction: ContextCompaction? = null,
     val running: Boolean = false,
     val note: String? = null,
+    /** CTX-02: состав активного контекста после сжатия (только размеры и количество). */
+    val session: SessionComposition? = null,
+)
+
+/**
+ * Что модель видит после сжатия — реконструкция по файлу сессии Pi. Текста здесь
+ * нет по замыслу: сервер отдаёт размеры и количество, а не содержимое.
+ */
+@Serializable
+data class SessionComposition(
+    val available: Boolean = false,
+    /** Причина, когда [available] = false: нет файла Pi, чужой проект, файл повреждён. */
+    val reason: String? = null,
+    /** `session-file-projection` — не buildSessionContext() самого Pi. */
+    val method: String? = null,
+    val active: CompositionActive? = null,
+    val compaction: CompositionCompaction? = null,
+    val history: CompositionHistory? = null,
+)
+
+@Serializable
+data class CompositionActive(val total: CompositionTotals? = null, val kept: CompositionTotals? = null)
+
+@Serializable
+data class CompositionTotals(
+    val messages: Long = 0,
+    val chars: Long = 0,
+    val toolCalls: Long = 0,
+    val toolResults: Long = 0,
+)
+
+@Serializable
+data class CompositionCompaction(
+    val summaryChars: Long = 0,
+    val summaryAvailable: Boolean = false,
+    val firstKeptEntryId: String? = null,
+    val tokensBefore: Long? = null,
+)
+
+@Serializable
+data class CompositionHistory(
+    val userMessages: Long = 0,
+    val assistantMessages: Long = 0,
+    val toolResults: Long = 0,
+    val branchMessages: Long = 0,
+    val excludedMessages: Long = 0,
+    val excludedChars: Long = 0,
 )
 
 /** Лимит контекста сессии: настройка TaskBridge, а не Pi. `tokens == null` — без лимита. */

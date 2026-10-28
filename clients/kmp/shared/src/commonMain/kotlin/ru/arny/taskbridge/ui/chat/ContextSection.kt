@@ -103,6 +103,15 @@ internal fun ContextSection(
     contextEstimateLine(current)?.let { line ->
         ContextValueRow(label = "Контекст после сжатия", value = line)
     }
+    contextKeptLine(current)?.let { line ->
+        ContextValueRow(label = "В контексте после сжатия", value = line)
+    }
+    contextSummaryLine(current)?.let { line ->
+        ContextValueRow(label = "Сводка сжатия", value = line)
+    }
+    contextExcludedLine(current)?.let { line ->
+        ContextValueRow(label = "Исключено из контекста", value = line)
+    }
     if (current.usage?.stale == true) {
         Text(
             "Последнее измерение — до последнего сжатия: оно относится к прежней истории.",
@@ -207,6 +216,31 @@ internal fun contextUnavailableLine(report: SessionContextReport): String? {
     return if (reason != null) "Текущий размер недоступен: $reason." else "Размера текущего запроса ещё нет."
 }
 
+/**
+ * CTX-02 на экране: сколько сообщений и символов реально осталось в контексте.
+ * Когда состав недоступен, причина называется, а не выдаётся за «пусто».
+ */
+internal fun contextKeptLine(report: SessionContextReport): String? {
+    val composition = report.session ?: return null
+    if (!composition.available) return null
+    val kept = composition.active?.kept ?: return null
+    val tools = if (kept.toolResults > 0) " · результатов инструментов: ${kept.toolResults}" else ""
+    return "${kept.messages} сообщ. · ${charCount(kept.chars)} симв.$tools"
+}
+
+internal fun contextSummaryLine(report: SessionContextReport): String? {
+    val compaction = report.session?.takeIf { it.available }?.compaction ?: return null
+    if (!compaction.summaryAvailable) return null
+    val before = compaction.tokensBefore?.let { " · до сжатия ${tokenCount(it)} ток." }.orEmpty()
+    return "${charCount(compaction.summaryChars)} симв.$before"
+}
+
+internal fun contextExcludedLine(report: SessionContextReport): String? {
+    val history = report.session?.takeIf { it.available }?.history ?: return null
+    if (history.excludedMessages <= 0) return null
+    return "${history.excludedMessages} сообщ. · ${charCount(history.excludedChars)} симв."
+}
+
 /** «≈78.8K (оценка Pi)» — estimatedTokensAfter, подписанный как оценка. */
 internal fun contextEstimateLine(report: SessionContextReport): String? {
     val tokens = report.postCompaction?.tokens ?: return null
@@ -242,6 +276,16 @@ internal fun contextCompactionLine(auto: Boolean?, triggerAt: Long?): String = w
 }
 
 /** Токены в подписи: до 10K — точно, дальше в тысячах (как в остальных подписях). */
+/**
+ * Символы, а не токены: «250K токенов» и «250K символов» — разные величины, и
+ * подменять одну другой нельзя (CTX-02/CTX-03).
+ */
+internal fun charCount(chars: Long?): String = when {
+    chars == null -> "—"
+    chars < 10_000 -> chars.toString()
+    else -> "${chars / 1000}K"
+}
+
 internal fun tokenCount(tokens: Long?): String = when {
     tokens == null -> "—"
     tokens < 10_000 -> tokens.toString()
