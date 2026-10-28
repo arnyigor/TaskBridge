@@ -3,10 +3,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TaskStore } from '../src/task-store.mjs';
 
-// Usage: npm run backup  →  data/backups/taskbridge-<timestamp>.db
+// Usage: npm run backup → <TASKBRIDGE_DATA_DIR or root/data>/backups/taskbridge-<timestamp>.db
 // VACUUM INTO produces a consistent snapshot while the server keeps running.
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const dataRoot = path.join(rootDir, 'data');
+const dataRoot = process.env.TASKBRIDGE_DATA_DIR
+  ? path.resolve(process.env.TASKBRIDGE_DATA_DIR)
+  : path.join(rootDir, 'data');
 const outDir = path.join(dataRoot, 'backups');
 const keep = 5;
 

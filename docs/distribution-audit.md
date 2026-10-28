@@ -89,3 +89,13 @@ Crucially, a standalone backend defaulting to <install>/server/data and <install
 **DIST-01 audit complete; autonomous distribution NOT READY.** Highest-priority next checks/fixes: CLI backup must honor TASKBRIDGE_DATA_DIR; separate code/config/data roots; choose and verify bundled Node/Pi; add backend and release manifests without depending on repository discovery.
 
 The probe stays inside the repository boundary. It therefore does **not** satisfy the plan's required outside-repository or clean-Windows acceptance, does not prove no-global-Node operation, and is not a final portable/Setup test. Visual Compact acceptance also remains open independently.
+
+## DIST-02 follow-up — backup data-root fix
+
+After the audit, scripts/backup.mjs was changed to resolve TASKBRIDGE_DATA_DIR exactly as src/server.mjs and scripts/start-lan.mjs do, falling back to <code-root>/data when unset/empty. No public CLI flags or API were added; filename/retention/checkpoint behavior is unchanged.
+
+Three hermetic CLI regressions copy only the backup script and TaskStore into a sandbox under .local. They cover the default root plus absolute/relative external data paths with spaces and Cyrillic. The external-root cases failed before the fix (no backup in the selected store). After the fix, they restore the selected sentinel and pre-backup events from an open WAL database, exclude subsequent writes, leave the live store intact and create no backup in the shadow code-root store.
+
+`node --test --test-force-exit tests/backup.test.mjs tests/store.test.mjs`: **16 PASS, 0 FAIL, 0 SKIP**. Logs: `.local/stabilization-baseline/backup-cli-before.log` / `backup-cli-after.log`.
+
+This fixes only the backup portion of DIST-02; external configuration paths, read-only program files, update separation, full restore/migration and retention-policy acceptance remain open. The real user's backup command/database was not used to verify this change.
