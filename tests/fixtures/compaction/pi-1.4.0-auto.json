@@ -1,0 +1,290 @@
+{
+  "provenance": {
+    "pi": "1.4.0",
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "capture": "isolated real Pi RPC",
+    "normalization": "Payload text replaced with BEFORE/AFTER; thinking and non-rendered message payloads omitted; tool IDs replaced; original RPC order and sequence offsets retained. TaskBridge envelopes and task metadata synthesized; not a server/SSE capture."
+  },
+  "task": {
+    "id": "compact-fixture",
+    "prompt": "Public compatibility test",
+    "status": "RUNNING"
+  },
+  "events": [
+    {
+      "taskId": "compact-fixture",
+      "seq": 1,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 2,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_start"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 7,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 9,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "BEFORE"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 10,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": ""
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 37,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "BEFORE"
+              }
+            ],
+            "stopReason": "toolUse"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 38,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "tool-1",
+          "toolName": "read",
+          "args": {
+            "path": "sample.txt"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 39,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "tool-1",
+          "toolName": "read",
+          "isError": false
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 42,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_end"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 43,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "compaction_start",
+          "reason": "threshold"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 44,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "compaction_end",
+          "reason": "threshold",
+          "result": {
+            "summary": "Public compatibility-test summary",
+            "tokensBefore": 15904,
+            "estimatedTokensAfter": 15739
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 45,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_start"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 46,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 225,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "AFTER"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 226,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": ""
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 229,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "AFTER"
+              }
+            ],
+            "stopReason": "stop"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 230,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_end"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 231,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 232,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "compaction_start",
+          "reason": "threshold"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 233,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "compaction_end",
+          "reason": "threshold",
+          "result": {
+            "summary": "Public compatibility-test summary",
+            "tokensBefore": 15355,
+            "estimatedTokensAfter": 3278
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 234,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      }
+    }
+  ]
+}

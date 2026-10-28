@@ -637,6 +637,24 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     const flagFile = process.env.FAKE_PI_413_FLAG;
     const always413 = process.env.FAKE_PI_ALWAYS_413 || (flagFile && fs.existsSync(flagFile));
     if (always413) return runFault('provider-incompatible', { ...command, message: `${command.message} body-limit no-tools` }, respond);
+    // Replay the anonymized real-Pi compact capture through the actual server
+    // event pipeline; the recording path is supplied only by an isolated test.
+    if (process.env.FAKE_PI_RECORDING && command.message.includes('[compact-recording]')) {
+      const recording = JSON.parse(fs.readFileSync(process.env.FAKE_PI_RECORDING, 'utf8'));
+      respond();
+      streaming = true;
+      turn += 1;
+      let index = 0;
+      const emit = () => {
+        const frame = recording.events[index++].data.pi;
+        if (frame.type === 'message_end' && frame.message?.role === 'assistant') persist(frame.message);
+        if (frame.type === 'agent_settled') streaming = false;
+        send(frame);
+        if (index < recording.events.length) pending = setTimeout(emit, 15);
+      };
+      pending = setTimeout(emit, 50);
+      return;
+    }
     // A model error BEFORE any output: the «Повторить сообщение» case. No text
     // deltas and no tool call, so the turn is genuinely empty.
     if (command.message.includes('model-error-empty')) {

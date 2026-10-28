@@ -1684,14 +1684,15 @@ function renderChat() {
   if (!chatState) return;
   // TURN_TRUNCATED (repeat message) removes turns from chatState; their DOM
   // nodes must go with them, or the retracted exchange stays on screen.
+  const displayTurns = chatState.displayTurns;
   for (const [id, node] of [...turnNodes]) {
-    if (!chatState.turns.some(t => t.id === id)) {
+    if (!displayTurns.some(t => t.id === id)) {
       (node.wrap || node.turn)?.remove();
       turnNodes.delete(id);
     }
   }
   const newest = newestTurn();
-  for (const turn of chatState.turns) {
+  for (const turn of displayTurns) {
     let node = turnNodes.get(turn.id);
     // A regenerated answer keeps its siblings hidden: only the selected variant
     // is on screen, and a hidden one must not stay in the DOM.
@@ -1732,8 +1733,9 @@ function renderChat() {
       continue;
     }
     if (turn.role !== 'assistant') continue;
-    if (node.turnRef && node.turnRef !== turn) resetTurnDom(node);
-    node.turnRef = turn;
+    const turnRef = turn.canonicalTurn || turn;
+    if (node.turnRef && node.turnRef !== turnRef) resetTurnDom(node);
+    node.turnRef = turnRef;
     liveTurn = node;
     liveText = turn.text;
     liveThinking = turn.thinking;
@@ -1798,7 +1800,13 @@ function renderChat() {
     }
     // A partial turn has no id the server knows: edit/fork/drop would address
     // a message that does not exist.
-    if (!turn.partial) updateTurnActions(node, turn, turn === newest);
+    if (turn.segmentActions === false) {
+      node.actionBar?.classList.add('hidden');
+      node.variantNav?.classList.add('hidden');
+    } else if (!turn.partial) {
+      const canonical = turn.canonicalTurn || turn;
+      updateTurnActions(node, canonical, canonical === newest);
+    }
   }
   scrollBottom();
 }
@@ -2400,8 +2408,8 @@ function renderPrependedTurns(turns) {
   // newly-backfilled turns are inserted right after it, not above it.
   const loadOlderBtn = document.getElementById('loadOlderButton');
   const reference = loadOlderBtn ? loadOlderBtn.nextSibling : $('msgsInner').firstChild;
-  for (const turn of turns) {
-    if (turnNodes.has(turn.id)) continue;
+  for (const turn of chatState.projectTurns(turns)) {
+    if (turn.hidden || turnNodes.has(turn.id)) continue;
     if (turn.role === 'user') {
       const userNode = { wrap: appendUserTurn(turn.text, turn.files || [], reference, turn.at), text: turn.text };
       turnNodes.set(turn.id, userNode);
@@ -2413,7 +2421,7 @@ function renderPrependedTurns(turns) {
     turnNodes.set(turn.id, settled);
     // A partial turn is not a turn the server knows by id: edit/fork/drop would
     // address a message that does not exist.
-    if (!turn.partial) updateTurnActions(settled, turn, false);
+    if (!turn.partial && turn.segmentActions !== false) updateTurnActions(settled, turn.canonicalTurn || turn, false);
   }
 }
 

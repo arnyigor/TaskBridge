@@ -111,6 +111,7 @@ export class ChatState {
     this.turns = [];
     this.tools = new Map();
     this.notes = new Set();
+    this.segmentViews = new WeakMap();
     // exchange key (0 = the session's own first prompt, else the seq of its
     // USER_MESSAGE) → { ids: [assistant turn ids], selected }: a regenerated
     // answer is another variant of the same exchange, and all of them stay in
@@ -166,6 +167,56 @@ export class ChatState {
     for (const [id, tool] of scratch.tools) if (!this.tools.has(id)) this.tools.set(id, tool);
     for (const [key, entry] of scratch.variants) if (!this.variants.has(key)) this.variants.set(key, entry);
     return turns;
+  }
+
+  // Canonical answers remain in turns. Only this projection splits their
+  // text/tools around successful compact boundaries; action handlers keep the
+  // original object and server ID. Cache view objects so DOM/tool folds survive.
+  get displayTurns() { return this.projectTurns(this.turns); }
+
+  projectTurns(turns) {
+    const notes = new Set(turns.filter(turn => turn.role === 'note'));
+    const attached = new Set(turns.flatMap(turn => (turn.compactionBoundaries || []).filter(b => notes.has(b.note)).map(b => b.note)));
+    const result = [];
+    for (const turn of turns) {
+      if (attached.has(turn)) continue;
+      const boundaries = (turn.compactionBoundaries || []).filter(b => notes.has(b.note));
+      if (!boundaries.length) { result.push(turn); continue; }
+      let views = this.segmentViews.get(turn);
+      if (!views) { views = new Map(); this.segmentViews.set(turn, views); }
+      let start = { text: 0, thinking: 0, tools: 0, seq: null };
+      const segments = [];
+      for (const end of [...boundaries, { text: turn.text.length, thinking: turn.thinking.length, tools: turn.tools.length }]) {
+        const text = turn.text.slice(start.text, end.text).replace(start.seq === null ? /^$/ : /^\n{1,2}/, '');
+        const thinking = turn.thinking.slice(start.thinking, end.thinking);
+        const tools = turn.tools.slice(start.tools, end.tools);
+        if (text || thinking || tools.length) {
+          const id = start.seq === null ? turn.id : `${turn.id}-segment-${start.seq}`;
+          let view = views.get(id);
+          if (!view) { view = {}; views.set(id, view); }
+          Object.assign(view, turn, { id, canonicalTurn: turn, text, thinking, tools, active: false, final: true, status: 'DONE', error: null, toolEvidence: null, segmentActions: false });
+          segments.push(view);
+          result.push(view);
+        }
+        if (end.note) {
+          end.note.hidden = turn.hidden;
+          result.push(end.note);
+        }
+        start = end;
+      }
+      const last = segments.at(-1);
+      if (last) {
+        last.segmentActions = true;
+        last.status = turn.status;
+        last.error = turn.error;
+        last.toolEvidence = turn.toolEvidence;
+        // A compact without subsequent content does not create a typing row.
+        const tail = boundaries.at(-1);
+        last.active = turn.active && (turn.text.length > tail.text || turn.thinking.length > tail.thinking || turn.tools.length > tail.tools);
+        last.final = !last.active;
+      }
+    }
+    return result;
   }
 
   addUser(text, files, id, at = null, preservePrevious = false, turn = null) {
@@ -612,13 +663,18 @@ export class ChatState {
     if (frame.type === 'agent_settled') this.finish('DONE', null, event.at);
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type)) {
       const summary = typeof frame.result?.summary === 'string' ? frame.result.summary.trim() : '';
-      const note = humanizeError(frame.errorMessage) || (summary ? `Контекст сжат:\n${summary}` : (frame.result ? 'Контекст сжат.' : null));
+      const successful = Boolean(frame.result && !frame.errorMessage && !frame.aborted && !frame.cancelled);
+      const note = humanizeError(frame.errorMessage) || (frame.aborted || frame.cancelled ? 'Сжатие отменено.' : (successful ? (summary ? `Контекст сжат:\n${summary}` : 'Контекст сжат.') : null));
       if (note && !this.notes.has(event.seq)) {
         this.notes.add(event.seq);
         const item = { id: `note-${event.seq}`, role: 'note', text: note };
         const currentIndex = isEmptyAssistantPlaceholder(this.current) ? this.turns.indexOf(this.current) : -1;
         if (currentIndex >= 0) this.turns.splice(currentIndex, 0, item);
         else this.turns.push(item);
+        const target = isEmptyAssistantPlaceholder(this.current) ? (this.messageTurn || (this.executionTurn?.active ? this.executionTurn : this.current)) : this.current;
+        if (successful && (target.text || target.thinking || target.tools.length)) {
+          (target.compactionBoundaries ||= []).push({ seq: event.seq, text: target.text.length, thinking: target.thinking.length, tools: target.tools.length, note: item });
+        }
       }
     }
     return true;

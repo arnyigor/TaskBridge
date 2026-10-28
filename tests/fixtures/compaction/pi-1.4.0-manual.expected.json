@@ -1,0 +1,5 @@
+[
+  { "id": "user-initial", "role": "user", "text": "Public compatibility test", "tools": [] },
+  { "id": "assistant-initial", "role": "assistant", "text": "BEFORE\n\nBEFORE", "tools": ["tool-1"] },
+  { "id": "note-54", "role": "note", "text": "Контекст сжат:\nPublic compatibility-test summary", "tools": [] }
+]

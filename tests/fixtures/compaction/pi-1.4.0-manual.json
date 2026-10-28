@@ -1,0 +1,263 @@
+{
+  "provenance": {
+    "pi": "1.4.0",
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "capture": "isolated real Pi RPC",
+    "normalization": "Payload text replaced with BEFORE/AFTER; thinking and non-rendered message payloads omitted; tool IDs replaced; original RPC order and sequence offsets retained. TaskBridge envelopes and task metadata synthesized; not a server/SSE capture."
+  },
+  "task": {
+    "id": "compact-fixture",
+    "prompt": "Public compatibility test",
+    "status": "RUNNING"
+  },
+  "events": [
+    {
+      "taskId": "compact-fixture",
+      "seq": 1,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "agent_start"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 2,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_start"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 7,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 9,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "BEFORE"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 10,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": ""
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 37,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "BEFORE"
+              }
+            ],
+            "stopReason": "toolUse"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 38,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "tool_execution_start",
+          "toolCallId": "tool-1",
+          "toolName": "read",
+          "args": {
+            "path": "sample.txt"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 39,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "tool_execution_end",
+          "toolCallId": "tool-1",
+          "toolName": "read",
+          "isError": false
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 42,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_end"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 43,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_start"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 44,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_start",
+          "message": {
+            "role": "assistant"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 46,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": "BEFORE"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 47,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_update",
+          "assistantMessageEvent": {
+            "type": "text_delta",
+            "delta": ""
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 49,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "message_end",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "BEFORE"
+              }
+            ],
+            "stopReason": "stop"
+          }
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 50,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "turn_end"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 51,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "agent_end"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 52,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "agent_settled"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 53,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "compaction_start",
+          "reason": "manual"
+        }
+      }
+    },
+    {
+      "taskId": "compact-fixture",
+      "seq": 54,
+      "type": "PI_EVENT",
+      "data": {
+        "pi": {
+          "type": "compaction_end",
+          "reason": "manual",
+          "result": {
+            "summary": "Public compatibility-test summary",
+            "tokensBefore": 4724,
+            "estimatedTokensAfter": 2998
+          }
+        }
+      }
+    }
+  ]
+}

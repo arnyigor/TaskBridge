@@ -198,6 +198,32 @@ test('steering during a message does not move its remaining text into the next r
   assert.equal(state.current.text, '');
 });
 
+test('successful compaction separates existing work from continuation', () => {
+  const state = new ChatState({ ...task(), status: 'RUNNING' });
+  const frames = [
+    { type: 'message_start', message: { role: 'assistant' } },
+    { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'До сжатия' } },
+    { type: 'tool_execution_start', toolName: 'read', toolCallId: 'before' },
+    { type: 'tool_execution_end', toolName: 'read', toolCallId: 'before', isError: false },
+    { type: 'compaction_start' },
+    { type: 'compaction_end', result: { summary: 'Сводка' } },
+    { type: 'message_start', message: { role: 'assistant' } },
+    { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'После сжатия' } },
+    { type: 'tool_execution_start', toolName: 'bash', toolCallId: 'after' },
+  ];
+  frames.forEach((pi, index) => state.apply({ seq: index + 1, type: 'PI_EVENT', data: { pi } }));
+  const displayed = state.displayTurns;
+  const before = displayed.findIndex(x => x.role === 'assistant' && x.text === 'До сжатия');
+  const note = displayed.findIndex(x => x.id === 'note-6');
+  const after = displayed.findIndex(x => x.role === 'assistant' && x.text === 'После сжатия');
+  assert.ok(before >= 0 && before < note && note < after, 'expected work → success note → continuation');
+  assert.equal(state.turns.filter(x => x.role === 'user').length, 1);
+  assert.equal(state.turns.filter(x => x.role === 'assistant').length, 1);
+  assert.deepEqual(displayed[before].tools.map(x => x.id), ['before']);
+  assert.deepEqual(displayed[after].tools.map(x => x.id), ['after']);
+  assert.equal(displayed[after].canonicalTurn, state.current);
+});
+
 test('compaction summary is placed before the answer that follows it', () => {
   const state = new ChatState({ ...task(), status: 'RUNNING' });
   state.apply({ seq: 1, type: 'PI_EVENT', data: { pi: { type: 'compaction_end', result: { summary: 'Сводка прошлого контекста' } } } });
@@ -379,6 +405,34 @@ test('DOM: saved answers survive repeated polls, context loads immediately, reco
   assert.equal(app.document.querySelectorAll('.typing').length, 0);
   assert.equal(app.document.querySelectorAll('.tool').length, 1);
   assert.match(app.streams[0].url, /after=12$/);
+});
+
+test('DOM: real compact stream keeps continuation below the notice and actions canonical', async () => {
+  const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/compaction/pi-1.4.0-auto.json', import.meta.url), 'utf8'));
+  const app = await ui();
+  app.tasks.a = { ...task(), status: 'RUNNING', assistantText: '' };
+  app.setFetchHook(async url => url.includes('/events') ? { ok: true, json: async () => ({ events: [], reachedStart: true }) } : null);
+  await app.selectTask('a');
+  let toolNode;
+  for (const event of fixture.events) {
+    app.streams[0].onmessage({ data: JSON.stringify({ ...event, taskId: 'a' }) });
+    app.renderChat();
+    const tool = app.document.querySelector('.tool');
+    if (tool && !toolNode) { toolNode = tool; toolNode.open = true; }
+  }
+  assert.equal(app.document.querySelector('.tool'), toolNode);
+  assert.equal(toolNode.open, true);
+  const content = app.document.getElementById('msgsInner').textContent;
+  assert(content.indexOf('BEFORE') < content.indexOf('Public compatibility-test summary'));
+  assert(content.indexOf('Public compatibility-test summary') < content.indexOf('AFTER'));
+  const assistants = [...app.document.querySelectorAll('.turn:not(.me)')];
+  assert.equal(assistants.length, 2);
+  assert.equal(app.document.querySelectorAll('.typing').length, 0);
+  assert.equal(assistants[0].querySelector('.turnActionBar')?.classList.contains('hidden') ?? true, true);
+  const actionHost = assistants[1];
+  assert.equal(actionHost.dataset.turnId, 'assistant-initial');
+  actionHost.querySelector('[data-action="edit"]').click();
+  assert.equal(actionHost.querySelector('.editBox textarea').value, 'BEFORE\n\nAFTER');
 });
 
 test('DOM: context panel shows current compaction explicitly', async () => {
