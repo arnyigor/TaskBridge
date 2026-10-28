@@ -472,6 +472,12 @@ test('DOM: an estimate after compaction is labelled, and a stale measurement say
       usage: { tokens: 160000, source: 'pi', measuredAt: '2026-10-28T09:59:00.000Z', stale: true, unavailableReason: null },
       postCompaction: { tokens: 78800, source: 'pi-estimate', measuredAt: '2026-10-28T10:00:00.000Z' },
       limit: { tokens: null, exceeded: false },
+      session: {
+        available: true, method: 'session-file-projection',
+        active: { kept: { messages: 4, chars: 2345, toolCalls: 0, toolResults: 1 } },
+        compaction: { summaryChars: 321, summaryAvailable: true, tokensBefore: 160000, firstKeptEntryId: 'c' },
+        history: { excludedMessages: 7, excludedChars: 4321, userMessages: 1, assistantMessages: 2, toolResults: 1, branchMessages: 11 },
+      },
     },
   };
   let current = reports.afterCompact;
@@ -488,6 +494,9 @@ test('DOM: an estimate after compaction is labelled, and a stale measurement say
   assert.match(text, /Всего в запросе: 160[\s ]000/);
   assert.match(text, /Последнее измерение — до последнего сжатия/);
   assert.match(text, /≈78[\s ]800 \(оценка Pi\)/);
+  assert.match(text, /В контексте после сжатия: 4 сообщ\./);
+  assert.match(text, /Сводка сжатия: 321 симв\./);
+  assert.match(text, /Исключено из контекста .*: 7 сообщ\./);
 });
 
 test('DOM: context panel shows current compaction explicitly', async () => {

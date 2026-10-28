@@ -237,12 +237,31 @@ export async function readPiSession(file, projectPath) {
   }
   branch.reverse();
   let context = branch;
+  // CTX-02: метаданные последнего сжатия возвращаются вместе с проекцией, чтобы
+  // отчёт «что осталось после compact» не разбирал файл второй раз.
+  let compactionMeta = null;
   const compactionIndex = branch.findLastIndex(entry => entry.type === 'compaction');
   if (compactionIndex >= 0) {
     const compaction = branch[compactionIndex];
     const firstKeptIndex = branch.findIndex(entry => entry.id === compaction.firstKeptEntryId);
     const kept = firstKeptIndex >= 0 && firstKeptIndex < compactionIndex ? branch.slice(firstKeptIndex, compactionIndex) : [];
     context = [compaction, ...kept, ...branch.slice(compactionIndex + 1)];
+    compactionMeta = {
+      firstKeptEntryId: typeof compaction.firstKeptEntryId === 'string' ? compaction.firstKeptEntryId : null,
+      firstKeptFound: firstKeptIndex >= 0 && firstKeptIndex < compactionIndex,
+      tokensBefore: Number.isFinite(compaction.tokensBefore) ? compaction.tokensBefore : null,
+      reason: typeof compaction.reason === 'string' ? compaction.reason : null,
+      at: typeof compaction.timestamp === 'string' ? compaction.timestamp : null,
+      // Записи ветки, выпавшие из активного контекста (до сохранённого куска).
+      ignoredEntries: branch.length - context.length,
+    };
   }
-  return { header, entries, messages: context.map(toMessage).filter(Boolean), branchMessages: branch.map(toMessage).filter(Boolean) };
+  return {
+    header,
+    entries,
+    messages: context.map(toMessage).filter(Boolean),
+    branchMessages: branch.map(toMessage).filter(Boolean),
+    compaction: compactionMeta,
+    ...(compactionMeta ? { firstKeptEntryId: compactionMeta.firstKeptEntryId, tokensBefore: compactionMeta.tokensBefore, ignoredEntries: compactionMeta.ignoredEntries } : {}),
+  };
 }

@@ -62,6 +62,8 @@ import { trustProjectDirectory } from './project-trust.mjs';
 import {
   assertContextLimit, buildContextReport, collectContextSources, estimateTokens, readCompactionSettings,
 } from './context-report.mjs';
+import { readPiSession } from './pi-session-index.mjs';
+import { summarizeSessionContext } from './context-composition.mjs';
 
 function now() { return new Date().toISOString(); }
 
@@ -4361,7 +4363,8 @@ export class TaskManager extends EventEmitter {
     const live = runtime && !runtime.pi.closed && runtime.pi.canSend?.() !== false;
     const stats = live ? await runtime.pi.getSessionStats().catch(() => null) : null;
     const model = task.model || task.requestedModel || null;
-    return buildContextReport({
+    const sessionComposition = await this.#sessionComposition(task);
+    const report = buildContextReport({
       measuredAt: stats?.contextUsage?.tokens != null ? now() : null,
       measurementSession: task.piSessionFile ?? null,
       taskId: task.id,
@@ -4373,6 +4376,22 @@ export class TaskManager extends EventEmitter {
       limit: task.contextLimit ?? null,
       running: !RUN_TERMINAL.has(task.status),
     });
+    // CTX-02: что именно осталось в контексте после сжатия. Текст не отдаётся —
+    // только размеры и количество; причина недоступности называется явно.
+    return { ...report, session: sessionComposition };
+  }
+
+  async #sessionComposition(task) {
+    if (!task.piSessionFile || !task.workspacePath) {
+      return { available: false, reason: task.piSessionFile ? 'у сессии нет рабочего каталога' : 'у сессии ещё нет файла Pi' };
+    }
+    try {
+      const data = await readPiSession(task.piSessionFile, task.workspacePath);
+      return { available: true, ...summarizeSessionContext(data) };
+    } catch (error) {
+      // Файл мог быть перемещён, принадлежать другому проекту или быть повреждён.
+      return { available: false, reason: error.message };
+    }
   }
 
   // Лимит контекста этой сессии. Не настройка Pi: Pi знает только своё окно

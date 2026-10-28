@@ -1511,6 +1511,26 @@ function renderContextReport(report) {
   if (report.usage?.stale) {
     lines.push('Последнее измерение — до последнего сжатия: оно относится к прежней истории.');
   }
+  // CTX-02: что именно осталось в контексте после сжатия — только размеры и
+  // количество; текст сводки и сообщений здесь не показывается.
+  const composition = report.session;
+  if (composition?.available) {
+    const kept = composition.active?.kept;
+    if (kept) {
+      lines.push(`В контексте после сжатия: ${kept.messages} сообщ.`
+        + ` · ${kept.chars.toLocaleString('ru-RU')} симв.`
+        + (kept.toolResults ? ` · результатов инструментов: ${kept.toolResults}` : ''));
+    }
+    if (composition.compaction?.summaryAvailable) {
+      lines.push(`Сводка сжатия: ${composition.compaction.summaryChars.toLocaleString('ru-RU')} симв.`
+        + (composition.compaction.tokensBefore ? ` · до сжатия ${composition.compaction.tokensBefore.toLocaleString('ru-RU')} ток.` : ''));
+    }
+    const history = composition.history;
+    if (history?.excludedMessages) {
+      lines.push(`Исключено из контекста (осталось в файле сессии): ${history.excludedMessages} сообщ.`
+        + ` · ${history.excludedChars.toLocaleString('ru-RU')} симв.`);
+    }
+  }
   for (const source of report.sources || []) lines.push(contextSourceLine(source));
   // «Остаток 0» при переоценке источников читался бы как «истории нет вообще»: в
   // этом случае показываем оговорку, а не ноль.
