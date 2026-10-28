@@ -242,11 +242,24 @@ class DesktopServerLauncher(private val store: KeyValueStore) : LocalServerLaunc
             "Каталог TaskBridge (scripts/start-lan.mjs) не найден — задайте настройку server.root в настройках. " +
                 "Проверено: " + checkedPathList(store.get("server.root"), anchors()),
         )
-        // node обязателен в PATH: его же требует сам сервер (start.cmd проверяет то же).
-        val process = ProcessBuilder("node", "scripts/start-lan.mjs", "start")
-            .directory(root)
-            .redirectErrorStream(true)
-            .start()
+        // Комплектный Node важнее PATH: у конечного пользователя Node может
+        // отсутствовать или стоять другой версии. Порядок выбора описан в
+        // resolveNodeCommand.
+        val node = resolveNodeCommand(root, System.getenv("TASKBRIDGE_NODE"), { isWindowsOs() }, File::isFile)
+        val process = try {
+            ProcessBuilder(node, "scripts/start-lan.mjs", "start")
+                .directory(root)
+                .redirectErrorStream(true)
+                .start()
+        } catch (error: java.io.IOException) {
+            // «node не найден» раньше всплывало как голый IOException: по нему нельзя
+            // понять, чего не хватает — комплектного runtime или PATH.
+            throw IllegalStateException(
+                "Не удалось запустить Node ($node). Проверьте комплектный runtime " +
+                    "или задайте путь через TASKBRIDGE_NODE. Для запуска из репозитория нужен Node.js 22.13+ в PATH.",
+                error,
+            )
+        }
         val output = StringBuilder()
         val reader = thread(isDaemon = true) {
             runCatching { process.inputStream.bufferedReader().forEachLine { output.appendLine(it) } }
@@ -320,6 +333,40 @@ internal fun readableOutput(text: String, tail: Int = 12): String {
     val noise = listOf("DeprecationWarning", "ExperimentalWarning", "(Use `node --trace-deprecation", "--trace-warnings")
     val meaningful = text.lines().map { it.trim() }.filterNot { line -> noise.any { line.contains(it) } }.filter { it.isNotEmpty() }
     return meaningful.takeLast(tail).joinToString("\n").ifEmpty { "вывод пуст — причину смотрите в lan-app.log" }
+}
+
+/** Платформа процесса. Вынесено ради тестов: выбор команды Node зависит от имени бинарника. */
+internal fun isWindowsOs(): Boolean = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+
+/**
+ * Команда сервера: явный TASKBRIDGE_NODE, затем комплектный Node и в последнюю
+ * очередь PATH (совместимость с разработкой и установками без Node в bundle).
+ * В распознанной portable-сборке проверяются server/node.exe и runtime/node/node.exe;
+ * внутри самого корня сервера также поддерживается runtime/node/node.exe.
+ * Чужой runtime рядом с обычным репозиторием не является частью TaskBridge.
+ *
+ * Возвращается именно команда, а не File: PATH-вариант — имя, которое ищет ОС.
+ */
+internal fun resolveNodeCommand(
+    root: File,
+    setting: String?,
+    isWindows: () -> Boolean,
+    exists: (File) -> Boolean,
+): String {
+    setting?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    val dist = root.absoluteFile.parentFile
+    val executable = if (isWindows()) "node.exe" else "node"
+    val candidates = buildList {
+        if (root.name == "server" && dist != null && File(dist, "TaskBridge.exe").isFile && File(dist, "app").isDirectory) {
+            add(File(root, executable))
+            add(File(dist, "runtime/node/$executable"))
+        }
+        add(File(root, "runtime/node/$executable"))
+    }
+    for (candidate in candidates) {
+        if (exists(candidate)) return candidate.absolutePath
+    }
+    return "node"
 }
 
 /** Каталог состояния сервера: тот же, что выбирает start-lan и src/server.mjs (`TASKBRIDGE_DATA_DIR` или `<корень>/data`). */
