@@ -1271,6 +1271,26 @@ data class ContextUsage(
     val percent: Double? = null,
     /** `pi` — числа пришли от запущенной сессии Pi; null — сессия не запущена. */
     val source: String? = null,
+    /** CTX-03: когда снято измерение и к какой сессии относится. */
+    val measuredAt: String? = null,
+    val sessionId: String? = null,
+    /** Измерение сделано до последнего сжатия: оно описывает прежнюю историю. */
+    val stale: Boolean = false,
+    /** Почему измерения нет (сессия не активна, Pi ещё не ответил). */
+    val unavailableReason: String? = null,
+)
+
+/**
+ * Оценка размера после успешного сжатия (`estimatedTokensAfter`). Это НЕ измерение:
+ * Pi может не сообщать `contextUsage` сразу после compact.
+ */
+@Serializable
+data class ContextPostCompaction(
+    val tokens: Long? = null,
+    val source: String? = null,
+    val measuredAt: String? = null,
+    val reason: String? = null,
+    val tokensBefore: Long? = null,
 )
 
 /** Настройки сжатия Pi, которые задают, когда начинается автосжатие. */
@@ -1308,6 +1328,8 @@ data class SessionContextReport(
     val model: ModelRef? = null,
     val contextWindow: Long? = null,
     val usage: ContextUsage? = null,
+    /** Оценка Pi после сжатия; null — сжатия не было. */
+    val postCompaction: ContextPostCompaction? = null,
     val conversation: ContextConversation? = null,
     val totalTokens: Long? = null,
     val sources: List<ContextSource> = emptyList(),

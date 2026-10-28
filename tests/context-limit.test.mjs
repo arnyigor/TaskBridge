@@ -107,7 +107,15 @@ test('a context limit is stored per session and compacts the history when exceed
   assert.ok(boundary, 'successful compaction frame is persisted');
   assert.equal(afterCompact.filter(event => event.data?.pi?.type === 'agent_start').length, 1, 'limit compaction does not start another agent run');
   assert.equal(afterCompact.filter(event => event.type === 'USER_MESSAGE').length, events.filter(event => event.type === 'USER_MESSAGE').length);
-  assert.equal((await api(`/api/tasks/${id}/context`)).limit.tokens, 40000);
+  const afterCompaction = await api(`/api/tasks/${id}/context`);
+  assert.equal(afterCompaction.limit.tokens, 40000);
+  // CTX-03: после сжатия отчёт не выдаёт оценку за измерение и помнит, когда
+  // снято последнее число Pi.
+  assert.equal(afterCompaction.postCompaction.tokens, 500);
+  assert.equal(afterCompaction.postCompaction.source, 'pi-estimate');
+  assert.equal(afterCompaction.compaction.last.estimatedTokensAfter, 500);
+  assert.equal(typeof afterCompaction.usage.stale, 'boolean');
+  assert.equal(afterCompaction.usage.source === 'pi', afterCompaction.usage.tokens !== null);
 
   // Clearing the limit is explicit: null means "no limit".
   const cleared = await api(`/api/tasks/${id}/context`, { limit: null });

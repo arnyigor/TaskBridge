@@ -4362,12 +4362,14 @@ export class TaskManager extends EventEmitter {
     const stats = live ? await runtime.pi.getSessionStats().catch(() => null) : null;
     const model = task.model || task.requestedModel || null;
     return buildContextReport({
+      measuredAt: stats?.contextUsage?.tokens != null ? now() : null,
+      measurementSession: task.piSessionFile ?? null,
       taskId: task.id,
       model: model ? { provider: model.provider ?? null, id: model.id ?? null, contextWindow: model.contextWindow ?? null } : null,
       contextWindow: model?.contextWindow ?? null,
       stats,
       sources,
-      compaction: { ...compaction, auto: task.autoCompactionEnabled },
+      compaction: { ...compaction, auto: task.autoCompactionEnabled, last: task.compaction?.last ?? null },
       limit: task.contextLimit ?? null,
       running: !RUN_TERMINAL.has(task.status),
     });
@@ -4551,9 +4553,10 @@ export class TaskManager extends EventEmitter {
         summary: typeof frame.result.summary === 'string' ? frame.result.summary : null,
         at: now()
       };
-      if (Number.isFinite(estimatedTokensAfter) && estimatedTokensAfter > 0) {
-        task.lastUsage = { ...(task.lastUsage || {}), totalTokens: estimatedTokensAfter };
-      }
+      // `lastUsage` описывает ПОСЛЕДНИЙ ОТВЕТ МОДЕЛИ. Оценку после сжатия сюда
+      // не подставляем (CTX-03): иначе оценка выдавала себя за измерение в
+      // статистике, экспорте сессии и отчёте «откуда контекст». Она живёт в
+      // `compaction.last.estimatedTokensAfter` и подписана как оценка.
     }
     if (frame.type === 'agent_start') {
       task.status = 'RUNNING';

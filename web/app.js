@@ -27,6 +27,7 @@ marked.setOptions({ gfm: true, breaks: true });
 let selectedTaskId = null;
 // Follow Plan (FP-05C): the server owns the state, the page only mirrors it.
 let planStatus = null;
+let planStatusRequestId = 0;
 let planMode = false;
 let planNotice = '';
 // Set from /api/auth. `serverIsLocal` means native open/reveal is possible —
@@ -1496,8 +1497,19 @@ function renderContextReport(report) {
       + (windowSize ? ` из ${windowSize.toLocaleString('ru-RU')}` : '')
       + (pct != null ? ` · ${pct}%` : ''));
   } else {
-    // Сессия не запущена — Pi ещё не считал этот запрос, и придумывать число нечем.
-    lines.push('Сессия не запущена: размера запроса у Pi ещё нет.');
+    // CTX-03: у отсутствия измерения есть причина, и она важнее общего «нет числа»:
+    // «сессия не активна» и «Pi ещё не ответил» — разные состояния.
+    lines.push(report.usage?.unavailableReason
+      ? `Текущий размер недоступен: ${report.usage.unavailableReason}.`
+      : 'Сессия не запущена: размера запроса у Pi ещё нет.');
+  }
+  // Оценка после сжатия подписана как оценка: это estimatedTokensAfter, а не измерение.
+  const estimate = report.postCompaction?.tokens;
+  if (estimate != null) {
+    lines.push(`Контекст после сжатия: ≈${estimate.toLocaleString('ru-RU')} (оценка Pi)`);
+  }
+  if (report.usage?.stale) {
+    lines.push('Последнее измерение — до последнего сжатия: оно относится к прежней истории.');
   }
   for (const source of report.sources || []) lines.push(contextSourceLine(source));
   // «Остаток 0» при переоценке источников читался бы как «истории нет вообще»: в
@@ -4497,15 +4509,18 @@ function schedulePlanStatusRefresh() {
 async function loadPlanStatus() {
   const id = selectedTaskId;
   if (!id) return null;
+  // Polling, SSE and dialog opening can overlap. Only the latest request may
+  // update the mirror, including when an older request fails after it.
+  const requestId = ++planStatusRequestId;
   try {
     const status = await api(`/api/tasks/${encodeURIComponent(id)}/plan`);
-    if (id !== selectedTaskId) return null;
+    if (id !== selectedTaskId || requestId !== planStatusRequestId) return null;
     planStatus = status;
     schedulePlanStatusRefresh();
     renderPlanCard();
     return status;
   } catch (error) {
-    if (id !== selectedTaskId) return null;
+    if (id !== selectedTaskId || requestId !== planStatusRequestId) return null;
     const code = ['HTTP_404', 'NOT_FOUND'].includes(error.code) ? 'PLAN_API_UNAVAILABLE'
       : /^(PLAN_|FOLLOW_PLAN_)/.test(error.code || '') ? error.code : 'PLAN_CONNECTION_LOST';
     planStatus = { ...planStatus, enabled: false, fileError: { code, message: planErrorText({ code, message: error.message }) } };

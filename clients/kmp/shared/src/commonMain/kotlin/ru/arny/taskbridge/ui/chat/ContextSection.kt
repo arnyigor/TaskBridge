@@ -96,6 +96,21 @@ internal fun ContextSection(
             value = tokenCount(total),
         )
     }
+    // CTX-03: у отсутствия измерения есть причина, и оценка после сжатия — не измерение.
+    contextUnavailableLine(current)?.let { line ->
+        Text(line, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    contextEstimateLine(current)?.let { line ->
+        ContextValueRow(label = "Контекст после сжатия", value = line)
+    }
+    if (current.usage?.stale == true) {
+        Text(
+            "Последнее измерение — до последнего сжатия: оно относится к прежней истории.",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(top = 4.dp),
+        )
+    }
     // «Остаток 0» при переоценке источников читался бы как «истории нет вообще».
     current.unaccountedTokens?.takeIf { !current.overestimated }?.let { rest ->
         ContextValueRow(
@@ -180,6 +195,22 @@ private fun ContextValueRow(label: String, value: String) {
         Spacer(Modifier.width(8.dp))
         Text(value, style = MaterialTheme.typography.bodyMedium)
     }
+}
+
+/**
+ * Почему текущего размера нет: «сессия не активна» и «Pi ещё не ответил» — разные
+ * состояния, и общее «нет числа» их не различает (CTX-03).
+ */
+internal fun contextUnavailableLine(report: SessionContextReport): String? {
+    if (report.totalTokens != null) return null
+    val reason = report.usage?.unavailableReason?.takeIf { it.isNotBlank() }
+    return if (reason != null) "Текущий размер недоступен: $reason." else "Размера текущего запроса ещё нет."
+}
+
+/** «≈78.8K (оценка Pi)» — estimatedTokensAfter, подписанный как оценка. */
+internal fun contextEstimateLine(report: SessionContextReport): String? {
+    val tokens = report.postCompaction?.tokens ?: return null
+    return "≈ ${tokenCount(tokens)} (оценка Pi)"
 }
 
 /** «60K из 200K · 30%» — то же число, что Pi показывает в своём футере. */

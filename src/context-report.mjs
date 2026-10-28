@@ -279,6 +279,10 @@ export function buildContextReport({
   compaction = null,
   limit = null,
   running = false,
+  // Когда сняты числа Pi и что они описывают (CTX-03). Без этого «всего» после
+  // сжатия не отличить от числа до сжатия, а оценку Pi — от измерения.
+  measuredAt = null,
+  measurementSession = null,
 } = {}) {
   const window = Number.isFinite(contextWindow) ? contextWindow : (stats?.contextUsage?.contextWindow ?? null);
   const totalTokens = Number.isFinite(stats?.contextUsage?.tokens) ? stats.contextUsage.tokens : null;
@@ -295,6 +299,20 @@ export function buildContextReport({
   // клиент должен показать именно оговорку, а не ноль.
   const overestimated = totalTokens !== null && measuredTokens > totalTokens;
   const triggerAt = window !== null && compaction ? window - compaction.reserveTokens : null;
+  // Последнее успешное сжатие и его оценка размера. Это ОЦЕНКА Pi
+  // (`estimatedTokensAfter`), а не измерение: после compact `contextUsage.tokens`
+  // может быть null, и подставлять сюда старое число нельзя.
+  const lastCompaction = compaction?.last || null;
+  const estimatedAfter = Number.isFinite(lastCompaction?.estimatedTokensAfter) ? lastCompaction.estimatedTokensAfter : null;
+  const measuredMs = measuredAt ? Date.parse(measuredAt) : NaN;
+  const compactionMs = lastCompaction?.at ? Date.parse(lastCompaction.at) : NaN;
+  // Измерение старше последнего сжатия описывает уже другую историю.
+  const stale = totalTokens !== null && Number.isFinite(measuredMs) && Number.isFinite(compactionMs)
+    ? measuredMs < compactionMs
+    : false;
+  const unavailableReason = totalTokens !== null ? null
+    : !running ? 'сессия Pi не активна: текущий размер недоступен'
+      : 'Pi пока не сообщил размер текущего запроса';
   return {
     taskId: taskId ?? null,
     model: model || null,
@@ -303,8 +321,20 @@ export function buildContextReport({
       tokens: totalTokens,
       contextWindow: window,
       percent: Number.isFinite(stats?.contextUsage?.percent) ? stats.contextUsage.percent : null,
-      source: totalTokens === null ? null : 'pi'
+      // Меняется вместе с tokens: null здесь означал бы «измерено, но неизвестно чем».
+      source: totalTokens === null ? null : 'pi',
+      measuredAt: totalTokens === null ? null : (measuredAt ?? null),
+      sessionId: totalTokens === null ? null : (measurementSession ?? null),
+      stale,
+      unavailableReason
     },
+    postCompaction: lastCompaction ? {
+      tokens: estimatedAfter,
+      source: estimatedAfter === null ? null : 'pi-estimate',
+      measuredAt: lastCompaction.at ?? null,
+      reason: lastCompaction.reason ?? null,
+      tokensBefore: Number.isFinite(lastCompaction.tokensBefore) ? lastCompaction.tokensBefore : null
+    } : null,
     conversation: stats ? {
       userMessages: stats.userMessages ?? null,
       assistantMessages: stats.assistantMessages ?? null,
@@ -327,10 +357,17 @@ export function buildContextReport({
       reserveTokens: compaction.reserveTokens,
       keepRecentTokens: compaction.keepRecentTokens,
       triggerAt,
-      fromProject: compaction.fromProject === true
+      fromProject: compaction.fromProject === true,
+      // Последнее успешное сжатие: счётчик и его числа нужны клиенту рядом с
+      // оценкой (postCompaction), а не вместо неё.
+      last: lastCompaction
     } : null,
     running: running === true,
-    note: overestimated
+    note: stale
+      ? 'Последнее измерение Pi сделано до сжатия — оно относится к прежней истории. Размер после сжатия показан как оценка Pi (estimatedTokensAfter), пока не придёт новый ответ модели.'
+      : totalTokens === null && estimatedAfter !== null
+        ? 'Текущий размер Pi не сообщает, поэтому показана оценка после сжатия (estimatedTokensAfter). Это не измерение.'
+        : overestimated
       ? 'Размеры источников — оценка (символы / 4, как считает Pi), и она больше того, что Pi насчитал на этом ходу: Pi берёт «всего» из последнего ответа модели, и до первого ответа его число меньше реального запроса. Сравнивайте обе цифры, а не их разность. «Всего» и строка истории/остатка взяты из чисел самого Pi (get_session_stats) — остаток режется нулём, потому что переоценка, а не пустая история.'
       : 'Размеры источников — оценка (символы / 4, как считает Pi). «Всего» и остаток взяты из чисел самого Pi (get_session_stats); текста, добавленного расширениями, в файлах нет, поэтому он попадает в остаток.'
   };

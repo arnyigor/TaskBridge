@@ -371,7 +371,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, 
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, probeResultText, renderModelList, renderModelFilters, resetModelFilters, openModelPicker, toggleModelFavorite, getFavorites: () => favoriteModels, setModelFilters: (patch) => { Object.assign(modelFilters, patch); renderModelFilters(); renderModelList(); }, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, loadContextReport, probeResultText, renderModelList, renderModelFilters, resetModelFilters, openModelPicker, toggleModelFavorite, getFavorites: () => favoriteModels, setModelFilters: (patch) => { Object.assign(modelFilters, patch); renderModelFilters(); renderModelList(); }, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, intervals, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -456,6 +456,38 @@ test('DOM: backfill across compact inserts segments around already rendered noti
   assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 2);
   app.renderChat();
   assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 2);
+});
+
+test('DOM: an estimate after compaction is labelled, and a stale measurement says so', async () => {
+  const app = await ui();
+  const reports = {
+    afterCompact: {
+      taskId: 'a', totalTokens: null, contextWindow: 200000, sources: [], measuredTokens: 0, unaccountedTokens: null,
+      usage: { tokens: null, source: null, measuredAt: null, stale: false, unavailableReason: 'Pi пока не сообщил размер текущего запроса' },
+      postCompaction: { tokens: 78800, source: 'pi-estimate', measuredAt: '2026-10-28T10:00:00.000Z' },
+      limit: { tokens: null, exceeded: false },
+    },
+    stale: {
+      taskId: 'a', totalTokens: 160000, contextWindow: 200000, sources: [], measuredTokens: 0, unaccountedTokens: 160000,
+      usage: { tokens: 160000, source: 'pi', measuredAt: '2026-10-28T09:59:00.000Z', stale: true, unavailableReason: null },
+      postCompaction: { tokens: 78800, source: 'pi-estimate', measuredAt: '2026-10-28T10:00:00.000Z' },
+      limit: { tokens: null, exceeded: false },
+    },
+  };
+  let current = reports.afterCompact;
+  app.setFetchHook(async url => url.endsWith('/context') ? { ok: true, json: async () => current } : null);
+  await app.selectTask('a');
+  await app.loadContextReport();
+  let text = app.document.getElementById('contextSources').textContent;
+  assert.match(text, /Текущий размер недоступен: Pi пока не сообщил размер текущего запроса/);
+  assert.match(text, /Контекст после сжатия: ≈78[\s ]800 \(оценка Pi\)/);
+  assert.doesNotMatch(text, /Всего в запросе/);
+  current = reports.stale;
+  await app.loadContextReport();
+  text = app.document.getElementById('contextSources').textContent;
+  assert.match(text, /Всего в запросе: 160[\s ]000/);
+  assert.match(text, /Последнее измерение — до последнего сжатия/);
+  assert.match(text, /≈78[\s ]800 \(оценка Pi\)/);
 });
 
 test('DOM: context panel shows current compaction explicitly', async () => {

@@ -320,7 +320,11 @@ test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compa
   assert.equal(compactedTask.compaction.count, 1);
   assert.equal(compactedTask.compaction.last.estimatedTokensAfter, 500);
   assert.equal(compactedTask.compaction.last.summary, 'Сжатая сводка предыдущего контекста');
-  assert.equal(compactedTask.lastUsage.totalTokens, 500);
+  // CTX-03: the estimate after compaction is not a measurement of the last
+  // response, so it must not overwrite lastUsage (a session export would then
+  // claim 500 tokens were really sent).
+  assert.equal(compactedTask.lastUsage?.totalTokens, 1100);
+  assert.equal(compactedTask.compaction.last.estimatedTokensAfter, 500);
   // The smart-compaction stage is active only until Pi sends compaction_end;
   // after that the diagnostics panel must not keep showing a busy final merge.
   assert.equal(compactedTask.current, '');

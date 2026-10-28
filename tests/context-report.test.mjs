@@ -245,3 +245,58 @@ test('assertContextLimit accepts null and integers in range, rejects the rest', 
     assert.throws(() => assertContextLimit(bad), error => error.code === 'INPUT_INVALID', `rejects ${String(bad)}`);
   }
 });
+
+
+test('CTX-03: an estimate after compaction is never presented as a measurement', () => {
+  const report = buildContextReport({
+    taskId: 'a', contextWindow: 200_000, running: true,
+    compaction: { auto: true, reserveTokens: 16384, keepRecentTokens: 20000, last: { reason: 'threshold', tokensBefore: 160_000, estimatedTokensAfter: 78_800, at: '2026-10-28T10:00:00.000Z' } },
+    sources: [],
+  });
+  assert.equal(report.totalTokens, null, 'Pi reported no measurement for the new context');
+  assert.equal(report.usage.tokens, null);
+  assert.equal(report.usage.source, null);
+  assert.equal(report.usage.measuredAt, null);
+  assert.match(report.usage.unavailableReason, /Pi пока не сообщил|не активна/);
+  assert.deepEqual(report.postCompaction, {
+    tokens: 78_800, source: 'pi-estimate', measuredAt: '2026-10-28T10:00:00.000Z', reason: 'threshold', tokensBefore: 160_000,
+  });
+  assert.match(report.note, /оценка после сжатия/);
+});
+
+test('CTX-03: a measurement older than the last compaction is flagged stale', () => {
+  const report = buildContextReport({
+    taskId: 'a', contextWindow: 200_000, running: true,
+    measuredAt: '2026-10-28T09:59:00.000Z', measurementSession: 'C:/data/sessions/a.jsonl',
+    stats: { contextUsage: { tokens: 160_000, percent: 80 }, userMessages: 10, assistantMessages: 10, totalMessages: 20 },
+    compaction: { auto: true, reserveTokens: 16384, keepRecentTokens: 20000, last: { reason: 'threshold', tokensBefore: 160_000, estimatedTokensAfter: 78_800, at: '2026-10-28T10:00:00.000Z' } },
+    sources: [{ id: 'instructions', known: true, tokens: 1000 }],
+  });
+  assert.equal(report.totalTokens, 160_000);
+  assert.equal(report.usage.source, 'pi');
+  assert.equal(report.usage.stale, true);
+  assert.equal(report.usage.sessionId, 'C:/data/sessions/a.jsonl');
+  assert.equal(report.postCompaction.tokens, 78_800);
+  assert.match(report.note, /сделано до сжатия/);
+});
+
+test('CTX-03: a fresh measurement after compaction is not stale and carries its time', () => {
+  const report = buildContextReport({
+    taskId: 'a', contextWindow: 200_000, running: true,
+    measuredAt: '2026-10-28T10:05:00.000Z',
+    stats: { contextUsage: { tokens: 90_000, percent: 45 } },
+    compaction: { auto: true, reserveTokens: 16384, keepRecentTokens: 20000, last: { reason: 'threshold', estimatedTokensAfter: 78_800, at: '2026-10-28T10:00:00.000Z' } },
+    sources: [{ id: 'instructions', known: true, tokens: 1000 }],
+  });
+  assert.equal(report.usage.stale, false);
+  assert.equal(report.usage.measuredAt, '2026-10-28T10:05:00.000Z');
+  assert.equal(report.usage.unavailableReason, null);
+  assert.equal(report.postCompaction.tokens, 78_800);
+});
+
+test('CTX-03: without any compaction there is no estimate block at all', () => {
+  const report = buildContextReport({ taskId: 'a', stats: { contextUsage: { tokens: 1000 } }, sources: [] });
+  assert.equal(report.postCompaction, null);
+  assert.equal(report.usage.stale, false);
+  assert.match(report.note, /оценка/i);
+});
