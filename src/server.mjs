@@ -2162,6 +2162,7 @@ async function handleRequest(req, res) {
       if (action === 'resume') {
         return json(res, 200, await command(() => followPlan.resume({
           taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
+          renewTimeBudget: body.renewTimeBudget === true,
           commandId: body.commandId, clientId: body.clientId
         })));
       }

@@ -716,3 +716,42 @@ test('UX-03C: a client-supplied path is never trusted on its own', async t => {
   const ok = await service.importPlan({ taskId: 't-1', path: planPath, commandId: 'ok' });
   assert.equal(ok.status.attached, true);
 });
+
+test('an expired time budget is an actionable error; only confirmed renewal resumes without resetting progress or cycles', async t => {
+  const { service, store, manager, planPath, workspace } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'attach-time' });
+  const original = store.getPlanBinding('t-1');
+  const startedAt = Date.now() - 7 * 60 * 60 * 1000;
+  store.savePlanBinding({ ...original, state: 'PAUSED', cycleId: 'c-16', budget: { startedAt, cycles: 16, noProgress: 1, audits: 0 } });
+  const bytes = await fs.readFile(path.join(workspace, planPath));
+  await assert.rejects(
+    service.resume({ taskId: 't-1', expectedRevision: 1, commandId: 'resume-expired' }),
+    error => error.code === 'PLAN_BUDGET_EXCEEDED' && /времени/.test(error.message),
+  );
+  assert.equal(manager.dispatched.length, 0);
+  assert.equal(store.getPlanBinding('t-1').budget.startedAt, startedAt);
+  assert.equal(manager.events.at(-1).data.code, 'PLAN_BUDGET_EXCEEDED');
+  const renewed = await service.resume({ taskId: 't-1', expectedRevision: 1, commandId: 'resume-confirmed', renewTimeBudget: true });
+  assert.equal(renewed.state, 'RUNNING_STEP');
+  assert.equal(renewed.cycleId, 'c-17');
+  assert.equal(manager.dispatched.length, 1);
+  const binding = store.getPlanBinding('t-1');
+  assert.equal(binding.budget.cycles, 17);
+  assert.equal(binding.budget.noProgress, 1);
+  assert(binding.budget.startedAt > startedAt);
+  assert.equal(binding.revision, original.revision);
+  assert.deepEqual(await fs.readFile(path.join(workspace, planPath)), bytes);
+  // Repeated confirmation during a running step must never duplicate dispatch.
+  await service.resume({ taskId: 't-1', commandId: 'resume-again', renewTimeBudget: true });
+  assert.equal(manager.dispatched.length, 1);
+});
+
+test('time renewal cannot bypass the cycle-count limit', async t => {
+  const { service, store, manager, planPath } = await setup(t);
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'attach-cycles' });
+  store.savePlanBinding({ ...store.getPlanBinding('t-1'), state: 'PAUSED', budget: { startedAt: Date.now(), cycles: 20 } });
+  await assert.rejects(service.resume({ taskId: 't-1', commandId: 'renew-cycles', renewTimeBudget: true }),
+    error => error.code === 'PLAN_BUDGET_EXCEEDED');
+  assert.equal(manager.dispatched.length, 0);
+  assert.equal(store.getPlanBinding('t-1').budget.cycles, 20);
+});

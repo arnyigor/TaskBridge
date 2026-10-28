@@ -88,6 +88,7 @@ class FollowPlanUiState internal constructor(val taskId: String) {
     var editorDiscard by mutableStateOf(false)
     var moreOpen by mutableStateOf(false)
     var confirmDetach by mutableStateOf(false)
+    var confirmTimeBudget by mutableStateOf(false)
     // FP-UX-04: результат сканирования живёт до следующего нажатия. При открытии
     // окна его нет — список файлов не запрашивается сам по себе.
     var scan by mutableStateOf<ru.arny.taskbridge.core.api.PlanScanResult?>(null)
@@ -558,7 +559,7 @@ private fun PlanActionsRow(
     val status = state.status
     val primary = planPrimaryAction(status)
 
-    fun command(run: suspend () -> PlanStatus) {
+    fun command(offerTimeBudget: Boolean = true, run: suspend () -> PlanStatus) {
         scope.launch {
             try {
                 state.apply(run())
@@ -566,6 +567,7 @@ private fun PlanActionsRow(
                 // 409 PLAN_REVISION_CONFLICT arrives here: the operator changed the
                 // file, so the dialog must show that instead of pretending to run.
                 state.notice = planErrorText(error)
+                if (offerTimeBudget && planErrorCode(error) == "PLAN_BUDGET_EXCEEDED") state.confirmTimeBudget = true
             }
         }
     }
@@ -612,6 +614,20 @@ private fun PlanActionsRow(
                 })
             }
         }
+    }
+    if (state.confirmTimeBudget) {
+        AlertDialog(
+            onDismissRequest = { state.confirmTimeBudget = false },
+            title = { Text("Достигнут лимит следования плану") },
+            text = { Text(state.notice + "\n\nМожно выделить новый временной бюджет и продолжить. Прогресс и счётчик циклов сохранятся; лимит количества циклов не сбрасывается.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    state.confirmTimeBudget = false
+                    command(offerTimeBudget = false) { api.resumePlan(state.taskId, status?.revision, newId(), renewTimeBudget = true) }
+                }) { Text("Выделить время и продолжить") }
+            },
+            dismissButton = { TextButton(onClick = { state.confirmTimeBudget = false }) { Text("Оставить на паузе") } },
+        )
     }
     if (state.confirmDetach) {
         AlertDialog(

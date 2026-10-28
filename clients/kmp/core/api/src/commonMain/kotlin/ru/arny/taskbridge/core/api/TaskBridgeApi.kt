@@ -964,8 +964,11 @@ class TaskBridgeApi(
     suspend fun pausePlan(id: String, commandId: String): PlanStatus =
         planCommand(id, "pause", commandId, buildJsonObject { put("clientId", connection.clientId) })
 
-    suspend fun resumePlan(id: String, expectedRevision: Int?, commandId: String): PlanStatus =
-        planCommand(id, "resume", commandId, planBody(expectedRevision))
+    suspend fun resumePlan(id: String, expectedRevision: Int?, commandId: String, renewTimeBudget: Boolean = false): PlanStatus =
+        planCommand(id, "resume", commandId, buildJsonObject {
+            planBody(expectedRevision).forEach { (key, value) -> put(key, value) }
+            if (renewTimeBudget) put("renewTimeBudget", true)
+        })
 
     suspend fun stopPlan(id: String, commandId: String): PlanStatus =
         planCommand(id, "stop", commandId, buildJsonObject { put("clientId", connection.clientId) })

@@ -882,6 +882,7 @@ export class FollowPlanService {
     }
     const result = await this.#follower(task).start({ taskId: task.id, commandId });
     await this.#report(task.id, result, { commandId, clientId });
+    if (result.code === 'PLAN_BUDGET_EXCEEDED') throw reject(result.code, result.message);
     return this.status(task.id);
   }
 
@@ -893,7 +894,7 @@ export class FollowPlanService {
     return this.status(task.id);
   }
 
-  async resume({ taskId, expectedRevision, commandId, clientId }) {
+  async resume({ taskId, expectedRevision, commandId, clientId, renewTimeBudget = false }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
     const binding = this.store.getPlanBinding(task.id);
@@ -906,8 +907,9 @@ export class FollowPlanService {
         throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`);
       }
     }
-    const result = await this.#follower(task).resume({ taskId: task.id });
+    const result = await this.#follower(task).resume({ taskId: task.id, renewTimeBudget });
     await this.#report(task.id, result, { commandId, clientId });
+    if (result.code === 'PLAN_BUDGET_EXCEEDED') throw reject(result.code, result.message);
     return this.status(task.id);
   }
 

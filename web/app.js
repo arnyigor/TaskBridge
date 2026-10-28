@@ -4816,7 +4816,14 @@ async function runPlanAction(action, button = null) {
   if (button) button.disabled = true;
   try {
     if (action === 'start') await planSend('start');
-    else if (action === 'resume') await planSend('resume');
+    else if (action === 'resume') {
+      try { await planSend('resume'); }
+      catch (error) {
+        if (error.code !== 'PLAN_BUDGET_EXCEEDED' || !confirm(`${planErrorText(error)}\n\nВыделить новый временной бюджет и продолжить? Прогресс и счётчик циклов сохранятся; лимит количества циклов не сбрасывается.`)) throw error;
+        if (id !== selectedTaskId) return;
+        await planSend('resume', { renewTimeBudget: true });
+      }
+    }
     else if (action === 'pause') await planSend('pause');
     else if (action === 'stop') await planSend('stop');
     else if (action === 'reconcile') await planSend('reconcile', { action: 'adopt_external' });

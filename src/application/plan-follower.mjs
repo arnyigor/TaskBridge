@@ -659,7 +659,7 @@ export class PlanFollower {
   }
 
   /** Operator continues after STOP or a pause: a new cycle, a new epoch-stamped id. */
-  async resume({ taskId }) {
+  async resume({ taskId, renewTimeBudget = false }) {
     const binding = this.#requireBinding(taskId);
     if (binding.state === 'COMPLETED') return this.#result(taskId, 'PLAN_COMPLETED', 'План уже завершён.');
     if (binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING') {
@@ -668,6 +668,12 @@ export class PlanFollower {
     const epoch = this.store.planCancelEpoch(taskId);
     const file = await this.plans.read(binding.path);
     if (!this.#stillOpenable(taskId, binding, epoch)) return this.#result(taskId, 'IGNORED', 'Состояние изменилось во время чтения плана.');
+    // Only an explicit operator confirmation grants more wall-clock time.
+    // Preserve cycle/no-progress counters and command identities: this must not
+    // turn resume into a way around the automatic-loop safeguards.
+    if (renewTimeBudget && binding.state === 'PAUSED') {
+      this.#save(taskId, { budget: { ...(binding.budget || {}), startedAt: this.now() } });
+    }
     return this.#openCycle({ taskId, plan: file.plan, hash: file.hash, reason: 'resume' });
   }
 
