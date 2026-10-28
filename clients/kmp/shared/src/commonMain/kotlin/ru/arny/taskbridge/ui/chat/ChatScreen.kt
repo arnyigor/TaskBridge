@@ -1097,7 +1097,8 @@ internal fun MessageList(
                             )
                         }
                         is ChatItem.Assistant -> {
-                            val newest = item.id == state.chat.newestAnswerId && !historyLocked && item.final
+                            val actionId = item.canonicalId.takeIf { item.segmentActions }
+                            val newest = actionId == state.chat.newestAnswerId && actionId != null && !historyLocked && item.final
                             AssistantMessage(
                                 item = item,
                                 time = timeRange(platform, item.at, item.endedAt),
@@ -1105,13 +1106,13 @@ internal fun MessageList(
                                     copy = { onCopyMessage(item.copyText()) },
                                     onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
                                     selected = selectedIds[item.id] == true,
-                                    edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.id, item.text)) }) else null,
-                                    fork = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
-                                    forkFrom = item.id.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it, from = true) } },
-                                    regenerate = if (newest) ({ session.regenerate(item.id) }) else null,
-                                    rerunWith = if (newest) ({ onDialog(ChatDialog.Rerun(item.id)) }) else null,
-                                    continueAnswer = if (newest && (item.text.isNotBlank() || item.tools.isNotEmpty())) ({ session.continueAnswer(item.id) }) else null,
-                                    deleteFrom = item.id.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
+                                    edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.canonicalId, item.canonicalText)) }) else null,
+                                    fork = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
+                                    forkFrom = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it, from = true) } },
+                                    regenerate = if (newest) ({ session.regenerate(item.canonicalId) }) else null,
+                                    rerunWith = if (newest) ({ onDialog(ChatDialog.Rerun(item.canonicalId)) }) else null,
+                                    continueAnswer = if (newest && (item.canonicalText.isNotBlank() || item.tools.isNotEmpty())) ({ session.continueAnswer(item.canonicalId) }) else null,
+                                    deleteFrom = actionId?.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
                                 ),
                                 onCopyText = { platform.copyText(it) },
                                 loadToolOutput = { session.toolOutput(it) },

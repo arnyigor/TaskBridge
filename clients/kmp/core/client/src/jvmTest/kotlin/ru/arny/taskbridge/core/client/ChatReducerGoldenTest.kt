@@ -264,7 +264,7 @@ class ChatReducerGoldenTest {
         val reducer = ChatReducer(task, seedInitial = false)
 
         reducer.prependOlder(task, listOf(compaction(10)), reachedStart = false)
-        reducer.apply(compaction(20))
+        reducer.apply(compaction(10)) // replay of the same event, not a second compact
 
         val notes = reducer.snapshot().items.filterIsInstance<ChatItem.Note>()
         assertEquals(listOf("Контекст сжат:\nКраткая сводка прошлого контекста"), notes.map { it.text })

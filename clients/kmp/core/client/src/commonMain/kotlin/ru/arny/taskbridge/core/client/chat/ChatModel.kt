@@ -54,6 +54,11 @@ sealed interface ChatItem {
         val variants: VariantInfo?,
         /** Files the agent created or changed during this answer (OUTPUT_FILES). */
         val files: List<FileRef> = emptyList(),
+        /** Server answer identity and full text, even for a visual compact segment. */
+        val canonicalId: String = id,
+        val canonicalText: String = text,
+        /** Only the last nonempty segment exposes history actions and variants. */
+        val segmentActions: Boolean = true,
     ) : ChatItem {
         val cutOff: Boolean get() = final && text.isBlank() && (superseded || status == "CANCELLED" || stopReason == "aborted")
     }

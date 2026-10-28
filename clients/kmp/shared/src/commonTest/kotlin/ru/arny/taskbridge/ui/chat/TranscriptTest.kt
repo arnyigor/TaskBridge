@@ -43,6 +43,19 @@ class TranscriptTest {
         )
     }
 
+    @Test
+    fun compactSegmentsCopyAndExportInVisualOrderWithoutRepeatingCanonicalText() {
+        val original = items()[1] as ChatItem.Assistant
+        val feed = listOf(
+            original.copy(text = "До", canonicalText = "До\n\nПосле", segmentActions = false),
+            ChatItem.Note("compact", "Сводка"),
+            original.copy(id = "assistant-1-segment-3", text = "После", canonicalText = "До\n\nПосле"),
+        )
+        assertEquals("До\n\n— Сводка —\n\nПосле", selectedMessagesText(feed, feed.map { it.id }.toSet()))
+        val transcript = chatTranscript(feed, null) { _, _ -> "" }
+        assertEquals("## Агент\nДо\n\n— Сводка —\n\n## Агент\nПосле\n", transcript)
+    }
+
     private fun items() = listOf(
         ChatItem.User("u1", "Запусти тесты", emptyList(), "10:00", false, null, "prompt", "user-1"),
         ChatItem.Assistant(

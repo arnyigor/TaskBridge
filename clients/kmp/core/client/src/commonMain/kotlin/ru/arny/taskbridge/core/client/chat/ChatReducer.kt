@@ -92,7 +92,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var commandId: String? = null,
         var mode: String? = null,
         var delivery: String = "Передано агенту",
+        val compactionBoundaries: MutableList<CompactionBoundary> = mutableListOf(),
+        val compactionNotice: Boolean = false,
     )
+
+    internal class CompactionBoundary(val seq: Long, val text: Int, val thinking: Int, val tools: Int, val notes: List<Turn>)
 
     private class Variants(val ids: MutableList<String>, var selected: String?)
 
@@ -125,6 +129,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private val piUsersSeen = mutableSetOf<String>()
     private var piUserTurn: Turn? = null
     private var mcpNotice: String? = null
+    private var compactionStartNote: Turn? = null
 
     /** Bumped on every change, so the UI can tell snapshots apart cheaply. */
     var version: Long = 0
@@ -174,7 +179,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val visibleOlder = older.filter { turn ->
             if (turn.role != Role.NOTE) return@filter true
             val seq = noteSeq(turn)
-            if ((seq != null && seq in notes) || turn.text in noteTexts) return@filter false
+            if ((seq != null && seq in notes) || (!turn.compactionNotice && turn.text in noteTexts)) return@filter false
             if (seq != null) notes += seq
             noteTexts += turn.text
             true
@@ -631,8 +636,17 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 if (tool.name == "subagent") subagentProgress(frame.obj("result"), null)?.let { tool.progress = it }
             }
             "agent_settled" -> finish("DONE", null, event.at)
-            "compaction_start", "auto_compaction_start" -> addNote(event, "Контекст сжимается…", beforeEmptyCurrentAnswer = true)
-            "compaction_end", "auto_compaction_end" -> compactionNote(frame)?.let { addNote(event, it, beforeEmptyCurrentAnswer = true) }
+            "compaction_start", "auto_compaction_start" -> {
+                compactionStartNote = addNote(event, "Контекст сжимается…", beforeEmptyCurrentAnswer = true, uniqueText = false)
+            }
+            "compaction_end", "auto_compaction_end" -> {
+                val note = compactionNote(frame)?.let { addNote(event, it, beforeEmptyCurrentAnswer = true, uniqueText = false) }
+                val target = if (current.isEmptyPlaceholder()) messageTurn ?: executionTurn?.takeIf { it.active } ?: current else current
+                if (note != null && successfulCompaction(frame) && (target.text.isNotEmpty() || target.thinking.isNotEmpty() || target.tools.isNotEmpty())) {
+                    target.compactionBoundaries += CompactionBoundary(event.seq, target.text.length, target.thinking.length, target.tools.size, listOfNotNull(compactionStartNote, note))
+                }
+                compactionStartNote = null
+            }
         }
     }
 
@@ -646,19 +660,20 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         addNote(event, text)
     }
 
-    private fun addNote(event: TaskEvent, text: String, beforeEmptyCurrentAnswer: Boolean = false) {
-        if (!notes.add(event.seq)) return
-        if (text in noteTexts || turns.any { it.role == Role.NOTE && it.text == text }) return
+    private fun addNote(event: TaskEvent, text: String, beforeEmptyCurrentAnswer: Boolean = false, uniqueText: Boolean = true): Turn? {
+        if (!notes.add(event.seq)) return null
+        if (uniqueText && (text in noteTexts || turns.any { it.role == Role.NOTE && it.text == text })) return null
         noteTexts += text
-        val note = Turn(id = "note-${event.seq}", role = Role.NOTE, text = text)
+        val note = Turn(id = "note-${event.seq}", role = Role.NOTE, text = text, compactionNotice = !uniqueText)
         if (beforeEmptyCurrentAnswer && current.role == Role.ASSISTANT && current.isEmptyPlaceholder()) {
             val index = turns.indexOf(current)
             if (index >= 0) {
                 turns.add(index, note)
-                return
+                return note
             }
         }
         turns += note
+        return note
     }
 
     private fun Turn.isEmptyPlaceholder(): Boolean = !final && text.isBlank() && thinking.isBlank() && tools.isEmpty() && files.isEmpty()
@@ -750,9 +765,54 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private fun decodeFiles(event: TaskEvent): List<FileRef> =
         event.data["files"]?.let { runCatching { TaskBridgeJson.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(FileRef.serializer()), it) }.getOrNull() }.orEmpty()
 
+    private fun projectSegments(turn: Turn, canonical: ChatItem.Assistant, visible: List<Turn>): List<ChatItem> {
+        val present = visible.toSet()
+        val boundaries = turn.compactionBoundaries.filter { b -> b.notes.any { it in present } }
+        if (boundaries.isEmpty()) return listOf(canonical)
+        val result = mutableListOf<ChatItem>()
+        var textStart = 0
+        var thinkingStart = 0
+        var toolsStart = 0
+        var startSeq: Long? = null
+        var lastSegment = -1
+        val tail = CompactionBoundary(0, canonical.text.length, canonical.thinking.length, canonical.tools.size, emptyList())
+        for (end in boundaries + tail) {
+            val textEnd = end.text.coerceIn(textStart, canonical.text.length)
+            val thinkingEnd = end.thinking.coerceIn(thinkingStart, canonical.thinking.length)
+            val toolsEnd = end.tools.coerceIn(toolsStart, canonical.tools.size)
+            val rawText = canonical.text.substring(textStart, textEnd)
+            val text = if (startSeq == null) rawText else rawText.removePrefix("\n\n")
+            val thinking = canonical.thinking.substring(thinkingStart, thinkingEnd)
+            val tools = canonical.tools.subList(toolsStart, toolsEnd).toList()
+            if (text.isNotEmpty() || thinking.isNotEmpty() || tools.isNotEmpty()) {
+                lastSegment = result.size
+                result += canonical.copy(
+                    id = startSeq?.let { "${canonical.id}-segment-$it" } ?: canonical.id,
+                    text = text, thinking = thinking, tools = tools,
+                    active = false, final = true, status = "DONE", error = null,
+                    variants = null, files = emptyList(), segmentActions = false,
+                )
+            }
+            result += end.notes.filter { it in present }.map { ChatItem.Note(it.id, it.text) }
+            textStart = textEnd
+            thinkingStart = thinkingEnd
+            toolsStart = toolsEnd
+            startSeq = end.seq
+        }
+        if (lastSegment >= 0) {
+            val last = result[lastSegment] as ChatItem.Assistant
+            val boundary = boundaries.last()
+            val active = canonical.active && (canonical.text.length > boundary.text || canonical.thinking.length > boundary.thinking || canonical.tools.size > boundary.tools)
+            result[lastSegment] = last.copy(active = active, final = !active, status = canonical.status, error = canonical.error, variants = canonical.variants, files = canonical.files, segmentActions = true)
+        }
+        return result
+    }
+
     fun snapshot(): ChatSnapshot {
-        val items = turns.filter { !it.hidden }.map { turn ->
-            when (turn.role) {
+        val visible = turns.filter { !it.hidden }
+        val attachedNotes = turns.flatMap { turn -> turn.compactionBoundaries.flatMap { it.notes } }.toSet()
+        val items = visible.filter { it !in attachedNotes }.flatMap { turn ->
+            val canonical = when (turn.role) {
                 Role.USER -> ChatItem.User(
                     id = turn.id, text = turn.text, files = turn.files, at = turn.at,
                     pending = turn.id.startsWith("user-pending-"), clientId = turn.clientId, mode = turn.mode,
@@ -774,10 +834,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     )
                 }
             }
+            if (canonical !is ChatItem.Assistant || turn.compactionBoundaries.isEmpty()) listOf(canonical)
+            else projectSegments(turn, canonical, visible)
         }
-        // The newest exchange is the one regenerate/continue/edit-answer accept.
-        // A partial turn has no id the server knows, so it is never that one.
-        val newestAnswerId = items.lastOrNull { it is ChatItem.Assistant && !it.id.startsWith("assistant-pending-") }?.id?.takeUnless { it.startsWith("assistant-partial-") }
+        // Use the canonical response, never a visual segment's LazyColumn key.
+        val newestAnswerId = visible.lastOrNull { it.role == Role.ASSISTANT && !it.id.startsWith("assistant-pending-") }?.id?.takeUnless { it.startsWith("assistant-partial-") }
         return ChatSnapshot(items = items, cursor = cursor, version = version, mcpNotice = mcpNotice, newestAnswerId = newestAnswerId)
     }
 }
@@ -819,7 +880,10 @@ private fun editChangePreview(args: JsonObject): String? {
     return blocks.takeIf { it.isNotEmpty() }?.joinToString("\n\n")?.take(CHANGE_PREVIEW_LIMIT)
 }
 
+private fun successfulCompaction(frame: JsonObject): Boolean = frame.obj("result") != null && frame.str("errorMessage").isNullOrEmpty() && frame.bool("aborted") != true && frame.bool("cancelled") != true
+
 private fun compactionNote(frame: JsonObject): String? {
+    if (frame.bool("aborted") == true || frame.bool("cancelled") == true) return "Сжатие отменено."
     frame.str("errorMessage")?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }?.let { return it }
     val result = frame.obj("result") ?: return null
     val summary = result.str("summary")?.trim().orEmpty()
