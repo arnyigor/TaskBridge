@@ -435,6 +435,29 @@ test('DOM: real compact stream keeps continuation below the notice and actions c
   assert.equal(actionHost.querySelector('.editBox textarea').value, 'BEFORE\n\nAFTER');
 });
 
+test('DOM: backfill across compact inserts segments around already rendered notices', async () => {
+  const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/compaction/pi-1.4.0-auto.json', import.meta.url), 'utf8'));
+  const app = await ui();
+  app.tasks.a = { ...task(), assistantText: '', status: 'RUNNING' };
+  const events = fixture.events.map(e => ({ ...e, taskId: 'a' }));
+  app.setFetchHook(async url => {
+    if (!url.includes('/events')) return null;
+    const before = new URL(url, 'http://localhost').searchParams.get('before');
+    return { ok: true, json: async () => ({ events: events.filter(e => before ? e.seq < 43 : e.seq >= 43), reachedStart: Boolean(before) }) };
+  });
+  await app.selectTask('a');
+  assert.match(app.document.getElementById('msgsInner').textContent, /AFTER/, 'tail content is visible before backfill');
+  await app.loadOlderHistory();
+  const content = app.document.getElementById('msgsInner').textContent;
+  const notice = content.indexOf('Public compatibility-test summary');
+  assert(content.indexOf('BEFORE') < notice);
+  assert(notice < content.indexOf('AFTER'));
+  assert(content.indexOf('AFTER') < content.lastIndexOf('Public compatibility-test summary'));
+  assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 2);
+  app.renderChat();
+  assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 2);
+});
+
 test('DOM: context panel shows current compaction explicitly', async () => {
   const app = await ui();
   app.renderTaskDetails({ ...task(), status: 'RUNNING', runtime: { state: 'WORKING', activity: 'compacting' } });

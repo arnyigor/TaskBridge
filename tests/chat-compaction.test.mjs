@@ -148,6 +148,86 @@ test('backfilled complete exchange projects boundaries without changing the live
   assert.equal(state.cursor, 10);
 });
 
+test('backfilling across a compact boundary reconstructs one canonical live answer', async () => {
+  const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/compaction/pi-1.4.0-auto.json', import.meta.url)));
+  const whole = new ChatState(fixture.task);
+  fixture.events.forEach(event => whole.apply(event));
+  const tail = new ChatState(fixture.task, { seedInitial: false });
+  const earlier = fixture.events.filter(event => event.seq <= 44);
+  fixture.events.filter(event => event.seq > 44).forEach(event => tail.apply(event));
+  const sink = tail.current;
+  const cursor = tail.cursor;
+  tail.prependOlder(fixture.task, earlier, true);
+  assert.deepEqual(projection(tail), projection(whole));
+  assert.equal(tail.current, sink, 'live sink identity survives prefix reconstruction');
+  assert.equal(tail.cursor, cursor);
+  assert.equal(tail.current.id, 'assistant-initial');
+});
+
+test('every two-page cut and three-page compact replay matches the full fixture', async () => {
+  const f = JSON.parse(await fs.readFile(new URL('./fixtures/compaction/pi-1.4.0-auto.json', import.meta.url)));
+  const whole = new ChatState(f.task);
+  f.events.forEach(e => whole.apply(e));
+  for (let cut = 1; cut < f.events.length; cut++) {
+    const tail = new ChatState(f.task, { seedInitial: false });
+    f.events.slice(cut).forEach(e => tail.apply(e));
+    tail.prependOlder(f.task, f.events.slice(0, cut), true);
+    assert.deepEqual(projection(tail), projection(whole), `cut ${cut}`);
+  }
+  const tail = new ChatState(f.task, { seedInitial: false });
+  f.events.slice(15).forEach(e => tail.apply(e));
+  tail.prependOlder(f.task, f.events.slice(7, 15), false);
+  tail.prependOlder(f.task, f.events.slice(0, 7), true);
+  assert.deepEqual(projection(tail), projection(whole));
+});
+
+test('an open message still reconciles message_end after its prefix arrives', () => {
+  const events = [
+    { type: 'message_start', message: { role: 'assistant' } }, text('before'), compact,
+    { type: 'message_start', message: { role: 'assistant' } }, text('after'),
+  ].map((pi, i) => frame(i + 1, pi));
+  const tail = new ChatState(task, { seedInitial: false });
+  events.slice(3).forEach(e => tail.apply(e));
+  tail.revealWindowStart(4);
+  const sink = tail.current;
+  tail.prependOlder(task, events.slice(0, 3), true);
+  assert.equal(tail.current, sink);
+  assert(!sink.partial);
+  tail.apply(frame(6, { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'after!' }] } }));
+  assert.deepEqual(tail.displayTurns.filter(t => t.role === 'assistant').map(t => t.text), ['before', 'after!']);
+  assert.equal(tail.windowEvents.length, 0, 'resolved prefix buffer is released');
+});
+
+test('unresolved windows do not retain tool output or conversation echoes', () => {
+  const state = new ChatState(task, { seedInitial: false });
+  const payload = 'PRIVATE-TOOL-OUTPUT'.repeat(1000);
+  state.apply(frame(1, { type: 'tool_execution_start', toolCallId: 't', toolName: 'write', args: { path: 'sample.txt', content: payload } }));
+  state.apply(frame(2, { type: 'tool_execution_end', toolCallId: 't', toolName: 'write', result: { content: [{ type: 'text', text: payload }] } }));
+  state.apply(frame(3, { type: 'agent_end', messages: [payload] }));
+  assert(!JSON.stringify(state.windowEvents).includes(payload));
+});
+
+test('backfill keeps message completion delivered after a steer', () => {
+  const state = new ChatState(task, { seedInitial: false });
+  state.apply(frame(2, text('A')));
+  state.apply({ seq: 3, type: 'USER_MESSAGE', message: 'steer', data: { mode: 'steer' } });
+  state.apply(frame(4, { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'AB' }] } }));
+  state.prependOlder(task, [frame(1, { type: 'message_start', message: { role: 'assistant' } })], true);
+  assert.equal(state.turns.find(t => t.id === 'assistant-initial').text, 'AB');
+});
+
+test('backfill cannot revive an answer settled by the task snapshot', () => {
+  const state = new ChatState(task, { seedInitial: false });
+  state.apply(frame(2, { type: 'message_start', message: { role: 'assistant' } }));
+  state.apply(frame(3, text('A')));
+  state.revealWindowStart(2);
+  state.snapshot({ ...task, status: 'CANCELLED' });
+  state.prependOlder(task, [frame(1, { type: 'agent_start' })], true);
+  assert.equal(state.current.active, false);
+  assert.equal(state.current.final, true);
+  assert.equal(state.current.status, 'CANCELLED');
+});
+
 test('compaction during steering stays with the original message sink', () => {
   const state = new ChatState(task);
   state.apply(frame(1, { type: 'message_start', message: { role: 'assistant' } }));

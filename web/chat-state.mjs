@@ -95,6 +95,28 @@ function turnNumber(value) {
   return Number.isFinite(number) && number > 0 ? number : null;
 }
 
+// Buffer only fields the reducer needs while the first exchange lacks its
+// prefix. Tool output/whole-conversation echoes must not be kept for backfill.
+function windowReplayEvent(event) {
+  const frame = event.data?.pi;
+  if (!frame) return event;
+  if (['agent_end', 'turn_end', 'tool_execution_update'].includes(frame.type)) return null;
+  let pi = frame;
+  if (['message_start', 'message_end'].includes(frame.type)) {
+    if (frame.message?.role !== 'assistant') return null;
+    pi = { type: frame.type, message: frame.type === 'message_start' ? { role: 'assistant' } : {
+      role: 'assistant', content: Array.isArray(frame.message.content) ? frame.message.content.filter(part => ['text', 'thinking'].includes(part.type)) : undefined,
+      stopReason: frame.message.stopReason, errorMessage: frame.message.errorMessage,
+    } };
+  } else if (frame.type === 'message_update') {
+    pi = { type: frame.type, assistantMessageEvent: { type: frame.assistantMessageEvent?.type, delta: frame.assistantMessageEvent?.delta } };
+  } else if (['tool_execution_start', 'tool_execution_end'].includes(frame.type)) {
+    const args = Object.fromEntries(Object.entries(frame.args || {}).filter(([key]) => ['command', 'path', 'file_path', 'filePath'].includes(key)));
+    pi = { type: frame.type, toolCallId: frame.toolCallId, toolName: frame.toolName, isError: frame.isError, args };
+  }
+  return { ...event, data: { ...event.data, pi } };
+}
+
 function isEmptyAssistantPlaceholder(turn) {
   return turn?.role === 'assistant' && !turn.final && !turn.text && !turn.thinking && !turn.tools?.length && !turn.files?.length;
 }
@@ -136,15 +158,63 @@ export class ChatState {
     // rendered.
     else this.current = { id: 'assistant-window-start', role: 'assistant', text: '', thinking: '', tools: [], active: false, status: '', error: null, variantKey: 0, at: null, endedAt: null, userAt: null };
     this.windowStart = seedInitial ? null : this.current;
+    // Only the unresolved first exchange is buffered, until its prefix arrives.
+    this.windowEvents = [];
+    this.windowRecording = !seedInitial;
   }
 
   // Replays an older, already-settled batch of events in an isolated scratch
   // reducer and splices the resulting turns onto the front of this one.
-  // Never touches this.current/messageTurn/executionTurn/cursor — those track
-  // the live tail, which a history-backfill must never disturb.
+  // Keep the live sink identity/cursor. If the first exchange was cut by size,
+  // reconstruct its prefix in scratch before updating that same sink object.
   prependOlder(task, events, reachedStart) {
     const scratch = new ChatState(task, { seedInitial: reachedStart });
     for (const event of events) scratch.apply(event);
+    const previousWindow = this.windowStart;
+    if (previousWindow) {
+      const joined = scratch.current;
+      const settled = previousWindow.final ? {
+        active: false, final: true, status: previousWindow.status, error: previousWindow.error,
+        endedAt: previousWindow.endedAt, stopReason: previousWindow.stopReason, superseded: previousWindow.superseded,
+      } : null;
+      for (const event of this.windowEvents) scratch.apply(event);
+      // Reuse live tools and notes: they may already have rendered controls.
+      const liveNotes = new Map(this.turns.filter(t => t.role === 'note').map(t => [t.id, t]));
+      for (const [id, tool] of scratch.tools) {
+        const live = this.tools.get(id);
+        if (live) {
+          const progress = live.progress;
+          Object.assign(live, tool);
+          if (progress) live.progress = progress;
+          scratch.tools.set(id, live);
+        }
+      }
+      joined.tools = joined.tools.map(tool => scratch.tools.get(tool.id) || tool);
+      for (const boundary of joined.compactionBoundaries || []) boundary.note = liveNotes.get(boundary.note.id) || boundary.note;
+      for (const key of Object.keys(previousWindow)) delete previousWindow[key];
+      Object.assign(previousWindow, joined);
+      if (settled) {
+        Object.assign(previousWindow, { ...settled, error: settled.error || joined.error, endedAt: settled.endedAt || joined.endedAt });
+        for (const tool of previousWindow.tools) if (tool.state === 'run') tool.state = 'interrupted';
+      }
+      if (this.orphanMessage?.turn === previousWindow && scratch.orphanMessage?.turn === joined) {
+        this.orphanMessage = { ...scratch.orphanMessage, turn: previousWindow };
+      }
+      scratch.turns = scratch.turns.map(t => t === joined ? previousWindow : (liveNotes.get(t.id) || t));
+      if (scratch.windowStart === joined) scratch.windowStart = previousWindow;
+      if (this.current === previousWindow || this.messageTurn === previousWindow) {
+        this.textPrefix = scratch.textPrefix;
+        this.thinkingPrefix = scratch.thinkingPrefix;
+        this.textSeparator = scratch.textSeparator;
+        this.separatorApplied = scratch.separatorApplied;
+        this.messageOpen = scratch.messageOpen;
+        this.messageTurn = scratch.messageTurn === joined ? previousWindow : scratch.messageTurn;
+      }
+      this.turns = this.turns.filter(t => t !== previousWindow);
+      this.windowStart = scratch.windowStart;
+      this.windowEvents = this.windowStart ? scratch.windowEvents : [];
+      this.windowRecording = this.windowRecording && scratch.windowRecording;
+    }
     const turns = [...scratch.turns];
     // A page cut by size opens mid-turn: its events belong to a turn whose
     // USER_MESSAGE is not in the page, so everything lands on the detached
@@ -158,15 +228,28 @@ export class ChatState {
       partial.partial = true;
       // A settle that never arrives in this page must not leave a typing
       // animation or a running chip in a historical turn.
-      partial.active = false;
-      partial.final = true;
-      for (const tool of partial.tools) if (tool.state === 'run') tool.state = 'interrupted';
+      if (partial !== this.current) {
+        partial.active = false;
+        partial.final = true;
+        for (const tool of partial.tools) if (tool.state === 'run') tool.state = 'interrupted';
+      }
       turns.unshift(partial);
     }
-    this.turns.unshift(...turns);
+    const known = new Set(this.turns.map(t => t.id));
+    const fresh = turns.filter(t => !known.has(t.id));
+    this.turns.unshift(...fresh);
+    for (const seq of scratch.notes) this.notes.add(seq);
     for (const [id, tool] of scratch.tools) if (!this.tools.has(id)) this.tools.set(id, tool);
     for (const [key, entry] of scratch.variants) if (!this.variants.has(key)) this.variants.set(key, entry);
-    return turns;
+    return fresh;
+  }
+
+  revealWindowStart(firstSeq) {
+    const partial = this.windowStart;
+    if (!partial || this.turns.includes(partial) || (!partial.text && !partial.thinking && !partial.tools.length)) return;
+    partial.id = `assistant-partial-${firstSeq}`;
+    partial.partial = true;
+    this.turns.unshift(partial);
   }
 
   // Canonical answers remain in turns. Only this projection splits their
@@ -450,6 +533,13 @@ export class ChatState {
     if (event.seq <= this.cursor) return false;
     if (Number.isSafeInteger(event.seq)) this.cursor = event.seq;
     const frame = event.data?.pi;
+    const window = this.windowStart;
+    if (window && (this.windowRecording || this.current === window || this.messageTurn === window || this.executionTurn === window || this.orphanMessage?.turn === window || window.tools.some(tool => tool.id === frame?.toolCallId))) {
+      const replay = windowReplayEvent(event);
+      if (replay) this.windowEvents.push(replay);
+      // A steer is itself needed to replay the old sink's late completion.
+      if (event.type === 'USER_MESSAGE') this.windowRecording = false;
+    }
     if (event.type === 'USER_MESSAGE') {
       // A steer is accepted while Pi still owns the current message/tools.
       // Receipt of that instruction does not mean the previous work stopped.

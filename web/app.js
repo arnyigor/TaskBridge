@@ -2407,9 +2407,18 @@ function renderPrependedTurns(turns) {
   // The "load older" button (if present) must stay the topmost element, so
   // newly-backfilled turns are inserted right after it, not above it.
   const loadOlderBtn = document.getElementById('loadOlderButton');
-  const reference = loadOlderBtn ? loadOlderBtn.nextSibling : $('msgsInner').firstChild;
-  for (const turn of chatState.projectTurns(turns)) {
-    if (turn.hidden || turnNodes.has(turn.id)) continue;
+  const displayed = chatState.displayTurns;
+  const ids = new Set(displayed.map(turn => turn.id));
+  for (const [id, node] of turnNodes) {
+    if (!ids.has(id)) { (node.wrap || node.turn)?.remove(); turnNodes.delete(id); }
+  }
+  let reference = loadOlderBtn ? loadOlderBtn.nextSibling : $('msgsInner').firstChild;
+  const added = new Set(turns);
+  for (const turn of displayed) {
+    if (turn.hidden) continue;
+    const existing = turnNodes.get(turn.id);
+    if (existing) { reference = (existing.wrap || existing.turn).nextSibling; continue; }
+    if (!added.has(turn) && !added.has(turn.canonicalTurn)) continue;
     if (turn.role === 'user') {
       const userNode = { wrap: appendUserTurn(turn.text, turn.files || [], reference, turn.at), text: turn.text };
       turnNodes.set(turn.id, userNode);
@@ -2481,6 +2490,7 @@ async function loadOlderHistory() {
     const prevScrollTop = msgsEl.scrollTop;
     reachedHistoryStart = reachedStart;
     renderPrependedTurns(prepended);
+    renderChat();
     renderLoadOlderIndicator();
     // Keep whatever was on screen in place instead of jumping as content
     // grows above it.
@@ -2864,6 +2874,7 @@ async function selectTask(id) {
       renderApprovals();
     } catch { /* approvals are optional */ }
     applyEvents(initial.events);
+    if (initial.events.length) chatState.revealWindowStart(initial.events[0].seq);
     renderLoadOlderIndicator();
     chatState.snapshot(t, true);
     renderChat();
