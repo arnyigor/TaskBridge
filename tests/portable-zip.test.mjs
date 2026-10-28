@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { buildPortableZip } from '../scripts/build-portable-zip.mjs';
+import { buildPortableZip, portableTarCommand } from '../scripts/build-portable-zip.mjs';
 
 async function sandbox(t, name) {
   await fs.mkdir('.local', { recursive: true });
@@ -46,12 +46,15 @@ async function staged(t, { withServer = true } = {}) {
 const hash = async file => crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
 // Windows tar reads `G:\path` as host:path, so every invocation runs from the
 // directory it works in and receives a relative name.
-const tar = (args, cwd) => spawnSync(process.platform === 'win32' ? 'tar.exe' : 'tar', args, { cwd, encoding: 'utf8' });
+const tar = (args, cwd) => spawnSync(portableTarCommand, args, { cwd, encoding: 'utf8' });
 
 test('the archive carries the program, the server bundle and a hash list', { timeout: 60000 }, async t => {
   const { root, dist } = await staged(t);
   const out = path.join(root, 'out', 'TaskBridge-Portable-test.zip');
+  // Build twice: SHA256SUMS must not include a stale hash of itself.
+  await buildPortableZip({ dist, out });
   const built = await buildPortableZip({ dist, out });
+  assert.deepEqual((await fs.readFile(out)).subarray(0, 4), Buffer.from([0x50, 0x4b, 0x03, 0x04]));
   assert.equal(built.target, out);
   assert.equal(built.serverVersion, '1.3.0');
   assert(built.bytes > 0);
@@ -71,6 +74,7 @@ test('the archive carries the program, the server bundle and a hash list', { tim
   assert.equal(untar.status, 0, untar.stderr);
   const sums = (await fs.readFile(path.join(extracted, 'TaskBridge', 'SHA256SUMS.txt'), 'utf8')).trim().split('\n');
   const entriesInSums = sums.map(line => line.slice(66));
+  assert(!entriesInSums.includes('SHA256SUMS.txt'));
   assert(entriesInSums.includes('TaskBridge.exe'));
   assert(entriesInSums.includes('server/release-manifest.json'));
   for (const line of sums) {
@@ -99,6 +103,17 @@ test('a missing server bundle is named, not silently zipped', async t => {
     () => buildPortableZip({ dist, out: path.join(root, 'x.zip') }),
     /standalonePortable/,
   );
+});
+
+test('GNU tar output is rejected even when the archiver exits successfully', { skip: process.platform !== 'win32' }, async t => {
+  const gitTar = path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Git', 'usr', 'bin', 'tar.exe');
+  try { await fs.access(gitTar); } catch { t.skip('Git GNU tar is not installed'); return; }
+  const { root, dist } = await staged(t);
+  const out = path.join(root, 'not-a-zip.zip');
+  await fs.writeFile(`${out}.sha256`, 'stale checksum');
+  await assert.rejects(() => buildPortableZip({ dist, out, tarCommand: gitTar }), /did not produce ZIP/);
+  assert.equal(await fs.stat(out).then(() => true, () => false), false);
+  assert.equal(await fs.stat(`${out}.sha256`).then(() => true, () => false), false);
 });
 
 test('a missing executable is named too', async t => {
