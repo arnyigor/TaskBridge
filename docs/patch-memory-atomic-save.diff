@@ -1,0 +1,406 @@
+--- a/src/mcp_tools/core.py
++++ b/src/mcp_tools/core.py
+@@ -36,7 +36,8 @@
+ # при лимите 1500 её нельзя было бы перезаписать через action='save'.
+ # 2000 токенов ~= 3% от 64k контекста.
+ MAX_MEMORY_TOKENS_LIMIT = 2000
+-# 15 (было 10): тем уже 13 после миграции заметок pi-memory-md.
++# Per-file resource bound; independent of stored topic count and LLM injection.
++MAX_MEMORY_FILE_BYTES = 256 * 1024
+ MAX_ACTIVE_PROJECTS = 15
+ 
+ # --- pi-memory-md: единственный ИСТОЧНИК ПРАВДЫ для новой памяти ---
+@@ -258,34 +259,257 @@
+     return sorted(directory.glob("*.md")) if directory.exists() else []
+ 
+ 
++class MemoryConflict(RuntimeError):
++    pass
++
++
++class MemoryCommitUncertain(RuntimeError):
++    pass
++
++
++def _file_sha(path: Path) -> Optional[str]:
++    try:
++        return hashlib.sha256(path.read_bytes()).hexdigest()
++    except FileNotFoundError:
++        return None
++
++
++@contextlib.contextmanager
++def _topic_lock(topic: str):
++    # Stable lock inode/file, never unlink it: the OS releases the byte lock on crash.
++    directory = MEMORY_DIR / '.locks'
++    directory.mkdir(parents=True, exist_ok=True)
++    with (directory / f'{topic}.lock').open('a+b') as handle:
++        if handle.seek(0, 2) == 0:
++            handle.write(b'0')
++            handle.flush()
++        handle.seek(0)
++        try:
++            if os.name == 'nt':
++                import msvcrt
++                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
++            else:
++                import fcntl
++                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except OSError as exc:
++            raise MemoryConflict('topic is locked by another save') from exc
++        try:
++            yield
++        finally:
++            handle.seek(0)
++            if os.name == 'nt':
++                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
++            else:
++                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
++
++
++def _write_durable(path: Path, data: bytes, security_source: Optional[Path] = None) -> None:
++    # Exclusive creation: never overwrite an existing backup or temporary file.
++    with path.open('xb') as handle:
++        if security_source is not None:
++            _copy_file_security(security_source, path)
++        handle.write(data)
++        handle.flush()
++        os.fsync(handle.fileno())
++    if path.read_bytes() != data:
++        raise OSError('written file failed verification')
++
++
++def _copy_file_security(source: Path, target: Path) -> None:
++    if os.name != 'nt':
++        import stat
++        os.chmod(target, stat.S_IMODE(source.stat().st_mode))
++        return
++    import ctypes
++    from ctypes import wintypes
++    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
++    attributes = kernel.GetFileAttributesW
++    attributes.argtypes = [wintypes.LPCWSTR]
++    attributes.restype = wintypes.DWORD
++    value = attributes(str(source))
++    if value == 0xFFFFFFFF:
++        raise ctypes.WinError(ctypes.get_last_error())
++    # Only ordinary/archive files are supported. Do not silently discard read-only,
++    # hidden/system, encrypted/compressed, sparse or reparse-point attributes.
++    if value & ~(0x80 | 0x20):
++        raise PermissionError('special file attributes require separate preservation support')
++    advapi = ctypes.WinDLL('advapi32', use_last_error=True)
++    get_security = advapi.GetFileSecurityW
++    get_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID,
++                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
++    get_security.restype = wintypes.BOOL
++    set_security = advapi.SetFileSecurityW
++    set_security.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.LPVOID]
++    set_security.restype = wintypes.BOOL
++    control = advapi.GetSecurityDescriptorControl
++    control.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD)]
++    control.restype = wintypes.BOOL
++    # Owner, primary group and DACL. SACL requires separate audit privileges;
++    # this helper does not claim to preserve audit/integrity metadata.
++    information = 0x1 | 0x2 | 0x4
++    def read(path):
++        needed = wintypes.DWORD()
++        get_security(str(path), information, None, 0, ctypes.byref(needed))
++        if not needed.value:
++            raise ctypes.WinError(ctypes.get_last_error())
++        buffer = ctypes.create_string_buffer(needed.value)
++        if not get_security(str(path), information, buffer, len(buffer), ctypes.byref(needed)):
++            raise ctypes.WinError(ctypes.get_last_error())
++        return buffer
++    descriptor = read(source)
++    flags, revision = wintypes.WORD(), wintypes.DWORD()
++    if not control(descriptor, ctypes.byref(flags), ctypes.byref(revision)):
++        raise ctypes.WinError(ctypes.get_last_error())
++    # Preserve DACL inheritance protection, not just the ACEs.
++    protected = 0x80000000 if flags.value & 0x1000 else 0x20000000
++    # Setting owner/group requires WRITE_OWNER even if unchanged. Require the
++    # inherited temp owner/group to match, then set only DACL (WRITE_DAC).
++    existing = read(target)
++    equal_sid = advapi.EqualSid
++    equal_sid.argtypes = [wintypes.LPVOID, wintypes.LPVOID]
++    equal_sid.restype = wintypes.BOOL
++    for name in ('GetSecurityDescriptorOwner', 'GetSecurityDescriptorGroup'):
++        get_sid = getattr(advapi, name)
++        get_sid.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.BOOL)]
++        get_sid.restype = wintypes.BOOL
++        old_sid, new_sid = wintypes.LPVOID(), wintypes.LPVOID()
++        defaulted = wintypes.BOOL()
++        if not get_sid(descriptor, ctypes.byref(old_sid), ctypes.byref(defaulted)):
++            raise ctypes.WinError(ctypes.get_last_error())
++        if not get_sid(existing, ctypes.byref(new_sid), ctypes.byref(defaulted)):
++            raise ctypes.WinError(ctypes.get_last_error())
++        if not equal_sid(old_sid, new_sid):
++            raise PermissionError('cannot preserve original owner/group on replacement')
++    if not set_security(str(target), 0x4 | protected, descriptor):
++        raise ctypes.WinError(ctypes.get_last_error())
++    copied = read(target)
++    copied_flags = wintypes.WORD()
++    if not control(copied, ctypes.byref(copied_flags), ctypes.byref(revision)):
++        raise ctypes.WinError(ctypes.get_last_error())
++    if (flags.value & 0x1000) != (copied_flags.value & 0x1000):
++        raise OSError('DACL inheritance protection changed')
++    get_dacl = advapi.GetSecurityDescriptorDacl
++    get_dacl.argtypes = [wintypes.LPVOID, ctypes.POINTER(wintypes.BOOL),
++                        ctypes.POINTER(wintypes.LPVOID), ctypes.POINTER(wintypes.BOOL)]
++    get_dacl.restype = wintypes.BOOL
++    def acl_bytes(sd):
++        present, defaulted, pointer = wintypes.BOOL(), wintypes.BOOL(), wintypes.LPVOID()
++        if not get_dacl(sd, ctypes.byref(present), ctypes.byref(pointer), ctypes.byref(defaulted)):
++            raise ctypes.WinError(ctypes.get_last_error())
++        if not present.value or not pointer.value:
++            return (bool(present.value), None)
++        # ACL header stores its byte length at offset 2 (USHORT AclSize).
++        length = ctypes.c_ushort.from_address(pointer.value + 2).value
++        return (True, ctypes.string_at(pointer, length))
++    if acl_bytes(copied) != acl_bytes(descriptor):
++        raise OSError('DACL copy failed verification')
++
++
++def _journal_path(topic: str) -> Path:
++    return MEMORY_DIR / '.operations' / f'{topic}.json'
++
++
++def _write_journal(topic: str, record: Dict[str, Any]) -> None:
++    target = _journal_path(topic)
++    target.parent.mkdir(parents=True, exist_ok=True)
++    temp = target.with_name(f'{target.name}.{uuid.uuid4().hex}.tmp')
++    try:
++        _write_durable(temp, json.dumps(record, ensure_ascii=False).encode('utf-8'))
++        os.replace(temp, target)
++    finally:
++        temp.unlink(missing_ok=True)
++
++
++def _recover_topic(topic: str, path: Path) -> Optional[Dict[str, Any]]:
++    journal = _journal_path(topic)
++    if not journal.exists():
++        return None
++    record = json.loads(journal.read_text(encoding='utf-8'))
++    if record.get('state') in ('committed', 'aborted'):
++        return record
++    current = _file_sha(path)
++    if current == record['new_sha256']:
++        record['state'] = 'committed'
++    elif current == record['old_sha256']:
++        record['state'] = 'aborted'
++    else:
++        # Never overwrite an unknown version, nor replay a temp over user data.
++        raise MemoryConflict('recovery found an unknown topic version')
++    _write_journal(topic, record)
++    return record
++
++
+ def _backup_topic(topic: str, path: Path) -> Optional[str]:
+-    """Снимок текущей версии темы перед перезаписью/удалением (страховка от плохого save).
+-
+-    Держим последние HISTORY_KEEP версий в .history/<topic>/ (каталог вне git):
+-    история версий не должна зависеть от того, жив ли git-шаг коммита.
+-    """
++    # No retention here: a backup is not proof that the following save committed.
+     if not path.exists():
+         return None
+-    topic_dir = _history_dir(topic)
++    original = path.read_bytes()
++    directory = _history_dir(topic)
++    directory.mkdir(parents=True, exist_ok=True)
++    stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
++    target = directory / f'{stamp}-{time.time_ns():020d}-{uuid.uuid4().hex}.md'
++    _write_durable(target, original, security_source=path)
++    return target.relative_to(MEMORY_DIR).as_posix()
++
++
++def _prune_topic_history(topic: str, preserved: Optional[str]) -> None:
++    # Called only after a verified commit. Keep the verified pre-save backup even
++    # when several names share a timestamp; cleanup cannot invalidate its receipt.
++    snapshots = [p for p in _history_snapshots(topic)
++                 if preserved is None or p != MEMORY_DIR / preserved]
++    keep = max(0, HISTORY_KEEP - (1 if preserved else 0))
++    for old in snapshots[:max(0, len(snapshots) - keep)]:
++        old.unlink()
++
++
++def _persist_topic(topic: str, path: Path, data: bytes, expected_sha: Optional[str]) -> Dict[str, Any]:
++    with _topic_lock(topic):
++        return _persist_topic_locked(topic, path, data, expected_sha)
++
++
++def _persist_topic_locked(topic: str, path: Path, data: bytes, expected_sha: Optional[str]) -> Dict[str, Any]:
++    _recover_topic(topic, path)
++    if _file_sha(path) != expected_sha:
++        raise MemoryConflict('topic changed since save began')
++    backup = _backup_topic(topic, path)
++    if expected_sha is not None:
++        if not backup or _file_sha(MEMORY_DIR / backup) != expected_sha:
++            raise OSError('backup failed verification; original not replaced')
++    record = {
++        'state': 'prepared', 'old_sha256': expected_sha,
++        'new_sha256': hashlib.sha256(data).hexdigest(), 'backup': backup,
++    }
++    temp = path.with_name(f'.{path.name}.{uuid.uuid4().hex}.tmp')
++    record['temp'] = temp.name
++    replaced = False
+     try:
+-        topic_dir.mkdir(parents=True, exist_ok=True)
+-        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+-        # Серийный номер в имени — всегда и фиксированной ширины: без него два снимка
+-        # в одну секунду сортировались неверно ("-1" считался старше базового имени)
+-        # и свежий снимок мог быть вытеснен собственной же чисткой >HISTORY_KEEP.
+-        sequence = 0
+-        while True:
+-            target = topic_dir / f"{stamp}-{sequence:02d}.md"
+-            if not target.exists():
+-                break
+-            sequence += 1
+-        target.write_bytes(path.read_bytes())
+-        snapshots = sorted(topic_dir.glob("*.md"))
+-        for old in snapshots[:-HISTORY_KEEP]:
+-            old.unlink(missing_ok=True)
+-        return str(target.relative_to(MEMORY_DIR)).replace("\\", "/")
+-    except OSError:
+-        return None
++        _write_durable(temp, data, security_source=path if expected_sha is not None else None)
++        _write_journal(topic, record)
++        if _file_sha(path) != expected_sha:
++            raise MemoryConflict('topic changed before replace')
++        # Same-directory replace. On Windows sharing/ACL errors are surfaced;
++        # never unlink the original as a fallback to a failed replace.
++        os.replace(temp, path)
++        replaced = True
++        if _file_sha(path) != record['new_sha256']:
++            raise OSError('post-replace verification failed')
++        record['state'] = 'committed'
++        _write_journal(topic, record)
++    except Exception as exc:
++        # Atomic replacement is the commit point. If later bookkeeping fails,
++        # report uncertainty explicitly, preserving the prepared recovery record.
++        if replaced:
++            raise MemoryCommitUncertain('replace completed; recovery verification required') from exc
++        raise
++    finally:
++        temp.unlink(missing_ok=True)
++    cleanup_warning = None
++    try:
++        _prune_topic_history(topic, backup)
++    except OSError as exc:
++        cleanup_warning = f'history cleanup failed: {type(exc).__name__}'
++    return {'backup': backup, 'sha256': record['new_sha256'], 'cleanup_warning': cleanup_warning}
++
+ 
+ 
+ def _archive_latest(topic: str) -> Optional[Path]:
+@@ -320,6 +544,8 @@
+         "age_days": (datetime.datetime.now() - last_activity).days,
+         "size_bytes": stat.st_size,
+     }
++
++
+ 
+ 
+ def _check_storage_limits() -> List[str]:
+@@ -336,7 +562,6 @@
+     if len(files) > MAX_ACTIVE_PROJECTS:
+         return [f.stem for f in files[MAX_ACTIVE_PROJECTS:]]
+     return []
+-
+ 
+ GIT_TIMEOUT_SEC = 5
+ GIT_LOG_FILE = MEMORY_DIR / ".gitlog.jsonl"
+@@ -756,6 +981,16 @@
+                 ensure_ascii=False,
+             )
+ 
++        data = _compose_slice(clean_topic, content).encode('utf-8')
++        if len(data) > MAX_MEMORY_FILE_BYTES:
++            return json.dumps({'error': {'code': 'MEMORY_TOO_LARGE',
++                                        'message': 'Note exceeds the per-file byte limit.'}}, ensure_ascii=False)
++        # Capture a CAS baseline BEFORE tokenization/other awaits.
++        try:
++            expected_sha = _file_sha(file_path)
++        except OSError as exc:
++            return json.dumps({'error': {'code': 'MEMORY_WRITE_FAILED', 'phase': 'read-original',
++                                        'reason': type(exc).__name__}}, ensure_ascii=False)
+         # Проверяем размер через токенизатор llama-server
+         tokens, _ = await asyncio.to_thread(_count_tokens_sync, content)
+         if tokens and tokens > MAX_MEMORY_TOKENS_LIMIT:
+@@ -772,10 +1007,22 @@
+                 ensure_ascii=False,
+             )
+ 
+-        backup = _backup_topic(clean_topic, file_path)
+-        file_path.write_text(_compose_slice(clean_topic, content), encoding="utf-8")
+-
+-        # Контроль размера хранилища: только предупреждение, без удаления файлов
++        try:
++            persisted = await asyncio.to_thread(
++                _persist_topic, clean_topic, file_path, data, expected_sha,
++            )
++        except MemoryConflict:
++            return json.dumps({'error': {'code': 'MEMORY_CONFLICT',
++                                        'message': 'Topic changed or is locked; reload before saving.'}}, ensure_ascii=False)
++        except MemoryCommitUncertain:
++            return json.dumps({'error': {'code': 'MEMORY_COMMIT_UNCERTAIN',
++                                        'message': 'Replace completed; inspect/recover before retrying.'}}, ensure_ascii=False)
++        except (OSError, ValueError, KeyError) as exc:
++            return json.dumps({'error': {'code': 'MEMORY_WRITE_FAILED',
++                                        'reason': type(exc).__name__,
++                                        'message': 'Save failed; inspect the recovery journal before retrying.'}}, ensure_ascii=False)
++        backup = persisted['backup']
++
+         over_limit = _check_storage_limits()
+         git_commit = await asyncio.to_thread(_git_commit_store, "save", clean_topic)
+ 
+@@ -786,6 +1033,8 @@
+                 "status": "SAVED",
+                 "backup": backup,
+                 "git_commit": git_commit,
++                "sha256": persisted['sha256'],
++                "cleanup_warning": persisted['cleanup_warning'],
+                 "message": f"Срез состояния '{clean_topic}' зафиксирован ({tokens} токенов). Занимает <3% контекста.",
+                 **(
+                     {
+@@ -805,6 +1054,21 @@
+             ensure_ascii=False,
+         )
+ 
++    if action not in {'delete', 'archive', 'restore'}:
++        return await _legacy_topic_action(action, clean_topic, file_path, version)
++    try:
++        with _topic_lock(clean_topic):
++            _recover_topic(clean_topic, file_path)
++            return await _legacy_topic_action(action, clean_topic, file_path, version)
++    except MemoryConflict:
++        return json.dumps({'error': {'code': 'MEMORY_CONFLICT', 'message': 'Topic is locked or needs recovery.'}})
++    except MemoryCommitUncertain:
++        return json.dumps({'error': {'code': 'MEMORY_COMMIT_UNCERTAIN', 'message': 'Verify recovery before retrying.'}})
++    except (OSError, ValueError, KeyError) as exc:
++        return json.dumps({'error': {'code': 'MEMORY_WRITE_FAILED', 'reason': type(exc).__name__}})
++
++
++async def _legacy_topic_action(action: str, clean_topic: str, file_path: Path, version: Optional[str] = None) -> str:
+     # 4. УДАЛЕНИЕ (снимок текущей версии остаётся в .history)
+     if action == "delete":
+         if file_path.exists():
+@@ -834,7 +1098,7 @@
+             )
+         backup = _backup_topic(clean_topic, file_path)
+         ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+-        target = ARCHIVE_DIR / f"{clean_topic}.{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
++        target = ARCHIVE_DIR / f"{clean_topic}.{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}-{time.time_ns():020d}-{uuid.uuid4().hex}.md"
+         file_path.replace(target)
+         return json.dumps(
+             {
+@@ -893,8 +1157,8 @@
+                     ensure_ascii=False,
+                 )
+             snapshot_bytes = snapshot.read_bytes()  # читаем ДО бэкапа: он может вытеснить старейший снимок
+-            backup = _backup_topic(clean_topic, file_path)
+-            file_path.write_bytes(snapshot_bytes)
++            persisted = _persist_topic_locked(clean_topic, file_path, snapshot_bytes, _file_sha(file_path))
++            backup = persisted['backup']
+             return json.dumps(
+                 {
+                     "topic": clean_topic,
