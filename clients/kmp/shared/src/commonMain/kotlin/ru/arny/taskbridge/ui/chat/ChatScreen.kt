@@ -144,6 +144,13 @@ internal sealed interface ChatDialog {
     data class EditAnswer(val turnId: String, val text: String) : ChatDialog
     /** [withAnswer]: started from an answer — the log is linear, so its question goes too. */
     data class DeleteFrom(val turnId: String, val withAnswer: Boolean = false) : ChatDialog
+    /**
+     * Действия над историей спрашивают подтверждение: строка иконок на телефоне плотная,
+     * и промах по соседней кнопке стартовал ход молча (оператор 2026-10-29).
+     */
+    data class ConfirmContinue(val turnId: String) : ChatDialog
+    data class ConfirmRegenerate(val turnId: String) : ChatDialog
+    data class ConfirmFork(val turnId: String, val from: Boolean) : ChatDialog
     data object ConfirmStop : ChatDialog
     data object ConfirmRestart : ChatDialog
     data object ConfirmClear : ChatDialog
@@ -209,6 +216,15 @@ fun ChatScreen(
         }
     }
     var dialog by remember { mutableStateOf<ChatDialog?>(null) }
+    // «Продолжить»: пока ответ не начал писаться, кнопка показывает индикатор — иначе
+    // нажатие выглядит как «ничего не произошло» (оператор 2026-10-29).
+    var continuePendingId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(continuePendingId) {
+        if (continuePendingId != null) {
+            delay(CONTINUE_FEEDBACK_MS)
+            continuePendingId = null
+        }
+    }
     // Ход, для которого оператор нажал «Подождать»: баннер молчания скрыт, пока
     // идёт этот же ход (turn совпадает); новый ход показывает баннер снова.
     var silenceWaitTurn by remember { mutableStateOf<Long?>(null) }
@@ -462,6 +478,7 @@ fun ChatScreen(
                                 following = following,
                                 historyLocked = historyLocked,
                                 onDialog = { dialog = it },
+                                continuePendingId = continuePendingId,
                                 onViewFile = { openFile(it) },
                                 onCopyMessage = { text ->
                                     platform.copyText(text)
@@ -574,7 +591,7 @@ fun ChatScreen(
         }
     }
 
-    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onDialog = { dialog = it }, onViewFile = { openFile(it) }, onClose = { dialog = null })
+    ChatDialogs(dialog, state, session, graph, send = { send(it) }, onDialog = { dialog = it }, onViewFile = { openFile(it) }, onClose = { dialog = null }, onContinueRequested = { continuePendingId = it })
 }
 
 @Composable
@@ -968,6 +985,8 @@ internal fun MessageList(
     following: Boolean,
     historyLocked: Boolean,
     onDialog: (ChatDialog) -> Unit,
+    /** Ответ, для которого уже нажато «Продолжить», но он ещё не начал писаться. */
+    continuePendingId: String? = null,
     onViewFile: (FileTarget) -> Unit,
     onCopyMessage: (String) -> Unit,
     /** Режим выбора сообщений: у каждого видна отметка, тап переключает выбор. */
@@ -1087,8 +1106,8 @@ internal fun MessageList(
                                     onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
                                     selected = selectedIds[item.id] == true,
                                     edit = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.EditMessage(it, item.text)) } },
-                                    fork = turnId?.takeIf { !historyLocked }?.let { { session.fork(it) } },
-                                    forkFrom = turnId?.takeIf { !historyLocked }?.let { { session.fork(it, from = true) } },
+                                    fork = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = false)) } },
+                                    forkFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = true)) } },
                                     deleteFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.DeleteFrom(it)) } },
                                 ),
                                 onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
@@ -1107,11 +1126,12 @@ internal fun MessageList(
                                     onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
                                     selected = selectedIds[item.id] == true,
                                     edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.canonicalId, item.canonicalText)) }) else null,
-                                    fork = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it) } },
-                                    forkFrom = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { session.fork(it, from = true) } },
-                                    regenerate = if (newest) ({ session.regenerate(item.canonicalId) }) else null,
-                                    rerunWith = if (newest) ({ onDialog(ChatDialog.Rerun(item.canonicalId)) }) else null,
-                                    continueAnswer = if (newest && (item.canonicalText.isNotBlank() || item.tools.isNotEmpty())) ({ session.continueAnswer(item.canonicalId) }) else null,
+                                    fork = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = false)) } },
+                                    forkFrom = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = true)) } },
+                                    regenerate = if (newest) ({ onDialog(ChatDialog.ConfirmRegenerate(item.canonicalId)) }) else null,
+                                    // «Повторить с параметрами» убрано из меню сообщения: выбор модели
+                                    // есть в меню сессии (оператор 2026-10-29).
+                                    continueAnswer = if (newest && (item.canonicalText.isNotBlank() || item.tools.isNotEmpty())) ({ onDialog(ChatDialog.ConfirmContinue(item.canonicalId)) }) else null,
                                     deleteFrom = actionId?.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
                                 ),
                                 onCopyText = { platform.copyText(it) },
@@ -1121,6 +1141,7 @@ internal fun MessageList(
                                 loadFile = { session.readFile(it) },
                                 loadWorkspaceFile = { session.readWorkspaceFile(it) },
                                 desktop = platform.kind == "desktop",
+                                continuePending = continuePendingId == item.canonicalId && !item.active,
                                 onSelectVariant = { position ->
                                     val variants = item.variants
                                     val variantId = variants?.variantIdAt(position)
@@ -1514,7 +1535,7 @@ private fun OutboxRow(message: OutgoingMessage, onRetry: () -> Unit, onEdit: () 
 }
 
 @Composable
-private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, send: (SendMode) -> Unit, onDialog: (ChatDialog) -> Unit, onViewFile: (FileTarget) -> Unit, onClose: () -> Unit) {
+private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, send: (SendMode) -> Unit, onDialog: (ChatDialog) -> Unit, onViewFile: (FileTarget) -> Unit, onClose: () -> Unit, onContinueRequested: (String) -> Unit = {}) {
     when (dialog) {
         null -> Unit
         is ChatDialog.EditMessage -> TextEditDialog(
@@ -1533,9 +1554,20 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
                 initial = dialog.text,
                 confirm = "Сохранить",
                 extra = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(asVariant, { asVariant = it })
-                        Text("Сохранить как новый вариант (старый останется)", style = MaterialTheme.typography.bodySmall)
+                    // Проверено по src/task-manager.mjs (#editTurn): branch = true создаёт новый
+                    // вариант той же пары «вопрос-ответ» и оставляет прежний; branch = false
+                    // заменяет текст ответа на месте, прежний теряется.
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(asVariant, { asVariant = it })
+                            Text("Оставить прежний ответ", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        Text(
+                            if (asVariant) "Правка станет ещё одним вариантом этого ответа: прежний текст останется, переключение — стрелками ‹ 1/2 › в строке ответа."
+                            else "Текст ответа будет заменён, и вернуть прежний вариант будет нельзя.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                 },
                 onConfirm = { session.editAnswer(dialog.turnId, it, asVariant); onClose() },
@@ -1548,6 +1580,31 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             confirm = "Удалить",
             destructive = true,
             onConfirm = { session.deleteFrom(dialog.turnId); onClose() },
+            onDismiss = onClose,
+        )
+        is ChatDialog.ConfirmContinue -> ConfirmDialog(
+            title = "Продолжить ответ?",
+            text = "Модель получит текущий ответ контекстом и допишет его продолжение в это же сообщение.",
+            confirm = "Продолжить",
+            destructive = false,
+            onConfirm = { onContinueRequested(dialog.turnId); session.continueAnswer(dialog.turnId); onClose() },
+            onDismiss = onClose,
+        )
+        is ChatDialog.ConfirmRegenerate -> ConfirmDialog(
+            title = "Ответить заново?",
+            text = "Модель запустится на тот же вопрос и напишет новый ответ. Текущий останется в истории вариантов.",
+            confirm = "Ответить заново",
+            destructive = false,
+            onConfirm = { session.regenerate(dialog.turnId); onClose() },
+            onDismiss = onClose,
+        )
+        is ChatDialog.ConfirmFork -> ConfirmDialog(
+            title = if (dialog.from) "Новая ветка отсюда?" else "Новая ветка до этого места?",
+            text = if (dialog.from) "Это сообщение и всё, что ниже, станет началом новой ветки сессии. Исходная ветка сохранится."
+            else "Новая ветка начнётся с истории до этого сообщения. Исходная ветка сохранится.",
+            confirm = "Создать ветку",
+            destructive = false,
+            onConfirm = { session.fork(dialog.turnId, from = dialog.from); onClose() },
             onDismiss = onClose,
         )
         ChatDialog.ConfirmRestart -> ConfirmDialog(
@@ -2462,6 +2519,12 @@ private fun ConfirmDialog(title: String, text: String, confirm: String, destruct
  */
 /** Сколько ждать одну страницу истории при «Копировать историю» (см. эффект копирования). */
 internal const val PAGE_WAIT_MS = 5_000L
+
+/**
+ * Сколько кнопка «Продолжить» крутит индикатор ожидания. Ответ обычно становится active
+ * заметно раньше; предел нужен, чтобы неудавшаяся отправка не оставляла вечный спиннер.
+ */
+internal const val CONTINUE_FEEDBACK_MS = 20_000L
 
 internal fun canStop(status: String?, pendingSends: Int = 0): Boolean =
     pendingSends > 0 || status in setOf(

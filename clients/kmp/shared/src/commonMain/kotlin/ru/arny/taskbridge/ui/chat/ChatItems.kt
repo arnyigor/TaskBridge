@@ -42,6 +42,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -149,6 +150,7 @@ fun UserBubble(
         else -> AppIcons.Check
     }
     val menu = remember { MenuAnchor() }
+    var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
     Column(Modifier.fillMaxWidth().padding(start = 48.dp).hoverable(interaction), horizontalAlignment = Alignment.End) {
@@ -173,19 +175,37 @@ fun UserBubble(
             }
         }
         Row(Modifier.padding(top = 2.dp).heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
-            // Same order as the web's msgActions: copy, time, then edit / fork / delete.
-            Row(Modifier.alpha(if (!desktop || hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
-                SmallAction(AppIcons.Copy, "Копировать", actions.copy)
-                actions.edit?.let { SmallAction(AppIcons.Edit, "Изменить и отправить заново", it) }
-                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка: история до этого сообщения", it) }
-                actions.forkFrom?.let { SmallAction(AppIcons.ForkFrom, "Новая ветка: это сообщение и всё, что ниже", it) }
-                actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить отсюда и ниже", it) }
+            // Один порядок на телефон и десктоп: иконками — понятные действия (копировать,
+            // изменить, продолжить), остальное текстом в меню. Раньше на десктопе меню
+            // дублировало ряд иконок (оператор 2026-10-29).
+            val buttons: @Composable () -> Unit = {
+                SmallAction(AppIcons.Copy, "Копировать", actions.copy, big = !desktop)
+                actions.edit?.let { SmallAction(AppIcons.Edit, "Изменить и отправить заново", it, big = !desktop) }
+                if (actions.fork != null || actions.forkFrom != null || actions.deleteFrom != null) Box {
+                    SmallAction(AppIcons.More, "Действия с сообщением", { buttonMenu = true }, big = !desktop)
+                    MessageMenu(buttonMenu, onDismiss = { buttonMenu = false }, actions = actions, isUser = true, inline = InlineActions)
+                }
             }
-            Spacer(Modifier.width(4.dp))
-            Icon(deliveryIcon, item.delivery, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.width(4.dp))
-            val meta = listOfNotNull(source, time.ifEmpty { null }, item.delivery).joinToString(" · ")
-            if (meta.isNotEmpty()) Text(meta, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val meta: @Composable () -> Unit = {
+                Icon(deliveryIcon, item.delivery, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.width(4.dp))
+                val text = listOfNotNull(source, time.ifEmpty { null }, item.delivery).joinToString(" · ")
+                if (text.isNotEmpty()) Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (desktop) {
+                Row(Modifier.alpha(if (hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically) { buttons() }
+                    Spacer(Modifier.width(4.dp))
+                    meta()
+                }
+            } else {
+                // Телефон: подпись и меню — две строки. В одной строке текст съедал
+                // ширину, и кнопки сжимались далеко ниже своего размера (2026-10-29).
+                Column {
+                    Row(Modifier.heightIn(min = 18.dp).alpha(if (hovered || menu.open || buttonMenu) 1f else 0f), verticalAlignment = Alignment.CenterVertically) { meta() }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) { buttons() }
+                }
+            }
         }
     }
 }
@@ -204,6 +224,8 @@ fun AssistantMessage(
     loadWorkspaceFile: suspend (path: String) -> Result<ByteArray>,
     /** Desktop: the action row appears on hover (the newest answer keeps it); the menu opens on a right click. */
     desktop: Boolean = false,
+    /** Нажато «Продолжить», но ответ ещё не начал писаться — кнопка показывает ожидание. */
+    continuePending: Boolean = false,
 ) {
     val menu = remember { MenuAnchor() }
     var buttonMenu by remember { mutableStateOf(false) }
@@ -236,7 +258,7 @@ fun AssistantMessage(
                             })
                         }
                         item.cutOff -> Muted("Запрос прерван")
-                        item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null) Muted("Без текста")
+                        item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null && item.segmentActions && item.id == item.canonicalId) Muted("Без текста")
                         item.final && item.error == null -> Muted("Ответ не был получен.")
                     }
                     if (item.active && item.text.isNotBlank()) TypingIndicator()
@@ -266,8 +288,16 @@ fun AssistantMessage(
             }
         }
         val showActions = !desktop || hovered || menu.open || buttonMenu || actions.regenerate != null
-        if (item.final || !item.active) {
-            Row(Modifier.padding(top = 4.dp).heightIn(min = 32.dp).alpha(if (showActions) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
+        if (item.segmentActions && (item.final || !item.active)) {
+            val answerStatus = when {
+                item.partial -> "Часть истории"
+                item.cutOff -> "Прервано"
+                item.error != null || item.status == "FAILED" -> "Ошибка"
+                item.status == "CANCELLED" -> "Остановлено"
+                item.final && (item.status == "SUCCEEDED" || item.status == "DONE") -> "Готово"
+                else -> null
+            }
+            val meta: @Composable () -> Unit = {
                 item.variants?.let { variants ->
                     IconButton(onClick = { onSelectVariant(variants.index - 1) }, enabled = variants.index > 0, modifier = Modifier.size(28.dp)) {
                         Icon(AppIcons.ChevronLeft, "Предыдущий вариант", Modifier.size(16.dp))
@@ -279,39 +309,65 @@ fun AssistantMessage(
                     Spacer(Modifier.width(6.dp))
                 }
                 if (time.isNotEmpty()) Text(time, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                val answerStatus = when {
-                    item.partial -> "Часть истории"
-                    item.cutOff -> "Прервано"
-                    item.error != null || item.status == "FAILED" -> "Ошибка"
-                    item.status == "CANCELLED" -> "Остановлено"
-                    item.final && (item.status == "SUCCEEDED" || item.status == "DONE") -> "Готово"
-                    else -> null
-                }
                 if (answerStatus != null) {
                     if (time.isNotEmpty()) Spacer(Modifier.width(6.dp))
                     Text("· $answerStatus", style = MaterialTheme.typography.labelSmall, color = if (answerStatus == "Ошибка") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Spacer(Modifier.weight(1f))
-                if (item.text.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать", actions.copy)
-                actions.regenerate?.let { SmallAction(AppIcons.Refresh, "Ответить заново", it) }
-                actions.rerunWith?.let { SmallAction(AppIcons.Settings, "Повторить с параметрами", it) }
-                actions.fork?.let { SmallAction(AppIcons.Fork, "Новая ветка: история до этого ответа", it) }
-                actions.forkFrom?.let { SmallAction(AppIcons.ForkFrom, "Новая ветка: этот ответ и всё, что ниже", it) }
-                actions.deleteFrom?.let { SmallAction(AppIcons.Delete, "Удалить ответ и всё ниже", it) }
-                actions.continueAnswer?.let { SmallAction(AppIcons.Play, "Продолжить ответ", it) }
-                if (actions.edit != null) Box {
-                    SmallAction(AppIcons.More, "Ещё") { buttonMenu = true }
-                    MessageMenu(buttonMenu, onDismiss = { buttonMenu = false }, actions = actions, isUser = false)
+            }
+            val buttons: @Composable () -> Unit = {
+                // В строке — только понятные иконки («Копировать», «Исправить», «Продолжить»),
+                // остальное текстом в меню: ветки, удаление, регенерация. Так же, как на
+                // телефоне (оператор 2026-10-29).
+                if (item.text.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать", actions.copy, big = !desktop)
+                actions.edit?.let { SmallAction(AppIcons.Edit, "Исправить ответ", it, big = !desktop) }
+                actions.continueAnswer?.let { continueAnswer ->
+                    if (continuePending) {
+                        // Нажатие уже принято: без индикатора казалось, что ничего не произошло.
+                        Box(Modifier.size(if (desktop) 32.dp else 40.dp), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        }
+                    } else {
+                        SmallAction(AppIcons.Play, "Продолжить ответ", continueAnswer, big = !desktop)
+                    }
+                }
+                if (actions.regenerate != null || actions.fork != null || actions.forkFrom != null || actions.deleteFrom != null) Box {
+                    SmallAction(AppIcons.More, "Действия с ответом", { buttonMenu = true }, big = !desktop)
+                    MessageMenu(buttonMenu, onDismiss = { buttonMenu = false }, actions = actions, isUser = false, inline = InlineActions)
+                }
+            }
+            if (desktop) {
+                Row(Modifier.padding(top = 4.dp).heightIn(min = 32.dp).alpha(if (showActions) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
+                    meta()
+                    Spacer(Modifier.weight(1f))
+                    buttons()
+                }
+            } else {
+                // Телефон: время и статус — своей строкой, ниже — одно меню действий.
+                // Раньше они делили одну строку, и Row сжимал кнопки до ~22 dp: по
+                // «Продолжить» и «Удалить» нельзя было попасть (оператор 2026-10-29).
+                Column(Modifier.padding(top = 4.dp)) {
+                    Row(Modifier.heightIn(min = 18.dp).alpha(if (showActions) 1f else 0f), verticalAlignment = Alignment.CenterVertically) { meta() }
+                    // Меню и иконки — у правого края (оператор 2026-10-29).
+                    Row(
+                        Modifier.fillMaxWidth().alpha(if (showActions) 1f else 0f),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) { buttons() }
                 }
             }
         }
     }
 }
 
+/**
+ * Кнопка действия у сообщения. [big] — телефон: цель нажатия 40 dp с иконкой 20 dp.
+ * 32 dp с иконкой 16 dp для пальца малы, а в строке с отметкой времени они ещё и
+ * сжимались остатком ширины (2026-10-29).
+ */
 @Composable
-private fun SmallAction(icon: ImageVector, label: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(32.dp)) {
-        Icon(icon, label, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun SmallAction(icon: ImageVector, label: String, onClick: () -> Unit, big: Boolean = false) {
+    IconButton(onClick = onClick, modifier = Modifier.size(if (big) 40.dp else 32.dp)) {
+        Icon(icon, label, Modifier.size(if (big) 20.dp else 16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
@@ -341,11 +397,16 @@ private fun AnchoredMenu(anchor: MenuAnchor, actions: MessageActions, isUser: Bo
     }
 }
 
+/** Действия, которые на телефоне стоят иконками в строке: в меню они не повторяются. */
+private enum class ActionSlot { COPY, EDIT, CONTINUE }
+
+private val InlineActions = setOf(ActionSlot.COPY, ActionSlot.EDIT, ActionSlot.CONTINUE)
+
 @Composable
-private fun MessageMenu(open: Boolean, onDismiss: () -> Unit, actions: MessageActions, isUser: Boolean) {
+private fun MessageMenu(open: Boolean, onDismiss: () -> Unit, actions: MessageActions, isUser: Boolean, inline: Set<ActionSlot> = emptySet()) {
     DropdownMenu(expanded = open, onDismissRequest = onDismiss) {
-        DropdownMenuItem(text = { Text("Копировать") }, leadingIcon = { Icon(AppIcons.Copy, null) }, onClick = { onDismiss(); actions.copy() })
-        actions.edit?.let {
+        if (ActionSlot.COPY !in inline) DropdownMenuItem(text = { Text("Копировать") }, leadingIcon = { Icon(AppIcons.Copy, null) }, onClick = { onDismiss(); actions.copy() })
+        if (ActionSlot.EDIT !in inline) actions.edit?.let {
             DropdownMenuItem(
                 text = { Text(if (isUser) "Изменить и отправить заново" else "Исправить ответ") },
                 leadingIcon = { Icon(AppIcons.Edit, null) },
@@ -354,7 +415,7 @@ private fun MessageMenu(open: Boolean, onDismiss: () -> Unit, actions: MessageAc
         }
         actions.regenerate?.let { DropdownMenuItem(text = { Text("Ответить заново") }, leadingIcon = { Icon(AppIcons.Refresh, null) }, onClick = { onDismiss(); it() }) }
         actions.rerunWith?.let { DropdownMenuItem(text = { Text("Повторить с параметрами") }, leadingIcon = { Icon(AppIcons.Settings, null) }, onClick = { onDismiss(); it() }) }
-        actions.continueAnswer?.let { DropdownMenuItem(text = { Text("Продолжить ответ") }, leadingIcon = { Icon(AppIcons.Play, null) }, onClick = { onDismiss(); it() }) }
+        if (ActionSlot.CONTINUE !in inline) actions.continueAnswer?.let { DropdownMenuItem(text = { Text("Продолжить ответ") }, leadingIcon = { Icon(AppIcons.Play, null) }, onClick = { onDismiss(); it() }) }
         actions.fork?.let { DropdownMenuItem(text = { Text("Новая ветка: до этого сообщения") }, leadingIcon = { Icon(AppIcons.Fork, null) }, onClick = { onDismiss(); it() }) }
         actions.forkFrom?.let { DropdownMenuItem(text = { Text("Новая ветка: отсюда и ниже") }, leadingIcon = { Icon(AppIcons.ForkFrom, null) }, onClick = { onDismiss(); it() }) }
         actions.deleteFrom?.let {
@@ -388,7 +449,7 @@ internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String
             // The character count shows that the model received the message and is
             // producing output, the way the web's «Рассуждение · N симв.» does.
             Text((if (streaming) "Думает…" else "Размышления") + " · ${thinking.length} симв.", style = MaterialTheme.typography.labelMedium, color = muted, modifier = Modifier.weight(1f))
-            if (open && thinking.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления") { onCopy(thinking) }
+            if (open && thinking.isNotBlank()) SmallAction(AppIcons.Copy, "Копировать размышления", { onCopy(thinking) })
         }
         AnimatedVisibility(open) {
             Column {
@@ -455,9 +516,9 @@ private fun ToolList(
 ) {
     Column(Modifier.padding(vertical = 2.dp)) {
         if (tools.size <= 3) {
-            for (tool in tools) ToolRow(tool, loadOutput, onCopy, onOpenPath)
+            for (tool in tools) key(tool.id) { ToolRow(tool, loadOutput, onCopy, onOpenPath) }
         } else {
-            for (group in groupTools(tools)) {
+            for (group in groupTools(tools)) key(group.tools.first().id) {
                 if (group.tools.size == 1) ToolRow(group.tools.single(), loadOutput, onCopy, onOpenPath)
                 else ToolGroupRow(group, loadOutput, onCopy, onOpenPath)
             }
@@ -497,7 +558,7 @@ private fun ToolGroupRow(
         }
         AnimatedVisibility(open) {
             Column {
-                SecondaryPane { Column { for (tool in group.tools) ToolRow(tool, loadOutput, onCopy, onOpenPath) } }
+                SecondaryPane { Column { for (tool in group.tools) key(tool.id) { ToolRow(tool, loadOutput, onCopy, onOpenPath) } } }
                 QuietRow(
                     leading = { Icon(AppIcons.ChevronUp, null, Modifier.size(14.dp), tint = muted) },
                     text = "Свернуть",
