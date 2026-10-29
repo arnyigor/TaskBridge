@@ -397,33 +397,112 @@ export class PiMemoryMdProvider {
    * `all` — режим cross-project: его результаты в инъекцию сами по себе не
    * попадают, но человеку и агенту видны, с пометкой происхождения (scope).
    */
-  async searchScope(query, { scope = 'project', project = null, limit = 20 } = {}) {
-    const capped = Math.max(1, Math.min(50, Number(limit) || 20));
-    const hits = [];
+  async searchScope(query, options = {}) {
+    return (await this.searchScopePage(query, options)).hits;
+  }
+
+  /** Filter and deduplicate all matches BEFORE slicing a page. The index
+   * selects candidates; reading matching bodies is necessary to validate dynamic
+   * path staleness and exact deduplication. No 50/200-file storage cutoff. */
+  async searchScopePage(query, { scope = 'project', project = null, limit = 20, offset = 0 } = {}) {
+    const take = Math.max(1, Math.min(50, Number(limit) || 20));
+    const skip = Math.max(0, Math.floor(Number(offset) || 0));
+    const selections = [];
     if ((scope === 'project' || scope === 'all') && project) {
-      for (const hit of await this.search(project, query, { limit: capped })) {
-        hits.push({ ...hit, scope: 'project' });
-      }
+      selections.push(await this.#scopeSearchHits(query, 'project', project));
     }
     if (scope === 'global' || scope === 'all') {
-      const terms = queryTerms(query);
-      const entries = await this.globalEntries({ limit: 200 });
-      for (const entry of entries) {
-        const score = scoreEntry(entry, terms);
-        if (terms.length && score <= 0) continue;
-        hits.push({ ...entry, text: excerpt(entry.text || '', terms, 700), score });
+      selections.push(await this.#scopeSearchHits(query, 'global', project));
+    }
+    const ranked = selections.flatMap(selection => selection.hits);
+    ranked.sort((a, b) => b.score - a.score
+      || Number(a.category === 'other') - Number(b.category === 'other')
+      || String(b.updatedAt).localeCompare(String(a.updatedAt))
+      || String(a.source).localeCompare(String(b.source))
+      || String(a.scope).localeCompare(String(b.scope)));
+    const seen = new Set();
+    const unique = ranked.filter(hit => {
+      if (seen.has(hit.dedupKey)) return false;
+      seen.add(hit.dedupKey);
+      return true;
+    });
+    const sources = new Set(selections.map(selection => selection.source));
+    return {
+      hits: unique.slice(skip, skip + take).map(({ dedupKey, ...hit }) => hit),
+      total: unique.length,
+      matched: selections.reduce((sum, selection) => sum + selection.matched, 0),
+      limit: take,
+      offset: skip,
+      counts: {
+        projectTotal: unique.filter(hit => hit.scope === 'project').length,
+        globalTotal: unique.filter(hit => hit.scope === 'global').length,
+        matchedProject: selections.find(selection => selection.scope === 'project')?.matched ?? 0,
+        matchedGlobal: selections.find(selection => selection.scope === 'global')?.matched ?? 0,
+      },
+      source: sources.size > 1 ? 'mixed' : [...sources][0] ?? 'files',
+    };
+  }
+
+  async #scopeSearchHits(query, scope, project) {
+    const global = scope === 'global';
+    const resolved = global
+      ? { memoryDir: this.root, coreDir: path.join(this.root, GLOBAL_SCOPE_DIR), projectPath: null }
+      : await this.resolveProject(project);
+    const terms = queryTerms(query);
+    const files = fsSync.existsSync(resolved.coreDir) ? await listMarkdown(resolved.coreDir) : [];
+    const fileIndex = global ? null : await projectFileIndex(resolved.projectPath);
+    const index = this.#openIndex();
+    const hits = [];
+    let source = 'files';
+    let matched = 0;
+    const add = async (file, score = null) => {
+      const entry = await readMemoryFile(file, resolved.memoryDir, { projectPath: resolved.projectPath, fileIndex });
+      if (!entry) return;
+      const rank = score ?? scoreEntry(entry, terms);
+      if (score === null && terms.length && rank <= 0) return;
+      if (score === null) matched += 1;
+      if (entry.stale) return;
+      hits.push({ ...entry, scope, score: rank, dedupKey: hashText(entry.text),
+        text: excerpt(entry.text || '', terms, 700) });
+    };
+    if (index && terms.length && files.length) {
+      try {
+        const key = global ? await this.#syncGlobal() : await this.#syncIndex(resolved, files, project);
+        matched = index.searchCount(query, { projectKey: key, scope });
+        // Bound the scan to the initial candidate count even under concurrent updates.
+        for (let offset = 0; offset < matched; offset += 50) {
+          const rows = index.search(query, { projectKey: key, scope, limit: 50, offset });
+          for (const row of rows) await add(path.join(resolved.memoryDir, row.relPath), -row.score);
+        }
+        source = 'index';
+      } catch (error) {
+        this.indexError = error.message;
+        hits.length = 0;
+        matched = 0;
       }
     }
-    hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)
-      || Number(a.category === 'other') - Number(b.category === 'other')
-      || String(a.source).localeCompare(String(b.source)));
-    const seen = new Set();
-    return hits.filter(hit => {
-      const key = hashText(hit.text);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    }).slice(0, capped);
+    if (source === 'files') {
+      for (const file of files) await add(file);
+    }
+    const marked = global ? hits : markSuperseded(hits, this.#supersedeTargetsFromCache(resolved, project, hits));
+    return { scope, hits: marked, matched, source };
+  }
+
+  /**
+   * Счётчик глобальных заметок без чтения содержимого (MEM-05A).
+   *
+   * `stored` — сколько файлов есть в `_global` на диске, `indexed` — сколько из
+   * них знает индекс. Это размер ХРАНИЛИЩА: рост числа заметок не меняет ни
+   * бюджет инъекции (`#globalHits`), ни размер выдачи поиска.
+   */
+  async globalStats() {
+    const dir = path.join(this.root, GLOBAL_SCOPE_DIR);
+    const files = fsSync.existsSync(dir) ? await listMarkdown(dir) : [];
+    let indexed = null;
+    if (this.index) {
+      try { indexed = this.index.stats({ projectKey: GLOBAL_INDEX_KEY }).notes; } catch { indexed = null; }
+    }
+    return { dir: path.resolve(this.root), scopeDir: GLOBAL_SCOPE_DIR, stored: files.length, indexed };
   }
 
   /**
@@ -440,7 +519,10 @@ export class PiMemoryMdProvider {
       const entry = await readMemoryFile(file, this.root, { projectPath: null });
       if (entry && !entry.stale) entries.push({ ...entry, scope: 'global' });
     }
-    return entries.sort((a, b) => String(a.source).localeCompare(String(b.source))).slice(0, limit);
+    const sorted = entries.sort((a, b) => String(a.source).localeCompare(String(b.source)));
+    // Чтение содержимого — дорогая часть: считать заметки нужно через
+    // globalStats(), а не через `limit: 0` (MEM-05A).
+    return sorted.slice(0, limit);
   }
 
   /** Глобальный каталог в индекс: тот же контракт mtime+size, свой ключ. */

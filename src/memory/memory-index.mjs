@@ -195,11 +195,15 @@ export class MemoryIndex {
    * Поиск. BM25 (меньше — лучше) плюс тай-брейкеры, чтобы порядок был
    * предсказуемым: категория (не `other` выше), свежесть, имя файла.
    */
-  search(query, { projectKey = null, scope = null, limit = 8, includeSuperseded = false } = {}) {
+  search(query, { projectKey = null, scope = null, limit = 8, offset = 0, includeSuperseded = false } = {}) {
     const match = ftsQuery(query);
     if (!match) return [];
     const where = [];
-    const params = { match, limit: Math.max(1, Math.min(50, Number(limit) || 8)) };
+    const params = {
+      match,
+      limit: Math.max(1, Math.min(50, Number(limit) || 8)),
+      offset: Math.max(0, Math.floor(Number(offset) || 0)),
+    };
     if (projectKey) { where.push('n.projectKey = :projectKey'); params.projectKey = String(projectKey); }
     if (scope) { where.push('n.scope = :scope'); params.scope = String(scope); }
     void includeSuperseded;
@@ -211,9 +215,31 @@ export class MemoryIndex {
       WHERE notes_fts MATCH :match
       ${where.length ? `AND ${where.join(' AND ')}` : ''}
       ORDER BY score, CASE WHEN n.category = 'other' THEN 1 ELSE 0 END, n.updatedAt DESC, n.relPath
-      LIMIT :limit
+      LIMIT :limit OFFSET :offset
     `).all(params);
     return rows.map(row => ({ ...row, score: Number(row.score) }));
+  }
+
+  /**
+   * Сколько всего совпадений у запроса (без выдачи). Отдельно от `search`:
+   * «сколько нашлось» и «сколько отдали» — разные вопросы, и пагинация без
+   * первого невозможна.
+   */
+  searchCount(query, { projectKey = null, scope = null } = {}) {
+    const match = ftsQuery(query);
+    if (!match) return 0;
+    const where = [];
+    const params = { match };
+    if (projectKey) { where.push('n.projectKey = :projectKey'); params.projectKey = String(projectKey); }
+    if (scope) { where.push('n.scope = :scope'); params.scope = String(scope); }
+    const row = this.#db.prepare(`
+      SELECT COUNT(*) AS c
+      FROM notes_fts
+      JOIN notes n ON n.noteId = notes_fts.noteId
+      WHERE notes_fts MATCH :match
+      ${where.length ? `AND ${where.join(' AND ')}` : ''}
+    `).get(params);
+    return Number(row?.c || 0);
   }
 
   /** Заметка попала в выдачу или в инъекцию: основа для давности и консолидации. */

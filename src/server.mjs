@@ -1714,13 +1714,14 @@ async function handleRequest(req, res) {
     }
 
     // Поиск по индексу памяти (этап M2): ?q обязателен, ?scope=project|global|all,
-    // ?projectId= — какой проект считать «своим» для режима all.
+    // ?projectId= — какой проект считать «своим» для режима all. ?offset= — страница.
     if (req.method === 'GET' && pathname === '/api/memory/search') {
       return json(res, 200, await manager.searchMemory({
         query: url.searchParams.get('q'),
         scope: url.searchParams.get('scope') || 'project',
         projectId: url.searchParams.get('projectId'),
         limit: Number(url.searchParams.get('limit')) || 20,
+        offset: Number(url.searchParams.get('offset')) || 0,
       }));
     }
 

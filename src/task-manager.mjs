@@ -941,11 +941,14 @@ export class TaskManager extends EventEmitter {
     // какой бюджет она обязана влезть. Это метаданные индекса, не содержимое.
     const started = Date.now();
     const notes = await this.memoryProvider.indexedNotes(project).catch(() => []);
+    // Хранилище и выдача — разные числа (MEM-05A): глобальный счётчик берётся
+    // без чтения содержимого всех заметок, поэтому он не упирается в лимит выдачи.
+    const globalStats = await this.memoryProvider.globalStats().catch(() => ({ stored: 0, indexed: null }));
     const global = await this.memoryProvider.globalEntries({ limit: 200 }).catch(() => []);
     // M3: метрики памяти — «сколько заметок» и «сколько предложений ждёт человека»
     // видны в /api/metrics, а не только на экране.
     memoryMetrics.recordSearch(Date.now() - started);
-    memoryMetrics.setGauge('notes_total', notes.length + global.length);
+    memoryMetrics.setGauge('notes_total', notes.length + globalStats.stored);
     memoryMetrics.setGauge('proposals_pending', proposals.pending ?? 0);
     const found = {
       ...overview,
@@ -966,7 +969,7 @@ export class TaskManager extends EventEmitter {
           ? Number(this.config.memory.indexBudgetTokens)
           : INDEX_BUDGET_TOKENS),
       },
-      global: { entries: global.length, approxTokens: global.reduce((sum, entry) => sum + (entry.estimatedTokens || 0), 0) },
+      global: { entries: globalStats.stored, indexed: globalStats.indexed, listed: global.length, approxTokens: global.reduce((sum, entry) => sum + (entry.estimatedTokens || 0), 0) },
       // The inspector is the same read path the resume uses: what is not safe to
       // hand to an agent is not shown here as «the project's knowledge» either.
       ...(ambiguous ? { status: 'ambiguous', warnings: [ambiguousMemoryWarning(collisions)] } : {}),
@@ -1086,7 +1089,7 @@ export class TaskManager extends EventEmitter {
    * `all` — это режим cross-project: он не инжектится в контекст сам по себе
    * (риск загрязнения), но человеку и тулзе виден — с пометкой происхождения.
    */
-  async searchMemory({ query = '', scope = 'project', projectId = null, limit = 20 } = {}) {
+  async searchMemory({ query = '', scope = 'project', projectId = null, limit = 20, offset = 0 } = {}) {
     const text = String(query || '').trim();
     if (!text) throw Object.assign(new Error('Нужен запрос: ?q='), { code: 'INPUT_INVALID' });
     if (!['project', 'global', 'all'].includes(scope)) {
@@ -1095,11 +1098,12 @@ export class TaskManager extends EventEmitter {
     const project = projectId ? this.projects.get(projectId) : null;
     if (projectId && !project) throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
     const searchStarted = Date.now();
-    const hits = await this.memoryProvider.searchScope(text, { scope, project, limit });
+    const page = await this.memoryProvider.searchScopePage(text, { scope, project, limit, offset });
+    const hits = page.hits;
     memoryMetrics.recordSearch(Date.now() - searchStarted);
-    const global = scope === 'project'
-      ? await this.memoryProvider.globalEntries({ limit: 0 }).catch(() => [])
-      : [];
+    // `globalAvailable` — размер ХРАНИЛИЩА, а не выдачи: он не должен зависеть от
+    // текущей страницы, скоупа и лимита (раньше здесь стоял globalEntries({limit: 0})).
+    const globalStored = (await this.memoryProvider.globalStats().catch(() => ({ stored: 0 }))).stored;
     return {
       query: text,
       scope,
@@ -1111,8 +1115,14 @@ export class TaskManager extends EventEmitter {
         hits: hits.length,
         project: hits.filter(hit => hit.scope !== 'global').length,
         global: hits.filter(hit => hit.scope === 'global').length,
-        globalAvailable: global.length,
+        globalAvailable: globalStored,
+        // Raw matches, eligible unique notes and returned page are distinct.
+        matched: page.matched,
+        eligible: page.total,
+        matchedProject: page.counts?.matchedProject ?? 0,
+        matchedGlobal: page.counts?.matchedGlobal ?? 0,
       },
+      page: { limit: page.limit, offset: page.offset, returned: hits.length, total: page.total },
     };
   }
 
