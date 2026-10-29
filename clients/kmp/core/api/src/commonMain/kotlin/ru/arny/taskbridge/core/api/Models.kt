@@ -1360,13 +1360,32 @@ data class SessionComposition(
     val reason: String? = null,
     /** `session-file-projection` — не buildSessionContext() самого Pi. */
     val method: String? = null,
+    val projectionVersion: String? = null,
+    val branchSource: String? = null,
+    val leafId: String? = null,
+    val checkpoint: CompositionTotals? = null,
     val active: CompositionActive? = null,
     val compaction: CompositionCompaction? = null,
     val history: CompositionHistory? = null,
+    val note: String? = null,
+)
+
+/** Text is fetched only by an explicit /context/summary request. */
+@Serializable
+data class ContextSummary(
+    val available: Boolean = false,
+    val summary: String? = null,
+    val reason: String? = null,
+    val at: String? = null,
 )
 
 @Serializable
-data class CompositionActive(val total: CompositionTotals? = null, val kept: CompositionTotals? = null)
+data class CompositionActive(
+    val total: CompositionTotals? = null,
+    val kept: CompositionTotals? = null,
+    val retained: CompositionTotals? = null,
+    val added: CompositionTotals? = null,
+)
 
 @Serializable
 data class CompositionTotals(
@@ -1382,6 +1401,8 @@ data class CompositionCompaction(
     val summaryAvailable: Boolean = false,
     val firstKeptEntryId: String? = null,
     val tokensBefore: Long? = null,
+    val at: String? = null,
+    val reason: String? = null,
 )
 
 @Serializable

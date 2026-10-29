@@ -1,5 +1,6 @@
 package ru.arny.taskbridge.ui.chat
 
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -21,6 +22,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.ContextSource
@@ -44,6 +46,8 @@ internal fun ContextSection(
     var report by remember(taskId) { mutableStateOf<SessionContextReport?>(null) }
     var failure by remember(taskId) { mutableStateOf<String?>(null) }
     var saving by remember(taskId) { mutableStateOf(false) }
+    var summaryText by remember(taskId) { mutableStateOf<String?>(null) }
+    var summaryLoading by remember(taskId) { mutableStateOf(false) }
 
     LaunchedEffect(taskId) {
         if (taskId == null) return@LaunchedEffect
@@ -80,16 +84,10 @@ internal fun ContextSection(
     contextHeadline(current)?.let { headline ->
         Text(headline, style = MaterialTheme.typography.bodyLarge)
     }
-    // Источники: то, что читается с диска. Итог и остаток — из чисел Pi.
-    for (source in current.sources) ContextSourceRow(source)
-    // Сумма источников — то, сколько статический контекст занимает по оценке;
-    // рядом — размер текущего запроса от Pi, чтобы обе цифры можно было сверить.
-    if (current.measuredTokens > 0) {
-        ContextValueRow(
-            label = "Сумма источников (оценка)",
-            value = "≈ ${tokenCount(current.measuredTokens)}",
-        )
-    }
+    FieldLabel("Использование контекста", top = 12)
+    current.usage?.measuredAt?.let { ContextValueRow("Измерение Pi", it) }
+    current.usage?.sessionId?.let { ContextValueRow("Сессия измерения", it) }
+    current.postCompaction?.measuredAt?.let { ContextValueRow("Время оценки Pi", it) }
     current.totalTokens?.let { total ->
         ContextValueRow(
             label = "Текущий размер контекста (Pi)",
@@ -103,6 +101,14 @@ internal fun ContextSection(
     contextEstimateLine(current)?.let { line ->
         ContextValueRow(label = "Контекст после сжатия", value = line)
     }
+    FieldLabel("Содержимое после compact", top = 12)
+    current.session?.takeIf { !it.available }?.let {
+        Text("Состав недоступен: ${it.reason ?: "нет данных"}", style = MaterialTheme.typography.bodySmall)
+    }
+    contextBranchLine(current)?.let { ContextValueRow("Ветка контекста", it) }
+    current.session?.checkpoint?.takeIf { it.messages > 0 }?.let { ContextValueRow("Системный checkpoint (JSON)", "${it.messages} сообщ. · ${charCount(it.chars)} симв.") }
+    current.session?.active?.retained?.let { ContextValueRow("Сохранено при сжатии", "${it.messages} сообщ. · ${charCount(it.chars)} симв.") }
+    current.session?.active?.added?.let { ContextValueRow("Добавлено после сжатия", "${it.messages} сообщ. · ${charCount(it.chars)} симв.") }
     contextKeptLine(current)?.let { line ->
         ContextValueRow(label = "В контексте после сжатия", value = line)
     }
@@ -111,6 +117,34 @@ internal fun ContextSection(
     }
     contextExcludedLine(current)?.let { line ->
         ContextValueRow(label = "Исключено из контекста", value = line)
+    }
+    current.session?.note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+    TextButton(onClick = {
+        if (summaryText != null) summaryText = null
+        else if (!summaryLoading) {
+            summaryLoading = true
+            scope.launch {
+                session.contextSummary().fold(
+                    onSuccess = { summaryText = if (it.available) it.summary else it.reason ?: "Сводка недоступна." },
+                    onFailure = { summaryText = it.message ?: "Не удалось прочитать сводку" },
+                )
+                summaryLoading = false
+            }
+        }
+    }, enabled = !summaryLoading) {
+        Text(if (summaryLoading) "Загрузка…" else if (summaryText != null) "Скрыть сводку" else "Прочитать сводку сжатия")
+    }
+    summaryText?.let { SelectionContainer { Text(it, style = MaterialTheme.typography.bodySmall) } }
+    FieldLabel("Статические источники (оценка, символы / 4)", top = 12)
+    // Источники: то, что читается с диска. Итог и остаток — из чисел Pi.
+    for (source in current.sources) ContextSourceRow(source)
+    // Сумма источников — то, сколько статический контекст занимает по оценке;
+    // рядом — размер текущего запроса от Pi, чтобы обе цифры можно было сверить.
+    if (current.measuredTokens > 0) {
+        ContextValueRow(
+            label = "Сумма источников (оценка)",
+            value = "≈ ${tokenCount(current.measuredTokens)}",
+        )
     }
     if (current.usage?.stale == true) {
         Text(
@@ -123,8 +157,8 @@ internal fun ContextSection(
     // «Остаток 0» при переоценке источников читался бы как «истории нет вообще».
     current.unaccountedTokens?.takeIf { !current.overestimated }?.let { rest ->
         ContextValueRow(
-            label = "История диалога и расширения",
-            value = tokenCount(rest) + " (остаток)",
+            label = "Прочие источники и история (приблизительная разность)",
+            value = "≈ " + tokenCount(rest),
         )
     }
     if (current.overestimated) {
@@ -144,6 +178,14 @@ internal fun ContextSection(
         )
     }
 
+    Text("Разность включает погрешность оценок и неучтённые источники; это не отдельное измерение истории.", style = MaterialTheme.typography.bodySmall)
+    FieldLabel("Информация о сжатии", top = 12)
+    current.postCompaction?.let { last ->
+        last.measuredAt?.let { ContextValueRow("Последнее успешное сжатие", it) }
+        last.reason?.let { ContextValueRow("Причина", it) }
+        compactionChangeLine(last.tokensBefore, last.tokens)?.let { ContextValueRow("Изменение размера (оценка)", it) }
+        contextFreedLine(current)?.let { ContextValueRow("Потенциально освобождено (оценка)", it) }
+    } ?: Text("Успешное сжатие ещё не зафиксировано.", style = MaterialTheme.typography.bodySmall)
     FieldLabel("Лимит контекста", top = 20)
     var draft by remember(current.limit.tokens) { mutableStateOf(current.limit.tokens?.toString() ?: "") }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -202,7 +244,8 @@ private fun ContextValueRow(label: String, value: String) {
             modifier = Modifier.weight(1f),
         )
         Spacer(Modifier.width(8.dp))
-        Text(value, style = MaterialTheme.typography.bodyMedium)
+        Text(value, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.End,
+            modifier = Modifier.weight(1f))
     }
 }
 
@@ -220,6 +263,15 @@ internal fun contextUnavailableLine(report: SessionContextReport): String? {
  * CTX-02 на экране: сколько сообщений и символов реально осталось в контексте.
  * Когда состав недоступен, причина называется, а не выдаётся за «пусто».
  */
+internal fun contextBranchLine(report: SessionContextReport): String? {
+    val composition = report.session?.takeIf { it.available } ?: return null
+    return when (composition.branchSource) {
+        "pi-leaf" -> "активная ветка Pi · leaf ${composition.leafId ?: "пусто"}"
+        "file-tail" -> "последняя запись файла; активная ветка Pi не подтверждена"
+        else -> null
+    }
+}
+
 internal fun contextKeptLine(report: SessionContextReport): String? {
     val composition = report.session ?: return null
     if (!composition.available) return null
@@ -290,4 +342,11 @@ internal fun tokenCount(tokens: Long?): String = when {
     tokens == null -> "—"
     tokens < 10_000 -> tokens.toString()
     else -> "${tokens / 1000}K"
+}
+
+/** A difference involving an estimate is not measured savings. */
+internal fun contextFreedLine(report: SessionContextReport): String? {
+    val before = report.postCompaction?.tokensBefore ?: return null
+    val after = report.postCompaction.tokens ?: return null
+    return "≈ ${tokenCount((before - after).coerceAtLeast(0))} ток. Это не измеренная экономия."
 }

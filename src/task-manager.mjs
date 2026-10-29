@@ -4361,12 +4361,25 @@ export class TaskManager extends EventEmitter {
     ]);
     const runtime = this.runtimes.get(id);
     const live = runtime && !runtime.pi.closed && runtime.pi.canSend?.() !== false;
-    const stats = live ? await runtime.pi.getSessionStats().catch(() => null) : null;
+    const sessionFile = task.piSessionFile;
+    let stats = live ? await runtime.pi.getSessionStats().catch(() => null) : null;
+    const sameFile = (a, b) => {
+      const normalize = file => process.platform === 'win32' ? path.resolve(file).toLowerCase() : path.resolve(file);
+      return typeof a === 'string' && typeof b === 'string' && normalize(a) === normalize(b);
+    };
+    let mismatchedSession = stats && (task.piSessionFile !== sessionFile
+      || (stats.sessionFile && !sameFile(stats.sessionFile, sessionFile)));
+    if (mismatchedSession) stats = null;
     const model = task.model || task.requestedModel || null;
     const sessionComposition = await this.#sessionComposition(task);
+    if (task.piSessionFile !== sessionFile) {
+      mismatchedSession = true;
+      stats = null;
+    }
     const report = buildContextReport({
       measuredAt: stats?.contextUsage?.tokens != null ? now() : null,
-      measurementSession: task.piSessionFile ?? null,
+      measurementSession: stats?.sessionFile ?? null,
+      unavailableReason: mismatchedSession ? 'Pi вернул статистику другой сессии; измерение не используется' : null,
       taskId: task.id,
       model: model ? { provider: model.provider ?? null, id: model.id ?? null, contextWindow: model.contextWindow ?? null } : null,
       contextWindow: model?.contextWindow ?? null,
@@ -4381,12 +4394,47 @@ export class TaskManager extends EventEmitter {
     return { ...report, session: sessionComposition };
   }
 
+  // Summary text is opt-in: never included in the normal context report.
+  async contextSummary(id) {
+    const task = this.tasks.get(id);
+    if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
+    if (!task.piSessionFile || !task.workspacePath) return { available: false, reason: 'У сессии ещё нет файла Pi или рабочего каталога.' };
+    try {
+      const data = await this.#contextSession(task);
+      const summary = data.messages.find(message => message.role === 'compactionSummary')?.summary;
+      return typeof summary === 'string' && summary.length
+        ? { available: true, summary, at: data.compaction?.at ?? null }
+        : { available: false, reason: 'В активной ветке нет сводки сжатия.' };
+    } catch (error) {
+      return { available: false, reason: error.message };
+    }
+  }
+
+  async #contextSession(task) {
+    const file = task.piSessionFile;
+    let data = await readPiSession(file, task.workspacePath);
+    const pi = this.runtimes.get(task.id)?.pi;
+    if (pi && !pi.closed && pi.canSend?.() !== false && typeof pi.request === 'function') {
+      const state = await pi.getState();
+      const normalize = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+      const sameFile = typeof state?.sessionFile === 'string' && normalize(state.sessionFile) === normalize(file);
+      if (!sameFile || file !== task.piSessionFile) throw new Error('Pi runtime points to a different session file');
+      // Asking since the disk tail normally returns no bodies, only the leafId.
+      // Do not fetch the whole tree/history just to count context categories.
+      const response = await pi.request({ type: 'get_entries', ...(data.entries.at(-1)?.id ? { since: data.entries.at(-1).id } : {}) });
+      if (response.success === false || !Object.hasOwn(response.data || {}, 'leafId')) throw new Error('Pi did not return an active leafId');
+      if (file !== task.piSessionFile) throw new Error('Pi session changed while reading active leaf');
+      data = await readPiSession(file, task.workspacePath, { leafId: response.data.leafId });
+    }
+    return data;
+  }
+
   async #sessionComposition(task) {
     if (!task.piSessionFile || !task.workspacePath) {
       return { available: false, reason: task.piSessionFile ? 'у сессии нет рабочего каталога' : 'у сессии ещё нет файла Pi' };
     }
     try {
-      const data = await readPiSession(task.piSessionFile, task.workspacePath);
+      const data = await this.#contextSession(task);
       return { available: true, ...summarizeSessionContext(data) };
     } catch (error) {
       // Файл мог быть перемещён, принадлежать другому проекту или быть повреждён.

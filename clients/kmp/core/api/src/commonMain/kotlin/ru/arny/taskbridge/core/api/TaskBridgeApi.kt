@@ -1208,6 +1208,9 @@ class TaskBridgeApi(
     suspend fun context(id: String): SessionContextReport =
         get("/api/tasks/${id.path()}/context", SessionContextReport.serializer())
 
+    suspend fun contextSummary(id: String): ContextSummary =
+        get("/api/tasks/${id.path()}/context/summary", ContextSummary.serializer())
+
     /**
      * Лимит контекста сессии в токенах, `null` — снять лимит. Возвращает свежий
      * отчёт, поэтому вызывающему не нужен второй запрос, чтобы его показать.

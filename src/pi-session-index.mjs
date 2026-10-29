@@ -172,10 +172,41 @@ export async function listPiSessions(project, roots, cache) {
     .map(({ canonicalCwd, ...session }) => session);
 }
 
+function contextEdits(entries) {
+  const edits = new Map();
+  for (const entry of entries) {
+    if (entry.type !== 'context_edit') continue;
+    if (typeof entry.targetId !== 'string' || !(entry.replacement === null || (entry.replacement &&
+      (typeof entry.replacement.content === 'string' || Array.isArray(entry.replacement.content))))) {
+      throw new Error('Invalid Pi context_edit payload');
+    }
+    edits.set(entry.targetId, entry);
+  }
+  return edits;
+}
+
+// Version-checked against Pi 1.4.0 sessionEntryToContextMessages/projectContextEntry.
+function projectContextEntry(entry, edits) {
+  const message = toMessage(entry);
+  const messages = entry.type === 'compaction' && entry.systemMessage
+    ? [entry.systemMessage, message] : message ? [message] : [];
+  const edit = edits.get(entry.id);
+  if (!edit) return messages;
+  if (edit.replacement === null) return [];
+  return messages.map(message => {
+    if (!['user', 'assistant', 'toolResult', 'custom'].includes(message.role)) return message;
+    const replacement = edit.replacement.content;
+    const content = ['assistant', 'toolResult'].includes(message.role) && typeof replacement === 'string'
+      ? [{ type: 'text', text: replacement }] : replacement;
+    return { ...message, content };
+  });
+}
+
 function toMessage(entry) {
   const timestamp = Date.parse(entry.timestamp);
   if (entry.type === 'message') {
     const message = entry.message;
+    if (message.role === 'system' && message.content == null) return { ...message, content: '' };
     return ['user', 'assistant', 'toolResult'].includes(message.role) && message.content == null ? { ...message, content: [] } : message;
   }
   if (entry.type === 'compaction') return { role: 'compactionSummary', summary: entry.summary, tokensBefore: entry.tokensBefore, timestamp };
@@ -190,7 +221,7 @@ function toMessage(entry) {
  * messages follows Pi's active, compacted context; branchMessages retains the
  * complete selected branch for chat display. Both retain native message roles.
  */
-export async function readPiSession(file, projectPath) {
+export async function readPiSession(file, projectPath, { leafId } = {}) {
   const project = await canonical(projectPath);
   const handle = await openSession(file);
   let source;
@@ -230,7 +261,8 @@ export async function readPiSession(file, projectPath) {
     byId.set(entry.id, entry);
   }
   const branch = [];
-  let current = entries.length > 1 ? entries.at(-1) : null;
+  if (leafId !== undefined && leafId !== null && !byId.has(leafId)) throw new Error('Pi active leaf is not in the session snapshot');
+  let current = leafId === null ? null : leafId !== undefined ? byId.get(leafId) : entries.length > 1 ? entries.at(-1) : null;
   while (current) {
     branch.push(current);
     current = current.parentId === null ? null : byId.get(current.parentId);
@@ -240,28 +272,43 @@ export async function readPiSession(file, projectPath) {
   // CTX-02: метаданные последнего сжатия возвращаются вместе с проекцией, чтобы
   // отчёт «что осталось после compact» не разбирал файл второй раз.
   let compactionMeta = null;
+  // Edits only participate when their entries belong to the active compacted
+  // range (verified against Pi 1.4.0 buildSessionProjection).
+  let edits = new Map();
   const compactionIndex = branch.findLastIndex(entry => entry.type === 'compaction');
   if (compactionIndex >= 0) {
     const compaction = branch[compactionIndex];
     const firstKeptIndex = branch.findIndex(entry => entry.id === compaction.firstKeptEntryId);
-    const kept = firstKeptIndex >= 0 && firstKeptIndex < compactionIndex ? branch.slice(firstKeptIndex, compactionIndex) : [];
+    // Pi 1.4.0 buildContextEntries drops old system messages in the kept range:
+    // the compaction entry's systemMessage is the current checkpoint instead.
+    const kept = firstKeptIndex >= 0 && firstKeptIndex < compactionIndex
+      ? branch.slice(firstKeptIndex, compactionIndex).filter(entry => !(entry.type === 'message' && entry.message.role === 'system')) : [];
     context = [compaction, ...kept, ...branch.slice(compactionIndex + 1)];
+    edits = contextEdits(context);
     compactionMeta = {
       firstKeptEntryId: typeof compaction.firstKeptEntryId === 'string' ? compaction.firstKeptEntryId : null,
       firstKeptFound: firstKeptIndex >= 0 && firstKeptIndex < compactionIndex,
       tokensBefore: Number.isFinite(compaction.tokensBefore) ? compaction.tokensBefore : null,
       reason: typeof compaction.reason === 'string' ? compaction.reason : null,
       at: typeof compaction.timestamp === 'string' ? compaction.timestamp : null,
+      keptMessages: kept.filter(entry => entry.type !== 'compaction').flatMap(entry => projectContextEntry(entry, edits)).length,
+      // Pi system messages may store sections/tools with an empty content string.
+      // Report serialized checkpoint size, not a fictitious zero-token prompt.
+      checkpoint: compaction.systemMessage ? { messages: 1, chars: JSON.stringify(compaction.systemMessage).length, toolCalls: 0, toolResults: 0 } : null,
       // Записи ветки, выпавшие из активного контекста (до сохранённого куска).
       ignoredEntries: branch.length - context.length,
     };
   }
+  if (compactionIndex < 0) edits = contextEdits(context);
   return {
     header,
     entries,
-    messages: context.map(toMessage).filter(Boolean),
+    messages: context.flatMap((entry, index) => entry.type === 'compaction' && index > 0 ? [] : projectContextEntry(entry, edits)),
+    contextBranchMessages: branch.flatMap(entry => projectContextEntry(entry, new Map())),
     branchMessages: branch.map(toMessage).filter(Boolean),
     compaction: compactionMeta,
+    leafId: branch.at(-1)?.id ?? null,
+    branchSource: leafId === undefined ? 'file-tail' : 'pi-leaf',
     ...(compactionMeta ? { firstKeptEntryId: compactionMeta.firstKeptEntryId, tokensBefore: compactionMeta.tokensBefore, ignoredEntries: compactionMeta.ignoredEntries } : {}),
   };
 }

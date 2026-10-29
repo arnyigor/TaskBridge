@@ -120,3 +120,20 @@ class CompactionChangeLineTest {
         assertNull(compactionChangeLine(482_700, null))
     }
 }
+
+class ContextBranchAndSavingsTest {
+    @Test
+    fun rpcLeafAndFileTailHaveDifferentLabels() {
+        assertEquals("активная ветка Pi · leaf branch-a", contextBranchLine(SessionContextReport(session = SessionComposition(available = true, branchSource = "pi-leaf", leafId = "branch-a"))))
+        assertEquals("последняя запись файла; активная ветка Pi не подтверждена", contextBranchLine(SessionContextReport(session = SessionComposition(available = true, branchSource = "file-tail"))))
+        assertNull(contextBranchLine(SessionContextReport()))
+        assertNull(contextBranchLine(SessionContextReport(session = SessionComposition(available = false, branchSource = "pi-leaf"))))
+    }
+
+    @Test
+    fun savingsAreAlwaysAnEstimateAndNeverNegative() {
+        val report = SessionContextReport(postCompaction = ContextPostCompaction(tokensBefore = 1000, tokens = 1200))
+        assertEquals("≈ 0 ток. Это не измеренная экономия.", contextFreedLine(report))
+        assertNull(contextFreedLine(SessionContextReport()))
+    }
+}

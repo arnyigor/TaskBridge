@@ -1,0 +1,544 @@
+{
+  "runtime": "@earendil-works/pi-coding-agent@1.4.0",
+  "sourceSha256": "046b6a1109ac3f0ed893bb85bf0648709362fa926a5da75761216cf2fcf9d926",
+  "cases": [
+    {
+      "name": "system message without content is normalized",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "system"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "system",
+          "content": ""
+        }
+      ]
+    },
+    {
+      "name": "latest edit wins and omitted tool result stays out",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "question"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "b",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "toolResult",
+            "content": [
+              {
+                "type": "text",
+                "text": "large result"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "context_edit",
+          "id": "c",
+          "parentId": "b",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "targetId": "b",
+          "replacement": {
+            "content": "short"
+          }
+        },
+        {
+          "type": "context_edit",
+          "id": "d",
+          "parentId": "c",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "targetId": "b",
+          "replacement": null
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "question"
+            }
+          ],
+          "timestamp": 1
+        }
+      ]
+    },
+    {
+      "name": "assistant and tool string replacements become text parts",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "old"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "b",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "toolResult",
+            "content": [
+              {
+                "type": "text",
+                "text": "result"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "context_edit",
+          "id": "c",
+          "parentId": "b",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "targetId": "a",
+          "replacement": {
+            "content": "new"
+          }
+        },
+        {
+          "type": "context_edit",
+          "id": "d",
+          "parentId": "c",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "targetId": "b",
+          "replacement": {
+            "content": "small"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "new"
+            }
+          ],
+          "timestamp": 1
+        },
+        {
+          "role": "toolResult",
+          "content": [
+            {
+              "type": "text",
+              "text": "small"
+            }
+          ],
+          "timestamp": 1
+        }
+      ]
+    },
+    {
+      "name": "checkpoint replaces retained system instructions",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "system",
+            "content": [
+              {
+                "type": "text",
+                "text": "old instructions"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "b",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "keep"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "compaction",
+          "id": "c",
+          "parentId": "b",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "firstKeptEntryId": "a",
+          "summary": "summary",
+          "tokensBefore": 1000,
+          "systemMessage": {
+            "role": "system",
+            "content": "checkpoint",
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "d",
+          "parentId": "c",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "after"
+              }
+            ],
+            "timestamp": 1
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "system",
+          "content": "checkpoint",
+          "timestamp": 1
+        },
+        {
+          "role": "compactionSummary",
+          "summary": "summary",
+          "tokensBefore": 1000,
+          "timestamp": 1793232000000
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "keep"
+            }
+          ],
+          "timestamp": 1
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "after"
+            }
+          ],
+          "timestamp": 1
+        }
+      ]
+    },
+    {
+      "name": "older compaction in kept range is not an extra summary",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "first"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "compaction",
+          "id": "b",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "firstKeptEntryId": "a",
+          "summary": "older",
+          "tokensBefore": 1000
+        },
+        {
+          "type": "message",
+          "id": "c",
+          "parentId": "b",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "second"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "compaction",
+          "id": "d",
+          "parentId": "c",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "firstKeptEntryId": "b",
+          "summary": "latest",
+          "tokensBefore": 1000
+        },
+        {
+          "type": "message",
+          "id": "e",
+          "parentId": "d",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "after"
+              }
+            ],
+            "timestamp": 1
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "compactionSummary",
+          "summary": "latest",
+          "tokensBefore": 1000,
+          "timestamp": 1793232000000
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "second"
+            }
+          ],
+          "timestamp": 1
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "after"
+            }
+          ],
+          "timestamp": 1
+        }
+      ]
+    },
+    {
+      "name": "edits before first-kept range do not replace retained content",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "discard"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "context_edit",
+          "id": "b",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "targetId": "c",
+          "replacement": {
+            "content": "must not apply"
+          }
+        },
+        {
+          "type": "message",
+          "id": "c",
+          "parentId": "b",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "kept"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "compaction",
+          "id": "d",
+          "parentId": "c",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "firstKeptEntryId": "c",
+          "summary": "summary",
+          "tokensBefore": 1000
+        }
+      ],
+      "expected": [
+        {
+          "role": "compactionSummary",
+          "summary": "summary",
+          "tokensBefore": 1000,
+          "timestamp": 1793232000000
+        },
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "kept"
+            }
+          ],
+          "timestamp": 1
+        }
+      ]
+    },
+    {
+      "name": "active leaf can precede the file tail",
+      "leafId": "b",
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "b",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "selected"
+              }
+            ],
+            "timestamp": 1
+          }
+        },
+        {
+          "type": "message",
+          "id": "c",
+          "parentId": "a",
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "assistant",
+            "content": [
+              {
+                "type": "text",
+                "text": "tail"
+              }
+            ],
+            "timestamp": 1
+          }
+        }
+      ],
+      "expected": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "root"
+            }
+          ],
+          "timestamp": 1
+        },
+        {
+          "role": "assistant",
+          "content": [
+            {
+              "type": "text",
+              "text": "selected"
+            }
+          ],
+          "timestamp": 1
+        }
+      ]
+    },
+    {
+      "name": "null leaf means empty context",
+      "leafId": null,
+      "entries": [
+        {
+          "type": "message",
+          "id": "a",
+          "parentId": null,
+          "timestamp": "2026-10-29T00:00:00.000Z",
+          "message": {
+            "role": "user",
+            "content": [
+              {
+                "type": "text",
+                "text": "root"
+              }
+            ],
+            "timestamp": 1
+          }
+        }
+      ],
+      "expected": []
+    }
+  ]
+}

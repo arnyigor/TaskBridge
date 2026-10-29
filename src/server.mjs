@@ -2478,6 +2478,8 @@ async function handleRequest(req, res) {
     // «Откуда контекст»: разбор запроса к модели по источникам (системный
     // промпт, инструкции проекта, навыки, MCP-инструменты, история) плюс числа
     // самого Pi. Читает с диска и из запущенного Pi, ничего не меняет.
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/context\/summary$/);
+    if (req.method === 'GET' && match) return json(res, 200, await manager.contextSummary(match[1]));
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/context$/);
     if (req.method === 'GET' && match) return json(res, 200, await manager.contextReport(match[1]));
     // Лимит контекста этой сессии: верхняя граница, после которой TaskBridge сам

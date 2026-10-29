@@ -10,16 +10,18 @@
 // состоит, и лишь по отдельному действию пользователя запросить содержимое.
 //
 // Важная оговорка, которую нельзя терять: это проекция по файлу сессии, а не
-// `SessionManager.buildSessionContext()` самого Pi. Ветвление, `context_edit` и
-// системный checkpoint версия Pi может учитывать иначе, поэтому результат
-// подписан как реконструкция, а не как измерение.
+// `SessionManager.buildSessionContext()` самого Pi. Проекция ветки, context_edit
+// и checkpoint сверена с Pi 1.4.0, но размер запроса зависит ещё от системных
+// секций и инструментов, поэтому это реконструкция, а не токенизация.
 
 const textOf = message => {
   if (!message) return '';
+  if (message.role === 'compactionSummary' || message.role === 'branchSummary') return String(message.summary || '');
   if (typeof message.content === 'string') return message.content;
   if (!Array.isArray(message.content)) return '';
   return message.content
-    .map(part => (part?.type === 'text' ? part.text || '' : part?.type === 'thinking' ? part.thinking || '' : ''))
+    .map(part => (part?.type === 'text' ? part.text || '' : part?.type === 'thinking' ? part.thinking || ''
+      : part?.type === 'toolCall' ? JSON.stringify(part.arguments ?? {}) : ''))
     .join('');
 };
 
@@ -57,7 +59,8 @@ function describe(role, message, timestamp = null) {
  */
 export function summarizeSessionContext(session = {}) {
   const active = Array.isArray(session.messages) ? session.messages : [];
-  const branch = Array.isArray(session.branchMessages) ? session.branchMessages : [];
+  const branch = Array.isArray(session.contextBranchMessages) ? session.contextBranchMessages
+    : Array.isArray(session.branchMessages) ? session.branchMessages : [];
   const activeEntries = active.map(message => describe(message.role, message, message.timestamp ?? null));
   const compactionIndex = activeEntries.findIndex(entry => entry.role === 'compactionSummary');
   const summary = compactionIndex >= 0 ? activeEntries[compactionIndex] : null;
@@ -68,19 +71,31 @@ export function summarizeSessionContext(session = {}) {
     toolCalls: acc.toolCalls + entry.toolCalls,
     toolResults: acc.toolResults + entry.toolResults,
   }), { messages: 0, chars: 0, toolCalls: 0, toolResults: 0 });
+  const retainedCount = session.compaction?.keptMessages ?? null;
   const byRole = role => kept.filter(entry => entry.role === role).length;
   // Исключённое — то, что осталось в файле ветки, но в активный контекст не вошло.
   const excludedCount = Math.max(0, branch.length - active.length);
   return {
     // Потолок доверия к реконструкции должен быть виден клиенту.
     method: 'session-file-projection',
-    active: { total: totals(activeEntries), kept: totals(kept), ignoredBeforeCompaction: typeof session.ignoredEntries === 'number' ? session.ignoredEntries : null },
+    projectionVersion: 'pi-1.4.0',
+    branchSource: session.branchSource ?? 'file-tail',
+    leafId: session.leafId ?? null,
+    checkpoint: session.compaction?.checkpoint ?? null,
+    active: {
+      total: totals(activeEntries), kept: totals(kept),
+      retained: retainedCount === null ? null : totals(kept.slice(0, retainedCount)),
+      added: retainedCount === null ? null : totals(kept.slice(retainedCount)),
+      ignoredBeforeCompaction: typeof session.ignoredEntries === 'number' ? session.ignoredEntries : null,
+    },
     compaction: summary ? {
       summaryChars: summary.summaryChars,
       // Сводку можно показать только по отдельному запросу: здесь её текста нет.
       summaryAvailable: summary.summaryChars > 0,
       firstKeptEntryId: session.firstKeptEntryId ?? null,
       tokensBefore: session.tokensBefore ?? null,
+      at: session.compaction?.at ?? null,
+      reason: session.compaction?.reason ?? null,
     } : null,
     history: {
       userMessages: byRole('user'),
@@ -92,6 +107,6 @@ export function summarizeSessionContext(session = {}) {
     },
     // Системный промпт и объявления инструментов в файле сессии не лежат — их
     // считает только отчёт по источникам (context-report.mjs).
-    note: 'Это реконструкция по файлу сессии Pi, а не buildSessionContext() самого Pi: ветвление, context_edit и системный checkpoint могут учитываться версией Pi иначе. Текст сводки и сообщений здесь не отдаётся — только размеры и количество.',
+    note: 'Реконструкция по правилам Pi 1.4.0: ветка, context_edit и системный checkpoint учтены. Это не токенизация запроса. Без активного Pi выбрана последняя запись файла, а не подтверждённый runtime leaf. Текст сообщений и сводки загружается только по отдельному запросу.',
   };
 }

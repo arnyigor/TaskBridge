@@ -33,6 +33,7 @@ import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.MessageRequest
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.SessionContextReport
+import ru.arny.taskbridge.core.api.ContextSummary
 import ru.arny.taskbridge.core.api.StreamItem
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeApi
@@ -938,6 +939,8 @@ class ChatSession(
 
     /** Откуда в модели берётся контекст (секция «Контекст» в шите сессии). */
     suspend fun context(): Result<SessionContextReport> = runCatching { api.context(taskId) }
+
+    suspend fun contextSummary(): Result<ContextSummary> = runCatching { api.contextSummary(taskId) }
 
     /**
      * Лимит контекста сессии: `null` — снять. Возвращает свежий отчёт, поэтому

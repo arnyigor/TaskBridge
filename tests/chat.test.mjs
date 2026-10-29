@@ -501,6 +501,9 @@ test('DOM: an estimate after compaction is labelled, and a stale measurement say
   assert.match(text, /В контексте после сжатия: 4 сообщ\./);
   assert.match(text, /Сводка сжатия: 321 симв\./);
   assert.match(text, /Исключено из контекста .*: 7 сообщ\./);
+  for (const heading of ['Использование контекста', 'Содержимое после compact', 'Статические источники', 'Информация о сжатии']) assert(text.includes(heading));
+  assert.match(text, /Прочие источники и история \(приблизительная разность\)/);
+  assert.match(text, /не отдельное измерение истории/);
 });
 
 test('DOM: the compaction row says which side is before and which is after', async () => {
@@ -4210,4 +4213,38 @@ test('совпадение времени не мешает: событие св
 
   assert.equal(second.status, 'FAILED', 'свой ход не должен считаться «поздним»');
   assert.deepEqual(second.toolEvidence.map(x => x.excerpt), ['entry-0']);
+});
+
+test('DOM: summary is opt-in, plain text, and a late response cannot leak into another session', async () => {
+  const app = await ui();
+  let requests = 0;
+  let release;
+  app.setFetchHook(async url => {
+    if (!url.endsWith('/context/summary')) return null;
+    requests++;
+    if (requests === 2) await new Promise(resolve => { release = resolve; });
+    return { ok: true, json: async () => ({ available: true, summary: '<img src=x onerror="alert(1)">summary A' }) };
+  });
+  await app.selectTask('a');
+  assert.equal(requests, 0);
+  const details = app.document.getElementById('contextSummaryDetails');
+  const body = app.document.getElementById('contextSummaryText');
+  details.open = true;
+  details.dispatchEvent(new app.window.Event('toggle'));
+  for (let n = 0; n < 50 && !body.textContent.includes('summary A'); n++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(requests, 1);
+  assert.match(body.textContent, /<img/);
+  assert.equal(body.querySelectorAll('img').length, 0);
+  details.open = false;
+  details.dispatchEvent(new app.window.Event('toggle'));
+  assert.equal(body.textContent, '');
+  details.open = true;
+  details.dispatchEvent(new app.window.Event('toggle'));
+  for (let n = 0; n < 50 && !release; n++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert(release);
+  await app.selectTask('b');
+  release();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(body.textContent, '');
+  assert.equal(details.open, false);
 });

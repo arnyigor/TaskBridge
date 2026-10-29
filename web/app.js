@@ -1489,7 +1489,7 @@ function contextSourceLine(source) {
 }
 
 function renderContextReport(report) {
-  const lines = [];
+  const lines = ['Использование контекста'];
   if (report.totalTokens != null) {
     const windowSize = report.contextWindow;
     const pct = report.usage?.percent;
@@ -1505,23 +1505,34 @@ function renderContextReport(report) {
       ? `Текущий размер недоступен: ${report.usage.unavailableReason}.`
       : 'Сессия не запущена: размера запроса у Pi ещё нет.');
   }
+  if (report.usage?.measuredAt) lines.push(`Измерение Pi: ${report.usage.measuredAt}`);
+  if (report.usage?.sessionId) lines.push(`Сессия измерения: ${report.usage.sessionId}`);
   // Оценка после сжатия подписана как оценка: это estimatedTokensAfter, а не измерение.
   const estimate = report.postCompaction?.tokens;
   if (estimate != null) {
     lines.push(`Контекст после сжатия: ≈${estimate.toLocaleString('ru-RU')} (оценка Pi)`);
+    if (report.postCompaction.measuredAt) lines.push(`Время оценки Pi: ${report.postCompaction.measuredAt}`);
   }
   if (report.usage?.stale) {
     lines.push('Последнее измерение — до последнего сжатия: оно относится к прежней истории.');
   }
   // CTX-02: что именно осталось в контексте после сжатия — только размеры и
   // количество; текст сводки и сообщений здесь не показывается.
+  lines.push('\nСодержимое после compact');
   const composition = report.session;
   if (composition?.available) {
+    if (composition.branchSource === 'pi-leaf') lines.push(`Ветка контекста: активная ветка Pi · leaf ${composition.leafId ?? 'пусто'}`);
+    if (composition.branchSource === 'file-tail') lines.push('Ветка контекста: последняя запись файла; активная ветка Pi не подтверждена');
+    if (composition.checkpoint?.messages > 0) lines.push(`Системный checkpoint (JSON): ${composition.checkpoint.messages} сообщ. · ${composition.checkpoint.chars.toLocaleString('ru-RU')} симв.`);
     const kept = composition.active?.kept;
     if (kept) {
       lines.push(`В контексте после сжатия: ${kept.messages} сообщ.`
         + ` · ${kept.chars.toLocaleString('ru-RU')} симв.`
         + (kept.toolResults ? ` · результатов инструментов: ${kept.toolResults}` : ''));
+    }
+    for (const [key, label] of [['retained', 'Сохранено при сжатии'], ['added', 'Добавлено после сжатия']]) {
+      const totals = composition.active?.[key];
+      if (totals) lines.push(`${label}: ${totals.messages} сообщ. · ${totals.chars.toLocaleString('ru-RU')} симв.`);
     }
     if (composition.compaction?.summaryAvailable) {
       lines.push(`Сводка сжатия: ${composition.compaction.summaryChars.toLocaleString('ru-RU')} симв.`
@@ -1533,13 +1544,27 @@ function renderContextReport(report) {
         + ` · ${history.excludedChars.toLocaleString('ru-RU')} симв.`);
     }
   }
+  if (composition?.available === false) lines.push(`Состав недоступен: ${composition.reason || 'нет данных'}`);
+  if (composition?.note) lines.push(composition.note);
+  lines.push('\nСтатические источники (оценка, символы / 4)');
   for (const source of report.sources || []) lines.push(contextSourceLine(source));
   // «Остаток 0» при переоценке источников читался бы как «истории нет вообще»: в
   // этом случае показываем оговорку, а не ноль.
   if (report.unaccountedTokens != null && !report.overestimated) {
-    lines.push(`История диалога и расширения (остаток): ${report.unaccountedTokens.toLocaleString('ru-RU')} ток.`);
+    lines.push(`Прочие источники и история (приблизительная разность): ≈${report.unaccountedTokens.toLocaleString('ru-RU')} ток.`);
   }
   if (report.overestimated) lines.push('Оценка источников больше, чем Pi насчитал на этом ходу.');
+  lines.push('Разность включает погрешность оценок и неучтённые источники; это не отдельное измерение истории.');
+  lines.push('\nИнформация о сжатии');
+  const last = report.postCompaction;
+  if (last) {
+    if (last.measuredAt) lines.push(`Последнее успешное сжатие: ${last.measuredAt}`);
+    if (last.reason) lines.push(`Причина: ${last.reason}`);
+    if (last.tokensBefore != null && last.tokens != null) {
+      lines.push(`Изменение размера (оценка): ${last.tokensBefore.toLocaleString('ru-RU')} → ≈${last.tokens.toLocaleString('ru-RU')} ток.`);
+      lines.push(`Потенциально освобождено (оценка): ≈${Math.max(0, last.tokensBefore - last.tokens).toLocaleString('ru-RU')} ток. Это не измеренная экономия.`);
+    }
+  } else lines.push('Успешное сжатие ещё не зафиксировано.');
   if (report.limit?.exceeded) {
     lines.push(`Контекст выше лимита ${report.limit.tokens.toLocaleString('ru-RU')} — он будет сжат в конце хода.`);
   }
@@ -1547,22 +1572,37 @@ function renderContextReport(report) {
   $('contextLimitInput').value = report.limit?.tokens != null ? String(report.limit.tokens) : '';
 }
 
+async function loadContextSummary() {
+  const id = selectedTaskId;
+  if (!id) return;
+  $('contextSummaryText').textContent = 'Загрузка…';
+  try {
+    const result = await api(`/api/tasks/${id}/context/summary`);
+    if (id !== selectedTaskId || !$('contextSummaryDetails').open) return;
+    // Session content is untrusted: never interpret the summary as HTML.
+    $('contextSummaryText').textContent = result.available ? result.summary : (result.reason || 'Сводка недоступна.');
+  } catch (e) {
+    if (id === selectedTaskId) $('contextSummaryText').textContent = e.message;
+  }
+}
+
 async function loadContextReport() {
-  if (!selectedTaskId) return;
+  const id = selectedTaskId;
+  if (!id) return;
   $('contextSources').textContent = 'Загрузка…';
   try {
-    const id = selectedTaskId;
     const report = await api(`/api/tasks/${id}/context`);
     if (id !== selectedTaskId) return;
     renderContextReport(report);
-  } catch (e) { $('contextSources').textContent = e.message; }
+  } catch (e) { if (id === selectedTaskId) $('contextSources').textContent = e.message; }
 }
 
 async function saveContextLimit(value) {
-  if (!selectedTaskId) return;
+  const id = selectedTaskId;
+  if (!id) return;
   try {
-    const report = await api(`/api/tasks/${selectedTaskId}/context`, { method: 'POST', body: JSON.stringify({ limit: value }) });
-    renderContextReport(report);
+    const report = await api(`/api/tasks/${id}/context`, { method: 'POST', body: JSON.stringify({ limit: value }) });
+    if (id === selectedTaskId) renderContextReport(report);
   } catch (e) { alert(e.message); }
 }
 
@@ -1695,6 +1735,8 @@ function resetSelection(id) {
   for (const field of ['taskTitle', 'taskStatus', 'taskModel', 'taskThinking', 'current', 'workspace', 'usage', 'contextState', 'compaction', 'artifacts', 'outputFiles', 'stateJson', 'applyInfo']) $(field).textContent = '—';
   // Отчёт «откуда контекст» — запрос, а не поле задачи: чистим его и просим снова.
   if ($('contextSources')) $('contextSources').textContent = 'Откройте, чтобы прочитать источники контекста и лимит сессии.';
+  $('contextSummaryDetails').open = false;
+  $('contextSummaryText').textContent = '';
   if ($('contextLimitInput')) $('contextLimitInput').value = '';
   $('worktreeActions').classList.add('hidden');
   $('contextBar').classList.add('hidden');
@@ -5048,6 +5090,10 @@ $('stateDetails').addEventListener('toggle', async () => {
 
 // Отчёт тянется только когда блок раскрыли: он читает файлы с диска и
 // опрашивает Pi, а детали сессии перерисовываются на каждом событии.
+$('contextSummaryDetails').addEventListener('toggle', () => {
+  if ($('contextSummaryDetails').open) loadContextSummary();
+  else $('contextSummaryText').textContent = '';
+});
 $('contextDetails').addEventListener('toggle', () => {
   if ($('contextDetails').open) loadContextReport();
 });
