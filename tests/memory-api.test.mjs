@@ -175,6 +175,34 @@ test('the consolidator offers merge candidates and only proposes (M3)', { timeou
   await assert.rejects(api('/api/projects/fixture/memory/consolidation', { first: 'core/project/queue-1.md' }), { code: 'INPUT_INVALID' });
 });
 
+test('search API separates stored, matched, eligible and returned counts', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const dir = path.join(fixture.root, 'memory-md', '_global');
+  await fs.mkdir(dir, { recursive: true });
+  for (const [name, frontmatter, body] of [
+    ['a', '', 'apicountmarker duplicate'],
+    ['b', '', 'apicountmarker duplicate'],
+    ['c', '', 'apicountmarker unique'],
+    ['stale', 'paths: [missing-fixture-file]\n', 'apicountmarker stale'],
+  ]) {
+    await fs.writeFile(path.join(dir, `${name}.md`), `---\ndescription: apicountmarker\n${frontmatter}---\n${body}\n`);
+  }
+  const first = await fixture.api('/api/memory/search?q=apicountmarker&scope=global&limit=1');
+  const second = await fixture.api('/api/memory/search?q=apicountmarker&scope=global&limit=1&offset=1');
+  assert.equal(first.counts.globalAvailable, 4);
+  assert.equal(first.counts.matched, 4);
+  assert.equal(first.counts.eligible, 2);
+  assert.equal(first.page.total, 2);
+  assert.equal(first.page.returned, 1);
+  assert.equal(second.page.offset, 1);
+  assert.equal(second.hits.length, 1);
+  assert.notEqual(first.hits[0].text, second.hits[0].text);
+  const own = await fixture.api('/api/memory/search?q=apicountmarker&scope=project&projectId=fixture');
+  assert.equal(own.counts.globalAvailable, 4);
+  assert.equal(own.hits.length, 0);
+});
+
 test('scheduled memory consolidator creates proposals once and never edits core memory', { timeout: 60000 }, async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'taskbridge-memory-scheduler-'));
   const store = new TaskStore(root);
