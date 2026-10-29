@@ -112,6 +112,12 @@ export function stepInstruction({ path, planId, revision, cycleId, stepId }) {
     `Текущий шаг: ${stepId}. Не отмечай его выполненным без критериев проверки.`,
     'Если найден относящийся к делу дефект, которого нет в плане, зарегистрируй finding с доказательством и предложи минимальный шаг с приоритетом P0/P1/P2.',
     'Незавершённый шаг, уже присутствующий в плане, не является новой находкой: выполни его, а не создавай новый. Если ошибка отдельная — укажи в finding.relatedStepIds, какие шаги она затрагивает и почему они её не покрывают.',
+    // Живой прогон 2026-10-29 (S-015): шаг требовал четырёх осей, три прошли,
+    // четвёртая невоспроизводима в фикстуре. Модель ответила только BLOCKED
+    // без находки и без шага — писать было нечего, файл не менялся, и каждый
+    // следующий «Продолжить» отправлял тот же шаг. Теперь этот случай назван.
+    `Если шаг нельзя выполнить в текущей среде (нет хука, фикстуры, API или ресурса), одного BLOCKED недостаточно: зарегистрируй finding P1 о том, чего именно не хватает и почему без этого шаг не закрывается (это находка о среде, а не повтор шага), и предложи add_step с criteria, verification и before: ${stepId}.`,
+    'BLOCKED без находки и без предложенного шага оставляет план на том же шаге, поэтому возвращайся к нему, только если действительно нужен ответ человека.',
     'Не создавай второй план, не меняй цель и не расширяй объём работ.',
     // Живой прогон 2026-10-26: агент вызвал edit для PLAN.md, хэш файла разошёлся
     // с ожидаемым — следующий settle получил REVISION_CONFLICT и план встал на разбор.
@@ -626,11 +632,17 @@ export class PlanFollower {
       const rejectedNote = revision.rejected.length
         ? ` Предложения не применены: ${[...new Set(revision.rejected.map(item => item.reason))].join('; ')}.`
         : '';
+      // Ход ничего не записал — шаг остаётся первым открытым, и режим из этого
+      // сам не выйдет. Живой прогон 2026-10-29: четыре «Продолжить» подряд
+      // отправляли один и тот же S-015, а карточка молчала.
+      const stuckNote = !applied && !completed.length
+        ? ` В файл ничего не записано: текущий шаг остаётся тем же — нужен шаг-разблокировка (finding P1 + add_step) или правка плана.`
+        : '';
       this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
-      return this.#result(taskId, 'PLAN_BLOCKED', `${verdict.reasons.join('; ') || `Пауза по решению ${verdict.decision}.`}${rejectedNote}`, {
+      return this.#result(taskId, 'PLAN_BLOCKED', `${verdict.reasons.join('; ') || `Пауза по решению ${verdict.decision}.`}${rejectedNote}${stuckNote}`, {
         decision: verdict.decision,
         rejectedProposals: revision.rejected,
-        ...(rejectedNote ? { problems: [rejectedNote.trim()] } : {})
+        ...(rejectedNote || stuckNote ? { problems: [rejectedNote, stuckNote].filter(Boolean).map(item => item.trim()) } : {})
       });
     }
 

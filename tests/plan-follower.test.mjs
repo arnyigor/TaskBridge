@@ -421,6 +421,7 @@ test('a BLOCKED turn names why a proposed step was refused instead of pausing si
 
   assert.equal(settled.code, 'PLAN_BLOCKED');
   assert.match(settled.message, /Предложения не применены: новый шаг требует критериев и способа проверки/);
+  assert.match(settled.message, /В файл ничего не записано/, 'оператор видит, что шаг не сдвинулся');
   assert.equal(settled.rejectedProposals.length, 1, 'отказ предложения виден клиенту');
   assert.equal(settled.outcome, 'REJECTED', 'отклонённое предложение — это отказ, а не «принято без изменений»');
   assert.equal(plans.state.writes, 0, 'отклонённое предложение файл не пишет');
@@ -437,6 +438,7 @@ test('a BLOCKED turn names why a proposed step was refused instead of pausing si
   assert.equal(plain.code, 'PLAN_BLOCKED');
   assert.equal(plain.outcome, 'RECEIVED', 'честный BLOCKED не выдаётся за отказ чекпоинта');
   assert.equal(plain.reasonCode, 'NOTHING_TO_APPLY');
+  assert.match(plain.message, /В файл ничего не записано: текущий шаг остаётся тем же/, 'пауза называет тупик');
 });
 
 test('a well-formed proposed step on BLOCKED gets the plan out of the deadlock', async t => {
@@ -457,6 +459,7 @@ test('a well-formed proposed step on BLOCKED gets the plan out of the deadlock',
 
   assert.equal(settled.code, 'PLAN_BLOCKED', 'пауза для оператора сохраняется');
   assert.deepEqual(settled.rejectedProposals, []);
+  assert.equal(/В файл ничего не записано/.test(settled.message), false, 'шаг записан — это не тупик');
   assert.deepEqual(parsePlan(plans.state.text).steps.map(step => step.id), ['S-003', 'S-001', 'S-002'],
     'новый шаг встал перед блокирующим');
 
