@@ -1152,8 +1152,8 @@ export class TaskStore {
         AND json_extract(payload, '$.data.pi.type') = 'message_end'
     `).get(id).seq);
     if (!lastEnd) return 0;
-    // A compact inside an open message makes its deltas the only record of
-    // where that message crossed the boundary. Keep all deltas for that message.
+    // A tool or compact inside an open message makes its deltas the only record
+    // of where that message crossed the timeline boundary. Keep those deltas.
     const info = this.db.prepare(`
       WITH boundaries AS MATERIALIZED (
         SELECT boundary.seq,
@@ -1168,11 +1168,12 @@ export class TaskStore {
         FROM events AS boundary
         WHERE boundary.task_id = ?
           AND json_extract(boundary.payload, '$.type') = 'PI_EVENT'
-          AND json_extract(boundary.payload, '$.data.pi.type') IN ('compaction_end', 'auto_compaction_end')
-          AND json_type(boundary.payload, '$.data.pi.result') = 'object'
-          AND COALESCE(json_extract(boundary.payload, '$.data.pi.errorMessage'), '') = ''
-          AND COALESCE(json_extract(boundary.payload, '$.data.pi.aborted'), 0) = 0
-          AND COALESCE(json_extract(boundary.payload, '$.data.pi.cancelled'), 0) = 0
+          AND (json_extract(boundary.payload, '$.data.pi.type') IN ('tool_execution_start', 'tool_execution_end')
+            OR (json_extract(boundary.payload, '$.data.pi.type') IN ('compaction_end', 'auto_compaction_end')
+              AND json_type(boundary.payload, '$.data.pi.result') = 'object'
+              AND COALESCE(json_extract(boundary.payload, '$.data.pi.errorMessage'), '') = ''
+              AND COALESCE(json_extract(boundary.payload, '$.data.pi.aborted'), 0) = 0
+              AND COALESCE(json_extract(boundary.payload, '$.data.pi.cancelled'), 0) = 0))
       ), protected AS MATERIALIZED (
         SELECT b.previous AS first_seq, b.next AS last_seq FROM boundaries b
         JOIN events start ON start.task_id = ? AND start.seq = b.previous

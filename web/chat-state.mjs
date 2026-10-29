@@ -211,6 +211,7 @@ export class ChatState {
         this.textSeparator = scratch.textSeparator;
         this.separatorApplied = scratch.separatorApplied;
         this.messageOpen = scratch.messageOpen;
+        this.messageSeq = scratch.messageSeq;
         this.messageTurn = scratch.messageTurn === joined ? previousWindow : scratch.messageTurn;
       }
       this.turns = this.turns.filter(t => t !== previousWindow);
@@ -257,9 +258,16 @@ export class ChatState {
   }
 
   // Canonical answers remain in turns. Only this projection splits their
-  // text/tools around successful compact boundaries; action handlers keep the
+  // content/tools at activity and compact boundaries; action handlers keep the
   // original object and server ID. Cache view objects so DOM/tool folds survive.
-  get displayTurns() { return this.projectTurns(this.turns); }
+  get displayTurns() {
+    // Default view: one continuous answer below its reasoning/tools. Keep the
+    // event-based projection for diagnostics, not between answer paragraphs.
+    for (const turn of this.turns) {
+      for (const boundary of turn.compactionBoundaries || []) boundary.note.hidden = turn.hidden;
+    }
+    return this.turns;
+  }
 
   projectTurns(turns) {
     const notes = new Set(turns.filter(turn => turn.role === 'note'));
@@ -267,7 +275,8 @@ export class ChatState {
     const result = [];
     for (const turn of turns) {
       if (attached.has(turn)) continue;
-      const boundaries = (turn.compactionBoundaries || []).filter(b => notes.has(b.note));
+      const boundaries = [...(turn.activityBoundaries || []), ...(turn.compactionBoundaries || []).filter(b => notes.has(b.note))]
+        .sort((a, b) => a.seq - b.seq);
       if (!boundaries.length) { result.push(turn); continue; }
       let views = this.segmentViews.get(turn);
       if (!views) { views = new Map(); this.segmentViews.set(turn, views); }
@@ -278,7 +287,7 @@ export class ChatState {
         const thinking = turn.thinking.slice(start.thinking, end.thinking);
         const tools = turn.tools.slice(start.tools, end.tools);
         if (text || thinking || tools.length) {
-          const id = start.seq === null ? turn.id : `${turn.id}-segment-${start.seq}`;
+          const id = start.seq === null ? turn.id : `${turn.id}-segment-${start.key || start.seq}`;
           let view = views.get(id);
           if (!view) { view = {}; views.set(id, view); }
           Object.assign(view, turn, { id, canonicalTurn: turn, text, thinking, tools, active: false, final: true, status: 'DONE', error: null, toolEvidence: null, segmentActions: false });
@@ -304,6 +313,20 @@ export class ChatState {
       }
     }
     return result;
+  }
+
+  // Offsets point into the canonical answer; no duplicated text or tool output.
+  // A whole message_end uses its message_start for stable live/history keys.
+  #activity(turn, kind, seq, messageSeq = seq) {
+    const compact = turn.compactionBoundaries?.at(-1);
+    const atCompact = compact && compact.text === turn.text.length && compact.thinking === turn.thinking.length && compact.tools === turn.tools.length;
+    if (turn.lastActivity && turn.lastActivity !== kind && !atCompact) {
+      (turn.activityBoundaries ||= []).push({
+        seq, key: `activity-${messageSeq}-${kind}-${turn.text.length}-${turn.thinking.length}-${turn.tools.length}`,
+        text: turn.text.length, thinking: turn.thinking.length, tools: turn.tools.length,
+      });
+    }
+    turn.lastActivity = kind;
   }
 
   addUser(text, files, id, at = null, preservePrevious = false, turn = null) {
@@ -651,10 +674,11 @@ export class ChatState {
       // A previous answer left open by an interrupt: its own end arrives LATE,
       // after this new answer started, and must not be attributed to it.
       if (this.messageOpen && this.messageTurn && this.messageTurn !== this.current) {
-        this.orphanMessage = { turn: this.messageTurn, textPrefix: this.textPrefix, thinkingPrefix: this.thinkingPrefix, textSeparator: this.textSeparator };
+        this.orphanMessage = { turn: this.messageTurn, textPrefix: this.textPrefix, thinkingPrefix: this.thinkingPrefix, textSeparator: this.textSeparator, messageSeq: this.messageSeq };
       }
       if (!this.current.at) this.current.at = event.at || null;
       this.messageTurn = this.current;
+      this.messageSeq = event.seq;
       this.executionTurn = this.current;
       this.textPrefix = this.current.text;
       this.thinkingPrefix = this.current.thinking;
@@ -668,17 +692,22 @@ export class ChatState {
         // Deltas without a message_start continue the current message (steering
         // mid-answer): only a real message_start starts a new paragraph.
         this.messageTurn = this.current;
+        this.messageSeq = event.seq;
         this.textPrefix = this.current.text;
         this.thinkingPrefix = this.current.thinking;
         this.messageOpen = true;
       }
       const turn = this.messageTurn || this.current;
       const delta = frame.assistantMessageEvent;
-      if (delta?.type === 'text_delta') {
+      if (delta?.type === 'text_delta' && delta.delta) {
+        this.#activity(turn, 'text', event.seq, this.messageSeq || event.seq);
         if (this.textSeparator && !this.separatorApplied) { turn.text += this.textSeparator; this.separatorApplied = true; }
         turn.text += delta.delta || '';
       }
-      if (delta?.type === 'thinking_delta') turn.thinking += delta.delta || '';
+      if (delta?.type === 'thinking_delta' && delta.delta) {
+        this.#activity(turn, 'thinking', event.seq, this.messageSeq || event.seq);
+        turn.thinking += delta.delta;
+      }
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       const sink = this.messageTurn || this.current;
@@ -695,13 +724,26 @@ export class ChatState {
       const content = frame.message.content;
       const markerText = Array.isArray(content) ? content.filter(x => x.type === 'text').map(x => x.text || '').join('') : '';
       if (Array.isArray(content)) {
-        const text = markerText;
-        const thinking = content.filter(x => x.type === 'thinking').map(x => x.thinking || '').join('');
         // The message text is rebuilt from the prefix, so the paragraph break
         // must be part of it — whether or not a delta already inserted it for
         // the streaming view.
-        turn.text = (orphan || this.messageTurn ? context.textPrefix + (context.textSeparator || '') : turn.text) + text;
-        turn.thinking = (orphan || this.messageTurn ? context.thinkingPrefix : turn.thinking) + thinking;
+        let textEnd = orphan || this.messageTurn ? context.textPrefix + (context.textSeparator || '') : turn.text;
+        let thinkingEnd = orphan || this.messageTurn ? context.thinkingPrefix : turn.thinking;
+        // History may contain only the final content blocks. Append only their
+        // missing suffixes, in block order; streamed prefixes are not new events.
+        for (const part of content) {
+          const field = part.type === 'text' ? 'text' : part.type === 'thinking' ? 'thinking' : null;
+          if (!field) continue;
+          if (field === 'text') textEnd += part.text || '';
+          else thinkingEnd += part.thinking || '';
+          const end = field === 'text' ? textEnd : thinkingEnd;
+          if (end.length > turn[field].length) {
+            this.#activity(turn, field, event.seq, context.messageSeq || event.seq);
+            turn[field] = end;
+          }
+        }
+        turn.text = textEnd;
+        turn.thinking = thinkingEnd;
       }
       if (typeof frame.message.stopReason === 'string') turn.stopReason = frame.message.stopReason;
       // Pi forwards the provider's error body verbatim; a JSON envelope is not a
@@ -736,6 +778,7 @@ export class ChatState {
         const named = frame.args?.path || frame.args?.file_path || frame.args?.filePath;
         const tool = { id, name: frame.toolName || 'tool', label: arg ? String(arg) : event.message, state: 'run', imagePath: isPrivateFilePath(named) ? undefined : named };
         if (tool.name === 'subagent') tool.progress = subagentProgress(null, frame.args);
+        this.#activity(turn, 'tools', event.seq);
         turn.tools.push(tool);
         this.tools.set(id, tool);
       }
@@ -751,7 +794,9 @@ export class ChatState {
       let tool = frame.toolCallId ? this.tools.get(frame.toolCallId) : [...this.tools.values()].reverse().find(x => x.state === 'run' && x.name === frame.toolName);
       if (!tool) {
         tool = { id: frame.toolCallId || `tool-${event.seq}`, name: frame.toolName || 'tool', label: event.message };
-        (this.executionTurn || this.current).tools.push(tool);
+        const turn = this.executionTurn || this.current;
+        this.#activity(turn, 'tools', event.seq);
+        turn.tools.push(tool);
         this.tools.set(tool.id, tool);
       }
       tool.state = frame.isError ? 'error' : 'done';

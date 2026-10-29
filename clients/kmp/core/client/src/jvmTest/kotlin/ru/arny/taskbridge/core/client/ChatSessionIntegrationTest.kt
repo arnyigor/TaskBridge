@@ -88,7 +88,7 @@ class ChatSessionIntegrationTest {
     private fun ChatSessionState.idle() = task != null && task.status in setOf("SUCCEEDED", "FAILED", "CANCELLED") && task.pendingPrompts.isEmpty()
 
     private fun ChatSessionState.users() = chat.items.filterIsInstance<ChatItem.User>()
-    private fun ChatSessionState.answers() = chat.items.filterIsInstance<ChatItem.Assistant>()
+    private fun ChatSessionState.answers() = chat.items.filterIsInstance<ChatItem.Assistant>().filter { it.segmentActions }
 
     @Test
     fun deletingAnOpenSessionEndsWithDeletedAndNoError() = runBlocking<Unit> {
@@ -120,7 +120,7 @@ class ChatSessionIntegrationTest {
         // History and live stream: the first answer arrives with its tool call.
         var state = chat.await("first answer") { it.link == LinkState.Live && it.idle() && it.answers().firstOrNull()?.text?.isNotEmpty() == true }
         assertEquals("Прочитай example.txt", state.users().single().text)
-        assertEquals("read", state.answers().single().tools.single().name)
+        assertEquals("read", state.chat.items.filterIsInstance<ChatItem.Assistant>().flatMap { it.tools }.single().name)
 
         // A follow-up: optimistic bubble, then the server's, never two.
         chat.send("второй вопрос")

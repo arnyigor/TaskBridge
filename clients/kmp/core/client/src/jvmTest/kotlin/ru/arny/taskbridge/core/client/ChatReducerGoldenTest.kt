@@ -43,7 +43,19 @@ class ChatReducerGoldenTest {
         val reducer = ChatReducer(golden.task)
         for (event in golden.events) reducer.apply(event)
         reducer.syncTask(golden.task)
-        return reducer.snapshot().items.map { item ->
+        // Exported fixtures describe logical turns (Web ChatState.turns), not
+        // visual timeline segments. Reassemble only for this canonical oracle.
+        val logical = reducer.snapshot().items.groupBy { item ->
+            if (item is ChatItem.Assistant) item.canonicalId else item.id
+        }.values.map { parts ->
+            val last = parts.last()
+            if (last is ChatItem.Assistant) last.copy(
+                id = last.canonicalId, text = last.canonicalText,
+                thinking = parts.filterIsInstance<ChatItem.Assistant>().joinToString("") { it.thinking },
+                tools = parts.filterIsInstance<ChatItem.Assistant>().flatMap { it.tools },
+            ) else last
+        }
+        return logical.map { item ->
             when (item) {
                 is ChatItem.User -> GoldenTurn(item.id, "user", item.text, "", "", false, false)
                 is ChatItem.Note -> GoldenTurn(item.id, "note", item.text, "", "", false, false)
@@ -123,8 +135,8 @@ class ChatReducerGoldenTest {
         reducer.revealWindowStart(window.first().seq)
         reducer.syncTask(golden.task, initial = true)
         val snapshot = reducer.snapshot()
-        val partial = snapshot.items.single() as ChatItem.Assistant
-        assertTrue(partial.partial && partial.text.isNotBlank(), "partial turn with the answer text: $partial")
+        val partials = snapshot.items.filterIsInstance<ChatItem.Assistant>()
+        assertTrue(partials.all { it.partial } && partials.any { it.text.isNotBlank() }, "partial timeline with the answer text: $partials")
         assertEquals(null, snapshot.newestAnswerId, "a partial turn is not regenerated or edited")
     }
 

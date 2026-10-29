@@ -13,7 +13,7 @@ fun toolKind(name: String): ToolKind = when (name.lowercase()) {
     else -> ToolKind.OTHER
 }
 
-/** Calls of one kind in a turn (an unknown tool is its own group, by name), in the order they first ran. */
+/** Compact summary by kind; event order remains available in the reducer. */
 data class ToolGroup(val kind: ToolKind, val name: String, val tools: List<ToolCall>) {
     val running: Boolean get() = tools.any { it.state == ToolState.RUNNING }
     val errors: Int get() = tools.count { it.state == ToolState.ERROR }

@@ -544,7 +544,7 @@ function reasoningEl(text) {
   return details;
 }
 
-function appendBotTurn() {
+function appendBotTurn(before = null) {
   hideEmptyState();
   const turn = document.createElement('div');
   turn.className = 'turn';
@@ -563,7 +563,7 @@ function appendBotTurn() {
   metaRow.append(botBadge(), meta, copyBtn);
   body.append(bubble, metaRow);
   turn.append(body);
-  $('msgsInner').append(turn);
+  $('msgsInner').insertBefore(turn, before);
   liveTurn = { body, bubble, md, meta, metaRow, copyBtn, turn };
   updateThinking();
   updateText();
@@ -720,7 +720,7 @@ function toolTrouble(turn) {
 function toolGroupSummary(turn) {
   const total = turn.tools.length;
   const word = pluralNoun(total, 'действие', 'действия', 'действий');
-  if (turn.active) {
+  if ((turn.canonicalTurn || turn).active && turn.tools.some(tool => tool.state === 'run')) {
     // Parallel calls are real, and the finished one may well be the last in the
     // list: the name belongs to a call still running, or the line lies.
     const running = [...turn.tools].reverse().find(tool => tool.state === 'run');
@@ -795,7 +795,7 @@ function layoutTools(node, turn) {
 // (an end event arriving late) or never arrive at all, so the settled signature
 // carries those counts and not just the length.
 function groupSignature(turn) {
-  if (!turn.active) {
+  if (!(turn.canonicalTurn || turn).active || !turn.tools.some(tool => tool.state === 'run')) {
     const { failed, unfinished } = toolTrouble(turn);
     return `done:${turn.tools.length}:${failed}:${unfinished}`;
   }
@@ -1768,6 +1768,16 @@ function renderChat() {
     }
   }
   const newest = newestTurn();
+  // Late completion can add a segment to an older answer. Insert new nodes
+  // before the next existing projected node, without moving/sorting live DOM.
+  const followingNodes = new Map();
+  let reference = null;
+  for (let i = displayTurns.length - 1; i >= 0; i--) {
+    const turn = displayTurns[i];
+    followingNodes.set(turn.id, reference);
+    const node = turnNodes.get(turn.id);
+    if (node && !turn.hidden) reference = node.wrap || node.turn;
+  }
   for (const turn of displayTurns) {
     let node = turnNodes.get(turn.id);
     // A regenerated answer keeps its siblings hidden: only the selected variant
@@ -1777,11 +1787,12 @@ function renderChat() {
       continue;
     }
     if (!node) {
+      const before = followingNodes.get(turn.id);
       if (turn.role === 'user') {
-        node = { wrap: appendUserTurn(turn.text, turn.files, null, turn.at), text: turn.text };
+        node = { wrap: appendUserTurn(turn.text, turn.files, before, turn.at), text: turn.text };
         turnNodes.set(turn.id, node);
       } else if (turn.role === 'note') {
-        turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, null, turn.memory) });
+        turnNodes.set(turn.id, { wrap: appendSystemNote(turn.text, before, turn.memory) });
         continue;
       } else {
         liveText = liveThinking = '';
@@ -1789,7 +1800,7 @@ function renderChat() {
         liveAwaiting = false;
         liveHasWork = false;
         liveCutOff = false;
-        appendBotTurn();
+        appendBotTurn(before);
         node = { ...liveTurn, tools: new Map() };
         turnNodes.set(turn.id, node);
       }
@@ -1822,7 +1833,6 @@ function renderChat() {
     liveAwaiting = awaiting;
     if (node.text !== turn.text || node.active !== turn.active || node.awaiting !== awaiting || node.error !== turn.error) {
       updateText();
-      node.copyBtn._text = turn.text;
       if (turn.error) {
         const error = document.createElement('div');
         error.className = 'turnError';
@@ -1834,6 +1844,8 @@ function renderChat() {
       node.awaiting = awaiting;
       node.error = turn.error;
     }
+    node.copyBtn._text = turnRef.text;
+    node.bubble?.classList.toggle('hidden', Boolean(turn.canonicalTurn && !turn.text && !turn.error));
     setTurnTime(node, turn, node.metaRow);
     syncToolEvidence(node, turn.toolEvidence);
     if (node.thinking !== turn.thinking) {
@@ -2409,7 +2421,8 @@ function renderSettledTurn(turn, before) {
   const meta = document.createElement('div');
   meta.className = 'meta';
   const copyBtn = copyButton('', 'Скопировать ответ');
-  copyBtn._text = turn.text;
+  copyBtn._text = (turn.canonicalTurn || turn).text;
+  bubble.classList.toggle('hidden', Boolean(turn.canonicalTurn && !turn.text && !turn.error));
   const metaRow = document.createElement('div');
   metaRow.className = 'metaRow';
   metaRow.append(botBadge(), meta, copyBtn);

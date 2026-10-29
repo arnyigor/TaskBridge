@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { startFixture } from './server-fixture.mjs';
 import { ChatState } from '../web/chat-state.mjs';
 
-const projection = state => state.displayTurns.map(item => ({ id: item.id, role: item.role, text: item.text, tools: item.tools?.map(tool => tool.id) }));
+const projection = state => state.projectTurns(state.turns).map(item => ({ id: item.id, role: item.role, text: item.text, tools: item.tools?.map(tool => tool.id) }));
 
 test('captured Pi compact stream survives HTTP history, SSE reconnect and server restart', { timeout: 60000 }, async t => {
   const fixture = await startFixture(0, { env: { FAKE_PI_RECORDING: fileURLToPath(new URL('./fixtures/compaction/pi-1.4.0-auto.json', import.meta.url)) } });
@@ -47,8 +47,8 @@ test('captured Pi compact stream survives HTTP history, SSE reconnect and server
   const boundary = received.find(event => event.data?.pi?.type === 'compaction_end' && event.data.pi.result);
   assert(boundary);
   assert.equal(received.filter(event => event.data?.pi?.type === 'agent_start').length, 1);
-  assert.deepEqual(live.displayTurns.map(item => item.role), ['user', 'assistant', 'note', 'assistant', 'note']);
-  assert.deepEqual(live.displayTurns.filter(item => item.role === 'assistant').map(item => item.text), ['BEFORE', 'AFTER']);
+  assert.deepEqual(live.projectTurns(live.turns).map(item => item.role), ['user', 'assistant', 'assistant', 'note', 'assistant', 'note']);
+  assert.deepEqual(live.projectTurns(live.turns).filter(item => item.role === 'assistant').map(item => item.text), ['BEFORE', '', 'AFTER']);
 
   const history = await fixture.api(`/api/tasks/${created.id}/events?limit=0`);
   const restored = new ChatState(created);

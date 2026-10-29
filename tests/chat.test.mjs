@@ -212,15 +212,16 @@ test('successful compaction separates existing work from continuation', () => {
     { type: 'tool_execution_start', toolName: 'bash', toolCallId: 'after' },
   ];
   frames.forEach((pi, index) => state.apply({ seq: index + 1, type: 'PI_EVENT', data: { pi } }));
-  const displayed = state.displayTurns;
+  const displayed = state.projectTurns(state.turns);
   const before = displayed.findIndex(x => x.role === 'assistant' && x.text === 'До сжатия');
   const note = displayed.findIndex(x => x.id === 'note-6');
   const after = displayed.findIndex(x => x.role === 'assistant' && x.text === 'После сжатия');
   assert.ok(before >= 0 && before < note && note < after, 'expected work → success note → continuation');
   assert.equal(state.turns.filter(x => x.role === 'user').length, 1);
   assert.equal(state.turns.filter(x => x.role === 'assistant').length, 1);
-  assert.deepEqual(displayed[before].tools.map(x => x.id), ['before']);
-  assert.deepEqual(displayed[after].tools.map(x => x.id), ['after']);
+  assert.deepEqual(displayed[before + 1].tools.map(x => x.id), ['before']);
+  assert(before + 1 < note);
+  assert.deepEqual(displayed[after + 1].tools.map(x => x.id), ['after']);
   assert.equal(displayed[after].canonicalTurn, state.current);
 });
 
@@ -407,7 +408,7 @@ test('DOM: saved answers survive repeated polls, context loads immediately, reco
   assert.match(app.streams[0].url, /after=12$/);
 });
 
-test('DOM: real compact stream keeps continuation below the notice and actions canonical', async () => {
+test('DOM: compact stream keeps one continuous answer and canonical actions', async () => {
   const fixture = JSON.parse(await fs.readFile(new URL('./fixtures/compaction/pi-1.4.0-auto.json', import.meta.url), 'utf8'));
   const app = await ui();
   app.tasks.a = { ...task(), status: 'RUNNING', assistantText: '' };
@@ -424,12 +425,11 @@ test('DOM: real compact stream keeps continuation below the notice and actions c
   assert.equal(toolNode.open, true);
   const content = app.document.getElementById('msgsInner').textContent;
   assert(content.indexOf('BEFORE') < content.indexOf('Public compatibility-test summary'));
-  assert(content.indexOf('Public compatibility-test summary') < content.indexOf('AFTER'));
+  assert(content.indexOf('AFTER') < content.indexOf('Public compatibility-test summary'));
   const assistants = [...app.document.querySelectorAll('.turn:not(.me)')];
-  assert.equal(assistants.length, 2);
+  assert.equal(assistants.length, 1); // one canonical answer, compact boundaries stay in data
   assert.equal(app.document.querySelectorAll('.typing').length, 0);
-  assert.equal(assistants[0].querySelector('.turnActionBar')?.classList.contains('hidden') ?? true, true);
-  const actionHost = assistants[1];
+  const actionHost = assistants.at(-1);
   assert.equal(actionHost.dataset.turnId, 'assistant-initial');
   actionHost.querySelector('[data-action="edit"]').click();
   assert.equal(actionHost.querySelector('.editBox textarea').value, 'BEFORE\n\nAFTER');
@@ -451,11 +451,11 @@ test('DOM: backfill across compact inserts segments around already rendered noti
   const content = app.document.getElementById('msgsInner').textContent;
   const notice = content.indexOf('Public compatibility-test summary');
   assert(content.indexOf('BEFORE') < notice);
-  assert(notice < content.indexOf('AFTER'));
+  assert(content.indexOf('AFTER') < notice);
   assert(content.indexOf('AFTER') < content.lastIndexOf('Public compatibility-test summary'));
-  assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 2);
+  assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 1);
   app.renderChat();
-  assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 2);
+  assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 1);
 });
 
 test('DOM: an estimate after compaction is labelled, and a stale measurement says so', async () => {
@@ -1421,7 +1421,7 @@ test('DOM: the sessions screen groups active and recent sessions and shares thei
   assert.deepEqual(app.copied, [`http://localhost/session/a`]);
 });
 
-test('DOM: commands sit above the answer and below the reasoning block', async () => {
+test('DOM: compact view puts merged reasoning and commands above the answer', async () => {
   const app = await ui();
   await app.selectTask('a');
 
@@ -1435,23 +1435,13 @@ test('DOM: commands sit above the answer and below the reasoning block', async (
   });
   await app.refreshTask();
 
-  // The fixture's tool calls belong to the last assistant turn, which is also
-  // where the injected thinking delta lands.
-  const body = [...app.document.querySelectorAll('.turn .body')].filter(node => node.querySelector('.msg.s-bot')).at(-1);
-  assert.ok(body, 'no assistant turn rendered');
-  const children = [...body.children].map(node => node.className.split(' ').filter(Boolean).join(' '));
-  const indexOf = kind => [...body.children].findIndex(node => node.classList.contains(kind));
-  const reasoning = indexOf('reasoning');
-  const tool = indexOf('tool');
-  const answer = indexOf('msg');
-
-  assert.ok(reasoning >= 0, `no reasoning block: ${children}`);
-  assert.ok(tool >= 0, `no tool chips: ${children}`);
-  assert.ok(answer >= 0, `no answer bubble: ${children}`);
-  assert.ok(reasoning < tool, `reasoning must precede commands: ${children}`);
-  assert.ok(tool < answer, `commands must precede the answer: ${children}`);
-  // The answer stays readable without scrolling past a long tool list.
-  assert.match(body.querySelector('.md').textContent, /Первый ответ|Второй ответ/);
+  const content = app.document.getElementById('msgsInner').textContent;
+  const answer = content.indexOf('Второй ответ');
+  const tool = content.indexOf('echo hello');
+  const reasoning = content.indexOf('Сначала подумаю про SessionManager.');
+  assert(answer >= 0 && tool >= 0 && reasoning >= 0);
+  assert(reasoning < tool && tool < answer, 'compact view keeps reasoning → tools → continuous answer');
+  assert.equal(app.document.querySelector('.reasoning').hasAttribute('open'), false, 'reasoning is not automatically expanded');
 });
 
 test('DOM: reasoning block can copy the full current text', async () => {
@@ -4247,4 +4237,130 @@ test('DOM: summary is opt-in, plain text, and a late response cannot leak into a
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(body.textContent, '');
   assert.equal(details.open, false);
+});
+
+// TIMELINE-01: one canonical answer, three text messages and two tool rounds.
+// Full message_end repeats the streamed text; parallel calls finish in reverse.
+function runOrderHistory() {
+  const frames = [];
+  const message = text => frames.push(
+    { type: 'message_start', message: { role: 'assistant' } },
+    { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } },
+    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text }] } },
+  );
+  const start = (id, name, path) => frames.push({ type: 'tool_execution_start', toolCallId: id, toolName: name, args: { path } });
+  const end = id => frames.push({ type: 'tool_execution_end', toolCallId: id, isError: false });
+  message('TIMELINE_TEXT_BEFORE');
+  start('timeline-read-a', 'read', 'TIMELINE_READ_A.txt');
+  start('timeline-read-b', 'read', 'TIMELINE_READ_B.txt');
+  end('timeline-read-b');
+  end('timeline-read-a');
+  message('TIMELINE_TEXT_BETWEEN');
+  start('timeline-edit', 'edit', 'TIMELINE_EDIT.txt');
+  end('timeline-edit');
+  message('TIMELINE_TEXT_AFTER');
+  frames.push({ type: 'agent_settled' });
+  return frames.map((pi, i) => ({ taskId: 'a', seq: i + 1, type: 'PI_EVENT', data: { pi } }));
+}
+
+const runOrderText = ['TIMELINE_TEXT_BEFORE', 'TIMELINE_TEXT_BETWEEN', 'TIMELINE_TEXT_AFTER'];
+const runOrderVisible = [runOrderText[0], 'TIMELINE_READ_A.txt', 'TIMELINE_READ_B.txt', runOrderText[1], 'TIMELINE_EDIT.txt', runOrderText[2]];
+
+test('TIMELINE-01: canonical replay deduplicates full message_end and preserves parallel tool identities', () => {
+  const state = new ChatState({ ...task(), status: 'RUNNING', assistantText: '' });
+  const events = runOrderHistory();
+  for (const event of events) state.apply(event);
+  for (const event of events) assert.equal(state.apply(event), false, 'reconnect duplicates are ignored');
+  assert.equal(state.turns.filter(turn => turn.role === 'assistant').length, 1);
+  assert.equal(state.current.id, 'assistant-initial');
+  assert.equal(state.current.text, runOrderText.join('\n\n'));
+  assert.deepEqual(state.current.tools.map(tool => [tool.id, tool.state]), [
+    ['timeline-read-a', 'done'], ['timeline-read-b', 'done'], ['timeline-edit', 'done'],
+  ]);
+});
+
+for (const mode of ['streaming', 'saved history']) {
+  test(`Compact DOM keeps text continuous below tools (${mode})`, async () => {
+    const app = await ui();
+    const events = runOrderHistory();
+    app.tasks.a = { ...task(), status: mode === 'streaming' ? 'RUNNING' : 'SUCCEEDED', assistantText: '' };
+    app.setFetchHook(async url => url.includes('/events') ? {
+      ok: true, json: async () => ({ events: mode === 'streaming' ? [] : events, reachedStart: true }),
+    } : null);
+    await app.selectTask('a');
+    const assertOrder = expected => {
+      const content = app.document.getElementById('msgsInner').textContent;
+      const positions = expected.map(token => content.indexOf(token));
+      assert(positions.every(position => position >= 0), 'all received text and tool labels are visible');
+      assert.deepEqual([...positions].sort((a, b) => a - b), positions, `chronology: ${expected.join(' → ')}`);
+    };
+    if (mode === 'streaming') {
+      for (const event of events) {
+        app.streams[0].onmessage({ data: JSON.stringify(event) });
+        app.renderChat();
+        // Check intermediate streaming too, not just the settled answer.
+        if (event.data.pi.toolCallId === 'timeline-read-a' && event.data.pi.type === 'tool_execution_start') {
+          assertOrder(['TIMELINE_READ_A.txt', runOrderText[0]]);
+        }
+      }
+    }
+    assertOrder(['TIMELINE_READ_A.txt', 'TIMELINE_READ_B.txt', 'TIMELINE_EDIT.txt', ...runOrderText]);
+    assert.equal(app.document.querySelectorAll('.turn:not(.me)').length, 1);
+    const content = app.document.getElementById('msgsInner').textContent;
+    for (const token of runOrderText) assert.equal(content.split(token).length - 1, 1, `${token} is not duplicated by message_end`);
+    const last = [...app.document.querySelectorAll('.turn:not(.me)')].at(-1);
+    assert.equal(last.dataset.turnId, 'assistant-initial');
+    last.querySelector('.metaRow .copyBtn').click();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(app.copied.at(-1), runOrderText.join('\n\n'), 'copy uses the whole canonical answer');
+  });
+}
+
+test('TIMELINE-02: late aborted completion inserts its segment before the newer exchange', async () => {
+  const app = await ui();
+  app.tasks.a = { ...task(), status: 'RUNNING', assistantText: '' };
+  app.setFetchHook(async url => url.includes('/events') ? { ok: true, json: async () => ({ events: [], reachedStart: true }) } : null);
+  await app.selectTask('a');
+  let seq = 0;
+  const send = event => {
+    app.streams[0].onmessage({ data: JSON.stringify({ taskId: 'a', seq: ++seq, ...event }) });
+    app.renderChat();
+  };
+  const pi = frame => send({ type: 'PI_EVENT', data: { pi: frame } });
+  pi({ type: 'message_start', message: { role: 'assistant' } });
+  pi({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'OLD_PREFIX' } });
+  pi({ type: 'tool_execution_start', toolName: 'read', toolCallId: 'old-tool', args: { path: 'OLD_TOOL.txt' } });
+  const toolNode = app.document.querySelector('.tool');
+  send({ type: 'USER_MESSAGE', data: { text: 'NEW_USER_PROMPT' } });
+  pi({ type: 'message_start', message: { role: 'assistant' } });
+  pi({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'NEW_ANSWER' } });
+  const freshNode = [...app.document.querySelectorAll('.turn')].find(node => node.textContent.includes('NEW_ANSWER'));
+  pi({ type: 'message_end', message: { role: 'assistant', stopReason: 'aborted', content: [{ type: 'text', text: 'OLD_PREFIXOLD_SUFFIX' }] } });
+  const content = app.document.getElementById('msgsInner').textContent;
+  const positions = ['OLD_TOOL.txt', 'OLD_PREFIX', 'OLD_SUFFIX', 'NEW_USER_PROMPT', 'NEW_ANSWER'].map(token => content.indexOf(token));
+  assert(positions.every(position => position >= 0));
+  assert.deepEqual(positions, [...positions].sort((a, b) => a - b));
+  assert.equal(app.document.querySelector('.tool'), toolNode, 'old tools are not rebuilt or moved');
+  assert.equal([...app.document.querySelectorAll('.turn')].find(node => node.textContent.includes('NEW_ANSWER')), freshNode);
+});
+
+test('TIMELINE-02: a tool group remains running when text starts in the next segment', async () => {
+  const app = await ui();
+  app.tasks.a = { ...task(), status: 'RUNNING', assistantText: '' };
+  app.setFetchHook(async url => url.includes('/events') ? { ok: true, json: async () => ({ events: [], reachedStart: true }) } : null);
+  await app.selectTask('a');
+  const frames = [
+    { type: 'message_start', message: { role: 'assistant' } },
+    ...['read', 'edit', 'bash'].map((toolName, i) => ({ type: 'tool_execution_start', toolName, toolCallId: `parallel-${i}` })),
+    { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'TEXT_WHILE_TOOLS_RUN' } },
+  ];
+  frames.forEach((pi, i) => {
+    app.streams[0].onmessage({ data: JSON.stringify({ taskId: 'a', seq: i + 1, type: 'PI_EVENT', data: { pi } }) });
+    app.renderChat();
+  });
+  const group = app.document.querySelector('.toolGroup');
+  assert(group);
+  assert.match(group.querySelector('summary').textContent, /bash/);
+  assert.doesNotMatch(group.querySelector('summary').textContent, /прервано/);
+  assert.equal(group.querySelectorAll('.tool.run').length, 3);
 });

@@ -1,5 +1,7 @@
 [
   { "id": "user-initial", "role": "user", "text": "Public compatibility test", "tools": [] },
-  { "id": "assistant-initial", "role": "assistant", "text": "BEFORE\n\nBEFORE", "tools": ["tool-1"] },
+  { "id": "assistant-initial", "role": "assistant", "text": "BEFORE", "tools": [] },
+  { "id": "assistant-initial-segment-activity-38-tools-6-0-0", "role": "assistant", "text": "", "tools": ["tool-1"] },
+  { "id": "assistant-initial-segment-activity-44-text-6-0-1", "role": "assistant", "text": "BEFORE", "tools": [] },
   { "id": "note-54", "role": "note", "text": "Контекст сжат:\nPublic compatibility-test summary", "tools": [] }
 ]

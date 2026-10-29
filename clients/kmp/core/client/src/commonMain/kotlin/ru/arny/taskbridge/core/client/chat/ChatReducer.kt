@@ -94,13 +94,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var delivery: String = "Передано агенту",
         val compactionBoundaries: MutableList<CompactionBoundary> = mutableListOf(),
         val compactionNotice: Boolean = false,
+        val activityBoundaries: MutableList<CompactionBoundary> = mutableListOf(),
+        var lastActivity: String? = null,
     )
 
-    internal class CompactionBoundary(val seq: Long, val text: Int, val thinking: Int, val tools: Int, val notes: List<Turn>)
+    internal class CompactionBoundary(val seq: Long, val text: Int, val thinking: Int, val tools: Int, val notes: List<Turn>, val key: String = seq.toString())
 
     private class Variants(val ids: MutableList<String>, var selected: String?)
 
-    private class Orphan(val turn: Turn, val textPrefix: String, val thinkingPrefix: String, val textSeparator: String)
+    private class Orphan(val turn: Turn, val textPrefix: String, val thinkingPrefix: String, val textSeparator: String, val messageSeq: Long = 0)
 
     val taskId: String = task.id
 
@@ -117,6 +119,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var current: Turn
     private var messageTurn: Turn? = null
     private var messageOpen = false
+    private var messageSeq = 0L
     private var orphanMessage: Orphan? = null
     private var executionTurn: Turn? = null
     private var windowStart: Turn? = null
@@ -215,13 +218,14 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 textSeparator = scratch.textSeparator
                 separatorApplied = scratch.separatorApplied
                 messageOpen = scratch.messageOpen
+                messageSeq = scratch.messageSeq
                 messageTurn = scratch.messageTurn
             }
             if (executionTurn === previousWindow) executionTurn = joined
             if (orphanMessage?.turn === previousWindow) {
                 val rebuilt = scratch.orphanMessage?.takeIf { it.turn === joined }
                 val old = orphanMessage!!
-                orphanMessage = Orphan(joined, rebuilt?.textPrefix ?: old.textPrefix, rebuilt?.thinkingPrefix ?: old.thinkingPrefix, rebuilt?.textSeparator ?: old.textSeparator)
+                orphanMessage = Orphan(joined, rebuilt?.textPrefix ?: old.textPrefix, rebuilt?.thinkingPrefix ?: old.thinkingPrefix, rebuilt?.textSeparator ?: old.textSeparator, rebuilt?.messageSeq ?: old.messageSeq)
             }
             turns.remove(previousWindow)
             windowStart = scratch.windowStart
@@ -642,7 +646,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 // An answer left open by an interrupt: its late end must not land on this one.
                 val open = messageTurn
                 if (messageOpen && open != null && open !== current) {
-                    orphanMessage = Orphan(open, textPrefix, thinkingPrefix, textSeparator)
+                    orphanMessage = Orphan(open, textPrefix, thinkingPrefix, textSeparator, messageSeq)
                 }
                 turns.getOrNull(currentIndex - 1)?.takeIf { it.role == Role.USER }?.let { user ->
                     user.delivery = "Модель начала ответ"
@@ -650,6 +654,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 }
                 markAnswerRunning(current, event.at)
                 messageTurn = current
+                messageSeq = event.seq
                 executionTurn = current
                 textPrefix = current.text
                 thinkingPrefix = current.thinking
@@ -662,6 +667,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     // Deltas without message_start continue the current message (steering).
                     markAnswerRunning(current, event.at)
                     messageTurn = current
+                    messageSeq = event.seq
                     textPrefix = current.text
                     thinkingPrefix = current.thinking
                     messageOpen = true
@@ -669,11 +675,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 val turn = messageTurn ?: current
                 val delta = frame.obj("assistantMessageEvent")
                 when (delta?.str("type")) {
-                    "text_delta" -> {
+                    "text_delta" -> if (!delta.str("delta").isNullOrEmpty()) {
+                        activity(turn, "text", event.seq, messageSeq)
                         if (textSeparator.isNotEmpty() && !separatorApplied) { turn.text += textSeparator; separatorApplied = true }
                         appendAssistantTextDelta(turn, delta.str("delta").orEmpty())
                     }
-                    "thinking_delta" -> turn.thinking += delta.str("delta").orEmpty()
+                    "thinking_delta" -> if (!delta.str("delta").isNullOrEmpty()) {
+                        activity(turn, "thinking", event.seq, messageSeq)
+                        turn.thinking += delta.str("delta").orEmpty()
+                    }
                 }
             }
             "message_end" -> if (frame.obj("message")?.str("role") == "assistant") onMessageEnd(event, frame.obj("message")!!)
@@ -694,6 +704,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                         changePreview = args?.let { changePreview(toolName, it) },
                     )
                     if (tool.name == "subagent") tool.progress = subagentProgress(null, args)
+                    activity(turn, "tools", event.seq)
                     turn.tools += tool
                     tools[id] = tool
                 }
@@ -709,7 +720,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 var tool = if (callId != null) tools[callId] else tools.values.lastOrNull { it.state == "run" && it.name == frame.str("toolName") }
                 if (tool == null) {
                     tool = Tool(callId ?: "tool-${event.seq}", frame.str("toolName") ?: "tool", event.message)
-                    (executionTurn ?: current).tools += tool
+                    val turn = executionTurn ?: current
+                    activity(turn, "tools", event.seq)
+                    turn.tools += tool
                     tools[tool.id] = tool
                 }
                 tool.state = if (frame.bool("isError") == true) "error" else "done"
@@ -776,14 +789,26 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             ?.joinToString("") { it.str("text").orEmpty() }
             .orEmpty()
         if (content != null) {
-            val text = filterMcpAdapterNoise(markerText)
-            val thinking = content.mapNotNull { it as? JsonObject }.filter { it.str("type") == "thinking" }.joinToString("") { it.str("thinking").orEmpty() }
             val rebuild = orphan != null || messageTurn != null
             val prefix = orphan?.textPrefix ?: textPrefix
             val separator = orphan?.textSeparator ?: textSeparator
             val thinkPrefix = orphan?.thinkingPrefix ?: thinkingPrefix
-            turn.text = (if (rebuild) prefix + separator else turn.text) + text
-            turn.thinking = (if (rebuild) thinkPrefix else turn.thinking) + thinking
+            var textEnd = if (rebuild) prefix + separator else turn.text
+            var thinkingEnd = if (rebuild) thinkPrefix else turn.thinking
+            for (part in content.mapNotNull { it as? JsonObject }) {
+                val kind = part.str("type")
+                if (kind != "text" && kind != "thinking") continue
+                if (kind == "text") textEnd = filterMcpAdapterNoise(textEnd + part.str("text").orEmpty())
+                else thinkingEnd += part.str("thinking").orEmpty()
+                val end = if (kind == "text") textEnd else thinkingEnd
+                val previous = if (kind == "text") turn.text else turn.thinking
+                if (end.length > previous.length) {
+                    activity(turn, kind, event.seq, orphan?.messageSeq ?: messageSeq.takeIf { it > 0 } ?: event.seq)
+                    if (kind == "text") turn.text = end else turn.thinking = end
+                }
+            }
+            turn.text = textEnd
+            turn.thinking = thinkingEnd
         }
         if (stopReason != null) turn.stopReason = stopReason
         if (errorMessage != null || aborted) {
@@ -845,15 +870,25 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private fun decodeFiles(event: TaskEvent): List<FileRef> =
         event.data["files"]?.let { runCatching { TaskBridgeJson.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(FileRef.serializer()), it) }.getOrNull() }.orEmpty()
 
+    private fun activity(turn: Turn, kind: String, seq: Long, messageSeq: Long = seq) {
+        val compact = turn.compactionBoundaries.lastOrNull()
+        val atCompact = compact != null && compact.text == turn.text.length && compact.thinking == turn.thinking.length && compact.tools == turn.tools.size
+        if (turn.lastActivity != null && turn.lastActivity != kind && !atCompact) {
+            turn.activityBoundaries += CompactionBoundary(seq, turn.text.length, turn.thinking.length, turn.tools.size, emptyList(),
+                "activity-$messageSeq-$kind-${turn.text.length}-${turn.thinking.length}-${turn.tools.size}")
+        }
+        turn.lastActivity = kind
+    }
+
     private fun projectSegments(turn: Turn, canonical: ChatItem.Assistant, visible: List<Turn>): List<ChatItem> {
         val present = visible.toSet()
-        val boundaries = turn.compactionBoundaries.filter { b -> b.notes.any { it in present } }
+        val boundaries = (turn.activityBoundaries + turn.compactionBoundaries.filter { b -> b.notes.any { it in present } }).sortedBy { it.seq }
         if (boundaries.isEmpty()) return listOf(canonical)
         val result = mutableListOf<ChatItem>()
         var textStart = 0
         var thinkingStart = 0
         var toolsStart = 0
-        var startSeq: Long? = null
+        var startKey: String? = null
         var lastSegment = -1
         val tail = CompactionBoundary(0, canonical.text.length, canonical.thinking.length, canonical.tools.size, emptyList())
         for (end in boundaries + tail) {
@@ -861,13 +896,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             val thinkingEnd = end.thinking.coerceIn(thinkingStart, canonical.thinking.length)
             val toolsEnd = end.tools.coerceIn(toolsStart, canonical.tools.size)
             val rawText = canonical.text.substring(textStart, textEnd)
-            val text = if (startSeq == null) rawText else rawText.removePrefix("\n\n")
+            val text = if (startKey == null) rawText else rawText.removePrefix("\n\n")
             val thinking = canonical.thinking.substring(thinkingStart, thinkingEnd)
             val tools = canonical.tools.subList(toolsStart, toolsEnd).toList()
             if (text.isNotEmpty() || thinking.isNotEmpty() || tools.isNotEmpty()) {
                 lastSegment = result.size
                 result += canonical.copy(
-                    id = startSeq?.let { "${canonical.id}-segment-$it" } ?: canonical.id,
+                    id = startKey?.let { "${canonical.id}-segment-$it" } ?: canonical.id,
                     text = text, thinking = thinking, tools = tools,
                     active = false, final = true, status = "DONE", error = null,
                     variants = null, files = emptyList(), segmentActions = false,
@@ -877,7 +912,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             textStart = textEnd
             thinkingStart = thinkingEnd
             toolsStart = toolsEnd
-            startSeq = end.seq
+            startKey = end.key
         }
         if (lastSegment >= 0) {
             val last = result[lastSegment] as ChatItem.Assistant
@@ -888,9 +923,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         return result
     }
 
-    fun snapshot(): ChatSnapshot {
+    fun snapshot(detailed: Boolean = false): ChatSnapshot {
         val visible = turns.filter { !it.hidden }
-        val attachedNotes = turns.flatMap { turn -> turn.compactionBoundaries.flatMap { it.notes } }.toSet()
+        val hiddenNotes = turns.filter { it.hidden }.flatMap { turn -> turn.compactionBoundaries.flatMap { it.notes } }.toSet()
+        val attachedNotes = if (detailed) turns.flatMap { turn -> turn.compactionBoundaries.flatMap { it.notes } }.toSet() else hiddenNotes
         val items = visible.filter { it !in attachedNotes }.flatMap { turn ->
             val canonical = when (turn.role) {
                 Role.USER -> ChatItem.User(
@@ -914,7 +950,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     )
                 }
             }
-            if (canonical !is ChatItem.Assistant || turn.compactionBoundaries.isEmpty()) listOf(canonical)
+            if (!detailed || canonical !is ChatItem.Assistant || (turn.compactionBoundaries.isEmpty() && turn.activityBoundaries.isEmpty())) listOf(canonical)
             else projectSegments(turn, canonical, visible)
         }
         // Use the canonical response, never a visual segment's LazyColumn key.

@@ -26,7 +26,7 @@ function history(count) {
   add({ type: 'agent_settled' });
   return { events, cut };
 }
-const normalized = state => state.displayTurns.map(item => ({ id: item.id, role: item.role, text: item.text, active: item.active, tools: item.tools?.map(t => [t.id, t.state]) }));
+const normalized = state => state.projectTurns(state.turns).map(item => ({ id: item.id, role: item.role, text: item.text, active: item.active, tools: item.tools?.map(t => [t.id, t.state]) }));
 
 for (const count of [1000, 10000]) {
   test(`C14: ${count} tools retain order/state through compact and paginated reconstruction`, t => {
@@ -38,14 +38,14 @@ for (const count of [1000, 10000]) {
       live.apply(event);
       if (event.seq % 250 === 0) {
         const start = performance.now();
-        void live.displayTurns;
+        void live.projectTurns(live.turns);
         maxProjectionMs = Math.max(maxProjectionMs, performance.now() - start);
       }
     }
     const applyAndProjectionMs = performance.now() - started;
-    const segments = live.displayTurns.filter(item => item.role === 'assistant');
-    assert.deepEqual(segments.map(item => item.text), ['before', 'after']);
-    assert.deepEqual(segments.map(item => item.tools.length), [count / 2, count / 2]);
+    const segments = live.projectTurns(live.turns).filter(item => item.role === 'assistant');
+    assert.deepEqual(segments.map(item => item.text), ['before', '', 'after', '']);
+    assert.deepEqual(segments.map(item => item.tools.length), [0, count / 2, 0, count / 2]);
     assert(segments.every(item => !item.active && item.tools.every(tool => tool.state === 'done')));
     assert.equal(new Set(segments.flatMap(item => item.tools.map(tool => tool.id))).size, count);
     assert.equal(live.turns.filter(item => item.role === 'assistant').length, 1);

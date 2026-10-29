@@ -53,15 +53,18 @@ export function lightenEvent(event) {
 // text is never lost.
 export function trimStreamingDeltas(events) {
   let openSince = -1;
-  let hasCompaction = false;
+  let hasBoundary = false;
   const closedRanges = [];
   for (let i = 0; i < events.length; i++) {
     const frame = events[i].data?.pi;
     if (!frame) continue;
-    if (frame.type === 'message_start') { openSince = i; hasCompaction = false; }
-    else if (openSince >= 0 && ['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result && !frame.errorMessage && !frame.aborted && !frame.cancelled) hasCompaction = true;
+    if (frame.type === 'message_start') { openSince = i; hasBoundary = false; }
+    // A tool or compact inside the message splits its text on the timeline.
+    // The final content alone cannot reconstruct text on both sides of it.
+    else if (openSince >= 0 && (['tool_execution_start', 'tool_execution_end'].includes(frame.type)
+      || (['compaction_end', 'auto_compaction_end'].includes(frame.type) && frame.result && !frame.errorMessage && !frame.aborted && !frame.cancelled))) hasBoundary = true;
     else if (frame.type === 'message_end') {
-      if (openSince >= 0 && !hasCompaction) closedRanges.push([openSince, i]);
+      if (openSince >= 0 && !hasBoundary) closedRanges.push([openSince, i]);
       openSince = -1;
     }
   }

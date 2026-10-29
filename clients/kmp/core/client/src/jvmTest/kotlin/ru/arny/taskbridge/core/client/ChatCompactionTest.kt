@@ -33,7 +33,7 @@ class ChatCompactionTest {
             val f = fixture(name)
             val reducer = ChatReducer(f.task)
             f.events.forEach { reducer.apply(it) }
-            val actual = reducer.snapshot().items.filterNot { it is ChatItem.Note && it.text == "Контекст сжимается…" }.map { item ->
+            val actual = reducer.snapshot(detailed = true).items.filterNot { it is ChatItem.Note && it.text == "Контекст сжимается…" }.map { item ->
                 when (item) {
                     is ChatItem.User -> ExpectedItem(item.id, "user", item.text, emptyList())
                     is ChatItem.Note -> ExpectedItem(item.id, "note", item.text, emptyList())
@@ -50,27 +50,27 @@ class ChatCompactionTest {
     fun realAutomaticPiStreamKeepsCanonicalIdentityAndStableSegments() {
         val f = fixture("auto")
         val live = ChatReducer(f.task)
-        f.events.forEach { live.apply(it); live.snapshot() }
+        f.events.forEach { live.apply(it); live.snapshot(detailed = true) }
         val replay = ChatReducer(f.task)
         f.events.forEach { replay.apply(it) }
-        assertEquals(live.snapshot().items, replay.snapshot().items)
-        val once = live.snapshot().items
+        assertEquals(live.snapshot(detailed = true).items, replay.snapshot(detailed = true).items)
+        val once = live.snapshot(detailed = true).items
         f.events.forEach { assertFalse(live.apply(it)) }
-        assertEquals(once, live.snapshot().items)
-        val snapshot = live.snapshot()
+        assertEquals(once, live.snapshot(detailed = true).items)
+        val snapshot = live.snapshot(detailed = true)
         val answers = snapshot.items.filterIsInstance<ChatItem.Assistant>()
-        assertEquals(listOf("BEFORE", "AFTER"), answers.map { it.text })
-        assertEquals(listOf("assistant-initial", "assistant-initial-segment-44"), answers.map { it.id })
+        assertEquals(listOf("BEFORE", "", "AFTER"), answers.map { it.text })
+        assertEquals(listOf("assistant-initial", "assistant-initial-segment-activity-38-tools-6-0-0", "assistant-initial-segment-44"), answers.map { it.id })
         assertTrue(answers.all { it.canonicalId == "assistant-initial" && it.canonicalText == "BEFORE\n\nAFTER" })
-        assertEquals(listOf(false, true), answers.map { it.segmentActions })
+        assertEquals(listOf(false, false, true), answers.map { it.segmentActions })
         assertEquals("assistant-initial", snapshot.newestAnswerId)
-        assertEquals(listOf("tool-1"), answers.first().tools.map { it.id })
+        assertEquals(listOf("tool-1"), answers[1].tools.map { it.id })
         assertTrue(answers.last().tools.isEmpty())
         assertTrue(answers.none { it.active })
         assertEquals(snapshot.items.size, snapshot.items.map { it.id }.toSet().size)
         assertEquals(2, snapshot.items.filterIsInstance<ChatItem.Note>().count { it.text.startsWith("Контекст сжат:") })
         val normalized = snapshot.items.filterNot { it is ChatItem.Note && it.text == "Контекст сжимается…" }
-        assertTrue(normalized[1] is ChatItem.Assistant && normalized[2] is ChatItem.Note && normalized[3] is ChatItem.Assistant && normalized[4] is ChatItem.Note)
+        assertTrue(normalized[1] is ChatItem.Assistant && normalized[2] is ChatItem.Assistant && normalized[3] is ChatItem.Note && normalized[4] is ChatItem.Assistant && normalized[5] is ChatItem.Note)
     }
 
     @Test
@@ -79,8 +79,8 @@ class ChatCompactionTest {
         val reducer = ChatReducer(f.task)
         f.events.filter { it.seq <= 229 }.forEach { reducer.apply(it) }
         reducer.apply(TaskEvent(taskId = f.task.id, seq = 230, type = "TASK_CANCELLED"))
-        val answers = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>()
-        assertEquals(listOf("BEFORE", "AFTER"), answers.map { it.text })
+        val answers = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>()
+        assertEquals(listOf("BEFORE", "", "AFTER"), answers.map { it.text })
         assertTrue(answers.all { it.final && !it.active && it.canonicalId == "assistant-initial" })
         assertEquals("CANCELLED", answers.last().status)
     }
@@ -95,12 +95,12 @@ class ChatCompactionTest {
             data = buildJsonObject { put("turnSeq", 0); put("variantId", id) },
         ))
         select(235, "TURN_VARIANT_START", "v2")
-        assertTrue(reducer.snapshot().items.none { it is ChatItem.Note })
-        assertEquals("assistant-v2", reducer.snapshot().newestAnswerId)
+        assertTrue(reducer.snapshot(detailed = true).items.none { it is ChatItem.Note })
+        assertEquals("assistant-v2", reducer.snapshot(detailed = true).newestAnswerId)
         select(236, "TURN_VARIANT_SELECTED", "initial")
-        val restored = reducer.snapshot()
+        val restored = reducer.snapshot(detailed = true)
         assertEquals("assistant-initial", restored.newestAnswerId)
-        assertEquals(listOf("BEFORE", "AFTER"), restored.items.filterIsInstance<ChatItem.Assistant>().map { it.text })
+        assertEquals(listOf("BEFORE", "", "AFTER"), restored.items.filterIsInstance<ChatItem.Assistant>().map { it.text })
         assertEquals(2, restored.items.filterIsInstance<ChatItem.Note>().count { it.text.startsWith("Контекст сжат:") })
     }
 
@@ -109,8 +109,8 @@ class ChatCompactionTest {
         val f = fixture("manual")
         val reducer = ChatReducer(f.task)
         f.events.forEach { reducer.apply(it) }
-        val snapshot = reducer.snapshot()
-        assertEquals(1, snapshot.items.filterIsInstance<ChatItem.Assistant>().size)
+        val snapshot = reducer.snapshot(detailed = true)
+        assertEquals(1, snapshot.items.filterIsInstance<ChatItem.Assistant>().map { it.canonicalId }.distinct().size)
         assertEquals("assistant-initial", snapshot.newestAnswerId)
         assertTrue(snapshot.items.last() is ChatItem.Note)
         assertTrue(snapshot.items.filterIsInstance<ChatItem.Assistant>().none { it.active })
@@ -129,8 +129,8 @@ class ChatCompactionTest {
             tail.revealWindowStart(f.events[cut].seq)
             val cursor = tail.cursor
             tail.prependOlder(f.task, f.events.take(cut), reachedStart = true)
-            assertEquals(whole.snapshot().items, tail.snapshot().items, "cut $cut")
-            assertEquals("assistant-initial", tail.snapshot().newestAnswerId)
+            assertEquals(whole.snapshot(detailed = true).items, tail.snapshot(detailed = true).items, "cut $cut")
+            assertEquals("assistant-initial", tail.snapshot(detailed = true).newestAnswerId)
             assertEquals(cursor, tail.cursor)
         }
         val tail = ChatReducer(f.task, seedInitial = false)
@@ -138,7 +138,7 @@ class ChatCompactionTest {
         tail.revealWindowStart(f.events[15].seq)
         tail.prependOlder(f.task, f.events.subList(7, 15), reachedStart = false)
         tail.prependOlder(f.task, f.events.take(7), reachedStart = true)
-        assertEquals(whole.snapshot().items, tail.snapshot().items, "three pages")
+        assertEquals(whole.snapshot(detailed = true).items, tail.snapshot(detailed = true).items, "three pages")
     }
 
     @Test
@@ -150,7 +150,7 @@ class ChatCompactionTest {
         reducer.apply(pi(4, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"AB"}]}}"""))
         reducer.revealWindowStart(2)
         reducer.prependOlder(task, listOf(pi(1, """{"type":"message_start","message":{"role":"assistant"}}""")), reachedStart = true)
-        val original = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().first { it.canonicalId == "assistant-initial" }
+        val original = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().first { it.canonicalId == "assistant-initial" }
         assertEquals("AB", original.text)
     }
 
@@ -163,7 +163,7 @@ class ChatCompactionTest {
         reducer.revealWindowStart(2)
         reducer.syncTask(task.copy(status = "CANCELLED"))
         reducer.prependOlder(task, listOf(pi(1, """{"type":"agent_start"}""")), reachedStart = true)
-        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().single()
+        val answer = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().single()
         assertFalse(answer.active)
         assertTrue(answer.final)
         assertEquals("CANCELLED", answer.status)
@@ -182,7 +182,7 @@ class ChatCompactionTest {
             pi(3, """{"type":"compaction_end","result":{"summary":"summary"}}"""),
         ), reachedStart = true)
         reducer.apply(pi(6, """{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"after!"}]}}"""))
-        val snapshot = reducer.snapshot()
+        val snapshot = reducer.snapshot(detailed = true)
         assertEquals(listOf("before", "after!"), snapshot.items.filterIsInstance<ChatItem.Assistant>().map { it.text })
         assertEquals("assistant-initial", snapshot.newestAnswerId)
         assertTrue(snapshot.items.filterIsInstance<ChatItem.Assistant>().none { it.partial })
@@ -203,9 +203,9 @@ class ChatCompactionTest {
             pi(3, """{"type":"message_start","message":{"role":"assistant"}}"""),
         ), reachedStart = true)
         reducer.apply(pi(8, """{"type":"message_end","message":{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"A"}]}}"""))
-        val answers = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>()
+        val answers = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>()
         assertEquals(listOf("P\n\nA", "N"), answers.map { it.text })
-        assertEquals("assistant-5", reducer.snapshot().newestAnswerId)
+        assertEquals("assistant-5", reducer.snapshot(detailed = true).newestAnswerId)
     }
 
     @Test
@@ -225,7 +225,7 @@ class ChatCompactionTest {
             pi(3, """{"type":"message_start","message":{"role":"assistant"}}"""), delta, steer,
         ), reachedStart = true)
         reducer.apply(pi(8, """{"type":"message_end","message":{"role":"assistant","stopReason":"aborted","content":[{"type":"text","text":"AB"}]}}"""))
-        assertEquals(listOf("P\n\nAB", "N"), reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().map { it.text })
+        assertEquals(listOf("P\n\nAB", "N"), reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().map { it.text })
     }
 
     @Test
@@ -239,7 +239,7 @@ class ChatCompactionTest {
         reducer.revealWindowStart(2)
         reducer.prependOlder(task, listOf(pi(1, """{"type":"message_start","message":{"role":"assistant"}}""")), reachedStart = true)
         reducer.apply(pi(6, """{"type":"tool_execution_end","toolCallId":"t","toolName":"read"}"""))
-        val answer = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last()
+        val answer = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().last()
         assertEquals("assistant-3", answer.id)
         assertEquals(ru.arny.taskbridge.core.client.chat.ToolState.DONE, answer.tools.single().state)
     }
@@ -252,12 +252,12 @@ class ChatCompactionTest {
         reducer.apply(TaskEvent(taskId = "a", seq = 3, type = "USER_MESSAGE", message = "steer", data = buildJsonObject { put("mode", "steer") }))
         reducer.apply(pi(4, """{"type":"tool_execution_end","toolCallId":"s","toolName":"subagent","result":{"details":{"results":[{"agent":"worker","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}]}]}]}}}"""))
         reducer.revealWindowStart(2)
-        val before = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().first().tools.single()
+        val before = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().first().tools.single()
         reducer.prependOlder(task, listOf(pi(1, """{"type":"message_start","message":{"role":"assistant"}}""")), reachedStart = true)
-        val after = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().first().tools.single()
+        val after = reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().first().tools.single()
         assertEquals(before, after)
         assertTrue(after.progress.orEmpty().contains("done"))
-        assertEquals("assistant-3", reducer.snapshot().newestAnswerId)
+        assertEquals("assistant-3", reducer.snapshot(detailed = true).newestAnswerId)
     }
 
     @Test
@@ -273,7 +273,7 @@ class ChatCompactionTest {
         frames.forEachIndexed { i, frame ->
             reducer.apply(TaskEvent(taskId = "a", seq = i + 1L, type = "PI_EVENT", data = buildJsonObject { put("pi", TaskBridgeJson.parseToJsonElement(frame)) }))
         }
-        assertEquals(listOf("before", "after"), reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().map { it.text })
+        assertEquals(listOf("before", "after"), reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().map { it.text })
     }
 
     @Test
@@ -305,14 +305,14 @@ class ChatCompactionTest {
                 whole.apply(event)
                 if (event.seq % 250 == 0L) {
                     val snapshotStart = System.nanoTime()
-                    whole.snapshot()
+                    whole.snapshot(detailed = true)
                     maxSnapshotNs = maxOf(maxSnapshotNs, System.nanoTime() - snapshotStart)
                 }
             }
             val applyMs = (System.nanoTime() - start) / 1_000_000.0
-            val answers = whole.snapshot().items.filterIsInstance<ChatItem.Assistant>()
-            assertEquals(listOf("before", "after"), answers.map { it.text })
-            assertEquals(listOf(count / 2, count / 2), answers.map { it.tools.size })
+            val answers = whole.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>()
+            assertEquals(listOf("before", "", "after", ""), answers.map { it.text })
+            assertEquals(listOf(0, count / 2, 0, count / 2), answers.map { it.tools.size })
             assertTrue(answers.all { !it.active && it.tools.all { tool -> tool.state == ru.arny.taskbridge.core.client.chat.ToolState.DONE } })
             assertEquals(count, answers.flatMap { it.tools }.map { it.id }.toSet().size)
             val tail = ChatReducer(task, seedInitial = false)
@@ -321,8 +321,8 @@ class ChatCompactionTest {
             val backfillStart = System.nanoTime()
             tail.prependOlder(task, events.take(cut), reachedStart = true)
             val backfillMs = (System.nanoTime() - backfillStart) / 1_000_000.0
-            assertEquals(whole.snapshot().items, tail.snapshot().items)
-            assertEquals("assistant-initial", tail.snapshot().newestAnswerId)
+            assertEquals(whole.snapshot(detailed = true).items, tail.snapshot(detailed = true).items)
+            assertEquals("assistant-initial", tail.snapshot(detailed = true).newestAnswerId)
             events.forEach { assertFalse(tail.apply(it)) }
             println("C14 KMP tools=$count events=${events.size} applyAndSnapshotsMs=$applyMs maxSnapshotMs=${maxSnapshotNs / 1_000_000.0} backfillMs=$backfillMs")
         }
@@ -340,8 +340,8 @@ class ChatCompactionTest {
             frames.forEachIndexed { i, frame ->
                 reducer.apply(TaskEvent(taskId = "a", seq = i + 1L, type = "PI_EVENT", data = buildJsonObject { put("pi", TaskBridgeJson.parseToJsonElement(frame)) }))
             }
-            assertEquals(1, reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().size)
-            assertTrue(reducer.snapshot().items.filterIsInstance<ChatItem.Note>().none { it.text.startsWith("Контекст сжат:") })
+            assertEquals(1, reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Assistant>().size)
+            assertTrue(reducer.snapshot(detailed = true).items.filterIsInstance<ChatItem.Note>().none { it.text.startsWith("Контекст сжат:") })
         }
     }
 }
