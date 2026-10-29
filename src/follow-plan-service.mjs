@@ -234,6 +234,7 @@ export class FollowPlanService {
       completionApplied: result.completionApplied === true,
       unconfirmedStepIds: result.unconfirmedStepIds || [],
       problems: result.problems || [],
+      rejectedProposals: result.rejectedProposals || [],
       dispatchCommandId: result.dispatchCommandId || null
     });
   }
@@ -1252,7 +1253,16 @@ export class FollowPlanService {
 
   /** Maps a follower result onto the task event log, so every client sees it once. */
   async #report(taskId, result, extra = {}) {
-    const data = { code: result.code, ...extra };
+    // Причина паузы идёт вместе с кодом: без неё UI показывал «Пауза по решению
+    // BLOCKED», и узнать, что предложенная правка плана отклонена и почему, было
+    // нельзя ни из события, ни из карточки плана.
+    const data = {
+      code: result.code,
+      ...(result.decision ? { decision: result.decision } : {}),
+      ...(result.problems?.length ? { problems: result.problems } : {}),
+      ...(result.rejectedProposals?.length ? { rejectedProposals: result.rejectedProposals } : {}),
+      ...extra
+    };
     switch (result.code) {
       case 'DISPATCHED':
         await this.#publish(taskId, 'PLAN_STEP_STARTED', result.message, {

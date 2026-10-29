@@ -197,10 +197,32 @@ test('CORE-02A: законный BLOCKED → PAUSED_REVIEW остаётся па
 
   const result = await service.turnSettled(settleArgs(store, { decision: 'BLOCKED', completedStepIds: [] }));
   assert.equal(result.code, 'PLAN_BLOCKED');
+  assert.equal(result.outcome, 'RECEIVED', 'честный BLOCKED — не отказ проверки');
   assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
   await service.turnCommitted({ taskId: 't-1' });
   assert.equal(dispatchedAfterStart(manager).length, 0, 'из PAUSED_REVIEW ничего не отправляется');
   assert.equal((await readPlan(workspace)).steps[0].status, 'TODO');
+  const paused = manager.events.filter(event => event.type === 'PLAN_PAUSED').at(-1);
+  assert.equal(paused?.data?.decision, 'BLOCKED', 'оператор видит решение, а не только код');
+});
+
+test('CORE-02A: отклонённое предложение правки плана назван в событии паузы', async t => {
+  const { service, store, manager, workspace } = await setup(t);
+  await started(service, store);
+  const args = settleArgs(store, { decision: 'BLOCKED', completedStepIds: [] });
+  // Живой прогон 2026-10-29: критерий был в тексте, отдельных criteria/verification
+  // не было — шаг пропал молча, и цикл встал на недостижимом шаге.
+  args.checkpoint.proposedChanges = [{ op: 'add_step', priority: 'P1', title: 'S-003', body: 'критерий в тексте' }];
+
+  const result = await service.turnSettled(args);
+
+  assert.equal(result.code, 'PLAN_BLOCKED');
+  assert.equal(result.outcome, 'REJECTED', 'отклонённое предложение — отказ, а не «принято без изменений»');
+  assert.match(result.message, /Предложения не применены: новый шаг требует критериев и способа проверки/);
+  const paused = manager.events.filter(event => event.type === 'PLAN_PAUSED').at(-1);
+  assert.match(paused.message, /Предложения не применены/, 'сообщение паузы говорит, что именно не принято');
+  assert.equal(paused.data.rejectedProposals.length, 1, 'причина едет вместе с событием');
+  assert.equal((await readPlan(workspace)).steps.length, 2, 'шаг не появился в плане');
 });
 
 test('CORE-02A: повторный settle того же хода не пишет файл второй раз', async t => {

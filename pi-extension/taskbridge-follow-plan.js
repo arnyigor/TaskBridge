@@ -67,8 +67,28 @@ export const CHECKPOINT_PARAMETERS = {
     },
     proposedChanges: {
       type: 'array',
-      description: 'minimal edits to the SAME plan file, applied by TaskBridge after validation',
-      items: { type: 'object' }
+      description: 'minimal edits to the SAME plan file, applied by TaskBridge after validation. '
+        + 'Only add_step and insert_after are accepted; any other op is refused.',
+      // The fields are spelled out because a proposal without criteria and
+      // verification is refused by src/application/plan-revision.mjs. Live run
+      // 2026-10-29: the model sent {op, priority, title, body}, the step never
+      // appeared in the plan, and the operator was never told why.
+      items: {
+        type: 'object',
+        properties: {
+          op: { type: 'string', enum: ['add_step', 'insert_after'], description: 'add_step puts the step before `before`, insert_after puts it after `after`' },
+          stepId: { type: 'string', description: 'new step id, e.g. S-015A' },
+          priority: { type: 'string', enum: ['P0', 'P1', 'P2', 'P3'], description: 'P0/P1 add work; P0 waits for operator approval' },
+          title: { type: 'string', description: 'one line: what the step does' },
+          criteria: { type: 'string', description: 'what proves the step is done — required, a body sentence is not accepted instead' },
+          verification: { type: 'string', description: 'the check that is run for this step — required' },
+          before: { type: 'string', description: 'existing step id the new step must run before; without before/after the step goes to the end of the plan' },
+          after: { type: 'string', description: 'existing step id the new step must run after' },
+          originFindingId: { type: 'string', description: 'finding id this step verifies' }
+        },
+        required: ['op', 'stepId', 'priority', 'title', 'criteria', 'verification'],
+        additionalProperties: false
+      }
     },
     nextStepId: { type: 'string' }
   },

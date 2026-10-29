@@ -401,6 +401,72 @@ test('a P0 defect pauses the cycle for approval and writes nothing', async t => 
   assert.equal(dispatched.length, 1, 'no turn is started for an unapproved P0');
 });
 
+test('a BLOCKED turn names why a proposed step was refused instead of pausing silently', async t => {
+  const { follower, plans, dispatched, store } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  // Живой прогон 2026-10-29: критерий был в тексте, отдельных полей
+  // criteria/verification не было — шаг в план не попал, а пауза молчала.
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: start.commandId,
+    checkpoint: checkpoint({
+      decision: 'BLOCKED',
+      proposedChanges: [{
+        op: 'add_step', priority: 'P1',
+        title: 'S-015A. Фикстура для двуручного состояния',
+        body: 'Критерий: экипировка двуручного предмета даёт blocked с причиной.'
+      }]
+    })
+  });
+
+  assert.equal(settled.code, 'PLAN_BLOCKED');
+  assert.match(settled.message, /Предложения не применены: новый шаг требует критериев и способа проверки/);
+  assert.equal(settled.rejectedProposals.length, 1, 'отказ предложения виден клиенту');
+  assert.equal(settled.outcome, 'REJECTED', 'отклонённое предложение — это отказ, а не «принято без изменений»');
+  assert.equal(plans.state.writes, 0, 'отклонённое предложение файл не пишет');
+  assert.equal(parsePlan(plans.state.text).steps.length, 2, 'шаг не появился в плане');
+  assert.equal(dispatched.length, 1, 'BLOCKED не запускает новый ход');
+  assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
+
+  // BLOCKED без предложений — решение модели, а не отказ проверки: чекпоинт принят.
+  const resumed = await follower.resume({ taskId: 't-1' });
+  const plain = await follower.onSettled({
+    taskId: 't-1', commandId: resumed.commandId,
+    checkpoint: checkpoint({ decision: 'BLOCKED', cycleId: resumed.cycleId })
+  });
+  assert.equal(plain.code, 'PLAN_BLOCKED');
+  assert.equal(plain.outcome, 'RECEIVED', 'честный BLOCKED не выдаётся за отказ чекпоинта');
+  assert.equal(plain.reasonCode, 'NOTHING_TO_APPLY');
+});
+
+test('a well-formed proposed step on BLOCKED gets the plan out of the deadlock', async t => {
+  const { follower, plans, dispatched } = await setup(t);
+  const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
+
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: start.commandId,
+    checkpoint: checkpoint({
+      decision: 'BLOCKED',
+      proposedChanges: [{
+        op: 'add_step', stepId: 'S-003', priority: 'P1', title: 'Снять блокировку',
+        criteria: 'шаг S-001 проверяем', verification: 'node --test tests/c.test.mjs',
+        before: 'S-001'
+      }]
+    })
+  });
+
+  assert.equal(settled.code, 'PLAN_BLOCKED', 'пауза для оператора сохраняется');
+  assert.deepEqual(settled.rejectedProposals, []);
+  assert.deepEqual(parsePlan(plans.state.text).steps.map(step => step.id), ['S-003', 'S-001', 'S-002'],
+    'новый шаг встал перед блокирующим');
+
+  // После «Продолжить» идёт новый шаг, а не прежний недостижимый.
+  const resumed = await follower.resume({ taskId: 't-1' });
+  assert.equal(resumed.code, 'DISPATCHED');
+  assert.equal(resumed.stepId, 'S-003');
+  assert.match(dispatched.at(-1).message, /Текущий шаг: S-003/);
+});
+
 test('a REPLAN with a validated patch continues with the new step', async t => {
   const { follower, plans, dispatched } = await setup(t);
   const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });

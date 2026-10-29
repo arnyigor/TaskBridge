@@ -393,14 +393,17 @@ export class PlanFollower {
       } catch { /* диагностика не должна ломать settle */ }
     }
     const confirmedStepIds = requested.filter(stepId => appliedStepIds.includes(stepId));
+    // PLAN_BLOCKED здесь не «отказ проверки», а решение модели: пауза для оператора.
+    // Отказом оно считается только тогда, когда отклонены предложенные правки плана.
     const rejectedCodes = new Set([
-      'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_UNKNOWN_OUTCOME',
+      'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_UNKNOWN_OUTCOME',
       'PLAN_BUDGET_EXCEEDED', 'PLAN_NO_PROGRESS', 'PLAN_CONFLICT', 'PLAN_WRITE_FAILED'
     ]);
+    const refusedProposals = Array.isArray(result.rejectedProposals) && result.rejectedProposals.length > 0;
     const changed = Boolean(own);
     const outcome = (result.outcome && result.outcome !== 'RECEIVED')
       ? result.outcome
-      : changed ? 'APPLIED' : rejectedCodes.has(result.code) ? 'REJECTED' : 'RECEIVED';
+      : changed ? 'APPLIED' : (rejectedCodes.has(result.code) || refusedProposals) ? 'REJECTED' : 'RECEIVED';
     const unconfirmed = requested.filter(stepId => !confirmedStepIds.includes(stepId));
     const reasonCode = result.reasonCode || (outcome === 'REJECTED'
       ? (result.code === 'IGNORED' ? 'STATE_INACTIVE' : result.code)
@@ -617,10 +620,17 @@ export class PlanFollower {
       // REPLAN (FP-04), BLOCKED, NEED_INPUT, NO_PROGRESS and malformed data all
       // stop for the operator: no silent extra cycle. What the turn did finish is
       // already written down above.
+      // Отклонённое предложение — тоже причина паузы: без неё «BLOCKED» выглядел
+      // как тупик на недостижимом шаге, а ответ (что именно не принято в
+      // правке плана) не видел ни оператор, ни следующий ход.
+      const rejectedNote = revision.rejected.length
+        ? ` Предложения не применены: ${[...new Set(revision.rejected.map(item => item.reason))].join('; ')}.`
+        : '';
       this.#save(taskId, { state: 'PAUSED_REVIEW', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
-      return this.#result(taskId, 'PLAN_BLOCKED', verdict.reasons.join('; ') || `Пауза по решению ${verdict.decision}.`, {
+      return this.#result(taskId, 'PLAN_BLOCKED', `${verdict.reasons.join('; ') || `Пауза по решению ${verdict.decision}.`}${rejectedNote}`, {
         decision: verdict.decision,
-        rejectedProposals: revision.rejected
+        rejectedProposals: revision.rejected,
+        ...(rejectedNote ? { problems: [rejectedNote.trim()] } : {})
       });
     }
 
