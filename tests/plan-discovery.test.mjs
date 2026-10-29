@@ -561,6 +561,92 @@ test('ИИ-сборка плана: модель получает ТЗ форм�
   assert.equal(extractManagedPlan('```\n---\ntaskbridge_plan: 1\n---\n```'), '---\ntaskbridge_plan: 1\n---\n');
 });
 
+const LIVE_PLAN_WITH_EXTRA_SECTION = `---
+taskbridge_plan: 1
+plan_id: p-live
+revision: 21
+goal: "Живой план"
+---
+
+# Живой план
+
+## Корректировка по C++-плану
+
+Полностью прочитан [другой план](OTHER.md) и используется как детализация.
+
+### Правила реализации
+
+- Не переписывать шаблон.
+- Python — только fixtures.
+
+| CPP | Шаг |
+|---|---|
+| CPP-01 | S-001 |
+
+## Шаги
+
+### S-001 | DONE | P1 | Первый шаг
+**Критерии:** сделано.
+**Проверка:** node --test tests/a.test.mjs
+**Результат:** [SYSTEM_VERIFIED] 5/5 pass
+
+### S-075 | TODO | P1 | Новый шаг
+**Критерии:** сделано.
+**Проверка:** node --test tests/b.test.mjs
+
+## Обнаруженные проблемы
+
+- F-001 | P1 | OPEN | повторный запуск
+`;
+
+test('вырезка плана: лишние разделы убираются, шаги и статусы остаются', async () => {
+  const { stripToManagedPlan } = await import('../src/application/plan-ai-review.mjs');
+  const { classifyPlan } = await import('../src/application/plan-file.mjs');
+  const stripped = stripToManagedPlan(LIVE_PLAN_WITH_EXTRA_SECTION);
+  assert.ok(stripped, 'управляемый план в тексте распознан без модели');
+  assert.ok(stripped.removed.some(line => /Корректировка по C\+\+-плану/.test(line)), 'лишний раздел убран');
+  assert.ok(stripped.removed.some(line => /CPP-01/.test(line)), 'таблица убрана');
+  const verdict = classifyPlan(stripped.text, { planId: 'p-live' });
+  assert.equal(verdict.verdict, 'VALID_MANAGED', `остаток обязан быть валиден: ${verdict.reason}`);
+  assert.deepEqual(verdict.plan.steps.map(step => [step.id, step.status]), [['S-001', 'DONE'], ['S-075', 'TODO']],
+    'шаги и статусы не переписаны');
+  assert.equal(verdict.plan.revision, 21, 'ревизия сохранена');
+  assert.match(verdict.plan.steps[0].result, /SYSTEM_VERIFIED/, 'результат закрытого шага сохранён');
+  assert.equal(verdict.plan.findings.length, 1, 'находка сохранена');
+  // Свободный текст планом не считается: его должен собрать модель.
+  assert.equal(stripToManagedPlan('# Заметки\n\nсделать пагинацию\n'), null);
+});
+
+test('ИИ-сборка: живой план чинится без модели, шаги и статусы не теряются', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-strip-'));
+  const workspace = path.join(root, 'workspace');
+  await fs.mkdir(workspace, { recursive: true });
+  await fs.writeFile(path.join(workspace, 'PLAN.md'), LIVE_PLAN_WITH_EXTRA_SECTION, 'utf8');
+  const store = new TaskStore(root);
+  t.after(() => cleanupStore(store, root));
+  let asked = 0;
+  const service = new FollowPlanService({
+    manager: {
+      getTask: id => (String(id) === 't-1' ? { id: 't-1', workspacePath: workspace, runId: null } : null),
+      listTasks: () => [{ id: 't-1' }],
+      message: async () => ({ id: 'x' }),
+      cancel: async () => {},
+      publishFollowPlanEvent: async () => {}
+    },
+    store,
+    config: { followPlan: { enabled: true } },
+    askModel: async () => { asked += 1; return { ok: false, error: 'EMPTY', provider: 'p', model: 'm' }; }
+  });
+  const draft = await service.aiDraft({ taskId: 't-1', path: 'PLAN.md' });
+  assert.equal(asked, 0, 'модель не нужна: вырезка детерминирована');
+  assert.equal(draft.verdict, 'VALID_MANAGED');
+  assert.equal(draft.steps, 2, 'оба шага на месте');
+  assert.equal(draft.model, null);
+  assert.ok(draft.removedLines > 0, 'видно, сколько строк убрано');
+  assert.match(draft.text, /### S-001 \| DONE \| P1/, 'статус закрытого шага не обнулён');
+  assert.equal(await fs.readFile(path.join(workspace, 'PLAN.md'), 'utf8'), LIVE_PLAN_WITH_EXTRA_SECTION, 'файл не изменён');
+});
+
 test('ИИ-сборка плана: невалидный ответ модели не пишется и назван причиной', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-draft-'));
   const workspace = path.join(root, 'workspace');

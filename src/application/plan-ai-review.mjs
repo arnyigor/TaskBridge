@@ -11,6 +11,8 @@
 //   * конфиденциальность: в ответ попадает, какая модель отвечала и локальная ли
 //     она — в облако текст уходит только так, как уходит любой ход этой сессии.
 
+import { STEPS_SECTION, FINDINGS_SECTION, STEP_HEADING, FINDING_LINE, FIELD } from './plan-file.mjs';
+
 export const AI_REVIEW_LIMITS = Object.freeze({
   // Больше 12 000 символов модель читает дольше, чем оператор ждёт, и это уже не
   // «проверить файл», а «пересказать проект».
@@ -105,6 +107,12 @@ export const PLAN_DRAFT_PROMPT = [
   '',
   'Правила: шаги только из текста, нумерация S-001, S-002, … по порядку; статус шага TODO;',
   'приоритет P0…P3; критерии обязательны у каждого шага; не выдумывай факты и файлы;',
+  // Живой прогон 2026-10-29: живой план на 77 шагов был переписан в 13 шагов с нуля
+  // и все статусы стали TODO. Если план уже есть, его нельзя сочинять заново.
+  'Если во входе УЖЕ есть план (front matter taskbridge_plan: 1 и раздел «## Шаги»): не переписывай его.',
+  'Сохрани в каждом шаге дословно id, статус, приоритет, заголовок, критерии, проверку, результат и происхождение;',
+  'не перенумеровывай шаги и не меняй статусы. Убери только то, что планом не является:',
+  'чужие разделы, прозу, таблицы, ссылки. Если в шаге не хватает критериев или проверки — дополни их из текста, шаг не удаляй.',
   'если в тексте нет работы, но есть заметки — сделай один шаг с честными критериями;',
   'раздел «Обнаруженные проблемы»: либо пусто, либо строки строго вида',
   '- F-001 | P1 | OPEN | <что не так>; свободный текст в этом разделе недопустим.'
@@ -162,4 +170,73 @@ export function normalizeDraftIssues(text) {
     return `- F-${String(lastNumber).padStart(3, '0')} | P3 | OPEN | ${body}`;
   });
   return fixed.join('\n');
+}
+
+
+/* ---------------- вырезка плана из документа без модели ---------------- */
+
+/**
+ * Убрать из документа всё, что не является планом, и оставить шаги как есть.
+ *
+ * Живой прогон 2026-10-29: оператор обновил живой план (77 шагов, 19 закрытых),
+ * добавив раздел «## Корректировка по C++-плану» с прозой и таблицей. Строгая
+ * проверка отказала всему файлу, а «Собрать план с помощью ИИ» переписало его в
+ * 13 шагов с нуля: новые номера, все статусы TODO. Здесь та же работа делается
+ * без модели и без потерь: front matter, заголовок, «## Шаги» с их полями и
+ * «## Обнаруженные проблемы» остаются дословно, остальное отбрасывается.
+ *
+ * Возвращает `null`, если во входе нет управляемого плана: тогда это свободный
+ * текст, и собирать план должна модель.
+ */
+export function stripToManagedPlan(input) {
+  const lines = String(input || '').replace(/\r\n?/g, '\n').split('\n');
+  if (lines[0]?.trim() !== '---') return null;
+  const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+  if (end < 0) return null;
+  const front = lines.slice(0, end + 1);
+  if (!front.some(line => /^taskbridge_plan:\s*1\s*$/.test(line.trim()))) return null;
+
+  const kept = [];
+  const removed = [];
+  let section = null;
+  let sawStep = false;
+  let sawFindings = false;
+  for (const line of lines.slice(end + 1)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith('## ')) {
+      section = trimmed.slice(3).trim();
+      if (section === STEPS_SECTION || section === FINDINGS_SECTION) {
+        if (section === FINDINGS_SECTION) sawFindings = true;
+        kept.push(line);
+      } else {
+        removed.push(line);
+      }
+      continue;
+    }
+    if (!trimmed) {
+      if (section === STEPS_SECTION || section === FINDINGS_SECTION) kept.push(line);
+      continue;
+    }
+    if (trimmed.startsWith('# ')) {
+      // Заголовок плана живёт до первого раздела; «# …» внутри раздела — уже текст.
+      if (!section) kept.push(line); else removed.push(line);
+      continue;
+    }
+    if (section === STEPS_SECTION) {
+      const isStep = trimmed.startsWith('###') && STEP_HEADING.test(trimmed);
+      if (isStep) sawStep = true;
+      if (isStep || FIELD.test(trimmed)) kept.push(line); else removed.push(line);
+      continue;
+    }
+    if (section === FINDINGS_SECTION) {
+      if (trimmed.startsWith('-') && FINDING_LINE.test(trimmed)) kept.push(line); else removed.push(line);
+      continue;
+    }
+    removed.push(line);
+  }
+  if (!sawStep) return null;
+
+  const body = kept.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '');
+  const text = `${front.join('\n')}\n\n${body}\n${sawFindings ? '' : `\n## ${FINDINGS_SECTION}\n`}`;
+  return { text, removed: removed.filter(line => line.trim()) };
 }

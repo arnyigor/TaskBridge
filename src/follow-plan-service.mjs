@@ -18,7 +18,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { parsePlan, proposeImport, classifyPlan, planHash, readPlan, readPlanText, serializePlan, updatePlan, writePlanAtomic, withPlanWriteLock, PlanError, DEFAULT_MAX_BYTES } from './application/plan-file.mjs';
 import { scanPlanFiles, SCAN_DEFAULTS } from './application/plan-scan.mjs';
-import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer, buildPlanDraftPrompt, extractManagedPlan, normalizeDraftIssues } from './application/plan-ai-review.mjs';
+import { AI_REVIEW_LIMITS, buildPlanReviewPrompt, parsePlanReviewAnswer, buildPlanDraftPrompt, extractManagedPlan, normalizeDraftIssues, stripToManagedPlan } from './application/plan-ai-review.mjs';
 import { PlanFollower, resultForStep, checkpointIdentity } from './application/plan-follower.mjs';
 
 export const FOLLOW_PLAN_EVENTS = Object.freeze([
@@ -579,6 +579,29 @@ export class FollowPlanService {
     }
     const capped = text.slice(0, AI_REVIEW_LIMITS.maxChars);
     const truncated = capped.length < text.length;
+    // Сначала без модели: если в файле УЖЕ есть управляемый план, лишние разделы
+    // просто вырезаются, а шаги, статусы и ревизия остаются как есть. Живой прогон
+    // 2026-10-29: оператор обновил живой план, «Собрать план с помощью ИИ»
+    // переписало 77 шагов в 13 и обнулило все статусы на TODO. Вырезка
+    // детерминирована, не жжёт токены и не теряет прогресс.
+    const stripped = stripToManagedPlan(text);
+    if (stripped) {
+      const structural = classifyPlan(stripped.text, { planId: this.#planIdFor(target) });
+      if (structural.verdict === 'VALID_MANAGED') {
+        return {
+          path: target,
+          text: stripped.text,
+          verdict: structural.verdict,
+          steps: structural.plan.steps.length,
+          goal: structural.plan.goal,
+          truncated: false,
+          charsSent: 0,
+          removedLines: stripped.removed.length,
+          model: null,
+          ms: 0
+        };
+      }
+    }
     const answer = await this.askModel({
       taskId: task.id,
       prompt: buildPlanDraftPrompt({ path: target, text: capped, truncated, hint: String(hint || '').slice(0, 500) }),
@@ -605,6 +628,7 @@ export class FollowPlanService {
       goal: classified.plan.goal,
       truncated,
       charsSent: capped.length,
+      removedLines: 0,
       model: { provider: answer.provider || null, id: answer.model || null, local: answer.local === true },
       ms: answer.ms ?? null
     };

@@ -34,9 +34,9 @@ export const DEFAULT_MAX_BYTES = 1024 * 1024;
 const STEP_ID = /^S-\d{3,}$/;
 const FINDING_ID = /^F-\d{3,}$/;
 const PLAN_ID = /^p-[A-Za-z0-9][A-Za-z0-9-]*$/;
-const STEP_HEADING = /^###\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.+?)\s*$/;
-const FINDING_LINE = /^-\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.+?)\s*$/;
-const FIELD = /^\*\*(Критерии|Проверка|Результат|Происхождение):\*\*\s*(.*)$/;
+export const STEP_HEADING = /^###\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.+?)\s*$/;
+export const FINDING_LINE = /^-\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*(.+?)\s*$/;
+export const FIELD = /^\*\*(Критерии|Проверка|Результат|Происхождение):\*\*\s*(.*)$/;
 
 export class PlanError extends Error {
   constructor(code, message, problems = []) {
