@@ -247,7 +247,7 @@ test('no measurable progress stops the loop at the configured limit', async t =>
     if (result.code !== 'DISPATCHED') break;
     current = result;
   }
-  assert.deepEqual(codes, ['DISPATCHED', 'DISPATCHED', 'PLAN_BUDGET_EXCEEDED']);
+  assert.deepEqual(codes, ['DISPATCHED', 'DISPATCHED', 'PLAN_NO_PROGRESS']);
   assert.equal(dispatched.length, 3, 'two steps forward, then the third stall stops it');
 });
 
@@ -577,3 +577,99 @@ test('REPLAN-05: a refused checkpoint leaves no partial edits in the file', asyn
   assert.equal(settled.code, 'PLAN_CHECKPOINT_REJECTED');
   assert.equal(plans.state.text, before, 'nothing is written when the checkpoint is refused');
 });
+
+test('a confirmed new cycle tranche preserves lifetime IDs and stops again at its own cap', async t => {
+  const { follower, store, dispatched } = await setup(t, { limits: { maxCycles: 2, noProgressLimit: 10 } });
+  store.savePlanBinding({ ...store.getPlanBinding('t-1'), state: 'PAUSED', cycleId: 'c-20', budget: { cycles: 20, startedAt: Date.now(), noProgress: 0 } });
+  assert.equal((await follower.resume({ taskId: 't-1' })).code, 'PLAN_BUDGET_EXCEEDED');
+  let current = await follower.resume({ taskId: 't-1', renewBudget: true });
+  assert.equal(current.code, 'DISPATCHED');
+  assert.equal(current.cycleId, 'c-21');
+  assert.equal(store.getPlanBinding('t-1').budget.cycleBase, 20);
+  assert.equal(store.getPlanBinding('t-1').budget.pauseReason, null);
+  const codes = [];
+  for (let n = 21; n <= 22; n++) {
+    current = await follower.onSettled({ taskId: 't-1', commandId: current.commandId,
+      checkpoint: checkpoint({ cycleId: `c-${n}`, decision: 'CONTINUE', completedStepIds: [] }) });
+    codes.push(current.code);
+  }
+  assert.deepEqual(codes, ['DISPATCHED', 'PLAN_BUDGET_EXCEEDED']);
+  assert.equal(dispatched.length, 2);
+  assert(store.getPlanBinding('t-1').budget.cycles >= 22);
+  assert.equal(store.getPlanBinding('t-1').budget.pauseReason.code, 'PLAN_BUDGET_EXCEEDED');
+  assert.equal((await follower.resume({ taskId: 't-1' })).code, 'PLAN_BUDGET_EXCEEDED');
+  assert.equal(dispatched.length, 2, 'no silent renewal');
+});
+
+test('a budget pause after an applied checkpoint does not create a conflict with its own plan update', async t => {
+  const { follower, store, plans } = await setup(t, { limits: { maxCycles: 1 } });
+  const started = await follower.start({ taskId: 't-1', commandId: 'start-self-conflict' });
+  const result = await follower.onSettled({ taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({ cycleId: started.cycleId, completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-verified', summary: 'pass' }] }) });
+  assert.equal(result.code, 'PLAN_BUDGET_EXCEEDED');
+  const binding = store.getPlanBinding('t-1');
+  assert.equal(binding.revision, parsePlan(plans.state.text).revision, 'binding follows the checkpoint already applied by this controller');
+  assert.equal(binding.hash, planHash(plans.state.text));
+});
+
+test('default policy resumes a month-old plan past 100 cycles and continues 25 productive steps without budget prompts', async t => {
+  const extra = Array.from({ length: 30 }, (_, n) => `\n### S-${String(n + 3).padStart(3, '0')} | TODO | P1 | Step ${n + 3}\n**Критерии:** verified.\n**Проверка:** test\n`).join('');
+  const initial = PLAN.replace('## Обнаруженные проблемы', extra + '\n## Обнаруженные проблемы');
+  const { follower, store, plans, dispatched } = await setup(t, { initial });
+  assert.equal(DEFAULT_LIMITS.maxCycles, null);
+  assert.equal(DEFAULT_LIMITS.budgetMs, null);
+  store.savePlanBinding({ ...store.getPlanBinding('t-1'), state: 'PAUSED', cycleId: 'c-100',
+    budget: { cycles: 100, startedAt: Date.now() - 32 * 24 * 60 * 60 * 1000, noProgress: 0,
+      pauseReason: { code: 'PLAN_BUDGET_EXCEEDED', message: 'Old cap' } } });
+  let current = await follower.resume({ taskId: 't-1' });
+  assert.equal(current.code, 'DISPATCHED');
+  assert.equal(current.cycleId, 'c-101');
+  for (let n = 0; n < 25; n++) {
+    const result = await follower.onSettled({ taskId: 't-1', commandId: current.commandId, deferDispatch: n % 2 === 0,
+      checkpoint: checkpoint({ cycleId: current.cycleId, revision: parsePlan(plans.state.text).revision,
+        completedStepIds: [current.stepId], evidence: [{ stepId: current.stepId, kind: 'test', ref: `verified-${n}`, summary: 'pass' }] }) });
+    current = result.code === 'DISPATCH_READY' ? await follower.dispatchPending({ taskId: 't-1', pending: result }) : result;
+    assert.equal(current.code, 'DISPATCHED', `productive cycle ${n + 1} must not hit a time/count cap`);
+  }
+  assert.equal(dispatched.length, 26);
+  assert.equal(current.cycleId, 'c-126');
+  assert.equal(store.getPlanBinding('t-1').budget.pauseReason, null);
+  assert.equal(parsePlan(plans.state.text).steps.filter(step => step.status === 'DONE').length, 25);
+});
+
+for (const repaired of [true, false]) {
+  test(`a missing ref beside other evidence gets one bounded correction audit (repaired=${repaired})`, async t => {
+    const { follower, plans, store, dispatched } = await setup(t);
+    const started = await follower.start({ taskId: 't-1', commandId: 'repair-evidence' });
+    const malformed = checkpoint({ completedStepIds: ['S-001'], evidence: [
+      { stepId: 'S-001', kind: 'file', ref: 'verified-read', summary: 'rechecked results' },
+      { stepId: 'S-001', kind: 'command', summary: 'missing reference' },
+    ] });
+    const before = plans.state.text;
+    const pending = await follower.onSettled({ taskId: 't-1', commandId: started.commandId, checkpoint: malformed, deferDispatch: true });
+    assert.equal(pending.code, 'DISPATCH_READY');
+    assert.equal(pending.audit, true);
+    assert.equal(plans.state.text, before, 'no DONE until the evidence passes');
+    assert.match(pending.message, /Checkpoint отклонён/);
+    assert.match(pending.message, /без ссылки/);
+    assert.match(pending.message, /не запускай следующий шаг/);
+    const audit = await follower.dispatchPending({ taskId: 't-1', pending });
+    assert.equal(audit.cycleId, started.cycleId);
+    assert.equal(store.getPlanBinding('t-1').budget.audits, 1);
+    const next = await follower.onSettled({ taskId: 't-1', commandId: audit.commandId,
+      checkpoint: repaired ? checkpoint({ completedStepIds: ['S-001'], evidence: [
+        { stepId: 'S-001', kind: 'test', ref: 'fresh-verification', summary: 'pass' },
+      ] }) : malformed });
+    if (repaired) {
+      assert.equal(next.code, 'DISPATCHED');
+      assert.equal(next.stepId, 'S-002');
+      assert.equal(parsePlan(plans.state.text).steps[0].status, 'DONE');
+    } else {
+      assert.equal(next.code, 'PLAN_CHECKPOINT_REJECTED');
+      assert.equal(plans.state.text, before);
+      assert.equal(dispatched.length, 2, 'only original turn and one correction turn');
+      assert.match(store.getPlanBinding('t-1').budget.pauseReason.message, /без ссылки/);
+    }
+  });
+}

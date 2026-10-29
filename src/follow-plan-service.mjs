@@ -273,6 +273,7 @@ export class FollowPlanService {
       stage: task.status === 'RUNNING' ? (task.turnState?.phase || 'RUNNING') : task.status,
       updatedAt: binding?.updatedAt || null,
       lastCheckpoint: this.checkpoints.get(task.id) || null,
+      pauseReason: ['PAUSED', 'PAUSED_REVIEW'].includes(binding?.state) ? binding?.budget?.pauseReason || null : null,
       conflict: false,
       title: null,
       goal: null,
@@ -894,7 +895,7 @@ export class FollowPlanService {
     return this.status(task.id);
   }
 
-  async resume({ taskId, expectedRevision, commandId, clientId, renewTimeBudget = false }) {
+  async resume({ taskId, expectedRevision, commandId, clientId, renewTimeBudget = false, renewBudget = false }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
     const binding = this.store.getPlanBinding(task.id);
@@ -907,7 +908,7 @@ export class FollowPlanService {
         throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`);
       }
     }
-    const result = await this.#follower(task).resume({ taskId: task.id, renewTimeBudget });
+    const result = await this.#follower(task).resume({ taskId: task.id, renewTimeBudget, renewBudget });
     await this.#report(task.id, result, { commandId, clientId });
     if (result.code === 'PLAN_BUDGET_EXCEEDED') throw reject(result.code, result.message);
     return this.status(task.id);
@@ -1269,6 +1270,7 @@ export class FollowPlanService {
       case 'PLAN_BLOCKED':
       case 'PLAN_UNKNOWN_OUTCOME':
       case 'PLAN_BUDGET_EXCEEDED':
+      case 'PLAN_NO_PROGRESS':
         await this.#publish(taskId, 'PLAN_PAUSED', result.message, data);
         return;
       case 'PAUSED':

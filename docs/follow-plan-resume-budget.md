@@ -1,4 +1,40 @@
-# Follow Plan: resume after the time budget expires
+# Follow Plan: pause reasons and long-running plans
+
+## Current policy (2026-10-29)
+
+Confirmed plans have no default time or cycle-count cap: `maxCycles: null`,
+`budgetMs: null`. Explicit numeric caps in `followPlan.limits` remain supported.
+Lifetime cycle IDs/progress never reset. STOP, file conflicts, unknown outcomes,
+blocking decisions and three cycles without measurable progress still stop work.
+No-progress uses `PLAN_NO_PROGRESS`, not the misleading budget-renewal dialog.
+Pause reasons survive service recreation in the existing binding budget JSON.
+
+A regression resumes a 32-day-old plan with 100 previous cycles and executes 25
+productive steps (alternating immediate/deferred dispatch) without budget prompts.
+The full Node run at this stage: 1767 PASS, 4 SKIP; shared JVM: 332 PASS. Android
+was installed with `-r`, APK hashes match and the secrets-store hash is unchanged.
+The running Desktop was not overwritten; the update is staged.
+
+Another reproduced defect: a checkpoint updated the plan, then hit a dispatch cap
+without advancing the binding revision/hash. Its own write looked like an external
+conflict. The binding now records a successful CAS before dispatch guards run.
+
+## Malformed extra evidence: one correction, not silent acceptance
+
+The live S-014 checkpoint was rejected with `подтверждение «command» без ссылки
+(ref)` despite the model's prose saying it was done. S-015 was therefore never
+scheduled. Validation remains strict. When the only problems are missing refs and
+other referenced evidence exists, the existing single audit slot can now ask for
+fresh verification and a corrected checkpoint. No plan writes or DONE occur before
+validation. A second malformed checkpoint pauses with its reason persisted. The
+correction instruction forbids new work and invented tool references.
+
+Follow Plan suites after this change: 256 PASS. New tests cover both successful
+correction and a repeated invalid checkpoint, including deferred dispatch. Live
+continuation of the user's real plan still requires acceptance after a server
+restart; the agent has not marked S-014 done or dispatched S-015.
+
+## Historical six-hour-budget incident
 
 ## Confirmed defect
 

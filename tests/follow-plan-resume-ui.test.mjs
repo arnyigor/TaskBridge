@@ -28,9 +28,9 @@ test('Web resume asks before renewing time and sends the opt-in only after confi
   await context.runPlanAction('resume');
   assert.equal(sent.length, 2);
   assert.equal(sent[0].extra, undefined);
-  assert.equal(sent[1].extra.renewTimeBudget, true);
+  assert.equal(sent[1].extra.renewBudget, true);
   assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /счётчик циклов сохранятся/);
+  assert.match(prompts[0], /общий счётчик сохранятся/);
   assert.equal(context.planNotice, '');
 });
 
@@ -47,4 +47,12 @@ test('renewal rejection is displayed without an infinite confirmation loop', asy
   await context.runPlanAction('resume');
   assert.equal(prompts.length, 1);
   assert.equal(context.planNotice, 'Cycle budget exhausted');
+});
+
+test('no-progress pause never offers the irrelevant time/cycle renewal dialog', async () => {
+  const { context, prompts } = harness(true);
+  context.planSend = async () => { throw Object.assign(new Error('No progress for three cycles'), { code: 'PLAN_NO_PROGRESS' }); };
+  await context.runPlanAction('resume');
+  assert.equal(prompts.length, 0);
+  assert.equal(context.planNotice, 'No progress for three cycles');
 });

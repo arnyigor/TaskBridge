@@ -214,8 +214,11 @@ export function decideCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_POL
  * The one control instruction the controller may send when a turn settled without
  * a checkpoint (ТЗ: не более одного проверочного хода).
  */
-export function auditInstruction({ path, planId, revision, cycleId, stepId }) {
-  return `Режим FOLLOW PLAN. Ты закончил ход, но не передал checkpoint. `
+export function auditInstruction({ path, planId, revision, cycleId, stepId, correctionProblems = [] }) {
+  const issue = correctionProblems.length
+    ? `Checkpoint отклонён: ${correctionProblems.join('; ')}. Повторно проверь только результаты текущего шага и исправь подтверждения. В evidence.ref укажи toolCallId успешной проверки этого контрольного хода; не придумывай ссылки и не запускай следующий шаг. `
+    : 'Ты закончил ход, но не передал checkpoint. ';
+  return `Режим FOLLOW PLAN. ${issue}`
     + `Сверь файл плана \`${path}\` (planId ${planId}, revision ${revision}, cycle ${cycleId}) и результаты этого хода: `
     + `что действительно выполнено и чем это подтверждено. `
     + `Передай taskbridge_plan_checkpoint с решением CONTINUE, REPLAN, COMPLETE, BLOCKED или NEED_INPUT`

@@ -248,6 +248,7 @@ fun planErrorText(code: String?, message: String?): String {
         "PLAN_INVALID" -> "Файл не соответствует формату плана. $detail".trim()
         "PLAN_REVISION_CONFLICT" -> "Файл плана изменён вне TaskBridge: сверьте версии и примите файл с диска. $detail".trim()
         "PLAN_UNKNOWN_OUTCOME" -> "Неизвестно, чем закончился прошлый ход: автоматический повтор запрещён. Проверьте состояние. $detail".trim()
+        "PLAN_NO_PROGRESS" -> "Нет подтверждённого прогресса — проверьте текущий шаг и критерии. $detail".trim()
         "PLAN_BUDGET_EXCEEDED" -> "Достигнут лимит циклов или времени — нужно ваше решение. $detail".trim()
         "FOLLOW_PLAN_DISABLED" -> "Режим «По плану» выключен в конфигурации сервера (followPlan.enabled)."
         "PLAN_BLOCKED" -> "Выполнение остановлено: ${detail.ifBlank { "шаг заблокирован" }}"

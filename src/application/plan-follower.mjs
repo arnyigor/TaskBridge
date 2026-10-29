@@ -24,10 +24,11 @@ import { planRevision } from './plan-revision.mjs';
 
 export const FOLLOWER_STATES = Object.freeze(['IDLE', 'RUNNING_STEP', 'REVIEWING', 'PAUSED_REVIEW', 'PAUSED', 'COMPLETED']);
 export const DEFAULT_LIMITS = Object.freeze({
-  maxCycles: 20,
+  // Confirmed plans may run for months. Optional explicit caps remain supported.
+  maxCycles: null,
   noProgressLimit: 3,
   auditTurnsPerCycle: 1,
-  budgetMs: 6 * 60 * 60 * 1000
+  budgetMs: null
 });
 
 const PRIORITY_ORDER = { P0: 0, P1: 1, P2: 2, P3: 3 };
@@ -203,11 +204,11 @@ export class PlanFollower {
     const binding = this.#requireBinding(taskId);
     const budget = binding.budget || {};
     const startedAt = budget.startedAt || this.now();
-    if (this.now() - startedAt > this.limits.budgetMs) {
+    if (Number.isFinite(this.limits.budgetMs) && this.now() - startedAt > this.limits.budgetMs) {
       this.#save(taskId, { state: 'PAUSED', budget: { ...budget, startedAt } });
       return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', 'Бюджет времени Follow Plan исчерпан.');
     }
-    if (Number(budget.cycles || 0) >= this.limits.maxCycles) {
+    if (Number.isFinite(this.limits.maxCycles) && Number(budget.cycles || 0) - Number(budget.cycleBase || 0) >= this.limits.maxCycles) {
       this.#save(taskId, { state: 'PAUSED', budget });
       return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', `Достигнут предел ${this.limits.maxCycles} автоматических циклов.`);
     }
@@ -224,7 +225,7 @@ export class PlanFollower {
    * only when the previous turn's terminal event is committed — a finalization
    * failure must not leave a step already on its way (FP-UX-02E).
    */
-  #prepareDispatch({ taskId, plan, hash, step, audit = false, budget, normalization = null }) {
+  #prepareDispatch({ taskId, plan, hash, step, audit = false, budget, normalization = null, correctionProblems = [] }) {
     const binding = this.#requireBinding(taskId);
     const epoch = this.store.planCancelEpoch(taskId);
     const cycleId = audit ? (binding.cycleId || 'c-1') : `c-${Number(budget?.cycles || 0) + 1}`;
@@ -232,12 +233,13 @@ export class PlanFollower {
     const nextBudget = {
       ...budget,
       cycles: audit ? Number(budget?.cycles || 0) : Number(budget?.cycles || 0) + 1,
-      audits: audit ? Number(budget?.audits || 0) + 1 : 0
+      audits: audit ? Number(budget?.audits || 0) + 1 : 0,
+      pauseReason: null
     };
     const message = audit && !step.id
-      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId })
+      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, correctionProblems })
       : audit
-      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id })
+      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id, correctionProblems })
       : stepInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id });
     return {
       taskId,
@@ -280,7 +282,7 @@ export class PlanFollower {
     }
     if (pending.stepId && !pending.audit) {
       const budget = pending.budget || {};
-      if (Number(budget.cycles || 0) > this.limits.maxCycles) {
+      if (Number.isFinite(this.limits.maxCycles) && Number(budget.cycles || 0) - Number(budget.cycleBase || 0) > this.limits.maxCycles) {
         this.#save(taskId, { state: 'PAUSED', dispatchCommandId: null, dispatchStepId: null, budget });
         return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', `Достигнут предел ${this.limits.maxCycles} автоматических циклов.`);
       }
@@ -301,16 +303,16 @@ export class PlanFollower {
     });
   }
 
-  async #dispatchStep({ taskId, plan, hash, step, audit = false, budget, normalization: input_normalization = null }) {
+  async #dispatchStep({ taskId, plan, hash, step, audit = false, budget, normalization: input_normalization = null, correctionProblems = [] }) {
     const binding = this.#requireBinding(taskId);
     // The budget is checked at every dispatch, not only when a cycle is opened:
     // long cycles must stop at the limit too.
     if (!audit) {
-      if (Number(budget?.cycles || 0) >= this.limits.maxCycles) {
+      if (Number.isFinite(this.limits.maxCycles) && Number(budget?.cycles || 0) - Number(budget?.cycleBase || 0) >= this.limits.maxCycles) {
         this.#save(taskId, { state: 'PAUSED', dispatchCommandId: null, dispatchStepId: null, budget });
         return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', `Достигнут предел ${this.limits.maxCycles} автоматических циклов.`);
       }
-      if (budget?.startedAt && this.now() - budget.startedAt > this.limits.budgetMs) {
+      if (Number.isFinite(this.limits.budgetMs) && budget?.startedAt && this.now() - budget.startedAt > this.limits.budgetMs) {
         this.#save(taskId, { state: 'PAUSED', dispatchCommandId: null, dispatchStepId: null, budget });
         return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', 'Бюджет времени Follow Plan исчерпан.');
       }
@@ -331,11 +333,12 @@ export class PlanFollower {
       budget: {
         ...budget,
         cycles: audit ? Number(budget?.cycles || 0) : Number(budget?.cycles || 0) + 1,
-        audits: audit ? Number(budget?.audits || 0) + 1 : 0
+        audits: audit ? Number(budget?.audits || 0) + 1 : 0,
+        pauseReason: null
       }
     });
     const message = audit
-      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id })
+      ? auditInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id, correctionProblems })
       : stepInstruction({ path: binding.path, planId: plan.planId, revision: plan.revision, cycleId, stepId: step.id });
     await this.dispatch({ taskId, commandId, message, stepId: step.id });
     return this.#result(taskId, 'DISPATCHED', audit ? 'Отправлен контрольный ход.' : `Отправлен шаг ${step.id}.`, {
@@ -392,7 +395,7 @@ export class PlanFollower {
     const confirmedStepIds = requested.filter(stepId => appliedStepIds.includes(stepId));
     const rejectedCodes = new Set([
       'IGNORED', 'PLAN_REVISION_CONFLICT', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_UNKNOWN_OUTCOME',
-      'PLAN_BUDGET_EXCEEDED', 'PLAN_CONFLICT', 'PLAN_WRITE_FAILED'
+      'PLAN_BUDGET_EXCEEDED', 'PLAN_NO_PROGRESS', 'PLAN_CONFLICT', 'PLAN_WRITE_FAILED'
     ]);
     const changed = Boolean(own);
     const outcome = (result.outcome && result.outcome !== 'RECEIVED')
@@ -486,6 +489,17 @@ export class PlanFollower {
     const valid = verdict.inspection.problems.length === 0;
     const completed = valid ? verdict.inspection.completedSteps : [];
 
+    // A malformed extra evidence item must not certify the step. Allow the same
+    // single audit already used for a missing checkpoint to repair this narrow
+    // error, not to redo side effects or silently skip validation.
+    const missingRefsOnly = !valid && verdict.inspection.problems.every(problem => problem.includes('без ссылки (ref)'));
+    const hasReferencedEvidence = Array.isArray(checkpoint.evidence) && checkpoint.evidence.some(item => typeof item?.ref === 'string' && item.ref.trim());
+    if (missingRefsOnly && hasReferencedEvidence && Number(budget.audits || 0) < this.limits.auditTurnsPerCycle) {
+      return this.#hop({ taskId, plan: file.plan, hash: file.hash,
+        step: { id: binding.dispatchStepId }, audit: true, budget, deferDispatch,
+        correctionProblems: verdict.inspection.problems });
+    }
+
     // Findings and proposals become edits of the SAME file, within the limits of
     // plan-revision: P1 runs next, P0 waits for approval, P2/P3 stay records.
     const revision = valid
@@ -547,6 +561,9 @@ export class PlanFollower {
     }
     const plan = applied?.plan || file.plan;
     const hash = applied?.hash || file.hash;
+    // Record our own successful CAS before any budget/dispatch guard can pause.
+    // Otherwise the new file is misreported as an external revision conflict.
+    if (applied) this.#save(taskId, { revision: plan.revision, hash });
 
     if (verdict.state === 'COMPLETED') {
       this.#save(taskId, { state: 'COMPLETED', revision: plan.revision, hash, dispatchCommandId: null, dispatchStepId: null });
@@ -615,7 +632,7 @@ export class PlanFollower {
         state: 'PAUSED', revision: plan.revision, hash,
         dispatchCommandId: null, dispatchStepId: null, budget: { ...budget, noProgress }
       });
-      return this.#result(taskId, 'PLAN_BUDGET_EXCEEDED', `Нет измеримого прогресса ${noProgress} цикла подряд — пауза.`);
+      return this.#result(taskId, 'PLAN_NO_PROGRESS', `Нет измеримого прогресса ${noProgress} цикла подряд — пауза.`);
     }
 
     const step = nextOpenStep(plan);
@@ -659,7 +676,7 @@ export class PlanFollower {
   }
 
   /** Operator continues after STOP or a pause: a new cycle, a new epoch-stamped id. */
-  async resume({ taskId, renewTimeBudget = false }) {
+  async resume({ taskId, renewTimeBudget = false, renewBudget = false }) {
     const binding = this.#requireBinding(taskId);
     if (binding.state === 'COMPLETED') return this.#result(taskId, 'PLAN_COMPLETED', 'План уже завершён.');
     if (binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING') {
@@ -671,8 +688,11 @@ export class PlanFollower {
     // Only an explicit operator confirmation grants more wall-clock time.
     // Preserve cycle/no-progress counters and command identities: this must not
     // turn resume into a way around the automatic-loop safeguards.
-    if (renewTimeBudget && binding.state === 'PAUSED') {
-      this.#save(taskId, { budget: { ...(binding.budget || {}), startedAt: this.now() } });
+    if ((renewTimeBudget || renewBudget) && binding.state === 'PAUSED') {
+      this.#save(taskId, { budget: {
+        ...(binding.budget || {}), startedAt: this.now(),
+        ...(renewBudget ? { cycleBase: Number(binding.budget?.cycles || 0) } : {})
+      } });
     }
     return this.#openCycle({ taskId, plan: file.plan, hash: file.hash, reason: 'resume' });
   }
@@ -712,6 +732,10 @@ export class PlanFollower {
   }
 
   #result(taskId, code, message, extra = {}) {
+    if (code === 'PLAN_BUDGET_EXCEEDED' || code === 'PLAN_NO_PROGRESS' || code === 'PLAN_CHECKPOINT_REJECTED') {
+      const binding = this.#binding(taskId);
+      this.#save(taskId, { budget: { ...(binding?.budget || {}), pauseReason: { code, message } } });
+    }
     return { taskId, code, message, ...extra };
   }
 

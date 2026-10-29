@@ -27,11 +27,22 @@ class FollowPlanResumeApiTest {
         }), SimpleConnection("http://pc:8787"))
         api.resumePlan("t1", 11, "first")
         api.resumePlan("t1", 11, "confirmed", renewTimeBudget = true)
+        api.resumePlan("t1", 11, "confirmed-tranche", renewBudget = true)
         val normal = TaskBridgeJson.parseToJsonElement(bodies[0]).jsonObject
         val confirmed = TaskBridgeJson.parseToJsonElement(bodies[1]).jsonObject
         assertFalse("renewTimeBudget" in normal)
         assertEquals("true", confirmed["renewTimeBudget"]?.jsonPrimitive?.content)
         assertEquals("11", confirmed["expectedRevision"]?.jsonPrimitive?.content)
+        val tranche = TaskBridgeJson.parseToJsonElement(bodies[2]).jsonObject
+        assertEquals("true", tranche["renewBudget"]?.jsonPrimitive?.content)
+        assertFalse("renewBudget" in normal)
+        assertFalse("renewBudget" in confirmed)
+    }
+
+    @Test
+    fun persistedPauseReasonIsDecodedForThePlanPanel() {
+        val status = TaskBridgeJson.decodeFromString(PlanStatus.serializer(), """{"state":"PAUSED","pauseReason":{"code":"PLAN_BUDGET_EXCEEDED","message":"Cycle limit 20"}}""")
+        assertEquals("Cycle limit 20", status.pauseReason?.message)
     }
 
     @Test

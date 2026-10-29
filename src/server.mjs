@@ -2163,6 +2163,7 @@ async function handleRequest(req, res) {
         return json(res, 200, await command(() => followPlan.resume({
           taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
           renewTimeBudget: body.renewTimeBudget === true,
+          renewBudget: body.renewBudget === true,
           commandId: body.commandId, clientId: body.clientId
         })));
       }
@@ -2764,7 +2765,7 @@ async function handleRequest(req, res) {
       // the one worth repeating later — the repeat returns the saved result.
       : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED',
         // Follow Plan: these are answers about the plan, not server faults.
-        'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED', 'PLAN_FILE_EXISTS'].includes(error.code) ? 409
+        'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_NO_PROGRESS', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED', 'PLAN_FILE_EXISTS'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429

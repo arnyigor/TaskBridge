@@ -55,7 +55,7 @@ function fakeManager({ workspace, taskId = 't-1' }) {
   };
 }
 
-const setup = async (t, { enabled = true } = {}) => {
+const setup = async (t, { enabled = true, limits = {} } = {}) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-fp-service-'));
   const workspace = path.join(root, 'workspace');
   await fs.mkdir(workspace, { recursive: true });
@@ -66,7 +66,7 @@ const setup = async (t, { enabled = true } = {}) => {
     await fs.rm(root, { recursive: true, force: true }).catch(() => {});
   });
   const manager = fakeManager({ workspace });
-  const service = new FollowPlanService({ manager, store, config: { followPlan: { enabled } } });
+  const service = new FollowPlanService({ manager, store, config: { followPlan: { enabled, limits } } });
   return { root, workspace, store, manager, service, planPath: 'docs-PLAN.md' };
 };
 
@@ -718,7 +718,7 @@ test('UX-03C: a client-supplied path is never trusted on its own', async t => {
 });
 
 test('an expired time budget is an actionable error; only confirmed renewal resumes without resetting progress or cycles', async t => {
-  const { service, store, manager, planPath, workspace } = await setup(t);
+  const { service, store, manager, planPath, workspace } = await setup(t, { limits: { budgetMs: 6 * 60 * 60 * 1000 } });
   await service.attach({ taskId: 't-1', path: planPath, commandId: 'attach-time' });
   const original = store.getPlanBinding('t-1');
   const startedAt = Date.now() - 7 * 60 * 60 * 1000;
@@ -747,11 +747,27 @@ test('an expired time budget is an actionable error; only confirmed renewal resu
 });
 
 test('time renewal cannot bypass the cycle-count limit', async t => {
-  const { service, store, manager, planPath } = await setup(t);
+  const { service, store, manager, planPath } = await setup(t, { limits: { maxCycles: 20 } });
   await service.attach({ taskId: 't-1', path: planPath, commandId: 'attach-cycles' });
   store.savePlanBinding({ ...store.getPlanBinding('t-1'), state: 'PAUSED', budget: { startedAt: Date.now(), cycles: 20 } });
   await assert.rejects(service.resume({ taskId: 't-1', commandId: 'renew-cycles', renewTimeBudget: true }),
     error => error.code === 'PLAN_BUDGET_EXCEEDED');
   assert.equal(manager.dispatched.length, 0);
   assert.equal(store.getPlanBinding('t-1').budget.cycles, 20);
+});
+
+test('a cycle-cap pause remains explained in status across service recreation and can be explicitly renewed', async t => {
+  const { service, store, manager, planPath } = await setup(t, { limits: { maxCycles: 20 } });
+  await service.attach({ taskId: 't-1', path: planPath, commandId: 'attach-renew-tranche' });
+  store.savePlanBinding({ ...store.getPlanBinding('t-1'), state: 'PAUSED', cycleId: 'c-20', budget: { startedAt: Date.now(), cycles: 20 } });
+  await assert.rejects(service.resume({ taskId: 't-1', expectedRevision: 1, commandId: 'at-cap' }), error => error.code === 'PLAN_BUDGET_EXCEEDED');
+  const recreated = new FollowPlanService({ manager, store, config: { followPlan: { enabled: true } } });
+  let status = await recreated.status('t-1');
+  assert.equal(status.pauseReason.code, 'PLAN_BUDGET_EXCEEDED');
+  assert.match(status.pauseReason.message, /20/);
+  status = await recreated.resume({ taskId: 't-1', expectedRevision: 1, commandId: 'new-tranche', renewBudget: true });
+  assert.equal(status.state, 'RUNNING_STEP');
+  assert.equal(status.cycleId, 'c-21');
+  assert.equal(status.pauseReason, null);
+  assert.equal(manager.dispatched.length, 1);
 });

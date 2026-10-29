@@ -1621,6 +1621,9 @@ data class PlanFileError(
     val problems: List<String> = emptyList(),
 )
 
+@Serializable
+data class PlanPauseReason(val code: String? = null, val message: String? = null)
+
 /** GET /api/tasks/:id/plan — состояние режима «По плану» для этой сессии. */
 @Serializable
 data class PlanStatus(
@@ -1640,6 +1643,7 @@ data class PlanStatus(
     val stage: String? = null,
     val updatedAt: String? = null,
     val lastCheckpoint: PlanCheckpointSummary? = null,
+    val pauseReason: PlanPauseReason? = null,
     val conflict: Boolean = false,
     val title: String? = null,
     val goal: String? = null,

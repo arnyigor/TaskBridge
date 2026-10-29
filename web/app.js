@@ -4307,7 +4307,7 @@ function renderPlanInspector() {
   const text = planStatus.conflict
     ? 'Файл плана изменён вне TaskBridge: сверьте версии и примите файл с диска.'
     : planStatus.fileError ? planErrorText(planStatus.fileError)
-      : planNotice || '';
+      : planNotice || planStatus.pauseReason?.message || '';
   notice.textContent = text;
   notice.classList.toggle('hidden', !text);
 
@@ -4819,9 +4819,9 @@ async function runPlanAction(action, button = null) {
     else if (action === 'resume') {
       try { await planSend('resume'); }
       catch (error) {
-        if (error.code !== 'PLAN_BUDGET_EXCEEDED' || !confirm(`${planErrorText(error)}\n\nВыделить новый временной бюджет и продолжить? Прогресс и счётчик циклов сохранятся; лимит количества циклов не сбрасывается.`)) throw error;
+        if (error.code !== 'PLAN_BUDGET_EXCEEDED' || !confirm(`${planErrorText(error)}\n\nПодтвердить новый пакет времени и автоматических циклов? Прогресс и общий счётчик сохранятся; после нового пакета потребуется подтверждение.`)) throw error;
         if (id !== selectedTaskId) return;
-        await planSend('resume', { renewTimeBudget: true });
+        await planSend('resume', { renewBudget: true });
       }
     }
     else if (action === 'pause') await planSend('pause');

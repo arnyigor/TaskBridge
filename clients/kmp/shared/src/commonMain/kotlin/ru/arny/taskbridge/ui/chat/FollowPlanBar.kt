@@ -411,7 +411,7 @@ fun FollowPlanIcon(
                             }
                         }
                     }
-                    val line = status?.fileError?.message ?: state.notice
+                    val line = status?.fileError?.message ?: state.notice.ifBlank { status?.pauseReason?.message.orEmpty() }
                     if (line.isNotBlank()) Text(planErrorText(null, line), style = MaterialTheme.typography.labelSmall, color = colors.error)
                     PlanActionsRow(state, api, newId, scope, onOpenPlan, onNotice)
                 } else {
@@ -619,12 +619,12 @@ private fun PlanActionsRow(
         AlertDialog(
             onDismissRequest = { state.confirmTimeBudget = false },
             title = { Text("Достигнут лимит следования плану") },
-            text = { Text(state.notice + "\n\nМожно выделить новый временной бюджет и продолжить. Прогресс и счётчик циклов сохранятся; лимит количества циклов не сбрасывается.") },
+            text = { Text(state.notice + "\n\nМожно подтвердить новый пакет времени и автоматических циклов. Прогресс и общий счётчик сохранятся. По исчерпании нового пакета план снова остановится для подтверждения.") },
             confirmButton = {
                 TextButton(onClick = {
                     state.confirmTimeBudget = false
-                    command(offerTimeBudget = false) { api.resumePlan(state.taskId, status?.revision, newId(), renewTimeBudget = true) }
-                }) { Text("Выделить время и продолжить") }
+                    command(offerTimeBudget = false) { api.resumePlan(state.taskId, status?.revision, newId(), renewBudget = true) }
+                }) { Text("Выделить новый бюджет и продолжить") }
             },
             dismissButton = { TextButton(onClick = { state.confirmTimeBudget = false }) { Text("Оставить на паузе") } },
         )

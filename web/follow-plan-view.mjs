@@ -334,6 +334,8 @@ export function planErrorText(error) {
       return `Файл плана изменён вне TaskBridge. Сверьте версии и примите файл с диска. ${detail}`.trim();
     case 'PLAN_UNKNOWN_OUTCOME':
       return `Неизвестно, чем закончился прошлый ход: автоматический повтор запрещён. Проверьте состояние. ${detail}`.trim();
+    case 'PLAN_NO_PROGRESS':
+      return `Нет подтверждённого прогресса — проверьте текущий шаг и критерии. ${detail}`.trim();
     case 'PLAN_BUDGET_EXCEEDED':
       return `Достигнут лимит автоматических циклов или времени — нужно ваше решение. ${detail}`.trim();
     case 'FOLLOW_PLAN_DISABLED':
