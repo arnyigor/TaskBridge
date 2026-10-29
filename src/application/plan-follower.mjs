@@ -18,7 +18,7 @@
 //   * the plan file is changed only through compare-and-swap on revision + hash,
 //     so an outside edit stops the cycle instead of being overwritten.
 
-import { decideCheckpoint, auditInstruction } from './plan-checkpoint.mjs';
+import { decideCheckpoint, auditInstruction, repairableProblems } from './plan-checkpoint.mjs';
 import { planHash } from './plan-file.mjs';
 import { planRevision } from './plan-revision.mjs';
 
@@ -502,12 +502,11 @@ export class PlanFollower {
     const valid = verdict.inspection.problems.length === 0;
     const completed = valid ? verdict.inspection.completedSteps : [];
 
-    // A malformed extra evidence item must not certify the step. Allow the same
-    // single audit already used for a missing checkpoint to repair this narrow
-    // error, not to redo side effects or silently skip validation.
-    const missingRefsOnly = !valid && verdict.inspection.problems.every(problem => problem.includes('без ссылки (ref)'));
-    const hasReferencedEvidence = Array.isArray(checkpoint.evidence) && checkpoint.evidence.some(item => typeof item?.ref === 'string' && item.ref.trim());
-    if (missingRefsOnly && hasReferencedEvidence && Number(budget.audits || 0) < this.limits.auditTurnsPerCycle) {
+    // Ошибка в поле отчёта — это исправимые данные, а не отказ модели: один
+    // контрольный ход на цикл просит исправить именно перечисленные поля.
+    // Придумка о чужом/старом прогоне и чужой цикл сюда не входят (см.
+    // repairableProblems): там решение за оператором, а не повторный вопрос.
+    if (repairableProblems(verdict.inspection.problems) && Number(budget.audits || 0) < this.limits.auditTurnsPerCycle) {
       return this.#hop({ taskId, plan: file.plan, hash: file.hash,
         step: { id: binding.dispatchStepId }, audit: true, budget, deferDispatch,
         correctionProblems: verdict.inspection.problems });

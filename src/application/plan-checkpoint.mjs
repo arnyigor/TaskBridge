@@ -130,6 +130,31 @@ export function inspectCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_PO
   };
 }
 
+/**
+ * Ошибки, которые модель может исправить повторной передачей checkpoint: битый
+ * идентификатор, пропущенное поле ссылки, разошедшаяся ревизия файла. Живой прогон
+ * 2026-10-29 дважды терял готовый ход на «неверный идентификатор проблемы»
+ * (F-NO-RESOURCE-DRAIN-HOOK, F-PT-REACH-MARGIN) и на устаревшей ревизии.
+ *
+ * Сюда НЕ входит придумка о чужом или старом прогоне: это заявление о работе,
+ * которой не было (CP-06/CP-10), и повторный вопрос вернул бы ту же ссылку.
+ * Совпадение cycleId/planId тоже не правится: такой checkpoint может принадлежать
+ * другому ходу, и решает оператор.
+ */
+const REPAIRABLE_MARKERS = Object.freeze([
+  'без ссылки (ref)',
+  'неверный идентификатор проблемы',
+  'неверный идентификатор шага',
+  'неизвестный вид подтверждения',
+  'подтверждение без описания',
+  'не совпадает с файлом',
+  'нет в плане',
+  'указан дважды'
+]);
+
+export const repairableProblems = problems => Array.isArray(problems) && problems.length > 0
+  && problems.every(problem => REPAIRABLE_MARKERS.some(marker => String(problem).includes(marker)));
+
 /** The plan after the checkpoint's claims were written into it (still in memory). */
 export function withCompletedSteps(plan, inspection) {
   const next = structuredClone(plan);
@@ -216,7 +241,11 @@ export function decideCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_POL
  */
 export function auditInstruction({ path, planId, revision, cycleId, stepId, correctionProblems = [] }) {
   const issue = correctionProblems.length
-    ? `Checkpoint отклонён: ${correctionProblems.join('; ')}. Повторно проверь только результаты текущего шага и исправь подтверждения. В evidence.ref укажи toolCallId успешной проверки этого контрольного хода; не придумывай ссылки и не запускай следующий шаг. `
+    ? `Checkpoint отклонён: ${correctionProblems.join('; ')}. `
+      + 'Исправь ровно перечисленные поля и передай taskbridge_plan_checkpoint снова: '
+      + 'идентификатор проблемы — виду F-001, идентификатор шага — виду S-001, '
+      + 'revision и cycleId — из сообщения шага, evidence.ref — toolCallId этого хода. '
+      + 'Не придумывай ссылки, не переделывай работу и не запускай следующий шаг. '
     : 'Ты закончил ход, но не передал checkpoint. ';
   return `Режим FOLLOW PLAN. ${issue}`
     + `Сверь файл плана \`${path}\` (planId ${planId}, revision ${revision}, cycle ${cycleId}) и результаты этого хода: `

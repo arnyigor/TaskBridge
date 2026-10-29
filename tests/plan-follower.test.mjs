@@ -216,22 +216,30 @@ test('a turn without a checkpoint gets exactly one audit turn, then a pause', as
   assert.equal(dispatched.length, 2, 'no third turn, no endless question chain');
 });
 
-test('an invalid checkpoint pauses the cycle instead of being interpreted', async t => {
+test('an invalid checkpoint gets one repair turn, then pauses instead of being interpreted', async t => {
   const { follower, plans, dispatched, store } = await setup(t);
   const start = await follower.start({ taskId: 't-1', commandId: 'cmd-start' });
-
-  const stale = await follower.onSettled({
-    taskId: 't-1', commandId: start.commandId,
-    checkpoint: checkpoint({ revision: 1, completedStepIds: ['S-001'], evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-1', summary: 'ok' }] })
+  const stale = checkpoint({
+    revision: 1, completedStepIds: ['S-001'],
+    evidence: [{ stepId: 'S-001', kind: 'test', ref: 'run-1', summary: 'ok' }]
   });
-  assert.equal(stale.decision, 'CONTINUE');
-  // Отказ валидации называется своим кодом (живой прогон 2026-10-27): «заблокировано»
-  // — это решение модели, а здесь чекпоинт не прошёл проверку.
-  assert.equal(stale.code, 'PLAN_CHECKPOINT_REJECTED');
-  assert.match(stale.message, /revision 1 не совпадает/);
+
+  // Живой прогон 2026-10-29: разошедшаяся ревизия — исправимое поле, а не
+  // повод потерять готовый ход. Один контрольный ход на цикл.
+  const repair = await follower.onSettled({ taskId: 't-1', commandId: start.commandId, checkpoint: stale });
+  assert.equal(repair.code, 'DISPATCHED');
+  assert.equal(repair.stepId, 'S-001', 'контрольный ход принадлежит тому же шагу');
+  assert.match(dispatched.at(-1).message, /Checkpoint отклонён/);
+  assert.match(dispatched.at(-1).message, /revision 1 не совпадает/);
+  assert.equal(parsePlan(plans.state.text).revision, 2, 'файл не тронут');
+
+  // Второй раз с той же ошибкой: контрольный ход израсходован — пауза с причиной.
+  const second = await follower.onSettled({ taskId: 't-1', commandId: repair.commandId, checkpoint: stale });
+  assert.equal(second.code, 'PLAN_CHECKPOINT_REJECTED');
+  assert.match(second.message, /revision 1 не совпадает/);
   assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW');
-  assert.equal(parsePlan(plans.state.text).revision, 2, 'the file was not touched');
-  assert.equal(dispatched.length, 1);
+  assert.equal(parsePlan(plans.state.text).revision, 2, 'файл не тронут и после отказа');
+  assert.equal(dispatched.length, 2, 'исходный ход и один контрольный');
 });
 
 test('no measurable progress stops the loop at the configured limit', async t => {
@@ -630,21 +638,51 @@ test('REPLAN-02: findings that need no new step still continue, and the file kee
   assert.match(plan.findings[0].summary, /относится к S-002/);
 });
 
+test('a descriptive finding id is a repairable field, not a lost cycle', async t => {
+  const { follower, plans, dispatched } = await setup(t);
+  const started = await follower.start({ taskId: 't-1', commandId: 'finding-id' });
+  const finding = { priority: 'P1', blocking: true, summary: 'запас хода до ручки мал' };
+
+  // Живой прогон 2026-10-29 дважды: модель прислала F-NO-RESOURCE-DRAIN-HOOK и
+  // F-PT-REACH-MARGIN, и весь готовый ход терялся на формате идентификатора.
+  const repair = await follower.onSettled({
+    taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({ decision: 'REPLAN', findings: [{ ...finding, id: 'F-PT-REACH-MARGIN' }] })
+  });
+  assert.equal(repair.code, 'DISPATCHED');
+  assert.match(dispatched.at(-1).message, /неверный идентификатор проблемы «F-PT-REACH-MARGIN»/);
+  assert.equal(plans.state.writes, 0, 'битый идентификатор файл не трогает');
+
+  // Исправленный идентификатор проходит, и цикл продолжается.
+  const fixed = await follower.onSettled({
+    taskId: 't-1', commandId: repair.commandId,
+    checkpoint: checkpoint({ decision: 'REPLAN', findings: [{ ...finding, id: 'F-901' }] })
+  });
+  assert.equal(fixed.code, 'DISPATCHED', `после исправления: ${fixed.message}`);
+  const written = parsePlan(plans.state.text);
+  assert.ok(written.findings.some(item => item.id === 'F-901'), 'находка записана');
+  assert.equal(fixed.stepId, written.steps[0].id, 'следующий ход идёт по файлу');
+});
+
 test('REPLAN-05: a refused checkpoint leaves no partial edits in the file', async t => {
-  const { follower, plans } = await setup(t);
+  const { follower, plans, dispatched } = await setup(t);
   const started = await follower.start({ taskId: 't-1', commandId: 'replan-5' });
   const before = plans.state.text;
-  const settled = await follower.onSettled({
+  const args = {
     taskId: 't-1', commandId: started.commandId,
     checkpoint: checkpoint({
       planId: 'p-fp03', decision: 'REPLAN', completedStepIds: ['S-001'],
-      // Evidence without a verifiable reference: the whole checkpoint is refused,
-      // so not even the completed step is written.
+      // Evidence without a verifiable reference: not even the completed step is
+      // written, and the repair turn sees the same untouched file.
       evidence: [{ stepId: 'S-001', kind: 'manual', summary: 'модель говорит, что сделала' }]
     })
-  });
+  };
+  const settled = await follower.onSettled(args);
+  // Подтверждение «вручную» там, где в плане есть способ проверки, — не
+  // исправимая опечатка, а заявление без доказательства: отказ сразу.
   assert.equal(settled.code, 'PLAN_CHECKPOINT_REJECTED');
   assert.equal(plans.state.text, before, 'nothing is written when the checkpoint is refused');
+  assert.equal(dispatched.length, 1, 'no extra turn for an unproven claim');
 });
 
 test('a confirmed new cycle tranche preserves lifetime IDs and stops again at its own cap', async t => {

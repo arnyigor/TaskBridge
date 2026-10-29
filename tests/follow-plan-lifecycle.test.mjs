@@ -383,10 +383,19 @@ test('CORE-02B: checkpoint своего цикла со старой ревиз�
   args.commandId = 'chat-message-command';
   args.checkpoint.revision = binding.expectedRevision + 1;
 
-  const result = await service.turnSettled(args);
+  // Разошедшаяся ревизия — исправимое поле: один контрольный ход, в котором
+  // причина названа, и файл не тронут.
+  const repair = await service.turnSettled(args);
+  assert.equal(repair.code, 'DISPATCH_READY');
+  assert.equal(repair.audit, true);
+  assert.match(repair.message, /Checkpoint отклонён: revision .* не совпадает с файлом/);
+  assert.equal((await readPlan(workspace)).steps[0].status, 'TODO', 'старая ревизия не закрывает шаг');
 
+  // Второй раз с той же ревизией: контрольный ход израсходован — пауза, а не зависание.
+  await service.turnCommitted({ taskId: 't-1' });
+  const auditCommandId = store.getPlanBinding('t-1').dispatchCommandId;
+  const result = await service.turnSettled({ ...args, commandId: auditCommandId });
   assert.equal(result.code, 'PLAN_CHECKPOINT_REJECTED');
-  assert.equal(result.reasonCode, 'PLAN_CHECKPOINT_REJECTED');
   assert.match(result.message, /revision .* не совпадает с файлом/, `названа настоящая причина: ${result.message}`);
   assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW', 'цикл не висит в RUNNING_STEP');
   assert.equal((await readPlan(workspace)).steps[0].status, 'TODO', 'старая ревизия не закрывает шаг');
