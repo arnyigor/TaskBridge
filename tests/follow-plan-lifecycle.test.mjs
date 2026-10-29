@@ -371,6 +371,29 @@ test('CORE-02B: checkpoint, пришедший после steering, принад
     'ложного FOREIGN_COMMAND нет');
 });
 
+test('CORE-02B: checkpoint своего цикла со старой ревизией называет ревизию, а не чужую команду', async t => {
+  const { service, store, manager, workspace } = await setup(t);
+  await started(service, store);
+  const binding = store.getPlanBinding('t-1');
+
+  // Живой прогон 2026-10-29 (c-30): steering слил ходы, и checkpoint пришёл с
+  // командой чата и ревизией 14, хотя файл был уже на 15. Раньше это был
+  // «FOREIGN_COMMAND» с висящим RUNNING_STEP и без названной причины.
+  const args = settleArgs(store, { completedStepIds: ['S-001'] });
+  args.commandId = 'chat-message-command';
+  args.checkpoint.revision = binding.expectedRevision + 1;
+
+  const result = await service.turnSettled(args);
+
+  assert.equal(result.code, 'PLAN_CHECKPOINT_REJECTED');
+  assert.equal(result.reasonCode, 'PLAN_CHECKPOINT_REJECTED');
+  assert.match(result.message, /revision .* не совпадает с файлом/, `названа настоящая причина: ${result.message}`);
+  assert.equal(store.getPlanBinding('t-1').state, 'PAUSED_REVIEW', 'цикл не висит в RUNNING_STEP');
+  assert.equal((await readPlan(workspace)).steps[0].status, 'TODO', 'старая ревизия не закрывает шаг');
+  const paused = manager.events.filter(event => event.type === 'PLAN_CHECKPOINT_REJECTED').at(-1);
+  assert.match(paused.message, /revision/, 'причина видна в событии');
+});
+
 test('CORE-02B: checkpoint чужого цикла не принимается как свой', async t => {
   const { service, store, workspace } = await setup(t);
   await started(service, store);

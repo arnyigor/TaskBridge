@@ -216,7 +216,10 @@ export class FollowPlanService {
       ? `Checkpoint применён: ${where}, revision ${result.planRevision ?? '—'}`
       : event === 'PLAN_CHECKPOINT_RECEIVED'
         ? `Checkpoint принят без изменений: ${reason || where}`
-        : `Checkpoint не применён: ${reason || result.code || 'без причины'}`;
+        // Настоящая причина важнее кодового имени: живой прогон 2026-10-29
+        // показывал «PLAN_CHECKPOINT_REJECTED» вместо «revision 14 не совпадает
+        // с файлом 15 — план менялся».
+        : `Checkpoint не применён: ${result.message || reason || result.code || 'без причины'}`;
     await this.#publish(task.id, event, message, {
       checkpointId: result.checkpointId || null,
       runId: task.runId || null,
@@ -1061,12 +1064,15 @@ export class FollowPlanService {
     }
     // Вклинившееся сообщение сливает чат-ход с плановым: Pi продолжает тот же ход и
     // присылает checkpoint уже после steering, поэтому settle приходит с командой
-    // чата (LIVE-03, 2026-10-26). Если checkpoint называет текущий цикл и ревизию,
-    // он принадлежит выданному шагу — принимаем подтверждение у него, а не у чата.
+    // чата (LIVE-03, 2026-10-26). Признак принадлежности — номер цикла, а не ревизия:
+    // живой прогон 2026-10-29 (c-30) прислал свой checkpoint со СТАРОЙ ревизией
+    // (14 вместо 15). Раньше такая пара уходила в FOREIGN_COMMAND: настоящая причина
+    // («план менялся») не называлась, а шаг оставался в RUNNING_STEP — цикл висел до
+    // перезапуска и превращался в «результат неизвестен». Теперь такой checkpoint
+    // принадлежит выданному шагу, и валидация называет разошедшуюся ревизию.
     let settleCommandId = commandId;
     if (checkpoint && commandId && binding.dispatchCommandId && commandId !== binding.dispatchCommandId
-      && String(checkpoint.cycleId || '') === String(binding.cycleId || '')
-      && Number(checkpoint.revision) === Number(binding.expectedRevision)) {
+      && String(checkpoint.cycleId || '') === String(binding.cycleId || '')) {
       settleCommandId = binding.dispatchCommandId;
     }
     const checked = this.#checkEvidence({ taskId: task.id, checkpoint, toolCalls });
