@@ -1,0 +1,69 @@
+--- a/src/mcp_tools/core.py
++++ b/src/mcp_tools/core.py
+@@ -38,7 +38,6 @@
+ MAX_MEMORY_TOKENS_LIMIT = 2000
+ # Per-file resource bound; independent of stored topic count and LLM injection.
+ MAX_MEMORY_FILE_BYTES = 256 * 1024
+-MAX_ACTIVE_PROJECTS = 15
+ 
+ # --- pi-memory-md: единственный ИСТОЧНИК ПРАВДЫ для новой памяти ---
+ # Писатель там же (skills memory-write/import). Здесь только чтение:
+@@ -548,21 +547,6 @@
+ 
+ 
+ 
+-def _check_storage_limits() -> List[str]:
+-    """Контроль размера хранилища БЕЗ удаления.
+-
+-    Раньше здесь было молчаливое old_file.unlink() для самых старых срезов при
+-    превышении MAX_ACTIVE_PROJECTS. Это давало безвозвратную потерю заметок:
+-    каталог не версионируется (/data/ в .gitignore), истории нет.
+-    Теперь функция только сообщает о превышении - решение принимает человек.
+-    """
+-    files = sorted(
+-        MEMORY_DIR.glob("*.md"), key=lambda f: f.stat().st_mtime, reverse=True
+-    )
+-    if len(files) > MAX_ACTIVE_PROJECTS:
+-        return [f.stem for f in files[MAX_ACTIVE_PROJECTS:]]
+-    return []
+-
+ GIT_TIMEOUT_SEC = 5
+ GIT_LOG_FILE = MEMORY_DIR / ".gitlog.jsonl"
+ 
+@@ -1023,7 +1007,6 @@
+                                         'message': 'Save failed; inspect the recovery journal before retrying.'}}, ensure_ascii=False)
+         backup = persisted['backup']
+ 
+-        over_limit = _check_storage_limits()
+         git_commit = await asyncio.to_thread(_git_commit_store, "save", clean_topic)
+ 
+         return json.dumps(
+@@ -1035,21 +1018,13 @@
+                 "git_commit": git_commit,
+                 "sha256": persisted['sha256'],
+                 "cleanup_warning": persisted['cleanup_warning'],
+-                "message": f"Срез состояния '{clean_topic}' зафиксирован ({tokens} токенов). Занимает <3% контекста.",
+-                **(
+-                    {
+-                        "warning": {
+-                            "code": "MEMORY_LIMIT_EXCEEDED",
+-                            "message": (
+-                                f"Тем больше лимита ({MAX_ACTIVE_PROJECTS}): {len(over_limit)} "
+-                                f"сверх ({', '.join(over_limit)}). Файлы НЕ удалены. "
+-                                f"Убери лишние через action='delete'."
+-                            ),
+-                        }
+-                    }
+-                    if over_limit
+-                    else {}
+-                ),
++                "message": f"Срез состояния '{clean_topic}' сохранён ({tokens} токенов). Бюджет инъекции не изменён.",
++                "storage": {
++                    "active_topics": len(list(MEMORY_DIR.glob('*.md'))),
++                    "archived_files": len(list(ARCHIVE_DIR.glob('*.md'))),
++                    "per_file_token_limit": MAX_MEMORY_TOKENS_LIMIT,
++                    "per_file_byte_limit": MAX_MEMORY_FILE_BYTES,
++                },
+             },
+             ensure_ascii=False,
+         )
