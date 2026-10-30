@@ -8,11 +8,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onFirst
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeDown
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
 import io.ktor.client.HttpClient
@@ -66,7 +62,7 @@ class MessageListScrollTest {
         val items = mutableStateListOf<ChatItem>().apply { for (i in 1..16) add(message(i)) }
         val chat = mutableStateOf(ChatSnapshot(items = items.toList(), newestAnswerId = "a16"))
         val listState = LazyListState()
-        var following = true
+        val following = mutableStateOf(true)
         setContent {
             MaterialTheme {
                 Box(Modifier.size(420.dp, 640.dp)) {
@@ -81,7 +77,7 @@ class MessageListScrollTest {
                             reachedStart = true,
                         ),
                         listState = listState,
-                        following = following,
+                        following = following.value,
                         historyLocked = false,
                         onDialog = {},
                         onViewFile = {},
@@ -94,11 +90,13 @@ class MessageListScrollTest {
         assertEquals(0, listState.firstVisibleItemIndex)
         assertEquals(0, listState.firstVisibleItemScrollOffset)
 
-        // 1. Читаем выше самого потока: тянем содержимое вниз.
-        val list = onAllNodes(hasScrollAction()).onFirst()
-        repeat(3) { list.performTouchInput { swipeDown() }; waitForIdle() }
-        assertTrue(listState.firstVisibleItemIndex > 0, "предусловие: лента прокручена выше низа")
-        following = false
+        // 1. Проверяем удержание позиции, а не распознавание жеста платформой.
+        // У Markdown есть вложенные scroll-узлы; onFirst() не гарантирует ленту.
+        runOnIdle { following.value = false }
+        waitForIdle()
+        listState.scrollToItem(3)
+        waitForIdle()
+        assertEquals(3, listState.firstVisibleItemIndex, "предусловие: лента прокручена выше низа")
         val before = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
         val visibleBefore = visible(listState)
         val last = items.last() as ChatItem.Assistant

@@ -15,6 +15,49 @@ import {
   planScanRows, planScanStatusLine, planScanEmptyText, planVerdictView, planAiReviewView, planAiErrorText
 } from '../web/follow-plan-view.mjs';
 
+// Execute the real loader with controlled HTTP completion order, without DOM.
+function planLoaderHarness() {
+  const source = fsSync.readFileSync(new URL('../web/app.js', import.meta.url), 'utf8');
+  const loader = source.slice(source.indexOf('async function loadPlanStatus()'), source.indexOf('\nfunction openPlanDialog()'));
+  const pending = [];
+  const api = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const harness = new Function('api', `
+    let selectedTaskId = 'task-a', planStatus = null, planNotice = '';
+    let planStatusRequestId = 0;
+    const schedulePlanStatusRefresh = () => {};
+    const renderPlanCard = () => {};
+    const planErrorText = error => error.message;
+    ${loader}
+    return { loadPlanStatus, status: () => planStatus, select: id => { selectedTaskId = id; } };
+  `)(api);
+  return { ...harness, pending };
+}
+
+for (const oldFails of [false, true]) {
+  test(`plan loader ignores an older ${oldFails ? 'error' : 'response'} after a newer response`, async () => {
+    const h = planLoaderHarness();
+    const old = h.loadPlanStatus();
+    const current = h.loadPlanStatus();
+    h.pending[1].resolve({ revision: 3, state: 'PAUSED' });
+    await current;
+    if (oldFails) h.pending[0].reject(new Error('old network error'));
+    else h.pending[0].resolve({ revision: 2, state: 'RUNNING_STEP' });
+    await old;
+    assert.equal(h.status().revision, 3);
+    assert.equal(h.status().state, 'PAUSED');
+    assert.equal(h.status().fileError, undefined);
+  });
+}
+
+test('plan loader ignores a response from a previous task', async () => {
+  const h = planLoaderHarness();
+  const old = h.loadPlanStatus();
+  h.select('task-b');
+  h.pending[0].resolve({ revision: 2 });
+  await old;
+  assert.equal(h.status(), null);
+});
+
 const running = {
   attached: true, path: 'docs/PLAN.md', state: 'RUNNING_STEP', stepId: 'S-004',
   revision: 7, progress: { done: 3, total: 7 }, goal: 'Стабилизировать историю',

@@ -13,6 +13,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
+import { resolveTurnInstructionsMode } from '../src/prompt-builder.mjs';
+
+test('пример рекомендует hook, отсутствие настройки сохраняет legacy, env имеет приоритет', () => {
+  const config = JSON.parse(fs.readFileSync(new URL('../config.example.json', import.meta.url), 'utf8'));
+  assert.equal(resolveTurnInstructionsMode(config, {}), 'hook');
+  assert.equal(resolveTurnInstructionsMode({}, {}), 'legacy');
+  assert.equal(resolveTurnInstructionsMode(config, { TASKBRIDGE_TURN_INSTRUCTIONS: 'legacy' }), 'legacy');
+});
 
 function deliveries(root) {
   const file = path.join(root, 'pi-deliveries.ndjson');

@@ -23,12 +23,13 @@ async function fixture(t, streaming = false) {
   await store.create(task);
   manager.tasks.set('a', task);
   const sent = [];
-  const pi = { closed: false, getState: async () => ({ isStreaming: streaming }), prompt: async text => { sent.push(text); }, sendFollowUp: async text => { sent.push(text); }, abort: async () => {}, killTree: async () => {} };
+  const state = { isStreaming: streaming };
+  const pi = { closed: false, getState: async () => state, prompt: async text => { sent.push(text); }, sendFollowUp: async text => { sent.push(text); }, abort: async () => {}, killTree: async () => {} };
   const runtime = { pi, eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false };
   manager.runtimes.set('a', runtime);
   manager.runtimeManager.isReady = async () => true;
   manager.runtimeManager.getBusyStatus = async () => ({ busy: false });
-  return { manager, store, task, pi, runtime, sent, root };
+  return { manager, store, task, pi, runtime, sent, root, state };
 }
 
 // Cutting in never stops anything: only the model itself or STOP ends a command.
@@ -470,9 +471,50 @@ test('setModel switches the session model and records the selection', async t =>
   assert.equal(events[0].data.provider, 'ollama');
 });
 
-test('setModel refuses while Pi is streaming and rejects malformed selections', async t => {
+test('setModel interrupts the busy turn — a smaller-context model is not a dead end', async t => {
   const streaming = await fixture(t, true);
-  await assert.rejects(streaming.manager.setModel('a', 'ollama', 'glm-5'), { code: 'BUSY' });
+  const seen = [];
+  let aborts = 0;
+  streaming.pi.abort = async () => { aborts += 1; streaming.state.isStreaming = false; };
+  streaming.pi.setModel = async (provider, modelId) => { seen.push([provider, modelId]); return { provider, id: modelId, contextWindow: 500000, maxTokens: 8192 }; };
+  const updated = await streaming.manager.setModel('a', 'ollama', 'small-ctx');
+  assert.equal(aborts, 1, 'the running answer is stopped, not awaited forever');
+  assert.deepEqual(seen, [['ollama', 'small-ctx']], 'the model is applied to the now idle session');
+  assert.deepEqual(updated.model, { provider: 'ollama', id: 'small-ctx', contextWindow: 500000, maxTokens: 8192 });
+  const events = (await streaming.store.readEvents('a', 0)).filter(e => e.type === 'MODEL_SWITCH');
+  assert.equal(events[0].data.interrupted, 'answer');
+  assert.match(events[0].message, /прерван текущий ответ/);
+});
+
+test('setModel interrupts a stuck compaction and names it', async t => {
+  const f = await fixture(t);
+  f.state.isCompacting = true;
+  let aborts = 0;
+  f.pi.abort = async () => { aborts += 1; f.state.isCompacting = false; };
+  f.pi.setModel = async (provider, modelId) => ({ provider, id: modelId });
+  const updated = await f.manager.setModel('a', 'ollama', 'glm-5');
+  assert.equal(aborts, 1);
+  assert.deepEqual(updated.model.provider, 'ollama');
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'MODEL_SWITCH');
+  assert.equal(events[0].data.interrupted, 'compaction');
+  assert.match(events[0].message, /прервано сжатие контекста/);
+});
+
+// Pi refused to stop (its own abort is best-effort): refusing the switch again
+// would leave the operator with no exit at all, so the choice is stored for the
+// next start of the session instead.
+test('setModel persists the selection when the session will not go idle', async t => {
+  const f = await fixture(t, true);
+  let applied = 0;
+  f.pi.setModel = async () => { applied += 1; };
+  const updated = await f.manager.setModel('a', 'ollama', 'glm-5');
+  assert.equal(applied, 0, 'nothing is applied to a live Pi that is still running');
+  assert.deepEqual(updated.requestedModel, { provider: 'ollama', id: 'glm-5' });
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type === 'MODEL_SWITCH');
+  assert.match(events[0].message, /применится при следующем запуске сессии/);
+});
+
+test('setModel rejects malformed selections', async t => {
   const f = await fixture(t);
   await assert.rejects(f.manager.setModel('a', 'ollama', ''), { code: 'INPUT_INVALID' });
   await assert.rejects(f.manager.setModel('missing', 'ollama', 'glm-5'), { code: 'NOT_FOUND' });

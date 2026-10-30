@@ -171,6 +171,19 @@ class AppGraph(val platform: PlatformServices) {
         private val _online = MutableStateFlow(true)
         val online = _online.asStateFlow()
 
+        /**
+         * Виден ли экран приложения — как состояние, а не как опрос флага.
+         *
+         * UI-циклы (телеметрия движка, счётчики длительности) держатся на этом:
+         * в фоне они не просыпаются вовсе, а при возврате на экран стартуют сразу,
+         * по событию. Раньше они просыпались каждые 1—5 с, чтобы проверить флаг —
+         * на телефоне системный детектор OnePlus (`[BgDetect]` в logcat) считал
+         * это расходом в фоне и дважды убивал приложение (замер 2026-10-30:
+         * 11:31 kill, 12:14 уведомление «расходует заряд», 12:20 force stop).
+         */
+        private val _visible = MutableStateFlow(platform.inForeground)
+        val visible: StateFlow<Boolean> = _visible.asStateFlow()
+
         /** The session on screen: its alerts are not notified and it alone may hold SSE. */
         var visibleSession: String? = null
             private set
@@ -280,6 +293,7 @@ class AppGraph(val platform: PlatformServices) {
 
         /** Called after the platform foreground flag changes. */
         fun appVisibilityChanged() {
+            _visible.value = platform.inForeground
             syncChatStreaming()
         }
 
@@ -369,6 +383,7 @@ class AppGraph(val platform: PlatformServices) {
 
         /** Network back or app in front again: only the visible stream wakes; every outbox resumes. */
         fun wakeUp() {
+            _visible.value = platform.inForeground
             syncChatStreaming()
             sessions.refresh()
             // reconnectNow gates stream/refresh by streamingEnabled, while delivery is

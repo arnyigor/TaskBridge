@@ -170,7 +170,21 @@ class AndroidPlatformServices(
 
     @Volatile
     var foreground: Boolean = false
-    override val inForeground: Boolean get() = foreground
+
+    /**
+     * Виден ли экран приложения.
+     *
+     * Мало `onStart`: при выключенном экране активность иногда остаётся
+     * `ResumedActivity` (проверено на телефоне 2026-10-30: `mWakefulness=Asleep`
+     * и одновременно `ResumedActivity: MainActivity`). Тогда приложение считало
+     * себя видимым, держало SSE, тикало счётчики и опрашивало `/api/info` — и
+     * система зафиксировала 25% CPU в фоне за 5 минут (уведомление «расходует
+     * заряд»). Погашенный экран — это фон, что бы ни говорил жизненный цикл.
+     */
+    override val inForeground: Boolean
+        get() = foreground && runCatching {
+            (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+        }.getOrDefault(true)
 
     /** Экономия энергии: система уже просит не будить телефон без нужды (раздел 4.3). */
     override val powerSaveMode: Boolean

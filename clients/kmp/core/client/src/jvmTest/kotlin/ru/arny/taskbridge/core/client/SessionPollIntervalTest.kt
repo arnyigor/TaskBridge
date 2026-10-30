@@ -1,5 +1,7 @@
 package ru.arny.taskbridge.core.client
 
+import ru.arny.taskbridge.core.client.sessions.BACKGROUND_ACTIVE_INTERVAL_MS
+import ru.arny.taskbridge.core.client.sessions.BACKGROUND_AWAITING_USER_MS
 import ru.arny.taskbridge.core.client.sessions.sessionPollIntervalMillis
 import ru.arny.taskbridge.core.client.sessions.shouldPoll
 import kotlin.test.Test
@@ -45,18 +47,45 @@ class SessionPollIntervalTest {
     @Test
     fun `in the background with work the poll stays, and slows down on power save`() {
         val normal = sessionPollIntervalMillis(active = true, inForeground = false)
-        assertEquals(5_000L, normal, "идёт работа — оператор ждёт уведомление о её конце")
+        assertEquals(
+            BACKGROUND_ACTIVE_INTERVAL_MS, normal,
+            "конец хода присылает wake-канал сервера, 5 с в фоне — лишние запросы",
+        )
         assertTrue(shouldPoll(normal))
         val saving = sessionPollIntervalMillis(active = true, inForeground = false, powerSave = true)
         assertEquals(30_000L, saving, "в экономии энергии уведомление может подождать")
         assertEquals(
-            5_000L,
+            BACKGROUND_ACTIVE_INTERVAL_MS,
             sessionPollIntervalMillis(
                 active = true,
                 inForeground = false,
                 activeCoveredByStream = true,
             ),
             "в фоне SSE закрыт, поэтому флаг покрытия не должен останавливать уведомления",
+        )
+    }
+
+    @Test
+    fun `a session waiting for the operator is polled rarely in the background`() {
+        assertEquals(
+            BACKGROUND_AWAITING_USER_MS,
+            sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true),
+            "агент ждёт ответа: до действия оператора в сессии не меняется ничего",
+        )
+        assertEquals(
+            BACKGROUND_AWAITING_USER_MS,
+            sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true, powerSave = true),
+            "экономия энергии не должна ускорять опрос",
+        )
+        assertTrue(
+            sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true) >
+                sessionPollIntervalMillis(active = true, inForeground = false),
+            "ожидание ответа дешевле, чем идущий ход",
+        )
+        // Видимый экран: ожидание ответа — та же работа, экран должен обновляться быстро.
+        assertEquals(
+            5_000L,
+            sessionPollIntervalMillis(active = true, inForeground = true, awaitingUserOnly = true),
         )
     }
 

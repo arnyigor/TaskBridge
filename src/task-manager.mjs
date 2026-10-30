@@ -4238,19 +4238,27 @@ export class TaskManager extends EventEmitter {
     // it. This is also what makes a model switch a way OUT of a hung session.
     const live = this.runtimes.get(id);
     if (!live || live.pi.closed || live.pi.canSend?.() === false) {
-      task.requestedModel = { provider: model.provider, id: targetModelId };
-      task.model = this.#taskModel({ id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null });
-      task.updatedAt = now();
-      await this.store.save(this.#publicTask(task));
-      await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id} (применится при следующем запуске сессии)`, { provider: model.provider, modelId: task.requestedModel.id });
-      return this.#publicTask(task);
+      return this.#persistModelSelection(task, model, targetModelId);
     }
     const runtime = await this.#ensureSession(task);
     const state = await runtime.pi.getState().catch(async error => {
       await this.#recoverRpcFailure(task, error);
       throw error;
     });
-    if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Дождитесь завершения ответа перед сменой модели.'), { code: 'BUSY' });
+    // A busy session must not lock the operator into the wrong model. Moving a
+    // history larger than the new window onto a smaller-context model is the
+    // case that hurts: the next prompt is refused for overflow and the session
+    // stays busy — a turn that cannot finish, or a compaction that does not fit
+    // the new window — so a manual compaction was the only exit. The run is
+    // interrupted first (`abort` cancels the turn, the compaction and the retry
+    // wait), so the switch lands on an idle session that can take the next
+    // message. If Pi cannot be stopped, the selection is persisted instead of
+    // refused (see #persistModelSelection).
+    let interrupted = null;
+    if (state?.isStreaming || state?.isCompacting) {
+      interrupted = await this.#interruptForModelSwitch(task, runtime, state);
+      if (!interrupted) return this.#persistModelSelection(task, model, targetModelId);
+    }
     // Cached ids only: the selection must not wait on a catalog probe.
     const applied = await runtime.pi.setModel(model.provider, targetModelId).catch(async (error) => {
       if (['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) {
@@ -4267,8 +4275,48 @@ export class TaskManager extends EventEmitter {
     task.thinkingLevelActual = nextState?.thinkingLevel ?? task.thinkingLevelActual ?? null;
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
-    await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id}`, { provider: model.provider, modelId: task.requestedModel.id });
+    const note = interrupted === 'compaction' ? ' (прервано сжатие контекста)' : interrupted ? ' (прерван текущий ответ)' : '';
+    await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id}${note}`, {
+      provider: model.provider,
+      modelId: task.requestedModel.id,
+      ...(interrupted ? { interrupted } : {})
+    });
     return this.#publicTask(task);
+  }
+
+  // The selection is stored, not applied: there is no live Pi to take it (the
+  // process is gone, or it would not stop). This is what makes a model switch a
+  // way OUT of a hung session instead of one more refusal.
+  async #persistModelSelection(task, model, targetModelId) {
+    task.requestedModel = { provider: model.provider, id: targetModelId };
+    task.model = this.#taskModel({ id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null });
+    task.updatedAt = now();
+    await this.store.save(this.#publicTask(task));
+    await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id} (применится при следующем запуске сессии)`, { provider: model.provider, modelId: task.requestedModel.id });
+    return this.#publicTask(task);
+  }
+
+  // Stops what keeps the session busy so the switch can be applied. Returns
+  // 'answer' / 'compaction' (what was interrupted) or null when Pi stayed busy:
+  // Pi's own `abort` ends the run, the compaction and the retry wait, then
+  // waits for idle, so an idle state afterwards is the real confirmation.
+  async #interruptForModelSwitch(task, runtime, state) {
+    const what = state?.isCompacting ? 'compaction' : 'answer';
+    try {
+      await runtime.pi.abort(this.config.pi?.abortTimeoutMs || 10000);
+    } catch (error) {
+      await this.#event(task, 'ABORT_TIMEOUT', `RPC abort failed: ${error.message}. Killing process tree.`).catch(() => {});
+      try {
+        await runtime.pi.killTree();
+      } catch {
+        // The process may already be gone. Ownership still has to be released.
+      }
+      await this.#recoverRpcFailure(task, error).catch(() => {});
+      return null;
+    }
+    const next = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(() => null);
+    if (next?.isStreaming || next?.isCompacting) return null;
+    return what;
   }
 
   async setThinkingLevel(id, level) {

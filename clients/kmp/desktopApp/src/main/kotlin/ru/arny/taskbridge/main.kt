@@ -15,6 +15,7 @@ import org.jetbrains.skia.Image
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -144,7 +145,12 @@ fun main() {
             state = windowState,
             title = "TaskBridge",
             icon = appIcon,
-            onPreviewKeyEvent = { event ->
+            // Esc = «назад» только когда его никто не забрал себе: сначала его видят
+            // обработчики экрана (поиск по сессии, панель файлов, подтверждение стопа),
+            // и лишь затем — окно. С preview-фазой окно перехватывало Esc первым, и
+            // закрыть поиск клавишей было нельзя: сессия закрывалась целиком
+            // (жалоба оператора 2026-10-30).
+            onKeyEvent = { event ->
                 if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) navigator?.pop() ?: false else false
             },
         ) {

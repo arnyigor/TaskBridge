@@ -5,7 +5,6 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
@@ -51,16 +50,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerEventType
-import androidx.compose.ui.input.pointer.isSecondaryPressed
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.unit.round
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -134,13 +126,7 @@ fun UserBubble(
     actions: MessageActions,
     onOpenFile: (fileId: String, name: String) -> Unit,
     loadFile: suspend (fileId: String) -> Result<ByteArray>,
-    /**
-     * Desktop: the action icons appear on hover, and the message menu opens on a right
-     * click. A long press is left to text selection there — holding the pointer over a
-     * word selects it, and the selection already shows its own «Копировать», so a second
-     * copy of the same action only gets in the way. On Android nothing selects text on a
-     * hold inside a message, so the menu keeps the long press.
-     */
+    /** Desktop: the action icons appear on hover; text keeps its standard copy menu. */
     desktop: Boolean = false,
 ) {
     val colors = LocalStatusColors.current
@@ -149,7 +135,6 @@ fun UserBubble(
         item.pending || item.delivery.startsWith("В очереди") || item.delivery.startsWith("Сервер готовит") || item.delivery.startsWith("Ожидает") -> AppIcons.Clock
         else -> AppIcons.Check
     }
-    val menu = remember { MenuAnchor() }
     var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -161,17 +146,24 @@ fun UserBubble(
                     color = colors.userBubble,
                     contentColor = colors.onUserBubble,
                     shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
-                    modifier = Modifier.menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = if (desktop) null else ({ menu.open = true })),
+                    modifier = Modifier.clickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }),
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                         if (item.mode == "steer") {
                             Text("инструкция по ходу работы", style = MaterialTheme.typography.labelSmall, color = colors.onUserBubble.copy(alpha = 0.7f))
                         }
-                        SelectionContainer { Text(item.text, style = MaterialTheme.typography.bodyLarge) }
+                        // Подсветка поиска по сессии: найденное в вопросе видно так же,
+                        // как в ответе (см. ChatSearch).
+                        SelectionContainer {
+                            Text(
+                                searchHighlighted(item.text),
+                                style = MaterialTheme.typography.bodyLarge,
+                                modifier = Modifier.searchBringIntoView(item.text),
+                            )
+                        }
                         if (item.files.isNotEmpty()) FileList(item.files, onOpenFile, loadFile, Modifier.padding(top = 8.dp))
                     }
                 }
-                AnchoredMenu(menu, actions, isUser = true)
             }
         }
         Row(Modifier.padding(top = 2.dp).heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -193,7 +185,7 @@ fun UserBubble(
                 if (text.isNotEmpty()) Text(text, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             if (desktop) {
-                Row(Modifier.alpha(if (hovered || menu.open) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
+                Row(Modifier.alpha(if (hovered || buttonMenu) 1f else 0f), verticalAlignment = Alignment.CenterVertically) {
                     Row(verticalAlignment = Alignment.CenterVertically) { buttons() }
                     Spacer(Modifier.width(4.dp))
                     meta()
@@ -202,7 +194,7 @@ fun UserBubble(
                 // Телефон: подпись и меню — две строки. В одной строке текст съедал
                 // ширину, и кнопки сжимались далеко ниже своего размера (2026-10-29).
                 Column {
-                    Row(Modifier.heightIn(min = 18.dp).alpha(if (hovered || menu.open || buttonMenu) 1f else 0f), verticalAlignment = Alignment.CenterVertically) { meta() }
+                    Row(Modifier.heightIn(min = 18.dp).alpha(if (hovered || buttonMenu) 1f else 0f), verticalAlignment = Alignment.CenterVertically) { meta() }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) { buttons() }
                 }
             }
@@ -222,12 +214,11 @@ fun AssistantMessage(
     onOpenFile: (fileId: String, name: String) -> Unit,
     loadFile: suspend (fileId: String) -> Result<ByteArray>,
     loadWorkspaceFile: suspend (path: String) -> Result<ByteArray>,
-    /** Desktop: the action row appears on hover (the newest answer keeps it); the menu opens on a right click. */
+    /** Desktop: the action row appears on hover (the newest answer keeps it). */
     desktop: Boolean = false,
     /** Нажато «Продолжить», но ответ ещё не начал писаться — кнопка показывает ожидание. */
     continuePending: Boolean = false,
 ) {
-    val menu = remember { MenuAnchor() }
     var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val hovered by interaction.collectIsHoveredAsState()
@@ -243,9 +234,9 @@ fun AssistantMessage(
         Row(verticalAlignment = Alignment.Top) {
             actions.onToggleSelect?.let { SelectMark(actions.selected, it) }
             Box(Modifier.weight(1f)) {
-                Column(Modifier.fillMaxWidth().menuAnchor(menu).combinedClickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }, onLongClick = if (desktop) null else ({ menu.open = true }))) {
+                Column(Modifier.fillMaxWidth().clickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() })) {
                     when {
-                        item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
+                        item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath, LocalSearchItemId provides item.id) {
                             SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
                         }
                         item.active -> Column {
@@ -284,10 +275,9 @@ fun AssistantMessage(
                         }
                     }
                 }
-                AnchoredMenu(menu, actions, isUser = false)
             }
         }
-        val showActions = !desktop || hovered || menu.open || buttonMenu || actions.regenerate != null
+        val showActions = !desktop || hovered || buttonMenu || actions.regenerate != null
         if (item.segmentActions && (item.final || !item.active)) {
             val answerStatus = when {
                 item.partial -> "Часть истории"
@@ -368,32 +358,6 @@ fun AssistantMessage(
 private fun SmallAction(icon: ImageVector, label: String, onClick: () -> Unit, big: Boolean = false) {
     IconButton(onClick = onClick, modifier = Modifier.size(if (big) 40.dp else 32.dp)) {
         Icon(icon, label, Modifier.size(if (big) 20.dp else 16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-/** A message's context menu opens where the finger / pointer was, not at the edge of a long message. */
-private class MenuAnchor {
-    var at by mutableStateOf(Offset.Zero)
-    var open by mutableStateOf(false)
-}
-
-/** Remembers each press position (without consuming it); a right click opens the menu at once. */
-private fun Modifier.menuAnchor(anchor: MenuAnchor): Modifier = pointerInput(anchor) {
-    awaitPointerEventScope {
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            if (event.type != PointerEventType.Press) continue
-            anchor.at = event.changes.firstOrNull()?.position ?: continue
-            if (event.buttons.isSecondaryPressed) anchor.open = true
-        }
-    }
-}
-
-/** Place inside the same Box as the anchored content (at its top-left). */
-@Composable
-private fun AnchoredMenu(anchor: MenuAnchor, actions: MessageActions, isUser: Boolean) {
-    Box(Modifier.offset { anchor.at.round() }) {
-        MessageMenu(anchor.open, onDismiss = { anchor.open = false }, actions = actions, isUser = isUser)
     }
 }
 
@@ -603,6 +567,10 @@ private fun RunSpinner(size: androidx.compose.ui.unit.Dp = 13.dp) {
     )
 }
 
+/**
+ * Тихая строка (сводка группы, строка вызова). Текст подсвечивается поиском по
+ * сессии: команда вида «npm test» видна именно здесь, пока полный вывод не раскрыт.
+ */
 @Composable
 private fun QuietRow(
     leading: @Composable () -> Unit,
@@ -618,16 +586,16 @@ private fun QuietRow(
     ) {
         Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) { leading() }
         Spacer(Modifier.width(8.dp))
-        Text(text, style = MaterialTheme.typography.labelLarge, color = color)
+        Text(searchHighlighted(text), style = MaterialTheme.typography.labelLarge, color = color, modifier = Modifier.searchBringIntoView(text))
         if (target != null) {
             Spacer(Modifier.width(6.dp))
             Text(
-                target,
+                searchHighlighted(target),
                 style = MonoStyle.copy(fontSize = MaterialTheme.typography.labelMedium.fontSize),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
+                modifier = Modifier.weight(1f, fill = false).searchBringIntoView(target),
             )
         }
         if (trailing != null) {
@@ -840,10 +808,14 @@ fun NoteRow(item: ChatItem.Note, onCopy: () -> Unit, selected: Boolean = false, 
         onToggleSelect?.let { SelectMark(selected, it) }
         if (!multiline) {
             Text(
-                item.text,
+                searchHighlighted(item.text),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.clip(RoundedCornerShape(50)).background(MaterialTheme.colorScheme.surfaceContainer).padding(horizontal = 12.dp, vertical = 4.dp),
+                modifier = Modifier
+                    .searchBringIntoView(item.text)
+                    .clip(RoundedCornerShape(50))
+                    .background(MaterialTheme.colorScheme.surfaceContainer)
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
             )
         } else {
             Column(
@@ -868,7 +840,7 @@ fun NoteRow(item: ChatItem.Note, onCopy: () -> Unit, selected: Boolean = false, 
                 if (expanded) {
                     SelectionContainer {
                         Text(
-                            item.text.lineSequence().drop(1).joinToString("\n").trimStart(),
+                            searchHighlighted(item.text.lineSequence().drop(1).joinToString("\n").trimStart()),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(top = 6.dp, end = 6.dp),

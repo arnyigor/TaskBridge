@@ -48,7 +48,7 @@
       "mode": "inherit"
     },
     "turnInstructions": {
-      "mode": "legacy"
+      "mode": "hook"
     }
   },
   "memory": {

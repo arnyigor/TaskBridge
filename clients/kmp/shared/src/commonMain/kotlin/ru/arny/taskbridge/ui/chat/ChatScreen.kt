@@ -254,12 +254,14 @@ fun ChatScreen(
     // ровно то, без чего « Модель читает промпт · 40% » появлялся только по счастливой
     // случайности (STAB-STATUS-01). После хода опрос прекращается сразу.
     val engineStatus = state.task?.status
-    LaunchedEffect(connection, taskId, engineStatus) {
+    // Видимость — событие, а не опрос: в фоне цикл не просыпается вовсе, а при
+    // возврате на экран стартует сразу (см. AppGraph.visible).
+    val visible by connection.visible.collectAsState()
+    LaunchedEffect(connection, taskId, engineStatus, visible) {
         if (engineStatus !in ACTIVE_STATUSES) return@LaunchedEffect
+        if (!shouldRefreshEngineInfo(activeTurn = true, inForeground = visible)) return@LaunchedEffect
         while (true) {
-            if (shouldRefreshEngineInfo(activeTurn = true, inForeground = graph.platform.inForeground)) {
-                connection.sessions.refreshInfo()
-            }
+            connection.sessions.refreshInfo()
             delay(ENGINE_INFO_INTERVAL_MS)
         }
     }
@@ -336,6 +338,50 @@ fun ChatScreen(
         selectedIds[id] = selectedIds[id] != true
     }
 
+    // Поиск по сессии. Выбранное совпадение хранится ИДЕНТИФИКАТОРОМ сообщения, а не
+    // номером в списке находок: лента под поиском меняется (приходит ответ, догружается
+    // история), номера съезжают — и переход по стрелкам попадал в «ничего»
+    // (жалоба оператора 2026-10-30, десктоп).
+    var searchOpen by remember(taskId) { mutableStateOf(false) }
+    var searchQuery by remember(taskId) { mutableStateOf("") }
+    // Только по taskId: состояние, созданное заново по ключу searchQuery, оставляло
+    // у нажатия старый экземпляр (Compose мемоизирует лямбды кнопок), и запись выбора
+    // уходила в выброшенный MutableState — счётчик не менялся. Сброс — в onQuery.
+    var searchSelected by remember(taskId) { mutableStateOf<String?>(null) }
+    // Номер перехода: возврат к уже просмотренному сообщению — тоже переход, и блок
+    // с находкой должен снова довести себя до экрана.
+    var searchStep by remember(taskId) { mutableStateOf(0) }
+    val searchHits = remember(state.chat.items, searchQuery) { chatSearchHits(state.chat.items, searchQuery) }
+    // Ничего не выбрано — ведём от самого нового совпадения: оно ближе к тому месту,
+    // где оператор читает ленту.
+    val searchCurrent = when {
+        searchHits.isEmpty() -> -1
+        else -> searchHits.indexOfFirst { it.itemId == searchSelected }.takeIf { it >= 0 } ?: searchHits.lastIndex
+    }
+    val activeSearchHit = searchHits.getOrNull(searchCurrent)
+    // Шаг поиска читает находки ЗАНОВО в момент нажатия, а не берёт их из замыкания:
+    // Compose мемоизирует лямбды кнопок, и захваченный список находок застывал на
+    // состоянии «находок ещё нет» — стрелки считали шаг от пустого списка и молча
+    // ничего не делали (оператор, десктоп, 2026-10-30). Видимые `searchHits` и
+    // `searchCurrent` остаются для отрисовки, а обработчик берёт свежие.
+    fun liveSearchHits(): List<ChatSearchHit> = chatSearchHits(state.chat.items, searchQuery.trim())
+    fun stepSearch(delta: Int) {
+        val hits = liveSearchHits()
+        val current = hits.indexOfFirst { it.itemId == searchSelected }.takeIf { it >= 0 } ?: hits.lastIndex
+        val next = stepSearchIndex(current, delta, hits.size)
+        if (next < 0 || next == current) return
+        searchStep++
+        searchSelected = hits[next].itemId
+    }
+    val closeSearch = { searchOpen = false; searchQuery = "" }
+    // Переход к найденному: лента встаёт на сообщение совпадения (и на долю высоты
+    // сообщения, если оно выше экрана). Ключ — само совпадение: правка запроса и
+    // приход нового контента не должны дёргать ленту без нужды.
+    val searchJump = activeSearchHit?.let { searchTarget(state.chat.items, it) }
+    LaunchedEffect(searchOpen, searchJump) {
+        if (searchOpen && searchJump != null) revealSearchHit(listState, searchJump)
+    }
+
     var copyingHistory by remember { mutableStateOf(false) }
     LaunchedEffect(copyingHistory) {
         if (!copyingHistory) return@LaunchedEffect
@@ -379,14 +425,19 @@ fun ChatScreen(
         onWidthCommitted = { graph.settings.filePanelWidth = panelWidth.value.toInt() },
         onOpenPath = { link -> openFile(FileTarget.Workspace(link.path, link.line, link.endLine)) },
         onEscape = {
-            when {
+            when (chatEscape(
+                dialogOpen = dialog != null,
+                searchOpen = searchOpen,
+                filesOpen = fileTabs.items.isNotEmpty(),
+                canStop = canStop(task?.status, state.outbox.size),
+            )) {
                 // Открытый диалог — отдельное окно и обрабатывает Esc сам.
-                dialog != null -> false
-                // Панель ближе всего: Esc закрывает файл, а не ход. СТОП — следующим Esc.
-                fileTabs.items.isNotEmpty() -> { fileTabs.closeActive(); true }
+                ChatEscape.DIALOG, ChatEscape.NOTHING -> false
+                ChatEscape.SEARCH -> { closeSearch(); true }
+                // Строка поиска стоит выше панели файлов: Esc закрывает её первой, файл — следующим.
+                ChatEscape.FILE -> { fileTabs.closeActive(); true }
                 // Esc = жёсткий стоп, как в консоли: подтверждение → killTree.
-                canStop(task?.status, state.outbox.size) -> { dialog = ChatDialog.ConfirmStop; true }
-                else -> false
+                ChatEscape.STOP -> { dialog = ChatDialog.ConfirmStop; true }
             }
         },
     ) {
@@ -401,6 +452,7 @@ fun ChatScreen(
                     onDialog = { dialog = it },
                     onCopyHistory = { copyingHistory = true },
                     onSelectMessages = { selectedIds.clear(); selecting = true },
+                    onSearch = { if (searchOpen) closeSearch() else searchOpen = true },
                     // Папки нет — открывать нечего: у свежей сессии рабочая папка ещё не
                     // подготовлена, и сервер ответил бы 404.
                     onOpenFolder = if (canOpenSessionFolder(platform.kind, state.task?.workspacePath)) ::openSessionFolder else null,
@@ -451,6 +503,21 @@ fun ChatScreen(
                         onCancel = { selecting = false; selectedIds.clear() },
                     )
                 }
+                // Строка поиска стоит над лентой, как и полоса выбора: счётчик и
+                // стрелки должны быть там же, где подсвеченное, а не в меню.
+                if (searchOpen) {
+                    ChatSearchBar(
+                        query = searchQuery,
+                        onQuery = { searchQuery = it; searchSelected = null; searchStep++ },
+                        matches = searchHits.size,
+                        current = searchCurrent,
+                        // История листается страницами: пока не долистана до начала,
+                        // поиск видит только загруженное и говорит об этом в поле.
+                        partialHistory = !state.reachedStart,
+                        onStep = ::stepSearch,
+                        onClose = closeSearch,
+                    )
+                }
                 // Один таймер фаз «агент пишет» на ленту: точки читают его из LocalTypingPhase
                 // и не заводят собственных анимаций. Пока генерации нет, active = false
                 // и лишних кадров не запрашивается вовсе.
@@ -477,6 +544,13 @@ fun ChatScreen(
                                 listState = listState,
                                 following = following,
                                 historyLocked = historyLocked,
+                                // Подсветка найденного: пустой запрос (поиск закрыт) —
+                                // обычная лента без единого лишнего спана.
+                                search = ChatSearchHighlight(
+                                    query = if (searchOpen) searchQuery.trim() else "",
+                                    activeItemId = activeSearchHit?.itemId,
+                                    step = searchStep,
+                                ),
                                 onDialog = { dialog = it },
                                 continuePendingId = continuePendingId,
                                 onViewFile = { openFile(it) },
@@ -534,7 +608,7 @@ fun ChatScreen(
                     top = {
                         // Follow Plan: карточка плана над полем ввода; сама иконка
                         // режима живёт в ряду композитора (planButton).
-                        DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
+                        DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, visible = visible, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
                             QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
                         }
@@ -604,6 +678,8 @@ private fun ChatTopBar(
     onDialog: (ChatDialog) -> Unit,
     onCopyHistory: () -> Unit,
     onSelectMessages: () -> Unit,
+    /** Поиск по открытой сессии; повторное нажатие закрывает строку поиска. */
+    onSearch: () -> Unit,
     /** null — папку открыть нельзя (телефон или у сессии ещё нет рабочей папки). */
     onOpenFolder: (() -> Unit)?,
 ) {
@@ -667,6 +743,7 @@ private fun ChatTopBar(
             }
         },
         actions = {
+            IconButton(onClick = onSearch) { Icon(AppIcons.Search, "Поиск по сессии") }
             onOpenFolder?.let { open ->
                 IconButton(onClick = open) { Icon(AppIcons.Folder, "Открыть папку сессии") }
             }
@@ -991,6 +1068,8 @@ internal fun MessageList(
     onCopyMessage: (String) -> Unit,
     /** Режим выбора сообщений: у каждого видна отметка, тап переключает выбор. */
     selectionMode: Boolean = false,
+    /** Что подсвечивать как найденное поиском по сессии (пустой запрос — ничего). */
+    search: ChatSearchHighlight = ChatSearchHighlight(),
     selectedIds: Map<String, Boolean> = emptyMap(),
     onToggleSelect: (String) -> Unit = {},
 ) {
@@ -1080,7 +1159,7 @@ internal fun MessageList(
         EmptyState(AppIcons.Chat, "Что сделать агенту?", listOfNotNull(setup.ifEmpty { null }, "Опишите задачу — агент прочитает проект, внесёт правки и запустит команды.").joinToString("\n"))
         return
     }
-    CompositionLocalProvider(LocalChatListState provides listState) {
+    CompositionLocalProvider(LocalChatListState provides listState, LocalChatSearch provides search) {
     LazyColumn(
         state = listState,
         reverseLayout = true,
@@ -1092,6 +1171,13 @@ internal fun MessageList(
         // growing answers with dispatchRawDelta here: nested with an expanded block's
         // Pinned scroll it re-enters LazyListState and crashes Android.
         items(reversed, key = { it.id }, contentType = { it::class.simpleName }) { item ->
+            // Сообщение, которое рисуется: по нему подсветка находит свои совпадения
+            // и отличает ведущее сообщение поиска от остальных. Держатель прокрутки
+            // свой на элемент — первый найденный блок сообщения доводит себя до экрана.
+            CompositionLocalProvider(
+                LocalSearchItemId provides item.id,
+                LocalSearchBringIntoView provides remember(item.id) { SearchBringIntoView() },
+            ) {
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
                 Box(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
                     when (item) {
@@ -1157,6 +1243,7 @@ internal fun MessageList(
                         )
                     }
                 }
+            }
             }
         }
         item(key = "history-start") {
@@ -1285,6 +1372,7 @@ private fun DeliveryDiagnostics(
     info: ApiInfo?,
     catalog: ModelCatalog?,
     platform: PlatformServices,
+    visible: Boolean,
     nowMillis: () -> Long,
     onRefresh: () -> Unit,
     onCopy: (String) -> Unit,
@@ -1292,15 +1380,7 @@ private fun DeliveryDiagnostics(
     var open by remember(state.taskId) { mutableStateOf(false) }
     // Возраст событий и длительность сессии в диагностике должны идти, пока панель
     // открыта, — иначе «12 с назад» застыло бы на моменте открытия.
-    var openTick by remember(state.taskId) { mutableStateOf(nowMillis()) }
-    LaunchedEffect(state.taskId, open) {
-        if (open) {
-            // Сразу свежий замер: без него первую секунду после открытия видны
-            // возрасты с прошлого открытия панели.
-            openTick = nowMillis()
-            while (true) { delay(1000); openTick = nowMillis() }
-        }
-    }
+    val openTick = rememberVisibleClock(active = open, visible = visible, nowMillis = nowMillis)
     val answer = state.chat.items.filterIsInstance<ChatItem.Assistant>().lastOrNull()
     // Live engine PP (llama.cpp reports it in /api/info before the first token)
     // makes «Модель читает промпт» work for a local session even on its first
@@ -1368,10 +1448,11 @@ private fun DeliveryDiagnostics(
     // Сколько длится сжатие: сервер ставит compactingSince на compaction_start.
     // Часы клиента и сервера расходятся на секунды по LAN — для счётчика это ок.
     val compactingSince = state.task?.runtime?.compactingSince
-    var compactTick by remember(state.taskId) { mutableStateOf(nowMillis()) }
-    LaunchedEffect(state.taskId, compactingSince) {
-        if (compactingSince != null && compactingSince > 0) while (true) { delay(1000); compactTick = nowMillis() }
-    }
+    val compactTick = rememberVisibleClock(
+        active = compactingSince != null && compactingSince > 0,
+        visible = visible,
+        nowMillis = nowMillis,
+    )
     val compactElapsed = compactingSince?.takeIf { it > 0 }?.let { (compactTick - it).coerceAtLeast(0) }
     val compactingDetail = compactElapsed?.let { " · ${elapsedClock(it)}" }.orEmpty()
     // «Читает промпт» — только по живому признаку: фаза движка (Strata: «reading the
@@ -1396,10 +1477,7 @@ private fun DeliveryDiagnostics(
     LaunchedEffect(state.taskId, state.task?.status, lastUserAt) {
         startedAt = turnStartedAt(state.task?.status, startedAt, lastUserAt)
     }
-    var tick by remember(state.taskId) { mutableStateOf(nowMillis()) }
-    LaunchedEffect(state.taskId, startedAt) {
-        if (startedAt != null) while (true) { delay(1000); tick = nowMillis() }
-    }
+    val tick = rememberVisibleClock(active = startedAt != null, visible = visible, nowMillis = nowMillis)
     val elapsed = startedAt?.let { (tick - it).coerceAtLeast(0) }
     // Подпись состояния — после счётчика: «повтор через 1 ч 31 мин» идёт по секундам
     // клиента (`tick`), и с застывшим «сейчас» она показывала бы уже прошедший повтор.
@@ -2051,6 +2129,34 @@ internal fun readsPromptNow(readingPrompt: Boolean, livePp: Double?, answerSilen
 internal const val ENGINE_INFO_INTERVAL_MS = 3_000L
 
 /**
+ * «Сейчас», обновляемое раз в секунду, — только пока экран виден.
+ *
+ * В фоне счётчики (длительность хода, сжатия, возраст событий) некому показывать,
+ * а тик раз в секунду пишет snapshot-состояние: композиция живёт дольше `onStop`, и
+ * счётчики продолжали бы будить ленту чата всю ночь. Поэтому в фоне цикл не
+ * запускается вовсе, а [visible] — событие, а не флаг для опроса: на возврате на
+ * экран счётчик стартует сразу.
+ */
+@Composable
+private fun rememberVisibleClock(
+    active: Boolean,
+    visible: Boolean,
+    nowMillis: () -> Long,
+): Long {
+    var now by remember(active) { mutableStateOf(nowMillis()) }
+    LaunchedEffect(active, visible) {
+        if (!active || !visible) return@LaunchedEffect
+        // Сразу свежий замер: счётчик не должен показывать значение с прошлого раза.
+        now = nowMillis()
+        while (true) {
+            now = nowMillis()
+            delay(1_000)
+        }
+    }
+    return now
+}
+
+/**
  * Стоит ли сейчас перечитывать `/api/info` ради телеметрии движка.
  *
  * Только активный ход и только видимый экран: в фоне телефон не должен держать
@@ -2530,6 +2636,25 @@ internal fun canStop(status: String?, pendingSends: Int = 0): Boolean =
     pendingSends > 0 || status in setOf(
         "QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING",
     )
+
+/** Что делает Esc в чате: закрывает то, что открыто последним. */
+internal enum class ChatEscape { DIALOG, SEARCH, FILE, STOP, NOTHING }
+
+/**
+ * Порядок Esc: сначала то, что появилось последним и лежит ближе всего к оператору.
+ * Поиск — перед панелью файлов и перед СТОПом: его открыли только что, и первое
+ * нажатие Esc должно вернуть ленту, а не выйти из сессии (жалоба оператора 2026-10-30).
+ *
+ * Открытый диалог отдаётся ему самому (`DIALOG` → обработчик ничего не делает):
+ * диалог — отдельное окно и Esc обрабатывает сам.
+ */
+internal fun chatEscape(dialogOpen: Boolean, searchOpen: Boolean, filesOpen: Boolean, canStop: Boolean): ChatEscape = when {
+    dialogOpen -> ChatEscape.DIALOG
+    searchOpen -> ChatEscape.SEARCH
+    filesOpen -> ChatEscape.FILE
+    canStop -> ChatEscape.STOP
+    else -> ChatEscape.NOTHING
+}
 
 /**
  * Шаг C-A: состояние молчания хода для баннера.

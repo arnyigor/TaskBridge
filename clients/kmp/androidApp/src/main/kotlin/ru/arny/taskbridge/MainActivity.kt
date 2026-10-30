@@ -1,7 +1,10 @@
 package ru.arny.taskbridge
 
 import android.Manifest
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.os.Build
@@ -64,16 +67,41 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         val app = application as TaskBridgeApplication
         app.platform.foreground = true
+        // Экран, а не только жизненный цикл: активность может остаться Resumed при
+        // погашенном экране, и тогда без этих событий ничто не пересчитает видимость.
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
+        }
+        runCatching { registerReceiver(screenReceiver, filter) }
         app.graph.connection?.wakeUp()
     }
 
     override fun onStop() {
         val app = application as TaskBridgeApplication
+        runCatching { unregisterReceiver(screenReceiver) }
         app.platform.foreground = false
         // The process may stay alive for notifications, but no hidden chat keeps
         // an SSE socket or decodes heartbeat-triggered snapshots in the background.
         app.graph.connection?.appVisibilityChanged()
         super.onStop()
+    }
+
+    /**
+     * Погас/зажёгся экран: сказать графу, что видимость изменилась.
+     *
+     * Сама видимость читается из `PowerManager.isInteractive` (см.
+     * `AndroidPlatformServices.inForeground`), здесь нужен только повод пересчитать
+     * её: закрыть SSE и тикающие счётчики при погасании и переподключиться при возврате.
+     * Замер 2026-10-30: при позиции «экран погас, активность Resumed» телефон получал
+     * 25% CPU в фоне за 5 минут — ровно поток живого чата, который никто не видел.
+     */
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val app = application as? TaskBridgeApplication ?: return
+            app.graph.connection?.appVisibilityChanged()
+            if (intent?.action == Intent.ACTION_SCREEN_ON) app.graph.connection?.wakeUp()
+        }
     }
 
     override fun onDestroy() {

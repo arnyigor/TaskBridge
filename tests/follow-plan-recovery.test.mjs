@@ -138,7 +138,9 @@ test('RC-05: a client that reconnects at the step boundary receives the current 
 });
 
 test('RC-06: two clients pressing Resume produce at most one new turn', { timeout: 90000 }, async t => {
-  const fixture = await fixtureWithPlan(t);
+  // Keep the first step in flight: the normal 80 ms turn can finish the whole
+  // plan before Pause, in which case COMPLETED correctly cannot be paused.
+  const fixture = await fixtureWithPlan(t, { plan: PLAN.replace('Первый шаг', 'Первый шаг slow') });
   const { api, root } = fixture;
   const task = await createTask(api);
   await api(`/api/tasks/${task.id}/plan/attach`, { path: 'PLAN.md', commandId: 'rc06-attach' });
@@ -148,7 +150,7 @@ test('RC-06: two clients pressing Resume produce at most one new turn', { timeou
     changes: { ops: [{ op: 'add_finding', findingId: 'F-001', priority: 'P2', summary: 'заметка' }] }
   }, 'PATCH');
   await api(`/api/tasks/${task.id}/plan/start`, { expectedRevision: 2, commandId: 'rc06-start' });
-  await sleep(300);
+  assert.ok(await waitFor(async () => (await planPrompts(root)).length === 1), 'the first plan turn must be delivered');
   await api(`/api/tasks/${task.id}/plan/pause`, { commandId: 'rc06-pause' });
   const paused = await waitFor(async () => {
     const value = await api(`/api/tasks/${task.id}/plan`);

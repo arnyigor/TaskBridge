@@ -150,6 +150,8 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
     val folded = lines > FOLDED_LINES + 6 && !expanded
     val shown = remember(code, folded) { if (folded) code.lineSequence().take(FOLDED_LINES).joinToString("\n") else code }
     val text = remember(shown, language, palette) { highlight(shown, language, palette) }
+    // Найденное в блоке кода тоже подсвечивается: ошибки и строки ищут именно там.
+    val marked = searchHighlighted(text)
     Column(
         modifier
             .fillMaxWidth()
@@ -181,10 +183,13 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         Text(
-            text,
+            marked,
             style = MonoStyle,
             softWrap = false,
-            modifier = Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 10.dp),
+            modifier = Modifier
+                .searchBringIntoView(marked.text)
+                .horizontalScroll(rememberScrollState())
+                .padding(horizontal = 12.dp, vertical = 10.dp),
         )
         if (lines > FOLDED_LINES + 6) DisableSelection {
             Text(
@@ -302,16 +307,21 @@ private class TableGrid { var rowBottoms = IntArray(0) }
 @Composable
 private fun ChipText(text: AnnotatedString, style: TextStyle, modifier: Modifier = Modifier, textAlign: TextAlign = TextAlign.Unspecified) {
     val chip = LocalStatusColors.current.codeChip
-    val ranges = remember(text) { codeRanges(text) }
+    // Поиск по сессии: подсветка идёт первой, чтобы коробки инлайн-кода считались
+    // по тому же тексту, что рисуется (фоновые спаны моноширинность не меняют).
+    val marked = searchHighlighted(text)
+    val ranges = remember(marked) { codeRanges(marked) }
     val boxes = remember { mutableStateOf(emptyList<Rect>()) }
     Text(
-        text = text,
+        text = marked,
         style = style,
         textAlign = textAlign,
         onTextLayout = { layout -> boxes.value = codeChipRects(layout, ranges) },
-        modifier = modifier.drawBehind {
-            for (box in boxes.value) drawRoundRect(chip, box.topLeft, box.size, CornerRadius(box.height * 0.22f))
-        },
+        modifier = modifier
+            .searchBringIntoView(marked.text)
+            .drawBehind {
+                for (box in boxes.value) drawRoundRect(chip, box.topLeft, box.size, CornerRadius(box.height * 0.22f))
+            },
     )
 }
 
