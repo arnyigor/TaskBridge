@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { TaskStore } from '../src/task-store.mjs';
 import { parsePlan, serializePlan, applyChanges, planHash } from '../src/application/plan-file.mjs';
-import { PlanFollower, DEFAULT_LIMITS, nextOpenStep, stepCommandId } from '../src/application/plan-follower.mjs';
+import { PlanFollower, DEFAULT_LIMITS, nextOpenStep, stepCommandId, stepInstruction } from '../src/application/plan-follower.mjs';
 
 const PLAN = `---
 taskbridge_plan: 1
@@ -447,6 +447,35 @@ test('a BLOCKED turn names why a proposed step was refused instead of pausing si
   assert.equal(plain.outcome, 'RECEIVED', 'честный BLOCKED не выдаётся за отказ чекпоинта');
   assert.equal(plain.reasonCode, 'NOTHING_TO_APPLY');
   assert.match(plain.message, /В файл ничего не записано: текущий шаг остаётся тем же/, 'пауза называет тупик');
+});
+
+test('evidence by a saved artifact closes the step without a toolCallId', async t => {
+  const { follower, plans, dispatched } = await setup(t);
+  const started = await follower.start({ taskId: 't-1', commandId: 'artifact-evidence' });
+
+  // Живой прогон 2026-10-30 (S-059): модель сделала шаг, но не заявила его,
+  // решив, что ref обязан быть toolCallId. Путь к артефакту принимается.
+  const settled = await follower.onSettled({
+    taskId: 't-1', commandId: started.commandId,
+    checkpoint: checkpoint({
+      completedStepIds: ['S-001'],
+      evidence: [{ stepId: 'S-001', kind: 'file', ref: 'build/s059-build.log', summary: 'benchmark собрана, лог сохранён' }]
+    })
+  });
+
+  assert.equal(settled.code, 'DISPATCHED', `артефакт должен закрывать шаг: ${settled.message}`);
+  const written = parsePlan(plans.state.text);
+  assert.equal(written.steps[0].status, 'DONE', 'шаг закрыт по пути к файлу');
+  assert.match(written.steps[0].result, /MODEL_REPORTED/, 'уровень честный: путь не проверен системой');
+  assert.equal(settled.stepId, 'S-002', 'цикл пошёл дальше');
+});
+
+test('the step instruction names both kinds of evidence reference', () => {
+  const instruction = stepInstruction({ path: 'PLAN.md', planId: 'p-x', revision: 3, cycleId: 'c-2', stepId: 'S-001' });
+  assert.match(instruction, /toolCallId/, 'toolCallId назван');
+  assert.match(instruction, /путь к сохранённому артефакту/, 'путь к артефакту назван явно');
+  assert.match(instruction, /SYSTEM_VERIFIED/);
+  assert.match(instruction, /MODEL_REPORTED/);
 });
 
 test('a well-formed proposed step on BLOCKED gets the plan out of the deadlock', async t => {

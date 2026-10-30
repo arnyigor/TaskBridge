@@ -105,7 +105,7 @@ export function inspectCheckpoint({ plan, checkpoint, cycle, policy = DEFAULT_PO
       continue;
     }
     unverified.push(id);
-    problems.push(`шаг ${id}: у шага есть способ проверки, но подтверждение без проверяемой ссылки — пришли ref на toolCallId этого хода`);
+    problems.push(`шаг ${id}: у шага есть способ проверки, но подтверждение без проверяемой ссылки — пришли ref: toolCallId этого хода или путь к сохранённому артефакту`);
   }
 
   const findings = (Array.isArray(value.findings) ? value.findings : []).map(finding => ({
@@ -244,7 +244,7 @@ export function auditInstruction({ path, planId, revision, cycleId, stepId, corr
     ? `Checkpoint отклонён: ${correctionProblems.join('; ')}. `
       + 'Исправь ровно перечисленные поля и передай taskbridge_plan_checkpoint снова: '
       + 'идентификатор проблемы — виду F-001, идентификатор шага — виду S-001, '
-      + 'revision и cycleId — из сообщения шага, evidence.ref — toolCallId этого хода. '
+      + 'revision и cycleId — из сообщения шага, evidence.ref — toolCallId этого хода или путь к сохранённому артефакту. '
       + 'Не придумывай ссылки, не переделывай работу и не запускай следующий шаг. '
     : 'Ты закончил ход, но не передал checkpoint. ';
   return `Режим FOLLOW PLAN. ${issue}`
