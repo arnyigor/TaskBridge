@@ -584,7 +584,16 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
   }
   if (command.type === 'set_auto_compaction') { automatic = command.enabled; return respond(); }
   if (command.type === 'compact') {
-    const result = { tokensBefore: 1100, estimatedTokensAfter: 500, summary: 'Сжатая сводка предыдущего контекста' };
+    // Two failure shapes a real Pi produces, pinned for the server-side guard
+    // (docs/context-compaction-plan.md, P2/P5).
+    if (process.env.FAKE_PI_COMPACT_SMALL === '1') {
+      return send({ type: 'response', id: command.id, command: command.type, success: false,
+        error: 'Nothing to compact (session too small)' });
+    }
+    // Same field set a real Pi returns (CompactionResult), so the server-side
+    // verification sees a realistic boundary instead of a fixture hole.
+    const result = { tokensBefore: 1100, estimatedTokensAfter: 500, firstKeptEntryId: 'fixture-kept-entry',
+      summary: process.env.FAKE_PI_COMPACT_EMPTY === '1' ? '' : 'Сжатая сводка предыдущего контекста' };
     // Shaped like the real smart-compaction extension (real session 2026-09-30):
     // compaction_start, a start notify, per-stage setStatus ticks with elapsed
     // seconds, then the compaction_end result — the stage the diagnostics panel

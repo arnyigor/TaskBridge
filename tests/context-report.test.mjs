@@ -300,3 +300,125 @@ test('CTX-03: without any compaction there is no estimate block at all', () => {
   assert.equal(report.usage.stale, false);
   assert.match(report.note, /оценка/i);
 });
+
+// CMP-01: an excluded tool is not sent to the model, so it must not be counted
+// as context. It stays visible in the status (cached), only the count changes.
+test('mcpDeclarations skips excluded tools and reports them separately', async t => {
+  const f = await fixture(t);
+  const status = {
+    mode: 'managed',
+    controllable: true,
+    servers: [{
+      name: 'img',
+      excludeTools: ['analyze_image'],
+      tools: [{ name: 'analyze_image', description: 'x'.repeat(100) }, { name: 'ocr', description: 'y'.repeat(10) }],
+    }],
+  };
+  const tools = mcpDeclarations(status);
+  assert.deepEqual(tools.map(tool => tool.name), ['ocr']);
+  const byId = Object.fromEntries((await collectContextSources({ cwd: f.project, agentDir: f.agentDir, mcp: status })).map(item => [item.id, item]));
+  assert.equal(byId['mcp-tools'].count, 1);
+  assert.equal(byId['mcp-tools'].excluded, 1);
+  assert.equal(byId['mcp-tools'].controllable, true);
+  assert.equal(byId['mcp-tools'].chars, 'ocr'.length + 10);
+});
+
+test('mcpDeclarations also honours the enabled flag the status now carries', () => {
+  const tools = mcpDeclarations({ servers: [{ name: 's', tools: [{ name: 'off', enabled: false }, { name: 'on', enabled: true }] }] });
+  assert.deepEqual(tools.map(tool => tool.name), ['on']);
+});
+
+// CMP-02: named numbers, each with its own source; unknown stays null.
+test('breakdown separates measured, estimated and unattributed parts', () => {
+  const sources = [
+    { id: 'system-prompt', known: true, tokens: 500 },
+    { id: 'instructions', known: true, tokens: 1500 },
+    { id: 'skills', known: true, tokens: 250 },
+    { id: 'mcp-tools', known: true, tokens: 1000 },
+    { id: 'builtin-tools', known: false, tokens: null },
+  ];
+  const report = buildContextReport({
+    taskId: 't4',
+    stats: { contextUsage: { tokens: 60000, contextWindow: 200000, percent: 30 } },
+    sources,
+    session: {
+      available: true,
+      active: { kept: { messages: 4, chars: 8000 } },
+      compaction: { summaryChars: 1600 },
+      history: { excludedChars: 40000 },
+    },
+  });
+  assert.equal(report.breakdown.systemTokens, 500);
+  assert.equal(report.breakdown.instructionsTokens, 1500);
+  assert.equal(report.breakdown.skillsTokens, 250);
+  assert.equal(report.breakdown.toolSchemaTokens, 1000);
+  assert.equal(report.breakdown.historyTokens, 2000, 'kept messages from the session file, not a residual');
+  assert.equal(report.breakdown.summaryTokens, 400);
+  assert.equal(report.breakdown.excludedTokens, 10000);
+  assert.equal(report.breakdown.estimatedTotalTokens, 3250);
+  assert.equal(report.breakdown.providerInputTokens, null, 'Pi does not report a per-request input size');
+  assert.equal(report.breakdown.unattributedTokens, report.unaccountedTokens);
+  assert.equal(report.breakdown.measuredAt, null);
+});
+
+test('breakdown never turns an unknown size into zero', () => {
+  const report = buildContextReport({
+    taskId: 't5',
+    sources: [{ id: 'system-prompt', known: false, tokens: null }],
+  });
+  assert.equal(report.breakdown.systemTokens, null);
+  assert.equal(report.breakdown.historyTokens, null);
+  assert.equal(report.breakdown.summaryTokens, null);
+  assert.equal(report.breakdown.estimatedTotalTokens, null);
+  assert.equal(report.breakdown.unattributedTokens, null);
+  assert.equal(report.breakdown.sources.total, null);
+});
+
+// The snapshot a compaction entry replays is real context, and it belongs to the
+// static part: it must be a named number, not part of the residual.
+test('breakdown names the compaction system snapshot and its stale tools', () => {
+  const report = buildContextReport({
+    taskId: 't6',
+    stats: { contextUsage: { tokens: 46000, contextWindow: 200000, percent: 23 } },
+    sources: [{ id: 'system-prompt', known: true, tokens: 500 }],
+    session: {
+      available: true,
+      active: { kept: { messages: 2, chars: 400 } },
+      compaction: { summaryChars: 6000 },
+      systemSnapshot: { chars: 60586, sections: { preamble: 2228, project_context: 12217, skills: 10503, cwd: 28 }, tools: ['read', 'project_md'], staleTools: ['project_md'] },
+    },
+  });
+  assert.equal(report.breakdown.snapshotTokens, 15147);
+  assert.equal(report.breakdown.snapshotTools, 2);
+  assert.deepEqual(report.breakdown.snapshotStaleTools, ['project_md']);
+  assert.equal(report.breakdown.snapshotSections.skills, 10503);
+  assert.equal(report.breakdown.sources.snapshot, 'файл сессии Pi (CompactionEntry.systemMessage)');
+  assert.equal(report.breakdown.historyTokens, 100);
+  assert.equal(report.breakdown.summaryTokens, 1500);
+});
+
+// P6: Pi's token accounting is per session. It must be shown as such, next to the
+// cache hit ratio, and never pasted into "current request size".
+test('provider tokens are labelled as session totals and the cache ratio is derived', () => {
+  const report = buildContextReport({
+    taskId: 't7',
+    stats: {
+      contextUsage: { tokens: 40000, contextWindow: 200000, percent: 20 },
+      tokens: { input: 20000, output: 5000, cacheRead: 60000, cacheWrite: 10000, total: 95000 },
+      cost: 0.12,
+    },
+    sources: [],
+  });
+  assert.equal(report.provider.tokens.cacheRead, 60000);
+  assert.equal(report.provider.tokens.cacheWrite, 10000);
+  assert.equal(report.provider.cacheHitRatio, 0.75, '60000 / (60000 + 20000)');
+  assert.equal(report.provider.scope, 'session');
+  assert.match(report.provider.note, /за сессию/);
+  assert.equal(report.breakdown.providerInputTokens, null);
+  assert.match(report.breakdown.providerInputReason, /сумму за сессию/);
+});
+
+test('without token statistics the provider block is absent, not zeroed', () => {
+  const report = buildContextReport({ taskId: 't8', stats: { contextUsage: { tokens: 100 } }, sources: [] });
+  assert.equal(report.provider, null);
+});

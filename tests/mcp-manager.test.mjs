@@ -180,3 +180,84 @@ test('off mode config stays empty (no direct tools, nothing to silence)', async 
   await mcp.ensureReady();
   assert.deepEqual(JSON.parse(await fs.readFile(mcp.offPath, 'utf8')), { mcpServers: {} });
 });
+
+// CMP-01: the per-task `mcp.mode` was parsed and then never used — #mcpArgs
+// always took the global lane. These four tests pin the effective launch.
+test('per-task mode wins over the global one and reaches args, env and fingerprint', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-taskmode-');
+  await fs.writeFile(path.join(dataRoot, 'mcp.json'), JSON.stringify({ mcpServers: { a: { command: 'a' } } }));
+  const taskDir = await temp(t, 'tb-mcp-taskdir-');
+
+  // Global inherit, task managed → TaskBridge must scope the task's Pi.
+  const inheritGlobal = new McpManager({ mcp: { mode: 'inherit' } }, dataRoot);
+  const managedTask = await inheritGlobal.launchFor({ mode: 'managed' }, { taskDir });
+  assert.equal(managedTask.mode, 'managed');
+  assert.deepEqual(managedTask.args, ['--mcp-config', inheritGlobal.path]);
+  assert.equal(managedTask.env.PI_MCP_CONFIG_MODE, 'exclusive');
+  assert.match(managedTask.fingerprint, /^[a-f0-9]{16}$/);
+
+  // Global managed, task inherit → no args at all, and the ignored override is named.
+  const managedGlobal = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  const inherited = await managedGlobal.launchFor({ mode: 'inherit', disabledServers: ['a'] }, { taskDir });
+  assert.deepEqual(inherited.args, []);
+  assert.deepEqual(inherited.env, {});
+  assert.equal(inherited.mode, 'inherit');
+  assert.equal(inherited.ignored, 'inherit');
+});
+
+// Regression: in `off` mode a per-task disabledServers list used to build a
+// derived copy of the MANAGED config (all servers enabled again) and pass that.
+test('off mode keeps the empty config even when the task disables servers', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-offtask-');
+  await fs.writeFile(path.join(dataRoot, 'mcp.json'), JSON.stringify({ mcpServers: { a: { command: 'a' } } }));
+  const taskDir = await temp(t, 'tb-mcp-offtask-dir-');
+  const mcp = new McpManager({ mcp: { mode: 'off' } }, dataRoot);
+  await mcp.ensureReady();
+  const launch = await mcp.launchFor({ disabledServers: ['a'] }, { taskDir });
+  assert.equal(launch.mode, 'off');
+  assert.deepEqual(launch.args, ['--mcp-config', mcp.offPath]);
+  assert.equal(launch.ignored, 'off');
+  await assert.rejects(fs.access(path.join(taskDir, 'mcp.json')), 'no derived config is written in off mode');
+});
+
+test('managed per-task override writes a derived copy with the pinned settings', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-derive-');
+  await fs.writeFile(path.join(dataRoot, 'mcp.json'), JSON.stringify({
+    mcpServers: { keep: { command: 'k' }, drop: { command: 'd' } }, settings: { collapsedResultLines: 3 },
+  }));
+  const taskDir = await temp(t, 'tb-mcp-derive-dir-');
+  const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  const launch = await mcp.launchFor({ disabledServers: ['drop', 'unknown'] }, { taskDir });
+  assert.equal(launch.scope, 'task');
+  assert.deepEqual(launch.args, ['--mcp-config', path.join(taskDir, 'mcp.json')]);
+  const written = JSON.parse(await fs.readFile(path.join(taskDir, 'mcp.json'), 'utf8'));
+  assert.equal(written.mcpServers.drop.disabled, true);
+  assert.equal(written.mcpServers.keep.disabled, undefined);
+  assert.equal(written.settings.warnOnLargeDirectTools, false);
+  assert.equal(written.settings.collapsedResultLines, 3);
+  // The shared file is untouched.
+  assert.equal(JSON.parse(await fs.readFile(path.join(dataRoot, 'mcp.json'), 'utf8')).mcpServers.drop.disabled, undefined);
+
+  // A changed config is a different fingerprint: that is what «pending_restart» is decided on.
+  const before = await mcp.activeFingerprint();
+  await mcp.setDisabled('keep', true);
+  assert.notEqual(await mcp.activeFingerprint(), before);
+});
+
+test('status marks excluded tools as not enabled and says inherit is not controllable', async t => {
+  const dataRoot = await temp(t, 'tb-mcp-enabled-');
+  const agentDir = await temp(t, 'tb-mcp-enabled-agent-');
+  await fs.writeFile(path.join(agentDir, 'mcp-cache.json'), JSON.stringify({
+    servers: { img: { tools: [{ name: 'ocr' }, { name: 'analyze_image' }] } },
+  }));
+  const mcp = new McpManager({ mcp: { mode: 'managed' } }, dataRoot);
+  await mcp.write({ mcpServers: { img: { command: 'python' } } });
+  await mcp.setToolExcluded('img', 'analyze_image', true);
+  const status = await mcp.status({ PI_AGENT_DIR: agentDir });
+  const img = status.servers.find(server => server.name === 'img');
+  assert.deepEqual(img.tools.map(tool => [tool.name, tool.enabled]), [['ocr', true], ['analyze_image', false]]);
+  assert.equal(status.controllable, true);
+
+  const inherited = await new McpManager({ mcp: { mode: 'inherit' } }, await temp(t, 'tb-mcp-inh-')).status({ PI_AGENT_DIR: agentDir });
+  assert.equal(inherited.controllable, false, 'inherit: Pi reads its own file, toggles here do not reach it');
+});

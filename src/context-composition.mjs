@@ -54,10 +54,53 @@ function describe(role, message, timestamp = null) {
 }
 
 /**
+ * Снимок системного промпта из записи compaction.
+ *
+ * Pi 1.4.0 сохраняет в `CompactionEntry.systemMessage` копию системного
+ * промпта и объявленных инструментов на момент сжатия (`session-manager.js`:
+ * `entry.systemMessage ? [entry.systemMessage, summary] : [summary]`), и эта
+ * копия участвует в каждом следующем запросе. Для реальной сессии это 60 586
+ * символов ≈ 15K токенов: preamble 2 228, project_context 12 217, skills 10 503,
+ * toolsAdded 34 898 (36 инструментов). Поэтому её размер обязан быть виден в
+ * отчёте отдельно: без этого он молча попадает в «прочие источники».
+ *
+ * `tools` — имена, объявленные в снимке; `staleTools` — те из них, которые
+ * сейчас отключены или исключены (отключённый MCP-инструмент остаётся в тексте
+ * старого снимка, хотя модель вызвать его больше не может). Сравнение идёт
+ * только с известными MCP-инструментами: список встроенных инструментов Pi
+ * снаружи не читается, и выдумывать его здесь нельзя.
+ */
+function systemSnapshotOf(message, toolNames = {}) {
+  if (!message || message.role !== 'system') return null;
+  const sections = {};
+  for (const [name, value] of Object.entries(message.sections || {})) {
+    if (typeof value === 'string') sections[name] = value.length;
+  }
+  const sectionsChars = Object.values(sections).reduce((sum, value) => sum + value, 0);
+  const contentChars = typeof message.content === 'string' ? message.content.length : 0;
+  const tools = Array.isArray(message.toolsAdded)
+    ? message.toolsAdded.map(tool => (typeof tool === 'string' ? tool : tool?.name)).filter(name => typeof name === 'string')
+    : [];
+  const toolChars = Array.isArray(message.toolsAdded) ? JSON.stringify(message.toolsAdded).length : 0;
+  const known = Array.isArray(toolNames?.managed) ? new Set(toolNames.managed) : null;
+  const enabled = Array.isArray(toolNames?.enabled) ? new Set(toolNames.enabled) : null;
+  return {
+    chars: sectionsChars + contentChars + toolChars,
+    sections,
+    tools,
+    toolChars,
+    // Только когда набор известен: иначе «устаревших» не бывает.
+    staleTools: known && enabled ? tools.filter(name => known.has(name) && !enabled.has(name)) : null,
+  };
+}
+
+/**
  * @param {{messages?: Array, branchMessages?: Array}} session результат readPiSession
+ * @param {{managed?: string[], enabled?: string[]}} [options.availableTools]
+ *   имена MCP-инструментов: известные адаптеру и фактически разрешённые сейчас
  * @returns метаданные состава активного контекста; никакого текста сообщений
  */
-export function summarizeSessionContext(session = {}) {
+export function summarizeSessionContext(session = {}, options = {}) {
   const active = Array.isArray(session.messages) ? session.messages : [];
   const branch = Array.isArray(session.contextBranchMessages) ? session.contextBranchMessages
     : Array.isArray(session.branchMessages) ? session.branchMessages : [];
@@ -82,6 +125,8 @@ export function summarizeSessionContext(session = {}) {
     branchSource: session.branchSource ?? 'file-tail',
     leafId: session.leafId ?? null,
     checkpoint: session.compaction?.checkpoint ?? null,
+    // Снимок системного промпта, который Pi переигрывает после сжатия.
+    systemSnapshot: systemSnapshotOf(active.find(message => message?.role === 'system'), options.availableTools),
     active: {
       total: totals(activeEntries), kept: totals(kept),
       retained: retainedCount === null ? null : totals(kept.slice(0, retainedCount)),
@@ -105,8 +150,8 @@ export function summarizeSessionContext(session = {}) {
       excludedMessages: excludedCount,
       excludedChars: Math.max(0, totals(branch.map(message => describe(message.role, message))).chars - totals(activeEntries).chars),
     },
-    // Системный промпт и объявления инструментов в файле сессии не лежат — их
-    // считает только отчёт по источникам (context-report.mjs).
+    // Системный промпт заново собирает Pi; в файле сессии лежит только снимок
+    // момента сжатия (`systemSnapshot`), и он не заменяет текущие секции.
     note: 'Реконструкция по правилам Pi 1.4.0: ветка, context_edit и системный checkpoint учтены. Это не токенизация запроса. Без активного Pi выбрана последняя запись файла, а не подтверждённый runtime leaf. Текст сообщений и сводки загружается только по отдельному запросу.',
   };
 }

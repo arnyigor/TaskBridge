@@ -5029,13 +5029,21 @@ $('renameButton').onclick = async () => {
 
 $('compact').onclick = async () => {
   if (!selectedTaskId) return;
-  const instructions = prompt('Доп. инструкции для compaction (можно оставить пустым):', '') ?? null;
+  // Focus text is Pi's `customInstructions`: «what must survive the summary».
+  const instructions = prompt('Что сохранить при сжатии (можно оставить пустым):\nПример: архитектурные решения, открытые вопросы, шаги Follow Plan', '') ?? null;
   if (instructions === null) return;
   try {
     const r = await api(`/api/tasks/${selectedTaskId}/compact`, { method: 'POST', body: JSON.stringify({ instructions }) });
-    alert(`Compaction завершён. Before: ${r.result?.tokensBefore ?? '?'}; after: ${r.result?.estimatedTokensAfter ?? '?'}`);
+    const result = r.result || {};
+    const lines = [`Compaction завершён. Before: ${result.tokensBefore ?? '?'}; after: ${result.estimatedTokensAfter ?? '?'}`];
+    // The server names what it checked; a failed check is not «success».
+    if (result.verification && result.verification.passed === false) {
+      lines.push(`Проверка не пройдена: ${(result.verification.failed || []).join(', ') || 'причина неизвестна'}`);
+    }
+    if (result.advice) lines.push(result.advice);
+    alert(lines.join('\n\n'));
   } catch (e) {
-    if (/too small|nothing to compact/i.test(e.message)) alert('Пока нечего сжимать — контекст ещё маленький.');
+    if (e.code === 'NOTHING_TO_COMPACT' || /too small|nothing to compact/i.test(e.message)) alert(e.message);
     else alert(e.message);
   }
 };
@@ -6036,11 +6044,15 @@ let lastMcpTools = new Set();
 function renderMcp() {
   const mode = mcpStatus?.mode || 'inherit';
   $('mcpMode').value = mode;
-  $('mcpHint').textContent = mode === 'inherit'
+  $('mcpHint').textContent = (mode === 'inherit'
     ? 'Задачи используют MCP-конфиг Pi без изменений (список ниже — только просмотр). Переключите на managed и импортируйте, чтобы управлять отсюда.'
     : mode === 'off'
       ? 'MCP выключен для задач: Pi запускается с пустым конфигом.'
-      : `Задачи используют конфиг TaskBridge: ${mcpStatus?.configPath || ''}`;
+      : `Задачи используют конфиг TaskBridge: ${mcpStatus?.configPath || ''}`)
+    // Pi получает MCP-конфигурацию при запуске, поэтому изменение не может
+    // попасть в уже работающий процесс. Сказать это честно важнее, чем сделать
+    // вид, что инструмент исчез из контекста модели (CMP-01).
+    + (mcpStatus?.apply?.state === 'pending_restart' ? ` ${mcpStatus.apply.detail || 'Изменение применится после перезапуска сессии.'}` : '');
   const servers = mcpStatus?.servers || [];
   const list = $('mcpList');
   list.innerHTML = '';

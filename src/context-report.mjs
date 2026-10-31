@@ -158,8 +158,13 @@ export function mcpDeclarations(status) {
   const tools = [];
   for (const server of servers) {
     if (server?.disabled) continue;
+    // A tool excluded in the UI is not sent to the model, so it must not be
+    // counted as context (CMP-01). The list itself comes from the adapter cache:
+    // it says which tools are known, not which of them a live Pi registered.
+    const excluded = new Set(Array.isArray(server?.excludeTools) ? server.excludeTools : []);
     for (const tool of server?.tools || []) {
       if (!tool || typeof tool.name !== 'string') continue;
+      if (excluded.has(tool.name) || tool.enabled === false) continue;
       tools.push({
         server: server.name,
         name: tool.name,
@@ -247,9 +252,15 @@ export async function collectContextSources({ cwd, agentDir = piAgentDir(), env 
   const tools = mcpDeclarations(mcp);
   const toolChars = tools.reduce((sum, tool) => sum + tool.chars, 0);
   const serverNames = [...new Set(tools.map(tool => tool.server))];
+  const excludedTools = (Array.isArray(mcp?.servers) ? mcp.servers : [])
+    .filter(server => !server?.disabled)
+    .reduce((sum, server) => sum + (Array.isArray(server.excludeTools) ? server.excludeTools.length : 0), 0);
   sources.push(source('mcp-tools', 'MCP-инструменты', serverNames.join(', '), {
     chars: toolChars, tokens: estimateTokens(toolChars), known: tools.length > 0,
-    count: tools.length, servers: serverNames,
+    count: tools.length, servers: serverNames, excluded: excludedTools,
+    // In `inherit` mode TaskBridge does not own the config Pi reads, so the
+    // toggles here do not reach the model (CMP-01: said, not hidden).
+    controllable: mcp?.controllable !== false,
     // Кэш адаптера: если серверы ещё не опрашивались, список будет пустым.
     partial: tools.length === 0,
   }));
@@ -283,6 +294,10 @@ export function buildContextReport({
   // сжатия не отличить от числа до сжатия, а оценку Pi — от измерения.
   measuredAt = null,
   measurementSession = null,
+  // Состав активной ветки из файла сессии (`summarizeSessionContext`). Из него
+  // берётся единственная измеряемая часть истории: сохранённые сообщения в
+  // контексте, сводка и то, что из контекста уже исключено.
+  session = null,
   unavailableReason: suppliedUnavailableReason = null,
 } = {}) {
   const window = Number.isFinite(contextWindow) ? contextWindow : (stats?.contextUsage?.contextWindow ?? null);
@@ -316,6 +331,55 @@ export function buildContextReport({
   const unavailableReason = totalTokens !== null ? null
     : suppliedUnavailableReason || (!running ? 'сессия Pi не активна: текущий размер недоступен'
       : 'Pi пока не сообщил размер текущего запроса');
+  // CMP-02: named, separately sourced numbers instead of one residual.
+  // `null` means «не измерено», never zero — an unknown size must not be shown
+  // as «nothing there». Everything marked `measured` is read from a file Pi
+  // itself uses; `estimate` is chars/4; `pi` is Pi's own contextUsage.
+  const tokenOf = (id) => {
+    const item = sources.find(candidate => candidate.id === id);
+    return item && item.known && Number.isFinite(item.tokens) ? item.tokens : null;
+  };
+  const measuredIds = ['system-prompt', 'append-system-prompt', 'instructions', 'skills', 'mcp-tools'];
+  const estimatedTotalTokens = measuredIds.reduce((sum, id) => {
+    const value = tokenOf(id);
+    return value === null ? sum : sum + value;
+  }, 0) || null;
+  const kept = session?.available ? session.active?.kept : null;
+  const summaryChars = session?.available ? session.compaction?.summaryChars : null;
+  const droppedChars = session?.available ? session.history?.excludedChars : null;
+  const snapshot = session?.available ? session.systemSnapshot ?? null : null;
+  const breakdown = {
+    systemTokens: tokenOf('system-prompt'),
+    appendSystemTokens: tokenOf('append-system-prompt'),
+    instructionsTokens: tokenOf('instructions'),
+    skillsTokens: tokenOf('skills'),
+    toolSchemaTokens: tokenOf('mcp-tools'),
+    // Снимок системного промпта из записи сжатия: Pi переигрывает его в каждом
+    // запросе после compact, и без этой строки он попадал в «прочие».
+    snapshotTokens: Number.isFinite(snapshot?.chars) ? estimateTokens(snapshot.chars) : null,
+    snapshotSections: snapshot?.sections ?? null,
+    snapshotTools: snapshot?.tools?.length ?? null,
+    snapshotStaleTools: snapshot?.staleTools ?? null,
+    // Сохранённая история в активном контексте и сводка — из файла сессии.
+    historyTokens: Number.isFinite(kept?.chars) ? estimateTokens(kept.chars) : null,
+    summaryTokens: Number.isFinite(summaryChars) ? estimateTokens(summaryChars) : null,
+    // Что из контекста уже исключено сжатием: это не расход, но и не ноль.
+    excludedTokens: Number.isFinite(droppedChars) ? estimateTokens(droppedChars) : null,
+    estimatedTotalTokens,
+    // Pi не отдаёт отдельного числа «вход запроса» в get_session_stats: его
+    // tokens.input — сумма за сессию, а не размер текущего контекста. Поэтому
+    // здесь null, а не подставленное похожее число.
+    providerInputTokens: null,
+    providerInputReason: 'Pi отдаёт tokens.input как сумму за сессию; размера текущего запроса в get_session_stats нет. См. provider.tokens.',
+    unattributedTokens: unaccountedTokens,
+    measuredAt,
+    sources: {
+      estimates: 'chars/4 по файлам (system, instructions, skills, MCP-схемы)',
+      history: Number.isFinite(kept?.chars) ? 'файл сессии Pi (активная ветка)' : null,
+      snapshot: Number.isFinite(snapshot?.chars) ? 'файл сессии Pi (CompactionEntry.systemMessage)' : null,
+      total: totalTokens === null ? null : 'Pi contextUsage',
+    },
+  };
   return {
     taskId: taskId ?? null,
     model: model || null,
@@ -346,8 +410,28 @@ export function buildContextReport({
       tokens: stats.tokens ?? null,
       cost: stats.cost ?? null
     } : null,
+    // Pi's own accounting, per session — not per request. Kept separate so nobody
+    // reads a session sum as the size of the current request, and so the cache
+    // behaviour is visible: cached reads cost a fraction of a normal input token,
+    // which is why a stable prefix matters more than a small one.
+    provider: stats?.tokens ? {
+      tokens: {
+        input: Number.isFinite(stats.tokens.input) ? stats.tokens.input : null,
+        output: Number.isFinite(stats.tokens.output) ? stats.tokens.output : null,
+        cacheRead: Number.isFinite(stats.tokens.cacheRead) ? stats.tokens.cacheRead : null,
+        cacheWrite: Number.isFinite(stats.tokens.cacheWrite) ? stats.tokens.cacheWrite : null,
+        total: Number.isFinite(stats.tokens.total) ? stats.tokens.total : null,
+      },
+      cacheHitRatio: Number.isFinite(stats.tokens.cacheRead) && Number.isFinite(stats.tokens.input)
+        && stats.tokens.cacheRead + stats.tokens.input > 0
+        ? stats.tokens.cacheRead / (stats.tokens.cacheRead + stats.tokens.input)
+        : null,
+      scope: 'session',
+      note: 'Суммы за сессию по данным Pi (get_session_stats), а не размер текущего запроса.',
+    } : null,
     totalTokens,
     sources,
+    breakdown,
     measuredTokens,
     unaccountedTokens,
     overestimated,

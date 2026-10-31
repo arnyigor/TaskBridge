@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { piAgentDir } from './pi-settings.mjs';
 
 // MCP for Pi is configured by the `pi-mcp-adapter` extension. TaskBridge does
@@ -69,6 +70,13 @@ async function readToolCache(env = process.env) {
   } catch {
     return {};
   }
+}
+
+// Order-insensitive digest of the server map exactly as Pi receives it.
+function fingerprintOf(servers) {
+  const keys = Object.keys(servers || {}).sort();
+  const canonical = JSON.stringify(keys.map(key => [key, servers[key]]));
+  return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 16);
 }
 
 export function isMcpConfig(value) {
@@ -270,6 +278,70 @@ export class McpManager {
     return { args: ['--mcp-config', file], env: { PI_MCP_CONFIG_MODE: 'exclusive' } };
   }
 
+  // The configuration a Pi process is actually launched with, for one task.
+  //
+  // One source of truth for three things that used to diverge: the args/env Pi
+  // gets, the per-task override, and the fingerprint the API reports so the UI
+  // can say whether a change reached an already running session.
+  //
+  // Modes (per task `mcp.mode` wins over the global one):
+  //   inherit — Pi's own config; TaskBridge cannot scope it, so a per-task
+  //             `disabledServers` list cannot be applied and `scope` says so
+  //             instead of silently dropping it (CMP-01 defect: the declared
+  //             per-task mode was parsed and then never used).
+  //   managed — TaskBridge file, per-task `disabledServers` → derived copy.
+  //   off     — empty file; a per-task list is meaningless, nothing to disable.
+  async launchFor(taskMcp = null, { taskDir = null, write = true } = {}) {
+    const requested = MCP_MODES.includes(taskMcp?.mode) ? taskMcp.mode : this.mode;
+    if (requested === 'inherit') {
+      return { mode: 'inherit', scope: 'pi', args: [], env: {}, path: null, fingerprint: 'inherit', ignored: taskMcp?.disabledServers?.length ? 'inherit' : null };
+    }
+    const basePath = requested === 'off' ? this.offPath : this.path;
+    const env = { PI_MCP_CONFIG_MODE: 'exclusive' };
+    if (requested === 'off') {
+      // The off config is empty by construction: a task cannot enable anything
+      // from it, so its `disabledServers` list has no effect (reported, not lost).
+      return {
+        mode: 'off', scope: 'global', args: ['--mcp-config', basePath], env, path: basePath,
+        fingerprint: 'off', ignored: taskMcp?.disabledServers?.length ? 'off' : null
+      };
+    }
+    const config = await this.read();
+    const servers = isMcpConfig(config.mcpServers) ? { ...config.mcpServers } : {};
+    const disabledServers = Array.isArray(taskMcp?.disabledServers) ? taskMcp.disabledServers : [];
+    let file = basePath;
+    let scope = 'global';
+    for (const name of disabledServers) {
+      // A name the config does not know cannot be disabled: say it, do not hide it.
+      if (servers[name]) servers[name] = { ...servers[name], disabled: true };
+    }
+    if (disabledServers.length && taskDir) {
+      file = path.join(taskDir, 'mcp.json');
+      scope = 'task';
+      // `write: false` is for comparisons only (has this change reached a running
+      // process?): a status read must not touch the filesystem.
+      if (write) {
+        await fs.mkdir(path.dirname(file), { recursive: true });
+        await fs.writeFile(file, `${JSON.stringify(withPinnedSettings({ ...config, mcpServers: servers }), null, 2)}\n`, 'utf8');
+      }
+    }
+    return {
+      mode: 'managed', scope, args: ['--mcp-config', file], env, path: file,
+      fingerprint: fingerprintOf(servers), ignored: null
+    };
+  }
+
+  // Fingerprint of the configuration currently served to new sessions. A live
+  // Pi process keeps the config it was started with (args/env are fixed at
+  // spawn), so comparing this with a process snapshot is the only honest way to
+  // answer «дошло ли изменение до этой сессии».
+  async activeFingerprint() {
+    if (this.mode === 'inherit') return 'inherit';
+    if (this.mode === 'off') return 'off';
+    const config = await this.read();
+    return fingerprintOf(isMcpConfig(config.mcpServers) ? config.mcpServers : {});
+  }
+
   async status(env = process.env) {
     const mode = this.mode;
     const tools = await readToolCache(env);
@@ -277,7 +349,19 @@ export class McpManager {
     const owners = new Map();
     for (const server of rawServers) for (const tool of tools[server.name] || []) owners.set(tool.name, [...(owners.get(tool.name) || []), server.name]);
     const collisions = [...owners.entries()].filter(([, names]) => names.length > 1).map(([tool, servers]) => ({ tool, servers }));
-    const servers = rawServers.map(server => ({ ...server, tools: tools[server.name] || [], health: this.health.get(server.name) || null }));
+    const servers = rawServers.map(server => {
+      // `excludeTools` was written and displayed but never applied to the tool
+      // list this report counts (CMP-01): an excluded tool was still billed as
+      // context. `enabled` is what the model may actually receive; `cached`
+      // stays visible so a toggle is not mistaken for «the tool is gone».
+      const excluded = new Set(server.excludeTools || []);
+      const cached = tools[server.name] || [];
+      return {
+        ...server,
+        tools: cached.map(tool => ({ ...tool, enabled: !server.disabled && !excluded.has(tool.name) })),
+        health: this.health.get(server.name) || null,
+      };
+    });
     let exists = false;
     try { await fs.access(mode === 'off' ? this.offPath : this.path); exists = true; } catch { /* not created yet */ }
     return {
@@ -285,6 +369,9 @@ export class McpManager {
       configPath: this.path,
       offPath: this.offPath,
       activePath: mode === 'off' ? this.offPath : mode === 'managed' ? this.path : null,
+      // `inherit` reads Pi's own file: the toggles in TaskBridge do not reach it.
+      controllable: mode !== 'inherit',
+      fingerprint: await this.activeFingerprint(),
       exists,
       servers,
       collisions

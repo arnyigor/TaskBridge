@@ -143,6 +143,9 @@ manager.turnInstructionsExtensionPath = path.join(rootDir, 'pi-extension', 'task
 // Media policy: keeps base64 screenshots out of the request without touching the
 // saved transcript (pi-extension/taskbridge-media.js).
 manager.mediaExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-media.js');
+// Context budget: old bulky tool results become references on each request
+// (pi-extension/taskbridge-context-budget.js). No model call, history untouched.
+manager.contextBudgetExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-context-budget.js');
 // Follow Plan checkpoint tool (FP-05A): only loaded when followPlan.enabled.
 manager.followPlanExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-follow-plan.js');
 await manager.init();

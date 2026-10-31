@@ -315,3 +315,51 @@ test('a system checkpoint with empty content and structured sections has a nonze
   assert(report.checkpoint.chars > 0);
   assert(!JSON.stringify(report).includes('public instructions'));
 });
+
+// Pi 1.4.0 stores the system prompt and the declared tools of the moment in
+// `CompactionEntry.systemMessage` and replays them after compaction
+// (session-manager.js: `entry.systemMessage ? [entry.systemMessage, summary] : …`).
+// Measured on a real session: 60 586 chars ≈ 15K tokens, of which 34 898 chars
+// are 36 tool declarations. Until now that size was invisible in the report.
+test('the compaction system snapshot is measured, and tools it declares but that are gone are named', async t => {
+  const f = await session(t);
+  const systemMessage = {
+    role: 'system',
+    content: '',
+    sections: { preamble: 'p'.repeat(100), project_context: 'c'.repeat(200), skills: 's'.repeat(300), cwd: 'cw' },
+    toolsAdded: [{ name: 'read' }, { name: 'mcpServer_execute_python_code' }, { name: 'project_md' }],
+  };
+  await f.write([f.message('a', null, 'user', text('question')),
+    { type: 'compaction', id: 'b', parentId: 'a', firstKeptEntryId: 'a', summary: 'summary', systemMessage }]);
+
+  const report = summarizeSessionContext(await readPiSession(f.file, f.project), {
+    availableTools: { managed: ['mcpServer_execute_python_code', 'project_md'], enabled: ['mcpServer_execute_python_code'] },
+  });
+  const snapshot = report.systemSnapshot;
+  assert.equal(snapshot.sections.preamble, 100);
+  assert.equal(snapshot.sections.skills, 300);
+  assert.deepEqual(snapshot.tools, ['read', 'mcpServer_execute_python_code', 'project_md']);
+  assert.equal(snapshot.toolChars, JSON.stringify(systemMessage.toolsAdded).length);
+  assert.equal(snapshot.chars, 100 + 200 + 300 + 2 + JSON.stringify(systemMessage.toolsAdded).length);
+  // project_md is known to the adapter but no longer allowed: its declaration is
+  // still in the snapshot text, while the model cannot call it any more.
+  assert.deepEqual(snapshot.staleTools, ['project_md']);
+  assert.equal(JSON.stringify(report).includes('pppppp'), false, 'no section text leaks');
+});
+
+test('without a tool inventory no snapshot tool is called stale', async t => {
+  const f = await session(t);
+  await f.write([f.message('a', null, 'user', text('question')),
+    { type: 'compaction', id: 'b', parentId: 'a', firstKeptEntryId: 'a', summary: 'summary',
+      systemMessage: { role: 'system', content: '', sections: {}, toolsAdded: [{ name: 'gone' }] } }]);
+  const report = summarizeSessionContext(await readPiSession(f.file, f.project));
+  assert.equal(report.systemSnapshot.staleTools, null);
+  assert.equal(report.systemSnapshot.tools.length, 1);
+});
+
+test('a session without a compaction snapshot reports none, not zero', async t => {
+  const f = await session(t);
+  await f.write([f.message('a', null, 'user', text('question'))]);
+  const report = summarizeSessionContext(await readPiSession(f.file, f.project));
+  assert.equal(report.systemSnapshot, null);
+});

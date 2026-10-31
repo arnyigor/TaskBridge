@@ -67,6 +67,24 @@ import { summarizeSessionContext } from './context-composition.mjs';
 
 function now() { return new Date().toISOString(); }
 
+// A tool call without its result (or a result without its call) is a broken
+// transcript: providers reject it, and a compaction that produced one must not be
+// reported as clean. Checks the projection Pi would send next.
+function toolPairsIntact(messages) {
+  if (!Array.isArray(messages)) return null;
+  const calls = new Set();
+  const results = new Set();
+  for (const message of messages) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const part of message.content) {
+      if (part?.type === 'toolCall' && typeof part.id === 'string') calls.add(part.id);
+      if (part?.type === 'toolResult' && typeof part.toolCallId === 'string') results.add(part.toolCallId);
+    }
+  }
+  for (const id of calls) if (!results.has(id)) return false;
+  return true;
+}
+
 // Work Items (MR-02, ROADMAP_NEXT_1110.md): six statuses, deliberately not a
 // project tracker. The vocabulary and the validation live in one place, so POST,
 // PATCH and the store cannot disagree about what is a legal value — an unknown
@@ -518,6 +536,10 @@ export class TaskManager extends EventEmitter {
     // Media policy extension (pi-extension/taskbridge-media.js): keeps the
     // request body small without rewriting the session file. Set by the server.
     this.mediaExtensionPath = null;
+    // Context budget (pi-extension/taskbridge-context-budget.js): old, bulky tool
+    // results are replaced by a reference on each request — the cheapest form of
+    // compaction, and the one that does not cost a model call. Set by the server.
+    this.contextBudgetExtensionPath = null;
     // Injected by the server; lets AUTO restart the managed runtime when the
     // chosen profile differs from the one currently loaded.
     this.runtimeSwitcher = null;
@@ -2437,7 +2459,7 @@ export class TaskManager extends EventEmitter {
     return value;
   }
 
-  // Per-task MCP override. Only meaningful in managed/off mode (see #mcpArgs).
+  // Per-task MCP override. Only meaningful in managed/off mode (see #mcpLaunch).
   #normalizeMcp(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const disabledServers = Array.isArray(value.disabledServers)
@@ -2495,27 +2517,43 @@ export class TaskManager extends EventEmitter {
   }
 
   // Full env for a task's Pi process: llama endpoint + TaskBridge MCP scoping.
-  #piEnv() {
+  // The MCP env belongs to the same launch decision as the args (#mcpLaunch),
+  // so it is taken from there — a per-task `mcp.mode` must also reach the env
+  // (PI_MCP_CONFIG_MODE), not just the file passed to --mcp-config.
+  #piEnv(launch = null) {
     const env = { ...(this.config.pi?.env || {}) };
     if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
-    Object.assign(env, this.mcp.launch().env);
+    if (launch) Object.assign(env, launch.env);
+    else Object.assign(env, this.mcp.launch().env);
     return Object.keys(env).length ? env : undefined;
   }
 
-  // MCP args for this task. In managed/off mode the base args point at the
-  // TaskBridge config; per-task `disabledServers` get a derived copy so a single
-  // task can opt out of specific servers without touching the shared file.
-  async #mcpArgs(task) {
-    const launch = this.mcp.launch();
-    const disabledServers = Array.isArray(task?.mcp?.disabledServers) ? task.mcp.disabledServers : [];
-    if (!launch.args.length || !disabledServers.length) return launch.args;
-    const config = await this.mcp.read();
-    const map = { ...(config.mcpServers || {}) };
-    for (const name of disabledServers) if (map[name]) map[name] = { ...map[name], disabled: true };
-    const file = path.join(this.store.taskDir(task.id), 'mcp.json');
-    await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.writeFile(file, `${JSON.stringify({ ...config, mcpServers: map }, null, 2)}\n`, 'utf8');
-    return ['--mcp-config', file];
+  // MCP scoping for this task (CMP-01). One call decides args, env and the
+  // fingerprint recorded on the runtime; a per-task `mcp.mode` used to be
+  // parsed and then ignored here.
+  async #mcpLaunch(task, options = {}) {
+    return this.mcp.launchFor(task?.mcp || null, { taskDir: this.store.taskDir(task.id), ...options });
+  }
+
+  // Did an MCP change reach the session that is running right now? Pi takes
+  // `--mcp-config` and PI_MCP_CONFIG_MODE at spawn and cannot be re-scoped live,
+  // so the honest answers are «applied» (nothing running on an older config) and
+  // «pending_restart» (a live process still holds the previous one).
+  async #mcpApplyState() {
+    const pending = [];
+    for (const [id, runtime] of this.runtimes) {
+      if (!runtime || runtime.retired || runtime.pi?.closed) continue;
+      const task = this.tasks.get(id);
+      if (!task) continue;
+      let launch;
+      try { launch = await this.#mcpLaunch(task, { write: false }); } catch { continue; }
+      if (runtime.mcp?.fingerprint && runtime.mcp.fingerprint !== launch.fingerprint) {
+        pending.push({ taskId: id, mode: runtime.mcp.mode ?? null, fingerprint: runtime.mcp.fingerprint, wanted: launch.fingerprint });
+      }
+    }
+    return pending.length
+      ? { state: 'pending_restart', pending, detail: 'Pi получил MCP-конфигурацию при запуске: изменение применится после перезапуска сессии.' }
+      : { state: 'applied', pending: [], detail: null };
   }
 
   // The router model that Pi is about to use. Only meaningful for local tasks;
@@ -3112,8 +3150,16 @@ export class TaskManager extends EventEmitter {
 
   async #createPi(task, sessionFile) {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
-    const args = [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...await this.#mcpArgs(task)];
-    const env = { ...(this.#piEnv() || {}) };
+    const mcpLaunch = await this.#mcpLaunch(task);
+    if (mcpLaunch.ignored === 'inherit' && task?.mcp?.disabledServers?.length) {
+      // Named instead of silently dropped: in inherit mode Pi reads its own file
+      // and TaskBridge has no way to scope it.
+      await this.#event(task, 'MCP_SCOPE_IGNORED',
+        'Режим MCP «inherit»: отключённые для этой сессии серверы не применяются, Pi использует свою конфигурацию',
+        { mode: mcpLaunch.mode, servers: task.mcp.disabledServers }, false).catch(() => {});
+    }
+    const args = [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...mcpLaunch.args];
+    const env = { ...(this.#piEnv(mcpLaunch) || {}) };
     if (this.approvalsConfig.enabled && this.approvalBaseUrl && this.approvalExtensionPath) {
       // A missing extension file must not break every task: log it and continue
       // without the gate rather than spawning Pi with a broken --extension.
@@ -3175,6 +3221,25 @@ export class TaskManager extends EventEmitter {
     // Follow Plan (FP-05A): the checkpoint tool the model reports through. Loaded
     // only when the mode is enabled, so a session without plans does not carry a
     // tool nobody uses.
+    // Context budget: old bulky tool results are replaced by a reference on each
+    // request (docs/context-compaction-best-practices.md, practice 1). Off with
+    // `pi.contextBudget.enabled: false`; the persisted history is never touched,
+    // so turning it off restores the raw output.
+    if (this.contextBudgetExtensionPath && this.config.pi?.contextBudget?.enabled !== false) {
+      const available = await fs.access(this.contextBudgetExtensionPath).then(() => true, () => false);
+      if (available) {
+        const budget = this.config.pi?.contextBudget || {};
+        args.push('-e', this.contextBudgetExtensionPath);
+        Object.assign(env, {
+          TASKBRIDGE_CONTEXT_BUDGET: '1',
+          TASKBRIDGE_CONTEXT_KEEP_TOKENS: String(budget.keepRecentToolTokens ?? 40000),
+          TASKBRIDGE_CONTEXT_MIN_CHARS: String(budget.minChars ?? 2000),
+          TASKBRIDGE_CONTEXT_LOG: path.join(this.dataRoot, 'context-budget.jsonl')
+        });
+      } else {
+        console.error(`[TaskBridge] context budget extension is missing: ${this.contextBudgetExtensionPath}`);
+      }
+    }
     if (this.config.followPlan?.enabled === true && this.followPlanExtensionPath) {
       const available = await fs.access(this.followPlanExtensionPath).then(() => true, () => false);
       if (available) {
@@ -3204,6 +3269,10 @@ export class TaskManager extends EventEmitter {
       settleResolvers: [],
       cancelRequested: false,
       turn: 0,
+      // What this process was launched with. Kept on the runtime so an MCP edit
+      // can be answered with «applied» or «pending_restart» instead of a claim
+      // that the tool disappeared from the model's context.
+      mcp: { mode: mcpLaunch.mode, scope: mcpLaunch.scope, path: mcpLaunch.path, fingerprint: mcpLaunch.fingerprint },
       eventChain: Promise.resolve()
     };
     this.runtimes.set(task.id, runtime);
@@ -3697,37 +3766,42 @@ export class TaskManager extends EventEmitter {
 
   // ---- MCP (pi-mcp-adapter) ----
 
+  // Status of the stored configuration plus what it means for the processes that
+  // are running now. `apply` is the only field a client may use to claim a
+  // change reached a session: `pending_restart` means the live Pi still holds
+  // the config it was spawned with.
   async mcpStatus() {
-    return this.mcp.status();
+    const status = await this.mcp.status();
+    return { ...status, apply: await this.#mcpApplyState() };
   }
 
   async setMcpServer(name, enabled) {
     await this.mcp.setDisabled(name, enabled !== true);
-    return this.mcp.status();
+    return this.mcpStatus();
   }
 
   async setMcpTool(server, tool, enabled) {
     await this.mcp.setToolExcluded(server, tool, enabled !== true);
-    return this.mcp.status();
+    return this.mcpStatus();
   }
 
   async probeMcp(server = null) {
-    return this.mcp.probe(server);
+    return { ...(await this.mcp.probe(server)), apply: await this.#mcpApplyState() };
   }
 
   async upsertMcpServer(name, definition) {
     await this.mcp.upsertServer(name, definition);
-    return this.mcp.status();
+    return this.mcpStatus();
   }
 
   async removeMcpServer(name) {
     await this.mcp.removeServer(name);
-    return this.mcp.status();
+    return this.mcpStatus();
   }
 
   async importMcp() {
     await this.mcp.importFromPi();
-    return this.mcp.status();
+    return this.mcpStatus();
   }
 
   async loadLocalModel(id) {
@@ -4429,7 +4503,16 @@ export class TaskManager extends EventEmitter {
       || (stats.sessionFile && !sameFile(stats.sessionFile, sessionFile)));
     if (mismatchedSession) stats = null;
     const model = task.model || task.requestedModel || null;
-    const sessionComposition = await this.#sessionComposition(task);
+    // Имена MCP-инструментов нужны, чтобы отличить «объявлен в снимке сжатия,
+    // но больше не разрешён» от встроенного инструмента Pi (его список снаружи
+    // не читается). `managed` — всё, что известно адаптеру, `enabled` — что
+    // разрешено сейчас (сервер не выключен, инструмент не исключён).
+    const mcpToolNames = {
+      managed: [...new Set((mcp?.servers || []).flatMap(server => (server.tools || []).map(tool => tool.name)))],
+      enabled: [...new Set((mcp?.servers || []).filter(server => !server.disabled)
+        .flatMap(server => (server.tools || []).filter(tool => tool.enabled !== false).map(tool => tool.name)))],
+    };
+    const sessionComposition = await this.#sessionComposition(task, { availableTools: mcpToolNames });
     if (task.piSessionFile !== sessionFile) {
       mismatchedSession = true;
       stats = null;
@@ -4443,6 +4526,7 @@ export class TaskManager extends EventEmitter {
       contextWindow: model?.contextWindow ?? null,
       stats,
       sources,
+      session: sessionComposition,
       compaction: { ...compaction, auto: task.autoCompactionEnabled, last: task.compaction?.last ?? null },
       limit: task.contextLimit ?? null,
       running: !RUN_TERMINAL.has(task.status),
@@ -4487,13 +4571,13 @@ export class TaskManager extends EventEmitter {
     return data;
   }
 
-  async #sessionComposition(task) {
+  async #sessionComposition(task, options = {}) {
     if (!task.piSessionFile || !task.workspacePath) {
       return { available: false, reason: task.piSessionFile ? 'у сессии нет рабочего каталога' : 'у сессии ещё нет файла Pi' };
     }
     try {
       const data = await this.#contextSession(task);
-      return { available: true, ...summarizeSessionContext(data) };
+      return { available: true, ...summarizeSessionContext(data, options) };
     } catch (error) {
       // Файл мог быть перемещён, принадлежать другому проекту или быть повреждён.
       return { available: false, reason: error.message };
@@ -6488,9 +6572,78 @@ export class TaskManager extends EventEmitter {
     const runtime = await this.#ensureSession(task);
     if (this.activeTaskIds.has(id) || (await runtime.pi.getState())?.isStreaming) throw Object.assign(new Error('Дождитесь завершения ответа перед сжатием контекста.'), { code: 'BUSY' });
     if (this.#usesLocalRuntime(task) && (await this.local.getBusyStatus()).busy) throw Object.assign(new Error('Локальная модель сейчас занята другим запросом.'), { code: 'MODEL_BUSY' });
-    await this.#event(task, 'COMPACT_REQUESTED', 'Manual compaction requested');
-    const response = await runtime.pi.compact(String(instructions || ''));
-    return response.data || null;
+    // What this session's history and Pi's tail budget predict, before a model
+    // call is spent. Pi answers «Nothing to compact (session too small)» in the
+    // same situation, but by then the operator has already waited; keepRecentTokens
+    // larger than the whole history is the usual cause.
+    const precheck = await this.#compactPrecheck(task).catch(() => null);
+    await this.#event(task, 'COMPACT_REQUESTED', 'Manual compaction requested', { prediction: precheck?.predictedNoop ?? null });
+    const entriesBefore = await this.#sessionEntryCount(task).catch(() => null);
+    let response;
+    try {
+      response = await runtime.pi.compact(String(instructions || ''));
+    } catch (error) {
+      if (/nothing to compact|too small|nothing available/i.test(String(error?.message || ''))) {
+        throw Object.assign(new Error(
+          `Сжимать нечего: история короче сохранённого хвоста Pi (keepRecentTokens = ${precheck?.keepRecentTokens ?? 'неизвестно'}). `
+          + 'Полное сжатие требует либо более длинной истории, либо меньшего keepRecentTokens; '
+          + 'на средних сессиях выгоднее очистка результатов инструментов (pi.contextBudget).'
+        ), { code: 'NOTHING_TO_COMPACT', prediction: precheck });
+      }
+      throw error;
+    }
+    const result = response.data || null;
+    // A compaction that «succeeded» but left no summary, a broken boundary or an
+    // orphaned tool call must not be reported as a clean result.
+    const verification = await this.#verifyCompaction(task, result, entriesBefore);
+    return { ...(result || {}), verification, advice: precheck?.advice ?? null };
+  }
+
+  // Prediction, not the decision: Pi still owns the cut. Numbers come from the
+  // session file plus the effective compaction settings, both readable here.
+  async #compactPrecheck(task) {
+    const settings = await readCompactionSettings({ cwd: task.workspacePath || null });
+    const composition = await this.#sessionComposition(task);
+    const summaryChars = composition?.available ? composition.compaction?.summaryChars ?? 0 : 0;
+    const keptChars = composition?.available ? composition.active?.kept?.chars ?? 0 : 0;
+    const historyTokens = estimateTokens(summaryChars + keptChars);
+    const predictedNoop = historyTokens > 0 && historyTokens <= settings.keepRecentTokens;
+    const usage = task.lastUsage || null;
+    const percent = Number.isFinite(usage?.percent) ? usage.percent : null;
+    let advice = null;
+    if (historyTokens === 0) advice = 'История ещё не измерена: прогноз сжатия недоступен.';
+    else if (predictedNoop) advice = `История ≈${historyTokens} ток., сохранённый хвост ${settings.keepRecentTokens} ток.: Pi не станет ничего сжимать. Нужен меньший keepRecentTokens или очистка результатов инструментов.`;
+    else if (percent !== null && percent >= 70) advice = `Окно заполнено на ${percent}% — рекомендуемая точка для сжатия.`;
+    else advice = `Прогноз: будет сжато ≈${Math.max(0, historyTokens - settings.keepRecentTokens)} ток. истории, сохранится хвост ≈${settings.keepRecentTokens} ток.`;
+    return { historyTokens, keepRecentTokens: settings.keepRecentTokens, reserveTokens: settings.reserveTokens, predictedNoop, percent, advice };
+  }
+
+  async #sessionEntryCount(task) {
+    if (!task.piSessionFile) return null;
+    const data = await readPiSession(task.piSessionFile, task.workspacePath);
+    return data.entries.length;
+  }
+
+  // Post-conditions of a successful compaction, checked against the file Pi
+  // wrote and the projection it will send next (audit CMP-03 acceptance list).
+  async #verifyCompaction(task, result, entriesBefore = null) {
+    const checks = {
+      summaryPresent: typeof result?.summary === 'string' ? result.summary.trim().length > 0 : false,
+      boundaryRecorded: typeof result?.firstKeptEntryId === 'string' && result.firstKeptEntryId.length > 0,
+      tokensBeforeRecorded: Number.isFinite(result?.tokensBefore),
+      historyPreserved: null,
+      toolPairsIntact: null,
+    };
+    let detail = null;
+    try {
+      const data = await readPiSession(task.piSessionFile, task.workspacePath);
+      if (entriesBefore !== null) checks.historyPreserved = data.entries.length >= entriesBefore;
+      checks.toolPairsIntact = toolPairsIntact(data.messages);
+    } catch (error) {
+      detail = error.message;
+    }
+    const failed = Object.entries(checks).filter(([, value]) => value === false).map(([name]) => name);
+    return { passed: failed.length === 0, checks, failed, detail };
   }
 
   // Normalizes the task's model selection against the live catalog before Pi
