@@ -83,6 +83,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.Json
 import ru.arny.taskbridge.AppGraph
+import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.ApiInfo
@@ -177,7 +178,7 @@ fun ChatScreen(
     val state by session.state.collectAsState()
     // Follow Plan: одно состояние на иконку композитора и карточку над ним.
     val planState = rememberFollowPlanState(connection.api, taskId, state.chat.version)
-    val sessionListState by connection.sessions.state.collectAsState()
+    val sessionListState = rememberVisibleSessionList(connection)
     val online by connection.online.collectAsState()
     val platform = graph.platform
     val snackbar = remember { SnackbarHostState() }
@@ -1850,7 +1851,7 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
     LaunchedEffect(Unit) { connection.sessions.models().onSuccess { catalog = it } }
     // Живой статус локальных моделей: окно контекста сессии берётся из него, а не
     // из каталога Pi, где у локальной модели записан статический размер.
-    val sessionListState by connection.sessions.state.collectAsState()
+    val sessionListState = rememberVisibleSessionList(connection)
     val task = state.task
     val running = task?.status in setOf("RUNNING", "PREPARING", "CANCELLING")
     AdaptiveSheet(
@@ -2118,6 +2119,23 @@ internal fun answerReserveTokens(task: Task?): Long {
  */
 internal fun readsPromptNow(readingPrompt: Boolean, livePp: Double?, answerSilent: Boolean): Boolean =
     answerSilent && (readingPrompt || livePp != null)
+
+/**
+ * Список сессий для экранов чата: обновления применяются только на видимом экране.
+ *
+ * Фоновый опрос нужен только ради уведомлений, но каждое его обновление пересобирало
+ * всю ленту чата: в фоне это ~0,3 с CPU на опрос (замер 2026-10-31, приложение
+ * свёрнуто, chat открыт). Здесь пересобирается только сам этот хелпер, а снимок
+ * для UI меняется лишь когда экран видно; при возврате на экран он свежий сразу.
+ */
+@Composable
+internal fun rememberVisibleSessionList(connection: AppGraph.Connected): SessionListState {
+    val live by connection.sessions.state.collectAsState()
+    val visible by connection.visible.collectAsState()
+    val shown = remember { mutableStateOf(live) }
+    LaunchedEffect(visible, live) { if (visible) shown.value = live }
+    return if (visible) live else shown.value
+}
 
 /**
  * Как часто открытый чат перечитывает `/api/info`, пока ход активен.

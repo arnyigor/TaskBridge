@@ -1,7 +1,6 @@
 package ru.arny.taskbridge.core.client
 
 import ru.arny.taskbridge.core.client.sessions.BACKGROUND_ACTIVE_INTERVAL_MS
-import ru.arny.taskbridge.core.client.sessions.BACKGROUND_AWAITING_USER_MS
 import ru.arny.taskbridge.core.client.sessions.sessionPollIntervalMillis
 import ru.arny.taskbridge.core.client.sessions.shouldPoll
 import kotlin.test.Test
@@ -49,8 +48,9 @@ class SessionPollIntervalTest {
         val normal = sessionPollIntervalMillis(active = true, inForeground = false)
         assertEquals(
             BACKGROUND_ACTIVE_INTERVAL_MS, normal,
-            "конец хода присылает wake-канал сервера, 5 с в фоне — лишние запросы",
+            "конец хода присылает wake-канал сервера, частый опрос в фоне — лишние запросы",
         )
+        assertEquals(60_000L, normal, "минута — страховка на случай промаха push")
         assertTrue(shouldPoll(normal))
         val saving = sessionPollIntervalMillis(active = true, inForeground = false, powerSave = true)
         assertEquals(30_000L, saving, "в экономии энергии уведомление может подождать")
@@ -66,19 +66,20 @@ class SessionPollIntervalTest {
     }
 
     @Test
-    fun `a session waiting for the operator is polled rarely in the background`() {
+    fun `a session waiting for the operator is not polled in the background at all`() {
+        val interval = sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true)
         assertEquals(
-            BACKGROUND_AWAITING_USER_MS,
-            sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true),
-            "агент ждёт ответа: до действия оператора в сессии не меняется ничего",
+            0L, interval,
+            "агент ждёт ответа: до действия оператора в сессии не меняется ничего, " +
+                "а телефонный детектор считает любое фоновое пробуждение расходом",
         )
+        assertFalse(shouldPoll(interval))
         assertEquals(
-            BACKGROUND_AWAITING_USER_MS,
+            0L,
             sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true, powerSave = true),
-            "экономия энергии не должна ускорять опрос",
         )
         assertTrue(
-            sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true) >
+            sessionPollIntervalMillis(active = true, inForeground = false, awaitingUserOnly = true) <
                 sessionPollIntervalMillis(active = true, inForeground = false),
             "ожидание ответа дешевле, чем идущий ход",
         )

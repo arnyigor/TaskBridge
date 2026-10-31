@@ -29,4 +29,17 @@ class OfflineRetryTest {
         // Счётчик не должен переполниться в отрицательную паузу (delay(-1) бросает).
         assertTrue(offlineRetryDelayMs(Int.MAX_VALUE) in OFFLINE_RETRY_MIN_MS..OFFLINE_RETRY_MAX_MS)
     }
+
+    @Test
+    fun inTheBackgroundTheLinkCycleIsRarelyAwake() {
+        // Экран не смотрят: и без связи, и со связью цикл должен просыпаться редко —
+        // это те фоновые пробуждения, за которые телефонный детектор ругается.
+        assertEquals(BACKGROUND_ONLINE_IDLE_MS, linkIdleDelayMs(visible = false))
+        assertEquals(ONLINE_IDLE_MS, linkIdleDelayMs(visible = true))
+        assertTrue(BACKGROUND_ONLINE_IDLE_MS > ONLINE_IDLE_MS)
+        val background = (0..8).map { offlineRetryDelayMs(it, visible = false) }
+        assertTrue(background.all { it >= BACKGROUND_OFFLINE_RETRY_MS }, "в фоне не чаще двух минут: $background")
+        val visible = (0..8).map { offlineRetryDelayMs(it, visible = true) }
+        assertTrue(visible.all { it <= OFFLINE_RETRY_MAX_MS }, "на экране — прежний потолок: $visible")
+    }
 }

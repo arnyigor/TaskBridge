@@ -97,8 +97,10 @@ data class SessionListState(
  *    спать до возврата в foreground). Так телефон не жжёт батарею на пустых запросах.
  *  - в фоне ход идёт — [BACKGROUND_ACTIVE_INTERVAL_MS], а не 5 с: конец хода
  *    присылает wake-канал сервера (4.3), частый опрос лишь дублировал бы push.
- *  - в фоне все активные сессии ждут ответа оператора — [BACKGROUND_AWAITING_USER_MS]:
- *    до его действия не меняется ничего, поэтому 5 с здесь не покупали ничего.
+ *  - в фоне все активные сессии ждут ответа оператора — опрос не идёт совсем (0):
+ *    до его действия не меняется ничего, а любое периодическое пробуждение в фоне
+ *    системный детектор телефона (OnePlus `[BgDetect]`) считает расходом и убивает
+ *    приложение (замер 2026-10-30/31: уведомление «расходует заряд» и force stop).
  *  - режим экономии энергии удлиняет интервал в фоне: система уже сказала, что
  *    батарея важнее свежести на секунду.
  */
@@ -113,23 +115,19 @@ fun sessionPollIntervalMillis(
     activeIntervalMillis: Long = 5_000,
     idleIntervalMillis: Long = 30_000,
     backgroundActiveMillis: Long = BACKGROUND_ACTIVE_INTERVAL_MS,
-    backgroundAwaitingUserMillis: Long = BACKGROUND_AWAITING_USER_MS,
 ): Long = when {
     inForeground -> if (active && !activeCoveredByStream) activeIntervalMillis else idleIntervalMillis
     !active -> 0L
-    awaitingUserOnly -> backgroundAwaitingUserMillis
+    awaitingUserOnly -> 0L
     powerSave -> idleIntervalMillis
     else -> backgroundActiveMillis
 }
 
 /**
- * Фон, ход идёт: конец хода сервер присылает wake-каналом, опрос — только страховка
- * на случай промаха push (телефон спал, Wi-Fi оборвался).
+ * Фон, ход идёт: конец хода сервер присылает wake-каналом, поэтому опрос — только
+ * страховка на случай промаха push (телефон спал, Wi-Fi оборвался).
  */
-const val BACKGROUND_ACTIVE_INTERVAL_MS = 20_000L
-
-/** Фон, все активные сессии ждут ответа оператора: до его действия не меняется ничего. */
-const val BACKGROUND_AWAITING_USER_MS = 60_000L
+const val BACKGROUND_ACTIVE_INTERVAL_MS = 60_000L
 
 /** 0 — опрос приостановлен: ждём возврата в foreground или пробуждения по сети. */
 fun shouldPoll(intervalMillis: Long): Boolean = intervalMillis > 0L
@@ -146,7 +144,6 @@ class SessionList(
     private val activeIntervalMillis: Long = 5_000,
     private val idleIntervalMillis: Long = 30_000,
     private val backgroundActiveMillis: Long = BACKGROUND_ACTIVE_INTERVAL_MS,
-    private val backgroundAwaitingUserMillis: Long = BACKGROUND_AWAITING_USER_MS,
     /** Виден ли экран приложения: в фоне опрос нужен только ради уведомлений (4.3). */
     private val inForeground: () -> Boolean = { true },
     /** Режим экономии энергии: интервалы удлиняются. */
@@ -192,7 +189,6 @@ class SessionList(
                     activeIntervalMillis = activeIntervalMillis,
                     idleIntervalMillis = idleIntervalMillis,
                     backgroundActiveMillis = backgroundActiveMillis,
-                    backgroundAwaitingUserMillis = backgroundAwaitingUserMillis,
                 )
             }
 

@@ -44,6 +44,17 @@ internal const val OFFLINE_RETRY_MAX_MS = 30_000L
 internal const val ONLINE_IDLE_MS = 15_000L
 
 /**
+ * В фоне те же проверки реже — и когда связь есть, и когда её нет.
+ *
+ * Потерянную связь проверять чаще раза в минуту незачем: экран не смотрят,
+ * а большая частота — это ровно те фоновые пробуждения, за которые системный
+ * детектор телефона (`[BgDetect]`) выносит предупреждения и убивает приложение.
+ * Возврат в foreground будит цикл сразу (`wakeUp`), так что незаметно не станет.
+ */
+internal const val BACKGROUND_ONLINE_IDLE_MS = 60_000L
+internal const val BACKGROUND_OFFLINE_RETRY_MS = 120_000L
+
+/**
  * Пауза перед следующей пробой связи при offline: удвоение с потолком.
  *
  * Чистая функция, чтобы «стало ли хуже» решалось тестом, а не ожиданием в UI.
@@ -54,6 +65,14 @@ internal fun offlineRetryDelayMs(attempt: Int): Long {
     repeat(attempt.coerceAtMost(16)) { delay = (delay * 2).coerceAtMost(OFFLINE_RETRY_MAX_MS) }
     return delay
 }
+
+/** Пауза цикла самовосстановления с учётом видимости: в фоне — реже. */
+internal fun linkIdleDelayMs(visible: Boolean): Long =
+    if (visible) ONLINE_IDLE_MS else BACKGROUND_ONLINE_IDLE_MS
+
+/** Пауза перед пробой связи: в фоне не чаще [BACKGROUND_OFFLINE_RETRY_MS]. */
+internal fun offlineRetryDelayMs(attempt: Int, visible: Boolean): Long =
+    if (visible) offlineRetryDelayMs(attempt) else maxOf(offlineRetryDelayMs(attempt), BACKGROUND_OFFLINE_RETRY_MS)
 
 /**
  * The app's long-lived objects. One per process: the Android app and the
@@ -242,7 +261,14 @@ class AppGraph(val platform: PlatformServices) {
                         _attention.update { it + alert.taskId }
                         platform.notify(alert)
                     }
-                    platform.setBackgroundWatch(state.tasks.count { displayStateOf(it).active || displayStateOf(it) == DisplayState.WAITING_USER })
+                    // Держим процесс живым только пока агент реально работает: сессия,
+                    // которая ждёт ответа оператора, часами держала foreground-сервис
+                    // (замер 2026-10-30: 7 ч 03 мин за сутки), а системный детектор
+                    // телефона считает такую работу расходом и убивает приложение.
+                    // Ожидание ответа видно по уведомлению о переходе в WAITING_USER.
+                    platform.setBackgroundWatch(
+                        state.tasks.count { displayStateOf(it) == DisplayState.WORKING || displayStateOf(it) == DisplayState.QUEUED },
+                    )
                     if (!state.loading) {
                         val reachable = state.error !is ApiError.Unreachable
                         val recovered = !_online.value && reachable
@@ -369,12 +395,13 @@ class AppGraph(val platform: PlatformServices) {
         private suspend fun healOfflineLink() {
             var attempt = 0
             while (true) {
+                val visible = platform.inForeground
                 if (_online.value) {
                     attempt = 0
-                    delay(ONLINE_IDLE_MS)
+                    delay(linkIdleDelayMs(visible))
                     continue
                 }
-                delay(offlineRetryDelayMs(attempt))
+                delay(offlineRetryDelayMs(attempt, visible))
                 attempt += 1
                 refreshHostReachability()
                 if (_online.value) wakeUp() else sessions.refresh()
