@@ -301,8 +301,12 @@ fun FollowPlanIcon(
                     Column(
                         modifier = Modifier
                             .weight(1f, fill = false)
+                            // Длинное описание шага раньше выдавливало кнопки за край
+                            // панели (живой отчёт с телефона 2026-10-31, S-087):
+                            // без прокрутки лишний текст просто обрезался снизу.
+                            .verticalScroll(rememberScrollState())
                             .padding(horizontal = 24.dp)
-                            .padding(bottom = 20.dp),
+                            .padding(bottom = 8.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                 val status = state.status
@@ -413,7 +417,6 @@ fun FollowPlanIcon(
                     }
                     val line = status?.fileError?.message ?: state.notice.ifBlank { status?.pauseReason?.message.orEmpty() }
                     if (line.isNotBlank()) Text(planErrorText(null, line), style = MaterialTheme.typography.labelSmall, color = colors.error)
-                    PlanActionsRow(state, api, newId, scope, onOpenPlan, onNotice)
                 } else {
                     // Стартовое состояние (FP-UX-04A): описание, проект, две кнопки и
                     // «План не подключён». Список файлов — только после нажатия.
@@ -485,6 +488,13 @@ fun FollowPlanIcon(
                 if (state.notice.isNotBlank() && !state.attached) {
                     Text(state.notice, style = MaterialTheme.typography.bodySmall, color = colors.error)
                 }
+                    }
+                    // Действия привязанного плана живут вне прокрутки: они всегда
+                    // видны, а текст шага и списки прокручиваются сами.
+                    if (state.attached) {
+                        Column(modifier = Modifier.padding(horizontal = 24.dp).padding(bottom = 20.dp)) {
+                            PlanActionsRow(state, api, newId, scope, onOpenPlan, onNotice)
+                        }
                     }
                 }
             }
