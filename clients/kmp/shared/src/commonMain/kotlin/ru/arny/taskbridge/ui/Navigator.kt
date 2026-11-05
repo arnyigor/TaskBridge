@@ -29,6 +29,10 @@ sealed interface Screen {
     @Serializable
     data class Project(val projectId: String) : Screen
 
+    /** Only navigation IDs/relative paths are saved, never file contents or tokens. */
+    @Serializable
+    data class RemoteFiles(val projectId: String, val taskId: String? = null, val rootId: String? = null, val path: String = "") : Screen
+
     @Serializable
     data class Chat(val taskId: String) : Screen
     /** A new session not yet on the PC: it is created by its first message. */
@@ -81,7 +85,7 @@ class Navigator(start: Screen) {
 
     /** Opens a chat on top of the list, replacing another open chat. */
     fun openChat(taskId: String) {
-        val base = stack.filterNot { it is Screen.Chat || it is Screen.Draft || it is Screen.Settings }
+        val base = stack.filterNot { it is Screen.Chat || it is Screen.Draft || it is Screen.Settings || it is Screen.RemoteFiles }
         stack = base + Screen.Chat(taskId)
     }
 
@@ -91,13 +95,18 @@ class Navigator(start: Screen) {
         stack = base + Screen.Project(projectId)
     }
 
+    fun remoteLocation(rootId: String?, path: String) {
+        val screen = current as? Screen.RemoteFiles ?: return
+        stack = stack.dropLast(1) + screen.copy(rootId = rootId, path = path)
+    }
+
     /** Sessions are one level below the project dashboard, so Back returns to it. */
     fun openProjectSessions(projectId: String) {
         push(Screen.Sessions(projectId))
     }
 
     fun openDraft(draft: SessionDraft) {
-        val base = stack.filterNot { it is Screen.Chat || it is Screen.Draft || it is Screen.Settings }
+        val base = stack.filterNot { it is Screen.Chat || it is Screen.Draft || it is Screen.Settings || it is Screen.RemoteFiles }
         stack = base + Screen.Draft(draft)
     }
 }

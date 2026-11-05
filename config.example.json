@@ -218,7 +218,11 @@
   },
   "deepseek": {
     "costHistoryPath": "",
-    "cacheMs": 600000
+    "tokenHistoryPath": "",
+    "cacheMs": 600000,
+    "tariff": {
+      "holidays": []
+    }
   },
   "providerStatus": {
     "wormsoft": {
@@ -248,7 +252,8 @@
       "name": "Example project (edit config.json)",
       "path": "C:\\path\\to\\your\\git-project",
       "useWorktree": true,
-      "verification": []
+      "verification": [],
+      "externalReadDirectories": []
     }
   ],
   "storage": {

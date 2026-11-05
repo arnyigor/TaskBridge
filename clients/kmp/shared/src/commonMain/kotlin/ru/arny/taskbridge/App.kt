@@ -32,6 +32,7 @@ import ru.arny.taskbridge.ui.chat.ChatScreen
 import ru.arny.taskbridge.ui.chat.DraftChatScreen
 import ru.arny.taskbridge.ui.projects.ProjectWorkspaceScreen
 import ru.arny.taskbridge.ui.projects.ProjectsScreen
+import ru.arny.taskbridge.ui.remotefiles.RemoteFilesScreen
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.models.LocalModelsScreen
@@ -71,6 +72,9 @@ fun App(graph: AppGraph, openTaskId: String? = null, openRequestId: Long = 0L, n
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             if (connection == null) {
                 ConnectScreen(graph, onConnected = { navigator.reset(Screen.Sessions()) })
+            } else if (navigator.current is Screen.RemoteFiles) {
+                // Keep the same composition/controller across Narrow/Wide changes.
+                RemoteFilesRoute(graph, connection, navigator, navigator.current as Screen.RemoteFiles)
             } else {
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val wide = maxWidth >= 840.dp
@@ -111,6 +115,12 @@ fun App(graph: AppGraph, openTaskId: String? = null, openRequestId: Long = 0L, n
     }
 }
 
+@Composable
+private fun RemoteFilesRoute(graph: AppGraph, connection: AppGraph.Connected, navigator: Navigator, screen: Screen.RemoteFiles) {
+    RemoteFilesScreen(graph, connection, screen.projectId, screen.taskId, screen.rootId, screen.path,
+        onLocation = navigator::remoteLocation, onBack = { navigator.pop() })
+}
+
 /** Phone: one screen at a time. */
 @Composable
 private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, navigator: Navigator) {
@@ -145,13 +155,16 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             onBack = { navigator.pop() },
             onOpenSessions = { navigator.openProjectSessions(screen.projectId) },
             onOpenSession = { navigator.openChat(it) },
+            onRemoteFiles = { navigator.push(Screen.RemoteFiles(screen.projectId)) },
         )
         is Screen.Chat -> ChatScreen(
             graph, connection, screen.taskId,
             onBack = { navigator.pop() },
             onOpenSession = { navigator.openChat(it) },
             showBack = true,
+            onRemoteFiles = { navigator.push(Screen.RemoteFiles(it, screen.taskId)) },
         )
+        is Screen.RemoteFiles -> RemoteFilesRoute(graph, connection, navigator, screen)
         is Screen.Draft -> DraftChatScreen(
             graph, connection, screen.draft,
             onBack = { navigator.pop() },
@@ -214,12 +227,14 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
                     onBack = { navigator.pop() },
                     onOpenSessions = { navigator.openProjectSessions(projectOpen.projectId) },
                     onOpenSession = { navigator.openChat(it) },
+                    onRemoteFiles = { navigator.push(Screen.RemoteFiles(projectOpen.projectId)) },
                 )
                 chat != null -> ChatScreen(
                     graph, connection, chat.taskId,
                     onBack = { navigator.pop() },
                     onOpenSession = { navigator.openChat(it) },
                     showBack = false,
+                    onRemoteFiles = { navigator.push(Screen.RemoteFiles(it, chat.taskId)) },
                 )
                 open is Screen.Draft -> DraftChatScreen(
                     graph, connection, open.draft,

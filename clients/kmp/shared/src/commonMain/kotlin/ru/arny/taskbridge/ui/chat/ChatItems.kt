@@ -218,6 +218,10 @@ fun AssistantMessage(
     desktop: Boolean = false,
     /** Нажато «Продолжить», но ответ ещё не начал писаться — кнопка показывает ожидание. */
     continuePending: Boolean = false,
+    /** Токены и деньги за этот ответ; null — провайдер без тарифа или usage не пришёл. */
+    usageLine: String? = null,
+    /** Ответ шёл по пиковому тарифу DeepSeek — подпись получает метку. */
+    usagePeak: Boolean = false,
 ) {
     var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
@@ -273,6 +277,23 @@ fun AssistantMessage(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+        // Расход за ответ — строкой под текстом: в мете (время · статус) она уже не
+        // помещается, а на телефоне мета и так занимает свою строку.
+        usageLine?.let { line ->
+            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(line, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (usagePeak) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                        shape = MaterialTheme.shapes.extraSmall,
+                    ) {
+                        Text("пик ×2", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp))
                     }
                 }
             }

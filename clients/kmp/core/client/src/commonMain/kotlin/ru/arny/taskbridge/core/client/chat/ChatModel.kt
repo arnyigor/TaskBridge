@@ -59,11 +59,28 @@ sealed interface ChatItem {
         val canonicalText: String = text,
         /** Only the last nonempty segment exposes history actions and variants. */
         val segmentActions: Boolean = true,
+        /** Токены ответа, сложенные по всем вызовам модели внутри него (Pi usage). */
+        val usage: AnswerUsage? = null,
+        /** Модель, которой считались деньги; null — ответ до сбора usage. */
+        val usageModel: String? = null,
+        /** Arguments are still streaming; this is not tool execution yet. */
+        val generatingToolCall: Boolean = false,
     ) : ChatItem {
         val cutOff: Boolean get() = final && text.isBlank() && (superseded || status == "CANCELLED" || stopReason == "aborted")
     }
 
     data class Note(override val id: String, val text: String) : ChatItem
+}
+
+/** Токены одного ответа: попадания в кэш, обычный вход и вывод. */
+data class AnswerUsage(val hit: Long = 0, val miss: Long = 0, val out: Long = 0) {
+    val total: Long get() = hit + miss + out
+    val isEmpty: Boolean get() = miss <= 0 && out <= 0
+
+    operator fun plus(other: AnswerUsage?): AnswerUsage {
+        if (other == null) return this
+        return AnswerUsage(hit + other.hit, miss + other.miss, out + other.out)
+    }
 }
 
 data class VariantInfo(val turnSeq: Long, val index: Int, val ids: List<String>) {

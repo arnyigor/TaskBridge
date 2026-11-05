@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { startFixture } from './server-fixture.mjs';
+import { externalProjectIdentity } from '../src/external-files/config.mjs';
 
 // A llama.cpp router stand-in whose slots can be made "processing", which is what
 // TaskBridge reads to decide that the local model is busy.
@@ -64,6 +65,17 @@ async function waitFor(fn, { tries = 200, delay = 50 } = {}) {
   }
   throw new Error(`condition not met: ${JSON.stringify(last)}`);
 }
+
+test('new chats bind the selected project identity and scratch chats have none', { timeout: 40000 }, async t => {
+  const { fixture } = await fixtureWithLocalModel(t);
+  const projects = await fixture.api('/api/projects');
+  const registered = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'новая сессия', model: LOCAL_MODEL });
+  assert.equal(registered.status, 'QUEUED');
+  assert.equal(registered.externalReadProjectKey, externalProjectIdentity(projects.find(project => project.id === 'fixture')));
+  const scratch = await fixture.api('/api/tasks', { projectId: '__scratch__', prompt: 'без проекта', model: LOCAL_MODEL });
+  assert.equal(scratch.status, 'QUEUED');
+  assert.equal(scratch.externalReadProjectKey, null);
+});
 
 test('while the model is busy a prompt is queued, not refused, and it is visible', { timeout: 40000 }, async t => {
   const { fixture } = await fixtureWithLocalModel(t);

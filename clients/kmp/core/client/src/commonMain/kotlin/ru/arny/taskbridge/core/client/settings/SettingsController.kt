@@ -16,6 +16,7 @@ import ru.arny.taskbridge.core.api.ProviderProfilesPage
 import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.humanizeError
+import ru.arny.taskbridge.core.client.settings.providerEndpoint
 
 data class ModelProbeState(
     val loading: Boolean = false,
@@ -29,6 +30,22 @@ data class ProviderDraftState(
     val result: ProviderDraftCheck? = null,
     val error: String? = null,
 )
+
+data class ProviderEditorState(
+    val existing: Boolean = false,
+    val id: String = "tb-",
+    val baseUrl: String = "",
+    val keyEnv: String = "",
+    val api: String = "openai-completions",
+    val models: String = "",
+    val query: String = "",
+) {
+    val modelIds: List<String> get() = models.lines().map(String::trim).filter(String::isNotBlank).distinct()
+    val ready: Boolean get() = Regex("tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?").matches(id.trim()) &&
+        providerEndpoint(baseUrl) != null &&
+        (keyEnv.isBlank() || Regex("[A-Z][A-Z0-9_]{0,95}").matches(keyEnv.trim())) &&
+        (providerEndpoint(baseUrl)?.local == true || keyEnv.isNotBlank()) && modelIds.size in 1..100
+}
 
 data class AgentSettingsState(
     val providerStatuses: Map<String, ProviderStatus> = emptyMap(),
@@ -47,6 +64,8 @@ data class AgentSettingsState(
     /** Результат `GET /models` по провайдеру; ключ — ID провайдера. */
     val providerChecks: Map<String, ProviderCheck> = emptyMap(),
     val providerDraft: ProviderDraftState? = null,
+    val providerEditor: ProviderEditorState? = null,
+    val providerDelete: String? = null,
     /** Что сказать оператору после правки (нужен ли перезапуск сервера, копия файла). */
     val providerNotice: String? = null,
     val error: String? = null,
@@ -88,7 +107,7 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
     // изменения, сделанного пока человек открыта форма (CONFLICT), а не затрёт его.
 
     fun loadProviderProfiles() {
-        if (_state.value.providerProfilesLoading) return
+        if (_state.value.providerProfilesLoading || _state.value.providerBusy != null) return
         _state.update { it.copy(providerProfilesLoading = true, error = null) }
         scope.launch {
             runCatching { api.providerProfiles() }
@@ -98,10 +117,51 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
         }
     }
 
+    fun editProvider(profile: ProviderProfile? = null) {
+        if (_state.value.providerBusy != null) return
+        _state.update { it.copy(
+            providerEditor = ProviderEditorState(
+                existing = profile != null, id = profile?.id ?: "tb-",
+                baseUrl = profile?.baseUrl.orEmpty(), keyEnv = profile?.keyEnv.orEmpty(),
+                api = profile?.api ?: "openai-completions",
+                models = profile?.models?.joinToString("\n") { model -> model.id }.orEmpty(),
+            ), providerDraft = null, providerNotice = null, error = null,
+        ) }
+    }
+
+    fun updateProviderEditor(editor: ProviderEditorState) {
+        if (_state.value.providerBusy != null || _state.value.providerDraft?.loading == true) return
+        _state.update { state -> state.copy(
+            providerEditor = editor,
+            providerDraft = if (state.providerEditor?.baseUrl != editor.baseUrl || state.providerEditor?.keyEnv != editor.keyEnv) null else state.providerDraft,
+        ) }
+    }
+
+    fun closeProviderEditor() {
+        if (_state.value.providerBusy == null && _state.value.providerDraft?.loading != true)
+            _state.update { it.copy(providerEditor = null, providerDraft = null) }
+    }
+
+    fun addDiscoveredModel(id: String) {
+        val editor = _state.value.providerEditor ?: return
+        if (editor.modelIds.size >= 100 || id in editor.modelIds) return
+        updateProviderEditor(editor.copy(models = (editor.modelIds + id).joinToString("\n")))
+    }
+
+    fun requestProviderDelete(id: String?) {
+        if (_state.value.providerBusy == null) _state.update { it.copy(providerDelete = id) }
+    }
+
+    fun saveProviderEditor() {
+        val editor = _state.value.providerEditor ?: return
+        if (!editor.ready || _state.value.providerDraft?.loading == true) return
+        saveProviderProfile(editor.id.trim(), editor.baseUrl.trim(), editor.keyEnv.trim(), editor.modelIds)
+    }
+
     fun saveProviderProfile(id: String, baseUrl: String, keyEnv: String, models: List<String>) =
         mutateProvider(id) {
-            api.saveProviderProfile(_state.value.providerRevision, id, baseUrl, keyEnv, models) to
-                "Сохранено. Обнови каталог моделей; для нового API-ключа перезапусти сервер на компьютере."
+            api.saveProviderProfile(_state.value.providerRevision, id, baseUrl, keyEnv, models, _state.value.providerEditor?.api ?: "openai-completions") to
+                "Сохранено. Каталог моделей обновлён; для нового API-ключа перезапусти сервер на компьютере."
         }
 
     fun removeProviderModels(id: String, models: List<String>) =
@@ -129,10 +189,10 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
 
     /** Проверка черновика до сохранения: черновик в файл не пишется, отдаётся каталог моделей. */
     fun checkProviderDraft(baseUrl: String, keyEnv: String) {
-        if (_state.value.providerDraft?.loading == true) return
+        if (_state.value.providerDraft?.loading == true || _state.value.providerBusy != null) return
         _state.update { it.copy(providerDraft = ProviderDraftState(loading = true), error = null) }
         scope.launch {
-            runCatching { api.providerDraftCheck(baseUrl, keyEnv) }
+            runCatching { api.providerDraftCheck(baseUrl, keyEnv, _state.value.providerEditor?.api ?: "openai-completions") }
                 .onSuccess { result -> _state.update { it.copy(providerDraft = ProviderDraftState(result = result)) } }
                 .onFailure { failure ->
                     _state.update { it.copy(providerDraft = ProviderDraftState(error = humanizeError(failure.message))) }
@@ -146,7 +206,7 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
 
     /** Одна правка models.json за раз: параллельная запись потеряла бы ревизию. */
     private fun mutateProvider(id: String, request: suspend () -> Pair<ProviderProfilesPage, String>) {
-        if (_state.value.providerBusy != null) return
+        if (_state.value.providerBusy != null || _state.value.providerProfilesLoading || _state.value.providerRevision.isBlank()) return
         _state.update { it.copy(providerBusy = id, providerNotice = null, error = null) }
         scope.launch {
             runCatching { request() }
@@ -156,11 +216,15 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
                             providerProfiles = page.providers,
                             providerRevision = page.revision,
                             providerNotice = notice,
+                            providerEditor = null,
+                            providerDraft = null,
+                            providerDelete = null,
                         )
                     }
                 }
                 .onFailure { failure -> _state.update { it.copy(error = humanizeError(failure.message)) } }
             _state.update { if (it.providerBusy == id) it.copy(providerBusy = null) else it }
+            if (_state.value.providerNotice != null) loadModels(refresh = true)
         }
     }
 

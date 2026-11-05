@@ -4,6 +4,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { listPiSessions, readPiSession } from './pi-session-index.mjs';
 import { TEXT_TAIL, THINKING_TAIL, appendTail } from './text-tail.mjs';
+import { externalProjectIdentity } from './external-files/config.mjs';
 
 const fail = (message, code = 'INPUT_INVALID') => Object.assign(new Error(message), { code });
 
@@ -177,6 +178,7 @@ export class NativeSessionService {
     const firstUser = messages.find(message => message.role === 'user');
     const task = {
       id: crypto.randomUUID().replaceAll('-', '').slice(0, 12), createdAt: importedAt, updatedAt: importedAt,
+      externalReadProjectKey: externalProjectIdentity(project),
       status: 'SUCCEEDED', projectId, prompt: (firstUser && messageText(firstUser)) || source.name || 'Продолжение сессии Pi',
       workspacePath: project.path, sourcePath: project.path, worktree: false,
       nativeHistory: true, nativeSession: true, nativeSourceKey: source.key,

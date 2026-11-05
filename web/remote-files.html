@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="same-origin"><title>Папки компьютера · TaskBridge</title>
+  <link rel="stylesheet" href="/remote-files.css">
+</head>
+<body>
+<main>
+  <header><a id="back" href="/">← В TaskBridge</a><h1>Папки компьютера</h1><p>Windows · TaskBridge Server</p></header>
+  <p>Файлы читает сервер. Просмотр пользователем, доступ агента и отправка модели — разные полномочия.</p>
+  <label>Проект <select id="project" aria-label="Проект"></select></label>
+  <button id="refresh" type="button">Обновить</button>
+  <p id="notice" role="status" aria-live="polite"></p>
+  <section aria-label="Удалённые каталоги"><div id="roots"></div></section>
+  <section id="browser" hidden>
+    <button id="up" type="button">На уровень вверх</button><h2 id="location"></h2>
+    <form id="search"><input id="query" maxlength="80" placeholder="Имя файла"><button>Найти (ограниченный поиск)</button></form>
+    <p id="scope"></p><div id="entries"></div><button id="more" type="button" hidden>Загрузить ещё</button>
+  </section>
+  <section>
+    <h2>Запросить новый доступ</h2>
+    <form id="request">
+      <label>Папка на Windows или описание <input id="requestedPath" maxlength="2048" required placeholder="Например, Downloads или D:\Assets"></label>
+      <fieldset id="permissions"><legend>Запрашиваемые права</legend></fieldset>
+      <p>Новые права подтверждаются только локально на Windows. Передача модели включает облачную модель, если она выбрана.</p>
+      <button>Отправить запрос оператору</button>
+    </form>
+    <div id="requests"></div>
+  </section>
+</main>
+<dialog id="preview"><h2 id="previewName"></h2><div id="previewBody"></div><button id="closePreview" type="button">Закрыть</button></dialog>
+<dialog id="decision"><h2>Локальное подтверждение Windows</h2><p id="decisionPermissions"></p><label>Проверенный каталог Windows <input id="operatorPath" maxlength="2048"></label><button id="approve" type="button">Подтвердить права</button><button id="deny" type="button">Отклонить</button><button id="closeDecision" type="button">Отмена</button></dialog>
+<dialog id="attachment"><h2>Отправить снимок в этот чат?</h2><p id="attachmentName"></p><p>Подготовлен на сервере, без скачивания на телефон. Срок действия — один час.</p><label>Сообщение агенту <textarea id="attachmentText"></textarea></label><button id="sendAttachment" type="button">Отправить в чат</button><button id="cancelAttachment" type="button">Отмена</button></dialog>
+<script type="module" src="/remote-files.js"></script>
+</body></html>

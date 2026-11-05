@@ -19,6 +19,10 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.onNodeWithTag
@@ -53,10 +57,23 @@ class ChatScrollFollowTest {
         val feed = mutableStateListOf<FeedItem>().apply { for (i in 1..12) add(FeedItem("m$i", 300)) }
         val listState = LazyListState()
         var following = true
+        lateinit var bottomLatch: BottomLatch
         setContent {
             MaterialTheme {
                 val latch = remember { BottomLatch() }
                 var follow by remember { mutableStateOf(true) }
+                bottomLatch = latch
+                val scrollIntent = remember(latch) {
+                    object : NestedScrollConnection {
+                        override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                            if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                                latch.userScroll(available.y)
+                                follow = latch.following
+                            }
+                            return Offset.Zero
+                        }
+                    }
+                }
                 // Как в ChatScreen: защёлка «у низа» считается по позиции ленты и составу ленты.
                 LaunchedEffect(listState, latch) {
                     snapshotFlow {
@@ -80,7 +97,9 @@ class ChatScrollFollowTest {
                     }
                 }
                 following = follow
-                ChatFeed(feed, listState, follow)
+                Box(Modifier.nestedScroll(scrollIntent)) {
+                    ChatFeed(feed, listState, follow)
+                }
             }
         }
         waitForIdle()
@@ -105,6 +124,18 @@ class ChatScrollFollowTest {
             waitForIdle()
             assertEquals(0, listState.firstVisibleItemIndex, "чанк не сдвигает низ")
             assertEquals(0, listState.firstVisibleItemScrollOffset)
+        }
+
+        // Малейшая попытка уйти вверх выключает слежение даже внутри порога 80 px.
+        onNodeWithTag("feed").performMouseInput { moveTo(center); scroll(-1f) }
+        waitForIdle()
+        assertTrue(listState.firstVisibleItemScrollOffset in 1..80, "предусловие: небольшой уход от низа")
+        assertFalse(following, "колесо вверх должно сразу отключать слежение")
+        repeat(3) {
+            val last = feed.last()
+            feed[feed.lastIndex] = last.copy(height = last.height + 20)
+            waitForIdle()
+            assertFalse(following, "чанк внутри порога не должен включать слежение")
         }
 
         // 3. Оператор читает выше. Жест у низа оставляет якорь у низа, а дальше он
@@ -137,6 +168,7 @@ class ChatScrollFollowTest {
         assertFalse(following)
 
         // 6. Возврат к низу возобновляет слежение: следующая дельта снова остаётся в виде.
+        runOnIdle { bottomLatch.resume() } // Как явная кнопка «К последнему сообщению».
         onNodeWithTag("feed").performScrollToIndex(0)
         waitForIdle()
         assertTrue(following, "у низа слежение включается снова")

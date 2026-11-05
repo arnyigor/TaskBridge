@@ -80,6 +80,44 @@ class BottomLatchTest {
     }
 
     @Test
+    fun `upward intent pauses before the position changes and survives incoming content`() {
+        val latch = BottomLatch()
+        latch.observe(0, 0, 10, "m10")
+        latch.userScroll(1f)
+        assertFalse(latch.following, "не ждём изменения позиции или конца жеста")
+        latch.observe(0, 0, 10, "m10")
+        latch.settle(0, 0)
+        assertFalse(latch.following, "даже неудавшаяся попытка прокрутки отключает слежение")
+        repeat(5) { chunk ->
+            latch.observe(0, 12, 11 + chunk, "m${11 + chunk}")
+            latch.settle(0, 12)
+            assertFalse(latch.following, "чанк не должен включать слежение внутри порога")
+        }
+    }
+
+    @Test
+    fun `paused following resumes only after scrolling back to the exact bottom`() {
+        val latch = BottomLatch()
+        latch.userScroll(20f)
+        latch.settle(0, 30)
+        latch.userScroll(-10f)
+        latch.observe(0, 12, 10, "m10")
+        latch.settle(0, 12)
+        assertFalse(latch.following)
+        latch.observe(0, 0, 10, "m10")
+        assertTrue(latch.following)
+    }
+
+    @Test
+    fun `explicit jump resumes following after upward intent`() {
+        val latch = BottomLatch()
+        latch.userScroll(1f)
+        latch.resume()
+        latch.observe(1, 0, 11, "m11")
+        assertTrue(latch.following, "новая вставка после явного возврата снова сопровождается")
+    }
+
+    @Test
     fun `returning to the bottom resumes following`() {
         val latch = BottomLatch()
         latch.observe(index = 0, offset = 0, count = 10, newestId = "m10")

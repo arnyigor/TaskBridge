@@ -96,6 +96,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val compactionNotice: Boolean = false,
         val activityBoundaries: MutableList<CompactionBoundary> = mutableListOf(),
         var lastActivity: String? = null,
+        /** Токены всех вызовов модели внутри этого ответа. */
+        var usage: AnswerUsage? = null,
+        /** Модель, которой эти токены считались (переживает смену модели в сессии). */
+        var usageModel: String? = null,
+        var generatingToolCall: Boolean = false,
     )
 
     internal class CompactionBoundary(val seq: Long, val text: Int, val thinking: Int, val tools: Int, val notes: List<Turn>, val key: String = seq.toString())
@@ -586,6 +591,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         turn.error = null
         turn.status = "RUNNING"
         turn.stopReason = null
+        turn.generatingToolCall = false
         turn.endedAt = null
         if (turn.at == null) turn.at = at
     }
@@ -675,12 +681,16 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 val turn = messageTurn ?: current
                 val delta = frame.obj("assistantMessageEvent")
                 when (delta?.str("type")) {
+                    "toolcall_start", "toolcall_delta", "toolcall_end" -> turn.generatingToolCall = true
+                    "text_start", "thinking_start" -> turn.generatingToolCall = false
                     "text_delta" -> if (!delta.str("delta").isNullOrEmpty()) {
+                        turn.generatingToolCall = false
                         activity(turn, "text", event.seq, messageSeq)
                         if (textSeparator.isNotEmpty() && !separatorApplied) { turn.text += textSeparator; separatorApplied = true }
                         appendAssistantTextDelta(turn, delta.str("delta").orEmpty())
                     }
                     "thinking_delta" -> if (!delta.str("delta").isNullOrEmpty()) {
+                        turn.generatingToolCall = false
                         activity(turn, "thinking", event.seq, messageSeq)
                         turn.thinking += delta.str("delta").orEmpty()
                     }
@@ -689,6 +699,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             "message_end" -> if (frame.obj("message")?.str("role") == "assistant") onMessageEnd(event, frame.obj("message")!!)
             "turn_end" -> updateUserDelivery(current)
             "tool_execution_start" -> {
+                (executionTurn ?: current).generatingToolCall = false
                 val id = frame.str("toolCallId") ?: "tool-${event.seq}"
                 if (id !in tools) {
                     val turn = executionTurn ?: current
@@ -769,7 +780,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         return note
     }
 
-    private fun Turn.isEmptyPlaceholder(): Boolean = !final && text.isBlank() && thinking.isBlank() && tools.isEmpty() && files.isEmpty()
+    private fun Turn.isEmptyPlaceholder(): Boolean = !final && !generatingToolCall && text.isBlank() && thinking.isBlank() && tools.isEmpty() && files.isEmpty()
 
     private fun onMessageEnd(event: TaskEvent, message: JsonObject) {
         val sink = messageTurn ?: current
@@ -783,6 +794,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             if (previous != null) orphan = Orphan(previous, previous.text, previous.thinking, "")
         }
         val turn = orphan?.turn ?: sink
+        turn.generatingToolCall = false
+        // Токены копятся на ответ целиком: один ответ — это несколько вызовов модели
+        // (между ними инструменты), и `task.lastUsage` описывает только последний.
+        messageUsage(message)?.let { usage ->
+            turn.usage = (turn.usage ?: AnswerUsage()) + usage
+            message.str("model")?.let { turn.usageModel = it }
+        }
         val content = message["content"] as? JsonArray
         val markerText = content?.mapNotNull { it as? JsonObject }
             ?.filter { it.str("type") == "text" }
@@ -947,6 +965,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                         active = turn.active, status = turn.status, error = turn.error, final = turn.final,
                         at = turn.at, endedAt = turn.endedAt, partial = turn.partial, superseded = turn.superseded,
                         stopReason = turn.stopReason, variants = variantInfo, files = turn.files,
+                        usage = turn.usage, usageModel = turn.usageModel,
+                        generatingToolCall = turn.active && turn.generatingToolCall,
                     )
                 }
             }
@@ -1036,6 +1056,21 @@ private fun compactionNote(frame: JsonObject): String? {
     val result = frame.obj("result") ?: return null
     val summary = result.str("summary")?.trim().orEmpty()
     return if (summary.isNotEmpty()) "Контекст сжат:\n$summary" else "Контекст сжат."
+}
+
+/**
+ * Токены одного вызова модели из `message.usage` Pi.
+ * `input` — обычный вход (промах кэша), `cacheRead` — попадание, `output` — вывод.
+ * Пустой usage (прерванный вызов) не считается расходом.
+ */
+private fun messageUsage(message: JsonObject): AnswerUsage? {
+    val usage = message.obj("usage") ?: return null
+    val parsed = AnswerUsage(
+        hit = usage.long("cacheRead") ?: 0,
+        miss = usage.long("input") ?: 0,
+        out = usage.long("output") ?: 0,
+    )
+    return parsed.takeUnless { it.isEmpty }
 }
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull

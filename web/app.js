@@ -4071,11 +4071,11 @@ function isTouchDevice() {
 // Both lists are the only registry of header controls: a button that index.html
 // has but these lists do not is never moved on a phone and stays in the header
 // (that is how «Выбрать сообщения» broke the phone layout — 2026-10-12).
-const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'automationsButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_CONTROLS = ['runtimeControl', 'modelButton', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'automationsButton', 'remoteFilesButton', 'serverRestartButton', 'pairButton', 'pcState', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
 // Menu order, not header order: the model switcher is what a phone opens this
 // menu for. The status dot stays in the header — 12px of a live indicator costs
 // no row, and the model chip was what pushed the header onto a second line.
-const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'automationsButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
+const HEADER_MENU_CONTROLS = ['modelButton', 'runtimeControl', 'localModelsButton', 'processesButton', 'mcpButton', 'providersButton', 'automationsButton', 'remoteFilesButton', 'serverRestartButton', 'pairButton', 'sessionDetailsButton', 'selectMessagesButton', 'helpButton', 'uiSettingsButton'];
 // The one width the phone layout starts at, shared by the header menu, the
 // session drawer and the CSS (see the media queries in web/app.css).
 const MOBILE_QUERY = '(max-width: 900px)';
@@ -6155,6 +6155,13 @@ $('mcpButton').onclick = async () => {
 // dialog over a live chat invites editing while a turn is streaming.
 $('providersButton').onclick = () => location.assign('/providers.html');
 $('automationsButton').onclick = () => location.assign('/automations.html');
+$('remoteFilesButton').onclick = () => {
+  const query = new URLSearchParams();
+  const projectId = currentTask?.projectId || $('project').value;
+  if (projectId) query.set('projectId', projectId);
+  if (currentTask?.id) query.set('taskId', currentTask.id);
+  window.open(`/remote-files.html?${query}`, '_blank', 'noopener');
+};
 $('mcpClose').onclick = () => $('mcpOverlay').classList.add('hidden');
 $('mcpRefresh').onclick = () => refreshMcp();
 $('mcpImport').onclick = async () => {

@@ -126,7 +126,7 @@ test('проверка черновика показывает модели и �
   const draftCall = calls.find(call => call.url.endsWith('/draft-check'));
   assert.ok(draftCall, 'маршрут вызван');
   assert.equal(draftCall.method, 'POST');
-  assert.deepEqual(draftCall.body, { baseUrl: 'https://api.example/v1', keyEnv: 'NEW_KEY' }, 'секрета в теле нет — только имя переменной');
+  assert.deepEqual(draftCall.body, { baseUrl: 'https://api.example/v1', keyEnv: 'NEW_KEY', api: 'openai-completions' }, 'секрета в теле нет — только имя переменной и выбранный протокол');
   assert.match(document.getElementById('draft-status').textContent, /Доступен/);
   assert.match(document.getElementById('discovered-count').textContent, /из 3/, 'каталог показан');
 

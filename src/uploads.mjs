@@ -83,6 +83,33 @@ export class UploadStore {
     }
   }
 
+  async stageSnapshot(file, binding) {
+    if (!Buffer.isBuffer(file.bytes) || file.bytes.length > this.maxFileBytes || !binding?.taskId || !binding?.projectId || !binding?.actor) throw fail('INPUT_INVALID', 'Недопустимое вложение.');
+    const token = this.newToken();
+    const dir = await this.#dir(token);
+    await fs.mkdir(dir, { recursive: true });
+    const entry = { id: crypto.randomUUID(), name: safeUploadName(file.name), size: file.bytes.length, mimeType: file.mimeType || contentType(file.name) };
+    try {
+      await fs.writeFile(path.join(dir, entry.id), file.bytes, { flag: 'wx' });
+      await fs.writeFile(path.join(dir, 'binding.json'), JSON.stringify(binding), { flag: 'wx' });
+      await fs.writeFile(path.join(dir, 'index.json'), JSON.stringify([entry]), { flag: 'wx' });
+      return { token, files: [entry] };
+    } catch (error) { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); throw error; }
+  }
+
+  async authorize(token, context = {}, { scopeOnly = false } = {}) {
+    const dir = await this.#dir(token);
+    let binding;
+    try { binding = JSON.parse(await fs.readFile(path.join(dir, 'binding.json'), 'utf8')); }
+    catch (error) { if (error.code === 'ENOENT') return; throw error; }
+    if (binding.taskId !== context.taskId || binding.projectId !== context.projectId || (!scopeOnly && binding.actor !== context.actor)) throw fail('FILE_FORBIDDEN', 'Вложение недоступно в этом чате.');
+    if (Date.now() > binding.expiresAt) throw fail('FILE_FORBIDDEN', 'Срок действия вложения истёк.');
+    if (binding.rootId) {
+      if (!this.externalAuthorization) throw fail('FILE_FORBIDDEN', 'Не удалось проверить разрешение вложения.');
+      await this.externalAuthorization(binding);
+    }
+  }
+
   async #load(token) {
     const dir = await this.#dir(token);
     try {
@@ -95,7 +122,8 @@ export class UploadStore {
 
   // Resolves client references against what was actually staged. Client-supplied
   // name/size/mime are ignored, so a forged ref cannot point outside the token.
-  async resolve(token, refs) {
+  async resolve(token, refs, context = {}) {
+    await this.authorize(token, context, { scopeOnly: true });
     const { dir, files } = await this.#load(token);
     // A task can wait in the queue longer than the TTL; keep the staging
     // directory alive as soon as it is actually referenced.

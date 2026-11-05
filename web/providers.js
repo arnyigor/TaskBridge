@@ -41,12 +41,23 @@
     if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
     return body;
   };
+  const readValue = id => {
+    const node = el(id);
+    const value = node.value;
+    return typeof value === 'string' ? value : node.getAttribute('data-value') || '';
+  };
+  const setValue = (id, value) => {
+    const node = el(id);
+    try { node.value = value; } catch { /* compact DOM test doubles may expose a getter only */ }
+    if (node.value !== value) node.setAttribute('data-value', value);
+  };
   const splitLines = value => String(value || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
   const draftFields = () => ({
-    id: el('provider-id').value.trim(),
-    baseUrl: el('base-url').value.trim(),
-    keyEnv: el('key-env').value.trim(),
-    models: splitLines(el('models').value),
+    id: readValue('provider-id').trim(),
+    baseUrl: readValue('base-url').trim(),
+    keyEnv: readValue('key-env').trim(),
+    api: readValue('api-type') || 'openai-completions',
+    models: [...new Set(splitLines(readValue('models')))],
   });
   const renderDiscovered = () => {
     const box = el('discovered');
@@ -81,7 +92,8 @@
     const fields = draftFields();
     if (wizard) {
       el('draft-preview').textContent = wizard.draftPreviewText(fields);
-      if (selected === null) el('save').disabled = !wizard.draftReady(fields);
+      el('endpoint-hint').textContent = wizard.endpointHint(fields.baseUrl);
+      el('save').disabled = busy || !revision || !wizard.draftReady(fields) || Boolean(selected && !profiles.find(p => p.id === selected)?.managed);
     }
     if (!el('discovered').classList.contains('hidden')) renderDiscovered();
   };
@@ -169,20 +181,21 @@
   const show = item => {
     selected = item?.id || null;
     el('editor-title').textContent = item ? (item.managed ? 'Настройки подключения' : 'Существующее подключение') : 'Новое подключение';
-    el('provider-id').value = item?.id || 'tb-';
+    setValue('provider-id', item?.id || 'tb-');
     el('provider-id').disabled = !!item;
-    el('base-url').value = item?.baseUrl || '';
-    el('key-env').value = item?.keyEnv || '';
-    el('models').value = item?.models?.map(m => m.id).join('\n') || '';
-    el('preset').value = 'custom';
+    setValue('base-url', item?.baseUrl || '');
+    setValue('key-env', item?.keyEnv || '');
+    setValue('api-type', item?.api || 'openai-completions');
+    setValue('models', item?.models?.map(m => m.id).join('\n') || '');
+    setValue('preset', 'custom');
     const disabled = !!item && !item.managed;
-    for (const id of ['base-url', 'key-env', 'models', 'preset', 'save', 'draft-check']) el(id).disabled = disabled;
+    for (const id of ['base-url', 'key-env', 'api-type', 'models', 'preset', 'save', 'draft-check']) el(id).disabled = disabled;
     // Проверка соединения не требует управляемого профиля: адрес резолвится на
     // сервере из каталога Pi, а models.json при этом не меняется.
     el('test').disabled = !item;
-    el('delete').disabled = !item?.managed;
+    el('delete').disabled = !item;
     // Найденные ранее модели относились к другому адресу — не подмешиваем их в новый.
-    discovered = []; picked = []; el('model-query').value = ''; el('draft-status').textContent = '';
+    discovered = []; picked = []; setValue('model-query', ''); el('draft-status').textContent = '';
     renderDiscovered();
     renderDraft();
     renderModelRemoval(item);
@@ -204,27 +217,28 @@
   });
   el('add').addEventListener('click', () => { show(null); status('Введите параметры нового подключения.'); });
   el('preset').addEventListener('change', () => {
-    switch (el('preset').value) {
-      case 'openrouter':
-        el('provider-id').value = 'tb-openrouter';
-        el('base-url').value = 'https://openrouter.ai/api/v1';
-        el('key-env').value = 'OPENROUTER_API_KEY';
-        break;
-      case 'local':
-        el('provider-id').value = 'tb-local';
-        el('base-url').value = 'http://127.0.0.1:8080/v1';
-        el('key-env').value = '';
-        break;
-      default: break;
+    if (busy) return;
+    const preset = wizard?.PROVIDER_PRESETS[el('preset').value];
+    if (!preset) return;
+    if (!selected) setValue('provider-id', preset.id);
+    setValue('base-url', preset.baseUrl);
+    setValue('key-env', preset.keyEnv);
+    setValue('api-type', preset.api);
+    discovered = []; picked = []; el('draft-status').textContent = '';
+    renderDiscovered();
+    renderDraft();
+  });
+  for (const id of ['provider-id', 'base-url', 'key-env', 'models', 'api-type']) el(id).addEventListener('input', () => {
+    if (['base-url', 'key-env', 'api-type'].includes(id)) {
+      discovered = []; picked = []; el('draft-status').textContent = ''; renderDiscovered();
     }
     renderDraft();
   });
-  for (const id of ['provider-id', 'base-url', 'key-env', 'models']) el(id).addEventListener('input', renderDraft);
   el('model-query').addEventListener('input', renderDiscovered);
   el('add-selected').addEventListener('click', () => {
     const current = splitLines(el('models').value);
     const limit = wizard ? wizard.WIZARD_MODEL_LIMIT : 100;
-    el('models').value = [...new Set([...current, ...picked])].slice(0, limit).join('\n');
+    setValue('models', [...new Set([...current, ...picked])].slice(0, limit).join('\n'));
     // Отметки снимаются: они уже в списке выше, повторное «добавить» ничего не даст.
     picked = [];
     el('model-query').value = '';
@@ -238,7 +252,7 @@
     el('draft-status').textContent = 'Проверяем адрес и запрашиваем список моделей…';
     try {
       // Черновик не пишется в models.json: этот запрос только читает GET /models.
-      const result = await api('/draft-check', { method: 'POST', body: JSON.stringify({ baseUrl: fields.baseUrl, keyEnv: fields.keyEnv }) });
+      const result = await api('/draft-check', { method: 'POST', body: JSON.stringify({ baseUrl: fields.baseUrl, keyEnv: fields.keyEnv, api: fields.api }) });
       const text = checkView
         ? checkView.providerCheckText(result)
         : `${result.status}. ${result.note || ''}`;
@@ -257,8 +271,8 @@
     if (busy) return;
     busy = true; el('save').disabled = true;
     try {
-      const { id, baseUrl, keyEnv, models } = draftFields();
-      const result = await api('', { method: 'PUT', body: JSON.stringify({ revision, id, baseUrl, keyEnv, models }) });
+      const { id, baseUrl, keyEnv, api: protocol, models } = draftFields();
+      const result = await api('', { method: 'PUT', body: JSON.stringify({ revision, id, baseUrl, keyEnv, api: protocol, models }) });
       revision = result.revision; profiles = result.providers;
       show(profiles.find(p => p.id === id));
       status(wizard
@@ -288,7 +302,7 @@
     finally { busy = false; el('test').disabled = false; }
   });
   el('delete').addEventListener('click', async () => {
-    if (!selected || busy || !confirm(`Удалить провайдер ${selected}? Уже запущенные сессии не будут перенастроены.`)) return;
+    if (!selected || busy || !confirm(`Удалить провайдер ${selected} и все его модели из models.json? Будет сохранена резервная копия. Уже запущенные сессии не будут перенастроены; следующий ход может потребовать выбора другой модели.`)) return;
     busy = true;
     try {
       const result = await api(`/${encodeURIComponent(selected)}`, { method: 'DELETE', body: JSON.stringify({ revision }) });

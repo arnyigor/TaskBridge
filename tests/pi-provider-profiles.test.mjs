@@ -73,12 +73,30 @@ test('update keeps metadata for unchanged model IDs', async t => {
   assert.notEqual(first.revision, after.revision);
 });
 
-test('stale edits are rejected; non-owned entries cannot be adopted or deleted', async t => {
+test('stale edits are rejected; non-owned entries cannot be adopted', async t => {
   const { dir, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const old = await service.list();
   await service.upsert(draft(old.revision));
   await rejectCode(service.upsert(draft(old.revision)), 'CONFLICT');
-  await rejectCode(service.remove('existing', (await service.list()).revision), 'INPUT_INVALID');
+  await rejectCode(service.upsert(draft((await service.list()).revision, { id: 'existing' })), 'INPUT_INVALID');
+});
+
+// Запрос оператора: чужое подключение тоже должно удаляться — с ревизией, копией
+// файла и отказом по промаху в ID, но без «присвоения» чужой записи.
+test('non-managed provider is deleted explicitly, stale revision and missing id are refused', async t => {
+  const { dir, file, original, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const { revision } = await service.list();
+  const removed = await service.remove('existing', revision);
+  assert.equal(removed.providers.find(p => p.id === 'existing'), undefined);
+  assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')), { ...original, providers: {} });
+  const backups = (await fs.readdir(dir)).filter(name => name.startsWith('models.json.bak-taskbridge-'));
+  assert.equal(backups.length, 1, 'перед удалением снимается копия файла');
+  const fresh = (await service.list()).revision;
+  await rejectCode(service.remove('existing', fresh), 'NOT_FOUND');
+  await service.upsert(draft((await service.list()).revision));
+  await rejectCode(service.remove('tb-test', revision), 'CONFLICT');
+  await rejectCode(service.remove('../secret', (await service.list()).revision), 'INPUT_INVALID');
+  // Чужую запись по-прежнему нельзя переписать под себя.
   await rejectCode(service.upsert(draft((await service.list()).revision, { id: 'existing' })), 'INPUT_INVALID');
 });
 

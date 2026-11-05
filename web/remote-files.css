@@ -1,0 +1,18 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; background: Canvas; color: CanvasText; }
+main { max-width: 900px; margin: auto; padding: 20px; }
+section { margin: 24px 0; }
+button, input, select, textarea { font: inherit; padding: 9px; border-radius: 6px; margin: 4px; max-width: 100%; box-sizing: border-box; }
+button { cursor: pointer; min-height: 44px; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+label { display: block; margin: 8px 0; }
+input:not([type=checkbox]), textarea { width: min(100%, 650px); }
+.entry { border: 1px solid GrayText; border-radius: 8px; padding: 12px; margin: 10px 0; overflow-wrap: anywhere; }
+.entry p { margin: 6px 0; }
+#notice { min-height: 24px; overflow-wrap: anywhere; }
+#notice.error { color: light-dark(#a00000, #ffa8a8); }
+dialog { max-width: min(90vw, 750px); max-height: 85vh; overflow: auto; border-radius: 12px; }
+dialog::backdrop { background: #0008; }
+#previewBody img { max-width: 100%; max-height: 65vh; object-fit: contain; }
+#previewBody pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+[hidden] { display: none !important; }

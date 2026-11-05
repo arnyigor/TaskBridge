@@ -99,27 +99,138 @@ export function aggregateCostHistory(text) {
     .map(([day, cost]) => ({ day, cost: numberOfDecimal(cost) }));
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
- * Прогноз по темпу расхода, как в apicost: recent = среднее по последним 3
- * завершённым дням, history = по последним 7. runway = ceil(balance / pace).
+ * Достроить календарные дни между первой и последней записью.
+ *
+ * В cost_history.csv попадают только дни с расходом: пропуск внутри покрытого
+ * диапазона — это подтверждённый ноль, а не «нет данных» (так же считает apicost,
+ * у которого внутри [first..last] дни материализуются нулями). Без этого среднее
+ * делится на число записей, а не на число дней, и окно «3 дня» растягивается на
+ * неделю — темп завышается ровно во столько раз.
  */
-export function computeRunway(balanceCny, dayCosts, today) {
-  const all = [...dayCosts].sort((a, b) => (a.day < b.day ? -1 : 1));
-  let completed = all.filter(d => d.day < today);
-  if (!completed.length && all.length && all[all.length - 1].day < today) {
-    completed = all;
+function fillDates(entries, empty) {
+  if (!entries.length) return [];
+  const sorted = [...entries].sort((a, b) => (a.day < b.day ? -1 : 1));
+  const byDay = new Map(sorted.map(entry => [entry.day, entry]));
+  const start = Date.parse(`${sorted[0].day}T00:00:00Z`);
+  const end = Date.parse(`${sorted[sorted.length - 1].day}T00:00:00Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return sorted;
+  const filled = [];
+  for (let ms = start; ms <= end; ms += DAY_MS) {
+    const day = new Date(ms).toISOString().slice(0, 10);
+    filled.push(byDay.get(day) || empty(day));
   }
+  return filled;
+}
+
+/** [{day, cost}] с нулями в пропущенных днях покрытого диапазона. */
+export function fillCalendarDays(days) {
+  return fillDates(days, day => ({ day, cost: 0 }));
+}
+
+/** [{day, hit, miss, out, total}] с нулями в пропущенных днях. */
+export function fillCalendarTokens(days) {
+  return fillDates(days, day => ({ day, hit: 0, miss: 0, out: 0, total: 0 }));
+}
+
+/** Сколько дней прошло от последней записи до сегодня (по местной дате). */
+export function dayAge(lastDay, today) {
+  const from = Date.parse(`${lastDay}T00:00:00Z`);
+  const to = Date.parse(`${today}T00:00:00Z`);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+  return Math.round((to - from) / DAY_MS);
+}
+
+/**
+ * Прогноз по темпу расхода: recent = среднее по последним 3 завершённым
+ * календарным дням, history = по последним 7. runway = ceil(balance / pace).
+ */
+export function computeRunway(balanceCny, dayCosts, today, options = {}) {
+  const recentWindow = Number(options.recentWindow) || 3;
+  const historyWindow = Number(options.historyWindow) || 7;
+  const completed = fillCalendarDays(dayCosts).filter(d => d.day < today);
   if (!completed.length) {
     return { recentPerDay: null, historyPerDay: null, recentDays: null, historyDays: null };
   }
-  const costs = completed.map(d => d.cost);
-  const recentPerDay = decimalMean(costs.slice(-Math.min(3, costs.length)));
-  const historyPerDay = decimalMean(costs.slice(-Math.min(7, costs.length)));
+  const tail = window => completed.slice(-Math.min(window, completed.length)).map(d => d.cost);
+  const recentPerDay = decimalMean(tail(recentWindow));
+  const historyPerDay = decimalMean(tail(historyWindow));
   return {
     recentPerDay,
     historyPerDay,
     recentDays: decimalCeilRatio(balanceCny, recentPerDay),
     historyDays: decimalCeilRatio(balanceCny, historyPerDay),
+  };
+}
+
+const TOKEN_TYPES = ['hit', 'miss', 'out'];
+
+/**
+ * day,model,key,type,price,amount → [{day, hit, miss, out, total}].
+ * `hit` — попадания в кэш, `miss` — обычный вход, `out` — вывод; `req` в расход
+ * токенов не входит, но нужен для «сколько запросов». Токены — целые, суммы
+ * копятся BigInt: 4 миллиарда токенов в double теряют единицы, а это ровно та
+ * точность, с которой цена считается деньгами.
+ */
+export function aggregateTokenHistory(text) {
+  const byDay = new Map();
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.toLowerCase().startsWith('day')) continue;
+    const cols = line.split(',');
+    if (cols.length < 6) continue;
+    const day = cols[0].trim();
+    const type = cols[3].trim();
+    const amount = Number(cols[5]);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !TOKEN_TYPES.includes(type) || !Number.isFinite(amount)) continue;
+    const entry = byDay.get(day) || { hit: 0n, miss: 0n, out: 0n };
+    entry[type] += BigInt(Math.round(amount));
+    byDay.set(day, entry);
+  }
+  return [...byDay.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([day, t]) => ({
+    day,
+    hit: Number(t.hit),
+    miss: Number(t.miss),
+    out: Number(t.out),
+    total: Number(t.hit + t.miss + t.out),
+  }));
+}
+
+/** Токены в день по последним завершённым календарным дням (окно — как у денег). */
+export function computeTokenPace(tokenDays, today, window = 3) {
+  const completed = fillCalendarTokens(tokenDays).filter(d => d.day < today);
+  if (!completed.length) return null;
+  const tail = completed.slice(-Math.min(window, completed.length));
+  const mean = key => Math.round(tail.reduce((sum, d) => sum + d[key], 0) / tail.length);
+  return { days: tail.length, hit: mean('hit'), miss: mean('miss'), out: mean('out'), total: mean('total') };
+}
+
+/**
+ * Факт по последнему месяцу, который есть в данных: сумма денег и токенов с
+ * первого числа по последний записанный день. «За месяц» на экране — это факт,
+ * а не экстраполяция; она отдельно, в прогнозе по темпу.
+ */
+export function monthFacts(costDays, tokenDays) {
+  const last = costDays.length ? costDays[costDays.length - 1].day
+    : (tokenDays.length ? tokenDays[tokenDays.length - 1].day : null);
+  if (!last) return null;
+  const key = last.slice(0, 7);
+  const costPart = fillCalendarDays(costDays).filter(d => d.day.startsWith(key));
+  const tokenPart = fillCalendarTokens(tokenDays).filter(d => d.day.startsWith(key));
+  const sumTokens = field => tokenPart.reduce((sum, d) => sum + d[field], 0);
+  const cny = costPart.length ? costPart.map(d => d.cost).reduce(decimalAdd, 0) : null;
+  return {
+    key,
+    from: costPart.length ? costPart[0].day : tokenPart[0].day,
+    to: last,
+    days: costPart.length || tokenPart.length,
+    tokens: sumTokens('total'),
+    hit: sumTokens('hit'),
+    miss: sumTokens('miss'),
+    out: sumTokens('out'),
+    cny,
   };
 }
 
@@ -305,17 +416,39 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
   const usd = balance.USD ?? 0;
   const totalCny = usdCny != null ? decimalAdd(decimalMultiply(usd, usdCny), cny) : null;
 
+  const today = localDate(options.now ? new Date(options.now) : new Date());
   let costHistory = null;
   let runway = { recentPerDay: null, historyPerDay: null, recentDays: null, historyDays: null };
-  if (totalCny != null && deepseekConfig.costHistoryPath) {
+  let tokenPace = null;
+  let month = null;
+  let costDays = [];
+  let tokenDays = [];
+  if (deepseekConfig.costHistoryPath) {
     try {
-      const text = await fs.readFile(deepseekConfig.costHistoryPath, 'utf8');
-      const days = aggregateCostHistory(text);
-      costHistory = days.length ? { lastDay: days[days.length - 1].day } : null;
-      runway = computeRunway(totalCny, days, localDate(options.now ? new Date(options.now) : new Date()));
+      costDays = aggregateCostHistory(await fs.readFile(deepseekConfig.costHistoryPath, 'utf8'));
     } catch {
       // нет истории — просто без прогноза
     }
+  }
+  if (deepseekConfig.tokenHistoryPath) {
+    try {
+      tokenDays = aggregateTokenHistory(await fs.readFile(deepseekConfig.tokenHistoryPath, 'utf8'));
+    } catch {
+      // нет истории токенов — останется без «сколько токенов в день»
+    }
+  }
+  if (totalCny != null && costDays.length) {
+    runway = computeRunway(totalCny, costDays, today);
+  }
+  if (costDays.length || tokenDays.length) {
+    const lastDay = costDays.length ? costDays[costDays.length - 1].day : tokenDays[tokenDays.length - 1].day;
+    const ageDays = dayAge(lastDay, today);
+    // Прогноз по устаревшим данным — не прогноз: если последняя запись старше
+    // двух дней, честнее сказать «данные до 21.09», чем показать сентябрьский пик
+    // как текущий темп. Числа при этом остаются — они про свой период.
+    costHistory = { lastDay, ageDays, stale: ageDays != null && ageDays > 2 };
+    tokenPace = computeTokenPace(tokenDays, today);
+    month = monthFacts(costDays, tokenDays);
   }
 
   const rub = rates
@@ -333,9 +466,12 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
   const effRubPerCny = rates ? (totalCny > 0 ? decimalRatio(rub.total, totalCny) : rates.cnyRub) : null;
   const rubPerDay = (value) => (value != null && effRubPerCny != null ? decimalMultiply(value, effRubPerCny) : null);
   const historyPerDayRub = rubPerDay(runway.historyPerDay);
+  // «Сейчас» — трёхдневное окно: оно отзывается на смену модели за день, а
+  // семидневное сглаживает выбросы и остаётся для «хватит на N дн.».
+  const recentPerDayRub = rubPerDay(runway.recentPerDay);
   // «₽/мес» считается по тому же темпу, что и «примерно на N дн.»: два разных
   // темпа в одной строке противоречили друг другу (дни × ₽/мес ≠ баланс).
-  const monthlyRub = historyPerDayRub == null ? null : decimalMultiply(historyPerDayRub, 30);
+  const monthlyRub = recentPerDayRub == null ? null : decimalMultiply(recentPerDayRub, 30);
 
   const result = {
     available: true,
@@ -348,11 +484,25 @@ export async function readDeepseekCost(deepseekConfig = {}, options = {}) {
     pace: {
       recentPerDay: runway.recentPerDay,
       historyPerDay: runway.historyPerDay,
-      recentPerDayRub: rubPerDay(runway.recentPerDay),
+      recentPerDayRub,
       historyPerDayRub,
       monthlyRub,
+      windowDays: 3,
     },
     runway: { recentDays: runway.recentDays, historyDays: runway.historyDays },
+    tokens: tokenPace ? {
+      windowDays: tokenPace.days,
+      tokensPerDay: tokenPace.total,
+      hitPerDay: tokenPace.hit,
+      missPerDay: tokenPace.miss,
+      outPerDay: tokenPace.out,
+      cnyPerDay: runway.recentPerDay,
+      rubPerDay: recentPerDayRub,
+    } : null,
+    month: month ? {
+      ...month,
+      rub: month.cny != null && effRubPerCny != null ? decimalMultiply(month.cny, effRubPerCny) : null,
+    } : null,
     costHistory,
   };
   cache.lastResult = { key: apiKey, at: Date.now(), value: result };

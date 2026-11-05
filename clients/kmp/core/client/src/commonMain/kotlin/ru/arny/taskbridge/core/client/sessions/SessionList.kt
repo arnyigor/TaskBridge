@@ -119,15 +119,16 @@ fun sessionPollIntervalMillis(
     inForeground -> if (active && !activeCoveredByStream) activeIntervalMillis else idleIntervalMillis
     !active -> 0L
     awaitingUserOnly -> 0L
-    powerSave -> idleIntervalMillis
+    powerSave -> backgroundActiveMillis * 2
     else -> backgroundActiveMillis
 }
 
 /**
- * Фон, ход идёт: конец хода сервер присылает wake-каналом, поэтому опрос — только
- * страховка на случай промаха push (телефон спал, Wi-Fi оборвался).
+ * Фон, ход идёт: конец хода сервер присылает wake-каналом (проверено на спящем
+ * телефоне 2026-11-01: `POST /wake` → 204, процесс просыпается и обновляется),
+ * поэтому опрос — только страховка на случай промаха push: раз в 3 минуты.
  */
-const val BACKGROUND_ACTIVE_INTERVAL_MS = 60_000L
+const val BACKGROUND_ACTIVE_INTERVAL_MS = 180_000L
 
 /** 0 — опрос приостановлен: ждём возврата в foreground или пробуждения по сети. */
 fun shouldPoll(intervalMillis: Long): Boolean = intervalMillis > 0L

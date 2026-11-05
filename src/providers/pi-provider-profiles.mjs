@@ -1,14 +1,15 @@
 /**
  * TaskBridge-managed Pi providers (first, intentionally narrow UI slice).
  *
- * Only `tb-*` entries are writable.  Existing/built-in/custom providers remain
- * untouched.  API tokens are NEVER accepted: use $ENV_VAR references instead.
+ * Only `tb-*` entries are editable. Existing config entries may be explicitly
+ * deleted with a revision and backup. API tokens are NEVER accepted: use $ENV_VAR references instead.
  * This adapter is deliberately replaceable by a future OMP adapter.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { parseProviderModels } from '../provider-models.mjs';
+import { providerEndpoint as normalizedUrl } from '../../web/provider-endpoint.mjs';
 
 const ID = /^tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const ENV = /^[A-Z][A-Z0-9_]{0,95}$/;
@@ -16,37 +17,20 @@ const MODEL_ID = /^[A-Za-z0-9_.:/+@-]{1,160}$/;
 // ID провайдера в Pi: имена вида deepseek, llama.cpp, strata-ud-iq4xs — не только tb-*.
 const PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_MODELS = 100;
+// Pi models.json API identifiers (docs/models-configuration.md).
+const APIS = new Set(['openai-completions', 'openai-responses', 'anthropic-messages']);
+function providerApi(value = 'openai-completions') {
+  if (!APIS.has(value)) throw fail('INPUT_INVALID', 'Выберите поддерживаемый протокол API.');
+  return value;
+}
+const authHeaders = (api, key) => api === 'anthropic-messages'
+  ? { 'anthropic-version': '2023-06-01', ...(key ? { 'x-api-key': key } : {}) }
+  : key ? { Authorization: `Bearer ${key}` } : {};
 const OWNED_NAME = id => `TaskBridge: ${id}`;
 const isOwned = (id, entry) => ID.test(id) && entry?.name === OWNED_NAME(id);
 const MAX_BYTES = 4 * 1024 * 1024;
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
-function normalizedUrl(raw) {
-  if (typeof raw !== 'string' || raw.length > 512) throw fail('INPUT_INVALID', 'Некорректный адрес сервера модели.');
-  let url;
-  try { url = new URL(raw.trim()); } catch { throw fail('INPUT_INVALID', 'Некорректный URL.'); }
-  if (url.username || url.password || url.hash || url.search || !url.hostname || !['https:', 'http:'].includes(url.protocol)) {
-    throw fail('INPUT_INVALID', 'Используйте URL HTTP(S) без логина, пароля, query и fragment.');
-  }
-  const host = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
-  const ipv4 = host.split('.').map(Number);
-  const localV4 = ipv4.length === 4 && ipv4.every(n => Number.isInteger(n) && n >= 0 && n <= 255)
-    && (ipv4[0] === 10 || (ipv4[0] === 172 && ipv4[1] >= 16 && ipv4[1] <= 31)
-      || (ipv4[0] === 192 && ipv4[1] === 168) || ipv4[0] === 127);
-  const isV4 = ipv4.length === 4 && ipv4.every(n => Number.isInteger(n) && n >= 0 && n <= 255);
-  // Адреса служебных диапазонов (link-local 169.254 — там живёт metadata-сервис облака,
-  // 0.0.0.0, multicast, зарезервированное) не проверяются даже как локальные:
-  // проверка черновика и сохранение не должны уметь говорить с ними.
-  const serviceV4 = isV4 && (ipv4[0] === 0 || ipv4[0] >= 224 || (ipv4[0] === 169 && ipv4[1] === 254));
-  const serviceV6 = /^(fe80:|fc|fd|ff|::)/.test(host);
-  if (serviceV4 || serviceV6) throw fail('INPUT_INVALID', 'Этот адрес не используется как сервер моделей.');
-  const local = host === 'localhost' || host === '::1' || localV4;
-  if (url.protocol === 'http:' && !local) throw fail('INPUT_INVALID', 'Обычный HTTP допустим только для localhost и локальных IPv4-адресов.');
-  if (url.protocol === 'http:' && !localV4 && host !== 'localhost' && host !== '::1') throw fail('INPUT_INVALID', 'Локальный адрес не поддерживается.');
-  const result = url.toString().replace(/\/+$/, '');
-  if (result.length > 512) throw fail('INPUT_INVALID', 'Слишком длинный URL.');
-  return { baseUrl: result, local };
-}
 
 function validateDraft(draft) {
   if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw fail('INPUT_INVALID', 'Требуется профиль провайдера.');
@@ -66,7 +50,7 @@ function validateDraft(draft) {
     unique.add(modelId);
     return { id: modelId };
   });
-  return { id, baseUrl, api: 'openai-completions', apiKey: rawEnv ? `$${rawEnv}` : 'local', models };
+  return { id, baseUrl, api: providerApi(draft.api), apiKey: rawEnv ? `$${rawEnv}` : 'local', models };
 }
 
 function publicView(id, entry, env) {
@@ -139,10 +123,10 @@ export class PiProviderProfiles {
 
   async remove(id, revision) {
     return this.#serialize(async () => {
-      if (!ID.test(id)) throw fail('INPUT_INVALID', 'Это не управляемый провайдер.');
+      if (!PROVIDER_ID.test(id)) throw fail('INPUT_INVALID', 'Некорректный ID провайдера.');
       const old = await readDocument(this.file);
       if (revision !== old.revision) throw fail('CONFLICT', 'Конфигурация изменилась. Обновите список.');
-      if (!isOwned(id, old.doc.providers[id])) throw fail('NOT_FOUND', 'Управляемый провайдер не найден.');
+      if (!Object.hasOwn(old.doc.providers, id)) throw fail('NOT_FOUND', 'Провайдер не найден в models.json.');
       delete old.doc.providers[id];
       await this.#write(old);
       return this.list();
@@ -157,12 +141,12 @@ export class PiProviderProfiles {
     const { baseUrl, local } = normalizedUrl(entry.baseUrl);
     const match = /^\$([A-Z][A-Z0-9_]{0,95})$/.exec(String(entry.apiKey || ''));
     const key = match ? this.env[match[1]] : null;
-    if (!local && !key) return { ok: false, status: 'missing-key', note: 'Сначала задайте переменную окружения на компьютере и перезапустите сервер.' };
+    if ((match || !local) && !key) return { ok: false, status: 'missing-key', note: 'Сначала задайте переменную окружения на компьютере и перезапустите сервер.' };
     const started = performance.now();
     try {
       const response = await this.fetchImpl(`${baseUrl}/models`, {
         method: 'GET',
-        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        headers: authHeaders(entry.api, key),
         redirect: 'error',
         signal: AbortSignal.timeout(8000),
       });
@@ -215,7 +199,8 @@ export class PiProviderProfiles {
    * логина/пароля/query, служебные диапазоны запрещены, redirect не выполняется
    * (иначе проверка черновика стала бы SSRF-ручкой).
    */
-  async draftCheck({ baseUrl, keyEnv = '', kind = 'remote', limit = 300 } = {}) {
+  async draftCheck({ baseUrl, keyEnv = '', api = 'openai-completions', kind = 'remote', limit = 300 } = {}) {
+    providerApi(api);
     const { baseUrl: url, local } = normalizedUrl(baseUrl);
     const rawEnv = String(keyEnv || '').trim();
     if (rawEnv && !ENV.test(rawEnv)) throw fail('INPUT_INVALID', 'Укажите имя переменной окружения, не сам API-ключ.');
@@ -223,12 +208,12 @@ export class PiProviderProfiles {
     // Локальный endpoint может быть без ключа; облачный без ключа не проверяем —
     // «нет ключа» это не «недоступен», и делать вид обратного нельзя.
     if (!local && !rawEnv) throw fail('INPUT_INVALID', 'Для облачного провайдера требуется имя переменной окружения API-ключа.');
-    if (!local && !key) return { ok: false, status: 'NO_KEY', code: 'NO_KEY', baseUrl: url, models: [], note: `Переменная ${rawEnv} не задана на компьютере или сервер запущен без неё.` };
+    if (rawEnv && !key) return { ok: false, status: 'NO_KEY', code: 'NO_KEY', baseUrl: url, models: [], note: `Переменная ${rawEnv} не задана на компьютере или сервер запущен без неё.` };
     const started = performance.now();
     try {
       const response = await this.fetchImpl(`${url}/models`, {
         method: 'GET',
-        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        headers: authHeaders(api, key),
         redirect: 'manual',
         signal: AbortSignal.timeout(8000),
       });

@@ -50,10 +50,13 @@ class SessionPollIntervalTest {
             BACKGROUND_ACTIVE_INTERVAL_MS, normal,
             "конец хода присылает wake-канал сервера, частый опрос в фоне — лишние запросы",
         )
-        assertEquals(60_000L, normal, "минута — страховка на случай промаха push")
+        assertEquals(180_000L, normal, "три минуты — страховка на случай промаха push")
         assertTrue(shouldPoll(normal))
         val saving = sessionPollIntervalMillis(active = true, inForeground = false, powerSave = true)
-        assertEquals(30_000L, saving, "в экономии энергии уведомление может подождать")
+        assertEquals(
+            360_000L, saving,
+            "в экономии энергии фон ещё реже (push остаётся основным путём уведомления)",
+        )
         assertEquals(
             BACKGROUND_ACTIVE_INTERVAL_MS,
             sessionPollIntervalMillis(

@@ -287,10 +287,93 @@ data class ProviderStatus(
     val rub: ProviderRubBalance? = null,
     val pace: ProviderPace? = null,
     val runway: ProviderRunway? = null,
+    /** Курсы, которыми сервер считал рубли (ЦБ). */
+    val rates: ProviderRates? = null,
+    /** Тариф за ответ модели: ставки, часы пика, валюта списания. */
+    val tariff: ProviderTariff? = null,
+    /** Токены и деньги в день по окну темпа (у DeepSeek — 3 дня). */
+    val tokens: ProviderTokenPace? = null,
+    /** Факт последнего месяца, который есть в истории расходов. */
+    val month: ProviderMonth? = null,
+    /** Докуда доведена история расходов и насколько она старая. */
+    val costHistory: ProviderCostHistory? = null,
     val subscription: ProviderSubscription? = null,
     val usage: ProviderUsage? = null,
     val limits: Map<String, ProviderLimit> = emptyMap(),
     val resetCredits: ProviderResetCredits? = null,
+)
+
+@Serializable data class ProviderRates(
+    val usdRub: Double? = null,
+    val cnyRub: Double? = null,
+    val usdCny: Double? = null,
+    val source: String? = null,
+)
+
+/** Ставка модели в валюте тарифа: CNY или USD за 1M токенов. */
+@Serializable data class ProviderRate(val hit: Double? = null, val miss: Double? = null, val out: Double? = null)
+
+/** Окно пика в UTC, [from, to). Строки «01:00»/«04:00», чтобы не тащить время в JSON. */
+@Serializable data class ProviderPeakWindow(val from: String? = null, val to: String? = null)
+
+@Serializable data class ProviderPeakRules(
+    /** Дни недели по UTC, как getUTCDay: 0 — воскресенье. */
+    val weekdaysUtc: List<Int> = emptyList(),
+    val windowsUtc: List<ProviderPeakWindow> = emptyList(),
+    /** Праздники КНР по датам UTC: в эти дни непик весь день. */
+    val holidays: List<String> = emptyList(),
+    val timeZoneRule: String? = null,
+)
+
+/**
+ * Тариф провайдера за один ответ. [currency] — то, в чём списывают деньги сейчас
+ * (у DeepSeek два кошелька: CNY и USD); [rates] — в этой валюте, [ratesCny] — прайс
+ * юаневого периода, если понадобится сводка за прошлые месяцы.
+ */
+@Serializable data class ProviderTariff(
+    val currency: String? = null,
+    val unit: String? = null,
+    val multiplier: Double? = null,
+    val rates: Map<String, ProviderRate> = emptyMap(),
+    val ratesCny: Map<String, ProviderRate> = emptyMap(),
+    val aliases: Map<String, String> = emptyMap(),
+    val peak: ProviderPeakRules? = null,
+    val source: String? = null,
+    val verifiedAt: String? = null,
+)
+
+/**
+ * Токены в день и деньги в день по окну темпа. Токены — Double: за сутки их
+ * бывает больше двух миллиардов, а Int в Kotlin переполняется на 2.1e9.
+ */
+@Serializable data class ProviderTokenPace(
+    val windowDays: Int? = null,
+    val tokensPerDay: Double? = null,
+    val hitPerDay: Double? = null,
+    val missPerDay: Double? = null,
+    val outPerDay: Double? = null,
+    val cnyPerDay: Double? = null,
+    val rubPerDay: Double? = null,
+)
+
+/** Факт месяца: с первого числа по последнюю запись — это расход, а не прогноз. */
+@Serializable data class ProviderMonth(
+    val key: String? = null,
+    val from: String? = null,
+    val to: String? = null,
+    val days: Int? = null,
+    val tokens: Double? = null,
+    val hit: Double? = null,
+    val miss: Double? = null,
+    val out: Double? = null,
+    val cny: Double? = null,
+    val rub: Double? = null,
+)
+
+@Serializable data class ProviderCostHistory(
+    val lastDay: String? = null,
+    val ageDays: Int? = null,
+    val stale: Boolean = false,
 )
 
 @Serializable data class ProviderBalance(val cny: Double? = null, val usd: Double? = null)

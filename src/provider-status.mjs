@@ -1,4 +1,5 @@
 import { readDeepseekCost } from './deepseek-cost.mjs';
+import { deepseekTariff, walletCurrency } from './deepseek-tariff.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
@@ -395,6 +396,12 @@ export async function readProviderStatuses(config = {}, options = {}) {
       provider: 'deepseek',
       label: 'DeepSeek',
       kind: 'balance',
+      // Тариф отдаётся всегда, даже когда баланс получить не удалось: цена
+      // ответа в чате не зависит от доступности API.
+      tariff: deepseekTariff({
+        ...config.deepseek?.tariff,
+        currency: walletCurrency(deepseek.balance, config.deepseek?.tariff),
+      }),
     },
     wormsoft,
     routerai,

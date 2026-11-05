@@ -35,6 +35,9 @@ export const DEFAULT_DESTRUCTIVE_PATTERNS = [
   /\b(rm|del|remove-item)\b[^\n]*(\.git\b|node_modules\b)/i
 ];
 
+// These exact tools are read-only transports. Their independent server policy
+// is mandatory even when approvals/Plan permit the tool itself.
+const SERVER_READ_TOOLS = new Set(['taskbridge_external_list', 'taskbridge_external_open']);
 const WRITE_TOOLS = new Set(['write', 'edit', 'create', 'apply_patch', 'multiedit', 'notebookedit']);
 const SHELL_TOOLS = new Set(['bash', 'powershell', 'shell', 'exec', 'run_command', 'terminal']);
 
@@ -79,6 +82,7 @@ function compileExtra(patterns = []) {
 // Returns null when no approval is required, otherwise { risk, detail }.
 export function classifyToolCall({ toolName, input = {}, workspacePath = null, config = DEFAULT_APPROVAL_CONFIG } = {}) {
   const name = String(toolName || '').toLowerCase();
+  if (SERVER_READ_TOOLS.has(name)) return null;
   const patterns = [...DEFAULT_DESTRUCTIVE_PATTERNS, ...compileExtra(config.extraPatterns)];
 
   if (SHELL_TOOLS.has(name)) {

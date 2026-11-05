@@ -110,6 +110,7 @@ fun ProjectWorkspaceScreen(
     onBack: () -> Unit,
     onOpenSessions: () -> Unit,
     onOpenSession: (String) -> Unit,
+    onRemoteFiles: () -> Unit = {},
 ) {
     val controller = remember(connection, projectId) { ProjectWorkspace(connection.api, projectId, connection.scope) }
     val state by controller.state.collectAsState()
@@ -134,6 +135,7 @@ fun ProjectWorkspaceScreen(
                 },
                 navigationIcon = { IconButton(onClick = onBack) { Icon(AppIcons.Back, "Назад к проектам") } },
                 actions = {
+                    IconButton(onClick = onRemoteFiles) { Icon(AppIcons.Folder, "Папки компьютера") }
                     IconButton(onClick = controller::refresh, enabled = !state.refreshing) { Icon(AppIcons.Refresh, "Обновить проект") }
                 },
             )

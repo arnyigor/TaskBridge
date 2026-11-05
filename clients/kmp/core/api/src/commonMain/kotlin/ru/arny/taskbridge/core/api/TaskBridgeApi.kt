@@ -225,6 +225,48 @@ class TaskBridgeApi(
     suspend fun registerLocalProject(path: String): Project =
         call(HttpMethod.Post, "/api/projects/local-register", Project.serializer(), buildJsonObject { put("path", path) })
 
+    // --- Windows files: server-only access, independent of Android SAF -------
+
+    suspend fun externalRead(projectId: String): ExternalReadSettings =
+        get("/api/projects/${projectId.encodeURLPathPart()}/external-read", ExternalReadSettings.serializer())
+
+    suspend fun remoteBrowse(projectId: String, rootId: String, path: String = "", cursor: String? = null): RemoteFileListing =
+        get("/api/projects/${projectId.encodeURLPathPart()}/remote-files/browse?rootId=${rootId.encodeURLParameter()}&path=${path.encodeURLParameter()}" +
+            (cursor?.let { "&cursor=${it.encodeURLParameter()}" } ?: ""), RemoteFileListing.serializer())
+
+    suspend fun remotePreview(projectId: String, rootId: String, path: String): RemoteFilePreview =
+        get("/api/projects/${projectId.encodeURLPathPart()}/remote-files/preview?rootId=${rootId.encodeURLParameter()}&path=${path.encodeURLParameter()}", RemoteFilePreview.serializer())
+
+    suspend fun remoteSearch(projectId: String, rootId: String, query: String): RemoteFileSearch =
+        get("/api/projects/${projectId.encodeURLPathPart()}/remote-files/search?rootId=${rootId.encodeURLParameter()}&q=${query.encodeURLParameter()}", RemoteFileSearch.serializer())
+
+    suspend fun requestExternalRead(projectId: String, path: String, permissions: List<String>, revision: Long, commandId: String): ExternalReadRequest =
+        call(HttpMethod.Post, "/api/projects/${projectId.encodeURLPathPart()}/external-read/requests", ExternalReadRequest.serializer(), buildJsonObject {
+            put("path", path); put("expectedRevision", revision); put("commandId", commandId)
+            put("permissions", kotlinx.serialization.json.JsonArray(permissions.map(::JsonPrimitive)))
+        })
+
+    suspend fun decideExternalRead(projectId: String, requestId: String, approved: Boolean, path: String, revision: Long, commandId: String): ExternalReadRequest =
+        call(HttpMethod.Post, "/api/projects/${projectId.encodeURLPathPart()}/external-read/requests/${requestId.encodeURLPathPart()}/decision", ExternalReadRequest.serializer(), buildJsonObject {
+            put("decision", if (approved) "APPROVED" else "DENIED"); put("path", path)
+            put("expectedRevision", revision); put("commandId", commandId)
+        })
+
+    suspend fun toggleExternalRead(projectId: String, rootId: String, enabled: Boolean, revision: Long, commandId: String): ExternalReadSettings =
+        call(HttpMethod.Post, "/api/projects/${projectId.encodeURLPathPart()}/external-read/roots/${rootId.encodeURLPathPart()}/toggle", ExternalReadSettings.serializer(), buildJsonObject {
+            put("enabled", enabled); put("expectedRevision", revision); put("commandId", commandId)
+        })
+
+    suspend fun revokeExternalRead(projectId: String, rootId: String, revision: Long, commandId: String): ExternalReadSettings =
+        call(HttpMethod.Post, "/api/projects/${projectId.encodeURLPathPart()}/external-read/roots/${rootId.encodeURLPathPart()}/revoke", ExternalReadSettings.serializer(), buildJsonObject {
+            put("expectedRevision", revision); put("commandId", commandId)
+        })
+
+    suspend fun prepareRemoteAttachment(taskId: String, rootId: String, path: String, revision: Long, commandId: String): UploadResult =
+        call(HttpMethod.Post, "/api/tasks/${taskId.encodeURLPathPart()}/remote-files/prepare-attachment", UploadResult.serializer(), buildJsonObject {
+            put("rootId", rootId); put("path", path); put("expectedRevision", revision); put("commandId", commandId)
+        })
+
     // --- project dashboard (MR-01) ------------------------------------------
 
     /** Every registered project with its session counts and pinned/archived. */
@@ -656,9 +698,8 @@ class TaskBridgeApi(
 
     // --- Провайдеры Pi: страница «Провайдеры» (то же, что веб-UI /providers) ---
     //
-    // Маршруты /api/provider-profiles* сервер отдаёт только через localhost
-    // (ORIGIN_FORBIDDEN): ключи живут в окружении процесса компьютера, и
-    // настраивать адрес, куда ходит Pi, должен только его владелец.
+    // /api/provider-profiles* доступны через localhost и сопряжённым устройствам.
+    // API-ключи остаются в окружении процесса компьютера.
     // /api/providers/check при этом доступен отовсюду — он read-only.
 
     /** Подключения из models.json + ревизия файла; каждая правка обязана прийти со своей ревизией. */
@@ -672,12 +713,14 @@ class TaskBridgeApi(
         baseUrl: String,
         keyEnv: String,
         models: List<String>,
+        api: String = "openai-completions",
     ): ProviderProfilesPage =
         call(HttpMethod.Put, "/api/provider-profiles", ProviderProfilesPage.serializer(), buildJsonObject {
             put("revision", revision)
             put("id", id)
             put("baseUrl", baseUrl)
             put("keyEnv", keyEnv)
+            put("api", api)
             put("models", kotlinx.serialization.json.JsonArray(models.map { JsonPrimitive(it) }))
         })
 
@@ -692,7 +735,7 @@ class TaskBridgeApi(
             put("models", kotlinx.serialization.json.JsonArray(models.map { JsonPrimitive(it) }))
         })
 
-    /** Удалить управляемую запись `tb-*` (копия models.json остаётся рядом). */
+    /** Удалить запись из models.json (копия файла остаётся рядом). */
     suspend fun deleteProviderProfile(id: String, revision: String): ProviderProfilesPage =
         call(HttpMethod.Delete, "/api/provider-profiles/${id.encodeURLPathPart()}", ProviderProfilesPage.serializer(), buildJsonObject {
             put("revision", revision)
@@ -713,10 +756,11 @@ class TaskBridgeApi(
      * Проверка несохранённого черновика до записи: соединение и каталог моделей
      * для выбора. Черновик при этом в models.json не попадает.
      */
-    suspend fun providerDraftCheck(baseUrl: String, keyEnv: String): ProviderDraftCheck =
+    suspend fun providerDraftCheck(baseUrl: String, keyEnv: String, api: String = "openai-completions"): ProviderDraftCheck =
         call(HttpMethod.Post, "/api/provider-profiles/draft-check", ProviderDraftCheck.serializer(), buildJsonObject {
             put("baseUrl", baseUrl)
             put("keyEnv", keyEnv)
+            put("api", api)
         })
 
     suspend fun mcp(): McpStatus = get("/api/mcp", McpStatus.serializer())

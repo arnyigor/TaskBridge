@@ -18,6 +18,8 @@ import { autoRestartDecision, autoRestartConfigured, nextRestartAt, normalizeAut
 import { listDirectory, resolveBrowsablePath, resolveLocalProjectPath, listWorkspaceFiles } from './project-browser.mjs';
 import { TaskStore } from './task-store.mjs';
 import { TaskManager, briefTask } from './task-manager.mjs';
+import { ExternalFilesService } from './external-files/service.mjs';
+import { createExternalRoutes, externalActor } from './external-files/routes.mjs';
 import { FollowPlanService } from './follow-plan-service.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
 import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, realpathNamed, serveFile, FILE_LIMITS } from './files.mjs';
@@ -127,6 +129,14 @@ const store = new TaskStore(dataRoot, {
   busyTimeoutMs: config.server?.sqlite?.busyTimeoutMs
 });
 const manager = new TaskManager(config, dataRoot, store);
+const access = new AccessControl(config.server?.auth, dataRoot);
+await access.init();
+const externalFiles = new ExternalFilesService({ manager, dataRoot });
+await externalFiles.init();
+const externalRoutes = createExternalRoutes({ service: externalFiles, manager, access, json, readJson });
+manager.externalFilesIssue = taskId => externalRoutes.issue(taskId);
+manager.externalFilesUrl = `http://127.0.0.1:${portOverride || Number(config.server?.port || 8787)}`;
+manager.externalFilesExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-external-files.js');
 // Which Pi we drive, checked once at startup (B0). Reported by /api/info; an
 // unsupported or missing Pi is a warning, never a startup failure.
 // Тот же выбор команды, что и у сессий: иначе /api/info проверял бы не тот Pi.
@@ -193,8 +203,6 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
     process.exit(0);
   });
 }
-const access = new AccessControl(config.server?.auth, dataRoot);
-await access.init();
 const runtimeControl = new RuntimeControl(manager.runtimeManager, manager);
 // AUTO dispatcher switches the managed model profile by restarting the runtime.
 manager.runtimeSwitcher = profileId => runtimeControl.restart(profileId);
@@ -1140,14 +1148,15 @@ async function handleRequest(req, res) {
         : errorJson(res, 404, Object.assign(new Error('Approval not found'), { code: 'NOT_FOUND' }));
     }
 
+    if (await externalRoutes.internal(req, res, url)) return;
     if (pathname.startsWith('/api/')) access.require(req);
+    if (await externalRoutes.client(req, res, url)) return;
 
-    // Local setup for TaskBridge-owned OpenAI-compatible providers. Not available
-    // over LAN: API keys remain in the Windows process environment, and no
-    // untrusted client may reconfigure what endpoint Pi talks to.
+    // Provider setup is available locally and to explicitly paired devices.
+    // The general auth/origin gates above still apply; API keys stay on the host.
     if (pathname === '/api/provider-profiles' || pathname.startsWith('/api/provider-profiles/')) {
-      if (!access.local(req)) {
-        return errorJson(res, 403, Object.assign(new Error('Настраивать провайдеры можно только на компьютере через localhost.'), { code: 'ORIGIN_FORBIDDEN' }));
+      if (!access.local(req) && !access.device(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Для настройки провайдеров подключите устройство по коду с компьютера.'), { code: 'ORIGIN_FORBIDDEN' }));
       }
       if (req.method === 'GET' && pathname === '/api/provider-profiles') {
         return json(res, 200, await providerProfiles.list());
@@ -1180,6 +1189,7 @@ async function handleRequest(req, res) {
         return json(res, 200, await providerProfiles.draftCheck({
           baseUrl: body?.baseUrl,
           keyEnv: body?.keyEnv ?? '',
+          api: body?.api ?? 'openai-completions',
           kind: body?.kind ?? 'remote',
           limit: body?.limit,
         }));
@@ -2350,7 +2360,7 @@ async function handleRequest(req, res) {
       // now: true is "send immediately, do not wait for the local model" (the
       // Ctrl+Enter path); otherwise a busy model means the prompt is queued.
       return json(res, 200, await manager.message(match[1], body.text, body.mode || 'auto', body.files || [], body.uploadToken,
-        { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId, deviceId: access.device(req)?.deviceId }));
+        { now: body.now === true, queue: body.queue === true, commandId: body.commandId, clientId: body.clientId, deviceId: access.device(req)?.deviceId, uploadActor: externalActor(access, req) }));
     }
 
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/turns\/([^/]+)$/);
@@ -2769,7 +2779,7 @@ async function handleRequest(req, res) {
       // They are answers about that command, not server faults: a 5xx would make
       // a retrying client treat them as an outage. ACCEPTED (still in flight) is
       // the one worth repeating later — the repeat returns the saved result.
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED',
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED', 'REVISION_CONFLICT',
         // Follow Plan: these are answers about the plan, not server faults.
         'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_NO_PROGRESS', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED', 'PLAN_FILE_EXISTS'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401

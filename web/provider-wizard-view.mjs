@@ -4,6 +4,32 @@
 // решает, записывать ли изменения в models.json, поэтому его содержимое и порядок
 // отбора моделей должны проверяться тестом.
 
+import { providerEndpoint } from './provider-endpoint.mjs';
+
+export const PROVIDER_APIS = Object.freeze({
+  'openai-completions': 'OpenAI Chat Completions',
+  'openai-responses': 'OpenAI Responses',
+  'anthropic-messages': 'Anthropic Messages',
+});
+
+export const PROVIDER_PRESETS = Object.freeze({
+  custom: { id: 'tb-', baseUrl: '', keyEnv: '', api: 'openai-completions' },
+  local: { id: 'tb-local', baseUrl: 'http://127.0.0.1:8083/v1', keyEnv: '', api: 'openai-completions' },
+  lmstudio: { id: 'tb-lmstudio', baseUrl: 'http://127.0.0.1:1234/v1', keyEnv: '', api: 'openai-completions' },
+  ollama: { id: 'tb-ollama', baseUrl: 'http://127.0.0.1:11434/v1', keyEnv: '', api: 'openai-completions' },
+  llamacpp: { id: 'tb-llamacpp', baseUrl: 'http://127.0.0.1:8080/v1', keyEnv: '', api: 'openai-completions' },
+  openrouter: { id: 'tb-openrouter', baseUrl: 'https://openrouter.ai/api/v1', keyEnv: 'OPENROUTER_API_KEY', api: 'openai-completions' },
+  openai: { id: 'tb-openai', baseUrl: 'https://api.openai.com/v1', keyEnv: 'OPENAI_API_KEY', api: 'openai-responses' },
+  anthropic: { id: 'tb-anthropic', baseUrl: 'https://api.anthropic.com/v1', keyEnv: 'ANTHROPIC_API_KEY', api: 'anthropic-messages' },
+});
+
+export function endpointHint(raw) {
+  try {
+    const { baseUrl, local } = providerEndpoint(raw);
+    return `${baseUrl} — ${local ? 'локальный/LAN API; ключ может быть пустым' : 'публичный API; HTTPS и переменная с ключом обязательны'}. Адрес открывает компьютер сервера TaskBridge, не телефон.`;
+  } catch (error) { return error.message; }
+}
+
 /** Шаги мастера — по одному предложению, чтобы экран не превращался в анкету. */
 export const WIZARD_STEPS = Object.freeze([
   'Тип подключения',
@@ -48,26 +74,29 @@ export function toggleDiscoveredModel(selected = [], id, { limit = WIZARD_MODEL_
  * Предпросмотр записи (шаг 5): ровно то, что уйдёт в models.json, без секретов.
  * Секрета здесь нет по построению — в файл пишется только имя переменной.
  */
-export function draftPreviewText({ id, baseUrl, keyEnv, models = [] } = {}) {
+export function draftPreviewText({ id, baseUrl, keyEnv, api = 'openai-completions', models = [] } = {}) {
   const name = String(id || '').trim() || '—';
-  const url = String(baseUrl || '').trim() || '—';
+  let url = String(baseUrl || '').trim() || '—';
+  try { url = providerEndpoint(baseUrl).baseUrl; } catch { /* validation is shown by endpointHint */ }
   const env = String(keyEnv || '').trim();
   const count = Array.isArray(models) ? models.length : 0;
   const key = env ? `ключ из переменной ${env}` : 'без ключа (локальный сервер)';
   const list = count ? [...models].slice(0, 5).map(model => (typeof model === 'string' ? model : model?.id)).filter(Boolean).join(', ') : '—';
   const tail = count > 5 ? ` и ещё ${count - 5}` : '';
-  return `Будет записано: ${name} → ${url}, ${key}. Моделей: ${count}. ${list}${tail}`;
+  return `Будет записано: ${name} → ${url} (${PROVIDER_APIS[api] || api}), ${key}. Моделей: ${count}. ${list}${tail}`;
 }
 
 /** Когда мастер считает черновик пригодным к записи — те же правила, что у сервера. */
-export function draftReady({ id, baseUrl, keyEnv, models = [] } = {}) {
+export function draftReady({ id, baseUrl, keyEnv, api = 'openai-completions', models = [] } = {}) {
   const readyId = /^tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(String(id || '').trim());
-  const url = String(baseUrl || '').trim();
-  const readyUrl = /^https?:\/\//.test(url);
-  const local = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/.test(url);
-  const readyKey = local || /^[A-Z][A-Z0-9_]{0,95}$/.test(String(keyEnv || '').trim());
-  const readyModels = Array.isArray(models) && models.length >= 1 && models.length <= WIZARD_MODEL_LIMIT;
-  return Boolean(readyId && readyUrl && readyKey && readyModels) && !/^tb-$/.test(String(id || '').trim());
+  let local;
+  try { ({ local } = providerEndpoint(baseUrl)); } catch { return false; }
+  const env = String(keyEnv || '').trim();
+  const readyKey = env ? /^[A-Z][A-Z0-9_]{0,95}$/.test(env) : local;
+  const readyModels = Array.isArray(models) && models.length >= 1 && models.length <= WIZARD_MODEL_LIMIT
+    && models.every(model => typeof model === 'string' && /^[A-Za-z0-9_.:/+@-]{1,160}$/.test(model))
+    && new Set(models).size === models.length;
+  return Boolean(readyId && readyKey && readyModels && Object.hasOwn(PROVIDER_APIS, api));
 }
 
 /**

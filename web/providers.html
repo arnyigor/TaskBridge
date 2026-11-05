@@ -19,21 +19,34 @@
       <section class="panel" aria-label="Список провайдеров">
         <div class="panel-head"><h2>Подключения</h2><button id="add" type="button">+ Добавить</button></div>
         <div id="providers" class="entries"></div>
-        <p class="muted hint">Существующие провайдеры — только для просмотра. TaskBridge редактирует только записи, которые создал сам (ID <code>tb-*</code>).</p>
+        <p class="muted hint">TaskBridge редактирует свои записи (ID <code>tb-*</code>). Другие подключения можно просматривать и удалять с подтверждением и резервной копией.</p>
       </section>
       <section class="panel" aria-label="Настройки подключения">
         <div class="panel-head"><h2 id="editor-title">Новое подключение</h2><span class="pill">Pi</span></div>
         <form id="provider-form">
           <label for="preset">Шаблон</label>
           <select id="preset">
-            <option value="custom">Свой OpenAI-compatible API</option>
-            <option value="openrouter">OpenRouter через API-ключ</option>
-            <option value="local">Локальная модель (llama.cpp / Strata / LM Studio)</option>
+            <option value="custom">Свой совместимый API</option>
+            <option value="local">Локальный / LAN сервер (свой порт)</option>
+            <option value="lmstudio">LM Studio</option>
+            <option value="ollama">Ollama (OpenAI API)</option>
+            <option value="llamacpp">llama.cpp / vLLM</option>
+            <option value="openrouter">OpenRouter</option>
+            <option value="openai">OpenAI Responses</option>
+            <option value="anthropic">Anthropic Messages</option>
           </select>
           <label for="provider-id">Идентификатор подключения</label>
           <input id="provider-id" placeholder="tb-my-provider" required maxlength="50" autocomplete="off" spellcheck="false" />
-          <label for="base-url">URL API</label>
-          <input id="base-url" type="url" required placeholder="https://provider.example/v1" autocomplete="off" spellcheck="false" />
+          <label for="base-url">Адрес API (не /chat/completions)</label>
+          <input id="base-url" type="text" required placeholder="127.0.0.1:8083/v1 или https://provider.example/v1" autocomplete="off" spellcheck="false" />
+          <p id="endpoint-hint" class="hint" role="status" aria-live="polite">Можно без http://. Localhost — компьютер сервера TaskBridge, не телефон. 17.0.0.1 — публичный адрес; localhost обычно 127.0.0.1.</p>
+          <label for="api-type">Протокол API</label>
+          <select id="api-type">
+            <option value="openai-completions">OpenAI Chat Completions — большинство локальных серверов</option>
+            <option value="openai-responses">OpenAI Responses</option>
+            <option value="anthropic-messages">Anthropic Messages</option>
+          </select>
+          <p class="hint">Поддерживаются совместимые API этих протоколов, а не произвольный HTTP-сервис. Для агентных задач модель и сервер должны поддерживать инструменты (tool calling). OAuth-подписки и нестандартные протоколы подключаются через Pi, не этим ключевым профилем.</p>
           <label for="key-env">Переменная окружения с API-ключом</label>
           <input id="key-env" placeholder="MY_PROVIDER_API_KEY" autocomplete="off" spellcheck="false" />
           <p class="hint">Вводи только <strong>имя</strong> переменной, не значение ключа. Локальным API без ключа оставь поле пустым. Секрет никогда не отправляется из этой формы.</p>
@@ -76,7 +89,7 @@
       <h2>Как пользоваться</h2>
       <p>1. Добавь подключение и список моделей. 2. Если используется API-ключ, задай указанную переменную окружения <strong>в процессе запуска TaskBridge</strong> и перезапусти сервер. 3. Проверь <code>GET /models</code>, затем обнови каталог в TaskBridge и выбери модель. Текущие работающие сессии не перенастраиваются.</p>
       <p>Проверка <code>/models</code> не запускает генерацию, не доказывает поддержку инструментов и не тратит токены генерации (провайдер может тарифицировать собственные запросы иначе). Генерацию проверяй отдельно из новой тестовой сессии.</p>
-      <p class="muted">Запись доступна только с компьютера через localhost. Ключи и сторонние конфиги здесь намеренно не редактируются. Полный мастер авторизации и OMP-адаптер — в следующих этапах.</p>
+      <p class="muted">Настройка доступна через localhost и устройствам, подключённым по коду. API-ключ задаётся на компьютере сервера через переменную окружения, не в этой форме.</p>
     </section>
   </main>
 </body>

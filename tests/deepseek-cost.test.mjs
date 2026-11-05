@@ -8,7 +8,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 import {
   aggregateCostHistory,
+  aggregateTokenHistory,
   computeRunway,
+  computeTokenPace,
+  dayAge,
+  fillCalendarDays,
+  monthFacts,
   decimalAdd,
   decimalCeilRatio,
   decimalMean,
@@ -48,25 +53,100 @@ test('aggregateCostHistory суммирует дни и сортирует по 
   assert.deepEqual(aggregateCostHistory(''), []);
 });
 
-test('computeRunway повторяет логику apicost: ceil(баланс / темп)', () => {
+test('computeRunway считает по календарным дням: пропуск — это ноль, а не «нет дня»', () => {
   const days = [
-    { day: '2026-09-22', cost: 10 }, // сегодняшний день — не завершён
-    { day: '2026-09-23', cost: 100 }, // будущий — не учитывается
-    { day: '2026-09-25', cost: 1 },
-  ];
-  // recent = 3 последних завершённых: 10, 3, 1 → 4.66(6); history = все 4
-  const history = [
     { day: '2026-09-18', cost: 20 },
     { day: '2026-09-19', cost: 10 },
     { day: '2026-09-20', cost: 3 },
     { day: '2026-09-21', cost: 1 },
+    { day: '2026-09-22', cost: 10 }, // сегодняшний день — не завершён
+    { day: '2026-09-23', cost: 100 }, // будущий — не учитывается
+    { day: '2026-09-25', cost: 1 },
   ];
-  const result = computeRunway(100, days.concat(history), '2026-09-26');
-  // завершённые: 20,10,3,1,10,100,1 (09-18…09-25, включая 09-23)
-  assert.equal(result.recentPerDay, (10 + 100 + 1) / 3);
-  assert.ok(Math.abs(result.historyPerDay - 145 / 7) < 1e-11, 'среднее — десятичное, а не 20.714285714285715');
+  const result = computeRunway(100, days, '2026-09-26');
+  // 09-24 в истории отсутствует — это подтверждённый ноль внутри покрытого
+  // диапазона. Окно «3 дня» — 23, 24, 25: 100 + 0 + 1. Старое поведение брало
+  // три последние ЗАПИСИ (100, 1, 10), растягивая окно на четыре дня.
+  assert.equal(result.recentPerDay, decimalMean([100, 0, 1]));
   assert.equal(result.recentDays, 3);
-  assert.equal(result.historyDays, 5);
+  // Окно 7 дней: 19…25 = 10, 3, 1, 10, 100, 0, 1.
+  assert.equal(result.historyPerDay, decimalMean([10, 3, 1, 10, 100, 0, 1]));
+  assert.equal(result.historyDays, 6);
+  // Окно шире истории — берётся вся история, без деления на несуществующие дни.
+  const short = computeRunway(100, [{ day: '2026-09-24', cost: 5 }], '2026-09-26');
+  assert.equal(short.recentPerDay, 5);
+  assert.equal(short.historyPerDay, 5);
+});
+
+test('fillCalendarDays достраивает пропуски нулями, сохраняя реальные суммы', () => {
+  const filled = fillCalendarDays([
+    { day: '2026-09-19', cost: 3 },
+    { day: '2026-09-22', cost: 1 },
+  ]);
+  assert.deepEqual(filled.map(d => [d.day, d.cost]), [
+    ['2026-09-19', 3],
+    ['2026-09-20', 0],
+    ['2026-09-21', 0],
+    ['2026-09-22', 1],
+  ]);
+  assert.deepEqual(fillCalendarDays([]), []);
+});
+
+test('aggregateTokenHistory складывает токены по типам и дням', () => {
+  const csv = [
+    'day,model,key,type,price,amount',
+    '2026-09-13,deepseek-flash,pi api key,hit,0.00000002,501671680',
+    '2026-09-13,deepseek-flash,pi api key,miss,0.000001,4152408',
+    '2026-09-13,deepseek-flash,pi api key,out,0.000004,1795616',
+    '2026-09-13,deepseek-flash,pi api key,req,0,1954',
+    '2026-09-12,deepseek-flash,pi api key,hit,0.00000002,59440000',
+  ].join('\n');
+  assert.deepEqual(aggregateTokenHistory(csv), [
+    { day: '2026-09-12', hit: 59440000, miss: 0, out: 0, total: 59440000 },
+    { day: '2026-09-13', hit: 501671680, miss: 4152408, out: 1795616, total: 507619704 },
+  ]);
+  assert.deepEqual(aggregateTokenHistory(''), []);
+});
+
+test('computeTokenPace берёт последние завершённые календарные дни', () => {
+  const days = [
+    { day: '2026-09-19', hit: 100, miss: 10, out: 1, total: 111 },
+    { day: '2026-09-20', hit: 200, miss: 20, out: 2, total: 222 }, // пропущен 21-й
+    { day: '2026-09-22', hit: 300, miss: 30, out: 3, total: 333 }, // сегодня — не завершён
+  ];
+  // 22.09 — сегодняшний день, не завершён: окно 19, 20 и 21 (ноль между ними).
+  assert.deepEqual(computeTokenPace(days, '2026-09-22', 3), { days: 3, hit: 100, miss: 10, out: 1, total: 111 });
+  // 23.09: окно 20, 21 (ноль), 22 — каждый счётчик округляется отдельно.
+  assert.deepEqual(computeTokenPace(days, '2026-09-23', 3), { days: 3, hit: 167, miss: 17, out: 2, total: 185 });
+  assert.equal(computeTokenPace([], '2026-09-23'), null);
+});
+
+test('monthFacts: факт месяца — сумма денег и токенов до последней записи', () => {
+  const cost = [
+    { day: '2026-08-31', cost: 5 },
+    { day: '2026-09-01', cost: 2 },
+    { day: '2026-09-03', cost: 3 },
+  ];
+  const tokens = [
+    { day: '2026-09-01', hit: 1000, miss: 100, out: 10, total: 1110 },
+    { day: '2026-09-03', hit: 2000, miss: 200, out: 20, total: 2220 },
+  ];
+  const month = monthFacts(cost, tokens);
+  assert.equal(month.key, '2026-09');
+  assert.equal(month.from, '2026-09-01');
+  assert.equal(month.to, '2026-09-03');
+  assert.equal(month.days, 3, 'включая 02.09 с нулём внутри диапазона');
+  assert.equal(month.cny, 5);
+  assert.equal(month.tokens, 3330);
+  assert.equal(month.hit, 3000);
+  assert.equal(monthFacts([], []), null);
+});
+
+test('dayAge считает давность последней записи', () => {
+  assert.equal(dayAge('2026-09-21', '2026-11-02'), 42);
+  assert.equal(dayAge('2026-11-01', '2026-11-02'), 1);
+  assert.equal(dayAge('2026-11-02', '2026-11-02'), 0);
+  assert.equal(dayAge('мусор', '2026-11-02'), null);
 });
 
 test('computeRunway: нулевой темп, пустая история и неположительный баланс', () => {

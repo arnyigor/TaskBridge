@@ -19,6 +19,7 @@ import { restoreSessionFile, sessionContainsUserMessage } from './session-histor
 import { DEFAULT_SESSION_MAX_MB } from './session-shrink.mjs';
 import { validateFiles, validateUploadRefs, metadata, stageFiles, rollbackFiles, snapshotWorkspace, captureOutputs } from './files.mjs';
 import { UploadStore } from './uploads.mjs';
+import { normalizeExternalReadProject, externalProjectIdentity } from './external-files/config.mjs';
 import { NativeSessionService, acquireNativeLease, sweepOrphanLocks } from './native-sessions.mjs';
 import { classifyEngineError } from './engine.mjs';
 import { humanizeError } from '../web/errors.mjs';
@@ -682,6 +683,11 @@ export class TaskManager extends EventEmitter {
   }
 
   async init() {
+    // Validate all configured grants before restoring or starting any Pi session.
+    // Projects without externalReadDirectories retain their original shape.
+    const projects = await Promise.all([...this.projects.values()].map(project => normalizeExternalReadProject(project, { allowMissing: true })));
+    for (const project of projects) this.projects.set(project.id, project);
+    if (this.config.projects) this.config.projects = projects;
     await this.uploads.cleanup().catch(() => {});
     await this.mcp.ensureReady().catch(() => {});
     const previous = await this.store.list();
@@ -902,6 +908,7 @@ export class TaskManager extends EventEmitter {
 
   registerProject(project) {
     if (this.projects.has(project.id)) throw Object.assign(new Error('Проект с таким именем уже существует.'), { code: 'INPUT_INVALID' });
+    project = { ...project, registrationId: crypto.randomUUID() };
     this.projects.set(project.id, project);
     this.config.projects = [...(this.config.projects || []), project];
   }
@@ -2597,14 +2604,14 @@ export class TaskManager extends EventEmitter {
     }
   }
 
-  async #resolveFiles(items, token) {
+  async #resolveFiles(items, token, context = {}) {
     if (!Array.isArray(items) || !items.length) return [];
     const inline = items.filter(item => item && typeof item.base64 === 'string');
     const refs = items.filter(item => item && !item.base64 && item.id);
     if (inline.length && refs.length) throw Object.assign(new Error('Нельзя смешивать встроенные и загруженные файлы в одном запросе.'), { code: 'INPUT_INVALID' });
     if (!refs.length) return validateFiles(items);
     if (!token) throw Object.assign(new Error('Не указан идентификатор загрузки.'), { code: 'INPUT_INVALID' });
-    return validateUploadRefs(refs, await this.uploads.resolve(token, refs));
+    return validateUploadRefs(refs, await this.uploads.resolve(token, refs, context));
   }
 
   async #createTask(input, options) {
@@ -2666,6 +2673,7 @@ export class TaskManager extends EventEmitter {
       status: 'QUEUED',
       queueReason: waitingReason,
       projectId,
+      externalReadProjectKey: externalProjectIdentity(this.projects.get(projectId)),
       prompt,
       // A session may be named when it is created (a resumed one is «<задача>
       // (продолжение)»); an empty name stays empty and the client falls back to
@@ -3160,6 +3168,13 @@ export class TaskManager extends EventEmitter {
     }
     const args = [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...mcpLaunch.args];
     const env = { ...(this.#piEnv(mcpLaunch) || {}) };
+    let externalCapability = null;
+    if (this.externalFilesIssue && this.externalFilesUrl && this.externalFilesExtensionPath) {
+      await fs.access(this.externalFilesExtensionPath);
+      externalCapability = this.externalFilesIssue(task.id);
+      args.push('-e', this.externalFilesExtensionPath);
+      Object.assign(env, { TASKBRIDGE_EXTERNAL_URL: this.externalFilesUrl, TASKBRIDGE_EXTERNAL_TASK: task.id, TASKBRIDGE_EXTERNAL_TOKEN: externalCapability.token });
+    }
     if (this.approvalsConfig.enabled && this.approvalBaseUrl && this.approvalExtensionPath) {
       // A missing extension file must not break every task: log it and continue
       // without the gate rather than spawning Pi with a broken --extension.
@@ -3264,6 +3279,7 @@ export class TaskManager extends EventEmitter {
       env: Object.keys(env).length ? env : undefined
     });
 
+    if (externalCapability) pi.once('close', externalCapability.revoke);
     const runtime = {
       pi,
       settleResolvers: [],
@@ -5879,6 +5895,7 @@ export class TaskManager extends EventEmitter {
       status: 'SUCCEEDED',
       queueReason: null,
       projectId: source.projectId,
+      externalReadProjectKey: source.externalReadProjectKey || (source.sourcePath && externalProjectIdentity({ path: source.sourcePath })),
       prompt: opening ? (opening.data?.text ?? opening.message ?? '') : source.prompt,
       title: source.title ? `${source.title} (ветка)` : null,
       // The workspace is prepared when the first message of the fork runs, so a
@@ -6078,6 +6095,7 @@ export class TaskManager extends EventEmitter {
   // same commandId+payload is replayed from the ledger instead of executed a
   // second time; the same id with different content is a CONFLICT.
   async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
+    if (uploadToken) await this.uploads.authorize(uploadToken, { taskId: id, projectId: this.tasks.get(id)?.projectId, actor: opts.uploadActor });
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     // Who sent it: carried into the queue entry and the USER_MESSAGE event, so a
     // client can match its own command in the history (e.g. after
@@ -6313,7 +6331,7 @@ export class TaskManager extends EventEmitter {
     const ownsSlot = this.activeTaskIds.has(id);
     const reservedElsewhere = (!ownsSlot && !this.#hasCapacityFor(task))
       || (ownsSlot && !alreadyFinished && task.status !== 'RUNNING');
-    const incomingFiles = await this.#resolveFiles(files, uploadToken);
+    const incomingFiles = await this.#resolveFiles(files, uploadToken, { taskId: id, projectId: task.projectId });
     const userText = String(text || '').trim() || (incomingFiles.length ? 'Прикреплённые файлы' : '');
     if (!userText) throw Object.assign(new Error('Добавьте сообщение или файл.'), { code: 'INPUT_INVALID' });
     if (!['auto', 'prompt', 'steer', 'follow_up'].includes(mode)) throw Object.assign(new Error('Неизвестный режим сообщения.'), { code: 'INPUT_INVALID' });

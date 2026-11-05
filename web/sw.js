@@ -2,11 +2,11 @@
 // cached: session data is never stored here, because a stale task list is worse
 // than an honest "machine offline" — the app always re-syncs after its cursor.
 
-const CACHE = 'taskbridge-v68';
+const CACHE = 'taskbridge-v69';
 // model-filter/model-picker-view — правила и строки выбора модели: app.js их
 // импортирует, поэтому без них офлайн-оболочка падала бы.
 const SHELL = [
-  '/', '/index.html', '/app.js?v=20261021-51', '/app.css', '/chat-state.mjs', '/errors.mjs', '/transport.mjs',
+  '/', '/index.html', '/app.js?v=20261104-52', '/app.css', '/chat-state.mjs', '/errors.mjs', '/transport.mjs',
   '/command-client.mjs', '/diagnostics.mjs', '/provider-status-view.mjs',
   '/composer-drafts.mjs',
   '/model-filter.mjs', '/model-picker-view.mjs',

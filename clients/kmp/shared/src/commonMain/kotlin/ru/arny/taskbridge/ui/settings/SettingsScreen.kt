@@ -70,8 +70,16 @@ import ru.arny.taskbridge.core.api.McpServer
 import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ModelProbeResult
 import ru.arny.taskbridge.core.api.ModelRef
+import ru.arny.taskbridge.core.api.ProviderCheck
+import ru.arny.taskbridge.core.api.ProviderDraftCheck
+import ru.arny.taskbridge.core.api.ProviderProfile
 import ru.arny.taskbridge.core.api.ProviderStatus
+import ru.arny.taskbridge.core.client.settings.ProviderEditorState
+import ru.arny.taskbridge.core.client.settings.providerApis
+import ru.arny.taskbridge.core.client.settings.providerEndpoint
+import ru.arny.taskbridge.core.client.settings.providerTemplates
 import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.core.client.settings.ProviderDraftState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.ui.common.SectionTitle
 import ru.arny.taskbridge.ui.common.formatBytes
@@ -104,6 +112,10 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
     var editMcpServer by remember { mutableStateOf<McpServer?>(null) }
     var addMcpServer by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(connection) {
+        connection.settingsController.loadProviderProfiles()
+    }
 
     LaunchedEffect(connection) {
         while (true) {
@@ -182,6 +194,21 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                 }
                 InfoRow(label = "Сеть устройства", value = if (online) "доступна" else "offline", warning = !online)
                 InfoRow(label = "TaskBridge", value = info?.name ?: "—")
+
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                ProviderProfilesSection(
+                    profiles = agentState.providerProfiles,
+                    loading = agentState.providerProfilesLoading,
+                    busy = agentState.providerBusy,
+                    checks = agentState.providerChecks,
+                    notice = agentState.providerNotice,
+                    onReload = connection.settingsController::loadProviderProfiles,
+                    onAdd = { connection.settingsController.editProvider() },
+                    onEdit = connection.settingsController::editProvider,
+                    onDelete = connection.settingsController::requestProviderDelete,
+                    onCheck = { connection.settingsController.checkProviderConnection(it) },
+                )
+
                 InfoRow(label = "Версия API", value = info?.let { "${it.apiVersion} (приложение знает: ${SUPPORTED_API_VERSIONS.joinToString()})" } ?: "—")
                 val pi = info?.pi
                 InfoRow(
@@ -609,6 +636,42 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
             },
         )
     }
+    agentState.providerEditor?.let { editor ->
+        ProviderEditorDialog(
+            editor = editor,
+            draft = agentState.providerDraft,
+            busy = agentState.providerBusy,
+            onChange = connection.settingsController::updateProviderEditor,
+            onDraftCheck = { connection.settingsController.checkProviderDraft(editor.baseUrl.trim(), editor.keyEnv.trim()) },
+            onAddModel = connection.settingsController::addDiscoveredModel,
+            onRemoveModel = { model -> connection.settingsController.removeProviderModels(editor.id.trim(), listOf(model)) },
+            onSave = connection.settingsController::saveProviderEditor,
+            onDismiss = connection.settingsController::closeProviderEditor,
+        )
+    }
+    agentState.providerDelete?.let { id ->
+        val profile = agentState.providerProfiles.firstOrNull { it.id == id }
+        AlertDialog(
+            onDismissRequest = { connection.settingsController.requestProviderDelete(null) },
+            title = { Text("Удалить $id?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Запись и её модели (${profile?.modelCount ?: 0}) убираются из models.json; рядом останется резервная копия файла.")
+                    Text(
+                        "Работающая сессия не переключится, но следующий ход может потребовать выбора другой модели.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { connection.settingsController.deleteProviderProfile(id) }) {
+                    Text("Удалить", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { connection.settingsController.requestProviderDelete(null) }) { Text("Отмена") } },
+        )
+    }
 }
 
 @Composable
@@ -620,6 +683,11 @@ private fun ProviderRow(status: ProviderStatus, refreshing: Boolean, onRefresh: 
         Column(Modifier.weight(1f)) {
             Text(status.label ?: status.provider ?: "Провайдер", style = MaterialTheme.typography.bodyMedium)
             Text(providerStatusText(status), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            // Расход и токены — отдельной строкой: темп, факт месяца и свежесть
+            // истории в одну строку с балансом уже не помещаются.
+            providerUsageDetail(status)?.let {
+                Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
         if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
         else Icon(AppIcons.Refresh, "Обновить данные провайдера", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -645,8 +713,7 @@ private fun providerStatusText(status: ProviderStatus): String {
         val parts = listOfNotNull(balance.cny?.let { "¥${number(it)}" }, balance.usd?.let { "\$${number(it)}" })
         val rub = status.rub?.total?.let { " · ≈ ${number(it)} ₽" }.orEmpty()
         val runway = status.runway?.historyDays?.let { " · примерно на $it дн." }.orEmpty()
-        val month = status.pace?.monthlyRub?.let { " · ~${number(it)} ₽/мес" }.orEmpty()
-        return parts.joinToString(" · ") + rub + runway + month + stale
+        return parts.joinToString(" · ") + rub + runway + stale
     }
     if (status.limits.isNotEmpty()) {
         val fiveHour = status.limits["fiveHour"]?.remainingPercent?.let { "5 ч: ${number(it)}%" }
@@ -866,6 +933,332 @@ private fun McpServerDialog(
             TextButton(onClick = { onSave(name.trim(), endpoint.trim().takeIf { useUrl }, endpoint.trim().takeIf { !useUrl }, args.lines().map(String::trim).filter(String::isNotEmpty)) }, enabled = name.isNotBlank() && endpoint.isNotBlank()) { Text("Сохранить") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
+    )
+}
+
+internal fun providerAuthLabel(profile: ProviderProfile): String = when (profile.auth) {
+    "keyless-local" -> "без API-ключа (локальный адрес)"
+    "configured" -> "ключ из переменной ${profile.keyEnv}"
+    "missing-env" -> "переменной ${profile.keyEnv.ifBlank { "с ключом" }} нет в процессе сервера"
+    "configured-elsewhere" -> "ключ задан вне TaskBridge"
+    else -> "ключ не определён"
+}
+
+/** Ответ сервера на проверку черновика — то, что человек должен прочитать перед записью. */
+internal fun providerDraftText(result: ProviderDraftCheck): String = when (result.status) {
+    "AVAILABLE" -> "Адрес отвечает: моделей ${result.models.size}${result.latencyMs?.let { " · $it мс" }.orEmpty()}"
+    "NO_KEY" -> result.note ?: "Переменной окружения нет в процессе сервера — проверка не делалась"
+    "REDIRECT" -> "Адрес отвечает редиректом; TaskBridge по нему не идёт"
+    "UNAUTHORIZED" -> "Провайдер отклонил ключ (HTTP ${result.httpStatus ?: 401})"
+    "RATE_LIMITED" -> "Провайдер ограничил запросы (HTTP ${result.httpStatus ?: 429})"
+    else -> listOfNotNull(
+        if (result.ok) "Ответ получен" else "Не проверено",
+        result.httpStatus?.let { "HTTP $it" },
+        result.note,
+        result.code,
+    ).joinToString(" · ")
+}
+
+internal fun providerCheckText(check: ProviderCheck): String {
+    val latency = check.latencyMs?.let { " · $it мс" }.orEmpty()
+    if (check.ok) return "GET /models отвечает$latency"
+    return when (check.status) {
+        "missing-key" -> "Переменная окружения с ключом не задана в процессе сервера"
+        "REDIRECT" -> "Адрес отвечает редиректом; переход не выполняется"
+        else -> listOfNotNull("Проверка не прошла", check.httpStatus?.let { "HTTP $it" }, check.status).joinToString(" · ") + latency
+    }
+}
+
+/**
+ * Подключения из `models.json`: список, проверка и правка.
+ *
+ * Правила сервера видны прямо в строках: запись `tb-*` можно изменить, любую —
+ * проверить и удалить. Ключ API сюда не попадает: только имя переменной.
+ */
+@Composable
+internal fun ProviderProfilesSection(
+    profiles: List<ProviderProfile>,
+    loading: Boolean,
+    busy: String?,
+    checks: Map<String, ProviderCheck>,
+    notice: String?,
+    onReload: () -> Unit,
+    onAdd: () -> Unit,
+    onEdit: (ProviderProfile) -> Unit,
+    onDelete: (String) -> Unit,
+    onCheck: (String) -> Unit,
+) {
+    SectionTitle("Подключения к провайдерам")
+    Text(
+        "Pi берёт подключения из models.json. TaskBridge правит только созданные им записи tb-*, любую можно проверить и удалить; перед записью файла он снимает копию. Ключ задаётся переменной окружения на компьютере сервера.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    )
+    FlowRow(
+        Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedButton(onClick = onReload, enabled = !loading && busy == null) {
+            Icon(AppIcons.Refresh, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Обновить")
+        }
+        OutlinedButton(onClick = onAdd, enabled = !loading && busy == null) {
+            Icon(AppIcons.Add, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("Добавить")
+        }
+        if (loading || busy != null) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+    }
+    notice?.let {
+        Text(
+            it,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+        )
+    }
+    if (!loading && profiles.isEmpty()) {
+        Text(
+            "Подключений не найдено. Добавьте свой OpenAI-совместимый API или подключитесь к локальной модели.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+        )
+    }
+    profiles.forEach { profile ->
+        ProviderProfileCard(
+            profile = profile,
+            busy = busy == profile.id,
+            check = checks[profile.id],
+            onCheck = { onCheck(profile.id) },
+            onEdit = { onEdit(profile) },
+            onDelete = { onDelete(profile.id) },
+        )
+    }
+}
+
+@Composable
+private fun ProviderProfileCard(
+    profile: ProviderProfile,
+    busy: Boolean,
+    check: ProviderCheck?,
+    onCheck: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    var expanded by rememberSaveable(profile.id) { mutableStateOf(false) }
+    val summary = listOfNotNull(
+        "${profile.modelCount} моделей",
+        if (profile.managed) "можно изменить" else "только просмотр и удаление",
+    ).joinToString(" · ")
+    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, top = 8.dp, end = 4.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f).clickable { expanded = !expanded }) {
+                Text(profile.id, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(summary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            else IconButton(onClick = onCheck) { Icon(AppIcons.Refresh, "Проверить подключение", Modifier.size(20.dp)) }
+            IconButton(onClick = { expanded = !expanded }) {
+                Icon(if (expanded) AppIcons.ChevronUp else AppIcons.ChevronDown, if (expanded) "Свернуть" else "Развернуть")
+            }
+        }
+        if (expanded) {
+            profile.baseUrl?.let { url ->
+                Text(url, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+            }
+            Text(providerAuthLabel(profile), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
+            check?.let {
+                Text(
+                    providerCheckText(it),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (it.ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
+                )
+            }
+            Row(Modifier.padding(horizontal = 4.dp)) {
+                TextButton(onClick = onCheck, enabled = !busy) { Text("Проверить /models") }
+                if (profile.managed) TextButton(onClick = onEdit, enabled = !busy) { Text("Изменить") }
+                TextButton(onClick = onDelete, enabled = !busy) { Text("Удалить", color = MaterialTheme.colorScheme.error) }
+            }
+        }
+    }
+}
+
+/**
+ * Форма подключения: адрес, имя переменной с ключом и модели.
+ *
+ * «Проверить и показать модели» пишет НИЧЕГО: сервер сначала отвечает каталогом
+ * `GET /models`, и только отмеченные ID отправляются сохранением вместе с
+ * ревизией models.json.
+ */
+@Composable
+internal fun ProviderEditorDialog(
+    editor: ProviderEditorState,
+    draft: ProviderDraftState?,
+    busy: String?,
+    onChange: (ProviderEditorState) -> Unit,
+    onDraftCheck: () -> Unit,
+    onAddModel: (String) -> Unit,
+    onRemoveModel: (String) -> Unit,
+    onSave: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val working = busy != null || draft?.loading == true
+    AlertDialog(
+        onDismissRequest = { if (!working) onDismiss() },
+        title = { Text(if (editor.existing) "Подключение ${editor.id}" else "Новое подключение") },
+        text = {
+            Column(
+                Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedTextField(
+                    editor.id,
+                    { onChange(editor.copy(id = it)) },
+                    label = { Text("Идентификатор (tb-…)") },
+                    singleLine = true,
+                    enabled = !editor.existing && !working,
+                )
+                Text("Шаблон подключения", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    providerTemplates.forEach { template ->
+                        FilterChip(
+                            selected = editor.baseUrl == template.baseUrl,
+                            onClick = { if (!editor.existing && !working) onChange(editor.copy(id = template.id, baseUrl = template.baseUrl, keyEnv = template.keyEnv, api = template.api)) },
+                            label = { Text(template.label) },
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    editor.baseUrl,
+                    { onChange(editor.copy(baseUrl = it)) },
+                    label = { Text("Адрес API") },
+                    placeholder = { Text("127.0.0.1:8083/v1 или https://provider.example/v1") },
+                    singleLine = true,
+                    enabled = !editor.existing && !working,
+                    supportingText = { Text(providerEndpoint(editor.baseUrl)?.let { endpoint ->
+                        "${endpoint.baseUrl} — ${if (endpoint.local) "локальный/LAN, ключ может быть пустым" else "публичный HTTPS, нужен ключ"}. Это адрес компьютера сервера TaskBridge."
+                    } ?: "Можно ввести без http://. Локальный HTTP разрешён только для localhost и приватных адресов.") },
+                    isError = editor.baseUrl.isNotBlank() && providerEndpoint(editor.baseUrl) == null,
+                )
+                Text("Протокол API", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    providerApis.forEach { (api, label) ->
+                        FilterChip(selected = editor.api == api, onClick = { if (!editor.existing && !working) onChange(editor.copy(api = api)) }, label = { Text(label) })
+                    }
+                }
+                OutlinedTextField(
+                    editor.keyEnv,
+                    { onChange(editor.copy(keyEnv = it)) },
+                    label = { Text("Переменная окружения с ключом") },
+                    placeholder = { Text("MY_PROVIDER_API_KEY") },
+                    singleLine = true,
+                    enabled = !editor.existing && !working,
+                )
+                Text(
+                    if (editor.existing) "Адрес, протокол и ключ существующего подключения TaskBridge не меняет — только список моделей."
+                    else "Только имя переменной, не сам ключ. Для локального API без ключа оставьте поле пустым.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (editor.existing) {
+                    Text("Модели", style = MaterialTheme.typography.labelLarge)
+                    editor.modelIds.forEach { id ->
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            Text(id, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            IconButton(onClick = { onRemoveModel(id) }, enabled = !working) {
+                                Icon(AppIcons.Delete, "Убрать модель $id", Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                } else {
+                    OutlinedTextField(
+                        editor.models,
+                        { onChange(editor.copy(models = it)) },
+                        label = { Text("ID моделей, по одному в строке") },
+                        minLines = 3,
+                        enabled = !working,
+                    )
+                }
+                OutlinedButton(
+                    onClick = onDraftCheck,
+                    enabled = !working && editor.baseUrl.isNotBlank(),
+                ) {
+                    if (draft?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    else Icon(AppIcons.Search, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Проверить и показать модели")
+                }
+                val status = draft?.error ?: draft?.result?.let(::providerDraftText)
+                if (status != null) {
+                    Text(
+                        status,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (draft?.error == null && draft?.result?.ok == true) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                    )
+                }
+                val discovered = draft?.result?.models.orEmpty()
+                if (discovered.isNotEmpty()) {
+                    Text("Найдено у провайдера: ${discovered.size}", style = MaterialTheme.typography.labelLarge)
+                    val query = editor.query.trim().lowercase()
+                    val visible = if (query.isEmpty()) discovered else discovered.filter { model ->
+                        model.id.lowercase().contains(query) || model.name?.lowercase()?.contains(query) == true
+                    }
+                    if (discovered.size > 8) {
+                        OutlinedTextField(
+                            editor.query,
+                            { onChange(editor.copy(query = it)) },
+                            label = { Text("Поиск по ID") },
+                            singleLine = true,
+                        )
+                    }
+                    if (visible.isEmpty()) Text("Ничего не найдено", style = MaterialTheme.typography.bodySmall)
+                    // Длинные каталоги не рисуем целиком: список в диалоге ограничен прокруткой.
+                    visible.take(60).forEach { model ->
+                        val added = model.id in editor.modelIds
+                        Row(
+                            Modifier.fillMaxWidth().clickable(enabled = !added && !working) { onAddModel(model.id) },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(if (added) AppIcons.Check else AppIcons.Add, null, Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                model.id,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                                color = if (added) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                            )
+                            model.contextWindow?.let { context ->
+                                Text("$context", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    if (visible.size > 60) {
+                        Text(
+                            "Показаны первые 60 из ${visible.size} — уточните поиск.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onSave, enabled = !editor.existing && editor.ready && !working) {
+                if (working) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Text("Сохранить")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !working) { Text("Закрыть") } },
     )
 }
 

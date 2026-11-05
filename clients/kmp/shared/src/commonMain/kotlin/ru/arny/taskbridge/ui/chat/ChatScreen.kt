@@ -67,6 +67,10 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
@@ -173,12 +177,23 @@ fun ChatScreen(
     onBack: () -> Unit,
     onOpenSession: (String) -> Unit,
     showBack: Boolean,
+    onRemoteFiles: (String) -> Unit = {},
 ) {
     val session = remember(taskId) { connection.chat(taskId) }
     val state by session.state.collectAsState()
     // Follow Plan: одно состояние на иконку композитора и карточку над ним.
     val planState = rememberFollowPlanState(connection.api, taskId, state.chat.version)
     val sessionListState = rememberVisibleSessionList(connection)
+    // Деньги за ответ считаются на клиенте: ставки и расписание пика приходят
+    // с /api/info вместе со статусом провайдера, курс рубля — оттуда же.
+    val deepseekStatus = sessionListState.info?.providerStatuses?.get("deepseek")
+    val usagePricing = remember(deepseekStatus?.tariff, deepseekStatus?.rates) {
+        val tariff = deepseekStatus?.tariff
+        if (tariff == null) null else UsagePricing(
+            tariff = tariff,
+            rubPerUnit = if (tariff.currency.equals("CNY", ignoreCase = true)) deepseekStatus.rates?.cnyRub else deepseekStatus.rates?.usdRub,
+        )
+    }
     val online by connection.online.collectAsState()
     val platform = graph.platform
     val snackbar = remember { SnackbarHostState() }
@@ -192,6 +207,17 @@ fun ChatScreen(
     val nearBottomPx = with(LocalDensity.current) { NEAR_BOTTOM_DP.dp.roundToPx() }
     val bottomLatch = remember(taskId, nearBottomPx) { BottomLatch(nearBottomPx) }
     var following by remember(taskId) { mutableStateOf(true) }
+    val scrollIntent = remember(bottomLatch) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source == NestedScrollSource.UserInput && available.y != 0f) {
+                    bottomLatch.userScroll(available.y)
+                    following = bottomLatch.following
+                }
+                return Offset.Zero
+            }
+        }
+    }
     LaunchedEffect(listState, bottomLatch) {
         snapshotFlow {
             val chatItems = state.chat.items
@@ -247,6 +273,20 @@ fun ChatScreen(
     var screenCatalog by remember { mutableStateOf<ModelCatalog?>(null) }
     var quickActions by remember(connection, taskId) { mutableStateOf(fallbackQuickActions()) }
     val pickFiles = rememberFilePicker { picked -> files = files + picked }
+    var fileSourcesOpen by remember { mutableStateOf(false) }
+    if (fileSourcesOpen) {
+        AlertDialog(
+            onDismissRequest = { fileSourcesOpen = false },
+            title = { Text("Добавить файл") },
+            text = {
+                Column {
+                    TextButton(onClick = { fileSourcesOpen = false; pickFiles() }, enabled = online) { Text("С этого устройства") }
+                    TextButton(onClick = { state.task?.projectId?.let(onRemoteFiles); fileSourcesOpen = false }, enabled = online && state.task?.projectId != null) { Text("С компьютера · TaskBridge Server") }
+                }
+            },
+            confirmButton = { TextButton(onClick = { fileSourcesOpen = false }) { Text("Закрыть") } },
+        )
+    }
 
     LaunchedEffect(connection) { connection.sessions.models().onSuccess { screenCatalog = it }.onFailure { /* chooser can retry */ } }
     // Живая телеметрия движка приходит только из /api/info: в SSE её нет, а список
@@ -313,6 +353,8 @@ fun ChatScreen(
         draft = TextFieldValue("")
         files = emptyList()
         draftAutosave.flush("")
+        bottomLatch.resume()
+        following = true
         scope.launch { listState.animateScrollToItem(0) }
     }
 
@@ -525,7 +567,7 @@ fun ChatScreen(
                 val generating = remember(state.chat.items) {
                     state.chat.items.any { it is ChatItem.Assistant && it.active }
                 }
-                Box(Modifier.weight(1f).fillMaxWidth()) {
+                Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(scrollIntent)) {
                     // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
                     // зависят обе стороны поведения — держать низ или не давать ленте
                     // сдвинуть чтение.
@@ -563,6 +605,7 @@ fun ChatScreen(
                                 selectionMode = selecting,
                                 selectedIds = selectedIds,
                                 onToggleSelect = ::toggleSelected,
+                                pricing = usagePricing,
                             )
                         }
                     }
@@ -574,7 +617,11 @@ fun ChatScreen(
                     val hasNew = showJump && newestSignature != seenSignature
                     // Qualified: inside Box-in-Column the ColumnScope overload would win and is illegal here.
                     androidx.compose.animation.AnimatedVisibility(showJump, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).padding(12.dp)) {
-                        SmallFloatingActionButton(onClick = { scope.launch { listState.animateScrollToItem(0) } }) {
+                        SmallFloatingActionButton(onClick = {
+                            bottomLatch.resume()
+                            following = true
+                            scope.launch { listState.animateScrollToItem(0) }
+                        }) {
                             Row(Modifier.padding(horizontal = if (hasNew) 12.dp else 0.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Icon(AppIcons.ArrowDown, "К последнему сообщению", Modifier.size(18.dp))
                                 if (hasNew) {
@@ -654,7 +701,7 @@ fun ChatScreen(
                     onQuickAction = { action -> draft = draft.withSlashCommand(action.insertText) },
                     fileCompletions = { session.workspaceFiles().getOrNull()?.entries ?: emptyList() },
                     onRemoveFile = { files = files - it },
-                    onAttach = pickFiles,
+                    onAttach = { fileSourcesOpen = true },
                     onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
                     working = working,
                     enterSends = graph.settings.enterSends && platform.kind == "desktop",
@@ -1003,11 +1050,42 @@ internal class BottomLatch(private val nearBottomPx: Int = 80) {
         private set
     private var seenCount: Int = -1
     private var seenNewest: String? = null
+    private var pausedByUser = false
+    private var returningToBottom = false
+
+    // reverseLayout: положительная дельта жеста/колеса ведёт к старым сообщениям.
+    // Намерение важнее порога «рядом с низом» и прихода контента в том же кадре.
+    fun userScroll(deltaY: Float) {
+        if (deltaY > 0f) {
+            pausedByUser = true
+            returningToBottom = false
+            following = false
+        } else if (deltaY < 0f) {
+            returningToBottom = true
+        }
+    }
+
+    fun resume() {
+        pausedByUser = false
+        returningToBottom = false
+        following = true
+    }
+
+    private fun keepPaused(index: Int, offset: Int): Boolean {
+        if (!pausedByUser) return false
+        if (returningToBottom && index == 0 && offset == 0) {
+            resume()
+            return false
+        }
+        following = false
+        return true
+    }
 
     fun observe(index: Int, offset: Int, count: Int, newestId: String?) {
         val contentChanged = count != seenCount || newestId != seenNewest
         seenCount = count
         seenNewest = newestId
+        if (keepPaused(index, offset)) return
         following = when {
             index == 0 && offset <= nearBottomPx -> true
             // Индекс сдвинула вставка (или удаление), а не жест: низ остаётся низом.
@@ -1026,6 +1104,7 @@ internal class BottomLatch(private val nearBottomPx: Int = 80) {
      * «на телефоне при получении сообщения идёт автоскролл вниз»).
      */
     fun settle(index: Int, offset: Int) {
+        if (keepPaused(index, offset)) return
         following = index == 0 && offset <= nearBottomPx
     }
 }
@@ -1073,6 +1152,8 @@ internal fun MessageList(
     search: ChatSearchHighlight = ChatSearchHighlight(),
     selectedIds: Map<String, Boolean> = emptyMap(),
     onToggleSelect: (String) -> Unit = {},
+    /** Тариф провайдера и курс рубля: из них считается строка «токены · деньги». */
+    pricing: UsagePricing? = null,
 ) {
     val platform = graph.platform
     val ownClient = graph.settings.clientId
@@ -1204,6 +1285,8 @@ internal fun MessageList(
                         }
                         is ChatItem.Assistant -> {
                             val actionId = item.canonicalId.takeIf { item.segmentActions }
+                            // Токены и деньги за ответ; модель — та, которой он сгенерирован.
+                            val usage = usageLine(item.usage, item.usageModel ?: state.task?.model?.id, item.at, pricing)
                             val newest = actionId == state.chat.newestAnswerId && actionId != null && !historyLocked && item.final
                             AssistantMessage(
                                 item = item,
@@ -1229,6 +1312,8 @@ internal fun MessageList(
                                 loadWorkspaceFile = { session.readWorkspaceFile(it) },
                                 desktop = platform.kind == "desktop",
                                 continuePending = continuePendingId == item.canonicalId && !item.active,
+                                usageLine = usage?.text,
+                                usagePeak = usage?.peak == true,
                                 onSelectVariant = { position ->
                                     val variants = item.variants
                                     val variantId = variants?.variantIdAt(position)
@@ -1460,7 +1545,7 @@ private fun DeliveryDiagnostics(
     // prompt») или PP из /api/info, и только пока модель ещё ничего не выдала.
     // `task.metrics.pp` прошлого хода не гаснет, и с ним подпись «Модель читает
     // промпт» висела над уже идущими размышлениями модели.
-    val answerSilent = answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty())
+    val answerSilent = answer == null || (answer.text.isBlank() && answer.thinking.isBlank() && answer.tools.isEmpty() && !answer.generatingToolCall)
     val readsPrompt = readsPromptNow(readingPrompt = readingPrompt, livePp = livePp, answerSilent = answerSilent)
     val details = buildDiagnosticsDetails(state, info, externalMetrics, now = openTick) { formatMoment(platform, it) }
     // Elapsed since the turn started, ticking every second. Seeded from the last
@@ -1489,14 +1574,13 @@ private fun DeliveryDiagnostics(
         // Отказ провайдера важнее прочего: пока он держит ход, не идёт ничего.
         state.task?.providerWait != null -> providerWaitPhase(state.task.providerWait, tick)
         state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$compactingDetail$readingDetail · подробнее"
+        answer?.active == true && answer.generatingToolCall -> assistantStreamPhaseLabel(answer)
         answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
         readsPrompt && answerSilent -> "Модель читает промпт$readingDetail"
         // История больше окна модели: провайдер отвечает 400, Pi повторяет запрос, и
         // «ожидается ответ агента» висит без событий — это не задержка модели.
         contextOverflow(state.task, info) != null && answer?.active != true -> "История не влезает в окно модели · подробнее"
-        answer?.active == true && answer.text.isNotBlank() -> "Получаем ответ модели"
-        answer?.active == true && answer.thinking.isNotBlank() -> "Получаем размышления модели"
-        answer?.active == true -> "Сообщение передано · ожидается ответ агента"
+        answer?.active == true -> assistantStreamPhaseLabel(answer)
         state.task?.pendingPrompts?.isNotEmpty() == true -> "Сообщение в очереди"
         else -> "Диагностика доставки"
     }
