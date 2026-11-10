@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Translunar mission - minimum TLI search and simulation</title>
+<style>
+  :root{
+    --bg:#05070d; --panel:#0b1018; --line:#1c2533; --ink:#c9d6e5; --dim:#728599;
+    --acc:#5ad1ff; --warm:#ffd166; --ok:#4ade80; --bad:#ff6b6b; --mag:#ff7ad9;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font:13px/1.45 ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+       display:flex;flex-direction:column}
+  header{display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--line);background:#080d15}
+  header h1{font-size:13px;margin:0;letter-spacing:.14em;color:var(--acc);font-weight:600}
+  .metric{display:flex;flex-direction:column;line-height:1.2}
+  .metric .lbl{font-size:10px;letter-spacing:.08em;color:var(--dim);text-transform:uppercase}
+  .metric .val{font-size:19px;color:var(--warm)}
+  .metric.ok .val{color:var(--ok)} .metric.bad .val{color:var(--bad)}
+  #status{margin-left:auto;padding:5px 11px;border:1px solid var(--line);border-radius:3px;font-size:11px;letter-spacing:.1em}
+  #status.wait{color:var(--dim)} #status.ok{color:var(--ok);border-color:#1e4432} #status.bad{color:var(--bad);border-color:#4a2020}
+  main{flex:1;display:grid;grid-template-columns:minmax(0,1.55fr) minmax(330px,.85fr);gap:10px;padding:10px;min-height:0}
+  .stage{position:relative;min-height:0;display:flex;flex-direction:column;gap:8px}
+  #sys{flex:1;width:100%;min-height:320px;background:#04060b;border:1px solid var(--line);border-radius:4px;display:block}
+  .banner{position:absolute;left:50%;top:14px;transform:translateX(-50%);padding:9px 16px;border-radius:4px;
+          font-size:13px;letter-spacing:.04em;display:none;text-align:center;max-width:92%}
+  .banner.show{display:block}
+  .banner.ok{background:rgba(16,52,34,.9);border:1px solid #2f7a52;color:var(--ok)}
+  .banner.bad{background:rgba(56,18,18,.9);border:1px solid #7a3030;color:var(--bad)}
+  .ctrl{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+  button{font:inherit;background:#111a26;color:var(--ink);border:1px solid var(--line);border-radius:3px;
+         padding:6px 11px;cursor:pointer}
+  button:hover{border-color:#2c3d52;background:#16222f}
+  button.on{background:#173247;border-color:var(--acc);color:var(--acc)}
+  .sep{flex:1}
+  .grp{color:var(--dim);font-size:11px;letter-spacing:.08em}
+  aside{display:flex;flex-direction:column;gap:10px;min-height:0}
+  .zooms{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .zc{position:relative}
+  .zc canvas{width:100%;height:190px;background:#04060b;border:1px solid var(--line);border-radius:4px;display:block}
+  .cap{position:absolute;left:7px;top:5px;font-size:10px;letter-spacing:.1em;color:var(--dim);pointer-events:none}
+  .hud{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:3px 9px;border:1px solid var(--line);
+       border-radius:4px;padding:9px 11px;background:var(--panel)}
+  .hud dt{color:var(--dim);font-size:11px}
+  .hud dd{margin:0;text-align:right;font-size:13px;white-space:nowrap}
+  .hud dd.ph{color:var(--acc)} .hud dd.w{color:var(--warm)}
+  .logwrap{flex:1;min-height:120px;border:1px solid var(--line);border-radius:4px;background:var(--panel);
+           overflow:auto;padding:9px 11px}
+  #log{white-space:pre;font-size:11.5px;color:#9fb2c8}
+  #log .hi{color:var(--warm)} #log .good{color:var(--ok)} #log .bad{color:var(--bad)} #log .hd{color:var(--acc)}
+  @media (max-width:980px){main{grid-template-columns:1fr}#sys{min-height:300px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>TRANSLUNAR MISSION &mdash; SEARCH FOR THE MINIMUM TLI</h1>
+  <div class="metric"><span class="lbl">lowest TLI delta-v found</span><span class="val" id="mDv">&hellip;</span></div>
+  <div class="metric" id="mCpaBox"><span class="lbl">verified closest approach to lunar surface</span><span class="val" id="mCpa">&hellip;</span></div>
+  <div id="status" class="wait">SEARCHING</div>
+</header>
+<main>
+  <section class="stage">
+    <canvas id="sys"></canvas>
+    <div class="banner" id="banner"></div>
+    <div class="ctrl">
+      <button id="btnStart">Start</button>
+      <button id="btnRestart">Restart</button>
+      <span class="grp">speed</span>
+      <button class="sp" data-sp="1">1x</button>
+      <button class="sp" data-sp="10">10x</button>
+      <button class="sp" data-sp="100">100x</button>
+      <button class="sp" data-sp="1000">1k</button>
+      <button class="sp on" data-sp="10000">10k</button>
+      <button class="sp" data-sp="100000">100k</button>
+      <span class="sep"></span>
+      <span class="grp" id="foot"></span>
+    </div>
+  </section>
+  <aside>
+    <div class="zooms">
+      <div class="zc"><canvas id="zoomEarth"></canvas><div class="cap">EARTH NEIGHBOURHOOD</div></div>
+      <div class="zc"><canvas id="zoomMoon"></canvas><div class="cap">LUNAR NEIGHBOURHOOD</div></div>
+    </div>
+    <dl class="hud">
+      <dt>elapsed (window 7.000 d)</dt><dd id="hT">T+00:00:00</dd><dt>since TLI</dt><dd id="hTl">&mdash;</dd>
+      <dt>phase</dt><dd id="hPh" class="ph">LEO</dd><dt>TLI delta-v</dt><dd id="hDv" class="w">&mdash;</dd>
+      <dt>speed (ECI)</dt><dd id="hV">&mdash;</dd><dt>speed rel. Moon</dt><dd id="hVm">&mdash;</dd>
+      <dt>altitude above Earth</dt><dd id="hDe">&mdash;</dd><dt>alt. above Moon surface</dt><dd id="hDm">&mdash;</dd>
+      <dt>closest approach so far</dt><dd id="hCpa" class="w">&mdash;</dd><dt>at</dt><dd id="hCpaT">&mdash;</dd>
+    </dl>
+    <div class="logwrap"><div id="log"></div></div>
+  </aside>
+</main>
+<script>
+// ----------------------------------------------------------------
+// NUMERICAL CORE - integrated by the page and by the Node tests verbatim
+// ----------------------------------------------------------------
+// ============================================================
+// CORE - physics model + TLI search. No DOM: the identical code runs
+// in the browser and under Node (used by the tests).
+// ============================================================
+
+// ---- fixed constants (values given by the task, used verbatim) ----
+const P = Object.freeze({
+  MU_E: 398600.0,          // km^3/s^2   Earth
+  MU_M: 4902.8,            // km^3/s^2   Moon
+  R_E: 6371.0,             // km         Earth radius
+  R_M: 1737.0,             // km         Moon radius
+  D: 384400.0,             // km         Earth-Moon distance, circular coplanar lunar orbit
+  T_MOON: 27.32 * 86400.0, // s          lunar orbital period
+  ALT_LEO: 200.0,          // km         parking orbit altitude
+  T_TOTAL: 7 * 86400.0,    // s          hard mission duration limit
+  TARGET_MAX: 500.0,       // km         success: closest approach to the lunar surface
+  ARRIVAL_SHOW: 3000.0     // km         "arrival" / success banner threshold
+});
+const DEG = Math.PI / 180;
+const N_MOON = 2 * Math.PI / P.T_MOON;                     // rad/s lunar mean motion
+const R_LEO = P.R_E + P.ALT_LEO;                           // 6571 km
+const V_LEO = Math.sqrt(P.MU_E / R_LEO);                   // circular speed 7.7885 km/s
+const T_LEO = 2 * Math.PI * Math.sqrt(R_LEO ** 3 / P.MU_E);// parking period
+const T_BURN = T_LEO;                                      // TLI epoch: 1 parking revolution
+const SOI_MOON = P.D * Math.pow(P.MU_M / P.MU_E, 2 / 5);   // Laplace sphere ~66200 km
+const DT_SCREEN = 10.0;                                    // screening step (requirement: <=10 s)
+const DT_FINE = 1.0;                                       // verification / playback step
+const HIT_TARGET = 0.55 * P.TARGET_MAX;                    // aim the perilune here
+
+// rotation constants for the prescribed lunar motion (keeps trig out of the loop)
+const rotCache = new Map();
+function rotConst(dt) {
+  let c = rotCache.get(dt);
+  if (!c) {
+    const a = N_MOON * dt;
+    c = { ch: Math.cos(a / 2), sh: Math.sin(a / 2), c1: Math.cos(a), s1: Math.sin(a) };
+    rotCache.set(dt, c);
+  }
+  return c;
+}
+
+let _ax = 0, _ay = 0;
+function accel(x, y, mx, my) {
+  const r2 = x * x + y * y, r = Math.sqrt(r2), kE = P.MU_E / (r2 * r);
+  const dx = mx - x, dy = my - y, d2 = dx * dx + dy * dy, d = Math.sqrt(d2);
+  const kM = P.MU_M / (d2 * d);
+  _ax = -kE * x + kM * dx; _ay = -kE * y + kM * dy;
+}
+
+// Mission model, identical for the search, the verification and the playback:
+// t = 0 the spacecraft is inserted into a 200 km circular parking orbit, coasts
+// there for exactly one revolution, then an impulsive prograde TLI of magnitude
+// dv is applied. The window closes 7 days after the epoch.
+// moonPhase0 = Moon position angle at t = 0 (rad).
+function createMission(dv, moonPhase0, opt) {
+  const coastFirst = opt.coastFirst !== false, dt = opt.dt;
+  const m = {
+    dv, dt, rc: rotConst(dt), t: 0, tEnd: opt.tEnd ?? P.T_TOTAL, prune: !!opt.prune,
+    x: R_LEO, y: 0, vx: 0, vy: V_LEO,
+    mx: P.D * Math.cos(moonPhase0), my: P.D * Math.sin(moonPhase0),
+    burnAt: coastFirst ? T_BURN : 0, burned: !coastFirst,
+    burnT: 0, burnX: 0, burnY: 0, burnSample: 0, vBefore: 0, vAfter: 0,
+    minSurf: Infinity, tMin: 0, moonImpact: false, earthImpact: false,
+    dead: null, prevVr: 1, rotN: 0, steps: 0, samples: null,
+    lastSx: 1e18, lastSy: 1e18, gap: opt.gap ?? 350, nSample: 0
+  };
+  if (opt.collect) m.samples = [];
+  return m;
+}
+
+function step(m) {
+  if (m.dead) return;
+  if (!m.burned && m.t >= m.burnAt) {
+    const sp = Math.hypot(m.vx, m.vy);
+    m.vBefore = sp; m.burnX = m.x; m.burnY = m.y; m.burnT = m.t;
+    m.vx += (m.vx / sp) * m.dv; m.vy += (m.vy / sp) * m.dv;
+    m.vAfter = Math.hypot(m.vx, m.vy); m.burned = true; m.burnSample = m.nSample;
+  }
+  const dxm = m.mx - m.x, dym = m.my - m.y;
+  const dm = Math.sqrt(dxm * dxm + dym * dym), surf = dm - P.R_M;
+  if (surf < m.minSurf) { m.minSurf = surf; m.tMin = m.t; }
+  if (dm <= P.R_M) { m.dead = 'LUNAR COLLISION'; m.moonImpact = true; return; }
+  if (m.x * m.x + m.y * m.y <= P.R_E * P.R_E) { m.dead = 'EARTH IMPACT'; m.earthImpact = true; return; }
+  if (m.samples) {
+    const gx = m.x - m.lastSx, gy = m.y - m.lastSy;
+    if (gx * gx + gy * gy > m.gap * m.gap) {
+      m.lastSx = m.x; m.lastSy = m.y; m.nSample++;
+      m.samples.push(m.t, m.x, m.y, m.vx, m.vy, m.mx, m.my);
+    }
+  }
+  // ---- RK4 on (x, y, vx, vy) with the Moon on its prescribed orbit ----
+  const dt = m.dt, h2 = dt * 0.5, rc = m.rc;
+  const mx = m.mx, my = m.my, x = m.x, y = m.y, vx = m.vx, vy = m.vy;
+  const mhx = mx * rc.ch - my * rc.sh, mhy = mx * rc.sh + my * rc.ch;
+  const m2x = mx * rc.c1 - my * rc.s1, m2y = mx * rc.s1 + my * rc.c1;
+  accel(x, y, mx, my); const ax1 = _ax, ay1 = _ay;
+  const vx2 = vx + ax1 * h2, vy2 = vy + ay1 * h2;
+  accel(x + vx * h2, y + vy * h2, mhx, mhy); const ax2 = _ax, ay2 = _ay;
+  const vx3 = vx + ax2 * h2, vy3 = vy + ay2 * h2;
+  accel(x + vx2 * h2, y + vy2 * h2, mhx, mhy); const ax3 = _ax, ay3 = _ay;
+  const vx4 = vx + ax3 * dt, vy4 = vy + ay3 * dt;
+  accel(x + vx3 * dt, y + vy3 * dt, m2x, m2y); const ax4 = _ax, ay4 = _ay;
+  m.x = x + (dt / 6) * (vx + 2 * vx2 + 2 * vx3 + vx4);
+  m.y = y + (dt / 6) * (vy + 2 * vy2 + 2 * vy3 + vy4);
+  m.vx = vx + (dt / 6) * (ax1 + 2 * ax2 + 2 * ax3 + ax4);
+  m.vy = vy + (dt / 6) * (ay1 + 2 * ay2 + 2 * ay3 + ay4);
+  m.mx = m2x; m.my = m2y;
+  if ((++m.rotN & 2047) === 0) { const s = P.D / Math.hypot(m.mx, m.my); m.mx *= s; m.my *= s; }
+  m.t += dt; m.steps++;
+  // ---- cheap rejection for the search ----
+  if (m.prune) {
+    const r = Math.sqrt(m.x * m.x + m.y * m.y);
+    const vr = (m.x * m.vx + m.y * m.vy) / r;
+    if (vr < 0 && m.prevVr > 0 && m.t > m.burnAt + 300 &&
+        r < P.D - SOI_MOON - 6000 && m.minSurf > 20 * P.TARGET_MAX) {
+      m.dead = 'SHORT OF LUNAR SPHERE';      // apogee cannot reach the Moon's sphere
+    }
+    m.prevVr = vr;
+    if (vr > 0 && r > P.D + 120000 && 0.5 * (m.vx * m.vx + m.vy * m.vy) - P.MU_E / r > 0) {
+      m.dead = 'EARTH ESCAPE';               // hyperbolic and receding
+    }
+  }
+}
+
+function run(m) { while (!m.dead && m.t < m.tEnd) step(m); return m; }
+
+// Earth-only (two-body) estimate of where/when the transfer crosses the lunar
+// orbit radius - or of its apogee if it stays short of it. The Moon must be
+// near that point, which gives the centre of the Moon-phase search band.
+function estimateEncounter(dv) {
+  const dt = 30, h2 = dt * 0.5;
+  let x = R_LEO, y = 0, vx = 0, vy = V_LEO + dv, t = 0, prevR = R_LEO;
+  let ang = 0, px = 1, py = 0;
+  for (let i = 0, n = Math.floor(P.T_TOTAL / dt); i < n; i++) {
+    const g0 = (x * x + y * y) * Math.sqrt(x * x + y * y);
+    const a1 = -P.MU_E * x / g0, b1 = -P.MU_E * y / g0;
+    const vx2 = vx + a1 * h2, vy2 = vy + b1 * h2, x2 = x + vx * h2, y2 = y + vy * h2;
+    const g2 = (x2 * x2 + y2 * y2) * Math.sqrt(x2 * x2 + y2 * y2);
+    const a2 = -P.MU_E * x2 / g2, b2 = -P.MU_E * y2 / g2;
+    const vx3 = vx + a2 * h2, vy3 = vy + b2 * h2, x3 = x + vx2 * h2, y3 = y + vy2 * h2;
+    const g3 = (x3 * x3 + y3 * y3) * Math.sqrt(x3 * x3 + y3 * y3);
+    const a3 = -P.MU_E * x3 / g3, b3 = -P.MU_E * y3 / g3;
+    const vx4 = vx + a3 * dt, vy4 = vy + b3 * dt, x4 = x + vx3 * dt, y4 = y + vy3 * dt;
+    const g4 = (x4 * x4 + y4 * y4) * Math.sqrt(x4 * x4 + y4 * y4);
+    const a4 = -P.MU_E * x4 / g4, b4 = -P.MU_E * y4 / g4;
+    x += (dt / 6) * (vx + 2 * vx2 + 2 * vx3 + vx4);
+    y += (dt / 6) * (vy + 2 * vy2 + 2 * vy3 + vy4);
+    vx += (dt / 6) * (a1 + 2 * a2 + 2 * a3 + a4);
+    vy += (dt / 6) * (b1 + 2 * b2 + 2 * b3 + b4);
+    t += dt;
+    const rn = Math.hypot(x, y), nx = x / rn, ny = y / rn;
+    ang += Math.atan2(px * ny - py * nx, px * nx + py * ny);
+    px = nx; py = ny;
+    if (rn >= P.D) return { angle: ang, time: t, r: rn, reached: true };
+    if (rn < prevR && t > 1200) return { angle: ang, time: t, r: rn, reached: false };
+    prevR = rn;
+  }
+  return null;
+}
+
+let EVALS = 0, STEPS = 0;
+function evalMission(dv, phase0, dt, collect) {
+  EVALS++;
+  const m = createMission(dv, phase0, { dt, prune: true, collect: !!collect });
+  run(m);
+  STEPS += m.steps;
+  return m;
+}
+function probe(dv, phase0, dt) {
+  const m = evalMission(dv, phase0, dt, false);
+  return { surf: m.minSurf, t: m.tMin, impact: m.moonImpact, dead: m.dead, phase: phase0, dv };
+}
+
+const isHit = (e) => !e.impact && e.surf > 0 && e.surf <= P.TARGET_MAX;
+
+// scan the Moon phase across a band; samples are returned in order so a
+// neighbouring pair can bracket a bisection
+function scanPhase(dv, center, halfDeg, stepDeg, dt) {
+  const list = [];
+  for (let d = -halfDeg; d <= halfDeg + 1e-9; d += stepDeg) {
+    const e = probe(dv, center + d * DEG, dt);
+    e.dDeg = d;
+    list.push(e);
+  }
+  let hit = null, impact = null, best = null;
+  for (const e of list) {
+    if (isHit(e)) { if (!hit || Math.abs(e.surf - HIT_TARGET) > Math.abs(hit.surf - HIT_TARGET)) hit = e; }
+    else if (e.surf <= 0) { if (!impact || e.surf > impact.surf) impact = e; }
+    if (!best || Math.abs(e.surf) < Math.abs(best.surf)) best = e;
+  }
+  return { list, hit, impact, best };
+}
+
+// drive the perilune to HIT_TARGET between two adjacent samples that bracket it
+function tunePhase(dv, list, dt) {
+  for (let i = 0; i + 1 < list.length; i++) {
+    const a = list[i], b = list[i + 1];
+    const fa = a.surf - HIT_TARGET, fb = b.surf - HIT_TARGET;
+    if (fa === 0) return a;
+    if ((fa < 0 && fb > 0) || (fb < 0 && fa > 0)) {
+      let lo = a.phase, hi = b.phase;
+      for (let k = 0; k < 18; k++) {
+        const mid = 0.5 * (lo + hi), e = probe(dv, mid, dt);
+        if (e.surf < HIT_TARGET) lo = mid; else hi = mid;
+      }
+      return probe(dv, 0.5 * (lo + hi), dt);
+    }
+  }
+  return null;
+}
+
+// For one TLI magnitude find a Moon phase that puts the perilune inside
+// (0, 500] km. warm is the Moon angle at the TLI epoch (rad).
+function solvePhase(dv, warm, dt, passes) {
+  const a0 = warm - N_MOON * T_BURN;          // mission-epoch angle
+  let cur = a0, impact = null, best = null;
+  for (const [half, st] of passes ?? [[3.5, 0.25], [0.5, 0.05], [0.15, 0.012]]) {
+    const s = scanPhase(dv, cur, half, st, dt);
+    if (s.hit) {
+      const tuned = tunePhase(dv, s.list, dt);
+      return { ok: true, e: tuned && isHit(tuned) ? tuned : s.hit, center: a0 };
+    }
+    if (s.impact && (!impact || s.impact.surf > impact.surf)) impact = s.impact;
+    if (s.best && (!best || Math.abs(s.best.surf) < Math.abs(best.surf))) best = s.best;
+    if (s.best) cur = s.best.phase;
+    if (s.impact) {                          // a collision means the pass is too deep:
+      const s2 = scanPhase(dv, s.impact.phase, 2.0, 0.1, dt);   // step sideways to a fly-by
+      if (s2.hit) {
+        const tuned = tunePhase(dv, s2.list, dt);
+        return { ok: true, e: tuned && isHit(tuned) ? tuned : s2.hit, center: a0 };
+      }
+    }
+  }
+  if (impact) return { ok: false, e: impact, impact: true, center: a0 };
+  return { ok: false, e: best, center: a0 };
+}
+
+// one row of the coarse grid: does some Moon phase give a sub-500 km pass?
+function coarseScan(dv, dt) {
+  const est = estimateEncounter(dv);
+  if (!est) return { dv, est: null };
+  const center = est.angle - N_MOON * (est.time + T_BURN);
+  const s = scanPhase(dv, center, 3.5, 0.25, dt);
+  const e = s.hit ?? s.best;
+  return {
+    dv, est, ok: !!s.hit, impact: !!(e && e.surf <= 0), center,
+    surf: e ? e.surf : Infinity, phase: e ? e.phase : center,
+    t: e ? e.t : 0, maxR: est.r
+  };
+}
+
+// the exact mission over the full 7-day window (used for verification/playback)
+function simulateMission(dv, phase0, dt, collect) {
+  const m = createMission(dv, phase0, { dt, collect: !!collect });
+  run(m);
+  return m;
+}
+
+const fmtKm = (v) => (v === Infinity || v === -Infinity ? '-' : v.toFixed(1));
+const fmtDay = (t) => (t / 86400).toFixed(3);
+const deg360 = (d) => ((d % 360) + 360) % 360;
+const atTLI = (phase0) => deg360(phase0 / DEG + N_MOON * T_BURN / DEG);
+
+async function searchTLI(emit, yieldFn, opts = {}) {
+  const t0 = Date.now();
+  const budget = opts.budgetMs ?? 45000;
+  EVALS = 0; STEPS = 0;
+  let ticks = 0;
+  const tick = async () => {
+    if (++ticks % 8 === 0) {
+      emit(`       ... ${EVALS} trajectories / ${(STEPS / 1e6).toFixed(1)} M steps / ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+      await yieldFn();
+    }
+  };
+  emit('MODEL  the spacecraft is a massless test particle in the combined point-mass field');
+  emit('       of the Earth and the Moon; the Earth is held at the origin and the Moon moves');
+  emit('       on the prescribed circular orbit of the task (384400 km, 27.32 d). No patched');
+  emit('       conics, no preset curve: every trajectory is integrated with RK4, fixed step,');
+  emit(`       ${P.T_TOTAL / 86400}-day window counted from the parking-orbit epoch, one prograde impulse.`);
+  emit('GOAL   the single lowest prograde TLI that puts the closest approach to the');
+  emit('       lunar surface inside (0, 500] km. A pass that intersects the lunar body');
+  emit('       is a collision, not an arrival, and does not count as a solution.');
+  emit('');
+  emit('STAGE A  TLI grid 2.950-3.360 km/s step 0.005, dt = 10 s screening; for each TLI');
+  emit('         the Moon phase is scanned around the two-body encounter estimate.');
+  emit('    dTLI     maxR     best perilune  phase@TLI   t(CPA)   verdict');
+  emit('    km/s     km       km             deg         days');
+  const rows = [];
+  for (let dv = 2.95; dv <= 3.36 + 1e-9; dv += 0.005) {
+    const c = coarseScan(dv, DT_SCREEN);
+    await tick();
+    if (!c.est) { emit(`    ${dv.toFixed(3)}   transfer neither turns around nor reaches the lunar orbit in the window`); continue; }
+    emit(`    ${dv.toFixed(3)}  ${c.maxR.toFixed(0).padStart(7)}  ${fmtKm(c.surf).padStart(12)}  ${atTLI(c.phase).toFixed(2).padStart(8)}  ${fmtDay(c.t).padStart(8)}   ` +
+         `${c.ok ? 'SUB-500 PASS' : (c.impact ? 'COLLISION' : 'miss')}`);
+    rows.push(c);
+    if (Date.now() - t0 > budget) { emit(`    (stage A truncated at the ${budget / 1000} s budget)`); break; }
+  }
+  const hits = rows.filter((r) => r.ok), fails = rows.filter((r) => !r.ok);
+  if (!hits.length) {
+    let best = null;
+    for (const f of fails) if (!best || (f.surf > 0 && f.surf < best.surf)) best = f;
+    return { success: false, rows, evals: EVALS, time: (Date.now() - t0) / 1000, best };
+  }
+  let top = hits[0];
+  for (const h of hits) if (h.dv < top.dv) top = h;
+  emit('');
+  emit(`STAGE B  lowest grid TLI with a sub-500 km pass: ${top.dv.toFixed(3)} km/s`);
+  let lo = null, hi = top;
+  for (const f of fails) if (f.dv < hi.dv && (!lo || f.dv > lo.dv)) lo = f;
+  let win = { dv: hi.dv, surf: hi.surf, phase: hi.phase, t: hi.t };
+  if (lo) {
+    emit(`         boundary bisection in [${lo.dv.toFixed(3)}, ${hi.dv.toFixed(3)}] km/s, Moon phase re-solved at each try`);
+    let a = lo.dv, b = hi.dv;
+    while (b - a > 0.0004 && Date.now() - t0 < budget) {
+      const mid = 0.5 * (a + b);
+      const r = solvePhase(mid, hi.center + N_MOON * T_BURN, DT_SCREEN, [[1.5, 0.15], [0.3, 0.03]]);
+      await tick();
+      emit(`         ${mid.toFixed(4)} -> ${(r.ok ? 'PASS' : (r.impact ? 'collision' : 'miss')).padEnd(9)} perilune ${fmtKm(r.e.surf).padStart(7)} km  phase@TLI ${atTLI(r.e.phase).toFixed(3)} deg`);
+      if (r.ok) { b = mid; win = { dv: mid, surf: r.e.surf, phase: r.e.phase, t: r.e.t }; }
+      else a = mid;
+    }
+    emit(`         screening boundary (dt = 10 s): dTLI_min = ${b.toFixed(4)} km/s, +/-0.4 m/s`);
+  }
+  // ---- STAGE C: the same boundary with dt = 1 s, a 10x finer step ----
+  emit('');
+  emit(`STAGE C  the near-minimum pass runs along a weak-stability boundary, so the`);
+  emit(`         boundary TLI is re-determined with dt = ${DT_FINE} s (Moon phase re-solved).`);
+  const finePasses = [[1.5, 0.1], [0.25, 0.015]];
+  const okFine = (dv, warm) => solvePhase(dv, warm, DT_FINE, finePasses);
+  let f = okFine(win.dv, win.phase + N_MOON * T_BURN);
+  await tick();
+  emit(`         dTLI ${win.dv.toFixed(4)} -> ${(f.ok ? 'PASS' : (f.impact ? 'collision' : 'miss'))} perilune ${fmtKm(f.e.surf)} km at ${fmtDay(f.e.t)} d, phase@TLI ${atTLI(f.e.phase).toFixed(3)} deg`);
+  let loF = null, hiF = null;
+  if (f.ok) {
+    hiF = { dv: win.dv, e: f.e };
+    for (const drop of [0.001, 0.002]) {          // is a smaller TLI confirmed as well?
+      const g = okFine(win.dv - drop, f.e.phase + N_MOON * T_BURN);
+      await tick();
+      emit(`         dTLI ${(win.dv - drop).toFixed(4)} -> ${(g.ok ? 'PASS' : (g.impact ? 'collision' : 'miss'))} perilune ${fmtKm(g.e.surf)} km`);
+      if (g.ok) hiF = { dv: win.dv - drop, e: g.e }; else { loF = win.dv - drop; break; }
+    }
+    if (!loF) loF = hiF.dv - 0.002;
+  } else {
+    loF = win.dv;
+    for (const rise of [0.001, 0.002, 0.004]) {
+      const g = okFine(win.dv + rise, win.phase + N_MOON * T_BURN);
+      await tick();
+      emit(`         dTLI ${(win.dv + rise).toFixed(4)} -> ${(g.ok ? 'PASS' : (g.impact ? 'collision' : 'miss'))} perilune ${fmtKm(g.e.surf)} km`);
+      if (g.ok) { hiF = { dv: win.dv + rise, e: g.e }; break; }
+    }
+    if (!hiF) {
+      emit('         no TLI within +4 m/s of the screening boundary produced a sub-500 km fly-by at dt = 1 s');
+      return { success: false, rows, evals: EVALS, best: { dv: win.dv, surf: f.e.surf, phase: f.e.phase, t: f.e.t } };
+    }
+  }
+  let a2 = loF, b2 = hiF.dv, eB = hiF.e;
+  while (b2 - a2 > 0.0005 && Date.now() - t0 < budget) {
+    const mid = 0.5 * (a2 + b2);
+    const r = okFine(mid, eB.phase + N_MOON * T_BURN);
+    await tick();
+    emit(`         dt=1 s bisection ${mid.toFixed(5)} -> ${(r.ok ? 'PASS' : 'miss')} perilune ${fmtKm(r.e.surf)} km  phase@TLI ${atTLI(r.e.phase).toFixed(3)} deg`);
+    if (r.ok) { b2 = mid; eB = r.e; } else a2 = mid;
+  }
+  emit(`         CONFIRMED boundary (dt = ${DT_FINE} s): dTLI_min = ${b2.toFixed(4)} km/s, +/-0.5 m/s`);
+  if (rows.length) {
+    emit(`         over the whole scanned range ${rows[0].dv.toFixed(3)}-${rows[rows.length - 1].dv.toFixed(3)} km/s`);
+    emit(`         (TLI grid 5 m/s, Moon-phase scan 0.25 deg) no lower TLI produced a sub-500 km`);
+    emit(`         fly-by: at ${rows[0].dv.toFixed(3)} km/s the transfer only reaches ${rows[0].maxR.toFixed(0)} km from`);
+    emit(`         Earth's centre, far short of the lunar sphere of influence (${SOI_MOON.toFixed(0)} km of the ${P.D.toFixed(0)} km orbit).`);
+  }
+  emit('');
+  emit('STAGE D  convergence of the reported closest approach (same solution, finer steps)');
+  for (const dt of [DT_SCREEN, 5, 2.5, DT_FINE, 0.5]) {
+    const m = simulateMission(b2, eB.phase, dt);
+    emit(`         dt = ${String(dt).padStart(4)} s  closest approach to the lunar surface = ${m.minSurf.toFixed(1).padStart(8)} km  at T+${fmtDay(m.tMin)} d${m.dead ? '  [' + m.dead + ']' : ''}`);
+    await tick();
+  }
+  const ver = simulateMission(b2, eB.phase, DT_FINE);
+  emit('');
+  emit(`VERIFICATION  the selected mission, integrated over the full ${P.T_TOTAL / 86400}-day window at dt = ${DT_FINE} s:`);
+  emit(`         dTLI = ${b2.toFixed(4)} km/s   Moon phase at TLI = ${atTLI(eB.phase).toFixed(4)} deg (at the epoch ${deg360(eB.phase / DEG).toFixed(4)} deg)`);
+  emit(`         minimum spacecraft-to-Moon-surface distance = ${ver.minSurf.toFixed(2)} km`);
+  emit(`         reached at ${fmtDay(ver.tMin)} d after the epoch = ${((ver.tMin - T_BURN) / 86400).toFixed(3)} d after the TLI`);
+  emit(`         requirement (<= 500 km, inside 7 days): ${ver.minSurf <= P.TARGET_MAX ? 'MET' : 'NOT MET'}`);
+  return {
+    success: ver.minSurf <= P.TARGET_MAX && !ver.moonImpact,
+    rows, evals: EVALS, steps: STEPS, time: (Date.now() - t0) / 1000,
+    dv: b2, phase: eB.phase, searchSurf: eB.surf, screeningDv: win.dv,
+    verified: { surf: ver.minSurf, t: ver.tMin, steps: ver.steps }
+  };
+}
+
+
+// ============================================================
+// APP - canvas rendering, HUD, controls. Uses the CORE above.
+// ============================================================
+const $ = (id) => document.getElementById(id);
+const logEl = $('log'), wrap = logEl.parentElement;
+
+function log(s, cls) {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = s;
+  logEl.appendChild(d);
+  while (logEl.childNodes.length > 600) logEl.removeChild(logEl.firstChild);
+  wrap.scrollTop = wrap.scrollHeight;
+}
+function emitLog(s) {
+  let c = null;
+  if (/^(MODEL|CRITERION|GOAL|CONSTANTS|DERIVED|STAGE|SELECTED|BOUNDARY|CONFIRMED|VERIFICATION|RUN |SEARCH)/.test(s)) c = 'hd';
+  else if (/SUB-500 PASS|CONFIRMED|\bMET\b|PASS perilune|-> PASS/.test(s)) c = 'good';
+  else if (/COLLISION|NOT MET|miss$|no TLI|truncated/.test(s)) c = 'bad';
+  log(s, c);
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------- canvases ----------------
+const V = { sys: mkView('sys'), zE: mkView('zoomEarth'), zM: mkView('zoomMoon') };
+function mkView(id) {
+  const cv = $(id), v = { cv, ctx: cv.getContext('2d'), w: 0, h: 0, stars: null, zm: 30000, ze: 11000 };
+  if (window.ResizeObserver) new ResizeObserver(() => fit(v)).observe(cv);
+  window.addEventListener('resize', () => fit(v));
+  fit(v);
+  return v;
+}
+function fit(v) {
+  const r = v.cv.getBoundingClientRect();
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = Math.max(1, Math.floor(r.width)), h = Math.max(1, Math.floor(r.height));
+  v.cv.width = Math.round(w * dpr); v.cv.height = Math.round(h * dpr);
+  v.w = w; v.h = h;
+  v.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  v.stars = stars(w, h);
+}
+function stars(w, h) {                 // deterministic pseudo starfield
+  let s = 12345;
+  const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const n = Math.round(w * h / 5200), a = [];
+  for (let i = 0; i < n; i++) a.push([rnd() * w, rnd() * h, 0.18 + rnd() * 0.55]);
+  return a;
+}
+function bg(v) {
+  const ctx = v.ctx;
+  ctx.fillStyle = '#04060b'; ctx.fillRect(0, 0, v.w, v.h);
+  ctx.fillStyle = '#aec6e4';
+  for (const st of v.stars) { ctx.globalAlpha = st[2] * 0.5; ctx.fillRect(st[0], st[1], 1, 1); }
+  ctx.globalAlpha = 1;
+}
+function ring(ctx, x, y, r, col, lw, dash) {
+  ctx.save(); ctx.strokeStyle = col; ctx.lineWidth = lw || 1;
+  if (dash) ctx.setLineDash(dash);
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2831853); ctx.stroke(); ctx.restore();
+}
+function dot(ctx, x, y, r, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2831853); ctx.fill(); }
+function cross(ctx, x, y, r, col) {
+  ctx.strokeStyle = col; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x - r, y); ctx.lineTo(x + r, y); ctx.moveTo(x, y - r); ctx.lineTo(x, y + r); ctx.stroke();
+}
+function txt(ctx, s, x, y, col, align, size) {
+  ctx.font = (size || 11) + 'px ui-monospace,Menlo,Consolas,monospace';
+  ctx.fillStyle = col || '#8fa6bf'; ctx.textAlign = align || 'left'; ctx.fillText(s, x, y); ctx.textAlign = 'left';
+}
+function arrow(ctx, x, y, dx, dy, col) {
+  const L = Math.hypot(dx, dy); if (L < 1) return;
+  const ux = dx / L, uy = dy / L;
+  ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + dx, y + dy); ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(x + dx, y + dy);
+  ctx.lineTo(x + dx - ux * 5 + uy * 2.5, y + dy - uy * 5 - ux * 2.5);
+  ctx.lineTo(x + dx - ux * 5 - uy * 2.5, y + dy - uy * 5 + ux * 2.5);
+  ctx.closePath(); ctx.fill();
+}
+const NICE = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000];
+function scaleBar(ctx, x, y, s, w, col) {           // s = px per km
+  const target = (w * 0.3) / s;
+  let km = NICE[0];
+  for (const n of NICE) if (n <= target) km = n;
+  const L = km * s;
+  ctx.strokeStyle = col; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + L, y); ctx.moveTo(x, y - 3); ctx.lineTo(x, y + 3);
+  ctx.lineTo(x + L, y - 3); ctx.lineTo(x + L, y + 3); ctx.stroke();
+  txt(ctx, fmtNum(km, 0) + ' km', x, y - 6, col);
+}
+function drawEarth(ctx, x, y, r) {
+  if (r > 3) {
+    const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.35, r * 0.1, x, y, r);
+    g.addColorStop(0, '#5fa0f0'); g.addColorStop(0.65, '#1f5cb4'); g.addColorStop(1, '#0b2a55');
+    ctx.fillStyle = g;
+  } else ctx.fillStyle = '#3f86d8';
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2831853); ctx.fill();
+  ctx.strokeStyle = 'rgba(130,200,255,.55)'; ctx.lineWidth = 1; ctx.stroke();
+}
+function drawMoon(ctx, x, y, r) {
+  ctx.fillStyle = '#d5cec3';
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2831853); ctx.fill();
+  if (r > 5) {
+    ctx.fillStyle = 'rgba(120,114,105,.45)';
+    ctx.beginPath(); ctx.arc(x - r * 0.28, y - r * 0.15, r * 0.3, 0, 6.2831853); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + r * 0.25, y + r * 0.3, r * 0.22, 0, 6.2831853); ctx.fill();
+  }
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2831853); ctx.stroke();
+}
+function drawCraft(ctx, x, y, ux, uy, col) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(Math.atan2(uy, ux));
+  ctx.fillStyle = col;
+  ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(-4, 3.4); ctx.lineTo(-4, -3.4); ctx.closePath(); ctx.fill();
+  ctx.restore();
+  ctx.globalAlpha = 0.25; dot(ctx, x, y, 7, col); ctx.globalAlpha = 1;
+}
+// path from the sample buffer; off = 0 absolute, 1 = relative to the sample Moon
+function drawPath(ctx, m, X, Y, rel, from, to, col, lw, maxPts) {
+  const n = Math.min(to, m.nSample);
+  if (n - from < 2) return;
+  const st = Math.max(1, Math.ceil((n - from) / (maxPts || 2600)));
+  ctx.strokeStyle = col; ctx.lineWidth = lw;
+  ctx.beginPath();
+  for (let i = from; i < n; i += st) {
+    const o = i * 7, px = m.samples[o + 1], py = m.samples[o + 2];
+    const mx = m.samples[o + 5], my = m.samples[o + 6];
+    ctx.lineTo(X(rel ? px - mx : px), Y(rel ? py - my : py));
+  }
+  ctx.stroke();
+}
+
+// ---------------- state ----------------
+let SOL = null, M = null;
+let running = false, finished = false, bannerOk = false, lastReal = 0, speed = 10000;
+let searchOk = false;
+
+function newRun() {
+  if (!SOL) return;
+  M = createMission(SOL.dv, SOL.phase, { dt: DT_FINE, collect: true, gap: 350 });
+  finished = false; running = false; bannerOk = false;
+  V.zM.zm = 30000; V.zE.ze = 11000;
+  $('banner').className = 'banner';
+  $('btnStart').textContent = 'Start';
+  setStatus(searchOk ? 'MISSION READY' : 'NO SUB-500 km SOLUTION FOUND', searchOk ? 'ok' : 'bad');
+}
+function setStatus(s, cls) { const e = $('status'); e.textContent = s; e.className = cls; }
+
+function phaseOf(m) {
+  if (!m.burned) return 'LEO';
+  if (m.t - m.burnAt < 180) return 'TLI BURN';
+  const dm = Math.hypot(m.mx - m.x, m.my - m.y);
+  if (dm <= SOI_MOON) return 'ARRIVAL';
+  return Math.hypot(m.x, m.y) < 0.5 * P.D ? 'COAST' : 'TRANSIT';
+}
+function fmtDur(t) {
+  const d = Math.floor(t / 86400), r = t - d * 86400;
+  return d + 'd ' + String(Math.floor(r / 3600)).padStart(2, '0') + ':' +
+    String(Math.floor(r / 60) % 60).padStart(2, '0') + ':' + String(Math.floor(r) % 60).padStart(2, '0');
+}
+const fmtNum = (v, d) => {
+  if (!isFinite(v)) return '-';
+  const s = Math.abs(v).toFixed(d ?? 1);
+  const [i, f] = s.split('.');
+  return (v < 0 ? '-' : '') + i.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + (f ? '.' + f : '');
+};
+function fmtT(t) {
+  const neg = t < 0; t = Math.abs(t);
+  const d = Math.floor(t / 86400), r = t - d * 86400;
+  const hh = String(Math.floor(r / 3600)).padStart(2, '0');
+  const mm = String(Math.floor(r / 60) % 60).padStart(2, '0');
+  const ss = String(Math.floor(r) % 60).padStart(2, '0');
+  return (neg ? 'T-' : 'T+') + d + 'd ' + hh + ':' + mm + ':' + ss;
+}
+function cpaSample(m) {                     // sample closest to the CPA time
+  let bi = -1, bd = Infinity;
+  for (let i = 0; i < m.nSample; i++) {
+    const d = Math.abs(m.samples[i * 7] - m.tMin);
+    if (d < bd) { bd = d; bi = i; }
+  }
+  return bi < 0 ? null : m.samples.slice(bi * 7, bi * 7 + 7);
+}
+
+// ---------------- main view ----------------
+function drawSys() {
+  const v = V.sys, ctx = v.ctx, w = v.w, h = v.h;
+  bg(v);
+  const vr = P.D * 1.07, s = Math.min(w, h) / (2 * vr), cx = w * 0.5, cy = h * 0.5;
+  const X = (x) => cx + x * s, Y = (y) => cy - y * s;
+  ring(ctx, cx, cy, P.D * s, 'rgba(120,148,180,.34)', 1, [3, 5]);
+  ring(ctx, cx, cy, R_LEO * s, 'rgba(90,209,255,.30)', 1, [2, 3]);
+  txt(ctx, 'lunar orbit  384 400 km', cx + P.D * s * 0.70, cy - P.D * s * 0.72, 'rgba(120,148,180,.75)');
+  txt(ctx, 'LEO 200 km', cx - R_LEO * s - 4, cy + R_LEO * s + 12, 'rgba(90,209,255,.7)', 'right');
+  if (!M) { txt(ctx, 'awaiting search result...', 12, h - 14, 'rgba(120,148,180,.6)'); return; }
+
+  const bI = M.burnSample || 0;
+  drawPath(ctx, M, X, Y, false, 0, bI, 'rgba(90,209,255,.35)', 1, 900);
+  drawPath(ctx, M, X, Y, false, bI, M.nSample, 'rgba(90,209,255,.62)', 1.2, 2800);
+  drawPath(ctx, M, X, Y, false, Math.max(bI, M.nSample - 150), M.nSample, 'rgba(255,255,255,.85)', 1.4, 200);
+
+  drawEarth(ctx, cx, cy, P.R_E * s);
+  ring(ctx, cx, cy, (P.R_E + 3) * s + 1.5, 'rgba(120,190,255,.25)', 1);
+  drawMoon(ctx, X(M.mx), Y(M.my), Math.max(1.6, P.R_M * s));
+  arrow(ctx, X(M.mx), Y(M.my), -M.my / P.D * 26, M.mx / P.D * 26, 'rgba(213,206,195,.6)');
+  txt(ctx, 'MOON', X(M.mx) + 9, Y(M.my) - 9, 'rgba(213,206,195,.85)');
+
+  if (M.burned) { cross(ctx, X(M.burnX), Y(M.burnY), 4, 'rgba(255,209,102,.85)'); txt(ctx, 'TLI', X(M.burnX) + 6, Y(M.burnY) + 4, 'rgba(255,209,102,.8)', 'right'); }
+  if (isFinite(M.minSurf)) {
+    const c = cpaSample(M);
+    if (c && M.minSurf < 60000) {
+      cross(ctx, X(c[1]), Y(c[2]), 4, 'rgba(255,122,217,.9)');
+      ctx.save(); ctx.strokeStyle = 'rgba(255,122,217,.4)'; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(X(c[1]), Y(c[2])); ctx.lineTo(X(c[5]), Y(c[6])); ctx.stroke(); ctx.restore();
+      txt(ctx, 'CPA ' + fmtNum(M.minSurf, 0) + ' km', X(c[1]) - 7, Y(c[2]) - 7, 'rgba(255,122,217,.9)', 'right');
+    }
+  }
+  drawCraft(ctx, X(M.x), Y(M.y), M.vx, M.vy, '#ffd166');
+  scaleBar(ctx, 14, h - 18, s, w, 'rgba(143,166,191,.8)');
+  txt(ctx, phaseOf(M) + '   ' + fmtT(M.t), w - 14, h - 18, 'rgba(90,209,255,.85)', 'right', 12);
+}
+
+// ---------------- Earth neighbourhood ----------------
+function drawZE() {
+  const v = V.zE, ctx = v.ctx, w = v.w, h = v.h;
+  bg(v);
+  if (!M) return;
+  const r = Math.hypot(M.x, M.y);
+  v.ze += (Math.min(30000, Math.max(9000, r * 1.15)) - v.ze) * 0.06;
+  const s = Math.min(w, h) / (2 * v.ze), cx = w * 0.5, cy = h * 0.5;
+  const X = (x) => cx + x * s, Y = (y) => cy - y * s;
+  ring(ctx, cx, cy, R_LEO * s, 'rgba(90,209,255,.35)', 1, [2, 3]);
+  ring(ctx, cx, cy, (P.R_E + P.ALT_LEO + 400) * s, 'rgba(90,209,255,.12)', 1);
+  const bI = M.burnSample || 0;
+  drawPath(ctx, M, X, Y, false, 0, bI, 'rgba(90,209,255,.45)', 1, 900);
+  drawPath(ctx, M, X, Y, false, bI, M.nSample, 'rgba(255,209,102,.55)', 1.1, 1200);
+  drawEarth(ctx, cx, cy, P.R_E * s);
+  if (M.burned) { cross(ctx, X(M.burnX), Y(M.burnY), 4, 'rgba(255,209,102,.9)'); txt(ctx, 'TLI ' + (SOL ? SOL.dv.toFixed(4) : '') + ' km/s', X(M.burnX) + 6, Y(M.burnY) - 6, 'rgba(255,209,102,.85)'); }
+  if (Math.hypot(M.x, M.y) < v.ze) drawCraft(ctx, X(M.x), Y(M.y), M.vx, M.vy, '#ffd166');
+  scaleBar(ctx, 10, h - 14, s, w, 'rgba(143,166,191,.75)');
+  txt(ctx, 'view half-width ' + fmtNum(v.ze, 0) + ' km', w - 10, 14, 'rgba(143,166,191,.7)', 'right');
+}
+
+// ---------------- lunar neighbourhood ----------------
+function drawZM() {
+  const v = V.zM, ctx = v.ctx, w = v.w, h = v.h;
+  bg(v);
+  if (!M) return;
+  const dm = Math.hypot(M.x - M.mx, M.y - M.my);
+  const want = Math.min(60000, Math.max(2600, dm * 1.6));
+  v.zm += (want - v.zm) * 0.08;
+  const s = Math.min(w, h) / (2 * v.zm), cx = w * 0.5, cy = h * 0.5;
+  const X = (x) => cx + (x - M.mx) * s, Y = (y) => cy - (y - M.my) * s;
+  if (SOI_MOON < v.zm * 1.3) {
+    const rr = SOI_MOON * s;
+    if (rr < Math.max(w, h)) { ring(ctx, cx, cy, rr, 'rgba(120,148,180,.28)', 1, [2, 4]); txt(ctx, "Moon's sphere of influence", cx + rr * 0.62, cy - rr * 0.72, 'rgba(120,148,180,.6)'); }
+  }
+  ring(ctx, cx, cy, (P.R_M + P.TARGET_MAX) * s, 'rgba(74,222,128,.5)', 1, [3, 3]);
+  ring(ctx, cx, cy, (P.R_M + P.ARRIVAL_SHOW) * s, 'rgba(74,222,128,.18)', 1, [2, 4]);
+  ring(ctx, cx, cy, P.R_M * s, 'rgba(74,222,128,.25)', 1, [2, 3]);
+  txt(ctx, '500 km target ring', cx, cy - (P.R_M + P.TARGET_MAX) * s - 4, 'rgba(74,222,128,.7)', 'center');
+
+  const bI = M.burnSample || 0;
+  drawPathRel(ctx, M, s, cx, cy, v.zm * 1.3, bI, 'rgba(90,209,255,.75)', 1.2);
+  drawMoon(ctx, cx, cy, P.R_M * s);
+  arrow(ctx, cx, cy, -M.my / P.D * 22, M.mx / P.D * 22, 'rgba(213,206,195,.55)');
+  if (isFinite(M.minSurf) && M.minSurf < v.zm * 1.2) {
+    const c = cpaSample(M);
+    if (c) {
+      const px = cx + (c[1] - c[5]) * s, py = cy - (c[2] - c[6]) * s;
+      cross(ctx, px, py, 5, 'rgba(255,122,217,.95)');
+      ctx.save(); ctx.strokeStyle = 'rgba(255,122,217,.45)'; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(cx, cy); ctx.stroke(); ctx.restore();
+      txt(ctx, 'CPA ' + fmtNum(M.minSurf, 1) + ' km', px + 7, py - 7, 'rgba(255,122,217,.95)');
+    }
+  }
+  if (dm < v.zm) drawCraft(ctx, X(M.x), Y(M.y), M.vx, M.vy, '#ffd166');
+  scaleBar(ctx, 10, h - 14, s, w, 'rgba(143,166,191,.75)');
+  txt(ctx, 'rel. distance ' + fmtNum(dm, 0) + ' km', w - 10, 14, 'rgba(143,166,191,.7)', 'right');
+}
+function drawPathRel(ctx, m, s, cx, cy, cut, from, col, lw) {
+  const n = m.nSample, st = Math.max(1, Math.ceil((n - from) / 2200));
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.beginPath();
+  let open = false;
+  for (let i = from; i < n; i += st) {
+    const o = i * 7;
+    const rx = m.samples[o + 1] - m.samples[o + 5], ry = m.samples[o + 2] - m.samples[o + 6];
+    if (rx * rx + ry * ry > cut * cut) { open = false; continue; }
+    if (open) ctx.lineTo(cx + rx * s, cy - ry * s); else ctx.moveTo(cx + rx * s, cy - ry * s);
+    open = true;
+  }
+  ctx.stroke();
+}
+
+// ---------------- HUD ----------------
+function hud() {
+  if (!M) return;
+  const r = Math.hypot(M.x, M.y), dm = Math.hypot(M.x - M.mx, M.y - M.my);
+  const vmx = -N_MOON * M.my, vmy = N_MOON * M.mx;
+  const spd = Math.hypot(M.vx, M.vy), rel = Math.hypot(M.vx - vmx, M.vy - vmy);
+  $('hT').textContent = fmtT(M.t);
+  $('hTl').textContent = M.burned ? '+' + fmtDur(M.t - M.burnAt) : '-' + fmtDur(M.burnAt - M.t);
+  $('hPh').textContent = phaseOf(M);
+  $('hDv').textContent = SOL ? SOL.dv.toFixed(4) + ' km/s' : '-';
+  $('hV').textContent = spd.toFixed(4) + ' km/s';
+  $('hVm').textContent = rel.toFixed(4) + ' km/s';
+  $('hDe').textContent = fmtNum(r - P.R_E, 1) + ' km';
+  $('hDm').textContent = fmtNum(dm - P.R_M, 1) + ' km';
+  $('hCpa').textContent = isFinite(M.minSurf) ? fmtNum(M.minSurf, 1) + ' km' : '-';
+  $('hCpaT').textContent = isFinite(M.minSurf) ? fmtT(M.tMin) : '-';
+}
+function banner(cls, html) {
+  const b = $('banner');
+  b.className = 'banner show ' + cls;
+  b.innerHTML = html;
+}
+function successText() {
+  return '<b>MISSION SUCCESS</b> &mdash; closest approach <b>' + fmtNum(M.minSurf, 1) +
+    ' km</b> above the lunar surface at ' + fmtT(M.tMin) +
+    ' (' + ((M.tMin - M.burnAt) / 86400).toFixed(3) + ' d after TLI), TLI &Delta;v = ' +
+    SOL.dv.toFixed(4) + ' km/s';
+}
+function nearText() {
+  return '<b>ARRIVAL, BUT NOT THE REQUIRED ONE</b> &mdash; closest approach <b>' + fmtNum(M.minSurf, 1) +
+    ' km</b> above the lunar surface at ' + fmtT(M.tMin) + '; the requirement is &le; 500 km. TLI &Delta;v = ' +
+    SOL.dv.toFixed(4) + ' km/s';
+}
+function raiseBanner() {
+  const dm = Math.hypot(M.mx - M.x, M.my - M.y) - P.R_M;
+  const ok500 = !M.moonImpact && M.minSurf <= P.TARGET_MAX;
+  if (!bannerOk && dm < P.ARRIVAL_SHOW) {
+    bannerOk = true;
+    banner(ok500 ? 'ok' : 'bad', ok500 ? successText() : nearText());
+  } else if (bannerOk && !finished) {
+    banner(ok500 ? 'ok' : 'bad', ok500 ? successText() : nearText());
+  }
+}
+
+// ---------------- loop ----------------
+function finishRun() {
+  if (finished) return;
+  finished = true; running = false; $('btnStart').textContent = 'Start';
+  const ok = searchOk && !M.moonImpact && M.minSurf <= P.TARGET_MAX;
+  log('');
+  log('RUN COMPLETE  window used: ' + (M.t / 86400).toFixed(3) + ' d of 7.000 d, integration steps ' +
+      M.steps.toLocaleString('en-US') + ' at dt = ' + M.dt + ' s');
+  log('  closest approach to the lunar surface: ' + M.minSurf.toFixed(2) + ' km at ' + fmtT(M.tMin) +
+      ' (TLI + ' + ((M.tMin - M.burnAt) / 86400).toFixed(3) + ' d)');
+  log('  required <= 500 km: ' + (ok ? 'MET' : 'NOT MET') + (M.dead ? '   [' + M.dead + ']' : ''), ok ? 'good' : 'bad');
+  if (!bannerOk) {
+    banner('bad', '<b>MISSION FAILED</b> &mdash; no pass closer than <b>' + fmtNum(M.minSurf, 1) +
+      ' km</b> to the lunar surface inside the 7-day window' + (M.dead ? ' (' + M.dead + ')' : ''));
+    setStatus('MISSION FAILED', 'bad');
+  } else {
+    const ok500 = !M.moonImpact && M.minSurf <= P.TARGET_MAX;
+    banner(ok500 ? 'ok' : 'bad', ok500 ? successText() : nearText());
+    setStatus(ok500 ? 'SUCCESS' : 'FAILED', ok500 ? 'ok' : 'bad');
+  }
+}
+function frame(ts) {
+  if (M && running && !finished) {
+    const dReal = Math.min(0.12, (ts - lastReal) / 1000);
+    let n = Math.round((dReal * speed) / M.dt);
+    n = Math.max(0, Math.min(n, 40000));
+    for (let i = 0; i < n; i++) {
+      if (M.dead || M.t >= M.tEnd) break;
+      step(M);
+    }
+    raiseBanner();
+    if (M.dead || M.t >= M.tEnd) finishRun();
+    else if (!finished) setStatus('RUNNING  ' + speed.toLocaleString('en-US') + 'x', searchOk ? 'ok' : 'bad');
+  }
+  lastReal = ts;
+  hud(); drawSys(); drawZE(); drawZM();
+  requestAnimationFrame(frame);
+}
+
+// ---------------- controls ----------------
+$('btnStart').onclick = () => {
+  if (!M) return;
+  if (finished) { newRun(); return; }
+  running = !running;
+  $('btnStart').textContent = running ? 'Pause' : 'Start';
+  if (running) setStatus('RUNNING  ' + speed.toLocaleString('en-US') + 'x', searchOk ? 'ok' : 'bad');
+  else setStatus('PAUSED', 'wait');
+};
+$('btnRestart').onclick = () => {
+  if (!SOL) return;
+  newRun(); log('run reset: TLI ' + SOL.dv.toFixed(4) + ' km/s, dt = ' + DT_FINE + ' s');
+};
+document.querySelectorAll('.sp').forEach((b) => {
+  b.onclick = () => {
+    document.querySelectorAll('.sp').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    speed = +b.dataset.sp;
+  };
+});
+
+// ---------------- boot ----------------
+(async function boot() {
+  log('CONSTANTS  Earth: radius 6371 km, mu 398600 km^3/s^2 | Moon: radius 1737 km, mu 4902.8 km^3/s^2');
+  log('           Earth-Moon distance 384400 km (circular coplanar orbit), period 27.32 d');
+  log('           spacecraft starts in a circular 200 km LEO; mission window 7 d');
+  log('DERIVED    LEO radius 6571 km, circular speed ' + V_LEO.toFixed(4) + ' km/s, period ' + fmtDur(T_LEO));
+  log('           lunar mean motion ' + (N_MOON * 86400 / DEG).toFixed(4) + ' deg/d, orbital speed ' + (N_MOON * P.D).toFixed(4) + ' km/s');
+  log('           lunar sphere of influence ' + fmtNum(SOI_MOON, 0) + ' km, escape dv from LEO ' +
+      (Math.sqrt(2 * P.MU_E / R_LEO) - V_LEO).toFixed(4) + ' km/s');
+  log('           TLI epoch = one parking revolution after the mission epoch (' + fmtDur(T_BURN) + ')');
+  log('');
+  const t0 = performance.now();
+  const res = await searchTLI(emitLog, () => sleep(0), { budgetMs: 60000 });
+  log('');
+  if (!res.best && !res.success) {
+    setStatus('SEARCH FAILED', 'bad');
+    log('no trajectory in the searched TLI/Moon-phase range produced a lunar pass', 'bad');
+    $('mDv').textContent = 'no solution';
+    return;
+  }
+  searchOk = !!res.success;
+  const dv = res.success ? res.dv : res.best.dv;
+  const ph = res.success ? res.phase : res.best.phase;
+  SOL = { dv, phase: ph };
+  const ver = res.verified ? res.verified : { surf: res.best.surf, t: res.best.t };
+  $('mDv').textContent = dv.toFixed(4) + ' km/s';
+  $('mDv').parentElement.className = 'metric ' + (searchOk ? 'ok' : 'bad');
+  $('mCpa').textContent = fmtNum(ver.surf, 1) + ' km';
+  $('mCpaBox').className = 'metric ' + (searchOk ? 'ok' : 'bad');
+  log('SEARCH TIME ' + res.evals + ' full 7-day trajectories, ' +
+      ((performance.now() - t0) / 1000).toFixed(1) + ' s', 'hd');
+  $('foot').textContent = 'the animation integrates the same equations live, dt = ' + DT_FINE + ' s';
+  newRun();
+  log('');
+  log(searchOk
+    ? 'Press Start. The plotted track, the burn and the approach are produced by the integrator, not by a preset curve.'
+    : 'Press Start to watch the best attempt found; the mission is labelled FAILED.', searchOk ? 'good' : 'bad');
+})();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
