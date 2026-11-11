@@ -44,12 +44,13 @@ import { createInvocationNotifier } from './automation/invocation-notifier.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { piAgentDir, readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { PiProviderProfiles } from './providers/pi-provider-profiles.mjs';
+import { ModelProfiles } from './providers/model-profiles.mjs';
 import { listQuickActions } from './pi-quick-actions.mjs';
 import { listProcesses, listGpuProcesses, gpuSummary, systemRam } from './process-info.mjs';
 import { createCleanupPreview, executeCleanup, getCleanupResultByCommand, cleanupHistory } from './cleanup.mjs';
 import { killProcess, killProcessesByRuntime } from './process-kill.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
-import { readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenAiCodexStatus } from './provider-status.mjs';
+import { consumeOpenAiReset, readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenAiCodexStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
 import { PiVersionProbe } from './pi-version.mjs';
 import { resolvePiCommand, piRuntimeState } from './pi-command.mjs';
@@ -84,6 +85,8 @@ const build = await (async () => {
 const config = await loadConfig(rootDir);
 const providerRefreshes = new Map();
 const providerProfiles = new PiProviderProfiles({ agentDir: piAgentDir() });
+// Пресеты модели — отдельный файл рядом с models.json (шаг 03): конфиг Pi не трогаем.
+const modelProfiles = new ModelProfiles({ agentDir: piAgentDir() });
 
 // Identifies this process run, not the code it runs: every page keeps the bootId
 // it first saw and reloads when it changes — that is how a phone tab (which has
@@ -1152,6 +1155,26 @@ async function handleRequest(req, res) {
     if (pathname.startsWith('/api/')) access.require(req);
     if (await externalRoutes.client(req, res, url)) return;
 
+    // Пресеты модели (шаг 03): тот же доступ, что у настройки провайдеров — настройка
+    // с телефона оператора после пары по коду. Файл model-profiles.json отдельный.
+    if (pathname === '/api/model-profiles' || pathname.startsWith('/api/model-profiles/')) {
+      if (!access.local(req) && !access.device(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Для настройки моделей подключите устройство по коду с компьютера.'), { code: 'ORIGIN_FORBIDDEN' }));
+      }
+      if (req.method === 'GET' && pathname === '/api/model-profiles') {
+        return json(res, 200, await modelProfiles.list());
+      }
+      if (req.method === 'PUT' && pathname === '/api/model-profiles') {
+        const body = await readJson(req);
+        return json(res, 200, await modelProfiles.upsert(body));
+      }
+      const profileRoute = pathname.match(/^\/api\/model-profiles\/([^/]+)$/);
+      if (req.method === 'DELETE' && profileRoute) {
+        const body = await readJson(req);
+        return json(res, 200, await modelProfiles.remove(decodeURIComponent(profileRoute[1]), body?.revision));
+      }
+    }
+
     // Provider setup is available locally and to explicitly paired devices.
     // The general auth/origin gates above still apply; API keys stay on the host.
     if (pathname === '/api/provider-profiles' || pathname.startsWith('/api/provider-profiles/')) {
@@ -1181,6 +1204,39 @@ async function handleRequest(req, res) {
           revision: body?.revision ?? null,
         });
         // Убранная модель не должна оставаться в выборе модели ещё TTL каталога.
+        manager.modelCatalog?.invalidate?.();
+        return json(res, 200, result);
+      }
+      // Полный редактор записи (аналог Pi Manager): все поля провайдера и модели.
+      // Секреты не покидают машину — литеральный ключ и секретоподобные headers
+      // приходят как $REDACTED и возвращаются в том же виде.
+      const rawProviderRoute = pathname.match(/^\/api\/provider-profiles\/([^/]+)\/raw$/);
+      if (rawProviderRoute) {
+        const id = decodeURIComponent(rawProviderRoute[1]);
+        if (req.method === 'GET') return json(res, 200, await providerProfiles.rawProvider(id));
+        if (req.method === 'PUT') {
+          const body = await readJson(req);
+          const result = await providerProfiles.setProviderRaw(id, body?.entry ?? {}, body?.revision);
+          manager.modelCatalog?.invalidate?.();
+          return json(res, 200, result);
+        }
+      }
+      const rawModelRoute = pathname.match(/^\/api\/provider-profiles\/([^/]+)\/models\/(.+)\/raw$/);
+      if (req.method === 'PUT' && rawModelRoute) {
+        const id = decodeURIComponent(rawModelRoute[1]);
+        const modelId = decodeURIComponent(rawModelRoute[2]);
+        const body = await readJson(req);
+        const result = await providerProfiles.setModelRaw(id, modelId, body?.model ?? {}, body?.revision);
+        manager.modelCatalog?.invalidate?.();
+        return json(res, 200, result);
+      }
+      // Отдельные настройки модели (шаг 02 плана): id-сегмент между «models» и «settings».
+      const modelSettingsRoute = pathname.match(/^\/api\/provider-profiles\/([^/]+)\/models\/([^/]+)\/settings$/);
+      if (req.method === 'PUT' && modelSettingsRoute) {
+        const id = decodeURIComponent(modelSettingsRoute[1]);
+        const modelId = decodeURIComponent(modelSettingsRoute[2]);
+        const body = await readJson(req);
+        const result = await providerProfiles.setModelSettings(id, modelId, body.settings ?? {}, body.revision);
         manager.modelCatalog?.invalidate?.();
         return json(res, 200, result);
       }
@@ -1311,6 +1367,15 @@ async function handleRequest(req, res) {
       })();
       providerRefreshes.set(provider, { at: Date.now(), promise });
       return json(res, 200, { [provider]: await promise });
+    }
+
+    if (req.method === 'POST' && pathname === '/api/providers/openai-codex/reset') {
+      if (!access.local(req) && !access.device(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Требуется сопряжённое устройство.'), { code: 'ORIGIN_FORBIDDEN' }));
+      }
+      const body = await readJson(req);
+      if (body?.confirmed !== true) throw Object.assign(new Error('Подтвердите расход кредита сброса.'), { code: 'INPUT_INVALID' });
+      return json(res, 200, await consumeOpenAiReset(config.providerStatus?.openaiCodex, { requestId: body.requestId }));
     }
 
     // Свой push в локальной сети (4.3): устройство регистрирует свой приёмник.

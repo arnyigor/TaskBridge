@@ -22,15 +22,17 @@ class ThinkingLevelsTest {
     )
     private val plain = ModelRef(provider = "deepseek", id = "deepseek-flash", reasoning = true, thinkingLevels = listOf("off", "minimal", "low", "medium", "high"))
     private val catalogLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+    // Каталог без записей: проверяется только откат на общий список.
+    private val catalog = ru.arny.taskbridge.core.api.ModelCatalog(thinkingLevels = catalogLevels)
 
     @Test
     fun pickerUsesTheModelMapNotTheCatalogueList() {
-        assertEquals(listOf("off", "low", "medium", "high", "xhigh"), thinkingChoices(strata, catalogLevels))
-        assertEquals(listOf("off", "minimal", "low", "medium", "high"), thinkingChoices(plain, catalogLevels))
+        assertEquals(listOf("off", "low", "medium", "high", "xhigh"), thinkingChoices(strata, catalog))
+        assertEquals(listOf("off", "minimal", "low", "medium", "high"), thinkingChoices(plain, catalog))
         // Модель без карты (её нет в каталоге, ещё не выбрана) — общий список:
         // пустой пикер хуже, чем неполный.
-        assertEquals(catalogLevels, thinkingChoices(null, catalogLevels))
-        assertEquals(catalogLevels, thinkingChoices(ModelRef(provider = "x", id = "y"), catalogLevels))
+        assertEquals(catalogLevels, thinkingChoices(null, catalog))
+        assertEquals(catalogLevels, thinkingChoices(ModelRef(provider = "x", id = "y"), catalog))
     }
 
     @Test

@@ -136,6 +136,10 @@ internal class FileViewState {
     var reloads by mutableStateOf(0)
         private set
 
+    /** A save is in flight: a second tap must not start another write. */
+    var saving by mutableStateOf(false)
+        internal set
+
     /** The file may have changed on the computer: read it again. */
     fun reload() { reloads++ }
 
@@ -257,6 +261,32 @@ internal fun fileLocationLine(target: FileTarget): String = when (target) {
 }
 
 /**
+ * The whole file, not the piece on screen: a view opened from `path#L120-L140`
+ * read only those lines, and a saved file must not be a fragment of one.
+ */
+internal suspend fun fullFileBytes(target: FileTarget, session: ChatSession): Result<ByteArray> = when (target) {
+    is FileTarget.Workspace -> session.readWorkspaceFile(target.path)
+    is FileTarget.Attachment -> session.readFile(target.id)
+    is FileTarget.Artifact -> session.readArtifact(target.name)
+}
+
+/** Reads [target] in full and asks the platform to save it; returns the message to show. */
+internal suspend fun saveTargetOnDevice(
+    target: FileTarget,
+    session: ChatSession,
+    platform: PlatformServices,
+    open: Boolean = false,
+): String = fullFileBytes(target, session).fold(
+    onSuccess = { bytes ->
+        platform.saveFile(target.name, bytes, mimeTypeOf(target.name), open)
+            .fold(onSuccess = { it }, onFailure = { it.message ?: "Не удалось сохранить файл" })
+    },
+    onFailure = { error ->
+        (error as? ApiException)?.let { describe(it.error) } ?: error.message ?: "Не удалось скачать файл"
+    },
+)
+
+/**
  * Reads the file through the API with this client's session (a browser given
  * the bare URL has no cookie) and shows it highlighted. On the PC itself the
  * server can also open it with its app or reveal it in the file manager.
@@ -284,14 +314,16 @@ fun FileViewer(
             ),
         )
     }
-    fun saveOnDevice(bytes: ByteArray, open: Boolean) = scope.launch {
-        state.setNotice(if (open) "Открываю…" else "Сохраняю…")
-        state.setNotice(
-            platform.saveFile(target.name, bytes, mimeTypeOf(target.name), open).fold(
-                onSuccess = { it },
-                onFailure = { it.message ?: "Не удалось сохранить файл" },
-            ),
-        )
+    /** Saves the whole file: the bytes on screen can be a line range of a large file. */
+    fun download(open: Boolean) = scope.launch {
+        if (state.saving) return@launch
+        state.saving = true
+        state.setNotice(if (open) "Скачиваю и открываю…" else "Скачиваю…")
+        try {
+            state.setNotice(saveTargetOnDevice(target, session, platform, open))
+        } finally {
+            state.saving = false
+        }
     }
 
     (loaded as? Loaded.Picture)?.takeIf { platform.kind == "android" }?.let { picture ->
@@ -309,9 +341,13 @@ fun FileViewer(
                 TextButton(onClick = { openInApp(reveal = true) }) { Text("Показать в папке") }
             }
             Spacer(Modifier.weight(1f))
-            (loaded as? Loaded.Binary)?.let { binary ->
-                TextButton(onClick = { saveOnDevice(binary.bytes, open = false) }) { Text("Скачать") }
-                if (platform.kind == "android") OutlinedButton(onClick = { saveOnDevice(binary.bytes, open = true) }) { Text("Открыть") }
+            // Anything the viewer could read is downloadable, text included: copying the
+            // text is not a file, and a phone has no other way to keep it.
+            if (loaded is Loaded.Text || loaded is Loaded.Binary) {
+                TextButton(onClick = { download(open = false) }, enabled = !state.saving) { Text("Скачать") }
+                if (loaded is Loaded.Binary && platform.kind == "android") {
+                    OutlinedButton(onClick = { download(open = true) }, enabled = !state.saving) { Text("Открыть") }
+                }
             }
             (loaded as? Loaded.Text)?.let { text ->
                 TextButton(onClick = { platform.copyText(text.text); state.setNotice("Скопировано") }) {

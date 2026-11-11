@@ -27,7 +27,7 @@ const PROFILES = {
   ],
 };
 
-function buildPage({ draft = null, tasks = [] } = {}) {
+function buildPage({ draft = null, tasks = [], modelProfiles = null } = {}) {
   const { document, window } = parseHTML(html);
   const calls = [];
   const fetchStub = async (url, options = {}) => {
@@ -38,7 +38,9 @@ function buildPage({ draft = null, tasks = [] } = {}) {
       ? tasks
       : target.endsWith('/draft-check')
         ? (draft || { ok: true, status: 'NO_KEY', models: [], note: 'нет ключа' })
-        : PROFILES;
+        : target.includes('/api/model-profiles')
+          ? (modelProfiles || { revision: 'rev-p1', profiles: [] })
+          : PROFILES;
     return { ok: true, status: 200, json: async () => payload };
   };
   // В linkedom у select только геттер value (та же особенность, из-за которой
@@ -46,6 +48,14 @@ function buildPage({ draft = null, tasks = [] } = {}) {
   // чтобы проверять логику страницы, а не поведение библиотеки.
   const preset = document.getElementById('preset');
   Object.defineProperty(preset, 'value', {
+    configurable: true,
+    get() { return this.getAttribute('data-value') || ''; },
+    set(next) { this.setAttribute('data-value', String(next)); },
+  });
+  // То же для выбора reasoning в настройках модели: без сеттера page не смогла бы
+  // подставить значение пресета, и тест проверял бы библиотеку, а не код страницы.
+  const reasoning = document.getElementById('model-reasoning');
+  Object.defineProperty(reasoning, 'value', {
     configurable: true,
     get() { return this.getAttribute('data-value') || ''; },
     set(next) { this.setAttribute('data-value', String(next)); },
@@ -144,7 +154,7 @@ test('модель убирается из выбранного провайде
   await tick(100);
   fire([...document.getElementById('providers').querySelectorAll('button.entry')][0], window);
   const rows = [...document.getElementById('model-removal-list').querySelectorAll('.entry')];
-  assert.deepEqual(rows.map(row => row.textContent.replace('Убрать', '').trim()), ['a', 'b'], 'модели записи видны');
+  assert.deepEqual(rows.map(row => row.textContent.replace('Убрать', '').replace('Настроить', '').trim()), ['a', 'b'], 'модели записи видны');
 
   // Стенд по умолчанию отклоняет подтверждение; здесь оно нужно принятым.
   setAccept(true);
@@ -177,4 +187,67 @@ test('перед удалением называется сессия, у кот
   assert.doesNotMatch(confirmations[0], /ser-3/, 'другой провайдер с тем же ID модели не упоминается');
   assert.doesNotMatch(confirmations[0], /ser-4/, 'завершённая сессия не названа активной');
   assert.match(confirmations[0], /резервной копией/, 'сказано про копию файла');
+});
+
+test('настройки модели: сохраняются отдельным маршрутом, пресет подставляется в поля', async () => {
+  const profiles = {
+    revision: 'rev-p1',
+    profiles: [{ id: 'p-fast', name: 'Быстрый', providerId: 'tb-demo', modelId: 'a', enabled: true, settings: { timeoutMs: 90000, reasoning: 'off' } }],
+  };
+  const { document, window, calls } = buildPage({ modelProfiles: profiles });
+  await tick(100);
+  fire([...document.getElementById('providers').querySelectorAll('button.entry')][0], window);
+
+  // Кнопка «Настроить» у каждой модели: панель открывается только по ней.
+  const rows = [...document.getElementById('model-removal-list').querySelectorAll('.entry')];
+  assert.equal(document.getElementById('model-settings').classList.contains('hidden'), true, 'панель закрыта до клика');
+  fire(rows[0].querySelectorAll('button')[1], window);
+  for (let attempt = 0; attempt < 100 && !document.getElementById('model-presets-list').textContent; attempt += 1) await tick(20);
+  assert.equal(document.getElementById('model-settings').classList.contains('hidden'), false);
+  assert.match(document.getElementById('model-settings-name').textContent, /a/);
+  assert.match(document.getElementById('model-presets-list').textContent, /Быстрый/, 'пресеты этой модели загружены');
+
+  // «Применить» подставляет значения пресета в поля, но ничего не пишет.
+  const applyButton = [...document.getElementById('model-presets-list').querySelectorAll('button')]
+    .find(button => button.textContent === 'Применить');
+  fire(applyButton, window);
+  assert.equal(document.getElementById('model-timeout').value, '90000');
+  assert.equal(document.getElementById('model-reasoning').value, 'off');
+  assert.equal(calls.filter(call => call.method !== 'GET').length, 0, 'применение пресета — без записи');
+
+  // Правка полей и сохранение: уходит только settings этой модели.
+  document.getElementById('model-prompt').value = 'Be brief.';
+  document.getElementById('model-context').value = '65536';
+  fire(document.getElementById('model-settings-save'), window);
+  for (let attempt = 0; attempt < 100 && !calls.some(call => call.url.endsWith('/settings')); attempt += 1) await tick(20);
+  const save = calls.find(call => call.url.endsWith('/settings'));
+  assert.ok(save, 'маршрут настроек модели вызван');
+  assert.equal(save.method, 'PUT');
+  assert.match(save.url, /\/api\/provider-profiles\/tb-demo\/models\/a\/settings$/);
+  assert.deepEqual(save.body.settings, {
+    promptTemplate: 'Be brief.', timeoutMs: 90000, contextWindow: 65536, reasoning: 'off',
+  });
+  assert.equal(save.body.revision, 'rev-1', 'ревизия models.json передана');
+
+  // «Сохранить как пресет» пишет в файл пресетов, а не в models.json.
+  // Ждём окончания предыдущего запроса: пока busy, клик игнорируется.
+  for (let attempt = 0; attempt < 100 && !/Сохранено/.test(document.getElementById('model-settings-status').textContent); attempt += 1) await tick(20);
+  document.getElementById('model-preset-name').value = 'Точный';
+  fire(document.getElementById('model-preset-save'), window);
+  for (let attempt = 0; attempt < 100 && !calls.some(call => call.url.endsWith('/api/model-profiles') && call.method === 'PUT'); attempt += 1) await tick(20);
+  const presetCall = calls.find(call => call.url.endsWith('/api/model-profiles') && call.method === 'PUT');
+  assert.ok(presetCall, 'пресет сохранён отдельным маршрутом');
+  assert.equal(presetCall.body.revision, 'rev-p1');
+  assert.equal(presetCall.body.name, 'Точный');
+  assert.equal(presetCall.body.providerId, 'tb-demo');
+  assert.equal(presetCall.body.modelId, 'a');
+
+  // Кривой JSON в «доп. полях» не уходит на сервер.
+  await tick(60); // busy снимается в finally после ответа, клик пока игнорируется
+  const before = calls.length;
+  document.getElementById('model-extra').value = '{oops';
+  fire(document.getElementById('model-settings-save'), window);
+  await tick(60);
+  assert.equal(calls.length, before, 'невалидный JSON отклонён до запроса');
+  assert.match(document.getElementById('model-settings-status').textContent, /JSON-объект/);
 });

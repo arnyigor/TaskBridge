@@ -48,9 +48,10 @@ class FilePanelTest {
     private val readme = "# План панели\n\nТекст документа.\n"
     private val gaps = "# Пробелы\n\nДругой файл.\n"
 
-    private fun session(): Pair<ChatSession, HttpClient> {
+    private fun session(urls: MutableList<String>? = null): Pair<ChatSession, HttpClient> {
         val json = headersOf(HttpHeaders.ContentType, "application/json")
         val http = HttpClient(MockEngine { request ->
+            urls?.add(request.url.toString())
             val path = request.url.parameters["path"].orEmpty()
             when {
                 path.endsWith("PRODUCT_GAPS.md") -> respond(gaps, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/markdown"))
@@ -154,8 +155,7 @@ class FilePanelTest {
     }
 
     @Test
-    fun thePanelTakesWidthFromTheChatInsteadOfCoveringIt() = runComposeUiTest {
-        val (chat, http) = session()
+    fun thePanelTakesWidthFromTheChatInsteadOfCoveringIt() = runComposeUiTest {        val (chat, http) = session()
         val tabs = FileTabs()
         tabs.open(FileTarget.Workspace("README.md"))
         setContent { Panel(tabs, chat) }
@@ -177,6 +177,55 @@ class FilePanelTest {
         awaitSeen("План панели")
         assertEquals(0, onAllNodesWithContentDescription("Закрыть панель файлов").fetchSemanticsNodes().size, "no dock on a narrow window")
         http.close()
+    }
+
+    /**
+     * The dock is the shape a phone in landscape and a tablet get. Saving a file must be
+     * possible there too, and it must save the whole file: a view opened from a link
+     * (`path#L2`) shows one line, but a file saved from it must not be that one line.
+     */
+    @Test
+    fun theDockDownloadsTheWholeFileEvenWhenTheViewShowsALineRange() = runComposeUiTest {
+        val urls = mutableListOf<String>()
+        val (chat, http) = session(urls)
+        val platform = RecordingPlatform()
+        val tabs = FileTabs()
+        tabs.open(FileTarget.Workspace("README.md", 2, 2))
+        setContent { Panel(tabs, chat, platform = platform) }
+
+        awaitSeen("README.md")
+        onNodeWithContentDescription("Действия с файлом").performClick()
+        onNodeWithText("Скачать файл").performClick()
+        waitUntil(timeoutMillis = 5_000) { platform.saved.isNotEmpty() }
+        assertEquals(readme, platform.saved.single().second.decodeToString())
+        assertTrue(urls.any { it.contains("workspace-file") }, "the file is read with this session: $urls")
+        // The view read the shown range; the save must have asked for the whole file last.
+        assertTrue(urls.last().contains("workspace-file") && !urls.last().contains("from="), "the saved bytes are the whole file: $urls")
+        http.close()
+    }
+
+    /** The phone sheet: a text file is downloadable, not only copyable. */
+    @Test
+    fun thePhoneSheetSavesATextFileNotOnlyCopiesIt() = runComposeUiTest {
+        val (chat, http) = session()
+        val platform = RecordingPlatform()
+        val tabs = FileTabs()
+        tabs.open(FileTarget.Workspace("README.md"))
+        setContent { Panel(tabs, chat, width = 600.dp, platform = platform) }
+
+        awaitSeen("План панели")
+        onNodeWithText("Скачать").performClick()
+        waitUntil(timeoutMillis = 5_000) { platform.saved.isNotEmpty() }
+        assertEquals(readme, platform.saved.single().second.decodeToString())
+        http.close()
+    }
+
+    private class RecordingPlatform(val saved: MutableList<Pair<String, ByteArray>> = mutableListOf()) :
+        PlatformServices by DesktopPlatformServices() {
+        override suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String?, open: Boolean): Result<String> {
+            saved += name to bytes
+            return Result.success("Сохранено: $name")
+        }
     }
 
     @Composable

@@ -11,7 +11,11 @@ import crypto from 'node:crypto';
 import { parseProviderModels } from '../provider-models.mjs';
 import { providerEndpoint as normalizedUrl } from '../../web/provider-endpoint.mjs';
 
-const ID = /^tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
+// ID собственной записи. Префикс `tb-` больше не требуется: он был соглашением,
+// а не защитой — владение доказывает маркер `name` (OWNED_NAME), а чужой ID
+// по-прежнему не перезаписывается (см. upsert). Старые `tb-*` подходят под это же
+// правило, поэтому существующие записи остаются управляемыми.
+const ID = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/;
 const ENV = /^[A-Z][A-Z0-9_]{0,95}$/;
 const MODEL_ID = /^[A-Za-z0-9_.:/+@-]{1,160}$/;
 // ID провайдера в Pi: имена вида deepseek, llama.cpp, strata-ud-iq4xs — не только tb-*.
@@ -27,15 +31,28 @@ const authHeaders = (api, key) => api === 'anthropic-messages'
   ? { 'anthropic-version': '2023-06-01', ...(key ? { 'x-api-key': key } : {}) }
   : key ? { Authorization: `Bearer ${key}` } : {};
 const OWNED_NAME = id => `TaskBridge: ${id}`;
-const isOwned = (id, entry) => ID.test(id) && entry?.name === OWNED_NAME(id);
+// Метка владения — начало имени. Человеческое название идёт после « — », иначе
+// оператор видел в Pi служебную строку «TaskBridge: tb-local» вместо своего имени.
+const OWNED_PREFIX = id => `${OWNED_NAME(id)} — `;
+const ownedName = (id, name) => (name ? OWNED_PREFIX(id) : OWNED_NAME(id)) + (name || '');
+const isOwned = (id, entry) => typeof entry?.name === 'string'
+  && (entry.name === OWNED_NAME(id) || entry.name.startsWith(OWNED_PREFIX(id)));
+const humanName = (id, entry) => (typeof entry?.name === 'string' && entry.name.startsWith(OWNED_PREFIX(id))
+  ? entry.name.slice(OWNED_PREFIX(id).length).trim() || null
+  : null);
 const MAX_BYTES = 4 * 1024 * 1024;
+// Секретные значения в headers и литеральные ключи не покидают машину: клиент
+// видит маркер и при записи возвращает его обратно, означающий «не менять».
+const REDACTED = '$REDACTED';
+const SECRETLIKE = value => typeof value === 'string' && value.length >= 24 && !value.startsWith('$');
+const MAX_ENTRY_BYTES = 256 * 1024;
 const fail = (code, message) => Object.assign(new Error(message), { code });
 
 
 function validateDraft(draft) {
   if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw fail('INPUT_INVALID', 'Требуется профиль провайдера.');
   const id = String(draft.id || '').trim();
-  if (!ID.test(id)) throw fail('INPUT_INVALID', 'ID должен начинаться с tb- и содержать только маленькие латинские буквы, цифры и дефисы.');
+  if (!ID.test(id)) throw fail('INPUT_INVALID', 'ID должен содержать только маленькие латинские буквы, цифры и дефисы и не начинаться/заканчиваться дефисом.');
   const { baseUrl, local } = normalizedUrl(draft.baseUrl);
   const rawEnv = String(draft.keyEnv || '').trim();
   if (rawEnv && !ENV.test(rawEnv)) throw fail('INPUT_INVALID', 'Укажите имя переменной окружения, не сам API-ключ.');
@@ -50,7 +67,55 @@ function validateDraft(draft) {
     unique.add(modelId);
     return { id: modelId };
   });
-  return { id, baseUrl, api: providerApi(draft.api), apiKey: rawEnv ? `$${rawEnv}` : 'local', models };
+  return {
+    id, baseUrl, api: providerApi(draft.api), apiKey: rawEnv ? `$${rawEnv}` : 'local', models,
+    modelDefaults: modelDefaults(draft.modelDefaults), displayName: displayName(draft.name),
+  };
+}
+
+/**
+ * Человеческое название записи — то, что оператор написал в форме.
+ *
+ * Отдельное поле модели не нужно: имя пишется в `name` после метки владения
+ * (`TaskBridge: <id> — <название>`), поэтому маркер и подпись не конфликтуют.
+ */
+function displayName(value) {
+  const name = typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+  if (!name) return null;
+  if (name.length > 60) throw fail('INPUT_INVALID', 'Название подключения — не длиннее 60 символов.');
+  if ([...name].some(ch => ch.codePointAt(0) < 32)) throw fail('INPUT_INVALID', 'В названии недопустимые символы.');
+  return name;
+}
+
+/**
+ * Поля модели, которые форма задаёт новым моделям сразу.
+ *
+ * Без них модель из models.json не умеет размышлять: `supportedThinkingLevels`
+ * (src/model-catalog.mjs) видит `reasoning !== true` и отдаёт только «off», а
+ * клиент честно подписывает его «None». Раньше новая модель получала один `id`,
+ * и уровни размышлений у неё появлялись только после ручной правки JSON.
+ *
+ * Только allowlist: `reasoning`, `thinkingLevelMap`, `compat`. Применяется к
+ * моделям, которых ещё нет в файле — настроенные вручную значения не трогаются.
+ */
+function modelDefaults(value) {
+  if (value == null) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) throw fail('INPUT_INVALID', 'Некорректные значения по умолчанию для моделей.');
+  const out = {};
+  if (value.reasoning !== undefined) {
+    if (typeof value.reasoning !== 'boolean') throw fail('INPUT_INVALID', 'reasoning должен быть true или false.');
+    out.reasoning = value.reasoning;
+  }
+  for (const key of ['thinkingLevelMap', 'compat']) {
+    const field = value[key];
+    if (field === undefined) continue;
+    if (!field || typeof field !== 'object' || Array.isArray(field)) throw fail('INPUT_INVALID', `Некорректное поле ${key}.`);
+    if (key === 'compat' && field.thinkingFormat !== undefined && typeof field.thinkingFormat !== 'string') {
+      throw fail('INPUT_INVALID', 'compat.thinkingFormat должен быть строкой.');
+    }
+    out[key] = field;
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 function publicView(id, entry, env) {
@@ -58,11 +123,20 @@ function publicView(id, entry, env) {
   const raw = typeof entry?.apiKey === 'string' ? entry.apiKey : '';
   const ref = /^\$([A-Z][A-Z0-9_]{0,95})$/.exec(raw);
   return {
-    id, managed: isOwned(id, entry), baseUrl: typeof entry?.baseUrl === 'string' ? entry.baseUrl : null,
+    id, managed: isOwned(id, entry), name: humanName(id, entry),
+    baseUrl: typeof entry?.baseUrl === 'string' ? entry.baseUrl : null,
     api: typeof entry?.api === 'string' ? entry.api : null,
     keyEnv: ref ? ref[1] : '',
     auth: raw === 'local' ? 'keyless-local' : ref ? (env[ref[1]] ? 'configured' : 'missing-env') : raw ? 'configured-elsewhere' : 'unknown',
-    models: Array.isArray(entry?.models) ? entry.models.slice(0, MAX_MODELS).map(m => ({ id: String(m?.id || '').slice(0, 160) })) : [],
+    models: Array.isArray(entry?.models) ? entry.models.slice(0, MAX_MODELS).map((m) => {
+      // Аналог Pi Manager: клиенту нужны редактируемые поля модели
+      // (name, contextWindow, maxTokens, input, thinkingLevelMap, compat, …),
+      // иначе форма не сможет их показать. Секретов в модели не бывает:
+      // ключ жив¸т на уровне провайдера.
+      const model = m && typeof m === 'object' && !Array.isArray(m) ? { ...m } : {};
+      model.id = String(m?.id || '').slice(0, 160);
+      return model;
+    }) : [],
     modelCount: Array.isArray(entry?.models) ? entry.models.length : 0,
   };
 }
@@ -106,15 +180,23 @@ export class PiProviderProfiles {
       if (body.revision !== old.revision) throw fail('CONFLICT', 'Конфигурация изменилась. Обновите список и повторите правку.');
       const current = old.doc.providers[next.id];
       // Collision-safe: do not adopt or silently overwrite somebody else's provider.
-      if (current && !(ID.test(next.id) && isOwned(next.id, current))) {
+      if (current && !isOwned(next.id, current)) {
         throw fail('CONFLICT', 'Этот ID занят чужим провайдером.');
       }
       const existingModels = new Map((Array.isArray(current?.models) ? current.models : []).map(m => [m?.id, m]));
-      old.doc.providers[next.id] = {
-        ...next,
-        name: OWNED_NAME(next.id),
-        // Preserve existing hand-tuned metadata for unchanged models.
-        models: next.models.map(m => ({ ...(existingModels.get(m.id) || {}), id: m.id })),
+      // Safe partial update: preserve every field of the current provider object that
+      // TaskBridge does not control itself (hand-tuned compatibility, extra headers,
+      // vendor-specific settings). Only controlled values are taken from the draft,
+      // and the models list is rewritten from the draft IDs while keeping metadata
+      // for unchanged model IDs.
+      // `modelDefaults` — вход формы, а не поле провайдера в models.json.
+      const { modelDefaults: defaults, displayName: label, ...fields } = next;
+      // Название не передали (пересохранение формы или старый клиент) — сохраняем прежнее.
+      const name = ownedName(next.id, label ?? humanName(next.id, current));
+      old.doc.providers[next.id] = { ...current, ...fields, name,
+        // Существующие модели сохраняют свои поля; новые получают значения формы,
+        // иначе они остались бы без reasoning/thinkingLevelMap/compat.
+        models: next.models.map(m => ({ ...(defaults || {}), ...(existingModels.get(m.id) || {}), id: m.id })),
       };
       await this.#write(old);
       return this.list();
@@ -187,6 +269,154 @@ export class PiProviderProfiles {
       entry.models = current.filter(model => !wanted.includes(String(model?.id ?? '')));
       await this.#write(old);
       return { ...(await this.list()), removed: wanted };
+    });
+  }
+
+  /**
+   * Полная запись провайдера для редактора, аналога Pi Manager.
+   *
+   * Отдаются все поля записи (baseUrl, api, name, headers, compat, oauth, models
+   * с их полями), КРОМЕ секретов: литеральный apiKey превращается в маркер
+   * `$REDACTED`, секретоподобные значения headers — тоже.
+   */
+  async rawProvider(id) {
+    const providerId = String(id || '');
+    if (!PROVIDER_ID.test(providerId)) throw fail('INPUT_INVALID', 'Некорректный ID провайдера.');
+    const { doc, revision } = await readDocument(this.file);
+    const entry = doc.providers[providerId];
+    if (!entry) throw fail('NOT_FOUND', `Провайдера ${providerId} нет в models.json.`);
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw fail('CONFLICT', 'Запись провайдера не объект.');
+    const copy = JSON.parse(JSON.stringify(entry));
+    const rawKey = typeof copy.apiKey === 'string' ? copy.apiKey : '';
+    if (rawKey && !/^\$[A-Z][A-Z0-9_]{0,95}$/.test(rawKey) && rawKey !== 'local') copy.apiKey = REDACTED;
+    if (copy.headers && typeof copy.headers === 'object') {
+      for (const [name, value] of Object.entries(copy.headers)) {
+        if (SECRETLIKE(value)) copy.headers[name] = REDACTED;
+      }
+    }
+    return { revision, entry: copy };
+  }
+
+  /**
+   * Полная замена записи провайдера из редактора.
+   *
+   * Ключ из UI не принимается: только `$ENV` или `local`. Маркер `$REDACTED`
+   * означает «оставить прежнее значение» — так правка, например, headers не
+   * затирает секрет, который клиент не видел.
+   */
+  async setProviderRaw(id, entry, revision) {
+    const providerId = String(id || '');
+    if (!PROVIDER_ID.test(providerId)) throw fail('INPUT_INVALID', 'Некорректный ID провайдера.');
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) throw fail('INPUT_INVALID', 'Запись провайдера должна быть объектом.');
+    if (Buffer.byteLength(JSON.stringify(entry)) > MAX_ENTRY_BYTES) throw fail('INPUT_INVALID', 'Запись провайдера слишком велика.');
+    const next = JSON.parse(JSON.stringify(entry));
+    delete next.id;
+    if (next.baseUrl !== undefined) next.baseUrl = normalizedUrl(next.baseUrl).baseUrl;
+    if (next.api !== undefined) next.api = providerApi(next.api);
+    if (next.apiKey !== undefined) {
+      const key = String(next.apiKey || '').trim();
+      if (key && key !== 'local' && key !== REDACTED && !/^\$[A-Z][A-Z0-9_]{0,95}$/.test(key)) {
+        throw fail('INPUT_INVALID', 'Ключ принимается только как $ПЕРЕМЕННАЯ или local, не как значение.');
+      }
+    }
+    if (next.models !== undefined) {
+      if (!Array.isArray(next.models) || next.models.length > MAX_MODELS) {
+        throw fail('INPUT_INVALID', `Модели — массив до ${MAX_MODELS} записей.`);
+      }
+      const seen = new Set();
+      next.models = next.models.map((model) => {
+        if (!model || typeof model !== 'object' || Array.isArray(model)) throw fail('INPUT_INVALID', 'Модель должна быть объектом.');
+        const modelId = String(model.id || '').trim();
+        if (!MODEL_ID.test(modelId)) throw fail('INPUT_INVALID', `Некорректный ID модели: ${modelId.slice(0, 100)}`);
+        if (seen.has(modelId)) throw fail('INPUT_INVALID', `Повторяющийся ID модели: ${modelId.slice(0, 100)}`);
+        seen.add(modelId);
+        return { ...model, id: modelId };
+      });
+    }
+    return this.#serialize(async () => {
+      const old = await readDocument(this.file);
+      if (revision !== old.revision) throw fail('CONFLICT', 'Конфигурация изменилась. Обновите список и повторите правку.');
+      const previous = old.doc.providers[providerId];
+      if (!previous) throw fail('NOT_FOUND', `Провайдера ${providerId} нет в models.json.`);
+      // Маркеры означают «не менять»: иначе правка формы стёрла бы секрет, которого клиент не видел.
+      if (next.apiKey === REDACTED) next.apiKey = previous.apiKey;
+      if (next.headers && typeof next.headers === 'object' && previous.headers && typeof previous.headers === 'object') {
+        for (const [name, value] of Object.entries(next.headers)) {
+          if (value === REDACTED && previous.headers[name] !== undefined) next.headers[name] = previous.headers[name];
+        }
+      }
+      old.doc.providers[providerId] = next;
+      await this.#write(old);
+      return { ...(await this.list()), revision: (await readDocument(this.file)).revision };
+    });
+  }
+
+  /**
+   * Полная замена объекта ОДНОЙ модели (все поля: name, contextWindow, maxTokens,
+   * input, reasoning, thinkingLevelMap, compat, samplingParams, …) — как в Pi Manager.
+   * Смена `id` переименовывает модель, если новый ID свободен.
+   */
+  async setModelRaw(id, modelId, model, revision) {
+    const providerId = String(id || '');
+    if (!PROVIDER_ID.test(providerId)) throw fail('INPUT_INVALID', 'Некорректный ID провайдера.');
+    if (!model || typeof model !== 'object' || Array.isArray(model)) throw fail('INPUT_INVALID', 'Модель должна быть объектом.');
+    const nextId = String(model.id || '').trim();
+    if (!MODEL_ID.test(nextId)) throw fail('INPUT_INVALID', 'Некорректный ID модели.');
+    if (Buffer.byteLength(JSON.stringify(model)) > MAX_ENTRY_BYTES) throw fail('INPUT_INVALID', 'Запись модели слишком велика.');
+    return this.#serialize(async () => {
+      const old = await readDocument(this.file);
+      if (revision !== old.revision) throw fail('CONFLICT', 'Конфигурация изменилась. Обновите список и повторите правку.');
+      const entry = old.doc.providers[providerId];
+      if (!entry) throw fail('NOT_FOUND', `Провайдера ${providerId} нет в models.json.`);
+      const models = Array.isArray(entry.models) ? entry.models : [];
+      const index = models.findIndex((item) => String(item?.id ?? '') === String(modelId));
+      if (index === -1) throw fail('INPUT_INVALID', `Модели ${modelId} нет у провайдера ${providerId}.`);
+      if (nextId !== String(modelId) && models.some((item, at) => at !== index && String(item?.id ?? '') === nextId)) {
+        throw fail('INPUT_INVALID', `У ${providerId} уже есть модель ${nextId}.`);
+      }
+      const clean = JSON.parse(JSON.stringify(model));
+      clean.id = nextId;
+      // `settings` остаётся отдельным объектом-настройкой: пустой — убираем, чтобы не
+      // показывать «настроена» без настроек.
+      if (clean.settings && typeof clean.settings === 'object' && !Array.isArray(clean.settings)
+        && Object.keys(clean.settings).length === 0) delete clean.settings;
+      models[index] = clean;
+      entry.models = models;
+      await this.#write(old);
+      return { ...(await this.list()), revision: (await readDocument(this.file)).revision };
+    });
+  }
+
+  /**
+   * Индивидуальные настройки модели (шаг 02 плана). Правится ТОЛЬКО объект `settings`:
+   * промпт, таймаут, контекстное окно, reasoning, cost и vendor-specific поля; ID модели,
+   * ключ и адрес провайдера — вне зоны правки.
+   */
+  async setModelSettings(id, modelId, settings, revision) {
+    const providerId = String(id || '');
+    if (!PROVIDER_ID.test(providerId)) throw fail('INPUT_INVALID', 'Некорректный ID провайдера.');
+    if (typeof settings !== 'object' || settings === null || Array.isArray(settings)) {
+      throw fail('INPUT_INVALID', 'Настройки модели должны быть объектом (можно пустым {}).');
+    }
+    return this.#serialize(async () => {
+      const old = await readDocument(this.file);
+      if (revision !== old.revision) throw fail('CONFLICT', 'Конфигурация изменилась. Обновите список и повторите правку.');
+      const entry = old.doc.providers[providerId];
+      if (!entry) throw fail('NOT_FOUND', `Провайдера ${providerId} нет в models.json.`);
+      const current = Array.isArray(entry.models) ? entry.models : [];
+      const index = current.findIndex((model) => String(model?.id ?? '') === String(modelId));
+      if (index === -1) throw fail('INPUT_INVALID', `Модели ${modelId} нет у провайдера ${providerId}.`);
+      const clean = {};
+      for (const [key, value] of Object.entries(settings)) {
+        if (typeof value === 'object' || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+          clean[key] = value;
+        }
+      }
+      // Пустой объект — это сброс: у модели не должно остаться пустого «настроена».
+      if (Object.keys(clean).length) current[index] = { ...current[index], settings: clean };
+      else delete current[index].settings;
+      await this.#write(old);
+      return { ...(await this.list()) };
     });
   }
 

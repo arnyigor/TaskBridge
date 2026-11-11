@@ -43,9 +43,16 @@ sealed interface Screen {
     /** Управление локальными моделями: рабочий экран, а не настройка. */
     @Serializable
     data object LocalModels : Screen
+    /** Редактор models.json — аналог Pi Manager: провайдеры, модели, их поля. */
+    @Serializable
+    data object PiModels : Screen
     /** Процессы машины с сервером: список, память и kill. */
     @Serializable
     data object Processes : Screen
+
+    /** Серверы MCP и их инструменты: рабочая область, а не параметр приложения. */
+    @Serializable
+    data object Mcp : Screen
 }
 
 /** A plain back stack: the app has four screens, a library would add more than it saves. */

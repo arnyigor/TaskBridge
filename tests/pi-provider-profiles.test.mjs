@@ -37,7 +37,9 @@ test('listing never returns existing literal API keys or unknown settings', asyn
   assert.equal(list.providers[0].managed, false);
   assert.ok(!JSON.stringify(list).includes('literal-top-secret'));
   assert.ok(!JSON.stringify(list).includes('doNotModify'));
-  assert.deepEqual(list.providers[0].models, [{ id: 'real-model' }]);
+  // Аналог Pi Manager: поля модели (compat, contextWindow, …) видны в списке,
+  // иначе форма модели не сможет их показать. Секретов в модели нет.
+  assert.deepEqual(list.providers[0].models, [{ id: 'real-model', compat: { special: true } }]);
 });
 
 test('save creates managed provider, preserves unknown records and writes original backup', async t => {
@@ -64,13 +66,50 @@ test('update keeps metadata for unchanged model IDs', async t => {
   const first = await service.upsert(draft((await service.list()).revision));
   const doc = JSON.parse(await fs.readFile(file, 'utf8'));
   doc.providers['tb-test'].models[0].compat = { thinkingFormat: 'chat-template' };
+  doc.providers['tb-test'].models[0].settings = { promptTemplate: 'Be brief.', timeoutMs: 15000 };
   await fs.writeFile(file, JSON.stringify(doc, null, 2));
   const latest = await service.list();
   const after = await service.upsert(draft(latest.revision, { models: [{ id: 'qwen/qwen3:27b' }] }));
   assert.equal(after.providers.find(p => p.id === 'tb-test').modelCount, 1);
   const saved = JSON.parse(await fs.readFile(file, 'utf8'));
   assert.deepEqual(saved.providers['tb-test'].models[0].compat, { thinkingFormat: 'chat-template' });
+  // Сохранение подключения не должно сбрасывать настройки модели, которые правит отдельный редактор.
+  assert.deepEqual(saved.providers['tb-test'].models[0].settings, { promptTemplate: 'Be brief.', timeoutMs: 15000 });
   assert.notEqual(first.revision, after.revision);
+});
+
+// P0 из аудита: update провайдера не должен терять произвольные поля провайдера
+// (ручная настройка совместимости, доп. заголовки, vendor-specific настройки).
+test('upsert preserves unknown provider-level fields', async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-upsert-fields-'));
+  const file = path.join(dir, 'models.json');
+  const original = {
+    providers: {
+      'tb-manual': {
+        id: 'tb-manual', baseUrl: 'https://manual.example/v1', api: 'openai-completions',
+        apiKey: '$TB_KEY', name: 'TaskBridge: tb-manual',
+        customField: 'keep-me', extraHeaders: { 'X-Custom': 'header' }, compat: { special: true },
+        models: [{ id: 'model-a' }],
+      },
+    },
+  };
+  await fs.writeFile(file, JSON.stringify(original, null, 2));
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const service = new PiProviderProfiles({ agentDir: dir });
+  const old = await service.list();
+  const next = {
+    id: 'tb-manual', baseUrl: 'https://manual.example/v1', keyEnv: 'TB_KEY',
+    api: 'openai-completions', models: [{ id: 'model-a' }, { id: 'model-b' }],
+  };
+  const updated = await service.upsert({ ...next, revision: old.revision });
+  const saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(updated.providers.find(p => p.id === 'tb-manual').managed, true);
+  assert.deepEqual(saved.providers['tb-manual'].customField, 'keep-me');
+  assert.deepEqual(saved.providers['tb-manual'].extraHeaders, { 'X-Custom': 'header' });
+  assert.deepEqual(saved.providers['tb-manual'].compat, { special: true });
+  assert.equal(saved.providers['tb-manual'].models.length, 2);
+  assert.deepEqual(saved.providers['tb-manual'].apiKey, '$TB_KEY');
+  assert.equal(saved.providers['tb-manual'].name, 'TaskBridge: tb-manual');
 });
 
 test('stale edits are rejected; non-owned entries cannot be adopted', async t => {
@@ -78,7 +117,9 @@ test('stale edits are rejected; non-owned entries cannot be adopted', async t =>
   const old = await service.list();
   await service.upsert(draft(old.revision));
   await rejectCode(service.upsert(draft(old.revision)), 'CONFLICT');
-  await rejectCode(service.upsert(draft((await service.list()).revision, { id: 'existing' })), 'INPUT_INVALID');
+  // Чужой ID больше не отвергается по формату (префикс `tb-` снят), но и не
+  // присваивается: запись с таким именем уже есть, и она не наша.
+  await rejectCode(service.upsert(draft((await service.list()).revision, { id: 'existing' })), 'CONFLICT');
 });
 
 // Запрос оператора: чужое подключение тоже должно удаляться — с ревизией, копией
@@ -96,8 +137,10 @@ test('non-managed provider is deleted explicitly, stale revision and missing id 
   await service.upsert(draft((await service.list()).revision));
   await rejectCode(service.remove('tb-test', revision), 'CONFLICT');
   await rejectCode(service.remove('../secret', (await service.list()).revision), 'INPUT_INVALID');
-  // Чужую запись по-прежнему нельзя переписать под себя.
-  await rejectCode(service.upsert(draft((await service.list()).revision, { id: 'existing' })), 'INPUT_INVALID');
+  // Чужую запись по-прежнему нельзя переписать под себя: `existing` уже удалён
+  // выше, поэтому чужая запись создаётся заново и проверяется на коллизию.
+  await fs.writeFile(file, JSON.stringify({ providers: { ...original.providers, existing: original.providers.existing } }, null, 2));
+  await rejectCode(service.upsert(draft((await service.list()).revision, { id: 'existing' })), 'CONFLICT');
 });
 
 test('reject unsafe hosts, literal credentials, duplicated models and traversal IDs', async t => {
@@ -242,4 +285,137 @@ test('модель убирается из чужой записи, осталь
   // Не-ASCII идентификатор — не имя провайдера Pi, а мусор из запроса.
   await rejectCode(service.removeModels('нет-провайдера', { models: ['x'], revision: fresh }), 'INPUT_INVALID');
   assert.deepEqual(JSON.parse(await fs.readFile(file, 'utf8')).providers.deepseek.models, [{ id: 'deepseek-flash', name: 'Flash' }]);
+});
+
+// Шаг 02 плана: у модели есть собственный объект settings (промпт, таймаут, контекст,
+// reasoning, cost), который сохраняется в models.json и не задевает остальные модели,
+// адрес провайдера и ключ.
+test('настройки модели сохраняются отдельно от адреса провайдера и его ключа', async t => {
+  const { dir, file, service } = await fixture();
+  t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  await fs.writeFile(file, JSON.stringify({
+    providers: {
+      'tb-local': {
+        baseUrl: 'https://gateway.example/v1', api: 'openai-completions', apiKey: '$TB_KEY',
+        name: 'TaskBridge: tb-local',
+        models: [{ id: 'model-a' }, { id: 'model-b' }],
+      },
+    },
+  }, null, 2), 'utf8');
+  const { revision } = await service.list();
+  const saved = await service.setModelSettings('tb-local', 'model-a', {
+    promptTemplate: 'Answer briefly.', timeoutMs: 45000, contextWindow: 131072,
+    reasoning: 'on', cost: { 'price-per-million-tokens': 0.5 },
+  }, revision);
+  assert.deepEqual(saved.providers[0].models.find(m => m.id === 'model-a').settings, {
+    promptTemplate: 'Answer briefly.', timeoutMs: 45000, contextWindow: 131072,
+    reasoning: 'on', cost: { 'price-per-million-tokens': 0.5 },
+  });
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.deepEqual(doc.providers['tb-local'].models[0].settings.promptTemplate, 'Answer briefly.');
+  assert.deepEqual(doc.providers['tb-local'].models[1], { id: 'model-b' }, 'соседняя модель не тронута');
+  assert.equal(doc.providers['tb-local'].apiKey, '$TB_KEY', 'ключ не тронут');
+  assert.equal(doc.providers['tb-local'].baseUrl, 'https://gateway.example/v1', 'адрес не тронут');
+  assert.equal(doc.providers['tb-local'].name, 'TaskBridge: tb-local', 'имя записи не тронуто');
+
+  // Устаревшая ревизия и промах по ID отклоняются, файл не меняется.
+  await rejectCode(service.setModelSettings('tb-local', 'model-a', { timeoutMs: 1 }, revision), 'CONFLICT');
+  const fresh = (await service.list()).revision;
+  await rejectCode(service.setModelSettings('tb-local', 'нет-такой', {}, fresh), 'INPUT_INVALID');
+  await rejectCode(service.setModelSettings('absent-provider', 'model-a', {}, fresh), 'NOT_FOUND');
+  await rejectCode(service.setModelSettings('tb-local', 'model-a', [], fresh), 'INPUT_INVALID');
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).providers['tb-local'].models[0].settings.timeoutMs, 45000);
+
+  // Пустой объект — сброс: пустого «настроена» у модели остаться не должно.
+  const resetRevision = (await service.list()).revision;
+  const cleared = await service.setModelSettings('tb-local', 'model-a', {}, resetRevision);
+  assert.equal(cleared.providers[0].models.find(m => m.id === 'model-a').settings, undefined);
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).providers['tb-local'].models[0].settings, undefined);
+});
+
+// Оператор 2026-11-11: префикс `tb-` в имени провайдера — внутреннее соглашение,
+// а не то, что человек должен набирать. ID без префикса принимается, владение
+// по-прежнему доказывает маркер `name`, а старые `tb-*` остаются управляемыми.
+test('id без префикса tb- принимается, старые tb-* остаются управляемыми', async t => {
+  const { dir, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const revision = (await service.list()).revision;
+  const saved = await service.upsert(draft(revision, { id: 'my-gateway' }));
+  const plain = saved.providers.find(p => p.id === 'my-gateway');
+  assert.equal(plain.managed, true);
+  assert.equal(plain.baseUrl, 'https://gateway.example/v1');
+
+  const after = await service.upsert(draft(saved.revision, { id: 'tb-legacy' }));
+  assert.equal(after.providers.find(p => p.id === 'tb-legacy').managed, true);
+  assert.equal(after.providers.find(p => p.id === 'my-gateway').managed, true);
+});
+
+// Причина «в выборе модели пишет None»: новая модель получала только `id`, без
+// reasoning/thinkingLevelMap/compat, и supportedThinkingLevels отдавал один «off».
+test('новые модели получают reasoning, thinkingLevelMap и compat из формы', async t => {
+  const { dir, file, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const preset = {
+    reasoning: true,
+    thinkingLevelMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: null, 'max*': null },
+    compat: { thinkingFormat: 'chat-template', chatTemplateKwargs: { enable_thinking: { $var: 'thinking.enabled' } } },
+  };
+  const revision = (await service.list()).revision;
+  await service.upsert(draft(revision, { id: 'local-llm', keyEnv: '', baseUrl: 'http://127.0.0.1:8083/v1', modelDefaults: preset }));
+
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+  const entry = doc.providers['local-llm'];
+  assert.equal(entry.modelDefaults, undefined, 'modelDefaults — вход формы, а не поле провайдера');
+  for (const model of entry.models) {
+    assert.deepEqual(model, { ...preset, id: model.id });
+  }
+});
+
+test('значения по умолчанию не перетирают настроенную вручную модель', async t => {
+  const { dir, file, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const revision = (await service.list()).revision;
+  await service.upsert(draft(revision, { id: 'hand-tuned', models: [{ id: 'm1' }] }));
+
+  const doc = JSON.parse(await fs.readFile(file, 'utf8'));
+  doc.providers['hand-tuned'].models[0].thinkingLevelMap = { off: null, low: 'custom' };
+  await fs.writeFile(file, JSON.stringify(doc, null, 2));
+
+  const before = (await service.list()).revision;
+  await service.upsert({
+    revision: before, id: 'hand-tuned', baseUrl: 'https://gateway.example/v1', keyEnv: 'TB_TEST_API_KEY',
+    models: [{ id: 'm1' }, { id: 'm2' }],
+    modelDefaults: { reasoning: true, thinkingLevelMap: { off: 'none' } },
+  });
+
+  const saved = JSON.parse(await fs.readFile(file, 'utf8')).providers['hand-tuned'];
+  assert.deepEqual(saved.models[0].thinkingLevelMap, { off: null, low: 'custom' }, 'ручная настройка сохранена');
+  assert.equal(saved.models[0].reasoning, true, 'недостающее поле добрано из формы');
+  assert.deepEqual(saved.models[1], { reasoning: true, thinkingLevelMap: { off: 'none' }, id: 'm2' });
+});
+
+// Оператор видел в Pi служебную строку «TaskBridge: tb-local» вместо своего
+// названия. Метка владения остаётся в начале `name`, человеческое название идёт
+// после неё, и list() отдаёт его отдельным полем — при этом старая запись без
+// названия остаётся управляемой.
+test('человеческое название сохраняется и не ломает маркер владения', async t => {
+  const { dir, file, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const revision = (await service.list()).revision;
+  const saved = await service.upsert(draft(revision, { id: 'my-gateway', name: 'Мой  шлюз' }));
+  const entry = saved.providers.find(p => p.id === 'my-gateway');
+  assert.equal(entry.managed, true, 'владение по-прежнему определяется');
+  assert.equal(entry.name, 'Мой шлюз');
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).providers['my-gateway'].name, 'TaskBridge: my-gateway — Мой шлюз');
+
+  // Пересохранение без названия не стирает его.
+  const again = await service.upsert(draft((await service.list()).revision, { id: 'my-gateway', models: [{ id: 'm1' }] }));
+  assert.equal(again.providers.find(p => p.id === 'my-gateway').name, 'Мой шлюз');
+
+  // Старая запись без человеческого имени остаётся управляемой и без подписи.
+  const legacy = await service.upsert(draft((await service.list()).revision, { id: 'tb-legacy' }));
+  assert.equal(legacy.providers.find(p => p.id === 'tb-legacy').managed, true);
+  assert.equal(legacy.providers.find(p => p.id === 'tb-legacy').name, null);
+});
+
+test('слишком длинное название отклоняется', async t => {
+  const { dir, service } = await fixture(); t.after(() => fs.rm(dir, { recursive: true, force: true }));
+  const revision = (await service.list()).revision;
+  await rejectCode(service.upsert(draft(revision, { id: 'too-long', name: 'x'.repeat(61) })), 'INPUT_INVALID');
 });

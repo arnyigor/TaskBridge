@@ -38,7 +38,7 @@ class ChatGapRepairTest {
         """{"taskId":"t","seq":$seq,"type":"USER_MESSAGE","data":{"text":"$text"}}"""
 
     /** Клиент, у которого история = [windows] (запросы с tail), поток = [sseBody]. */
-    private class Fixture(windows: List<String>, private val rawBody: String, sseBody: String) {
+    private class Fixture(windows: List<String>, private val rawBody: String, sseBody: String, private val snapshotSeq: Long = 0) {
         val windowCalls = AtomicInteger()
         val rawCalls = AtomicInteger()
         private val pages = ConcurrentLinkedQueue(windows)
@@ -57,7 +57,7 @@ class ChatGapRepairTest {
                 path.endsWith("/stream") ->
                     respond(sseBody, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"))
                 path.endsWith("/approvals") -> respond("[]", HttpStatusCode.OK, json)
-                else -> respond("""{"id":"t","status":"SUCCEEDED"}""", HttpStatusCode.OK, json)
+                else -> respond("""{"id":"t","status":"SUCCEEDED","snapshotSeq":$snapshotSeq}""", HttpStatusCode.OK, json)
             }
         })
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -72,6 +72,27 @@ class ChatGapRepairTest {
         fun close() {
             scope.cancel()
             http.close()
+        }
+    }
+
+    @Test
+    fun `a heartbeat repairs missing tail events without a later live event`() = runBlocking<Unit> {
+        val fixture = Fixture(
+            windows = listOf("""{"events":[${user(1, "one")}],"reachedStart":false}"""),
+            rawBody = """[${user(2, "two")},{"taskId":"t","seq":3,"type":"TASK_SUCCEEDED"}]""",
+            sseBody = ": heartbeat\n\n",
+            snapshotSeq = 3,
+        )
+        try {
+            fixture.session.start()
+            withTimeout(5_000) {
+                while (fixture.session.state.value.chat.cursor < 3) delay(20)
+            }
+            assertEquals(listOf("one", "two"), fixture.userTexts())
+            assertEquals(1, fixture.rawCalls.get())
+            assertEquals(false, fixture.session.state.value.chat.items.filterIsInstance<ChatItem.Assistant>().last().active)
+        } finally {
+            fixture.close()
         }
     }
 

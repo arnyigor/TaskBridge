@@ -346,6 +346,50 @@ async function fetchOpenAiJson(fetchImpl, url, auth, timeoutMs) {
   return response.json();
 }
 
+// Undocumented ChatGPT endpoint, independently observed in Codex clients; may change.
+// Never retry a consume automatically: an ambiguous response may already have spent a credit.
+const resetRequests = new Map();
+let resetInFlight = false;
+export function consumeOpenAiReset(config = {}, options = {}) {
+  const requestId = options.requestId;
+  const fail = (code, message) => Object.assign(new Error(message), { code });
+  if (!/^[a-f0-9-]{32,64}$/i.test(requestId || '')) return Promise.reject(fail('INPUT_INVALID', 'Некорректный ID запроса сброса.'));
+  if (resetRequests.has(requestId)) return resetRequests.get(requestId);
+  if (resetInFlight) return Promise.reject(fail('CONFLICT', 'Сброс уже выполняется.'));
+  if (resetRequests.size >= 1000) return Promise.reject(fail('CONFLICT', 'Лимит запросов сброса; перезапустите сервер.'));
+  resetInFlight = true;
+  const work = (async () => {
+    const auth = await readOpenAiAuth(config, options.env || process.env);
+    if (!auth) throw fail('INPUT_INVALID', 'Вход Codex не найден.');
+    const baseUrl = String(config.baseUrl || 'https://chatgpt.com/backend-api').replace(/\/+$/, '');
+    const fetchImpl = options.fetch || fetch;
+    const timeoutMs = Number(config.timeoutMs || options.timeoutMs || 10000);
+    const credits = await fetchOpenAiJson(fetchImpl, `${baseUrl}/wham/rate-limit-reset-credits`, auth, timeoutMs);
+    const credit = (Array.isArray(credits?.credits) ? credits.credits : [])
+      .filter(c => c?.status === 'available' && typeof c.id === 'string' && c.id
+        && (!c.expires_at || Date.parse(c.expires_at) > Date.now()))
+      .sort((a, b) => (Date.parse(a.expires_at) || Infinity) - (Date.parse(b.expires_at) || Infinity))[0];
+    if (!credit) throw fail('CONFLICT', 'Нет доступного кредита сброса. Обновите данные провайдера.');
+    const headers = { Authorization: `Bearer ${auth.accessToken}`, 'OpenAI-Beta': 'codex-1',
+      originator: 'Codex Desktop', Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (auth.accountId) headers['ChatGPT-Account-ID'] = auth.accountId;
+    let response;
+    try {
+      response = await fetchImpl(`${baseUrl}/wham/rate-limit-reset-credits/consume`, {
+        method: 'POST', headers, redirect: 'error', signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify({ credit_id: credit.id, redeem_request_id: requestId }),
+      });
+    } catch {
+      throw fail('CONFLICT', 'Результат сброса неизвестен. Обновите лимиты; не повторяйте сброс автоматически.');
+    }
+    if (!response.ok) throw fail('CONFLICT', `Сброс не подтверждён (HTTP ${response.status}). Обновите лимиты перед повтором.`);
+    cache.delete(`openai-codex:${auth.key}`);
+    return { 'openai-codex': await readOpenAiCodexStatus(config, { ...options, noCache: true, cacheOnly: false, minRefreshMs: 0 }) };
+  })().finally(() => { resetInFlight = false; });
+  resetRequests.set(requestId, work);
+  return work;
+}
+
 export async function readOpenAiCodexStatus(config = {}, options = {}) {
   const env = options.env || process.env;
   let auth = null;

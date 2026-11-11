@@ -52,6 +52,140 @@
     if (node.value !== value) node.setAttribute('data-value', value);
   };
   const splitLines = value => String(value || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  // Настройки одной модели и её пресеты (шаги 02–03): свой маршрут, свой файл.
+  const MODEL_KNOWN = ['promptTemplate', 'timeoutMs', 'contextWindow', 'reasoning', 'cost'];
+  const apiProfiles = async (endpoint, options = {}) => {
+    const response = await fetch(`/api/model-profiles${endpoint}`, {
+      credentials: 'same-origin', cache: 'no-store', ...options,
+      headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    return body;
+  };
+  let modelTarget = null;
+  let modelPresets = [];
+  let modelPresetsRevision = null;
+  let presetId = null;
+
+  const parseObject = (value, label) => {
+    const text = String(value || '').trim();
+    if (!text) return null;
+    let parsed;
+    try { parsed = JSON.parse(text); } catch { throw new Error(`${label}: нужен JSON-объект.`); }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error(`${label}: нужен JSON-объект.`);
+    return parsed;
+  };
+
+  const renderModelPresets = () => {
+    const list = el('model-presets-list');
+    list.replaceChildren();
+    const forModel = modelPresets.filter(p => p.providerId === modelTarget?.providerId && p.modelId === modelTarget?.modelId);
+    if (!forModel.length) {
+      const line = document.createElement('p');
+      line.className = 'muted'; line.textContent = 'Пресетов пока нет';
+      list.append(line);
+      return;
+    }
+    for (const profile of forModel) {
+      const row = document.createElement('div');
+      row.className = 'entry static';
+      const name = document.createElement('span');
+      name.textContent = `${profile.name}${profile.id === presetId ? ' · применён' : ''}`;
+      const apply = document.createElement('button');
+      apply.type = 'button'; apply.className = 'subtle small'; apply.textContent = 'Применить';
+      apply.addEventListener('click', () => {
+        applyPreset(profile);
+        status(`Пресет «${profile.name}» подставлен в поля. В файл он уйдёт по «Сохранить настройки».`, 'success');
+      });
+      const remove = document.createElement('button');
+      remove.type = 'button'; remove.className = 'subtle small'; remove.textContent = 'Удалить';
+      remove.addEventListener('click', async () => {
+        if (busy || !modelPresetsRevision) return;
+        if (!confirm(`Удалить пресет «${profile.name}»?`)) return;
+        busy = true;
+        try {
+          const result = await apiProfiles(`/${encodeURIComponent(profile.id)}`, {
+            method: 'DELETE', body: JSON.stringify({ revision: modelPresetsRevision }),
+          });
+          modelPresets = result.profiles; modelPresetsRevision = result.revision;
+          if (presetId === profile.id) presetId = null;
+          renderModelPresets();
+          status(`Пресет «${profile.name}» удалён.`, 'success');
+        } catch (error) { status(error.message, 'error'); }
+        finally { busy = false; }
+      });
+      row.append(name, apply, remove);
+      list.append(row);
+    }
+  };
+
+  const applyPreset = profile => {
+    const settings = profile?.settings || {};
+    const unknown = {};
+    for (const [key, value] of Object.entries(settings)) if (!MODEL_KNOWN.includes(key)) unknown[key] = value;
+    setValue('model-prompt', settings.promptTemplate || '');
+    setValue('model-timeout', settings.timeoutMs ?? '');
+    setValue('model-context', settings.contextWindow ?? '');
+    setValue('model-reasoning', settings.reasoning || '');
+    setValue('model-cost', settings.cost ? JSON.stringify(settings.cost) : '');
+    setValue('model-extra', Object.keys(unknown).length ? JSON.stringify(unknown) : '');
+    setValue('model-preset-name', profile.name);
+    presetId = profile.id;
+    renderModelPresets();
+  };
+
+  const closeModelSettings = () => {
+    modelTarget = null; presetId = null;
+    el('model-settings').classList.add('hidden');
+    el('model-settings-status').textContent = '';
+  };
+
+  const openModelSettings = async (providerId, modelId, settings) => {
+    modelTarget = { providerId, modelId };
+    presetId = null;
+    el('model-settings').classList.remove('hidden');
+    el('model-settings-name').textContent = modelId;
+    el('model-settings-status').textContent = '';
+    setValue('model-prompt', settings?.promptTemplate || '');
+    setValue('model-timeout', settings?.timeoutMs ?? '');
+    setValue('model-context', settings?.contextWindow ?? '');
+    setValue('model-reasoning', settings?.reasoning || '');
+    setValue('model-cost', settings?.cost ? JSON.stringify(settings.cost) : '');
+    const unknown = {};
+    for (const [key, value] of Object.entries(settings || {})) if (!MODEL_KNOWN.includes(key)) unknown[key] = value;
+    setValue('model-extra', Object.keys(unknown).length ? JSON.stringify(unknown) : '');
+    setValue('model-preset-name', '');
+    try {
+      const page = await apiProfiles('');
+      modelPresets = Array.isArray(page.profiles) ? page.profiles : [];
+      modelPresetsRevision = page.revision || null;
+    } catch { modelPresets = []; modelPresetsRevision = null; }
+    renderModelPresets();
+  };
+
+  const modelSettingsPayload = () => {
+    const payload = {};
+    const prompt = readValue('model-prompt').trim();
+    if (prompt) payload.promptTemplate = prompt;
+    const timeout = readValue('model-timeout').trim();
+    if (timeout) {
+      if (!/^\d+$/.test(timeout)) throw new Error('Таймаут — целое число миллисекунд.');
+      payload.timeoutMs = Number(timeout);
+    }
+    const context = readValue('model-context').trim();
+    if (context) {
+      if (!/^\d+$/.test(context)) throw new Error('Контекст — целое число токенов.');
+      payload.contextWindow = Number(context);
+    }
+    const reasoning = readValue('model-reasoning');
+    if (reasoning) payload.reasoning = reasoning;
+    const cost = parseObject(readValue('model-cost'), 'Стоимость');
+    if (cost) payload.cost = cost;
+    const extra = parseObject(readValue('model-extra'), 'Доп. поля');
+    if (extra) Object.assign(payload, extra);
+    return payload;
+  };
   const draftFields = () => ({
     id: readValue('provider-id').trim(),
     baseUrl: readValue('base-url').trim(),
@@ -155,6 +289,17 @@
         finally { busy = false; }
       });
       row.append(name, remove);
+      // Настройка модели — отдельный диалог: адрес и ключ подключения не меняются,
+      // а settings живут у модели и переживают пересохранение подключения.
+      const tune = document.createElement('button');
+      tune.type = 'button';
+      tune.className = 'subtle small';
+      tune.textContent = model.settings ? 'Настроить (изменена)' : 'Настроить';
+      tune.addEventListener('click', async () => {
+        await openModelSettings(item.id, model.id, model.settings);
+        status(`Настройки модели ${model.id}: сохранение уйдёт только в settings этой модели.`);
+      });
+      row.append(tune);
       list.append(row);
     }
   };
@@ -180,6 +325,9 @@
   };
   const show = item => {
     selected = item?.id || null;
+    // Панель настроек модели относится к конкретному подключению: при переходе на
+    // другое она закрывается, чтобы settings одного не попали в другое.
+    if (modelTarget && modelTarget.providerId !== (item?.id || null)) closeModelSettings();
     el('editor-title').textContent = item ? (item.managed ? 'Настройки подключения' : 'Существующее подключение') : 'Новое подключение';
     setValue('provider-id', item?.id || 'tb-');
     el('provider-id').disabled = !!item;
@@ -309,6 +457,51 @@
       revision = result.revision; profiles = result.providers;
       show(null); status('Провайдер удалён. Оригинальный models.json сохранён в резервной копии.', 'success');
     } catch (e) { status(e.message, 'error'); }
+    finally { busy = false; }
+  });
+  el('model-settings-close').addEventListener('click', () => closeModelSettings());
+  el('model-settings-save').addEventListener('click', async () => {
+    if (!modelTarget || busy || !revision) return;
+    let payload;
+    try { payload = modelSettingsPayload(); }
+    catch (error) { el('model-settings-status').textContent = error.message; return; }
+    busy = true;
+    el('model-settings-status').textContent = 'Сохранение…';
+    try {
+      const result = await api(`/${encodeURIComponent(modelTarget.providerId)}/models/${encodeURIComponent(modelTarget.modelId)}/settings`, {
+        method: 'PUT', body: JSON.stringify({ settings: payload, revision }),
+      });
+      revision = result.revision; profiles = result.providers;
+      const updated = profiles.find(p => p.id === modelTarget.providerId);
+      show(updated);
+      el('model-settings-status').textContent = 'Сохранено. Новая сессия возьмёт настройки; текущая — не обязательно.';
+      status(`Настройки модели ${modelTarget.modelId} сохранены.`, 'success');
+    } catch (error) { el('model-settings-status').textContent = error.message; }
+    finally { busy = false; }
+  });
+  el('model-preset-save').addEventListener('click', async () => {
+    if (!modelTarget || busy || !modelPresetsRevision) return;
+    const name = readValue('model-preset-name').trim();
+    if (!name) { el('model-settings-status').textContent = 'Укажите имя пресета.'; return; }
+    let payload;
+    try { payload = modelSettingsPayload(); }
+    catch (error) { el('model-settings-status').textContent = error.message; return; }
+    busy = true;
+    el('model-settings-status').textContent = 'Сохранение пресета…';
+    try {
+      const result = await apiProfiles('', {
+        method: 'PUT',
+        body: JSON.stringify({
+          revision: modelPresetsRevision, ...(presetId ? { id: presetId } : {}),
+          name, providerId: modelTarget.providerId, modelId: modelTarget.modelId, settings: payload,
+        }),
+      });
+      modelPresets = result.profiles; modelPresetsRevision = result.revision;
+      presetId = result.profiles.find(p => p.providerId === modelTarget.providerId
+        && p.modelId === modelTarget.modelId && p.name === name)?.id || null;
+      renderModelPresets();
+      el('model-settings-status').textContent = `Пресет «${name}» сохранён в model-profiles.json.`;
+    } catch (error) { el('model-settings-status').textContent = error.message; }
     finally { busy = false; }
   });
   refresh({ preserve: false }).then(() => show(null)).catch(e => status(`Не удалось прочитать настройки: ${e.message}`, 'error'));

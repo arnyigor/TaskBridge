@@ -77,6 +77,43 @@
             </div>
           </fieldset>
           <p id="draft-preview" class="hint" role="status" aria-live="polite"></p>
+          <!-- Настройки одной модели (шаг 02) и её пресеты (шаг 03). Отдельно от формы
+               подключения: сохранение подключения не должно сбрасывать ручную настройку
+               модели, а пресет хранится в model-profiles.json, не в конфиге Pi. -->
+          <fieldset id="model-settings" class="hidden">
+            <legend>Настройки модели <code id="model-settings-name"></code></legend>
+            <label for="model-prompt">Prompt-шаблон</label>
+            <textarea id="model-prompt" rows="3" spellcheck="false"></textarea>
+            <label for="model-timeout">Таймаут, мс</label>
+            <input id="model-timeout" inputmode="numeric" autocomplete="off" />
+            <label for="model-context">Контекст, токенов</label>
+            <input id="model-context" inputmode="numeric" autocomplete="off" />
+            <label for="model-reasoning">Reasoning</label>
+            <select id="model-reasoning">
+              <option value="">не задан</option>
+              <option value="auto">auto</option>
+              <option value="on">on</option>
+              <option value="off">off</option>
+            </select>
+            <label for="model-cost">Стоимость, JSON-объект (необязательно)</label>
+            <textarea id="model-cost" rows="2" spellcheck="false" placeholder='{"input": 0.5, "output": 1.5}'></textarea>
+            <label for="model-extra">Доп. поля провайдера, JSON-объект (необязательно)</label>
+            <textarea id="model-extra" rows="3" spellcheck="false" placeholder='{"thinkingLevelMap": {"max": "max"}}'></textarea>
+            <div class="actions">
+              <button id="model-settings-save" type="button">Сохранить настройки</button>
+              <button id="model-settings-close" class="subtle" type="button">Закрыть</button>
+              <span id="model-settings-status" class="hint" role="status" aria-live="polite"></span>
+            </div>
+            <fieldset id="model-presets">
+              <legend>Пресеты этой модели</legend>
+              <div id="model-presets-list" class="entries"></div>
+              <div class="actions">
+                <input id="model-preset-name" placeholder="Имя пресета" maxlength="60" autocomplete="off" />
+                <button id="model-preset-save" class="subtle" type="button">Сохранить как пресет</button>
+              </div>
+              <p class="hint">Пресет сам ничего не меняет: «Применить» подставляет значения в поля, в models.json они уходят только по «Сохранить настройки».</p>
+            </fieldset>
+          </fieldset>
           <div class="actions">
             <button id="save" type="submit">Сохранить</button>
             <button id="test" class="subtle" type="button" disabled>Проверить /models</button>

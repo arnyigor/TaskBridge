@@ -108,7 +108,7 @@ fun NewSessionSheet(
             model = chosen
             // Уровень по умолчанию мог быть сохранён для другой модели, а карта у
             // каждой своя (Strata не принимает «minimal»/«max»).
-            thinking = clampThinkingLevel(loaded.defaultThinkingLevel, thinkingChoices(chosen, loaded.thinkingLevels))
+            thinking = clampThinkingLevel(loaded.defaultThinkingLevel, thinkingChoices(chosen, loaded))
         }
     }
 
@@ -219,11 +219,19 @@ fun NewSessionSheet(
         val modelPickerInfo = remember(sessionListState.info, settingsState.providerStatuses) {
             sessionListState.info?.let { info -> info.copy(providerStatuses = info.providerStatuses + settingsState.providerStatuses) }
         }
-        ModelPicker(catalog, model, graph.settings, info = modelPickerInfo, onPick = { model = it; thinking = clampThinkingLevel(thinking, thinkingChoices(it, catalog?.thinkingLevels.orEmpty())) })
+        ModelPicker(catalog, model, graph.settings, info = modelPickerInfo, onPick = { picked ->
+            // «off» — единственный уровень модели без размышлений. Переносить его на
+            // рассуждающую модель бессмысленно: человек видел «None» вместо уровней.
+            val previousCouldThink = thinkingChoices(model, catalog).size > 1
+            val levels = thinkingChoices(picked, catalog)
+            model = picked
+            thinking = if (!previousCouldThink && thinking == "off") clampThinkingLevel(catalog?.defaultThinkingLevel, levels)
+            else clampThinkingLevel(thinking, levels)
+        })
         // Уровни — из карты выбранной модели: у локальных (Strata) набор другой,
         // чем у модели Pi по умолчанию, и «High» там означает xhigh.
-        val levels = thinkingChoices(model, catalog?.thinkingLevels.orEmpty())
-        if (levels.isNotEmpty() && model?.reasoning != false) {
+        val levels = thinkingChoices(model, catalog)
+        if (thinkingLevelsShown(model, catalog)) {
             FieldLabel("Размышления", top = 16)
             ThinkingPicker(levels, thinking, onPick = { thinking = it })
         }
@@ -556,14 +564,38 @@ fun ThinkingPicker(levels: List<String>, current: String?, onPick: (String) -> U
 }
 
 /**
+ * Модель из каталога: у задачи, пришедшей в списке или из живого состояния Pi,
+ * `reasoning` и `thinkingLevels` не заполнены (сервер сокращает модель до
+ * provider/id, чтобы не раздувать список), а каталог знает их точно.
+ */
+internal fun catalogEntry(model: ModelRef?, catalog: ModelCatalog?): ModelRef? =
+    catalog?.models?.firstOrNull { candidate ->
+        candidate.id == model?.id && (model?.provider.isNullOrBlank() || candidate.provider == model.provider)
+    }
+
+/**
  * Уровни для пикера: карта выбранной модели, а не общий список каталога (тот
  * относится к текущей модели Pi по умолчанию и для локальных моделей неверен).
- * Пустая карта (модель ещё не выбрана, или её нет в каталоге) — откат на общий
- * список, чтобы пикер не остался пустым.
+ *
+ * Порядок: уровни самой модели → уровни той же модели из каталога (задача из
+ * списка модель сокращает) → общий список каталога.
  */
-internal fun thinkingChoices(model: ModelRef?, catalogLevels: List<String>): List<String> {
+internal fun thinkingChoices(model: ModelRef?, catalog: ModelCatalog?): List<String> {
     val own = model?.thinkingLevels.orEmpty()
-    return if (own.isNotEmpty()) own else catalogLevels
+    if (own.isNotEmpty()) return own
+    val fromCatalog = catalogEntry(model, catalog)?.thinkingLevels.orEmpty()
+    if (fromCatalog.isNotEmpty()) return fromCatalog
+    return catalog?.thinkingLevels.orEmpty()
+}
+
+/**
+ * Умеет ли модель размышлять. Признак тоже берётся из каталога, когда у самой
+ * модели его нет: иначе пикер скрывался бы у рассуждающих моделей и показывал
+ * один «None» у тех, что не умеют.
+ */
+internal fun thinkingLevelsShown(model: ModelRef?, catalog: ModelCatalog?): Boolean {
+    val reasoning = model?.reasoning ?: catalogEntry(model, catalog)?.reasoning
+    return reasoning != false && thinkingChoices(model, catalog).isNotEmpty()
 }
 
 /**

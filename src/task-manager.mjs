@@ -2721,6 +2721,43 @@ export class TaskManager extends EventEmitter {
     return this.#admit(() => this.nativeSessions.importSession(input));
   }
 
+  /**
+   * Длительность хода: от `agent_start` до терминального кадра. Считается здесь,
+   * по часам сервера: клиент это число только отображает, поэтому переподключение
+   * и перезагрузка истории не меняют результат.
+   *
+   * В длительность входит весь ход — ожидание модели, генерация и выполнение
+   * инструментов; TTFT идёт отдельным числом. `_promptStartedAt` для этого не
+   * годится: `#recordGenerationSpeed` обнуляет его на `message_end`, который
+   * приходит раньше `agent_settled`.
+   */
+  #recordTurnMetrics(task, finishedAt) {
+    const startedAt = Number(task._turnStartedAt || 0);
+    if (!startedAt) return;
+    const finished = Number(finishedAt) || Date.now();
+    // Длительность — по монотонным часам процесса: перевод системного времени
+    // посреди хода не должен дать отрицательное или скакнувшее значение.
+    const monoStart = Number(task._turnStartedMono || 0);
+    const durationMs = monoStart > 0 ? Math.round(performance.now() - monoStart) : Math.round(finished - startedAt);
+    const tg = task._turnMessageCount === 1 ? Number(task._turnMeasuredTg) : NaN;
+    task.turnMetrics = {
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date(finished).toISOString(),
+      durationMs: Math.max(0, durationMs),
+      firstTokenMs: task._turnFirstTokenMono != null && monoStart > 0
+        ? Math.max(0, Math.round(task._turnFirstTokenMono - monoStart)) : null,
+      segmentId: task._turnStartSeq != null ? String(task._turnStartSeq) : null,
+      startEventSeq: task._turnStartSeq ?? null,
+      messageEventSeq: task._turnMessageSeq ?? null,
+      outputTokensPerSecond: Number.isFinite(tg) && tg > 0 ? tg : null
+    };
+    task._turnStartedAt = 0;
+    task._turnStartedMono = 0;
+    task._turnFirstTokenAt = 0;
+    task.updatedAt = now();
+    return task.turnMetrics;
+  }
+
   async renameTask(id, title) {
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
@@ -2738,10 +2775,12 @@ export class TaskManager extends EventEmitter {
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
     const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
+      _turnStartedAt, _turnStartedMono, _turnFirstTokenAt, _turnFirstTokenMono, _turnStartSeq, _turnMessageSeq, _turnMeasuredTg, _turnMessageCount,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
+      turnMetrics: task.turnMetrics || null,
       // Шаг C-B: версия снимка — seq последнего событие-факта этой сессии. Клиент
       // сравнивает её со своим курсором и не даёт старому GET откатить «лицо» хода
       // (фазу, стадию, статус), которую уже принесло SSE.
@@ -4624,6 +4663,14 @@ export class TaskManager extends EventEmitter {
     // отрисованного сообщения.
     task._lastProgressAt = Date.now();
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
+    // Ход закрыт: длительность фиксируется ДО публикации терминального статуса,
+    // иначе снимок задачи уйдёт клиенту без неё. Событие TURN_METRICS нужно не
+    // для текущего хода (он виден в снимке задачи), а для истории: у каждого
+    // ответа в ленте своё время, а снимок знает только последнее.
+    if (frame.type === 'agent_settled') {
+      const metrics = this.#recordTurnMetrics(task, Date.now());
+      if (metrics) await this.#event(task, 'TURN_METRICS', 'Время хода', { ...metrics });
+    }
     // STOP must stick. Pi keeps sending the frames it had already queued when the
     // abort arrived — the tail of the half-finished message, or an `agent_start`
     // for a turn it was about to begin — and handled like any other they revived
@@ -4791,10 +4838,31 @@ export class TaskManager extends EventEmitter {
       task._firstTokenAt = 0;
       task._firstDeltaAt = 0;
       task._lastDeltaAt = 0;
+      // Метки хода живут до `agent_settled`: к этому моменту `_promptStartedAt`
+      // уже обнулён учётом скорости, а длительность всего хода ещё нужна.
+      task._turnStartedAt = task._promptStartedAt;
+      task._turnStartedMono = performance.now();
+      task._turnFirstTokenAt = 0;
+      task._turnFirstTokenMono = null;
+      task._turnStartSeq = null;
+      task._turnMessageSeq = null;
+      task._turnMeasuredTg = null;
+      task._turnMessageCount = 0;
+      task.turnMetrics = null;
       task.updatedAt = now();
       await this.store.save(this.#publicTask(task));
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      task._turnMessageCount = (task._turnMessageCount || 0) + 1;
+      // Pi names the model but not always the provider, and never says whether the
+      // engine is local. Both are facts the server already knows; guessing them on
+      // the client from a model name is how "local model with cloud price" happens.
+      const ranModel = task.model || task.requestedModel;
+      if (ranModel) {
+        if (frame.message.provider == null && ranModel.provider) frame.message.provider = ranModel.provider;
+        if (frame.message.model == null) frame.message.model = ranModel.id;
+      }
+      if (frame.message.isLocal == null) frame.message.isLocal = this.#usesLocalRuntime(task);
       if (frame.message.usage?.totalTokens > 0) task.lastUsage = frame.message.usage;
       if (frame.message.stopReason === 'error') task._modelError = frame.message.errorMessage || 'Модель завершила ответ с ошибкой.';
       // A message that produced no token at all is a failed attempt (connection
@@ -4803,7 +4871,8 @@ export class TaskManager extends EventEmitter {
       // shows. An answer cut short by an error keeps its sample — tokens were
       // really generated and their rate is real.
       if (frame.message.stopReason !== 'error' || Number(frame.message.usage?.output || 0) > 0) {
-        await this.#recordGenerationSpeed(task);
+        const measured = await this.#recordGenerationSpeed(task);
+        task._turnMeasuredTg = Number(frame.message.usage?.output || 0) > 0 ? measured?.tg ?? null : null;
       }
     }
     if (frame.type === 'message_end' || frame.type === 'compaction_end' || frame.type === 'auto_compaction_end') {
@@ -4811,7 +4880,11 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
     }
 
-    await this.#event(task, 'PI_EVENT', summarizePiEvent(frame), { pi: storedPiFrame(frame) }, false);
+    const piEvent = await this.#event(task, 'PI_EVENT', summarizePiEvent(frame), { pi: storedPiFrame(frame) }, false);
+    if (frame.type === 'agent_start') task._turnStartSeq = piEvent?.seq ?? null;
+    if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      task._turnMessageSeq = piEvent?.seq ?? null;
+    }
 
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
       await this.store.pruneStreamingDeltas(task.id).catch(() => {});
@@ -4829,6 +4902,10 @@ export class TaskManager extends EventEmitter {
   // of it, because that is prefill and is reported as its own number.
   #trackStreamTime(task) {
     const at = Date.now();
+    if (!task._turnFirstTokenAt) {
+      task._turnFirstTokenAt = at;
+      task._turnFirstTokenMono = performance.now();
+    }
     if (!task._firstTokenAt && task._promptStartedAt) {
       task._firstTokenAt = at;
       task._promptMs = Math.max(0, at - task._promptStartedAt);
@@ -4901,6 +4978,7 @@ export class TaskManager extends EventEmitter {
     // Скорости сессии, а не одного хода: PP у кеш-попаданий отсутствует, поэтому
     // копятся только те ходы, где число было (см. accumulateSessionSpeeds).
     task.speeds = accumulateSessionSpeeds(task.speeds, metrics);
+    return metrics;
   }
 
   #waitForSettle(taskId, timeoutMs) {
@@ -5316,6 +5394,10 @@ export class TaskManager extends EventEmitter {
     // ожидание провайдера снимается здесь же: иначе остановленная сессия остаётся
     // с «ждём провайдера» до следующего хода (пункт 1.2 плана).
     await this.#clearProviderWait(task, 'cancelled', { announce: false });
+    // Прерванный ход тоже имеет фактическое время — но не «до конца ответа».
+    // Pi после STOP может не прислать `agent_settled`, поэтому фиксируем здесь.
+    const metrics = this.#recordTurnMetrics(task, Date.now());
+    if (metrics) await this.#event(task, 'TURN_METRICS', 'Время хода', { ...metrics });
     this.#terminalPublication.hold(task, this.#publicTask(task));
     task.status = 'CANCELLED';
     task.current = 'Cancelled';
@@ -6965,6 +7047,10 @@ export class TaskManager extends EventEmitter {
     // Consumers may close their stream at TASK_*: publish the runtime change
     // first so the terminal event really is the final event of this turn.
     if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) {
+      // Crashes and transport failures may never produce agent_settled. Close
+      // the measurement before the terminal journal event in those paths too.
+      const metrics = this.#recordTurnMetrics(task, Date.now());
+      if (metrics) await this.#recordEvent(task, 'TURN_METRICS', 'Время хода', { ...metrics }, false);
       const change = this.#runtimeChange(task);
       if (change) await this.#recordEvent(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason: type }, false);
     }

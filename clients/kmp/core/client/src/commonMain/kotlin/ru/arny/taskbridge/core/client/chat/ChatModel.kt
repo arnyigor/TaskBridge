@@ -1,6 +1,7 @@
 package ru.arny.taskbridge.core.client.chat
 
 import ru.arny.taskbridge.core.api.FileRef
+import ru.arny.taskbridge.core.api.TurnMetrics
 
 /** What the chat screen renders: immutable, rebuilt after every change. */
 data class ChatSnapshot(
@@ -63,6 +64,12 @@ sealed interface ChatItem {
         val usage: AnswerUsage? = null,
         /** Модель, которой считались деньги; null — ответ до сбора usage. */
         val usageModel: String? = null,
+        /** Explicit server knowledge, not a guess based on a model name. */
+        val usageIsLocal: Boolean? = null,
+        /** Метрики хода: длительность, TTFT и скорость генерации — считались сервером. */
+        val turnMetrics: TurnMetrics? = null,
+        /** Сколько сегментов хода суммировано в [turnMetrics] («Продолжить»); 0 или 1 — один. */
+        val metricsSegments: Int = 0,
         /** Arguments are still streaming; this is not tool execution yet. */
         val generatingToolCall: Boolean = false,
     ) : ChatItem {
@@ -72,14 +79,54 @@ sealed interface ChatItem {
     data class Note(override val id: String, val text: String) : ChatItem
 }
 
-/** Токены одного ответа: попадания в кэш, обычный вход и вывод. */
-data class AnswerUsage(val hit: Long = 0, val miss: Long = 0, val out: Long = 0) {
-    val total: Long get() = hit + miss + out
-    val isEmpty: Boolean get() = miss <= 0 && out <= 0
+/**
+ * Токены одного ответа: попадания в кэш, обычный вход, вывод и запись в кэш.
+ *
+ * Поля nullable намеренно: «провайдер не сообщил число» и «провайдер сообщил 0» —
+ * разные факты, и таблица под ответом показывает их по-разному (неизвестную
+ * строку скрывает, известный ноль показывает).
+ */
+data class AnswerUsage(
+    val hit: Long? = null,
+    val miss: Long? = null,
+    val out: Long? = null,
+    /** Запись в кэш — платная величина, но в сумму токенов хода не входит. */
+    val cacheWrite: Long? = null,
+    /** Provider total disagrees with complete validated components. The UI still uses the components. */
+    val totalMismatch: Boolean = false,
+) {
+    /** Сумма только известных слагаемых; cacheWrite в неё не входит. null — складывать нечего. */
+    val total: Long?
+        get() {
+            val known = listOfNotNull(hit, miss, out).filter { it >= 0 }
+            if (known.isEmpty()) return null
+            var sum = 0L
+            for (value in known) {
+                if (value > Long.MAX_VALUE - sum) return null
+                sum += value
+            }
+            return sum
+        }
+
+    /** Расхода не было: ни входа, ни выхода (пустой usage прерванного вызова). */
+    val isEmpty: Boolean get() = listOfNotNull(hit, miss, out, cacheWrite).none { it > 0 }
 
     operator fun plus(other: AnswerUsage?): AnswerUsage {
         if (other == null) return this
-        return AnswerUsage(hit + other.hit, miss + other.miss, out + other.out)
+        return AnswerUsage(
+            hit = add(hit, other.hit),
+            miss = add(miss, other.miss),
+            out = add(out, other.out),
+            cacheWrite = add(cacheWrite, other.cacheWrite),
+            totalMismatch = totalMismatch || other.totalMismatch,
+        )
+    }
+
+    private fun add(a: Long?, b: Long?): Long? = when {
+        a == null -> b
+        b == null -> a
+        a < 0 || b < 0 || a > Long.MAX_VALUE - b -> null
+        else -> a + b
     }
 }
 

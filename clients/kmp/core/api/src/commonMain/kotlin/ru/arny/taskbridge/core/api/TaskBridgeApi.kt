@@ -692,6 +692,11 @@ class TaskBridgeApi(
     suspend fun deleteLibraryModel(id: String): LibraryDeletion =
         call(HttpMethod.Post, "/api/library/delete", LibraryDeletion.serializer(), buildJsonObject { put("id", id) })
 
+    /** Explicit credit spend; never call as part of polling or automatic retries. */
+    suspend fun useCodexReset(requestId: String): Map<String, ProviderStatus> =
+        call(HttpMethod.Post, "/api/providers/openai-codex/reset", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),
+            buildJsonObject { put("confirmed", true); put("requestId", requestId) })
+
     suspend fun refreshProvider(provider: String): Map<String, ProviderStatus> =
         call(HttpMethod.Post, "/api/providers/refresh", kotlinx.serialization.builtins.MapSerializer(String.serializer(), ProviderStatus.serializer()),
             buildJsonObject { put("provider", provider) })
@@ -714,6 +719,10 @@ class TaskBridgeApi(
         keyEnv: String,
         models: List<String>,
         api: String = "openai-completions",
+        /** Поля, которые получат НОВЫЕ модели этого подключения (reasoning и т.д.). */
+        modelDefaults: JsonObject? = null,
+        /** Человеческое название записи: сервер пишет его после метки владения. */
+        name: String? = null,
     ): ProviderProfilesPage =
         call(HttpMethod.Put, "/api/provider-profiles", ProviderProfilesPage.serializer(), buildJsonObject {
             put("revision", revision)
@@ -721,6 +730,8 @@ class TaskBridgeApi(
             put("baseUrl", baseUrl)
             put("keyEnv", keyEnv)
             put("api", api)
+            if (modelDefaults != null) put("modelDefaults", modelDefaults)
+            if (!name.isNullOrBlank()) put("name", name)
             put("models", kotlinx.serialization.json.JsonArray(models.map { JsonPrimitive(it) }))
         })
 
@@ -734,6 +745,90 @@ class TaskBridgeApi(
             put("revision", revision)
             put("models", kotlinx.serialization.json.JsonArray(models.map { JsonPrimitive(it) }))
         })
+
+    /**
+     * Сохранить индивидуальные настройки модели (prompt, timeout, контекст, reasoning, cost).
+     * Правится только объект `settings` модели; адрес провайдера и его ключ сервер не трогает.
+     * `settings` — произвольный объект, поэтому передаётся как JsonObject (пустой {} сбрасывает).
+     */
+    suspend fun setModelSettings(
+        provider: String,
+        modelId: String,
+        settings: JsonObject,
+        revision: String,
+    ): ProviderProfilesPage =
+        call(
+            HttpMethod.Put,
+            "/api/provider-profiles/${provider.encodeURLPathPart()}/models/${modelId.encodeURLPathPart()}/settings",
+            ProviderProfilesPage.serializer(),
+            buildJsonObject {
+                put("revision", revision)
+                put("settings", settings)
+            },
+        )
+
+    /** Именованные пресеты моделей (model-profiles.json, шаг 03). */
+    suspend fun listModelProfiles(): ModelProfilesPage =
+        call(HttpMethod.Get, "/api/model-profiles", ModelProfilesPage.serializer())
+
+    /**
+     * Создать или обновить пресет. Без `id` сервер создаёт новый (`p-` + hex);
+     * дубликат имени у той же модели отклоняется `CONFLICT`, а не перезаписывается.
+     */
+    suspend fun saveModelProfile(
+        revision: String,
+        id: String?,
+        name: String,
+        providerId: String,
+        modelId: String,
+        settings: JsonObject,
+    ): ModelProfilesPage =
+        call(HttpMethod.Put, "/api/model-profiles", ModelProfilesPage.serializer(), buildJsonObject {
+            put("revision", revision)
+            if (id != null) put("id", id)
+            put("name", name)
+            put("providerId", providerId)
+            put("modelId", modelId)
+            put("settings", settings)
+        })
+
+    suspend fun deleteModelProfile(id: String, revision: String): ModelProfilesPage =
+        call(HttpMethod.Delete, "/api/model-profiles/${id.encodeURLPathPart()}", ModelProfilesPage.serializer(), buildJsonObject {
+            put("revision", revision)
+        })
+
+    /** Полная запись провайдера для редактора (аналог Pi Manager); секреты — `$REDACTED`. */
+    suspend fun rawProviderProfile(id: String): ProviderRawPage =
+        call(HttpMethod.Get, "/api/provider-profiles/${id.encodeURLPathPart()}/raw", ProviderRawPage.serializer())
+
+    /** Полная замена записи провайдера; `$REDACTED` в ключе/headers означает «не менять». */
+    suspend fun saveProviderRaw(id: String, entry: JsonObject, revision: String): ProviderProfilesPage =
+        call(
+            HttpMethod.Put,
+            "/api/provider-profiles/${id.encodeURLPathPart()}/raw",
+            ProviderProfilesPage.serializer(),
+            buildJsonObject {
+                put("revision", revision)
+                put("entry", entry)
+            },
+        )
+
+    /** Полная замена объекта модели (все поля: name, contextWindow, maxTokens, input, …). */
+    suspend fun saveModelRaw(
+        id: String,
+        modelId: String,
+        model: JsonObject,
+        revision: String,
+    ): ProviderProfilesPage =
+        call(
+            HttpMethod.Put,
+            "/api/provider-profiles/${id.encodeURLPathPart()}/models/${modelId.encodeURLPathPart()}/raw",
+            ProviderProfilesPage.serializer(),
+            buildJsonObject {
+                put("revision", revision)
+                put("model", model)
+            },
+        )
 
     /** Удалить запись из models.json (копия файла остаётся рядом). */
     suspend fun deleteProviderProfile(id: String, revision: String): ProviderProfilesPage =

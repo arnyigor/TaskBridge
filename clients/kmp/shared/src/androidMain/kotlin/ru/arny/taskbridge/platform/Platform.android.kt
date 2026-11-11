@@ -16,6 +16,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
+import android.os.Environment
 import android.os.PowerManager
 import android.provider.MediaStore
 import android.provider.OpenableColumns
@@ -325,21 +326,22 @@ class AndroidPlatformServices(
     override suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String?, open: Boolean): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val safeName = name.substringAfterLast('/').substringAfterLast('\\').ifBlank { "taskbridge-file" }
+            // MediaStore.Downloads появился в API 29: на Android 7–9 обращение к нему
+            // падает, поэтому там файл идёт в собственный каталог приложения.
+            if (Build.VERSION.SDK_INT < 29) return@runCatching saveFileBeforeQ(safeName, bytes)
             val resolver = context.contentResolver
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType ?: "application/octet-stream")
-                if (Build.VERSION.SDK_INT >= 29) put(MediaStore.MediaColumns.IS_PENDING, 1)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: throw IllegalStateException("Не удалось создать файл в Downloads")
             try {
                 resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("Не удалось открыть файл для записи")
-                if (Build.VERSION.SDK_INT >= 29) {
-                    values.clear()
-                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                    resolver.update(uri, values, null, null)
-                }
+                values.clear()
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
                 if (open) {
                     val intent = Intent(Intent.ACTION_VIEW)
                         .setDataAndType(uri, mimeType ?: "application/octet-stream")
@@ -352,6 +354,20 @@ class AndroidPlatformServices(
                 throw e
             }
         }
+    }
+
+    /**
+     * Android 9 и старше: публичная папка Загрузки требует WRITE_EXTERNAL_STORAGE
+     * (приложение его не запрашивает), поэтому файл остаётся в своём внешнем каталоге
+     * приложения — без разрешений, а точный путь показывается в сообщении.
+     */
+    private fun saveFileBeforeQ(name: String, bytes: ByteArray): String {
+        val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+            ?: throw IllegalStateException("Внешнее хранилище недоступно")
+        dir.mkdirs()
+        val target = uniqueDownloadFile(dir, name)
+        target.writeBytes(bytes)
+        return "Сохранено: ${target.absolutePath}"
     }
 
     companion object {
@@ -443,3 +459,18 @@ actual fun rememberPlanFilePicker(startDir: String?, onPicked: (UploadFile) -> U
 }
 
 actual fun workspaceRelativePath(workspace: String?, sourcePath: String?): String? = null
+
+/** Не затирает уже скачанное: второй файл с тем же именем получает « (1)». */
+private fun uniqueDownloadFile(dir: File, name: String): File {
+    val first = File(dir, name)
+    if (!first.exists()) return first
+    // Точка в начале (.gitignore) — часть имени, а не расширение.
+    val dot = name.lastIndexOf('.')
+    val base = if (dot > 0) name.substring(0, dot) else name
+    val extension = if (dot > 0) name.substring(dot) else ""
+    for (index in 1..999) {
+        val next = File(dir, "$base ($index)$extension")
+        if (!next.exists()) return next
+    }
+    return File(dir, "$base-${System.currentTimeMillis()}$extension")
+}

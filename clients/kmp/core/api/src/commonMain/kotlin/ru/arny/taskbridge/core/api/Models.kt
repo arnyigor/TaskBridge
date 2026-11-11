@@ -429,6 +429,8 @@ data class ProviderProfile(
     val id: String = "",
     /** Правку сервер разрешает только записи, которую создал сам TaskBridge (ID `tb-*`). */
     val managed: Boolean = false,
+    /** Человеческое название из формы; null — запись названа только ID. */
+    val name: String? = null,
     val baseUrl: String? = null,
     val api: String? = null,
     val keyEnv: String = "",
@@ -438,7 +440,45 @@ data class ProviderProfile(
     val modelCount: Int = 0,
 )
 
-@Serializable data class ProviderProfileModel(val id: String = "")
+/**
+ * Индивидуальные настройки модели — произвольный объект, который сервер хранит рядом с ID модели.
+ *
+ * Намеренно НЕ типизирован: Pi и разные провайдеры держат тут свои ключи
+ * (`thinkingLevelMap`, `input`, `cost`, …). Типизированный класс отбросил бы всё, что
+ * этому клиенту неизвестно, и первое же сохранение из UI стёрло бы ручную настройку.
+ * Удобные поля (prompt, timeout, контекст, reasoning) вытаскиваются хелперами в форме.
+ */
+@Serializable
+data class ProviderProfileModel(val id: String = "", val settings: JsonObject? = null)
+
+/**
+ * Именованный пресет модели («Быстрый», «Глубокий анализ») — отдельный файл
+ * model-profiles.json рядом с models.json, а не конфиг Pi.
+ */
+@Serializable
+data class ModelProfile(
+    val id: String = "",
+    val name: String = "",
+    val providerId: String = "",
+    val modelId: String = "",
+    val enabled: Boolean = true,
+    val settings: JsonObject = JsonObject(emptyMap()),
+    val updatedAt: String? = null,
+)
+
+/** `GET /api/model-profiles`: сами пресеты и ревизия файла, с которой идёт правка. */
+@Serializable
+data class ModelProfilesPage(
+    val revision: String = "",
+    val profiles: List<ModelProfile> = emptyList(),
+)
+
+/** Запись провайдера целиком — для редактора, аналога Pi Manager (секреты → `$REDACTED`). */
+@Serializable
+data class ProviderRawPage(
+    val revision: String = "",
+    val entry: JsonObject = JsonObject(emptyMap()),
+)
 
 /** Список подключений + ревизия models.json (sha256). Правка уходит только со своей ревизией. */
 @Serializable
@@ -1265,6 +1305,24 @@ data class GenerationMetrics(
     val ppApproximate: Boolean = false,
 )
 
+/**
+ * Метрики одного хода: когда он начат и завершён, сколько длился, TTFT и скорость
+ * генерации. Поля считаются сервером по своим часам — клиент их только отображает,
+ * не пересчитывает.
+ */
+@Serializable
+data class TurnMetrics(
+    /** Persisted journal anchors identify the answer independently of event delivery order. */
+    val segmentId: String? = null,
+    val startEventSeq: Long? = null,
+    val messageEventSeq: Long? = null,
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
+    val durationMs: Long? = null,
+    val firstTokenMs: Long? = null,
+    val outputTokensPerSecond: Double? = null,
+)
+
 @Serializable
 data class SessionSpeeds(
     /** Ходов, за которые посчитаны скорости сессии. */
@@ -1543,6 +1601,8 @@ data class Task(
     val outputFiles: List<FileRef> = emptyList(),
     val lastUsage: Usage? = null,
     val metrics: GenerationMetrics? = null,
+    /** Метрики хода: начало/конец, длительность, TTFT и скорость генерации. Считаются сервером, клиент только отображает. null — ход без данных (старая история). */
+    val turnMetrics: TurnMetrics? = null,
     /** Скорости всей сессии (макс./средний PP, средняя TG); null — ходов ещё не было. */
     val speeds: SessionSpeeds? = null,
     val compaction: CompactionInfo? = null,

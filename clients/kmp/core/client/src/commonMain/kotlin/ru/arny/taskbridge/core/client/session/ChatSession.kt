@@ -534,6 +534,12 @@ class ChatSession(
         try {
             val cursor = mutex.withLock { reducer?.cursor ?: 0L }
             val fetched = api.task(taskId)
+            // A heartbeat can be the only frame after a lost tail. Metadata alone
+            // cannot restore missing messages: repair up to the server's event
+            // version even when no later SSE event arrives to expose the gap.
+            if (fetched.snapshotSeq > cursor && fetched.snapshotSeq < Long.MAX_VALUE) {
+                repairGap(fetched.snapshotSeq + 1)
+            }
             mutex.withLock {
                 val chat = reducer
                 // A response started before a new SSE event cannot settle that newer turn.

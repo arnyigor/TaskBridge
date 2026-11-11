@@ -1,0 +1,36 @@
+<resources>
+    <string name="usage_title">Использование ресурсов за ход</string>
+    <string name="usage_summary">Использование</string>
+    <string name="usage_provider_model">Поставщик/модель</string>
+    <string name="usage_cache_hit">Попадание в кэш</string>
+    <string name="usage_uncached">Некэшированный ввод</string>
+    <string name="usage_cached">Кэшированный ввод</string>
+    <string name="usage_cache_write">Запись в кэш</string>
+    <string name="usage_output">Выход</string>
+    <string name="usage_duration">Время работы</string>
+    <string name="usage_ttft">Ожидание первого токена (TTFT)</string>
+    <string name="usage_speed">Скорость генерации</string>
+    <string name="usage_cost">Стоимость</string>
+    <string name="usage_peak">Тариф пиковый</string>
+    <string name="usage_status">Статус</string>
+    <string name="usage_interrupted">Прервано</string>
+    <string name="usage_failed">Ошибка</string>
+    <string name="usage_copy">Копировать</string>
+    <string name="usage_close">Закрыть</string>
+    <string name="usage_local">локальная</string>
+    <string name="usage_tokens">ток</string>
+    <string name="usage_seconds">с</string>
+    <string name="usage_billion">млрд</string>
+    <string name="usage_expanded">развёрнуто</string>
+    <string name="usage_collapsed">свёрнуто</string>
+    <string name="usage_details">Подробности использования ресурсов</string>
+    <string name="usage_total">Итог</string>
+    <string name="usage_yes">да</string>
+    <string name="usage_peak_badge">пик ×%1$s</string>
+    <plurals name="usage_segments">
+        <item quantity="one">за %1$d сегмент</item>
+        <item quantity="few">за %1$d сегмента</item>
+        <item quantity="many">за %1$d сегментов</item>
+        <item quantity="other">за %1$d сегмента</item>
+    </plurals>
+</resources>

@@ -394,6 +394,20 @@ private fun PanelActions(target: FileTarget, session: ChatSession, platform: Pla
     var open by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun tell(message: String) = state.setNotice(message)
+    // The dock is what a phone in landscape or a tablet shows instead of the sheet:
+    // without this item those users cannot keep a file at all.
+    fun download() {
+        if (state.saving) return
+        state.saving = true
+        scope.launch {
+            tell("Скачиваю…")
+            try {
+                tell(saveTargetOnDevice(target, session, platform))
+            } finally {
+                state.saving = false
+            }
+        }
+    }
     fun openComputer(reveal: Boolean) = scope.launch {
         tell(
             requestOpenOnComputer(target, session, reveal).fold(
@@ -405,6 +419,15 @@ private fun PanelActions(target: FileTarget, session: ChatSession, platform: Pla
     Box {
         IconButton(onClick = { open = true }) { Icon(AppIcons.More, "Действия с файлом", Modifier.size(17.dp)) }
         DropdownMenu(open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("Скачать файл") },
+                leadingIcon = { Icon(AppIcons.ArrowDown, null, Modifier.size(16.dp)) },
+                enabled = !state.saving,
+                onClick = {
+                    open = false
+                    download()
+                },
+            )
             DropdownMenuItem(
                 text = { Text("Копировать путь") },
                 leadingIcon = { Icon(AppIcons.Copy, null, Modifier.size(16.dp)) },

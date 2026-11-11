@@ -1,5 +1,7 @@
 package ru.arny.taskbridge
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.ComposeFoundationFlags
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -37,6 +39,7 @@ import ru.arny.taskbridge.ui.theme.AppIcons
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 
+@OptIn(ExperimentalFoundationApi::class)
 fun main() {
     // A second launch brings the running window forward instead of starting another tray instance.
     if (!SingleInstance.claimPrimary()) {
@@ -47,6 +50,12 @@ fun main() {
     SingleInstance.listen { showRequests.value += 1 }
     val packagedVersion = object {}.javaClass.getResourceAsStream("/taskbridge-version.txt")
         ?.bufferedReader()?.use { it.readText().trim() }.orEmpty()
+        // Compose в режиме выделения прокручивает каждый скролл-контейнер над курсором
+        // (SelectionManager.bringDraggedPositionIntoView). В reverseLayout-ленте чата это
+        // рывком уводит её к последнему сообщению, как только начинаешь выделять текст,
+        // поэтому на десктопе автопрокрутка выделения выключена: колесо мыши при
+        // зажатой кнопке продолжает работать, а лента сама не двигается.
+        ComposeFoundationFlags.isSelectionAutoScrollEnabled = false
     val platform = DesktopPlatformServices(appVersion = packagedVersion)
     val graph = AppGraph(platform)
 

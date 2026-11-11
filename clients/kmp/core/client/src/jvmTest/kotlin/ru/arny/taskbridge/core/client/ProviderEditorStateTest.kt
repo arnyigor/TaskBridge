@@ -31,11 +31,16 @@ class ProviderEditorStateTest {
     }
 
     @Test
-    fun `identifier must stay inside the tb prefix the server accepts`() {
-        assertFalse(editor(id = "deepseek").ready, "чужую запись нельзя присвоить")
-        assertFalse(editor(id = "tb-").ready)
-        assertFalse(editor(id = "tb-demo/../x").ready)
-        assertTrue(editor(id = "tb-my-provider").ready)
+    fun `identifier follows the server slug rule without the tb prefix`() {
+        // Префикс `tb-` сервер больше не требует: владение доказывает маркер `name`,
+        // а коллизию с чужой записью он отклоняет сам (CONFLICT).
+        assertTrue(editor(id = "deepseek").ready)
+        assertTrue(editor(id = "my-provider").ready)
+        assertTrue(editor(id = "tb-legacy").ready, "старые tb-* остаются валидными")
+        assertFalse(editor(id = "").ready)
+        assertFalse(editor(id = "-demo").ready)
+        assertFalse(editor(id = "Demo").ready, "только маленькие латинские буквы")
+        assertFalse(editor(id = "tb-demo/../x").ready, "слеш и точки вне допустимого набора")
     }
 
     @Test

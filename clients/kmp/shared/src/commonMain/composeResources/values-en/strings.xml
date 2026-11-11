@@ -1,0 +1,34 @@
+<resources>
+    <string name="usage_title">Resource usage for this turn</string>
+    <string name="usage_summary">Usage</string>
+    <string name="usage_provider_model">Provider/model</string>
+    <string name="usage_cache_hit">Cache hit</string>
+    <string name="usage_uncached">Uncached input</string>
+    <string name="usage_cached">Cached input</string>
+    <string name="usage_cache_write">Cache write</string>
+    <string name="usage_output">Output</string>
+    <string name="usage_duration">Duration</string>
+    <string name="usage_ttft">Time to first token (TTFT)</string>
+    <string name="usage_speed">Generation speed</string>
+    <string name="usage_cost">Cost</string>
+    <string name="usage_peak">Peak tariff</string>
+    <string name="usage_status">Status</string>
+    <string name="usage_interrupted">Interrupted</string>
+    <string name="usage_failed">Failed</string>
+    <string name="usage_copy">Copy</string>
+    <string name="usage_close">Close</string>
+    <string name="usage_local">local</string>
+    <string name="usage_tokens">tokens</string>
+    <string name="usage_seconds">s</string>
+    <string name="usage_billion">B</string>
+    <string name="usage_expanded">expanded</string>
+    <string name="usage_collapsed">collapsed</string>
+    <string name="usage_details">Resource usage details</string>
+    <string name="usage_total">Total</string>
+    <string name="usage_yes">yes</string>
+    <string name="usage_peak_badge">peak ×%1$s</string>
+    <plurals name="usage_segments">
+        <item quantity="one">across %1$d segment</item>
+        <item quantity="other">across %1$d segments</item>
+    </plurals>
+</resources>

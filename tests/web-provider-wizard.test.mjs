@@ -66,7 +66,10 @@ test('предпросмотр показывает, что именно уйд�
 test('готовность черновика повторяет серверные правила', () => {
   const base = { id: 'tb-demo', baseUrl: 'https://api.example/v1', keyEnv: 'DEMO_KEY', models: ['a'] };
   assert.equal(draftReady(base), true);
-  assert.equal(draftReady({ ...base, id: 'demo' }), false, 'ID только tb-*');
+  // Префикс `tb-` снят: ID без него теперь принимает и сервер.
+  assert.equal(draftReady({ ...base, id: 'demo' }), true, 'ID без префикса допустим');
+  assert.equal(draftReady({ ...base, id: 'Demo' }), false, 'только маленькие латинские буквы');
+  assert.equal(draftReady({ ...base, id: '-demo' }), false);
   assert.equal(draftReady({ ...base, id: 'tb-' }), false);
   assert.equal(draftReady({ ...base, baseUrl: 'ftp://api.example/v1' }), false);
   assert.equal(draftReady({ ...base, keyEnv: 'sk-live-123' }), false, 'значение ключа вместо имени не принимается');

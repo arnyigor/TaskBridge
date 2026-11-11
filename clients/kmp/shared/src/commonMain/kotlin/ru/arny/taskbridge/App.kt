@@ -35,7 +35,9 @@ import ru.arny.taskbridge.ui.projects.ProjectsScreen
 import ru.arny.taskbridge.ui.remotefiles.RemoteFilesScreen
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.EmptyState
+import ru.arny.taskbridge.ui.mcp.McpScreen
 import ru.arny.taskbridge.ui.models.LocalModelsScreen
+import ru.arny.taskbridge.ui.models.PiModelsScreen
 import ru.arny.taskbridge.ui.connect.ConnectScreen
 import ru.arny.taskbridge.ui.processes.ProcessesScreen
 import ru.arny.taskbridge.ui.sessions.SessionsScreen
@@ -171,9 +173,11 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             onCreated = { navigator.openChat(it) },
             showBack = true,
         )
-        Screen.Settings -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) })
+        Screen.Settings -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) }, onOpenPiModels = { navigator.push(Screen.PiModels) }, onOpenMcp = { navigator.push(Screen.Mcp) })
         Screen.LocalModels -> LocalModelsScreen(graph, connection, onBack = { navigator.pop() })
+        Screen.PiModels -> PiModelsScreen(graph, connection, onBack = { navigator.pop() }, onOpenLocalModels = { navigator.push(Screen.LocalModels) })
         Screen.Processes -> ProcessesScreen(connection, onBack = { navigator.pop() })
+        Screen.Mcp -> McpScreen(connection, onBack = { navigator.pop() })
     }
 }
 
@@ -189,7 +193,9 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
     val projectSessions = navigator.stack.lastOrNull { it is Screen.Sessions } as? Screen.Sessions
     val settingsOpen = navigator.current == Screen.Settings
     val localModelsOpen = navigator.current == Screen.LocalModels
+    val piModelsOpen = navigator.current == Screen.PiModels
     val processesOpen = navigator.current == Screen.Processes
+    val mcpOpen = navigator.current == Screen.Mcp
     val projectsOpen = navigator.current == Screen.Projects || navigator.current is Screen.Project
     val projectOpen = navigator.current as? Screen.Project
     Row(Modifier.fillMaxSize()) {
@@ -220,8 +226,10 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
         Box(Modifier.weight(1f).fillMaxHeight()) {
             when {
                 localModelsOpen -> LocalModelsScreen(graph, connection, onBack = { navigator.pop() })
+                piModelsOpen -> PiModelsScreen(graph, connection, onBack = { navigator.pop() }, onOpenLocalModels = { navigator.push(Screen.LocalModels) })
                 processesOpen -> ProcessesScreen(connection, onBack = { navigator.pop() })
-                settingsOpen -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) })
+                mcpOpen -> McpScreen(connection, onBack = { navigator.pop() })
+                settingsOpen -> SettingsScreen(graph, connection, onBack = { navigator.pop() }, onDisconnected = { navigator.reset(Screen.Connect) }, onOpenLocalModels = { navigator.push(Screen.LocalModels) }, onOpenProcesses = { navigator.push(Screen.Processes) }, onOpenPiModels = { navigator.push(Screen.PiModels) }, onOpenMcp = { navigator.push(Screen.Mcp) })
                 projectOpen != null -> ProjectWorkspaceScreen(
                     graph, connection, projectOpen.projectId,
                     onBack = { navigator.pop() },

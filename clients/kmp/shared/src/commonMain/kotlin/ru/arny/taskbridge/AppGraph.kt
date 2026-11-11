@@ -26,6 +26,7 @@ import ru.arny.taskbridge.core.client.sessions.SessionAlerts
 import ru.arny.taskbridge.core.client.sessions.SessionList
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.settings.AppSettings
+import ru.arny.taskbridge.core.client.settings.PiModelsController
 import ru.arny.taskbridge.core.client.settings.SettingsController
 import ru.arny.taskbridge.core.client.settings.StoredConnection
 import ru.arny.taskbridge.core.client.settings.savedAddressNeedsPairing
@@ -176,6 +177,8 @@ class AppGraph(val platform: PlatformServices) {
             localServerAvailable = { platform.localServerLauncher?.available() == true },
         )
         val settingsController = SettingsController(api, scope)
+        /** Редактор models.json (аналог Pi Manager): своя панель, своя ревизия. */
+        val piModelsController = PiModelsController(api, scope)
         private val persistence = platform.chatPersistence(baseUrl)
         // Copy-on-write: UI, network callbacks and the stream actor may read snapshots
         // concurrently, but no iterator ever observes a mutating HashMap.

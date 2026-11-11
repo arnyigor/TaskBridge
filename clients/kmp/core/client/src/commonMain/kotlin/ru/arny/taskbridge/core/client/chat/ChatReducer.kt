@@ -10,6 +10,7 @@ import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
+import ru.arny.taskbridge.core.api.TurnMetrics
 import ru.arny.taskbridge.core.client.humanizeError
 
 // The chat of one session, rebuilt from its event log.
@@ -100,6 +101,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var usage: AnswerUsage? = null,
         /** Модель, которой эти токены считались (переживает смену модели в сессии). */
         var usageModel: String? = null,
+        var usageIsLocal: Boolean? = null,
+        /** Метрики хода: длительность, TTFT и скорость — приходят от сервера. */
+        var turnMetrics: TurnMetrics? = null,
+        /** Сколько сегментов хода суммировано в [turnMetrics] («Продолжить»). */
+        var metricsSegments: Int = 0,
+        val usageEventSeqs: MutableSet<Long> = mutableSetOf(),
+        val metricSegmentIds: MutableSet<String> = mutableSetOf(),
         var generatingToolCall: Boolean = false,
     )
 
@@ -490,7 +498,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (oldestSeq == null) oldestSeq = event.seq
         version++
         val window = windowStart
-        if (window != null && (windowRecording || current === window || messageTurn === window || executionTurn === window || orphanMessage?.turn === window || window.tools.any { it.id == event.piFrame?.str("toolCallId") })) {
+        val targetsWindow = window != null && event.type == "TURN_METRICS" &&
+            listOfNotNull(event.data.long("messageEventSeq"), event.data.long("startEventSeq"))
+                .any(window.usageEventSeqs::contains)
+        if (window != null && (targetsWindow || windowRecording || current === window || messageTurn === window || executionTurn === window || orphanMessage?.turn === window || window.tools.any { it.id == event.piFrame?.str("toolCallId") })) {
             windowReplayEvent(event)?.let { windowEvents += it }
             if (event.type == "USER_MESSAGE") windowRecording = false
         }
@@ -519,6 +530,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             }
             // Files the agent left in the workspace: they belong to the answer that made them.
             "OUTPUT_FILES" -> if (current.role == Role.ASSISTANT) current.files = current.files + decodeFiles(event)
+            // Время хода приходит отдельным событием: снимок задачи знает только
+            // последний ход, а у каждого ответа в ленте — своё время.
+            "TURN_METRICS" -> decodeTurnMetrics(event)?.let { metrics ->
+                mergeTurnMetrics(metrics)
+            }
             "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
                 finish(event.type.removePrefix("TASK_"), if (event.type == "TASK_FAILED") event.message else null, event.at)
             // Output of a slash extension command (/nudge status, ...): Pi runs it
@@ -613,7 +629,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     private fun applyFrame(event: TaskEvent, frame: JsonObject) {
         when (frame.str("type")) {
-            "agent_start" -> markAnswerRunning(current, event.at)
+            "agent_start" -> {
+                current.usageEventSeqs += event.seq
+                markAnswerRunning(current, event.at)
+            }
             "message_start" -> if (frame.obj("message")?.str("role") == "user") {
                 val text = (frame.obj("message")?.get("content") as? JsonArray)
                     ?.mapNotNull { it as? JsonObject }
@@ -794,12 +813,19 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             if (previous != null) orphan = Orphan(previous, previous.text, previous.thinking, "")
         }
         val turn = orphan?.turn ?: sink
+        turn.usageEventSeqs += event.seq
         turn.generatingToolCall = false
         // Токены копятся на ответ целиком: один ответ — это несколько вызовов модели
         // (между ними инструменты), и `task.lastUsage` описывает только последний.
         messageUsage(message)?.let { usage ->
             turn.usage = (turn.usage ?: AnswerUsage()) + usage
-            message.str("model")?.let { turn.usageModel = it }
+        }
+        message.str("model")?.let { model ->
+            val provider = message.str("provider")
+            turn.usageModel = if (provider.isNullOrBlank() || model.startsWith("$provider/")) model else "$provider/$model"
+        }
+        message.bool("isLocal")?.let { local ->
+            turn.usageIsLocal = turn.usageIsLocal?.let { it && local } ?: local
         }
         val content = message["content"] as? JsonArray
         val markerText = content?.mapNotNull { it as? JsonObject }
@@ -885,6 +911,51 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         version++
     }
 
+    /**
+     * Метрики хода относятся к ответу, который сейчас писался: он может быть ещё
+     * «активным» (терминальный статус приходит следующим событием), но он всегда
+     * последний среди ассистентских.
+     *
+     * «Продолжить» дописывает ответ в тот же Turn, поэтому второй сегмент
+     * складывается с первым: время — суммой, TTFT — первый, скорость для суммы
+     * не имеет смысла и убирается. Новая генерация (регенерация) — это новый Turn
+     * со своими числами, и складывать с прежней она не может по построению.
+     */
+    private fun mergeTurnMetrics(metrics: TurnMetrics) {
+        val anchors = listOfNotNull(metrics.messageEventSeq, metrics.startEventSeq)
+        val candidates = turns + listOfNotNull(windowStart)
+        val target = if (anchors.isNotEmpty()) {
+            candidates.lastOrNull { it.role == Role.ASSISTANT && anchors.any(it.usageEventSeqs::contains) }
+        } else {
+            // Compatibility with events emitted before journal anchors were added.
+            candidates.lastOrNull { it.role == Role.ASSISTANT && it.active }
+                ?: candidates.lastOrNull { it.role == Role.ASSISTANT }
+        } ?: return
+        val segmentId = metrics.segmentId
+        if (segmentId != null && !target.metricSegmentIds.add(segmentId)) return
+        val previous = target.turnMetrics
+        target.metricsSegments += 1
+        target.turnMetrics = if (previous == null) metrics else TurnMetrics(
+            startedAt = previous.startedAt,
+            finishedAt = metrics.finishedAt,
+            durationMs = previous.durationMs?.let { first ->
+                metrics.durationMs?.takeIf { it <= Long.MAX_VALUE - first }?.plus(first)
+            },
+            firstTokenMs = previous.firstTokenMs ?: metrics.firstTokenMs,
+            outputTokensPerSecond = null,
+        )
+    }
+
+    private fun decodeTurnMetrics(event: TaskEvent): TurnMetrics? =
+        runCatching { TaskBridgeJson.decodeFromJsonElement(TurnMetrics.serializer(), event.data) }.getOrNull()?.let { raw ->
+            val duration = raw.durationMs?.takeIf { it >= 0 } ?: return@let null
+            raw.copy(
+                durationMs = duration,
+                firstTokenMs = raw.firstTokenMs?.takeIf { it in 0..duration },
+                outputTokensPerSecond = raw.outputTokensPerSecond?.takeIf { it.isFinite() && it >= 0 },
+            )
+        }
+
     private fun decodeFiles(event: TaskEvent): List<FileRef> =
         event.data["files"]?.let { runCatching { TaskBridgeJson.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(FileRef.serializer()), it) }.getOrNull() }.orEmpty()
 
@@ -965,7 +1036,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                         active = turn.active, status = turn.status, error = turn.error, final = turn.final,
                         at = turn.at, endedAt = turn.endedAt, partial = turn.partial, superseded = turn.superseded,
                         stopReason = turn.stopReason, variants = variantInfo, files = turn.files,
-                        usage = turn.usage, usageModel = turn.usageModel,
+                        usage = turn.usage, usageModel = turn.usageModel, usageIsLocal = turn.usageIsLocal,
+                        turnMetrics = turn.turnMetrics, metricsSegments = turn.metricsSegments,
                         generatingToolCall = turn.active && turn.generatingToolCall,
                     )
                 }
@@ -1030,7 +1102,7 @@ private fun windowReplayEvent(event: TaskEvent): TaskEvent? {
             val content = (message["content"] as? JsonArray)?.filter { part ->
                 (part as? JsonObject)?.str("type") in listOf("text", "thinking")
             }
-            val saved = message.filterKeys { it in setOf("role", "stopReason", "errorMessage") }.toMutableMap()
+            val saved = message.filterKeys { it in setOf("role", "stopReason", "errorMessage", "usage", "model", "provider", "isLocal") }.toMutableMap()
             if (content != null && (type == "message_end" || role == "user")) saved["content"] = JsonArray(content)
             JsonObject(mapOf("type" to frame.getValue("type"), "message" to JsonObject(saved)))
         }
@@ -1060,18 +1132,26 @@ private fun compactionNote(frame: JsonObject): String? {
 
 /**
  * Токены одного вызова модели из `message.usage` Pi.
- * `input` — обычный вход (промах кэша), `cacheRead` — попадание, `output` — вывод.
+ * `input` — обычный вход (промах кэша), `cacheRead` — попадание, `output` — вывод,
+ * `cacheWrite` — запись в кэш (в сумму токенов хода не входит).
  * Пустой usage (прерванный вызов) не считается расходом.
  */
 private fun messageUsage(message: JsonObject): AnswerUsage? {
     val usage = message.obj("usage") ?: return null
     val parsed = AnswerUsage(
-        hit = usage.long("cacheRead") ?: 0,
-        miss = usage.long("input") ?: 0,
-        out = usage.long("output") ?: 0,
+        hit = usage.count("cacheRead"),
+        miss = usage.count("input"),
+        out = usage.count("output"),
+        cacheWrite = usage.count("cacheWrite"),
     )
-    return parsed.takeUnless { it.isEmpty }
+    val reported = usage.count("totalTokens")
+    val complete = parsed.hit != null && parsed.miss != null && parsed.out != null
+    return parsed.copy(totalMismatch = complete && reported != null && parsed.total != null && reported != parsed.total)
+        .takeUnless { it.isEmpty }
 }
+
+/** Счётчик токенов: отсутствующее или невозможное значение (меньше нуля) — «неизвестно». */
+private fun JsonObject.count(key: String): Long? = long(key)?.takeIf { it >= 0 }
 
 private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
 private fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.let { it.longOrNull ?: it.contentOrNull?.toLongOrNull() }

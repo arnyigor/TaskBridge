@@ -5,8 +5,15 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelProfile
 import ru.arny.taskbridge.core.api.ModelProbeResult
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ProviderCheck
@@ -31,20 +38,51 @@ data class ProviderDraftState(
     val error: String? = null,
 )
 
+/** Состояние черновика редактора подключения: пока не нажато «Сохранить», файл Pi не меняется.
+ *
+ * Модель может быть в трёх состояниях: в черновике (добавлена), в списке (только для чтения,
+ * берётся из сохранённого провайдера), либо помечена к удалению (removedModelIds) — удаляется
+ * только вместе с сохранением черновика. Удаление модели из редактора теперь работает через
+ * тот же draft, как и добавление: физически модель уходит из models.json только при onSave.
+ */
 data class ProviderEditorState(
     val existing: Boolean = false,
-    val id: String = "tb-",
+    /**
+     * Название, которое пишет человек. ID записи выводится из него
+     * ([providerIdFromName]) — требования к слагу не его забота.
+     */
+    val name: String = "",
+    val id: String = "",
     val baseUrl: String = "",
     val keyEnv: String = "",
     val api: String = "openai-completions",
+    /**
+     * Новая модель этого подключения умеет размышлять: ей сразу пишутся
+     * `reasoning`, `thinkingLevelMap` и `compat`. Без них Pi отдаёт только «off»,
+     * и клиент показывает «None» вместо уровней.
+     */
+    val thinking: Boolean = true,
+    /** Модели, добавленные в черновике (текст для редактирования). */
     val models: String = "",
+    /** Модели, отмеченные на удаление в черновике — показываются как pending removal;
+     * физически удаляются только при сохранении черновика. */
+    val removedModelIds: Set<String> = emptySet(),
     val query: String = "",
 ) {
-    val modelIds: List<String> get() = models.lines().map(String::trim).filter(String::isNotBlank).distinct()
-    val ready: Boolean get() = Regex("tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?").matches(id.trim()) &&
+    /** Итоговый список моделей в черновике: добавленные минус отмеченные на удаление. */
+    val modelIds: List<String> get() = (models.lines().map(String::trim).filter(String::isNotBlank) +
+        (if (existing) modelIdsFromExisting else emptyList())).distinct() - removedModelIds
+    val ready: Boolean get() = providerIdPattern.matches(id.trim()) &&
         providerEndpoint(baseUrl) != null &&
         (keyEnv.isBlank() || Regex("[A-Z][A-Z0-9_]{0,95}").matches(keyEnv.trim())) &&
         (providerEndpoint(baseUrl)?.local == true || keyEnv.isNotBlank()) && modelIds.size in 1..100
+
+    companion object {
+        /** Текущие модели сохранённого подключения (только чтение) — берутся из профиля.
+         * Заполняются при открытии редактора; используются вычисляемым свойством
+         * `modelIds`, чтобы существующие модели отображались как список для чтения. */
+        var modelIdsFromExisting: List<String> = emptyList()
+    }
 }
 
 data class AgentSettingsState(
@@ -100,6 +138,21 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
         }
     }
 
+    fun useCodexReset() {
+        val provider = "openai-codex"
+        if (provider in _state.value.refreshingProviders) return
+        _state.update { it.copy(refreshingProviders = it.refreshingProviders + provider, error = null) }
+        val hex = List(32) { "0123456789abcdef"[kotlin.random.Random.nextInt(16)] }.joinToString("")
+        val requestId = "${hex.take(8)}-${hex.substring(8, 12)}-4${hex.substring(13, 16)}-a${hex.substring(17, 20)}-${hex.substring(20)}"
+        scope.launch {
+            runCatching { api.useCodexReset(requestId) }
+                .onSuccess { statuses -> _state.update { it.copy(providerStatuses = it.providerStatuses + statuses,
+                    providerNotice = "Кредит сброса использован. Лимиты запрошены заново.") } }
+                .onFailure { failure -> _state.update { it.copy(error = humanizeError(failure.message)) } }
+            _state.update { it.copy(refreshingProviders = it.refreshingProviders - provider) }
+        }
+    }
+
     fun clearError() = _state.update { it.copy(error = null) }
 
     // --- Провайдеры Pi (страница «Провайдеры»): списком владеет сервер, здесь только намерения.
@@ -119,9 +172,16 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
 
     fun editProvider(profile: ProviderProfile? = null) {
         if (_state.value.providerBusy != null) return
+        ProviderEditorState.modelIdsFromExisting = profile?.models?.map { it.id } ?: emptyList()
         _state.update { it.copy(
             providerEditor = ProviderEditorState(
-                existing = profile != null, id = profile?.id ?: "tb-",
+                // У существующей записи названия не хранится (сервер пишет туда
+                // "TaskBridge: <id>"), поэтому в поле показывается сам ID — только чтение.
+                existing = profile != null,
+                // Только настоящее имя записи: подставлять сюда ID нельзя — при
+                // сохранении он попал бы в `name` и стал виден в Pi как название.
+                name = profile?.name.orEmpty(),
+                id = profile?.id.orEmpty(),
                 baseUrl = profile?.baseUrl.orEmpty(), keyEnv = profile?.keyEnv.orEmpty(),
                 api = profile?.api ?: "openai-completions",
                 models = profile?.models?.joinToString("\n") { model -> model.id }.orEmpty(),
@@ -131,9 +191,14 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
 
     fun updateProviderEditor(editor: ProviderEditorState) {
         if (_state.value.providerBusy != null || _state.value.providerDraft?.loading == true) return
+        // ID новой записи выводится из названия здесь, а не в форме: иначе каждая
+        // правка подписи должна была бы помнить о правиле ID отдельно.
+        val named = if (editor.existing) editor else editor.copy(
+            id = providerIdFromName(editor.name, _state.value.providerProfiles.map { it.id }),
+        )
         _state.update { state -> state.copy(
-            providerEditor = editor,
-            providerDraft = if (state.providerEditor?.baseUrl != editor.baseUrl || state.providerEditor?.keyEnv != editor.keyEnv) null else state.providerDraft,
+            providerEditor = named,
+            providerDraft = if (state.providerEditor?.baseUrl != named.baseUrl || state.providerEditor?.keyEnv != named.keyEnv) null else state.providerDraft,
         ) }
     }
 
@@ -142,10 +207,26 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
             _state.update { it.copy(providerEditor = null, providerDraft = null) }
     }
 
+    /** Добавить модель в черновик — без записи в models.json. Если модель была помечена на
+     * удаление, она возвращается в список. */
     fun addDiscoveredModel(id: String) {
         val editor = _state.value.providerEditor ?: return
+        if (id in editor.removedModelIds) return
         if (editor.modelIds.size >= 100 || id in editor.modelIds) return
         updateProviderEditor(editor.copy(models = (editor.modelIds + id).joinToString("\n")))
+    }
+
+    /** Пометить модель на удаление в черновике: она исчезает из выбора, но остаётся в
+     * models.json до момента сохранения черновика. Удаление из редактора теперь работает
+     * так же, как добавление — через единый draft, а не прямым изменением сохранённого файла.
+     */
+    fun removeModelFromDraft(id: String) {
+        val editor = _state.value.providerEditor ?: return
+        if (id !in editor.modelIds) return
+        updateProviderEditor(editor.copy(
+            models = editor.modelIds.filterNot { it == id }.joinToString("\n"),
+            removedModelIds = editor.removedModelIds + id,
+        ))
     }
 
     fun requestProviderDelete(id: String?) {
@@ -155,13 +236,31 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
     fun saveProviderEditor() {
         val editor = _state.value.providerEditor ?: return
         if (!editor.ready || _state.value.providerDraft?.loading == true) return
-        saveProviderProfile(editor.id.trim(), editor.baseUrl.trim(), editor.keyEnv.trim(), editor.modelIds)
+        saveProviderProfile(
+            editor.id.trim(),
+            editor.baseUrl.trim(),
+            editor.keyEnv.trim(),
+            editor.modelIds,
+            modelDefaults = if (editor.thinking) THINKING_MODEL_DEFAULTS else null,
+            // Имя отправляется и для существующей записи: иначе переименовать её
+            // можно было бы только правкой models.json руками.
+            name = editor.name.trim().takeIf { it.isNotBlank() },
+        )
     }
 
-    fun saveProviderProfile(id: String, baseUrl: String, keyEnv: String, models: List<String>) =
+    fun saveProviderProfile(
+        id: String,
+        baseUrl: String,
+        keyEnv: String,
+        models: List<String>,
+        modelDefaults: JsonObject? = null,
+        name: String? = null,
+    ) =
         mutateProvider(id) {
-            api.saveProviderProfile(_state.value.providerRevision, id, baseUrl, keyEnv, models, _state.value.providerEditor?.api ?: "openai-completions") to
-                "Сохранено. Каталог моделей обновлён; для нового API-ключа перезапусти сервер на компьютере."
+            api.saveProviderProfile(
+                _state.value.providerRevision, id, baseUrl, keyEnv, models,
+                _state.value.providerEditor?.api ?: "openai-completions", modelDefaults, name,
+            ) to "Сохранено. Каталог моделей обновлён; для нового API-ключа перезапусти сервер на компьютере."
         }
 
     fun removeProviderModels(id: String, models: List<String>) =

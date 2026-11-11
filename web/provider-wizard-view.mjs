@@ -88,7 +88,9 @@ export function draftPreviewText({ id, baseUrl, keyEnv, api = 'openai-completion
 
 /** Когда мастер считает черновик пригодным к записи — те же правила, что у сервера. */
 export function draftReady({ id, baseUrl, keyEnv, api = 'openai-completions', models = [] } = {}) {
-  const readyId = /^tb-[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(String(id || '').trim());
+  // Префикс `tb-` больше не требуется сервером (владение доказывает маркер
+  // `name`), но старые `tb-*` подходят под это же правило.
+  const readyId = /^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(String(id || '').trim());
   let local;
   try { ({ local } = providerEndpoint(baseUrl)); } catch { return false; }
   const env = String(keyEnv || '').trim();

@@ -9,6 +9,7 @@ import ru.arny.taskbridge.core.api.ProviderPeakRules
 import ru.arny.taskbridge.core.api.ProviderPeakWindow
 import ru.arny.taskbridge.core.api.ProviderRate
 import ru.arny.taskbridge.core.api.ProviderTariff
+import ru.arny.taskbridge.core.api.TurnMetrics
 import ru.arny.taskbridge.core.client.chat.AnswerUsage
 
 /**
@@ -117,5 +118,128 @@ class MessageUsageTextTest {
         assertEquals("0.0138", fixed(0.013845, 4))
         assertEquals("1.12", fixed(1.1159, 2))
         assertEquals("3.21", fixed(3.205249, 2))
+    }
+
+    // --- Время работы сообщения (серверное значение, клиент не пересчитывает) ---
+
+    @Test
+    fun durationUsesFourFormats() {
+        assertEquals("0.4 с", durationText(400))
+        assertEquals("42 с", durationText(42_000))
+        assertEquals("1:05", durationText(65_000))
+        assertEquals("1:02:05", durationText(3_725_000))
+    }
+
+    @Test
+    fun durationNeverShowsSixtySeconds() {
+        assertEquals("59 с", durationText(59_900))
+        assertEquals("1:00", durationText(60_000))
+    }
+
+    @Test
+    fun exactTokensKeepEveryDigit() {
+        assertEquals("1 235 652 ток", tokensExact(1_235_652))
+        assertEquals("8 412 ток", tokensExact(8_412))
+        assertEquals("0 ток", tokensExact(0))
+        assertEquals("999 ток", tokensExact(999))
+    }
+
+    @Test
+    fun cacheHitIsComputedBeforeRounding() {
+        assertEquals("99.8%", cacheHitText(1_228_928, 2_165))
+        assertEquals("0.0%", cacheHitText(0, 1_000))
+        assertEquals("100.0%", cacheHitText(1_000, 0))
+        assertNull(cacheHitText(0, 0))
+        assertNull(cacheHitText(null, 10))
+        assertNull(cacheHitText(10, null))
+    }
+
+    @Test
+    fun cacheWriteIsNotPartOfTheTurnTotal() {
+        val usage = AnswerUsage(hit = 1_228_928, miss = 2_165, out = 4_559, cacheWrite = 7_000)
+        assertEquals(1_235_652, usage.total)
+    }
+
+    @Test
+    fun speedIsDerivedFromOutputAndWindowOnly() {
+        assertEquals("47 ток/с", tokensPerSecondText(4_559, 97_000))
+        assertNull(tokensPerSecondText(0, 1_000))
+        assertNull(tokensPerSecondText(10, 0))
+        assertNull(tokensPerSecondText(null, 1_000))
+    }
+
+    @Test
+    fun durationAloneStillProducesABar() {
+        val line = usageLine(null, "deepseek-flash", null, null, TurnMetrics(durationMs = 42_000))
+        assertEquals("42 с", line?.text)
+    }
+
+    @Test
+    fun noUsageAndNoDurationMeansNoBar() {
+        assertNull(usageLine(null, "deepseek-flash", null, null, null))
+        assertNull(usageDetails(null, "deepseek-flash", null, null, null))
+    }
+
+    @Test
+    fun barShowsTokensAndDurationTogether() {
+        val line = usageLine(AnswerUsage(hit = 1_228_928, miss = 2_165, out = 4_559), "deepseek-flash", null, null, TurnMetrics(durationMs = 42_000))
+        assertEquals("1.2M ток · 42 с", line?.text)
+    }
+
+    // --- Таблица: «неизвестно» и «ноль» — разные факты ---
+
+    @Test
+    fun partialUsageKeepsUnknownFieldsOutOfTheTotal() {
+        val usage = AnswerUsage(miss = 100, out = 10)
+        assertEquals(110, usage.total)
+        assertNull(usage.hit)
+        assertNull(usage.cacheWrite)
+    }
+
+    @Test
+    fun knownZeroIsKeptApartFromUnknown() {
+        val usage = AnswerUsage(hit = 0, miss = 100, out = 0, cacheWrite = 0)
+        assertEquals(100, usage.total)
+        assertEquals(0, usage.cacheWrite)
+        assertEquals("0.0%", cacheHitText(usage.hit, usage.miss))
+    }
+
+    @Test
+    fun summingAnswersKeepsUnknownsUnknown() {
+        val first = AnswerUsage(hit = 10, miss = 5, out = 1)
+        val second = AnswerUsage(miss = 3, out = 2)
+        val sum = first + second
+        assertEquals(10, sum.hit)
+        assertEquals(8, sum.miss)
+        assertEquals(3, sum.out)
+        assertNull(sum.cacheWrite)
+    }
+
+    @Test
+    fun largeAndInvalidCountsNeverWrapAround() {
+        assertEquals("50.0%", cacheHitText(Long.MAX_VALUE, Long.MAX_VALUE))
+        assertNull(cacheHitText(-1, 10))
+        assertNull(cacheHitText(10, -1))
+        assertNull(AnswerUsage(hit = Long.MAX_VALUE, miss = 1).total)
+        assertNull((AnswerUsage(hit = Long.MAX_VALUE) + AnswerUsage(hit = 1)).hit)
+    }
+
+    @Test
+    fun localModelFromTheServerSuppressesMoneyEvenWithATariff() {
+        val usage = AnswerUsage(hit = 1_000, miss = 100, out = 10)
+        val priced = usageDetails(usage, "deepseek-flash", null, UsagePricing(tariff, 80.0), null, isLocal = true)
+            ?: error("usage есть — блок обязан быть")
+        assertTrue(priced.local)
+        assertNull(priced.cost, "локальная модель не тарифицируется")
+        assertFalse(priced.text.contains("$"))
+    }
+
+    @Test
+    fun providerTotalMismatchKeepsTheComponentSum() {
+        val usage = AnswerUsage(hit = 1_228_928, miss = 2_165, out = 4_559, totalMismatch = true)
+        assertEquals(1_235_652, usage.total)
+        val details = usageDetails(usage, "deepseek-flash", null, null, null)
+            ?: error("usage есть — блок обязан быть")
+        assertTrue(details.text.startsWith("1.2M ток"))
     }
 }

@@ -68,6 +68,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -137,7 +144,9 @@ import ru.arny.taskbridge.ui.sessions.latencyFor
 import ru.arny.taskbridge.ui.sessions.modelLatencyLabel
 import ru.arny.taskbridge.ui.sessions.ModelChooser
 import ru.arny.taskbridge.ui.sessions.ThinkingPicker
+import ru.arny.taskbridge.ui.sessions.catalogEntry
 import ru.arny.taskbridge.ui.sessions.thinkingChoices
+import ru.arny.taskbridge.ui.sessions.thinkingLevelsShown
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
@@ -1157,6 +1166,16 @@ internal fun MessageList(
 ) {
     val platform = graph.platform
     val ownClient = graph.settings.clientId
+    // Открытая таблица ресурсов: не более одного блока одновременно, поэтому
+    // состояние живёт здесь, а не в каждой строке ленты.
+    var expandedUsageId by remember { mutableStateOf<String?>(null) }
+    // Прокрутка ленты закрывает блок: он не должен «ехать» вместе с чужим
+    // сообщением и перекрывать соседние ответы.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
+            if (scrolling) expandedUsageId = null
+        }
+    }
     val items = state.chat.items
     val reversed = remember(items) { items.asReversed() }
 
@@ -1286,7 +1305,9 @@ internal fun MessageList(
                         is ChatItem.Assistant -> {
                             val actionId = item.canonicalId.takeIf { item.segmentActions }
                             // Токены и деньги за ответ; модель — та, которой он сгенерирован.
-                            val usage = usageLine(item.usage, item.usageModel ?: state.task?.model?.id, item.at, pricing)
+                            val usage = remember(item.usage, item.usageModel, item.usageIsLocal, item.at, pricing, item.turnMetrics) {
+                                usageDetails(item.usage, item.usageModel, item.at, pricing, item.turnMetrics, item.usageIsLocal)
+                            }
                             val newest = actionId == state.chat.newestAnswerId && actionId != null && !historyLocked && item.final
                             AssistantMessage(
                                 item = item,
@@ -1312,8 +1333,9 @@ internal fun MessageList(
                                 loadWorkspaceFile = { session.readWorkspaceFile(it) },
                                 desktop = platform.kind == "desktop",
                                 continuePending = continuePendingId == item.canonicalId && !item.active,
-                                usageLine = usage?.text,
-                                usagePeak = usage?.peak == true,
+                                usageDetails = usage,
+                                usageExpanded = expandedUsageId == item.canonicalId,
+                                onToggleUsage = { expandedUsageId = if (expandedUsageId == item.canonicalId) null else item.canonicalId },
                                 onSelectVariant = { position ->
                                     val variants = item.variants
                                     val variantId = variants?.variantIdAt(position)
@@ -1979,10 +2001,22 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         )
         // Размышления — здесь, как и раньше: ряд иконок под полем ввода убран (он
         // мешал и дублировал этот шит).
-        val levels = thinkingChoices(task?.model, catalog?.thinkingLevels.orEmpty())
-        if (levels.isNotEmpty() && task?.model?.reasoning != false) {
+        // Уровни и признак «умеет размышлять» берутся из каталога, когда у самой
+        // задачи их нет: сервер сокращает модель в списке и в живом состоянии Pi до
+        // provider/id, и раньше пикер падал на общий список каталога — один «None».
+        val levels = thinkingChoices(task?.model, catalog)
+        if (thinkingLevelsShown(task?.model, catalog)) {
             FieldLabel("Размышления", top = 20)
             ThinkingPicker(levels, task?.thinkingLevelActual ?: task?.thinkingLevel, onPick = { session.setThinking(it) })
+        } else if ((task?.model?.reasoning ?: catalogEntry(task?.model, catalog)?.reasoning) == false) {
+            // Пропавший выбор уровней иначе ничем не объясняется: у этой модели в
+            // models.json стоит reasoning: false, и Pi её уровни не принимает.
+            FieldLabel("Размышления", top = 20)
+            Text(
+                "Модель помечена как не умеющая размышлять (reasoning: false в models.json), поэтому уровней нет. Включить: «Модели Pi» → запись → RAW JSON.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         FieldLabel("Контекст", top = 20)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2663,7 +2697,7 @@ private fun formatTokensK(tokens: Long): String =
     if (tokens >= 1000) "${(tokens / 100.0).roundToInt() / 10.0}K" else "$tokens"
 
 @Composable
-private fun TextEditDialog(
+internal fun TextEditDialog(
     title: String,
     hint: String?,
     initial: String,
@@ -2674,6 +2708,14 @@ private fun TextEditDialog(
     extra: (@Composable () -> Unit)? = null,
 ) {
     var text by remember { mutableStateOf(initial) }
+    // KeyDown repeats while the key is held: the action must run once, not once per event.
+    var submitted by remember(initial) { mutableStateOf(false) }
+    val submit: () -> Unit = {
+        if (!submitted && text.isNotBlank()) {
+            submitted = true
+            onConfirm(text)
+        }
+    }
     if (singleLine) {
         AlertDialog(
             onDismissRequest = onDismiss,
@@ -2684,6 +2726,14 @@ private fun TextEditDialog(
         )
         return
     }
+    fun onEnterShortcut(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
+        if (event.type != KeyEventType.KeyDown) return false
+        if (event.key != Key.Enter && event.key != Key.NumPadEnter) return false
+        if (!event.isCtrlPressed && !event.isMetaPressed) return false
+        // Swallow the event even for blank text, otherwise the field inserts a newline.
+        submit()
+        return true
+    }
     // A long message needs room: a wide dialog on desktop, a full sheet on a phone.
     AdaptiveSheet(
         title = title,
@@ -2692,10 +2742,16 @@ private fun TextEditDialog(
         maxWidth = 760,
         footer = {
             TextButton(onClick = onDismiss) { Text("Отмена") }
-            Button(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text(confirm) }
+            Button(onClick = { submit() }, enabled = text.isNotBlank()) { Text(confirm) }
         },
     ) {
-        OutlinedTextField(text, { text = it }, minLines = 6, maxLines = 20, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(
+            text,
+            { text = it },
+            minLines = 6,
+            maxLines = 20,
+            modifier = Modifier.fillMaxWidth().onPreviewKeyEvent { onEnterShortcut(it) },
+        )
         extra?.invoke()
     }
 }

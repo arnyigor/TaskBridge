@@ -99,6 +99,26 @@ class MessageActions(
 )
 
 /**
+ * Тап по сообщению переключает его выбор, но только когда режим выбора включён
+ * (`onToggleSelect != null`).
+ *
+ * В обычном режиме тап ничего не значит, поэтому `clickable` выключён (`enabled = false`).
+ * Держать его включённым нельзя: это focusable-узел с tap-детектором, и он ломает
+ * выделение текста на десктопе сразу двумя способами. Он забирает клавиатурный фокус
+ * себе, а Ctrl+C обрабатывается только на пути фокуса
+ * (`SelectionManager.modifier.onKeyEvent`), поэтому копирование уходило в поле ввода.
+ * И он съедает событие отпускания, из-за чего второй клик двойного клика не доходил
+ * до SelectionContainer и слово не выделялось.
+ */
+private fun selectToggle(actions: MessageActions): Modifier =
+    Modifier.clickable(
+        interactionSource = null,
+        indication = null,
+        enabled = actions.onToggleSelect != null,
+        onClick = { actions.onToggleSelect?.invoke() },
+    )
+
+/**
  * Отметка выбора у сообщения: тап по ней делает то же, что тап по сообщению.
  */
 @Composable
@@ -146,7 +166,7 @@ fun UserBubble(
                     color = colors.userBubble,
                     contentColor = colors.onUserBubble,
                     shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
-                    modifier = Modifier.clickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() }),
+                    modifier = Modifier.then(selectToggle(actions)),
                 ) {
                     Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                         if (item.mode == "steer") {
@@ -218,10 +238,11 @@ fun AssistantMessage(
     desktop: Boolean = false,
     /** Нажато «Продолжить», но ответ ещё не начал писаться — кнопка показывает ожидание. */
     continuePending: Boolean = false,
-    /** Токены и деньги за этот ответ; null — провайдер без тарифа или usage не пришёл. */
-    usageLine: String? = null,
-    /** Ответ шёл по пиковому тарифу DeepSeek — подпись получает метку. */
-    usagePeak: Boolean = false,
+    /** Токены, время и деньги за этот ответ; null — считать нечего (ни usage, ни времени). */
+    usageDetails: UsageDetails? = null,
+    /** Подпись этого ответа сейчас раскрыта (открыт максимум один блок за раз). */
+    usageExpanded: Boolean = false,
+    onToggleUsage: () -> Unit = {},
 ) {
     var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
@@ -238,7 +259,7 @@ fun AssistantMessage(
         Row(verticalAlignment = Alignment.Top) {
             actions.onToggleSelect?.let { SelectMark(actions.selected, it) }
             Box(Modifier.weight(1f)) {
-                Column(Modifier.fillMaxWidth().clickable(interactionSource = null, indication = null, onClick = { actions.onToggleSelect?.invoke() })) {
+                Column(Modifier.fillMaxWidth().then(selectToggle(actions))) {
                     when {
                         item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath, LocalSearchItemId provides item.id) {
                             SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
@@ -282,32 +303,33 @@ fun AssistantMessage(
             }
         }
         // Расход за ответ — строкой под текстом: в мете (время · статус) она уже не
-        // помещается, а на телефоне мета и так занимает свою строку.
-        usageLine?.let { line ->
-            Row(Modifier.padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(line, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (usagePeak) {
-                    Spacer(Modifier.width(6.dp))
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                        shape = MaterialTheme.shapes.extraSmall,
-                    ) {
-                        Text("пик ×2", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp))
-                    }
-                }
-            }
+        // помещается, а на телефоне мета и так занимает свою строку. По нажатию
+        // раскрывается таблица: одновременно открыт максимум один блок (id держит экран).
+        val answerStatus = when {
+            item.partial -> "Часть истории"
+            item.cutOff -> "Прервано"
+            item.error != null || item.status == "FAILED" -> "Ошибка"
+            item.status == "CANCELLED" -> "Остановлено"
+            item.final && (item.status == "SUCCEEDED" || item.status == "DONE") -> "Готово"
+            else -> null
+        }
+        if (item.segmentActions && !item.active) usageDetails?.let { details ->
+            ResourceUsageBlock(
+                details = details,
+                expanded = usageExpanded,
+                onToggle = onToggleUsage,
+                onCopy = onCopyText,
+                desktop = desktop,
+                status = when {
+                    item.error != null || item.status == "FAILED" -> "FAILED"
+                    item.cutOff || item.status == "CANCELLED" || item.stopReason == "aborted" -> "CANCELLED"
+                    else -> null
+                },
+                segments = item.metricsSegments,
+            )
         }
         val showActions = !desktop || hovered || buttonMenu || actions.regenerate != null
         if (item.segmentActions && (item.final || !item.active)) {
-            val answerStatus = when {
-                item.partial -> "Часть истории"
-                item.cutOff -> "Прервано"
-                item.error != null || item.status == "FAILED" -> "Ошибка"
-                item.status == "CANCELLED" -> "Остановлено"
-                item.final && (item.status == "SUCCEEDED" || item.status == "DONE") -> "Готово"
-                else -> null
-            }
             val meta: @Composable () -> Unit = {
                 item.variants?.let { variants ->
                     IconButton(onClick = { onSelectVariant(variants.index - 1) }, enabled = variants.index > 0, modifier = Modifier.size(28.dp)) {
