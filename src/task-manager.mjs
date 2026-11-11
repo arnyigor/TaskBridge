@@ -290,6 +290,25 @@ const LIST_ATTACHMENTS = 2;
 /** One session as the list endpoints ship it: the same task, with the per-session megabytes cut to previews. */
 // Подпись модели для строки списка: provider/id/name. Всё остальное описание
 // (окно контекста, стоимость, уровни размышлений) нужно экрану сессии.
+/**
+ * Модель задачи вместе с описанием из каталога: contextWindow, reasoning,
+ * thinkingLevels, thinkingMap. Голое `{id, provider}` оставляем только тем
+ * моделям, которых в каталоге нет — по-другому показать их уровни нечем.
+ */
+export function taskModelFromCatalog(model, catalog) {
+  if (!model?.id) return null;
+  const entry = catalog?.models?.find(candidate =>
+    candidate.id === model.id && (!model.provider || candidate.provider === model.provider));
+  if (entry) {
+    return {
+      ...entry,
+      contextWindow: model.contextWindow ?? entry.contextWindow ?? null,
+      maxTokens: model.maxTokens ?? entry.maxTokens ?? null
+    };
+  }
+  return { id: model.id, provider: model.provider ?? null, contextWindow: model.contextWindow ?? null, maxTokens: model.maxTokens ?? null };
+}
+
 function briefModel(model) {
   return Object.fromEntries(['provider', 'id', 'name']
     .filter(key => model[key] !== undefined)
@@ -2429,7 +2448,13 @@ export class TaskManager extends EventEmitter {
 
   getTask(id) {
     const task = this.tasks.get(id);
-    return task ? this.#publicTask(task) : null;
+    if (!task) return null;
+    const view = this.#publicTask(task);
+    // Экран сессии читает модель отсюда: обогащаем на чтении, чтобы уже
+    // записанные сессии с голой моделью тоже получили reasoning и уровни —
+    // без ожидания следующего захвата модели.
+    if (view?.model) view.model = this.#taskModel(view.model);
+    return view;
   }
 
   async #admit(action, key = 'global') {
@@ -4491,17 +4516,11 @@ export class TaskManager extends EventEmitter {
   // (null in its map) and «Глубоко» without the note that the engine receives
   // «xhigh». Cached ids only, this runs on hot paths.
   #taskModel(model) {
-    if (!model?.id) return null;
-    const entry = this.modelCatalog.peek()?.models?.find(candidate =>
-      candidate.id === model.id && (!model.provider || candidate.provider === model.provider));
-    if (entry) {
-      return {
-        ...entry,
-        contextWindow: model.contextWindow ?? entry.contextWindow ?? null,
-        maxTokens: model.maxTokens ?? entry.maxTokens ?? null
-      };
-    }
-    return { id: model.id, provider: model.provider ?? null, contextWindow: model.contextWindow ?? null, maxTokens: model.maxTokens ?? null };
+    // `peek()` живёт TTL (60 с): если каталог в этот момент протух, модель
+    // записывалась голой (provider/id), и у сессии не было ни `reasoning`, ни
+    // уровней размышлений — пикер показывал один «None». `lastKnown()` отдаёт
+    // прежний каталог без учёта TTL, и обогащение перестаёт быть лотереей.
+    return taskModelFromCatalog(model, this.modelCatalog.peek() ?? this.modelCatalog.lastKnown());
   }
 
   // Levels the model accepts, from the catalogue entry for it. Empty when the
