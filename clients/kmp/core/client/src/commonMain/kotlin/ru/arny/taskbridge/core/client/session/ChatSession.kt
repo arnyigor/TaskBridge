@@ -251,6 +251,11 @@ class ChatSession(
                 return@withLock
             }
             startStreamIfReadyLocked()
+            // Сверка версии не ждёт кадра. Сокет после возврата к чату может молчать:
+            // следующий кадр придёт только с heartbeat или новым событием, а при пустом
+            // хвосте реплея не придёт вовсе — и чат оставался со старой историей при
+            // живом соединении (телефон в этот момент просто открывал окно заново).
+            refreshRequests.trySend(Unit)
         }
     }
 
@@ -539,6 +544,13 @@ class ChatSession(
             // version even when no later SSE event arrives to expose the gap.
             if (fetched.snapshotSeq > cursor && fetched.snapshotSeq < Long.MAX_VALUE) {
                 repairGap(fetched.snapshotSeq + 1)
+            } else if (fetched.snapshotSeq in 1 until cursor && mutex.withLock { reducer?.cursor == cursor }) {
+                // Версия сервера НИЖЕ курсора: историю переписали (удалили/правили ходы,
+                // восстановили стор). После курсора не придёт уже ничего — это состояние
+                // не лечится ожиданием, и чат оставался замороженным, пока процесс жив.
+                // Лечится тем же, что делает свежий клиент: окно заново.
+                loadInitial()
+                return
             }
             mutex.withLock {
                 val chat = reducer
