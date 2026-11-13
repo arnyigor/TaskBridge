@@ -42,7 +42,7 @@ function requestIdOf(headers) {
   return typeof incoming === 'string' && /^[\w.-]{8,64}$/.test(incoming) ? incoming : crypto.randomUUID();
 }
 
-function forwardRequestHeaders(headers, clientAddress, requestId = null) {
+function forwardRequestHeaders(headers, clientAddress, requestId = null, remoteIngress = false, secure = false) {
   const out = {};
   for (const [name, value] of Object.entries(headers)) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue;
@@ -56,6 +56,11 @@ function forwardRequestHeaders(headers, clientAddress, requestId = null) {
   const client = clientAddress ? String(clientAddress) : '127.0.0.1';
   const existing = headers['x-forwarded-for'];
   out['x-forwarded-for'] = existing ? `${existing}, ${client}` : client;
+  // These are hop-owned, never client-owned. Serve terminates HTTPS before
+  // reaching the dedicated loopback listener; its peer address is not the user.
+  delete out['x-taskbridge-remote-ingress'];
+  if (remoteIngress) out['x-taskbridge-remote-ingress'] = '1';
+  out['x-forwarded-proto'] = secure || remoteIngress ? 'https' : 'http';
   if (requestId) out['x-taskbridge-request-id'] = requestId;
   return out;
 }
@@ -73,8 +78,9 @@ function responseHeaders(headers) {
 // bound ones. `upstreamPort` is required — a proxy with nowhere to go is a bug,
 // not a configuration. `tls: { key, cert }` makes it an https listener (the
 // proxy owns the public TLS face, the app behind it stays plain loopback http).
-export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, port = 0, host = '0.0.0.0', tls = null, logger = console } = {}) {
+export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, port = 0, host = '0.0.0.0', tls = null, remoteIngress = false, logger = console } = {}) {
   if (!Number.isInteger(upstreamPort) || upstreamPort <= 0) throw new Error('upstreamPort is required');
+  if (remoteIngress && !['127.0.0.1', '::1'].includes(host)) throw new Error('remote ingress must bind loopback');
   const sockets = new Set();
 
   const handle = (req, res) => {
@@ -85,7 +91,7 @@ export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, p
       port: upstreamPort,
       method: req.method,
       path: req.url,
-      headers: forwardRequestHeaders(req.headers, req.socket?.remoteAddress, requestId),
+      headers: forwardRequestHeaders(req.headers, req.socket?.remoteAddress, requestId, remoteIngress, Boolean(tls)),
     });
 
     upstream.on('response', (up) => {
@@ -184,6 +190,23 @@ if (import.meta.url === pathToFileURL(process.argv[1]).href) {
       console.log(`[proxy] https://${host}:${secure.port} -> 127.0.0.1:${upstreamPort} (self-signed: ${certPath})`);
     } catch (error) {
       console.error(`[proxy] HTTPS disabled: failed to prepare certificate (${error.message}). Is 'openssl' on PATH?`);
+    }
+  }
+
+  // Only this dedicated door may be targeted by Tailscale Serve. Never expose
+  // it (even on loopback) with pairing disabled.
+  const tailscale = config.server?.tailscale || {};
+  if (tailscale.enabled === true && config.server?.auth?.enabled === true) {
+    try {
+      const servePort = Number(tailscale.servePort ?? 8788);
+      if (!Number.isInteger(servePort) || servePort < 1 || servePort > 65535) throw new Error('tailscale.servePort must be 1..65535');
+      const serve = createReverseProxy({ upstreamPort, port: servePort, host: '127.0.0.1', remoteIngress: true });
+      await serve.listen();
+      started.push(serve);
+      console.log(`[proxy] Serve ingress http://127.0.0.1:${serve.port} -> 127.0.0.1:${upstreamPort} (remote privileges only)`);
+    } catch (error) {
+      // This optional door must never take the existing LAN listeners down.
+      console.error(`[proxy] Serve ingress disabled: ${error.message}. LAN remains available.`);
     }
   }
 

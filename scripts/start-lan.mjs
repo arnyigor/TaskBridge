@@ -164,7 +164,18 @@ async function launchProxy(internalPort, publicPort, lanHost, label = 'start-lan
   });
   const proxyUp = await waitForProxy(proxy, readyFile, publicPort, lanHost);
   try { fs.unlinkSync(readyFile); } catch { /* proxy failed before binding */ }
-  if (proxyUp && proxy.exitCode === null) return proxy;
+  const config = await loadConfig(ROOT);
+  const tailscale = config.server?.tailscale;
+  const servePort = tailscale?.enabled === true && config.server?.auth?.enabled === true
+    ? Number(tailscale.servePort ?? 8788) : null;
+  if (proxyUp && proxy.exitCode === null) {
+    if (servePort !== null) {
+      const serveStarted = tailSince(proxyLog, proxyMarker).includes(`[proxy] Serve ingress http://127.0.0.1:${servePort} ->`);
+      if (serveStarted) console.log(`[lan] private HTTPS: point Tailscale Serve at 127.0.0.1:${servePort} (never at ${publicPort})`);
+      else console.warn('[lan] Serve ingress unavailable; LAN remains running. See lan-proxy.log.');
+    }
+    return proxy;
+  }
   killTree(proxy.pid);
   console.error('[lan] the proxy did not come up. Its log says:');
   console.error(meaningfulTail(tailSince(proxyLog, proxyMarker)) || '  (empty)');

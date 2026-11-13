@@ -7,6 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createReverseProxy } from '../src/proxy.mjs';
 import { ensureTlsCert } from '../src/tls.mjs';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 function startUpstream(handler) {
   const server = http.createServer(handler);
@@ -40,6 +42,53 @@ async function withProxy(t, handler, proxyOptions = {}) {
   t.after(() => proxy.close());
   return { proxy, upPort };
 }
+
+test('CLI keeps LAN available when Serve is disabled, busy or misconfigured', { timeout: 15000 }, async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'proxy-serve-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const { server: upstream, port: upstreamPort } = await startUpstream((req, res) => res.end(req.headers['x-taskbridge-remote-ingress'] || 'lan'));
+  t.after(() => new Promise(resolve => upstream.close(resolve)));
+  for (const [index, { enabled, busy, invalid }] of [
+    { enabled: true }, { enabled: false }, { enabled: true, busy: true }, { enabled: true, invalid: true },
+  ].entries()) {
+    const probe = await startUpstream((req, res) => res.end('occupied'));
+    const servePort = invalid ? -1 : probe.port;
+    if (busy) t.after(() => new Promise(resolve => probe.server.close(resolve)));
+    else await new Promise(resolve => probe.server.close(resolve));
+    const ready = path.join(root, `ready-${index}`);
+    await fs.writeFile(path.join(root, 'config.json'), JSON.stringify({ server: { host: '127.0.0.1', auth: { enabled }, tailscale: { enabled: true, servePort } } }));
+    const child = spawn(process.execPath, [fileURLToPath(new URL('../src/proxy.mjs', import.meta.url))], {
+      env: { ...process.env, TASKBRIDGE_CONFIG_DIR: root, LAN_INTERNAL_PORT: String(upstreamPort), LAN_PORT: '0', LAN_HOST: '127.0.0.1', LAN_TLS: 'off', LAN_READY_FILE: ready },
+      windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let logs = '';
+    child.stdout.on('data', chunk => { logs += chunk; });
+    child.stderr.on('data', chunk => { logs += chunk; });
+    const stop = async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise(resolve => child.once('exit', resolve));
+      child.kill();
+      await exited;
+    };
+    t.after(stop);
+    try {
+      let isReady = false;
+      for (let i = 0; i < 200; i++) {
+        if (child.exitCode !== null) break;
+        try { isReady = (await fs.readFile(ready, 'utf8')) === String(child.pid); } catch {}
+        if (isReady) break;
+        await sleep(25);
+      }
+      assert.ok(isReady, logs);
+      const lanPort = Number(/\[proxy\] http:\/\/127\.0\.0\.1:(\d+) ->/.exec(logs)?.[1]);
+      assert.ok(lanPort > 0, logs);
+      assert.equal((await request(lanPort)).body, 'lan');
+      if (busy || invalid) assert.match(logs, /Serve ingress disabled/);
+      else if (enabled) assert.equal((await request(servePort)).body, '1');
+      else await assert.rejects(request(servePort), error => error.code === 'ECONNREFUSED');
+    } finally { await stop(); }
+  }
+});
 
 test('the proxy returns the upstream status, headers and body', async (t) => {
   const { proxy } = await withProxy(t, (req, res) => {
@@ -76,6 +125,20 @@ test('the proxy appends the real client address to X-Forwarded-For', async (t) =
   });
   const res = await request(proxy.port, { path: '/', headers: { 'x-forwarded-for': '198.51.100.7' } });
   assert.equal(res.body, '198.51.100.7, 127.0.0.1');
+});
+
+test('ingress classification and HTTPS headers belong to the proxy, not the client', async t => {
+  const handler = (req, res) => res.end(JSON.stringify(req.headers));
+  const headers = { 'x-taskbridge-remote-ingress': '0', 'x-forwarded-proto': 'http' };
+  const { proxy } = await withProxy(t, handler, { remoteIngress: true });
+  const remote = JSON.parse((await request(proxy.port, { headers })).body);
+  assert.equal(remote['x-taskbridge-remote-ingress'], '1');
+  assert.equal(remote['x-forwarded-proto'], 'https');
+  const { proxy: lan } = await withProxy(t, handler);
+  const local = JSON.parse((await request(lan.port, { headers: { 'x-taskbridge-remote-ingress': '1', 'x-forwarded-proto': 'https' } })).body);
+  assert.equal(local['x-taskbridge-remote-ingress'], undefined);
+  assert.equal(local['x-forwarded-proto'], 'http');
+  assert.throws(() => createReverseProxy({ upstreamPort: 1234, remoteIngress: true }), /must bind loopback/);
 });
 
 test('an event stream is forwarded as it is written, not held until its end', async (t) => {
@@ -202,7 +265,7 @@ test('with a certificate the proxy terminates TLS and still forwards plain http'
     }).on('error', reject);
   });
 
-  assert.deepEqual(JSON.parse(body), { scheme: 'http' });
+  assert.deepEqual(JSON.parse(body), { scheme: 'https' });
   assert.match(proxy.baseUrl, /^https:/);
 });
 

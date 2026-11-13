@@ -35,6 +35,54 @@ async function withProxy(t) {
   return { fixture, proxy, base: `http://127.0.0.1:${proxy.port}` };
 }
 
+test('paired native client uploads, receives SSE, stops and reconnects through Serve ingress', { timeout: 40000 }, async t => {
+  const fixture = await startFixture(undefined, { server: { auth: { enabled: true } } });
+  t.after(() => fixture.close());
+  const options = { upstreamPort: Number(new URL(fixture.base).port), host: '127.0.0.1', remoteIngress: true };
+  let proxy = createReverseProxy(options);
+  await proxy.listen();
+  t.after(() => proxy.close());
+  const port = proxy.port;
+  const base = proxy.baseUrl;
+  const { code } = await fixture.api('/api/auth/pairing');
+  const paired = await fetch(`${base}/api/auth/pair`, { method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' }, body: JSON.stringify({ code, clientKind: 'android' }) });
+  assert.equal(paired.status, 200);
+  const { token } = await paired.json();
+  // Explicit fresh connections also model reconnect after the proxy process
+  // restarts, rather than reusing fetch's now-dead keep-alive socket.
+  const headers = { authorization: `Bearer ${token}`, connection: 'close' };
+  const form = new FormData();
+  form.append('files', new Blob(['Serve upload']), 'note.txt');
+  const uploaded = await fetch(`${base}/api/uploads`, { method: 'POST', headers: { ...headers, 'x-taskbridge-upload': '1' }, body: form });
+  assert.equal(uploaded.status, 201);
+  const upload = await uploaded.json();
+  const created = await fetch(`${base}/api/tasks`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify({ projectId: 'fixture', prompt: 'fault-hang', files: upload.files.map(file => ({ id: file.id })), uploadToken: upload.token }) });
+  assert.equal(created.status, 202);
+  const task = await created.json();
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const stream = await fetch(`${base}/api/tasks/${task.id}/stream`, { headers, signal: controller.signal });
+  assert.equal(stream.status, 200);
+  assert.match(stream.headers.get('content-type'), /text\/event-stream/);
+  const reader = stream.body.getReader();
+  let seen = '';
+  while (!seen.includes('data:')) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    seen += new TextDecoder().decode(value);
+  }
+  controller.abort();
+  assert.match(seen, /data:/);
+  const stopped = await fetch(`${base}/api/tasks/${task.id}/cancel`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(stopped.status, 200);
+  assert.equal((await stopped.json()).status, 'CANCELLED');
+  await proxy.close();
+  proxy = createReverseProxy({ ...options, port });
+  await proxy.listen();
+  assert.equal((await fetch(`${base}/api/tasks/${task.id}`, { headers })).status, 200);
+  assert.equal((await fetch(`${base}/api/tasks/${task.id}`, { headers: { connection: 'close' } })).status, 401);
+});
+
 test('the proxy reports the real build, not a placeholder of its own', { timeout: 30000 }, async t => {
   const { base, fixture } = await withProxy(t);
 

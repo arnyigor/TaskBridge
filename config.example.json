@@ -23,6 +23,8 @@
       "allowedOrigins": []
     },
     "tailscale": {
+      "enabled": false,
+      "servePort": 8788,
       "ip": null,
       "httpsUrl": null
     },

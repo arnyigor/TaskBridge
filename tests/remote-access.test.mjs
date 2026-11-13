@@ -4,6 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
+import { createReverseProxy } from '../src/proxy.mjs';
 
 // Stage 1 of the roadmap over real HTTP: device tokens (R1.2), Origin (R1.3),
 // the reverse-proxy trap (R1.4) and the pairing QR (R1.7). A "remote" client is
@@ -35,6 +36,49 @@ function request(base, route, { method = 'GET', headers = {}, body } = {}) {
 }
 
 const remote = (extra = {}) => ({ 'x-forwarded-for': PHONE, ...extra });
+
+test('Serve ingress never grants local privileges, even with rewritten Host and forged headers', { timeout: 30000 }, async t => {
+  const fixture = await startFixture(undefined, { server: { auth: { enabled: true } } });
+  t.after(() => fixture.close());
+  const proxy = createReverseProxy({ upstreamPort: Number(new URL(fixture.base).port), host: '127.0.0.1', remoteIngress: true });
+  await proxy.listen();
+  t.after(() => proxy.close());
+  const forged = { host: 'localhost', 'x-forwarded-for': '127.0.0.1', 'x-taskbridge-remote-ingress': '0', 'x-forwarded-proto': 'http' };
+  assert.equal((await request(proxy.baseUrl, '/api/tasks', { headers: forged })).status, 401);
+  assert.equal((await request(proxy.baseUrl, '/api/auth/pairing', { headers: forged })).status, 403);
+  const auth = (await request(proxy.baseUrl, '/api/auth', { headers: forged })).data;
+  assert.equal(auth.local, false);
+  assert.equal(auth.machine, false);
+  assert.equal(auth.authenticated, false);
+  const code = (await request(fixture.base, '/api/auth/pairing')).data.code;
+  const paired = await request(proxy.baseUrl, '/api/auth/pair', { method: 'POST', headers: { ...forged, origin: 'https://localhost' }, body: { code } });
+  assert.equal(paired.status, 200);
+  assert.match(String(paired.headers['set-cookie']), /; Secure/);
+  const cookie = String(paired.headers['set-cookie']).split(';')[0];
+  assert.equal((await request(proxy.baseUrl, '/api/tasks', { headers: { ...forged, cookie } })).status, 200);
+  const native = await request(proxy.baseUrl, '/api/auth/pair', { method: 'POST', headers: forged, body: { code, clientKind: 'android' } });
+  assert.equal(native.status, 200);
+  const authorization = `Bearer ${native.data.token}`;
+  const created = await request(proxy.baseUrl, '/api/tasks', { method: 'POST', headers: { ...forged, authorization }, body: { projectId: 'fixture', prompt: 'via Serve ingress' } });
+  assert.equal(created.status, 202);
+  const open = await request(proxy.baseUrl, `/api/tasks/${created.data.id}/workspace/open`, { method: 'POST', headers: { ...forged, authorization }, body: { confirmed: true } });
+  assert.equal(open.data.code, 'FILE_OPEN_LOCAL_ONLY');
+  const evil = await request(proxy.baseUrl, '/api/tasks', { method: 'POST', headers: { ...forged, cookie, origin: 'https://evil.example' }, body: {} });
+  assert.equal(evil.status, 403);
+  assert.equal((await request(proxy.baseUrl, `/api/auth/devices/${native.data.deviceId}`, { method: 'DELETE', headers: { ...forged, authorization } })).status, 403);
+});
+
+test('a remote ingress fails closed even if upstream auth is disabled', { timeout: 30000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const proxy = createReverseProxy({ upstreamPort: Number(new URL(fixture.base).port), host: '127.0.0.1', remoteIngress: true });
+  await proxy.listen();
+  t.after(() => proxy.close());
+  assert.equal((await request(proxy.baseUrl, '/api/tasks')).status, 401);
+  assert.equal((await request(proxy.baseUrl, '/api/auth/pairing')).status, 403);
+  assert.equal((await request(proxy.baseUrl, '/api/auth/pair', { method: 'POST', body: { code: '12345678' } })).status, 401);
+  assert.equal((await request(fixture.base, '/api/tasks')).status, 200);
+});
 
 test('stage 1: pairing, Bearer, cookies, Origin, proxy headers, revocation', { timeout: 60000 }, async t => {
   const fixture = await startFixture(undefined, {

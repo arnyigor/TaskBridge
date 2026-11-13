@@ -121,7 +121,12 @@ export class AccessControl {
     return token ? this.deviceByToken(token) : null;
   }
 
+  remoteIngress(req) {
+    return isLoopback(req.socket?.remoteAddress) && req.headers['x-taskbridge-remote-ingress'] === '1';
+  }
+
   local(req) {
+    if (this.remoteIngress(req)) return false;
     let host;
     try { host = new URL(`http://${req.headers.host}`).hostname; } catch { return false; }
     // R1.4: behind a reverse proxy (ours, or `tailscale serve`) the peer is
@@ -165,7 +170,8 @@ export class AccessControl {
   }
 
   machine(req) {
-    return this.isThisMachine(this.clientAddress(req));
+    return !this.remoteIngress(req) && !req.headers['tailscale-user-login']
+      && this.isThisMachine(this.clientAddress(req));
   }
 
   sign(text) { return crypto.createHmac('sha256', this.secret).update(text).digest('hex'); }
@@ -177,7 +183,8 @@ export class AccessControl {
   }
 
   authenticated(req) {
-    if (!this.enabled || this.local(req)) return true;
+    if (!this.enabled) return !this.remoteIngress(req);
+    if (this.local(req)) return true;
     const bearer = this.bearer(req);
     if (bearer) return Boolean(this.deviceByToken(bearer));
     // R1.3: a browser always sends Origin on a state-changing request, so a
@@ -218,9 +225,12 @@ export class AccessControl {
   }
 
   async pair(req, res, { code, deviceName, clientKind } = {}) {
-    if (!this.enabled) return null;
-    // Behind the LAN proxy every peer is loopback; count attempts per real client,
-    // or one phone's typos lock out every other device.
+    if (!this.enabled) {
+      if (this.remoteIngress(req)) throw fail('Удалённый доступ требует включённой авторизации.');
+      return null;
+    }
+    // LAN uses the last address appended by our proxy. Serve ingress deliberately
+    // shares its loopback bucket: untrusted headers must not bypass rate limits.
     const ip = this.clientAddress(req);
     const now = Date.now();
     // Bound memory, including requests from changing addresses.
@@ -235,7 +245,9 @@ export class AccessControl {
     const { device, token } = await this.addDevice({ name: deviceName, kind: clientKind });
     // Browsers keep the same device token as an HttpOnly cookie. Chrome caps a
     // cookie at 400 days; revoking the device is the real expiry.
-    res.setHeader('set-cookie', `taskbridge_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000${req.socket.encrypted ? '; Secure' : ''}`);
+    const secure = req.socket.encrypted || this.remoteIngress(req)
+      || (isLoopback(req.socket?.remoteAddress) && req.headers['x-forwarded-proto'] === 'https');
+    res.setHeader('set-cookie', `taskbridge_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000${secure ? '; Secure' : ''}`);
     return { deviceId: device.deviceId, token };
   }
 }
