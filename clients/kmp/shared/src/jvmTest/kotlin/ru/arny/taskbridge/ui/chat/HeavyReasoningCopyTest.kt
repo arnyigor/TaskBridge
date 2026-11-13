@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
@@ -34,18 +35,6 @@ import kotlin.test.assertTrue
 
 @OptIn(ExperimentalTestApi::class)
 class HeavyReasoningCopyTest {
-    @Test
-    fun previewKeepsTrimmedTailWithoutChangingTheSource() {
-        assertEquals("", thinkingTail(" \n\t", 12))
-        assertEquals("short", thinkingTail(" \nshort\n  ", 12))
-        assertEquals("…last", thinkingTail("  prefix-last  ", 4))
-        val source = " \n" + "Большой reasoning\n".repeat(20_000) + "the end\n "
-        val displayed = thinkingTail(source, 12_000)
-        assertEquals(12_001, displayed.length)
-        assertTrue(displayed.endsWith("the end"))
-        assertTrue(source.endsWith("\n "))
-    }
-
     @Test
     fun mixedChatKeepsComposerAndFullReasoningCopyUsable() = runComposeUiTest {
         val reasoning = " \n" + "Проверка reasoning, bash и изменений файлов\n".repeat(6_000) + "\n "
@@ -91,6 +80,44 @@ class HeavyReasoningCopyTest {
     }
 
     @Test
+    fun theWholeReasoningIsReachableAndTheStreamFollowsOnlyAtTheEnd() = runComposeUiTest {
+        // Строки разной длины: куски фиксированной ширины тогда не совпадают, и проверка
+        // «разложен только видимый кусок» что-то значит.
+        fun body(count: Int, from: Int) = (from until from + count).joinToString("") { "Рассуждение $it о коде\n" }
+        var thinking by mutableStateOf(body(1_000, 0))
+        setContent {
+            MaterialTheme {
+                Box(Modifier.width(380.dp)) {
+                    ThinkingBlock(thinking, streaming = true, onCopy = {})
+                }
+            }
+        }
+        onNodeWithText("Думает… · ${thinking.length} симв.").performClick()
+
+        fun chunksOf(text: String) = ThinkingChunker().apply { update(text) }
+
+        // Открытый блок начинает с конца: во время потока читают именно хвост.
+        val tail = chunksOf(thinking)
+        onNodeWithText(tail.chunk(tail.count - 1)).assertExists()
+        // Остальные куски не разложены: 280dp панели — это не весь reasoning.
+        assertTrue(onAllNodesWithText(tail.chunk(0)).fetchSemanticsNodes().isEmpty(), "начало не должно раскладываться, пока его не показали")
+
+        // Поток дописывает куски, пока читатель внизу — новый хвост виден без жеста.
+        thinking = thinking + body(200, thinking.length)
+        val grown = chunksOf(thinking)
+        onNodeWithText(grown.chunk(grown.count - 1)).assertExists()
+
+        // Начало достижимо внутренним скроллом, а не только хвост.
+        onNodeWithTag(ThinkingScrollTag).performScrollToIndex(0)
+        onNodeWithText(grown.chunk(0)).assertExists()
+
+        // Читателя, ушедшего вверх, поток не тащит за собой.
+        thinking = thinking + body(200, thinking.length)
+        onNodeWithText(grown.chunk(0)).assertExists()
+        assertTrue(ThinkingChunker().apply { update(thinking) }.count > grown.count)
+    }
+
+    @Test
     fun expandedPreviewStaysBoundedButCopyPreservesTheEntireOriginal() = runComposeUiTest {
         val original = "  \n" + "Рассуждение о коде и командах\n".repeat(9_000) + "\n  "
         assertTrue(original.length > 200_000)
@@ -108,6 +135,9 @@ class HeavyReasoningCopyTest {
         fun sha256(value: String) = MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).toList()
         assertEquals(sha256(original), sha256(copied!!))
         assertTrue(onAllNodesWithText(original).fetchSemanticsNodes().isEmpty(), "full reasoning must not be laid out")
+        // 220 тысяч символов не превращаются в столько же узлов: разложены считанные куски.
+        val laidOut = onAllNodes(hasText("Рассуждение", substring = true)).fetchSemanticsNodes().size
+        assertTrue(laidOut in 1..4, "разложено $laidOut кусков из ${ThinkingChunker().apply { update(original) }.count}")
         onNodeWithText("Свернуть").performClick()
         onNodeWithContentDescription("Копировать размышления").assertDoesNotExist()
     }

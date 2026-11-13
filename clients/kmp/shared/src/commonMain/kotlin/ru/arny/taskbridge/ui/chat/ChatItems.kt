@@ -39,8 +39,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -54,10 +57,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -440,7 +445,7 @@ private fun Muted(text: String) {
     Text(text, style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
-/** The model's reasoning: one quiet line, folded; the last line peeks through while it streams. */
+/** The model's reasoning: one quiet line, folded; unfolded it scrolls inside a bounded pane. */
 @Composable
 internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String) -> Unit) {
     var open by remember { mutableStateOf(false) }
@@ -460,7 +465,7 @@ internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String
         }
         AnimatedVisibility(open) {
             Column {
-                SecondaryPane { ThinkingText(thinking, muted) }
+                ThinkingText(thinking, muted)
                 QuietRow(
                     leading = { Icon(AppIcons.ChevronUp, null, Modifier.size(14.dp), tint = muted) },
                     text = "Свернуть",
@@ -472,37 +477,149 @@ internal fun ThinkingBlock(thinking: String, streaming: Boolean, onCopy: (String
     }
 }
 
+/**
+ * The unfolded reasoning. Short text is laid out as it is; a long one is cut into small
+ * pieces and only the visible pieces are laid out, inside a pane of its own height with
+ * its own scroll. The whole reasoning of a heavy turn (hundreds of thousands of
+ * characters) must never reach the text layout in one piece: that is what made folding
+ * it out slow.
+ */
 @Composable
 private fun ThinkingText(text: String, color: Color) {
-    val displayed = remember(text) { thinkingTail(text, ThinkingExpandedMaxChars) }
-    SelectionContainer {
-        Text(
-            displayed,
-            style = MaterialTheme.typography.bodySmall,
-            color = color,
-            maxLines = ThinkingExpandedMaxLines,
-            overflow = TextOverflow.Ellipsis,
-        )
+    // Pieces are re-cut here, in composition, and only the tail of the text is re-cut while
+    // it streams, so a delta does not copy the whole reasoning again.
+    val chunks = remember { ThinkingChunker() }
+    val count = chunks.update(text)
+    if (count <= ThinkingChunksBeforeScroll) {
+        SecondaryPane {
+            SelectionContainer {
+                if (count > 0) ThinkingChunk(chunks.chunk(0), color)
+            }
+        }
+        return
+    }
+    SecondaryPane(height = ThinkingPaneHeight) {
+        val state = rememberLazyListState()
+        // "Is the reader at the end" is read from the previous layout: composition runs before
+        // layout, so when new pieces arrive this still holds the old piece count and the old
+        // position. A scroll of the reader's own (finger, wheel) then stops the following,
+        // and the stream cannot knock the reader out of it.
+        val atEnd = remember(state) {
+            derivedStateOf<Boolean> {
+                val info = state.layoutInfo
+                val visibleLast = info.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf true
+                visibleLast >= info.totalItemsCount - 1
+            }
+        }
+        val wasAtEnd = atEnd.value
+        // The unfolded block opens at the end: during a stream the tail is what is read.
+        LaunchedEffect(count) {
+            if (wasAtEnd && count > 0) state.scrollToItem(count - 1)
+        }
+        SelectionContainer {
+            LazyColumn(state = state, modifier = Modifier.fillMaxWidth().testTag(ThinkingScrollTag)) {
+                items(count = count, key = { it }) { index ->
+                    ThinkingChunk(chunks.chunk(index), color)
+                }
+            }
+        }
     }
 }
 
-internal fun thinkingTail(text: String, maxChars: Int): String {
-    // Find trim boundaries without allocating a full-sized intermediate copy.
-    var start = 0
-    var end = text.length
-    while (start < end && text[start].isWhitespace()) start++
-    while (end > start && text[end - 1].isWhitespace()) end--
-    return if (end - start <= maxChars) text.substring(start, end)
-        else "…" + text.substring(end - maxChars, end)
+@Composable
+private fun ThinkingChunk(text: String, color: Color) {
+    Text(text, style = MaterialTheme.typography.bodySmall, color = color)
 }
 
-private const val ThinkingExpandedMaxLines = 30
-private const val ThinkingExpandedMaxChars = 12_000
+/** Test tag of the reasoning pane's own scroll, see [ThinkingText]. */
+internal const val ThinkingScrollTag = "thinking-scroll"
 
-/** Indented, left-ruled secondary content under a quiet row: reasoning, tool output. */
+/**
+ * Cuts reasoning into pieces of at most [maxChars] so that the unfolded block can lay out
+ * only what is on screen.
+ *
+ * A piece boundary never splits a surrogate pair. While the text only grows, only the last
+ * piece (and the pieces that follow it) are re-cut: every earlier boundary is computed from
+ * characters that cannot change any more. A text that is not an extension of the previous one
+ * (a restored message, another variant, an edited turn) is cut from scratch once.
+ */
+internal class ThinkingChunker(private val maxChars: Int = ThinkingChunkChars) {
+    private val pieces = ArrayList<String>()
+    private var source: String = ""
+
+    /** Where the last piece starts in [source]; the re-cut after a delta starts here. */
+    private var lastStart = 0
+
+    val count: Int get() = pieces.size
+
+    fun chunk(index: Int): String = pieces[index]
+
+    /** Re-cuts the pieces for [text] and returns how many there are. */
+    fun update(text: String): Int {
+        if (text === source) return pieces.size
+        if (text.length >= source.length && text.startsWith(source)) {
+            if (text.length > source.length) append(text)
+        } else {
+            rebuild(text)
+        }
+        source = text
+        return pieces.size
+    }
+
+    private fun append(text: String) {
+        var start = lastStart
+        var index = pieces.size - 1
+        while (true) {
+            val end = boundary(text, start)
+            val piece = text.substring(start, end)
+            // The first re-cut piece is the one that was last: it may have grown or may be
+            // the very first piece. Everything after it is only ever appended.
+            if (index in pieces.indices) pieces[index] = piece else pieces.add(piece)
+            lastStart = start
+            index = pieces.size
+            if (end >= text.length) break
+            start = end
+        }
+    }
+
+    private fun rebuild(text: String) {
+        pieces.clear()
+        lastStart = 0
+        var start = 0
+        while (start < text.length) {
+            val end = boundary(text, start)
+            pieces.add(text.substring(start, end))
+            lastStart = start
+            start = end
+        }
+    }
+
+    private fun boundary(text: String, from: Int): Int {
+        var end = minOf(from + maxChars, text.length)
+        // A half of an emoji pair in its own piece renders as a broken character.
+        if (end < text.length && end > from + 1 && text[end - 1].isHighSurrogate() && text[end].isLowSurrogate()) end--
+        return end
+    }
+}
+
+private const val ThinkingChunkChars = 1_200
+
+/** One piece still fits the width of an answer; more than one gets the pane and its scroll. */
+private const val ThinkingChunksBeforeScroll = 1
+
+private val ThinkingPaneHeight = 280.dp
+
+/**
+ * Indented, left-ruled secondary content under a quiet row: reasoning, tool output.
+ *
+ * [height] fixes the pane instead of following its content. A scrollable child must use it:
+ * intrinsic height would measure the whole scrollable content, and a lazy list does not
+ * answer intrinsic measurement at all.
+ */
 @Composable
-private fun SecondaryPane(content: @Composable () -> Unit) {
-    Row(Modifier.padding(start = 8.dp, top = 4.dp, bottom = 4.dp).height(IntrinsicSize.Min)) {
+private fun SecondaryPane(height: Dp? = null, content: @Composable () -> Unit) {
+    val padding = Modifier.padding(start = 8.dp, top = 4.dp, bottom = 4.dp)
+    Row(if (height != null) padding.height(height) else padding.height(IntrinsicSize.Min)) {
         Box(Modifier.width(2.dp).fillMaxHeight().background(MaterialTheme.colorScheme.outlineVariant))
         Spacer(Modifier.width(12.dp))
         Box(Modifier.weight(1f)) { content() }
