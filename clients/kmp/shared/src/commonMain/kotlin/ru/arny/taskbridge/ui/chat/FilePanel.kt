@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -45,6 +46,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -240,13 +242,16 @@ internal fun FilePanel(
     onOpenPath: (WorkspaceLink) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val tabState = rememberSaveableStateHolder()
     Surface(modifier.fillMaxHeight(), color = MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxSize()) {
             TabStrip(tabs, onClose)
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
             val target = tabs.active
             if (target != null) {
-                PanelFile(target, session, platform, onOpenPath)
+                tabState.SaveableStateProvider(target.identity) {
+                    PanelFile(target, session, platform, onOpenPath)
+                }
             } else {
                 Spacer(Modifier.fillMaxSize())
             }
@@ -319,8 +324,9 @@ private fun ColumnScope.PanelFile(
     // A Markdown file opens as the document it is; the source stays one tap away.
     // Both are remembered per file, so switching tabs does not carry the mode and
     // the scroll position of the previous one.
-    var source by remember(target.identity) { mutableStateOf(false) }
+    var source by rememberSaveable(target.identity) { mutableStateOf(false) }
     val scroll = rememberSaveable(target.identity, saver = ScrollState.Saver) { ScrollState(0) }
+    val markdownScroll = rememberSaveable(target.identity, saver = LazyListState.Saver) { LazyListState() }
     val markdown = isMarkdownName(target.name)
     Row(
         Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 10.dp),
@@ -361,8 +367,11 @@ private fun ColumnScope.PanelFile(
         )
     }
     HorizontalDivider(Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
-    Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(14.dp)) {
-        FileBody(target, state.loaded, platform, markdown = !source, onOpenPath = onOpenPath)
+    val bodyModifier = Modifier.fillMaxSize()
+        .then(if (markdown && !source) Modifier else Modifier.verticalScroll(scroll))
+        .padding(14.dp)
+    Column(bodyModifier) {
+        FileBody(target, state.loaded, platform, markdown = !source, onOpenPath = onOpenPath, markdownListState = markdownScroll)
     }
 }
 

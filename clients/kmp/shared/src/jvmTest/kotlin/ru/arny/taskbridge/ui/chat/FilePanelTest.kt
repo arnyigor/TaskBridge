@@ -9,6 +9,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.hasScrollToIndexAction
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -48,14 +51,14 @@ class FilePanelTest {
     private val readme = "# План панели\n\nТекст документа.\n"
     private val gaps = "# Пробелы\n\nДругой файл.\n"
 
-    private fun session(urls: MutableList<String>? = null): Pair<ChatSession, HttpClient> {
+    private fun session(urls: MutableList<String>? = null, document: String = readme): Pair<ChatSession, HttpClient> {
         val json = headersOf(HttpHeaders.ContentType, "application/json")
         val http = HttpClient(MockEngine { request ->
             urls?.add(request.url.toString())
             val path = request.url.parameters["path"].orEmpty()
             when {
                 path.endsWith("PRODUCT_GAPS.md") -> respond(gaps, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/markdown"))
-                path.endsWith("README.md") -> respond(readme, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/markdown"))
+                path.endsWith("README.md") -> respond(document, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/markdown"))
                 else -> respond("""{"id":"t","status":"SUCCEEDED"}""", HttpStatusCode.OK, json)
             }
         })
@@ -65,6 +68,69 @@ class FilePanelTest {
             "t", scope, ids = { "id" }, now = { "2026-10-20T00:00:00Z" },
         )
         return session to http
+    }
+
+    @Test
+    fun largeMarkdownIsLazyInThePhoneSheet() = largeMarkdownIsLazy(600.dp, 0)
+
+    @Test
+    fun largeMarkdownIsLazyInTheDockAndKeepsItsTabPosition() = largeMarkdownIsLazy(1200.dp, 1)
+
+    private fun largeMarkdownIsLazy(width: Dp, listIndex: Int) = runComposeUiTest {
+        // Over 500 KB on the wire; the existing 300 KB preview ends inside a folded fence.
+        val document = "# Beginning\n\n" + "Paragraph with **bold** and `code`.\n\n".repeat(5000) +
+            "# Preview end\n\n```text\n" + "output line\n".repeat(40_000) + "```\n"
+        assertTrue(document.encodeToByteArray().size > 500_000)
+        val (chat, http) = session(document = document)
+        val tabs = FileTabs()
+        tabs.open(FileTarget.Workspace("README.md"))
+        val copied = mutableListOf<String>()
+        val platform = object : PlatformServices by DesktopPlatformServices() {
+            override fun copyText(text: String) { copied += text }
+        }
+        try {
+            setContent { Panel(tabs, chat, width = width, platform = platform) }
+            awaitSeen("Beginning")
+            // A plain Column would expose all 5000 paragraphs in the semantics tree.
+            assertTrue(onAllNodesWithText("Paragraph with bold and code.").fetchSemanticsNodes().size < 100)
+            onNodeWithText("Preview end").assertDoesNotExist()
+            onAllNodes(hasScrollToIndexAction())[listIndex].performScrollToNode(hasText("Preview end"))
+            awaitSeen("Preview end")
+            if (listIndex == 1) {
+                tabs.open(FileTarget.Workspace("docs/PRODUCT_GAPS.md"))
+                awaitSeen("Пробелы")
+                onNodeWithText("README.md").performClick()
+                awaitSeen("Preview end")
+                onNodeWithContentDescription("Копировать содержимое файла").performClick()
+            } else {
+                onAllNodesWithText("Копировать")[1].performClick()
+            }
+            assertEquals(listOf(textPreview(document.encodeToByteArray()).text), copied)
+        } finally {
+            http.close()
+        }
+    }
+
+    @Test
+    fun aLargeOrderedListIsLazyAndKeepsNumbersAndCheckboxes() = runComposeUiTest {
+        val document = (42..10_000).joinToString("\n") { index ->
+            "$index. ${if (index == 42) "[x] " else if (index == 43) "[ ] " else ""}entry $index"
+        }
+        val (chat, http) = session(document = document)
+        val tabs = FileTabs().apply { open(FileTarget.Workspace("README.md")) }
+        try {
+            setContent { Panel(tabs, chat) }
+            awaitSeen("entry 42")
+            onNodeWithText("☑").assertExists()
+            onNodeWithText("☐").assertExists()
+            onNodeWithText("44.").assertExists()
+            onNodeWithText("entry 10000").assertDoesNotExist()
+            onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("entry 10000"))
+            awaitSeen("entry 10000")
+            onNodeWithText("10000.").assertExists()
+        } finally {
+            http.close()
+        }
     }
 
     @Test

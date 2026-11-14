@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.HorizontalDivider
@@ -28,7 +30,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -36,6 +41,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import io.ktor.http.decodeURLPart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -83,6 +90,48 @@ fun MarkdownView(text: String, onCopy: (String) -> Unit, modifier: Modifier = Mo
     val blocks = remember(text) { Markdown.parse(text) }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         for (block in blocks) Block(block, onCopy)
+    }
+}
+
+/** File previews parse off Main; key the state too so a new file never shows old blocks. */
+@Composable
+internal fun rememberFileMarkdown(text: String?): List<MdBlock>? = key(text) {
+    val blocks by produceState<List<MdBlock>?>(null, text) {
+        if (text != null) value = withContext(Dispatchers.Default) { Markdown.parse(text) }
+    }
+    blocks
+}
+
+/** Each top-level list entry is bounded independently, not one enormous lazy item. */
+internal fun LazyListScope.markdownFileItems(
+    blocks: List<MdBlock>?,
+    onCopy: (String) -> Unit,
+    onOpenPath: ((WorkspaceLink) -> Unit)?,
+) {
+    if (blocks == null) {
+        item {
+            Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
+                androidx.compose.material3.CircularProgressIndicator()
+            }
+        }
+        return
+    }
+    blocks.forEachIndexed { blockIndex, block ->
+        if (block is MdBlock.ListBlock) {
+            items(block.items.size, key = { "$blockIndex:$it" }) { index ->
+                CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
+                    SelectionContainer(Modifier.padding(bottom = 4.dp)) {
+                        Block(block.copy(start = block.start + index, items = listOf(block.items[index])), onCopy)
+                    }
+                }
+            }
+        } else {
+            item(key = "$blockIndex") {
+                CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
+                    SelectionContainer(Modifier.padding(bottom = 10.dp)) { Block(block, onCopy) }
+                }
+            }
+        }
     }
 }
 

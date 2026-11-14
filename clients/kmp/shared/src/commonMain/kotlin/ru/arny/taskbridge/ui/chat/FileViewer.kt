@@ -12,6 +12,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -22,7 +26,6 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -33,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.client.session.ChatSession
@@ -98,6 +103,15 @@ internal sealed interface Loaded {
 
 internal fun looksBinary(bytes: ByteArray): Boolean = bytes.take(8000).any { it == 0.toByte() }
 
+/** Keep the preview byte limit without decoding an incomplete trailing UTF-8 character. */
+internal fun textPreview(bytes: ByteArray): Loaded.Text {
+    var end = minOf(bytes.size, SHOWN_BYTES)
+    if (end < bytes.size) {
+        while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end--
+    }
+    return Loaded.Text(bytes.decodeToString(endIndex = end), bytes.size, bytes.size > SHOWN_BYTES)
+}
+
 private val MARKDOWN_NAME = Regex("\\.(?:md|markdown|mdx)$", RegexOption.IGNORE_CASE)
 private val VIDEO_NAME = Regex("\\.(?:mp4|webm|mov|m4v|mkv|avi)$", RegexOption.IGNORE_CASE)
 
@@ -154,11 +168,13 @@ private suspend fun loadFile(target: FileTarget, session: ChatSession): Loaded {
     }
     return result.fold(
         onSuccess = { bytes ->
-            val picture = if (isImageName(target.name)) decodeImage(bytes) else null
-            when {
-                picture != null -> Loaded.Picture(picture, bytes)
-                looksBinary(bytes) -> Loaded.Binary(bytes)
-                else -> Loaded.Text(bytes.copyOf(minOf(bytes.size, SHOWN_BYTES)).decodeToString(), bytes.size, bytes.size > SHOWN_BYTES)
+            withContext(Dispatchers.Default) {
+                val picture = if (isImageName(target.name)) decodeImage(bytes) else null
+                when {
+                    picture != null -> Loaded.Picture(picture, bytes)
+                    looksBinary(bytes) -> Loaded.Binary(bytes)
+                    else -> textPreview(bytes)
+                }
             }
         },
         onFailure = { Loaded.Failed((it as? ApiException)?.let { e -> describe(e.error) } ?: it.message ?: "Не удалось прочитать файл") },
@@ -204,6 +220,7 @@ internal fun FileBody(
     platform: PlatformServices,
     markdown: Boolean = true,
     onOpenPath: ((WorkspaceLink) -> Unit)? = null,
+    markdownListState: LazyListState = rememberLazyListState(),
 ) {
     when (val state = loaded) {
         null -> Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
@@ -214,11 +231,14 @@ internal fun FileBody(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         is Loaded.Text -> if (markdown && isMarkdownName(target.name)) {
-            // A Markdown file is shown the way it is meant to be read — headings,
-            // lists, quotes, tables, code — like the same file in the web viewer.
-            // «Копировать» in the footer still takes the source text.
-            CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
-                SelectionContainer { MarkdownView(state.text, onCopy = { platform.copyText(it) }) }
+            val blocks = rememberFileMarkdown(state.text)
+            // Do not clamp a restored tab position against a temporary one-item loading list.
+            if (blocks == null) {
+                Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+            } else {
+                LazyColumn(state = markdownListState) {
+                    markdownFileItems(blocks, onCopy = { platform.copyText(it) }, onOpenPath = onOpenPath)
+                }
             }
         } else {
             val palette = codePalette()
@@ -330,8 +350,17 @@ fun FileViewer(
         PictureViewer(picture.bitmap, picture.original, target.name, onDismiss)
         return
     }
+    val markdownText = (loaded as? Loaded.Text)?.takeIf { isMarkdownName(target.name) }?.text
+    val blocks = rememberFileMarkdown(markdownText)
+    val markdownContent: (LazyListScope.() -> Unit)? = if (markdownText != null) {
+        {
+            state.notice?.let { notice -> item { Text(notice, style = MaterialTheme.typography.labelMedium) } }
+            markdownFileItems(blocks, onCopy = { platform.copyText(it) }, onOpenPath = onOpenPath)
+        }
+    } else null
     AdaptiveSheet(
         title = target.name,
+        lazyContent = markdownContent,
         subtitle = listOfNotNull((target as? FileTarget.Workspace)?.path, fileInfoLine(target, loaded)).joinToString(" · "),
         onDismiss = onDismiss,
         maxWidth = 960,
