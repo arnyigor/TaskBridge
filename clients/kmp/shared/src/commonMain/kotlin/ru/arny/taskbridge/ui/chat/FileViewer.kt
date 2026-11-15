@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -29,6 +30,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -104,7 +107,8 @@ internal sealed interface Loaded {
 internal fun looksBinary(bytes: ByteArray): Boolean = bytes.take(8000).any { it == 0.toByte() }
 
 /** Keep the preview byte limit without decoding an incomplete trailing UTF-8 character. */
-internal fun textPreview(bytes: ByteArray): Loaded.Text {
+internal fun textPreview(bytes: ByteArray, markdown: Boolean = false): Loaded.Text {
+    if (markdown) return Loaded.Text(bytes.decodeToString(), bytes.size, false)
     var end = minOf(bytes.size, SHOWN_BYTES)
     if (end < bytes.size) {
         while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end--
@@ -173,7 +177,7 @@ private suspend fun loadFile(target: FileTarget, session: ChatSession): Loaded {
                 when {
                     picture != null -> Loaded.Picture(picture, bytes)
                     looksBinary(bytes) -> Loaded.Binary(bytes)
-                    else -> textPreview(bytes)
+                    else -> textPreview(bytes, markdown = isMarkdownName(target.name))
                 }
             }
         },
@@ -240,6 +244,9 @@ internal fun FileBody(
                     markdownFileItems(blocks, onCopy = { platform.copyText(it) }, onOpenPath = onOpenPath)
                 }
             }
+        } else if (isMarkdownName(target.name)) {
+            // Full Markdown source must not regress to one enormous Text when switching mode.
+            FileMarkdownSource(state.text, markdownListState)
         } else {
             val palette = codePalette()
             val language = remember(target.name) { languageOfFile(target.name) }
@@ -260,6 +267,34 @@ internal fun FileBody(
                 )
                 SelectionContainer(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
                     Text(highlighted, style = MonoStyle, softWrap = false, modifier = Modifier.padding(end = 12.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FileMarkdownSource(text: String, listState: LazyListState) = key(text) {
+    val chunks by produceState<List<Pair<Int, String>>?>(null, text) {
+        value = withContext(Dispatchers.Default) {
+            var line = 1
+            splitFileCode(text).map { chunk ->
+                (line to chunk).also { line += chunk.count { it == '\n' } }
+            }
+        }
+    }
+    val source = chunks
+    if (source == null) {
+        Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
+    } else LazyColumn(state = listState) {
+        itemsIndexed(source) { _, (line, chunk) ->
+            // The next lazy row supplies the line break; don't add a blank line per chunk.
+            val shown = chunk.removeSuffix("\n")
+            val numbers = remember(line, shown) { (line..line + shown.count { it == '\n' }).joinToString("\n") }
+            Row(Modifier.fillMaxWidth().background(LocalStatusColors.current.codeBackground)) {
+                Text(numbers, style = MonoStyle, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 10.dp))
+                SelectionContainer(Modifier.weight(1f).horizontalScroll(rememberScrollState())) {
+                    Text(shown, style = MonoStyle, softWrap = false)
                 }
             }
         }

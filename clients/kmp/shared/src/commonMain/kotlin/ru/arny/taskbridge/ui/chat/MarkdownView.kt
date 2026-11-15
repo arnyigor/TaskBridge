@@ -95,20 +95,20 @@ fun MarkdownView(text: String, onCopy: (String) -> Unit, modifier: Modifier = Mo
 
 /** File previews parse off Main; key the state too so a new file never shows old blocks. */
 @Composable
-internal fun rememberFileMarkdown(text: String?): List<MdBlock>? = key(text) {
-    val blocks by produceState<List<MdBlock>?>(null, text) {
-        if (text != null) value = withContext(Dispatchers.Default) { Markdown.parse(text) }
+internal fun rememberFileMarkdown(text: String?): FileMarkdownDocument? = key(text) {
+    val document by produceState<FileMarkdownDocument?>(null, text) {
+        if (text != null) value = withContext(Dispatchers.Default) { prepareFileMarkdown(Markdown.parse(text)) }
     }
-    blocks
+    document
 }
 
-/** Each top-level list entry is bounded independently, not one enormous lazy item. */
+/** All expensive structures are bounded before they reach the lazy layout. */
 internal fun LazyListScope.markdownFileItems(
-    blocks: List<MdBlock>?,
+    document: FileMarkdownDocument?,
     onCopy: (String) -> Unit,
     onOpenPath: ((WorkspaceLink) -> Unit)?,
 ) {
-    if (blocks == null) {
+    if (document == null) {
         item {
             Box(Modifier.fillMaxWidth().padding(32.dp), contentAlignment = Alignment.Center) {
                 androidx.compose.material3.CircularProgressIndicator()
@@ -116,22 +116,59 @@ internal fun LazyListScope.markdownFileItems(
         }
         return
     }
-    blocks.forEachIndexed { blockIndex, block ->
-        if (block is MdBlock.ListBlock) {
-            items(block.items.size, key = { "$blockIndex:$it" }) { index ->
-                CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
-                    SelectionContainer(Modifier.padding(bottom = 4.dp)) {
-                        Block(block.copy(start = block.start + index, items = listOf(block.items[index])), onCopy)
+    document.items.forEachIndexed { index, entry ->
+        val code = entry.code
+        val expanded = index in document.expandedCodes
+        val count = if (code != null && expanded) code.chunks.size else 1
+        items(count, key = { "$index:$it" }) { part ->
+            CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
+                SelectionContainer(Modifier.padding(bottom = 4.dp)) {
+                    FileDecorated(entry.decorations, continuation = part > 0) {
+                        when {
+                            code != null -> Column {
+                                // Each chunk is small even after expansion; Copy still takes the whole fence.
+                                CodeBlock(code.source.language, code.chunks[part], onCopy = { onCopy(code.source.code) })
+                                if (code.chunks.size > 1 && (part == 0 && !expanded || part == count - 1 && expanded)) {
+                                    DisableSelection {
+                                        Text(
+                                            if (expanded) "Свернуть" else "Показать весь код (${code.lines} стр.)",
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.fillMaxWidth().clickable { document.toggleCode(index) }.padding(8.dp),
+                                        )
+                                    }
+                                }
+                            }
+                            entry.tablePage -> TableBlock(entry.block as MdBlock.Table, fixedColumns = true)
+                            else -> Block(entry.block, onCopy)
+                        }
                     }
                 }
             }
-        } else {
-            item(key = "$blockIndex") {
-                CompositionLocalProvider(LocalOpenFile provides onOpenPath) {
-                    SelectionContainer(Modifier.padding(bottom = 10.dp)) { Block(block, onCopy) }
-                }
+        }
+    }
+}
+
+@Composable
+private fun FileDecorated(
+    decorations: List<FileDecoration>,
+    continuation: Boolean,
+    index: Int = 0,
+    content: @Composable () -> Unit,
+) {
+    if (index == decorations.size) { content(); return }
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val decoration = decorations[index]
+    Row(Modifier.fillMaxWidth().drawBehind {
+        if (decoration == FileDecoration.Quote) drawRect(muted.copy(alpha = 0.4f), size = Size(3.dp.toPx(), size.height))
+    }) {
+        when (decoration) {
+            FileDecoration.Quote -> Spacer(Modifier.width(13.dp))
+            is FileDecoration.Marker -> {
+                Text(if (continuation) "" else decoration.text.orEmpty(), modifier = Modifier.widthIn(min = 22.dp), color = muted)
+                Spacer(Modifier.width(4.dp))
             }
         }
+        Column(Modifier.weight(1f)) { FileDecorated(decorations, continuation, index + 1, content) }
     }
 }
 
@@ -258,7 +295,7 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
  * the widest columns first. Only when even that cannot fit does it scroll sideways.
  */
 @Composable
-private fun TableBlock(table: MdBlock.Table) {
+private fun TableBlock(table: MdBlock.Table, fixedColumns: Boolean = false) {
     val border = MaterialTheme.colorScheme.outlineVariant
     val headerLine = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)
     val columns = maxOf(table.header.size, table.rows.maxOfOrNull { it.size } ?: 0)
@@ -297,12 +334,15 @@ private fun TableBlock(table: MdBlock.Table) {
             ) { measurables, _ ->
                 val maxColumn = 420.dp.roundToPx()
                 val minColumn = 72.dp.roundToPx()
-                val desired = IntArray(columns) { c -> rows.indices.maxOf { r -> measurables[r * columns + c].maxIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn) }
-                val floor = IntArray(columns) { c -> minOf(desired[c], maxOf(minColumn, rows.indices.maxOf { r -> measurables[r * columns + c].minIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn / 2))) }
+                // File table pages share equal widths, independent of which rows are visible.
+                val desired = if (fixedColumns) IntArray(columns) { (available / columns).coerceIn(minColumn, maxColumn) }
+                    else IntArray(columns) { c -> rows.indices.maxOf { r -> measurables[r * columns + c].maxIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn) }
+                val floor = if (fixedColumns) desired else IntArray(columns) { c -> minOf(desired[c], maxOf(minColumn, rows.indices.maxOf { r -> measurables[r * columns + c].minIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn / 2))) }
                 val widths = fitColumns(desired, floor, available)
                 val placeables = measurables.mapIndexed { i, m -> m.measure(Constraints.fixedWidth(widths[i % columns])) }
                 val heights = IntArray(rows.size) { r -> (0 until columns).maxOf { c -> placeables[r * columns + c].height } }
-                grid.rowBottoms = IntArray(rows.size) { r -> heights.take(r + 1).sum() }
+                var bottom = 0
+                grid.rowBottoms = IntArray(rows.size) { r -> bottom += heights[r]; bottom }
                 layout(widths.sum(), heights.sum()) {
                     var y = 0
                     for (r in rows.indices) {

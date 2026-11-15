@@ -327,6 +327,7 @@ private fun ColumnScope.PanelFile(
     var source by rememberSaveable(target.identity) { mutableStateOf(false) }
     val scroll = rememberSaveable(target.identity, saver = ScrollState.Saver) { ScrollState(0) }
     val markdownScroll = rememberSaveable(target.identity, saver = LazyListState.Saver) { LazyListState() }
+    val sourceScroll = rememberSaveable(target.identity, saver = LazyListState.Saver) { LazyListState() }
     val markdown = isMarkdownName(target.name)
     Row(
         Modifier.fillMaxWidth().padding(start = 14.dp, end = 6.dp, top = 10.dp),
@@ -368,10 +369,10 @@ private fun ColumnScope.PanelFile(
     }
     HorizontalDivider(Modifier.padding(top = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
     val bodyModifier = Modifier.fillMaxSize()
-        .then(if (markdown && !source) Modifier else Modifier.verticalScroll(scroll))
+        .then(if (markdown) Modifier else Modifier.verticalScroll(scroll))
         .padding(14.dp)
     Column(bodyModifier) {
-        FileBody(target, state.loaded, platform, markdown = !source, onOpenPath = onOpenPath, markdownListState = markdownScroll)
+        FileBody(target, state.loaded, platform, markdown = !source, onOpenPath = onOpenPath, markdownListState = if (source) sourceScroll else markdownScroll)
     }
 }
 

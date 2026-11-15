@@ -8,6 +8,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
@@ -77,9 +80,9 @@ class FilePanelTest {
     fun largeMarkdownIsLazyInTheDockAndKeepsItsTabPosition() = largeMarkdownIsLazy(1200.dp, 1)
 
     private fun largeMarkdownIsLazy(width: Dp, listIndex: Int) = runComposeUiTest {
-        // Over 500 KB on the wire; the existing 300 KB preview ends inside a folded fence.
+        // The tail is beyond the former 300 KB cap, after a large closed fence.
         val document = "# Beginning\n\n" + "Paragraph with **bold** and `code`.\n\n".repeat(5000) +
-            "# Preview end\n\n```text\n" + "output line\n".repeat(40_000) + "```\n"
+            "# Preview end\n\n```text\n" + "output line\n".repeat(40_000) + "```\n\n# True file end\n"
         assertTrue(document.encodeToByteArray().size > 500_000)
         val (chat, http) = session(document = document)
         val tabs = FileTabs()
@@ -103,9 +106,70 @@ class FilePanelTest {
                 awaitSeen("Preview end")
                 onNodeWithContentDescription("Копировать содержимое файла").performClick()
             } else {
-                onAllNodesWithText("Копировать")[1].performClick()
+                onNode(hasText("Копировать") and SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)).performClick()
             }
-            assertEquals(listOf(textPreview(document.encodeToByteArray()).text), copied)
+            assertEquals(listOf(document), copied)
+            onAllNodes(hasScrollToIndexAction())[listIndex].performScrollToNode(hasText("True file end"))
+            awaitSeen("True file end")
+            if (listIndex == 1) {
+                onNodeWithText("Текст").performClick()
+                awaitSeen("# Beginning", substring = true)
+                onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("# True file end", substring = true))
+                awaitSeen("# True file end", substring = true)
+                onNodeWithText("Просмотр").performClick()
+                awaitSeen("True file end")
+            }
+        } finally {
+            http.close()
+        }
+    }
+
+    @Test
+    fun tablesInsideListAndQuoteRenderWithoutIntrinsicMeasurement() = runComposeUiTest {
+        val document = "# Nested\n\n- | A | B |\n  | --- | --- |\n  | list cell | value |\n\n" +
+            "> | A | B |\n> | --- | --- |\n> | quote cell | value |\n"
+        val (chat, http) = session(document = document)
+        val tabs = FileTabs().apply { open(FileTarget.Workspace("README.md")) }
+        try {
+            setContent { Panel(tabs, chat) }
+            awaitSeen("list cell")
+            awaitSeen("quote cell")
+        } finally {
+            http.close()
+        }
+    }
+
+    @Test
+    fun nestedQuoteTableAndExpandedCodeHaveReachableTails() = runComposeUiTest {
+        val document = "# Heavy\n\n> " + "word ".repeat(3000) + "QUOTE_END\n\n" +
+            "| Name | Value |\n| --- | --- |\n" +
+            (0..300).joinToString("\n") { "| row $it | value $it |" } +
+            "\n\n```text\n" + "code line\n".repeat(200) + "CODE_END\n```\n\n# File tail"
+        val (chat, http) = session(document = document)
+        val tabs = FileTabs().apply { open(FileTarget.Workspace("README.md")) }
+        val copied = mutableListOf<String>()
+        val platform = object : PlatformServices by DesktopPlatformServices() {
+            override fun copyText(text: String) { copied += text }
+        }
+        try {
+            setContent { Panel(tabs, chat, platform = platform) }
+            awaitSeen("Heavy")
+            onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("QUOTE_END", substring = true))
+            awaitSeen("QUOTE_END", substring = true)
+            assertTrue(onAllNodesWithText("row ", substring = true).fetchSemanticsNodes().size < 30)
+            onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("row 300"))
+            awaitSeen("row 300")
+            onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("Показать весь код", substring = true))
+            onNodeWithText("Показать весь код", substring = true).performClick()
+            onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("CODE_END", substring = true))
+            awaitSeen("CODE_END", substring = true)
+            val copyButtons = onAllNodesWithText("Копировать")
+            copyButtons[copyButtons.fetchSemanticsNodes().lastIndex].performClick()
+            waitForIdle()
+            assertEquals(listOf("code line\n".repeat(200) + "CODE_END"), copied)
+            onNodeWithText("Свернуть").performClick()
+            onAllNodes(hasScrollToIndexAction())[1].performScrollToNode(hasText("File tail"))
+            awaitSeen("File tail")
         } finally {
             http.close()
         }
