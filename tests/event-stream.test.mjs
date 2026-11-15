@@ -216,3 +216,42 @@ test('replay: a slow client reaches the newest event instead of being cut off (2
   assert.equal(last, newest, `клиент дошёл до новейшего события (получено ${ids.length}, последнее ${last})`);
   assert.ok(ids.length > 300, `реплей доставлен целиком, а не обрывком: ${ids.length} событий`);
 });
+
+// Инцидент 2026-11-15: часть сообщений приходила на телефон и не приходила на
+// десктоп. Клиент, отставший от журнала больше чем на одну страницу, догружается
+// через `/events?after=<курсор>&limit=500` (ChatSession.backfillUpTo). Эндпоинт
+// отдавал НОВЕЙШИЕ 500 событий после курсора, а клиент ждёт самые старые: первый
+// элемент страницы сдвигал его курсор в середину дыры, остаток он считал
+// догруженным, и пропущенные сообщения терялись на этом клиенте навсегда.
+test('catch-up: events after a cursor start at the cursor, not at the newest page', { timeout: 60000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const task = await fixture.api('/api/tasks', { projectId: 'fixture', prompt: 'cursor probe' });
+  // Ход настоящего (тестового) движка должен закончиться: иначе его события
+  // вклиниваются между фиктивными и ожидаемые seq сдвигаются.
+  for (let attempt = 0; attempt < 300; attempt++) {
+    const snapshot = await fixture.api(`/api/tasks/${task.id}`);
+    if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(snapshot.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  const store = new TaskStore(path.join(fixture.root, 'data'));
+  const before = await store.maxSeq(task.id);
+  for (let index = 0; index < 600; index++) {
+    await store.appendEvent(task.id, { type: 'STATUS', message: `gap ${index}`, data: {} });
+  }
+  store.close();
+
+  // Курсор клиента остался на последнем событии до дыры: 600 событий впереди,
+  // страница — 500. Часть дыры (100 событий) не влезает в одну страницу.
+  const page = await fixture.api(`/api/tasks/${task.id}/events?after=${before}&limit=500`);
+  assert.equal(page.length, 500, 'страница заполнена целиком');
+  assert.equal(page[0].seq, before + 1, 'страница начинается сразу после курсора');
+  assert.equal(page[page.length - 1].seq, before + 500, 'страница кончается на 500-м событии дыры');
+  assert.deepEqual(page.map(event => event.seq), page.map(event => event.seq).sort((a, b) => a - b), 'события по возрастанию');
+
+  // Второй запрос от нового курсора догружает остаток: дыра закрывается целиком.
+  const rest = await fixture.api(`/api/tasks/${task.id}/events?after=${page[page.length - 1].seq}&limit=500`);
+  assert.equal(rest.length, 100, 'остаток дыры — 100 событий');
+  assert.equal(rest[0].seq, before + 501, 'и он начинается сразу после первой страницы');
+  assert.equal(rest[rest.length - 1].seq, before + 600, 'последнее событие дыры догружено');
+});

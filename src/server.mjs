@@ -2342,7 +2342,17 @@ async function handleRequest(req, res) {
         const cut = bounded.length !== window.events.length;
         return json(res, 200, { events: bounded, reachedStart: window.reachedStart && !hasOlder && !cut });
       }
-      const events = trimStreamingDeltas(await store.readEvents(match[1], limit, after));
+      // `after` is a catch-up cursor, not a history tail: a client that missed
+      // more than `limit` events must get the OLDEST of them first. readEvents()
+      // returns the newest `limit` after the cursor, so a gap wider than one page
+      // arrived cut in the middle — the client applied the head of that page,
+      // saw its cursor reach the last seq, counted the gap closed
+      // (ChatSession.backfillUpTo) and lost every message in the skipped part
+      // for good. A desktop chat without the messages the phone sent is exactly
+      // that (2026-11-15). Without a cursor the read stays the history tail.
+      const events = trimStreamingDeltas(after > 0
+        ? await store.readEventsForward(match[1], limit, after)
+        : await store.readEvents(match[1], limit, after));
       return json(res, 200, events);
     }
 
