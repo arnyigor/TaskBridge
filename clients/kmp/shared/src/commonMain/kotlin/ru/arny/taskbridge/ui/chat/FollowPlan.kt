@@ -92,6 +92,18 @@ fun planActions(status: PlanStatus?, enabled: Boolean = true): List<PlanAction> 
         PlanAction("pause", "Пауза после шага", enabled && active, if (active) "Текущий шаг доиграет, следующий не будет отправлен" else "Пауза возможна только во время шага"),
         PlanAction("stop", "STOP сейчас", enabled && (active || state == "PAUSED_REVIEW"), "Остановить ход и оставить план на разбор"),
         PlanAction("open", "Открыть план", attached, status?.path ?: "Файл плана не подключён"),
+        // Замечания к плану собирает Plannotator в браузере; ответ возвращается в
+        // эту же сессию обычным сообщением, поэтому шаг следования не запускается.
+        PlanAction(
+            id = "annotate",
+            label = "Ревью в Plannotator",
+            enabled = enabled && attached && !active && status?.path != null,
+            hint = when {
+                !attached -> "Сначала подключите файл плана"
+                active -> "Идёт шаг: замечания оставьте после его завершения"
+                else -> "Открыть план для замечаний в браузере"
+            },
+        ),
         PlanAction("reconcile", "Принять файл", enabled && attached && !active && blocked, "Принять версию файла с диска и снять конфликт"),
         PlanAction("edit", "Изменить план", enabled && attached && !active, "Править файл плана в проекте"),
     )
@@ -322,6 +334,10 @@ fun planPathProblem(value: String): String? {
     if (!text.lowercase().endsWith(".md")) return "План — это Markdown-файл (*.md)"
     return null
 }
+
+/** Аргумент `/plannotator-annotate`: путь с пробелами — в кавычках, без них — как есть. */
+fun annotatePathArg(path: String): String =
+    if (path.any { it.isWhitespace() }) "\"$path\"" else path
 
 // --- FP-UX-04: сканирование, вердикт и ИИ -----------------------------------
 

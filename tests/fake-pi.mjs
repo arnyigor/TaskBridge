@@ -636,6 +636,12 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       fs.appendFileSync('pi-deliveries.ndjson', JSON.stringify({ type: command.type, message: command.message }) + '\n');
     } catch { /* a fixture without a writable cwd must not fail the turn */ }
     await parkOn('prompt');
+    // Расширение, которое Pi исполняет без хода модели: ответ `handled` и ни одного
+    // кадра хода. Так проверяется, что TaskBridge сам закрывает такой ход, а не
+    // оставляет задачу в RUNNING до STOP.
+    if (command.type === 'prompt' && command.message.trim().startsWith('/handled-command')) {
+      return respond({ disposition: 'handled' });
+    }
     if (command.message.includes('reject')) return respond({}, false);
     const fault = faultOf(command.message);
     if (fault) return runFault(fault, command, respond);

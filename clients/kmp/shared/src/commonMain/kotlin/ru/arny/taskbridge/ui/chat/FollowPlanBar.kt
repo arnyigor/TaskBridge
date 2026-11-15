@@ -58,6 +58,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.ApiException
+import ru.arny.taskbridge.core.api.MessageRequest
 import ru.arny.taskbridge.core.api.PlanInspection
 import ru.arny.taskbridge.core.api.PlanStatus
 import ru.arny.taskbridge.core.api.TaskBridgeApi
@@ -599,6 +600,23 @@ private fun PlanActionsRow(
                 } catch (error: ApiException) { state.notice = planErrorText(error) }
             }
             "open" -> status?.path?.let(onOpenPlan)
+            // Slash-команда расширения Plannotator: она открывает план в браузере
+            // на машине сервера, а замечания приходят в сессию сообщением.
+            "annotate" -> status?.path?.let { path ->
+                scope.launch {
+                    try {
+                        api.message(
+                            state.taskId,
+                            MessageRequest(
+                                text = "/plannotator-annotate ${annotatePathArg(path)}",
+                                commandId = newId(),
+                            ),
+                        )
+                    } catch (error: ApiException) {
+                        state.notice = planErrorText(error)
+                    }
+                }
+            }
         }
     }
     val contextual = if (status?.state in setOf("RUNNING_STEP", "REVIEWING")) "stop" else "edit"

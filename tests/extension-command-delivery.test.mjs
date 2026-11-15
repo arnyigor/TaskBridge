@@ -115,3 +115,23 @@ test('то же имя на свободной сессии идёт prompt и �
   assert.equal(sent.length, 1, JSON.stringify(deliveries(fixture.root)));
   assert.equal(sent[0].type, 'prompt', 'на свободной сессии поведение не изменилось');
 });
+
+// PLANN-ANN: `/plannotator-annotate` — команда расширения, которую Pi исполняет без
+// хода модели: ответ `handled`, и `agent_settled` не приходит вообще. Без явного
+// закрытия хода задача висела в RUNNING (кнопка «ревью плана» запирала сессию).
+test('команда, исполненная без хода модели, закрывает ход а не оставляет RUNNING', { timeout: 40000 }, async t => {
+  const fixture = await startFixture();
+  t.after(() => fixture.close());
+  const { api } = fixture;
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первое' });
+  const id = created.id;
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+
+  await api(`/api/tasks/${id}/message`, { text: '/handled-command docs/PLAN.md' });
+  const done = await terminal(api, id);
+  assert.equal(done.status, 'SUCCEEDED', `ход закрыт сразу, без STOP: ${fixture.logs()}`);
+
+  // Слот машины свободен: следующее обычное сообщение тоже проходит.
+  await api(`/api/tasks/${id}/message`, { text: 'после команды' });
+  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+});

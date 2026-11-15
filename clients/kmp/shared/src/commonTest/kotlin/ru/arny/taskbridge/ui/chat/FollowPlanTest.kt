@@ -99,7 +99,23 @@ class FollowPlanTest {
         val model = planCardModel(running)
         assertTrue(model.visible)
         assertEquals("Стабилизировать историю", model.goal)
-        assertEquals(7, model.actions.size)
+        assertEquals(8, model.actions.size)
+    }
+
+    @Test
+    fun `Plannotator review is offered for an attached plan and never starts a step`() {
+        val idle = planActions(PlanStatus(enabled = true, attached = true, state = "IDLE", path = "docs/PLAN.md"))
+            .associateBy { it.id }
+        assertTrue(idle.getValue("annotate").enabled)
+        // Pi refuses a prompt mid-turn, so the button is off while a step runs.
+        assertTrue(!planActions(running).associateBy { it.id }.getValue("annotate").enabled)
+        assertTrue(!planActions(PlanStatus(attached = false)).first { it.id == "annotate" }.enabled)
+    }
+
+    @Test
+    fun `the annotate command quotes a path with spaces`() {
+        assertEquals("docs/PLAN.md", annotatePathArg("docs/PLAN.md"))
+        assertEquals("\"docs/my plan.md\"", annotatePathArg("docs/my plan.md"))
     }
 
     @Test

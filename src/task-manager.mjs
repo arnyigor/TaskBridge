@@ -5076,6 +5076,18 @@ export class TaskManager extends EventEmitter {
     return { DISPATCHING: 1, ACKED: 2, PROGRESS: 3, SETTLED: 4, FAILED: 4, CANCELLED: 4 }[phase] || 0;
   }
 
+  // Slash-команда расширения Pi (`/plannotator-annotate` и подобные) исполняется без
+  // хода модели: Pi отвечает `handled`, а `agent_settled` для такого промпта не
+  // приходит. Ход закрывается здесь, иначе задача висела бы в RUNNING, а слот
+  // машины не освободился бы до STOP.
+  async #closeCommandOnlyTurn(task, id) {
+    task.inFlightPrompt = null;
+    await this.#turnStateEvent(task, 'SETTLED');
+    await this.store.save(this.#publicTask(task)).catch(() => {});
+    this.#resolveSettle(id);
+    this.#releaseSlot(id);
+  }
+
   // Шаг C-A: публикация фазы хода. Лёгкое аддитивное событие TURN_STATE идёт
   // в общей ленте событий (попадает в replay/историю); клиенты, не знающие
   // тип, его игнорируют. persistTask=false: фаза меняется часто, снимок задачи
@@ -6595,9 +6607,17 @@ export class TaskManager extends EventEmitter {
     if (!streaming) await this.#turnStateEvent(task, 'DISPATCHING');
     const dispatchedAt = Date.now();
     let ackError = null;
+    // Slash-команда расширения Pi (например `/plannotator-annotate`) исполняется без
+    // хода модели: Pi отвечает `disposition: handled`, а `agent_settled` для такого
+    // промпта не приходит. Без этой ветки задача оставалась в RUNNING до STOP.
+    let commandOnly = false;
     try {
-      if (effectiveMode === 'prompt') await runtime.pi.prompt(message);
-      else await runtime.pi.sendFollowUp(message, effectiveMode);
+      const ack = effectiveMode === 'prompt'
+        ? await runtime.pi.prompt(message)
+        : await runtime.pi.sendFollowUp(message, effectiveMode);
+      // `!streaming`: когда ход уже идёт, этот текст лишь вклинился, и закрывать
+      // будет сам стримящий ход — его agent_settled ещё придёт.
+      commandOnly = !streaming && ack?.data?.disposition === 'handled';
       accepted = true;
       // Pi текст получил, но STOP пришёл, пока RPC был в пути: ход принадлежит
       // отмене — он не объявляется пользовательским и не возвращает сессию в
@@ -6629,13 +6649,17 @@ export class TaskManager extends EventEmitter {
           ...(origin || {}), ...(deliveredPendingId ? { pendingId: deliveredPendingId } : {}),
         });
       }
-      if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
-      else await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
-      if (!streaming) await this.#turnStateEvent(task, 'ACKED');
-      // Вклинивание не начинает новый ход: фаза остаётся за живыми кадрами Pi.
-      // Сброс нужен только чтобы снятый ранее терминальный ранг (Стоп → CANCELLED)
-      // не блокировал PROGRESS, если Pi ещё стримит.
-      else task._turnPhase = null;
+      if (commandOnly) {
+        await this.#closeCommandOnlyTurn(task, id);
+      } else {
+        if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
+        else await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
+        if (!streaming) await this.#turnStateEvent(task, 'ACKED');
+        // Вклинивание не начинает новый ход: фаза остаётся за живыми кадрами Pi.
+        // Сброс нужен только чтобы снятый ранее терминальный ранг (Стоп → CANCELLED)
+        // не блокировал PROGRESS, если Pi ещё стримит.
+        else task._turnPhase = null;
+      }
       // Release gate immediately after USER_MESSAGE is safely persisted so the
       // HTTP response returns to client without waiting for subsequent background ticks.
       release();
@@ -6658,7 +6682,7 @@ export class TaskManager extends EventEmitter {
         ackMs: ackError ? null : Math.max(0, Date.now() - dispatchedAt), ackError
       });
     }
-    if (!streaming) {
+    if (!streaming && !commandOnly) {
       (async () => {
         try {
           await settled;
