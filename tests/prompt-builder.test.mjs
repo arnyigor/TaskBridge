@@ -106,7 +106,6 @@ test('общий контракт есть в любом профиле: ост�
     assert.match(prompt, /once the requested answer is confirmed, report it and stop/, profile);
     assert.match(prompt, /say which part is unconfirmed instead of guessing/, profile);
     assert.match(prompt, /keep what the earlier tools already confirmed and report the failure/, profile);
-    assert.match(prompt, /Work only inside the current working directory\./, profile);
   }
 });
 
@@ -123,7 +122,7 @@ test('неизвестный профиль не оставляет ход бе�
   const prompt = buildTurnPrompt({ text: 'запрос', profile: 'nonsense' });
   assert.match(prompt, /Task instructions \(nonsense\)/);
   assert.match(prompt, /Investigation is allowed/, 'неизвестное значение ведёт себя как explore');
-  assert.match(prompt, /Work only inside the current working directory\./);
+  assert.match(prompt, /Do only what the request asks/, 'границы остаются из контракта');
 });
 
 test('инструкции хода собираются одним генератором: buildTurnPrompt вставляет ровно turnInstructions', () => {
@@ -133,7 +132,7 @@ test('инструкции хода собираются одним генера
     assert.ok(prompt.endsWith(block), `${profile}: блок совпадает`);
     assert.equal(prompt.split('Task instructions (').length, 2, `${profile}: блок один, а не два`);
   }
-  // Вложения влияют только на строку про рабочую папку и на note, не на профиль.
+  // Вложения влияют только на строку про вложения и на note, не на профиль.
   const withFiles = turnInstructions(QUICK, { files: ['.taskbridge-input/a.txt'] });
   assert.match(withFiles, /Read attached files as needed/);
   assert.doesNotMatch(turnInstructions(QUICK), /Read attached files/);

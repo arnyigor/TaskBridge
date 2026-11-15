@@ -93,7 +93,9 @@ export function turnInstructions(profile = EXPLORE, { files = [] } = {}) {
     `Task instructions (${profile}):`,
     ...CONTRACT.map(line => `- ${line}`),
     `- ${PROFILE_NOTES[profile] || PROFILE_NOTES[EXPLORE]}`,
-    `- Work only inside the current working directory.${list.length ? ' Read attached files as needed.' : ''}`,
+    // No workspace-only rule here: it was a prompt-level line, not a sandbox,
+    // and it blocked reading a second project the operator had installed.
+    ...(list.length ? ['- Read attached files as needed.'] : []),
   ];
   return lines.join('\n');
 }
