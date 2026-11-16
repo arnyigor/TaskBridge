@@ -1571,6 +1571,8 @@ data class TurnState(
     val stage: String? = null,
     val lastProgressAt: String? = null,
     val silentMs: Long? = null,
+    /** Ход начат (agent_start), но поток ответа ещё не открыт: мс ожидания первого токена. */
+    val waitingModelMs: Long? = null,
 )
 
 @Serializable

@@ -2799,7 +2799,7 @@ export class TaskManager extends EventEmitter {
     const pendingTerminal = this.#terminalPublication.snapshot(task);
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
     const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
-      _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt,
+      _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt, _modelFrameAt,
       _turnStartedAt, _turnStartedMono, _turnFirstTokenAt, _turnFirstTokenMono, _turnStartSeq, _turnMessageSeq, _turnMeasuredTg, _turnMessageCount,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
@@ -2841,6 +2841,11 @@ export class TaskManager extends EventEmitter {
       // раз в 2 с и не должен вычитать часы другого устройства.
       silentMs: task._lastProgressAt && !RUN_TERMINAL.has(task.status)
         ? Math.max(0, Date.now() - task._lastProgressAt)
+        : null,
+      // Сколько ход ждёт первого кадра ответа модели (провайдер может молчать
+      // сам, а не «модель думает»): null — поток ответа уже открыт.
+      waitingModelMs: !task._modelFrameAt && task._promptStartedAt && !RUN_TERMINAL.has(task.status)
+        ? Math.max(0, Date.now() - task._promptStartedAt)
         : null
     };
   }
@@ -4759,6 +4764,9 @@ export class TaskManager extends EventEmitter {
       task._promptStartedAt = Date.now();
       task._promptMs = 0;
       task._firstTokenAt = 0;
+      // Следующий вызов модели начинается после результата инструмента: ожидание
+      // первого кадра считается от этого момента, а не от начала хода.
+      task._modelFrameAt = 0;
     }
     if (frame.type === 'compaction_start' || frame.type === 'auto_compaction_start') {
       task._compacting = true;
@@ -4788,6 +4796,12 @@ export class TaskManager extends EventEmitter {
       if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'turn_ended' });
     }
 
+    // Первый кадр ответа модели закрывает ожидание провайдера: после него
+    // turnState.waitingModelMs = null (поток открыт, молчание считается иначе).
+    if (!task._modelFrameAt && (frame.type === 'message_update' ||
+        (frame.type === 'message_start' && frame.message?.role === 'assistant'))) {
+      task._modelFrameAt = Date.now();
+    }
     if (frame.type === 'message_update') {
       const delta = frame.assistantMessageEvent;
       if (delta?.type === 'text_delta' || delta?.type === 'thinking_delta') this.#trackStreamTime(task);
@@ -4860,6 +4874,7 @@ export class TaskManager extends EventEmitter {
       task._firstTokenAt = 0;
       task._firstDeltaAt = 0;
       task._lastDeltaAt = 0;
+      task._modelFrameAt = 0;
       // Метки хода живут до `agent_settled`: к этому моменту `_promptStartedAt`
       // уже обнулён учётом скорости, а длительность всего хода ещё нужна.
       task._turnStartedAt = task._promptStartedAt;
@@ -5048,6 +5063,8 @@ export class TaskManager extends EventEmitter {
     task._turnPhase = null;
     // Silence starts with this dispatch, not the previous turn's last frame.
     task._lastProgressAt = Date.now();
+    // Новый ход ждёт свой первый кадр ответа модели.
+    task._modelFrameAt = 0;
     return turn;
   }
 

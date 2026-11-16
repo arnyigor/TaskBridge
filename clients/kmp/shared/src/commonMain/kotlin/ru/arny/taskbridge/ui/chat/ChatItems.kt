@@ -68,6 +68,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.ToolOutput
+import ru.arny.taskbridge.core.api.TurnState
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ToolCall
 import ru.arny.taskbridge.core.client.chat.ToolState
@@ -248,6 +249,8 @@ fun AssistantMessage(
     /** Подпись этого ответа сейчас раскрыта (открыт максимум один блок за раз). */
     usageExpanded: Boolean = false,
     onToggleUsage: () -> Unit = {},
+    /** Фаза хода с сервера: что именно сейчас ждём (первый токен / скрытый вывод). */
+    turnState: TurnState? = null,
 ) {
     var buttonMenu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
@@ -266,43 +269,39 @@ fun AssistantMessage(
             Box(Modifier.weight(1f)) {
                 Column(Modifier.fillMaxWidth().then(selectToggle(actions))) {
                     when {
-                        item.text.isNotBlank() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath, LocalSearchItemId provides item.id) {
+                        item.text.isNotBlank() && item.text.trim() != item.error?.trim() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath, LocalSearchItemId provides item.id) {
                             SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
                         }
-                        item.active -> Column {
+                        item.active && item.error == null -> Column {
                             TypingIndicator()
                             Muted(when {
                                 item.id.startsWith("assistant-pending-") -> "Ожидается подтверждение отправки"
                                 item.tools.any { it.state == ToolState.RUNNING } -> "Агент выполняет команды"
                                 item.thinking.isNotBlank() || item.tools.isNotEmpty() -> "Агент работает · итоговый ответ ещё не получен"
-                                else -> "Агент принял сообщение · ожидается начало работы"
+                                else -> assistantStreamPhaseLabel(item, turnState)
                             })
                         }
                         item.cutOff -> Muted("Запрос прерван")
                         item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null && item.segmentActions && item.id == item.canonicalId) Muted("Без текста")
-                        item.final && item.error == null -> Muted("Ответ не был получен.")
+                        item.final && item.error == null -> ChatErrorStatus(
+                            raw = "Ответ не был получен.",
+                            onCopy = { onCopyText("Ответ не был получен.") },
+                            onRetry = actions.regenerate,
+                        )
                     }
-                    if (item.active && item.text.isNotBlank()) TypingIndicator()
+                    if (item.active && item.text.isNotBlank() && item.error == null) TypingIndicator()
                     // Turn output files (created and merely viewed by tools) stay in the
                     // data and the web's «Файлы агента» panel, but the chat does not
                     // display them: every file a tool touches otherwise floods the chat
                     // with chips.
                     item.error?.let { error ->
-                        Surface(
-                            color = MaterialTheme.colorScheme.errorContainer,
-                            contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                            shape = MaterialTheme.shapes.small,
+                        ChatErrorStatus(
+                            raw = error,
+                            onCopy = { onCopyText(error) },
+                            active = item.active,
+                            onRetry = actions.regenerate,
                             modifier = Modifier.padding(top = 8.dp),
-                        ) {
-                            Row(Modifier.padding(10.dp), verticalAlignment = Alignment.Top) {
-                                Icon(AppIcons.Alert, null, Modifier.size(16.dp).padding(top = 2.dp))
-                                Spacer(Modifier.width(8.dp))
-                                SelectionContainer(Modifier.weight(1f, fill = false)) { Text(error, style = MaterialTheme.typography.bodySmall) }
-                                IconButton(onClick = { onCopyText(error) }, modifier = Modifier.padding(start = 4.dp).size(24.dp)) {
-                                    Icon(AppIcons.Copy, "Копировать ошибку", Modifier.size(14.dp))
-                                }
-                            }
-                        }
+                        )
                     }
                 }
             }
@@ -704,7 +703,9 @@ internal fun toolVerb(name: String, running: Boolean): String = when (name.lower
     "bash" -> if (running) "Выполняет" else "Выполнил"
     "grep" -> if (running) "Ищет" else "Искал"
     "find", "ls" -> if (running) "Смотрит" else "Просмотрел"
-    else -> name
+    // Сломанный вызов приходит с командой вместо имени: одна первая строка,
+    // обрезанная до ~40 символов, иначе она занимает весь экран (скриншот 2026-11-16).
+    else -> name.lineSequence().first().let { if (it.length > 40) it.take(40) + "…" else it }
 }
 
 /** What the row names: a file tool shows the file name, a command its first line. */
@@ -746,7 +747,15 @@ private fun QuietRow(
     ) {
         Box(Modifier.size(16.dp), contentAlignment = Alignment.Center) { leading() }
         Spacer(Modifier.width(8.dp))
-        Text(searchHighlighted(text), style = MaterialTheme.typography.labelLarge, color = color, modifier = Modifier.searchBringIntoView(text))
+        // weight: имя не уступает цели, но и не уводит строку в многострочие.
+        Text(
+            searchHighlighted(text),
+            style = MaterialTheme.typography.labelLarge,
+            color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false).searchBringIntoView(text),
+        )
         if (target != null) {
             Spacer(Modifier.width(6.dp))
             Text(
@@ -819,6 +828,11 @@ private fun ToolRow(
         AnimatedVisibility(open) {
             SecondaryPane {
                 Column {
+                    // Полное имя — только для незнакомого инструмента (у известного
+                    // оно уже сказано глаголом), чтобы данные не терялись в обрезке.
+                    if (toolVerb(tool.name, false) == tool.name && tool.name.isNotBlank()) {
+                        SelectionContainer { Text(tool.name, style = MonoStyle, color = if (error) colors.failed else MaterialTheme.colorScheme.onSurfaceVariant) }
+                    }
                     if (!tool.label.isNullOrBlank()) {
                         SelectionContainer { Text(tool.label.orEmpty(), style = MonoStyle, color = MaterialTheme.colorScheme.onSurface) }
                     }
@@ -961,19 +975,32 @@ fun FileChip(name: String, size: String, onClick: (() -> Unit)?) {
 }
 
 @Composable
-fun NoteRow(item: ChatItem.Note, onCopy: () -> Unit, selected: Boolean = false, onToggleSelect: (() -> Unit)? = null) {
+fun NoteRow(
+    item: ChatItem.Note,
+    onCopy: () -> Unit,
+    selected: Boolean = false,
+    onToggleSelect: (() -> Unit)? = null,
+    noticeCount: Int = 1,
+    noticeRetrying: Boolean = isProviderRetryNotice(item.text),
+    noticeRecovered: Boolean = false,
+) {
     val multiline = item.text.contains('\n')
     var expanded by remember(item.id) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.Center) {
         onToggleSelect?.let { SelectMark(selected, it) }
-        if (!multiline) {
+        if (isProviderErrorNotice(item.text)) {
+            ChatErrorStatus(
+                item.text, onCopy, modifier = Modifier.weight(1f), notice = true,
+                retrying = noticeRetrying, count = noticeCount, recovered = noticeRecovered,
+            )
+        } else if (!multiline) {
             Text(
                 searchHighlighted(item.text),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier
                     .searchBringIntoView(item.text)
-                    .clip(RoundedCornerShape(50))
+                    .clip(RoundedCornerShape(10.dp))
                     .background(MaterialTheme.colorScheme.surfaceContainer)
                     .padding(horizontal = 12.dp, vertical = 4.dp),
             )

@@ -1177,7 +1177,10 @@ internal fun MessageList(
         }
     }
     val items = state.chat.items
-    val reversed = remember(items) { items.asReversed() }
+    // Search indices and selection refer to original messages, never grouped notices.
+    val groupNotices = !selectionMode && search.query.isBlank()
+    val timeline = remember(items, groupNotices) { errorTimeline(items, groupNotices) }
+    val reversed = remember(timeline.items) { timeline.items.asReversed() }
 
     // Якорь чтения: элемент, на котором стоит пользователь, и смещение внутри
     // него. Обновляется на каждом сдвиге, который сделал сам оператор, и
@@ -1335,6 +1338,7 @@ internal fun MessageList(
                                 continuePending = continuePendingId == item.canonicalId && !item.active,
                                 usageDetails = usage,
                                 usageExpanded = expandedUsageId == item.canonicalId,
+                                turnState = state.task?.turnState,
                                 onToggleUsage = { expandedUsageId = if (expandedUsageId == item.canonicalId) null else item.canonicalId },
                                 onSelectVariant = { position ->
                                     val variants = item.variants
@@ -1343,12 +1347,18 @@ internal fun MessageList(
                                 },
                             )
                         }
-                        is ChatItem.Note -> NoteRow(
-                            item = item,
-                            onCopy = { onCopyMessage(item.copyText()) },
-                            selected = selectedIds[item.id] == true,
-                            onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
-                        )
+                        is ChatItem.Note -> {
+                            val group = timeline.groups[item.id]
+                            NoteRow(
+                                item = if (group != null) item.copy(text = group.raw) else item,
+                                onCopy = { onCopyMessage(group?.raw ?: item.copyText()) },
+                                selected = selectedIds[item.id] == true,
+                                onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                                noticeCount = group?.notes?.size ?: 1,
+                                noticeRetrying = group?.retrying ?: false,
+                                noticeRecovered = group?.recovered ?: false,
+                            )
+                        }
                     }
                 }
             }
@@ -1596,13 +1606,13 @@ private fun DeliveryDiagnostics(
         // Отказ провайдера важнее прочего: пока он держит ход, не идёт ничего.
         state.task?.providerWait != null -> providerWaitPhase(state.task.providerWait, tick)
         state.task?.runtime?.activity == "compacting" -> "Сжимается контекст$compactingDetail$readingDetail · подробнее"
-        answer?.active == true && answer.generatingToolCall -> assistantStreamPhaseLabel(answer)
+        answer?.active == true && answer.generatingToolCall -> assistantStreamPhaseLabel(answer, state.task?.turnState)
         answer?.tools?.any { it.state == ToolState.RUNNING } == true -> "Агент выполняет команды"
         readsPrompt && answerSilent -> "Модель читает промпт$readingDetail"
         // История больше окна модели: провайдер отвечает 400, Pi повторяет запрос, и
         // «ожидается ответ агента» висит без событий — это не задержка модели.
         contextOverflow(state.task, info) != null && answer?.active != true -> "История не влезает в окно модели · подробнее"
-        answer?.active == true -> assistantStreamPhaseLabel(answer)
+        answer?.active == true -> assistantStreamPhaseLabel(answer, state.task?.turnState)
         state.task?.pendingPrompts?.isNotEmpty() == true -> "Сообщение в очереди"
         else -> "Диагностика доставки"
     }
@@ -2852,9 +2862,11 @@ internal fun chatEscape(dialogOpen: Boolean, searchOpen: Boolean, filesOpen: Boo
  * порог по умолчанию — 120 с (как в web). Молчание сообщается только для
  * живого хода: терминальная сессия молчать не может.
  */
-data class SilenceState(val totalMs: Long, val stage: String?) {
+data class SilenceState(val totalMs: Long, val stage: String?, val waitingModelMs: Long? = null) {
+    // waitingModelMs != null — запрос ещё не начал отвечать потоком (нет ни одного
+    // кадра ответа): причина не «модель молчит», а «первый токен не пришёл».
     val label: String
-        get() = "Модель молчит ${totalMs / 60000}:${(totalMs % 60000 / 1000).toString().padStart(2, '0')}"
+        get() = if (waitingModelMs != null) "Ждём первый токен ${mmss(waitingModelMs)}" else "Модель молчит ${mmss(totalMs)}"
 }
 
 internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceState? {
@@ -2862,28 +2874,36 @@ internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceSta
     if (task?.status != "RUNNING" || task.providerWait != null ||
         task.runtime?.activity in setOf("tool", "compacting", "waiting_model")) return null
     val silent = task?.turnState?.silentMs?.takeIf { it >= thresholdMs } ?: return null
-    return SilenceState(silent, task.turnState?.stage?.takeIf { it.isNotBlank() })
+    return SilenceState(silent, task.turnState?.stage?.takeIf { it.isNotBlank() }, task.turnState?.waitingModelMs)
 }
+
+// Служебные стадии не про модель: «Pi is working» — заглушка agent_start.
+private val SilenceStageNoise = setOf("Pi is working", "Pi starting")
 
 @Composable
 private fun SilenceBanner(silence: SilenceState, onWait: () -> Unit, onStop: () -> Unit, onRestart: () -> Unit) {
     val colors = LocalStatusColors.current
+    // На узком экране кнопки в Row вытесняли текст до одного слова на строку:
+    // заголовок и пояснение идут во всю ширину, действия — отдельной строкой.
     Surface(Modifier.fillMaxWidth(), color = colors.waiting.copy(alpha = 0.12f)) {
-        Row(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(AppIcons.Alert, null, tint = colors.waiting, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(10.dp))
-            Column(Modifier.weight(1f)) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(AppIcons.Alert, null, tint = colors.waiting, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(10.dp))
                 Text(silence.label, style = MaterialTheme.typography.labelLarge, color = colors.waiting)
-                Text(
-                    "Последний прогресс: ${silence.stage ?: "стадия неизвестна"}. Ход может быть просто долгим.",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
-            TextButton(onClick = onWait) { Text("Подождать") }
-            // Перезапуск — не «повторить»: промпт сам не переотправится (план 4.2/C-A).
-            TextButton(onClick = onRestart) { Text("Перезапустить") }
-            TextButton(onClick = onStop) { Text("STOP", color = MaterialTheme.colorScheme.error) }
+            val stage = silence.stage?.takeIf { it.isNotBlank() && it !in SilenceStageNoise }
+            Text(
+                "Последний прогресс: ${stage ?: "стадия неизвестна"}. Ход может быть просто долгим.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = onWait) { Text("Подождать") }
+                // Перезапуск — не «повторить»: промпт сам не переотправится (план 4.2/C-A).
+                TextButton(onClick = onRestart) { Text("Перезапустить") }
+                TextButton(onClick = onStop) { Text("STOP", color = MaterialTheme.colorScheme.error) }
+            }
         }
     }
 }

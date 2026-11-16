@@ -59,6 +59,8 @@ test('a completed turn publishes DISPATCHING→ACKED→PROGRESS→SETTLED before
   assert.equal(done.turnState.phase, 'SETTLED');
   assert.equal(done.turnState.turn, 1);
   assert.equal(done.turnState.silentMs, null);
+  // Ожидание первого кадра модели не переживает терминальный ход.
+  assert.equal(done.turnState.waitingModelMs, null);
 });
 
 test('a follow-up starts a new turn with its own phases', { timeout: 60000 }, async t => {

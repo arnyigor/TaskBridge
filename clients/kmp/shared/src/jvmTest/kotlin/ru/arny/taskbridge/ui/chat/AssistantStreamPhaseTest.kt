@@ -3,6 +3,7 @@ package ru.arny.taskbridge.ui.chat
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.Task
+import ru.arny.taskbridge.core.api.TurnState
 import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
@@ -85,5 +86,39 @@ class AssistantStreamPhaseTest {
             assertEquals(live.snapshot(detailed = true).items, paged.snapshot(detailed = true).items, "cut $cut")
             assertTrue(answer(paged).generatingToolCall)
         }
+    }
+}
+
+/**
+ * Фаза хода с сервера уточняет ожидание: «запрос передан» — это три разных
+ * состояния (диспетчеризация, подтверждение Pi, ожидание провайдера модели).
+ */
+class AssistantStreamPhaseWaitTest {
+    private val assistant = ChatItem.Assistant(
+        id = "assistant-1", text = "", thinking = "", tools = emptyList(), active = true,
+        status = "RUNNING", error = null, final = false, at = null, endedAt = null,
+        partial = false, superseded = false, stopReason = null, variants = null,
+    )
+
+    @Test
+    fun `turn phases name what is actually awaited`() {
+        assertEquals("Передаём запрос в Pi", assistantStreamPhaseLabel(assistant, TurnState(phase = "DISPATCHING")))
+        assertEquals("Pi принял запрос", assistantStreamPhaseLabel(assistant, TurnState(phase = "ACKED")))
+        assertEquals(
+            "Запрос у провайдера модели · ждём первый токен 2:05",
+            assistantStreamPhaseLabel(assistant, TurnState(phase = "PROGRESS", waitingModelMs = 125_000L)),
+        )
+        // Поток открыт, но видимого вывода нет — причину не утверждаем.
+        assertEquals(
+            "Модель отвечает без видимого вывода (возможно, скрытые размышления)",
+            assistantStreamPhaseLabel(assistant, TurnState(phase = "PROGRESS")),
+        )
+    }
+
+    @Test
+    fun `visible output wins over the wait phases and an old server keeps the old label`() {
+        val answering = assistant.copy(thinking = "размышляю")
+        assertEquals("Получаем размышления модели", assistantStreamPhaseLabel(answering, TurnState(phase = "PROGRESS", waitingModelMs = 5_000L)))
+        assertEquals("Сообщение передано · ожидается ответ агента", assistantStreamPhaseLabel(assistant, null))
     }
 }
