@@ -4798,7 +4798,10 @@ export class TaskManager extends EventEmitter {
       // контекст» (chars/4 вверх), и число сопоставимо с остальными подписями.
       task.current = `Pi is thinking… (~${estimateTokens(task.thinkingText.length)} tok)`;
       }
-      if (frame.usage?.totalTokens > 0) task.lastUsage = frame.usage;
+      // Момент измерения рядом с самим измерением: по одному `lastUsage` клиент
+      // не может отличить число, снятое до сжатия, от числа после него, и панель
+      // показывала 455007 ток., когда в контексте было 42K (живой отчёт 2026-11-15).
+      if (frame.usage?.totalTokens > 0) { task.lastUsage = frame.usage; task.lastUsageAt = now(); }
     }
     if (frame.type === 'tool_execution_start') {
       const arg = frame.args?.command || frame.args?.path || frame.args?.file_path || '';
@@ -4882,7 +4885,8 @@ export class TaskManager extends EventEmitter {
         if (frame.message.model == null) frame.message.model = ranModel.id;
       }
       if (frame.message.isLocal == null) frame.message.isLocal = this.#usesLocalRuntime(task);
-      if (frame.message.usage?.totalTokens > 0) task.lastUsage = frame.message.usage;
+      // См. выше у message_update: время измерения — часть измерения.
+      if (frame.message.usage?.totalTokens > 0) { task.lastUsage = frame.message.usage; task.lastUsageAt = now(); }
       if (frame.message.stopReason === 'error') task._modelError = frame.message.errorMessage || 'Модель завершила ответ с ошибкой.';
       // A message that produced no token at all is a failed attempt (connection
       // error, the wait before a retry): its time-to-first-token is the WAIT, not
@@ -5687,6 +5691,7 @@ export class TaskManager extends EventEmitter {
       task.status = 'SUCCEEDED';
       task.queueReason = null;
       task.lastUsage = null;
+      task.lastUsageAt = null;
       task.pendingPrompts = [];
       await this.#truncateFrom(task, 1, { dropInitial: true, reason: 'clear' });
       return { ok: true };

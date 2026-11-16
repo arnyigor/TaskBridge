@@ -60,3 +60,33 @@ test('«Nothing to compact» becomes a readable reason with the tail budget', { 
     return true;
   });
 });
+
+// Живой отчёт 2026-11-15: после ручного сжатия панель показывала «Контекст сессии:
+// 455007» — ровно `tokensBefore`, — хотя в контексте было ≈35K. `lastUsage` после
+// сжатия остаётся прежним намеренно, поэтому клиенту нужно ВРЕМЯ измерения: по нему
+// видно, что число относится к прошлому запросу, и оценку нельзя выдавать за него.
+test('the measurement carries its own timestamp, so a post-compaction panel cannot show the pre-compaction size', { timeout: 40000 }, async t => {
+  const f = await fixture(t);
+  const before = await f.api(`/api/tasks/${f.id}`);
+  assert.ok(before.lastUsageAt, 'lastUsageAt is written together with lastUsage');
+  assert.equal(before.lastUsage.totalTokens, 1100);
+  assert.ok(Date.parse(before.lastUsageAt) <= Date.now());
+
+  const response = await f.api(`/api/tasks/${f.id}/compact`, {});
+  assert.ok(response.result, 'compact still succeeds');
+
+  // Кадры сжатия стримят асинхронно (та же гонка, что и в context-limit.test.mjs):
+  // счётчик и граница появляются не в момент ответа на команду.
+  let after = before;
+  for (let i = 0; i < 100 && after.compaction.count !== 1; i++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+    after = await f.api(`/api/tasks/${f.id}`);
+  }
+  assert.equal(after.compaction.count, 1);
+  // Измерение остаётся прежним (это прошлый запрос, а не оценка нового размера)…
+  assert.deepEqual(after.lastUsage, before.lastUsage);
+  assert.equal(after.lastUsageAt, before.lastUsageAt);
+  // …но его время теперь старше сжатия: клиент обязан взять оценку, а не это число.
+  assert.ok(Date.parse(after.lastUsageAt) < Date.parse(after.compaction.last.at));
+  assert.ok(after.compaction.last.estimatedTokensAfter > 0);
+});

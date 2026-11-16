@@ -69,7 +69,7 @@ test('image parts survive: only the text of an old result is archived', () => {
     role: 'toolResult', toolCallId: 'img', toolName: 'read', isError: false, timestamp: 1,
     content: [{ type: 'text', text: 'y'.repeat(50_000) }, { type: 'image', data: 'AAAA' }],
   };
-  const plan = planArchival([withImage, user('z'.repeat(400_000))], { keepRecentToolTokens: 1000, minChars: 2_000 });
+  const plan = planArchival([withImage, assistant('done'), user('z'.repeat(400_000))], { keepRecentToolTokens: 1000, minChars: 2_000 });
   assert.equal(plan.archived, 1);
   const parts = plan.messages[0].content;
   assert.equal(parts.filter(part => part.type === 'image').length, 1, 'the media policy keeps its part');
@@ -78,7 +78,7 @@ test('image parts survive: only the text of an old result is archived', () => {
 
 test('error results are archived like any other: the fact of the call and the id remain', () => {
   const failed = toolResult('err', 30_000, { isError: true });
-  const plan = planArchival([failed, user('q'.repeat(200_000))], { keepRecentToolTokens: 1000, minChars: 2_000 });
+  const plan = planArchival([failed, assistant('done'), user('q'.repeat(200_000))], { keepRecentToolTokens: 1000, minChars: 2_000 });
   assert.equal(plan.messages[0].isError, true);
   assert.equal(plan.messages[0].toolCallId, 'err');
 });
@@ -86,4 +86,76 @@ test('error results are archived like any other: the fact of the call and the id
 test('empty input is not a change', () => {
   assert.equal(planArchival([], {}).changed, false);
   assert.equal(planArchival(null, {}).changed, false);
+});
+
+test('the archive line is not an instruction to re-run the tool', () => {
+  const text = archivedText('grep', 10_034);
+  assert.match(text, /10_034|10034/);
+  assert.match(text, /архивирован/);
+  assert.doesNotMatch(text, /повторите|заново|прочитайте/i,
+    'an imperative here makes the model repeat the same call forever');
+});
+
+const toolCall = (id, name, args) => ({
+  role: 'assistant', content: [{ type: 'toolCall', id, name, arguments: args }], timestamp: 1,
+});
+
+test('an old write body is truncated but the call keeps its id, name and shape', () => {
+  const call = toolCall('w1', 'write', { path: 'src/a.kt', content: 'y'.repeat(20_000) });
+  const plan = planArchival([call, user('z'.repeat(200_000))],
+    { keepRecentToolTokens: 1_000, minChars: 2_000, toolInputChars: 800 });
+  const part = plan.messages[0].content[0];
+  assert.equal(plan.truncated, 1);
+  assert.equal(part.id, 'w1');
+  assert.equal(part.name, 'write');
+  assert.equal(part.arguments.path, 'src/a.kt', 'short values stay readable');
+  assert.equal(typeof part.arguments.content, 'string', 'the schema type is preserved');
+  assert.ok(part.arguments.content.length < 400, 'the body is gone');
+  assert.ok(plan.savedChars > 19_000);
+});
+
+test('recent tool calls and short arguments are left untouched', () => {
+  const big = toolCall('w2', 'write', { content: 'y'.repeat(5_000) });
+  const recent = planArchival([big, user('q')], { keepRecentToolTokens: 40_000, toolInputChars: 800 });
+  assert.equal(recent.truncated, 0, 'the current turn keeps its own arguments');
+  const short = toolCall('b1', 'bash', { command: 'ls -la' });
+  const plan = planArchival([short, user('z'.repeat(200_000))],
+    { keepRecentToolTokens: 1_000, minChars: 2_000, toolInputChars: 800 });
+  assert.equal(plan.truncated, 0);
+});
+
+test('tool arguments count towards the budget instead of being invisible', () => {
+  const call = toolCall('w3', 'write', { content: 'y'.repeat(40_000) });
+  assert.equal(messageChars(call), JSON.stringify({ content: 'y'.repeat(40_000) }).length);
+});
+
+test('a result the model has not seen yet is never archived, however large', () => {
+  const huge = toolResult('h1', 400_000);
+  const plan = planArchival([assistant('run it'), huge],
+    { keepRecentToolTokens: 40_000, minChars: 2_000, toolInputChars: 800 });
+  assert.equal(plan.archived, 0, 'the answer to the last call must reach the model');
+  assert.equal(plan.messages[1].content[0].text.length, 400_000, 'the result is intact');
+});
+
+test('parallel results of one turn are protected together', () => {
+  const a = toolResult('p1', 300_000);
+  const b = toolResult('p2', 300_000);
+  const plan = planArchival([assistant('two calls'), a, b],
+    { keepRecentToolTokens: 40_000, minChars: 2_000, toolInputChars: 800 });
+  assert.equal(plan.archived, 0);
+});
+
+test('once the model has answered, the same result becomes archivable', () => {
+  const huge = toolResult('h2', 300_000);
+  const plan = planArchival([assistant('run'), huge, assistant('seen'), user('next')],
+    { keepRecentToolTokens: 1_000, minChars: 2_000, toolInputChars: 800 });
+  assert.equal(plan.archived, 1);
+});
+
+test('edit and bash arguments are never truncated: they record what was changed', () => {
+  const editCall = toolCall('e1', 'edit', { path: 'a.kt', oldText: 'o'.repeat(5_000), newText: 'n'.repeat(5_000) });
+  const bashCall = toolCall('b2', 'bash', { command: 'cat > f <<EOF\n' + 'z'.repeat(5_000) + '\nEOF' });
+  const plan = planArchival([editCall, bashCall, assistant('done'), user('q'.repeat(200_000))],
+    { keepRecentToolTokens: 1_000, minChars: 2_000, toolInputChars: 800 });
+  assert.equal(plan.truncated, 0);
 });

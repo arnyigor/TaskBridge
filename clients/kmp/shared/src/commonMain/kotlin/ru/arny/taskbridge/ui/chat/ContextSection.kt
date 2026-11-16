@@ -28,6 +28,7 @@ import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.ContextSource
 import ru.arny.taskbridge.core.api.SessionContextReport
 import ru.arny.taskbridge.core.client.session.ChatSession
+import ru.arny.taskbridge.ui.common.parseIsoMillis
 import ru.arny.taskbridge.ui.sessions.FieldLabel
 
 /**
@@ -41,6 +42,8 @@ import ru.arny.taskbridge.ui.sessions.FieldLabel
 internal fun ContextSection(
     taskId: String?,
     session: ChatSession,
+    /** Местное время момента: сервер присылает ISO в UTC, и рядом с местным началом сессии сырая строка читалась как другой момент. */
+    moment: (Long) -> String,
 ) {
     val scope = rememberCoroutineScope()
     var report by remember(taskId) { mutableStateOf<SessionContextReport?>(null) }
@@ -181,7 +184,7 @@ internal fun ContextSection(
     Text("Разность включает погрешность оценок и неучтённые источники; это не отдельное измерение истории.", style = MaterialTheme.typography.bodySmall)
     FieldLabel("Информация о сжатии", top = 12)
     current.postCompaction?.let { last ->
-        last.measuredAt?.let { ContextValueRow("Последнее успешное сжатие", it) }
+        last.measuredAt?.let { at -> parseIsoMillis(at)?.let(moment) }?.let { ContextValueRow("Последнее успешное сжатие", it) }
         last.reason?.let { ContextValueRow("Причина", it) }
         compactionChangeLine(last.tokensBefore, last.tokens)?.let { ContextValueRow("Изменение размера (оценка)", it) }
         contextFreedLine(current)?.let { ContextValueRow("Потенциально освобождено (оценка)", it) }

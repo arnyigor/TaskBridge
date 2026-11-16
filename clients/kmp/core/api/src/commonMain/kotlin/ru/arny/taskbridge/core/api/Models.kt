@@ -1600,6 +1600,13 @@ data class Task(
     val files: List<FileRef> = emptyList(),
     val outputFiles: List<FileRef> = emptyList(),
     val lastUsage: Usage? = null,
+    /**
+     * Момент снятия [lastUsage] (ISO, UTC). Нужен, чтобы отличить измерение, сделанное
+     * до сжатия, от измерения после него: `lastUsage` после compact намеренно остаётся
+     * прежним, и без этого времени панель показывала размер до сжатия как текущий.
+     * null — старая задача, поле не писалось: тогда свежесть неизвестна.
+     */
+    val lastUsageAt: String? = null,
     val metrics: GenerationMetrics? = null,
     /** Метрики хода: начало/конец, длительность, TTFT и скорость генерации. Считаются сервером, клиент только отображает. null — ход без данных (старая история). */
     val turnMetrics: TurnMetrics? = null,

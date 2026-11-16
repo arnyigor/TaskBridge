@@ -11,7 +11,9 @@ import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.Usage
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * Окно контекста сессии с локальной моделью берётся из живого статуса TaskBridge, а
@@ -186,5 +188,76 @@ class SessionContextWindowTest {
         )
         assertEquals(16384L, answerReserveTokens(openai))
         assertEquals(120010L to 128000L, contextOverflow(openai, null))
+    }
+
+    /**
+     * Живой случай 2026-11-15 (сессия b6e1c7607b7f): ручное сжатие в 16:02:02,
+     * `tokensBefore` 455007, оценка после 35198. `lastUsage` после сжатия остаётся
+     * намеренно — это измерение ПРОШЛОГО запроса, — и панель показывала 455007 как
+     * текущий контекст, хотя Pi уже присылал 43384 (16:05:43) и 50681 (16:08:22).
+     */
+    @Test
+    fun aMeasurementOlderThanTheCompactionIsNotTheCurrentContext() {
+        val cloud = ModelRef(provider = "opencode", id = "deepseek-v4.1-flash", contextWindow = 1_048_576)
+        val before = Task(
+            id = "b6e1c7607b7f",
+            model = cloud,
+            lastUsage = Usage(input = 1838, cacheRead = 451968, output = 1201, totalTokens = 455007),
+            lastUsageAt = "2026-11-15T15:59:30.901Z",
+            compaction = CompactionInfo(
+                count = 1,
+                last = CompactionLast(tokensBefore = 455007, estimatedTokensAfter = 35_198, reason = "manual", at = "2026-11-15T16:02:02.027Z"),
+            ),
+        )
+        // Измерение до сжатия текущим контекстом не является: показываем оценку и
+        // называем её оценкой, а не измерением.
+        assertEquals(35_198L, sessionContextUsed(before))
+        assertTrue(sessionContextEstimated(before))
+        // Оценка меньше окна — предупреждения о переполнении нет (455007 его давал).
+        assertNull(contextOverflow(before, null))
+        // Проверка переполнения считает то же число, что и строка контекста.
+        assertEquals(35_198L to 20_000L, contextOverflow(before.copy(model = cloud.copy(contextWindow = 20_000)), null))
+
+        // Первый же ответ после сжатия делает измерение свежим, и оно побеждает оценку.
+        val after = before.copy(
+            lastUsage = Usage(input = 37864, cacheRead = 4096, output = 1424, totalTokens = 43384),
+            lastUsageAt = "2026-11-15T16:05:43.404Z",
+        )
+        assertEquals(43_384L, sessionContextUsed(after))
+        assertFalse(sessionContextEstimated(after))
+        // Историческое «было → ≈стало» остаётся оценкой сжатия: 35198 и 43384 — разные
+        // моменты, и подменять одно другим нельзя.
+        assertEquals(35_198L, after.compaction?.last?.estimatedTokensAfter)
+    }
+
+    /**
+     * Задача без `lastUsageAt` (старая запись) считается измеренной: времени съёма в
+     * ней нет, и подменять последнее известное число догадкой нельзя.
+     */
+    @Test
+    fun anOldTaskWithoutTheMeasurementTimeKeepsShowingItsMeasurement() {
+        val task = Task(
+            id = "t1",
+            model = ModelRef(provider = "strata-iq3s", id = "qwen", contextWindow = 262144),
+            lastUsage = Usage(input = 143016, output = 914, totalTokens = 143930),
+            compaction = CompactionInfo(count = 1, last = CompactionLast(estimatedTokensAfter = 9_901, at = "2026-11-15T16:02:02.027Z")),
+        )
+        assertEquals(143930L, sessionContextUsed(task))
+        assertFalse(sessionContextEstimated(task))
+    }
+
+    /** Сжатие без нового измерения и без оценки: числа нет вообще — и подставлять нечего. */
+    @Test
+    fun aCompactionWithoutAnEstimateLeavesTheContextUnknown() {
+        val task = Task(
+            id = "t1",
+            model = ModelRef(provider = "opencode", id = "m", contextWindow = 1_048_576),
+            lastUsage = Usage(input = 10, output = 5, totalTokens = 455_007),
+            lastUsageAt = "2026-11-15T15:59:30.901Z",
+            compaction = CompactionInfo(count = 1, last = CompactionLast(tokensBefore = 455_007, at = "2026-11-15T16:02:02.027Z")),
+        )
+        assertNull(sessionContextUsed(task))
+        assertFalse(sessionContextEstimated(task))
+        assertNull(contextOverflow(task.copy(model = task.model?.copy(contextWindow = 20_000)), null))
     }
 }

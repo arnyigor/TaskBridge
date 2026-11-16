@@ -27,6 +27,8 @@
 //   TASKBRIDGE_CONTEXT_BUDGET=0        disable the extension entirely
 //   TASKBRIDGE_CONTEXT_KEEP_TOKENS     recent tokens left untouched (default 40000)
 //   TASKBRIDGE_CONTEXT_MIN_CHARS       smallest tool result worth archiving (default 2000)
+//   TASKBRIDGE_CONTEXT_TOOL_INPUT_CHARS longest string kept inside tool call arguments
+//                                      (default 800; 0 disables truncation)
 //   TASKBRIDGE_CONTEXT_LOG             JSONL file: what was archived on each request
 //   TASKBRIDGE_CONTEXT_DEBUG=1         log every request, not only the changed ones
 //
@@ -35,6 +37,12 @@
 export const DEFAULT_POLICY = Object.freeze({
   keepRecentToolTokens: 40_000,
   minChars: 2_000,
+  toolInputChars: 800,
+  // Only tools whose long arguments are the CONTENT OF A FILE, which still exists on
+  // disk. `edit` oldText/newText and `bash` commands are the model's only record of
+  // what it changed and what it ran — truncating them loses information that cannot
+  // be recovered by reading a file.
+  truncatableTools: Object.freeze(['write']),
 });
 
 const positive = (value, fallback) => {
@@ -60,7 +68,45 @@ export function messageChars(message) {
   const content = message?.content;
   if (typeof content === 'string') return content.length;
   if (!Array.isArray(content)) return 0;
-  return content.reduce((sum, part) => sum + textOf(part).length, 0);
+  return content.reduce((sum, part) => sum + textOf(part).length + argumentsChars(part), 0);
+}
+
+/**
+ * Characters a tool call's arguments occupy. They were invisible to the budget
+ * until now: in a long session `write`/`edit` bodies outweighed every tool result.
+ */
+function argumentsChars(part) {
+  const args = part?.arguments;
+  if (args === undefined || args === null) return 0;
+  if (typeof args === 'string') return args.length;
+  try {
+    return JSON.stringify(args).length;
+  } catch {
+    return 0;
+  }
+}
+
+export const TRUNCATED = '…[аргументы обрезаны]';
+
+/**
+ * Shorten every long string inside a tool call's arguments, keeping their shape.
+ *
+ * Recursing over values (instead of dropping `arguments` entirely) keeps the types
+ * the declared input_schema expects, so the history stays valid for the provider.
+ */
+export function truncateValue(value, limit, keep = 200) {
+  if (typeof value === 'string') {
+    return value.length > limit
+      ? `${value.slice(0, keep)} ${TRUNCATED} ${value.length} симв.`
+      : value;
+  }
+  if (Array.isArray(value)) return value.map(item => truncateValue(item, limit, keep));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [key, item] of Object.entries(value)) out[key] = truncateValue(item, limit, keep);
+    return out;
+  }
+  return value;
 }
 
 /** Tool results are the only thing archived: they carry the bulky, re-fetchable output. */
@@ -70,8 +116,20 @@ export function isArchivable(message) {
 
 export function archivedText(name, chars) {
   const label = name ? `${name}` : 'инструмент';
-  return `[результат ${label} архивирован: ${chars} символов. `
-    + 'Исходный вывод остался в истории сессии; при необходимости повторите команду или прочитайте файл заново.]';
+  // Deliberately neutral: an instruction such as «повторите команду» turns the
+  // archive into a to-do item and makes the model re-run the same tool forever.
+  return `[результат ${label} архивирован: ${chars} символов — вывод удалён из контекста, данных здесь нет.]`;
+}
+
+/**
+ * Index just past the last assistant message: everything after it is still unseen
+ * by the model and must reach it intact, however large it is.
+ */
+export function unseenStart(messages) {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === 'assistant') return index + 1;
+  }
+  return 0; // no assistant turn yet: nothing has been shown, so nothing is old
 }
 
 /**
@@ -83,8 +141,12 @@ export function archivedText(name, chars) {
 export function planArchival(messages, policy = {}) {
   const keepRecentTokens = positive(policy.keepRecentToolTokens, DEFAULT_POLICY.keepRecentToolTokens);
   const minChars = positive(policy.minChars, DEFAULT_POLICY.minChars);
+  const toolInputChars = positive(policy.toolInputChars, DEFAULT_POLICY.toolInputChars);
+  const truncatableTools = Array.isArray(policy.truncatableTools)
+    ? new Set(policy.truncatableTools)
+    : new Set(DEFAULT_POLICY.truncatableTools);
   const list = Array.isArray(messages) ? messages : [];
-  const result = { messages: list, changed: false, archived: 0, savedChars: 0, keptTokens: 0 };
+  const result = { messages: list, changed: false, archived: 0, truncated: 0, savedChars: 0, keptTokens: 0 };
   if (!list.length) return result;
 
   // Boundary: walk back until the budget is spent; everything before it is old.
@@ -99,6 +161,13 @@ export function planArchival(messages, policy = {}) {
       boundary = estimateTokens(messageChars(list[index])) > keepRecentTokens ? index + 1 : index;
       break;
     }
+  }
+  if (boundary > 0) {
+    // An oversized result is not «old»: if the model has not answered since it
+    // arrived, archiving it hides the only answer to the call it just made, and
+    // the agent tends to repeat that call. This guard is the difference between
+    // «the model forgot» and «the model never saw it».
+    boundary = Math.min(boundary, unseenStart(list));
   }
   if (boundary > 0) {
     accumulated = 0;
@@ -122,6 +191,23 @@ export function planArchival(messages, policy = {}) {
     result.savedChars += chars;
     result.changed = true;
   }
+  if (toolInputChars > 0) {
+    for (let index = 0; index < boundary; index++) {
+      const message = next[index];
+      if (message?.role !== 'assistant' || !Array.isArray(message.content)) continue;
+      const truncatable = part => truncatableTools.has(part?.name) && argumentsChars(part) > toolInputChars;
+      if (!message.content.some(truncatable)) continue;
+      const content = message.content.map(part => (truncatable(part)
+        ? { ...part, arguments: truncateValue(part.arguments, toolInputChars) }
+        : part));
+      const before = message.content.reduce((sum, part) => sum + argumentsChars(part), 0);
+      const after = content.reduce((sum, part) => sum + argumentsChars(part), 0);
+      next[index] = { ...message, content };
+      result.truncated += 1;
+      result.savedChars += before - after;
+      result.changed = true;
+    }
+  }
   if (!result.changed) return result;
   result.messages = next;
   return result;
@@ -132,6 +218,7 @@ export default function contextBudgetExtension(pi) {
   const policy = {
     keepRecentToolTokens: positive(process.env.TASKBRIDGE_CONTEXT_KEEP_TOKENS, DEFAULT_POLICY.keepRecentToolTokens),
     minChars: positive(process.env.TASKBRIDGE_CONTEXT_MIN_CHARS, DEFAULT_POLICY.minChars),
+    toolInputChars: positive(process.env.TASKBRIDGE_CONTEXT_TOOL_INPUT_CHARS, DEFAULT_POLICY.toolInputChars),
   };
   const logPath = process.env.TASKBRIDGE_CONTEXT_LOG || '';
   const debug = String(process.env.TASKBRIDGE_CONTEXT_DEBUG ?? '') === '1';
@@ -144,7 +231,7 @@ export default function contextBudgetExtension(pi) {
     if (logPath) {
       const record = JSON.stringify({
         at: new Date().toISOString(), request: requests, changed: plan.changed,
-        archived: plan.archived, savedChars: plan.savedChars,
+        archived: plan.archived, truncated: plan.truncated, savedChars: plan.savedChars,
         savedTokens: estimateTokens(plan.savedChars), keptTokens: plan.keptTokens,
       });
       import('node:fs/promises')

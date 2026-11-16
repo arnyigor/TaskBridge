@@ -1629,8 +1629,10 @@ private fun DeliveryDiagnostics(
         state.task?.status == "QUEUED" -> LocalStatusColors.current.queued
         else -> LocalStatusColors.current.muted
     }
+    // «≈» — число после сжатия: это оценка Pi, а не измерение, и путать их нельзя.
+    val estimateMark = if (sessionContextEstimated(state.task)) "≈" else ""
     val contextLabel = if (window != null && window > 0 && used != null) {
-        "Контекст ${(used * 100.0 / window).roundToInt()}% (${formatTokensK(used)}/${formatTokensK(window)})"
+        "Контекст $estimateMark${(used * 100.0 / window).roundToInt()}% ($estimateMark${formatTokensK(used)}/${formatTokensK(window)})"
     } else null
     val queueLabel = state.task?.pendingPrompts?.size?.takeIf { it > 0 }?.let { "В очереди: $it" }
     // Живой запрос движка — отдельным сегментом с подписью: у первого хода своего
@@ -2027,7 +2029,7 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
             Spacer(Modifier.width(12.dp))
             Switch(checked = task?.autoCompactionEnabled != false, onCheckedChange = { session.setAutoCompaction(it) })
         }
-        ContextSection(taskId = task?.id, session = session)
+        ContextSection(taskId = task?.id, session = session, moment = { formatMoment(graph.platform, it) })
         val usage = task?.lastUsage
         val window = sessionContextWindow(task, sessionListState.info)
         val catalogModel = catalog?.models?.firstOrNull { it.key == task?.model?.key }
@@ -2169,7 +2171,31 @@ internal fun liveEnginePrompt(model: ModelRef?, info: ApiInfo?): Long? {
  * строкой с подписью «Движок обрабатывает промпт».
  */
 internal fun sessionContextUsed(task: Task?): Long? =
-    task?.lastUsage?.totalTokens ?: task?.compaction?.last?.estimatedTokensAfter
+    if (sessionMeasurementCurrent(task)) task?.lastUsage?.totalTokens
+    else task?.compaction?.last?.estimatedTokensAfter
+
+/**
+ * Относится ли `lastUsage` к тому контексту, который в сессии сейчас.
+ *
+ * После успешного сжатия `lastUsage` остаётся прежним намеренно: это измерение
+ * прошлого запроса, а не оценка нового размера. Без времени съёма отличить его от
+ * свежего невозможно — и панель показывала 455007 ток. (ровно `tokensBefore`), когда
+ * в контексте было ≈35K (живой отчёт 2026-11-15).
+ *
+ * Старая задача без `lastUsageAt` считается измеренной: времени съёма в ней нет,
+ * и подменять последнее известное число догадкой нельзя.
+ */
+internal fun sessionMeasurementCurrent(task: Task?): Boolean {
+    val usage = task?.lastUsage ?: return false
+    if ((usage.totalTokens ?: 0L) <= 0) return false
+    val measuredAt = parseIsoMillis(task.lastUsageAt) ?: return true
+    val compactedAt = parseIsoMillis(task.compaction?.last?.at) ?: return true
+    return measuredAt >= compactedAt
+}
+
+/** Число в `sessionContextUsed` — оценка Pi после сжатия, а не измерение. */
+internal fun sessionContextEstimated(task: Task?): Boolean =
+    !sessionMeasurementCurrent(task) && task?.compaction?.last?.estimatedTokensAfter != null
 
 /**
  * История с резервом ответа не влезает в окно модели, или null если влезает (или
@@ -2191,7 +2217,7 @@ internal fun sessionContextUsed(task: Task?): Long? =
  */
 internal fun contextOverflow(task: Task?, info: ApiInfo?): Pair<Long, Long>? {
     val window = sessionContextWindow(task, info)?.takeIf { it > 0 } ?: return null
-    val tokens = task?.compaction?.last?.estimatedTokensAfter ?: task?.lastUsage?.totalTokens ?: return null
+    val tokens = sessionContextUsed(task) ?: return null
     val reserve = answerReserveTokens(task)
     return if (tokens + reserve > window) tokens to window else null
 }
@@ -2433,7 +2459,7 @@ internal fun buildDiagnosticsDetails(
         // первым: остальные числа ниже, а без него полуторачасовая тишина выглядела
         // как обычная работа модели.
         providerWaitLine(task?.providerWait, now, moment),
-        *sessionDiagnosticsLines(task, info).toTypedArray(),
+        *sessionDiagnosticsLines(task, info, moment).toTypedArray(),
         externalMetrics?.let(::strataPpLine),
         "Событий получено от сервера: ${state.chat.cursor} · сообщений в очереди: ${pendingPrompts.size}",
         task?.errorCode?.let { "Код ошибки: $it" },
@@ -2524,7 +2550,7 @@ internal fun lastEventLabel(kind: String?): String? = when (kind) {
     else -> kind
 }
 
-private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
+private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?, moment: (Long) -> String): List<String> {
     val metrics = task?.metrics
     // «Последний ход», а не «скорость сессии»: это числа одного хода, и рядом с ними
     // стоят средние по сессии — иначе два разных числа назывались бы одинаково.
@@ -2541,13 +2567,16 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
     // How long the last turn waited for the first token — the direct answer to
     // «промпт отправлен, а облако молчит».
     val firstToken = metrics?.promptMs?.takeIf { it > 0 }?.let { "Первый токен: ${formatLatencyMs(it)}" }
-    val usage = task?.lastUsage
     val window = sessionContextWindow(task, info)
     val compactedTokens = task?.compaction?.last?.estimatedTokensAfter
     // Живое число движка называем по имени: пока модель работает, это размер
     // запроса в работе, а не накопленный контекст сессии, — разные числа.
     val livePrompt = liveEnginePrompt(task?.model ?: task?.requestedModel, info)
-    val contextTokens = usage?.totalTokens ?: compactedTokens
+    // Одно правило для строки, процентов и переполнения: измерение после последнего
+    // сжатия → оценка этого сжатия → неизвестно. Раньше здесь всегда побеждал
+    // `lastUsage`, и после сжатия панель показывала размер ДО него (455007 вместо ≈35K).
+    val contextTokens = sessionContextUsed(task)
+    val contextEstimated = sessionContextEstimated(task)
     // Первой строкой: если история больше окна, всё остальное в диагностике — уже
     // следствие, и запрос уйдёт в повтор.
     val overflow = contextOverflow(task, info)?.let { (tokens, limit) ->
@@ -2574,15 +2603,17 @@ private fun sessionDiagnosticsLines(task: Task?, info: ApiInfo?): List<String> {
         val change = compactionChangeLine(last.tokensBefore, last.estimatedTokensAfter)
         listOfNotNull(change, last.reason?.let(::compactionReasonLabel)).joinToString(" · ")
             .takeIf { it.isNotEmpty() }
-            ?.let { "Последнее сжатие: $it · ${last.at?.substringBefore('.')?.replace('T', ' ') ?: "—"}" }
+            ?.let { "Последнее сжатие: $it · " + (last.at?.let { at -> parseIsoMillis(at)?.let(moment) } ?: "—") }
     }
     val livePromptLine = livePrompt
         ?.takeIf { prompt -> prompt > 0 && prompt != contextTokens }
         ?.let { prompt -> "Движок обрабатывает промпт: $prompt${window?.let { " из ${it / 1000}K" }.orEmpty()} ток." }
     val sessionContext = contextTokens?.let { tokens ->
         val percent = window?.takeIf { it > 0 }?.let { " · ${(tokens * 100.0 / it).roundToInt()}%" }.orEmpty()
-        val label = if (usage?.totalTokens != null) "Контекст сессии" else "Контекст после сжатия"
+        val label = if (contextEstimated) "Контекст после сжатия (оценка)" else "Контекст сессии"
         "$label: $tokens${window?.let { " из ${it / 1000}K" }.orEmpty()} ток.$percent"
+    } ?: task?.compaction?.last?.at?.let {
+        "Контекст сессии: актуального размера нет — после сжатия Pi не присылал ни измерения, ни оценки"
     }
     val localProvider = info?.local?.provider
     val sessionProvider = task?.model?.provider ?: task?.requestedModel?.provider
