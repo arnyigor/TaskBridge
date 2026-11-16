@@ -101,6 +101,7 @@ export const API_ROUTES = [
   { method: 'POST', path: '/api/tasks/from-session', summary: 'import a Pi session (clone by default)' },
   { method: 'GET', path: '/api/tasks/:id', summary: 'one task' },
   { method: 'PATCH', path: '/api/tasks/:id', summary: 'rename' },
+  { method: 'POST', path: '/api/tasks/:id/mode', summary: 'switch idle session mode: agent / plan / chat; retire runtime, preserve history; busy rejected' },
   { method: 'DELETE', path: '/api/tasks/:id', summary: 'delete the task and everything it owns' },
 
   // --- tasks: events and live stream ---------------------------------------

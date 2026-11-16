@@ -87,6 +87,10 @@ fun Composer(
     top: @Composable () -> Unit = {},
     /** Between the attachment and the actions icons: the plan toggle (Follow Plan). */
     planButton: @Composable () -> Unit = {},
+    /** Right after the icons: the session mode chip (Agent / Plan), which belongs to the next message. */
+    modeButton: @Composable () -> Unit = {},
+    /** Режим «Планирование»: акцентная рамка поля и другой placeholder — видно, что сессия только читает. */
+    readOnly: Boolean = false,
     /** Extra items of the actions menu (the session's model and context); call `close` on click. */
     moreItems: @Composable (close: () -> Unit) -> Unit = {},
 ) {
@@ -194,7 +198,7 @@ fun Composer(
                 color = MaterialTheme.colorScheme.surfaceContainerLowest,
                 border = BorderStroke(
                     1.dp,
-                    if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
+                    if (focused || readOnly) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
                 ),
             ) {
                 Column(Modifier.padding(6.dp).onPreviewKeyEvent(::handleQuickActionKey)) {
@@ -211,7 +215,9 @@ fun Composer(
                                 Box(contentAlignment = Alignment.CenterStart) {
                                     if (value.text.isEmpty()) {
                                         Text(
-                                            if (working) "Добавить инструкцию…" else "Сообщение агенту…",
+                                            if (working) "Добавить инструкцию…"
+                                            else if (readOnly) "Что спланировать? Планирование только читает проект…"
+                                            else "Сообщение агенту…",
                                             style = MaterialTheme.typography.bodyLarge,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             maxLines = 1,
@@ -272,6 +278,7 @@ fun Composer(
                             Icon(AppIcons.Attach, "Прикрепить файл", Modifier.size(20.dp))
                         }
                         planButton()
+                        modeButton()
                         Box {
                             IconButton(onClick = { actionsMenu = true }, enabled = enabled, modifier = Modifier.size(40.dp)) {
                                 Icon(AppIcons.Tool, "Действия и буфер обмена", Modifier.size(20.dp))

@@ -24,6 +24,8 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -361,6 +363,7 @@ fun FileViewer(
     val scope = rememberCoroutineScope()
     val state = rememberFileViewState(target, session)
     val loaded = state.loaded
+    val snackbar = remember { SnackbarHostState() }
     fun openInApp(reveal: Boolean) = scope.launch {
         state.setNotice(
             requestOpenOnComputer(target, session, reveal).fold(
@@ -375,7 +378,12 @@ fun FileViewer(
         state.saving = true
         state.setNotice(if (open) "Скачиваю и открываю…" else "Скачиваю…")
         try {
-            state.setNotice(saveTargetOnDevice(target, session, platform, open))
+            val message = saveTargetOnDevice(target, session, platform, open)
+            state.setNotice(message)
+            scope.launch {
+                snackbar.currentSnackbarData?.dismiss()
+                snackbar.showSnackbar(message)
+            }
         } finally {
             state.saving = false
         }
@@ -395,6 +403,7 @@ fun FileViewer(
     } else null
     AdaptiveSheet(
         title = target.name,
+        pinned = { SnackbarHost(snackbar) },
         lazyContent = markdownContent,
         subtitle = listOfNotNull((target as? FileTarget.Workspace)?.path, fileInfoLine(target, loaded)).joinToString(" · "),
         onDismiss = onDismiss,

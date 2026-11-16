@@ -937,6 +937,15 @@ class TaskBridgeApi(
     suspend fun workspaceFiles(id: String): WorkspaceFileListing =
         get("/api/tasks/${id.path()}/workspace-files", WorkspaceFileListing.serializer())
 
+    suspend fun setSessionMode(id: String, mode: String): Task =
+        call(HttpMethod.Post, "/api/tasks/${id.path()}/mode", Task.serializer(), buildJsonObject { put("mode", mode) })
+
+    suspend fun planReport(id: String, version: Int): PlanReport =
+        call(HttpMethod.Get, "/api/tasks/$id/plan-reports/$version", PlanReport.serializer())
+
+    suspend fun planHandoff(id: String, request: PlanHandoffRequest): Task =
+        call(HttpMethod.Post, "/api/tasks/$id/plan-handoff", Task.serializer(), TaskBridgeJson.encodeToJsonElement(PlanHandoffRequest.serializer(), request))
+
     suspend fun createTask(request: CreateTaskRequest): Task =
         call(HttpMethod.Post, "/api/tasks", Task.serializer(), TaskBridgeJson.encodeToJsonElement(CreateTaskRequest.serializer(), request.withClient()))
 

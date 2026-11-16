@@ -161,7 +161,7 @@ fun NewSessionSheet(
         },
     ) {
         FieldLabel("Что делаем")
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             FilterChip(selected = !continuing, onClick = { continuing = false }, label = { Text("Новая сессия") })
             FilterChip(selected = continuing, onClick = { continuing = true }, label = { Text("Продолжить сессию Pi") })
         }

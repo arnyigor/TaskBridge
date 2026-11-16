@@ -71,6 +71,15 @@ export async function restoreSessions(previous, { store, enqueue, restorePending
         await store.save(task).catch(() => {});
         trimmed++;
       }
+      // A verification that was RUNNING when the process stopped has no owner in
+      // a fresh process: the shell died with it. Left as RUNNING, it made
+      // `setSessionMode` refuse that session for ever ("Сессия занята"), long
+      // after the checks were over. The result is genuinely unknown, so it is
+      // marked as interrupted rather than as passed or failed.
+      if (task.verificationStatus === 'RUNNING') {
+        task.verificationStatus = 'INTERRUPTED';
+        await store.save(task).catch(() => {});
+      }
       // A queued task is restored: nothing was sent to Pi yet, so the prompt is
       // still exactly what the operator asked for. A task that was already
       // running (or preparing) cannot be resumed — its Pi process is gone.

@@ -1,3 +1,4 @@
+import { readOnlySession } from './session-capabilities.mjs';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -2141,6 +2142,7 @@ async function handleRequest(req, res) {
     if (planRoute) {
       const planTaskId = decodeURIComponent(planRoute[1]);
       const action = planRoute[2] || null;
+      if (readOnlySession(manager.getTask(planTaskId)) && req.method !== 'GET') throw Object.assign(new Error('Follow Plan mutations disabled in read-only mode'), { code: 'INPUT_INVALID' });
       if (!manager.getTask(planTaskId)) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
       if (!action && req.method === 'GET') return json(res, 200, await followPlan.status(planTaskId));
       if (action === 'content' && req.method === 'GET') {
@@ -2493,6 +2495,13 @@ async function handleRequest(req, res) {
         thinkingLevel: body.thinkingLevel || null,
       }));
     }
+
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-reports(?:\/(\d+))?$/);
+    if (req.method === 'GET' && match) return json(res, 200, await manager.planReport(match[1], match[2]));
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/mode$/);
+    if (req.method === 'POST' && match) return json(res, 200, await manager.setSessionMode(match[1], (await readJson(req)).mode));
+    match = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-handoff$/);
+    if (req.method === 'POST' && match) return json(res, 201, await manager.handoffPlan(match[1], await readJson(req)));
 
     // Switching between the answers of one exchange: a reading preference, so
     // nothing is rewritten and no model is asked.

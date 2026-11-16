@@ -33,6 +33,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import androidx.core.content.FileProvider
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import ru.arny.taskbridge.core.api.UploadFile
@@ -328,32 +329,67 @@ class AndroidPlatformServices(
             val safeName = name.substringAfterLast('/').substringAfterLast('\\').ifBlank { "taskbridge-file" }
             // MediaStore.Downloads появился в API 29: на Android 7–9 обращение к нему
             // падает, поэтому там файл идёт в собственный каталог приложения.
-            if (Build.VERSION.SDK_INT < 29) return@runCatching saveFileBeforeQ(safeName, bytes)
-            val resolver = context.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
-                put(MediaStore.MediaColumns.MIME_TYPE, mimeType ?: "application/octet-stream")
-                put(MediaStore.MediaColumns.IS_PENDING, 1)
-            }
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("Не удалось создать файл в Downloads")
-            try {
-                resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("Не удалось открыть файл для записи")
-                values.clear()
-                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-                if (open) {
-                    val intent = Intent(Intent.ACTION_VIEW)
-                        .setDataAndType(uri, mimeType ?: "application/octet-stream")
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    context.startActivity(intent)
+            val type = mimeType ?: "application/octet-stream"
+            val uri: Uri
+            val message: String
+            if (Build.VERSION.SDK_INT < 29) {
+                val target = saveFileBeforeQ(safeName, bytes)
+                uri = FileProvider.getUriForFile(context, "${context.packageName}.downloads", target)
+                message = "Сохранено: ${target.absolutePath}"
+            } else {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, safeName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType ?: "application/octet-stream")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
-                "Сохранено в Загрузки: $safeName"
-            } catch (e: Throwable) {
-                resolver.delete(uri, null, null)
-                throw e
+                uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("Не удалось создать файл в Downloads")
+                try {
+                    resolver.openOutputStream(uri)?.use { it.write(bytes) } ?: throw IllegalStateException("Не удалось открыть файл для записи")
+                    values.clear()
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    check(resolver.update(uri, values, null, null) > 0) { "Не удалось завершить сохранение файла" }
+                } catch (e: Throwable) {
+                    runCatching { resolver.delete(uri, null, null) }
+                    throw e
+                }
+                message = "Сохранено в Загрузки: $safeName"
             }
+            // Notification permission/channel denial must not turn a completed write into a failure.
+            runCatching { notifyDownload(uri, safeName, type) }
+            if (open) {
+                runCatching { context.startActivity(downloadOpenIntent(uri, type)) }
+                    .onFailure { return@runCatching "$message. Не удалось открыть файл: ${it.message.orEmpty()}" }
+            }
+            message
         }
+    }
+
+    private fun downloadOpenIntent(uri: Uri, mimeType: String): Intent = Intent(Intent.ACTION_VIEW)
+        .setDataAndType(uri, mimeType)
+        .apply { clipData = ClipData.newRawUri("Файл", uri) }
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+    private fun notifyDownload(uri: Uri, name: String, mimeType: String) {
+        ensureChannels(notifications)
+        if (!notifications.areNotificationsEnabled()) return
+        val pending = PendingIntent.getActivity(
+            context, 0, downloadOpenIntent(uri, mimeType),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        @Suppress("DEPRECATION")
+        val builder = if (Build.VERSION.SDK_INT >= 26) android.app.Notification.Builder(context, CHANNEL_DOWNLOADS)
+            else android.app.Notification.Builder(context)
+        val notification = builder
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("Файл сохранён")
+            .setContentText(name)
+            .setContentIntent(pending)
+            .addAction(android.app.Notification.Action.Builder(null, "Открыть", pending).build())
+            .setAutoCancel(true)
+            .build()
+        notifications.notify("download:$uri", NOTIFICATION_ID, notification)
     }
 
     /**
@@ -361,19 +397,25 @@ class AndroidPlatformServices(
      * (приложение его не запрашивает), поэтому файл остаётся в своём внешнем каталоге
      * приложения — без разрешений, а точный путь показывается в сообщении.
      */
-    private fun saveFileBeforeQ(name: String, bytes: ByteArray): String {
+    private fun saveFileBeforeQ(name: String, bytes: ByteArray): File {
         val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
             ?: throw IllegalStateException("Внешнее хранилище недоступно")
         dir.mkdirs()
         val target = uniqueDownloadFile(dir, name)
-        target.writeBytes(bytes)
-        return "Сохранено: ${target.absolutePath}"
+        try {
+            target.writeBytes(bytes)
+        } catch (e: Throwable) {
+            target.delete()
+            throw e
+        }
+        return target
     }
 
     companion object {
         const val CHANNEL_URGENT = "waiting_user"
         const val CHANNEL_UPDATES = "updates"
         const val CHANNEL_WATCH = "watch"
+        const val CHANNEL_DOWNLOADS = "downloads"
         const val NOTIFICATION_ID = 1
 
         fun ensureChannels(manager: NotificationManager) {
@@ -382,6 +424,7 @@ class AndroidPlatformServices(
                 description = "Агент остановился и ждёт решения"
             })
             manager.createNotificationChannel(NotificationChannel(CHANNEL_UPDATES, "Завершение задач", NotificationManager.IMPORTANCE_DEFAULT))
+            manager.createNotificationChannel(NotificationChannel(CHANNEL_DOWNLOADS, "Скачанные файлы", NotificationManager.IMPORTANCE_DEFAULT))
             manager.createNotificationChannel(NotificationChannel(CHANNEL_WATCH, "Наблюдение за сессиями", NotificationManager.IMPORTANCE_MIN).apply {
                 description = "Постоянное уведомление, пока агент работает, а приложение свёрнуто"
             })

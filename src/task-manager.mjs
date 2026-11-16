@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url';
+import { sessionMode, readOnlySession } from './session-capabilities.mjs';
 import { restoreSessions, preflightSession } from './application/session-recovery.mjs';
 import { EventEmitter } from 'node:events';
 import { TerminalPublication } from './domain/terminal-publication.mjs';
@@ -494,6 +496,7 @@ export class TaskManager extends EventEmitter {
     this.commandLedger = this.commandCoordinator.cache;
     this.admitting = false;
     this.admissionKeys = new Set();
+    this.admissionCompletions = new Map();
     // Task id whose pending prompt the pump is delivering right now (delegating
     // delivery). Read by sendPendingNow to refuse cutting into it.
     this.dispatching = null;
@@ -1692,6 +1695,7 @@ export class TaskManager extends EventEmitter {
    * живое состояние Git, а не поток текста от модели.
    */
   async #checkpointStart(task) {
+    if (readOnlySession(task)) return null;
     if (task.checkpoint) return task.checkpoint;
     if (!task.workspacePath) return null;
     task.checkpoint = {
@@ -2460,12 +2464,65 @@ export class TaskManager extends EventEmitter {
   async #admit(action, key = 'global') {
     if (this.admissionKeys.has(key)) throw Object.assign(new Error('Другой запрос этой сессии ещё отправляется. Повторите позже.'), { code: 'BUSY' });
     this.admissionKeys.add(key);
+    let release;
+    this.admissionCompletions.set(key, new Promise(resolve => { release = resolve; }));
     this.admitting = true;
     try { return await action(); }
     finally {
       this.admissionKeys.delete(key);
       this.admitting = this.admissionKeys.size > 0;
+      this.admissionCompletions.delete(key);
+      release();
     }
+  }
+
+  // FollowPlan owns this task's admission until every awaited mutation finishes.
+  // The scoped sender reuses that admission, but keeps message validation and
+  // the command ledger. It cannot be used after the operation has returned.
+  async withSessionAdmission(id, action, { wait = false } = {}) {
+    id = String(id);
+    // Internal turn hooks cannot ask a client to retry: wait behind the current
+    // operation, then re-read mode/binding under admission instead of losing it.
+    while (wait && this.admissionKeys.has(id)) await this.admissionCompletions.get(id);
+    return this.#admit(async () => {
+      let active = true;
+      const admit = send => {
+        if (!active) throw Object.assign(new Error('Admission expired'), { code: 'BUSY' });
+        return send();
+      };
+      try {
+        return await action((...args) => this.#messageWithAdmission(...args, admit));
+      } finally { active = false; }
+    }, String(id));
+  }
+
+  async planReport(id, version) {
+    // Read-only: saved reports stay readable while the next Plan turn runs.
+    const task = this.tasks.get(id);
+    if (!task || this.deleted.has(id)) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+    if (task.mode !== 'plan') throw Object.assign(new Error('Not a Plan session'), { code: 'INPUT_INVALID' });
+    if (version == null) return { versions: task.planReports || [] };
+    const report = task.planReports?.find(r => r.version === Number(version));
+    if (!report) throw Object.assign(new Error('Report not found'), { code: 'NOT_FOUND' });
+    const markdown = await fs.readFile(path.join(this.store.taskDir(id), 'artifacts', report.name), 'utf8');
+    return { ...report, markdown };
+  }
+
+  async handoffPlan(id, input = {}) {
+    if (input.confirmed !== true || !input.commandId || !input.model) throw Object.assign(new Error('Confirm handoff and select Agent model'), { code: 'INPUT_INVALID' });
+    const source = this.#mutableTask(id);
+    const report = await this.planReport(id, input.version);
+    if (!report.markdown) throw Object.assign(new Error('Select report version'), { code: 'INPUT_INVALID' });
+    // Stable identity survives retries and server restart, including a lost HTTP response.
+    const requestedId = 'plan-agent-' + crypto.createHash('sha256').update(`${id}:${input.commandId}`).digest('hex').slice(0, 32);
+    const existing = this.tasks.get(requestedId);
+    if (existing) return this.#publicTask(existing);
+    return this.createTask({ projectId: source.projectId, mode: 'agent', model: input.model,
+      title: `${source.title || 'Plan'} (Agent)`,
+      prompt: `Implement the user-confirmed Plan report v${report.version}. Independently inspect the current project before changing files. This is Markdown context, not an executable Follow Plan.
+
+${report.markdown}`,
+    }, { requestedId, commandId: requestedId });
   }
 
   async createTask(input, options = {}) {
@@ -2555,6 +2612,10 @@ export class TaskManager extends EventEmitter {
   #piEnv(launch = null) {
     const env = { ...(this.config.pi?.env || {}) };
     if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
+    // Python под Windows при пайпе пишет stdout в cp1251, а tool-логи сессии
+    // декодируются как UTF-8 — кириллица превращается в U+FFFD (наблюдено
+    // 2026-11-16). Python 3.7+ умеет UTF-8 mode, если переменная задана.
+    if (!env.PYTHONUTF8) env.PYTHONUTF8 = '1';
     if (launch) Object.assign(env, launch.env);
     else Object.assign(env, this.mcp.launch().env);
     return Object.keys(env).length ? env : undefined;
@@ -2640,6 +2701,9 @@ export class TaskManager extends EventEmitter {
   }
 
   async #createTask(input, options) {
+    const mode = sessionMode(input.mode);
+    if (readOnlySession({ mode }) && /^[!\/]/.test(String(input.prompt || '').trimStart())) throw Object.assign(new Error('Commands disabled in read-only sessions'), { code: 'INPUT_INVALID' });
+    if (readOnlySession({ mode }) && ((input.files || []).length || input.uploadToken)) throw Object.assign(new Error('Read-only sessions do not support attachments'), { code: 'INPUT_INVALID' });
     const requestedId = options.requestedId;
     if (requestedId !== undefined && (typeof requestedId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(requestedId))) {
       throw Object.assign(new Error('Некорректный cloud taskId.'), { code: 'INPUT_INVALID' });
@@ -2698,6 +2762,7 @@ export class TaskManager extends EventEmitter {
       status: 'QUEUED',
       queueReason: waitingReason,
       projectId,
+      mode,
       externalReadProjectKey: externalProjectIdentity(this.projects.get(projectId)),
       prompt,
       // A session may be named when it is created (a resumed one is «<задача>
@@ -2743,6 +2808,8 @@ export class TaskManager extends EventEmitter {
   }
 
   async importSession(input) {
+    // Native import's `mode` is clone/take-over, not a session capability.
+    if (sessionMode(input.sessionMode) !== 'agent') throw Object.assign(new Error('Pi import requires Agent mode'), { code: 'INPUT_INVALID' });
     return this.#admit(() => this.nativeSessions.importSession(input));
   }
 
@@ -2798,13 +2865,14 @@ export class TaskManager extends EventEmitter {
     // on the preceding snapshot until the terminal event has been persisted.
     const pendingTerminal = this.#terminalPublication.snapshot(task);
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
-    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
+    const { _planAnswer, _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt, _modelFrameAt,
       _turnStartedAt, _turnStartedMono, _turnFirstTokenAt, _turnFirstTokenMono, _turnStartSeq, _turnMessageSeq, _turnMeasuredTg, _turnMessageCount,
-      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
+      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _verificationsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
+      mode: sessionMode(task.mode),
       turnMetrics: task.turnMetrics || null,
       // Шаг C-B: версия снимка — seq последнего событие-факта этой сессии. Клиент
       // сравнивает её со своим курсором и не даёт старому GET откатить «лицо» хода
@@ -3117,7 +3185,7 @@ export class TaskManager extends EventEmitter {
       // starts while this turn finalizes must not overwrite them.
       const turn = this.#beginTurn(task);
       ownedTurn = turn;
-      const baseline = await snapshotWorkspace(task.workspacePath);
+      const baseline = (readOnlySession(task) ? null : await snapshotWorkspace(task.workspacePath));
       if (task.status === 'CANCELLED' || this.deleted.has(task.id) || this.runtimes.get(task.id)?.cancelRequested) {
         await pi.killTree();
         return;
@@ -3184,6 +3252,12 @@ export class TaskManager extends EventEmitter {
   }
 
   async #prepareWorkspace(task) {
+    if (readOnlySession(task)) {
+      const project = this.projects.get(task.projectId);
+      if (!project) throw new Error('Plan requires a project');
+      const root = await fs.realpath(project.path);
+      return { workspacePath: root, sourcePath: root, worktree: false, baseCommit: null };
+    }
     let prepared;
     // A resumed session may be told to reuse the working copy the previous one
     // left behind (MR-04). Only a TaskBridge-managed worktree qualifies: anything
@@ -3204,6 +3278,7 @@ export class TaskManager extends EventEmitter {
   }
 
   #buildPrompt(task) {
+    if (readOnlySession(task)) return task.prompt;
     // A Pi command must arrive as the whole message: Pi resolves «/skill:…» and
     // «/prompt:…» itself, and an appended instruction block would turn the command
     // into a sentence.
@@ -3227,7 +3302,8 @@ export class TaskManager extends EventEmitter {
 
   async #createPi(task, sessionFile) {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
-    const mcpLaunch = await this.#mcpLaunch(task);
+    const restricted = readOnlySession(task);
+    const mcpLaunch = restricted ? { args: ['--no-mcp'], mode: 'disabled' } : await this.#mcpLaunch(task);
     if (mcpLaunch.ignored === 'inherit' && task?.mcp?.disabledServers?.length) {
       // Named instead of silently dropped: in inherit mode Pi reads its own file
       // and TaskBridge has no way to scope it.
@@ -3235,9 +3311,14 @@ export class TaskManager extends EventEmitter {
         'Режим MCP «inherit»: отключённые для этой сессии серверы не применяются, Pi использует свою конфигурацию',
         { mode: mcpLaunch.mode, servers: task.mcp.disabledServers }, false).catch(() => {});
     }
-    const args = [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...mcpLaunch.args];
+    const args = [...(restricted ? [] : (this.config.pi?.args || [])), ...this.#selectionArgs(task), ...mcpLaunch.args];
     const env = { ...(this.#piEnv(mcpLaunch) || {}) };
+    // Never inherit capability tokens or a previous read-only launch's mode/root.
+    for (const key of Object.keys({ ...process.env, ...env })) {
+      if (/^TASKBRIDGE_(PLAN_|SESSION_MODE$|EXTERNAL_|APPROVAL_|MEDIA_|CONTEXT_)/.test(key)) env[key] = undefined;
+    }
     let externalCapability = null;
+    if (!restricted) {
     if (this.externalFilesIssue && this.externalFilesUrl && this.externalFilesExtensionPath) {
       await fs.access(this.externalFilesExtensionPath);
       externalCapability = this.externalFilesIssue(task.id);
@@ -3333,6 +3414,14 @@ export class TaskManager extends EventEmitter {
       } else {
         console.error(`[TaskBridge] follow-plan extension is missing: ${this.followPlanExtensionPath}`);
       }
+    }
+    } else {
+      args.push('--no-context-files', '--no-themes', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-builtin-tools', '-e', fileURLToPath(new URL('../pi-extension/taskbridge-plan.js', import.meta.url)));
+      // --no-extensions also drops the built-in llama.cpp provider (Pi 1.5.1
+      // docs/settings.md); it registers models, not tools, so local models stay usable.
+      if (task.requestedModel?.provider === 'llama.cpp') args.push('-e', 'builtin:llama.cpp');
+      env.TASKBRIDGE_PLAN_ROOT = task.workspacePath;
+      env.TASKBRIDGE_SESSION_MODE = task.mode;
     }
     const pi = new PiRpcSession({
       command: resolvePiCommand({ config: this.config }).command,
@@ -4890,6 +4979,7 @@ export class TaskManager extends EventEmitter {
       await this.store.save(this.#publicTask(task));
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
+      if (task.mode === 'plan') task._planAnswer = (frame.message.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
       task._turnMessageCount = (task._turnMessageCount || 0) + 1;
       // Pi names the model but not always the provider, and never says whether the
       // engine is local. Both are facts the server already knows; guessing them on
@@ -5048,6 +5138,7 @@ export class TaskManager extends EventEmitter {
     const turn = (runtime?.turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
+    if (task.mode === 'plan') task._planAnswer = '';
     // A checkpoint belongs to the turn that reported it; the next turn must not
     // inherit it (the tool call for the new turn has not happened yet).
     task._planCheckpoint = null;
@@ -5146,6 +5237,24 @@ export class TaskManager extends EventEmitter {
     if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }), turn);
     // The turn completed: the in-flight marker is spent (see #deliverMessage).
     if (task.inFlightPrompt) { task.inFlightPrompt = null; await this.store.save(this.#publicTask(task)).catch(() => {}); }
+    if (readOnlySession(task)) {
+      if (task.mode === 'plan') {
+        const version = (task.planReports?.length || 0) + 1;
+        const name = `plan-report-v${version}.md`;
+        await this.store.writeArtifact(task.id, name, task._planAnswer || task.assistantText || '');
+        task.planReports = [...(task.planReports || []), { version, name, createdAt: now() }];
+      }
+      task.verification = [];
+      task.verificationStatus = 'NOT_APPLICABLE';
+      this.#terminalPublication.hold(task, this.#publicTask(task));
+      task.status = 'SUCCEEDED';
+      task.current = task.mode === 'plan' ? 'Plan report ready' : 'Chat answer ready';
+      task.updatedAt = now();
+      await this.#turnStateEvent(task, 'SETTLED');
+      await this.#event(task, 'TASK_SUCCEEDED', task.current);
+      await this.store.save(this.#publicTask(task));
+      return;
+    }
     await this.#setStatus(task, 'VERIFYING', 'Collecting diff and changed files');
     const gitState = await collectGitStateForCompletion(task.workspacePath);
     // STOP can arrive while Git is being inspected. Do not resume finalizing
@@ -5241,6 +5350,7 @@ export class TaskManager extends EventEmitter {
   // Project verification is advisory and detached (see #verifyAndFinalize): it
   // must never change the task outcome, hold the slot or delay the next message.
   #runVerification(task, commands, turn) {
+    task._verificationsRunning = (task._verificationsRunning || 0) + 1;
     const running = (async () => {
       try {
         const verification = await runVerification(commands, task.workspacePath, (result) => {
@@ -5261,7 +5371,16 @@ export class TaskManager extends EventEmitter {
         });
         await this.#writeResult(task).catch(() => {});
       } catch (error) {
-        if (!this.deleted.has(task.id)) await this.#event(task, 'VERIFICATION_ERROR', error.message).catch(() => {});
+        if (!this.deleted.has(task.id)) {
+          // The run itself threw (missing workspace, spawn failure): without this
+          // the status stayed RUNNING for ever, and `setSessionMode` answered
+          // "Сессия занята" to every attempt to change the mode.
+          if (turn == null || task._turn === turn) task.verificationStatus = 'INTERRUPTED';
+          await this.store.save(this.#publicTask(task)).catch(() => {});
+          await this.#event(task, 'VERIFICATION_ERROR', error.message).catch(() => {});
+        }
+      } finally {
+        task._verificationsRunning--;
       }
     })();
     running.catch(() => {});
@@ -5877,6 +5996,52 @@ export class TaskManager extends EventEmitter {
   // responding) this is the routine exit — the message probe answers "hung Pi"
   // and fails, so a hung session is otherwise at the mercy of a server restart,
   // which is the emergency exit that hits every session.
+  async setSessionMode(id, value) {
+    if (value == null) throw Object.assign(new Error('Session mode required'), { code: 'INPUT_INVALID' });
+    const mode = sessionMode(value);
+    return this.#admit(async () => {
+      const task = this.tasks.get(id);
+      if (!task || this.deleted.has(id)) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
+      const current = this.runtimes.get(id);
+      const binding = this.store.getPlanBinding(id);
+      if (['RUNNING_STEP', 'REVIEWING'].includes(binding?.state)) throw Object.assign(new Error('Сначала остановите Follow Plan.'), { code: 'BUSY' });
+      if (!RUN_TERMINAL.has(task.status) || task.inFlightPrompt || task._starting || task._compacting
+        || task.verificationStatus === 'RUNNING' || task._verificationsRunning
+        || task._toolsRunning || task.pendingPrompts?.length || task._incomingFiles?.length || task._uploadToken) {
+        throw Object.assign(new Error('Сессия занята — дождитесь завершения и отправки очереди.'), { code: 'BUSY' });
+      }
+      if (current && !current.retired && !current.pi.closed) {
+        const state = await current.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
+        if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Сессия занята.'), { code: 'BUSY' });
+      }
+      if (sessionMode(task.mode) === mode && !current?.retired) return this.#publicTask(task);
+      // Fail closed: retire before killing, wait for the OS close, and only then
+      // persist new permissions. Keep the retired runtime on any failure so a
+      // retry cannot skip the termination barrier. History/native lease stay put.
+      if (current) {
+        current.retired = true;
+        current.cancelRequested = true;
+        await current.eventChain;
+        await current.pi.killTreeAndWait();
+        this.#resolveSettle(id);
+        if (this.runtimes.get(id) === current) this.runtimes.delete(id);
+      } else if (task.piPid) {
+        throw Object.assign(new Error('Runtime ownership unknown; recover session before changing mode'), { code: 'BUSY' });
+      }
+      this.approvalTokens.delete(id);
+      task.piPid = null;
+      task.piStartedAt = null;
+      task.mode = mode;
+      task._planAnswer = '';
+      task._planCheckpoint = null;
+      task.updatedAt = now();
+      await this.store.save(this.#publicTask(task));
+      await this.#event(task, 'SESSION_MODE_CHANGED', `Режим сессии: ${mode}`, { mode });
+      // Lazy recreation uses the same native session file on the next message.
+      return this.#publicTask(task);
+    }, id);
+  }
+
   async restartSession(id) {
     return this.#admit(() => this.#restartSession(id), id);
   }
@@ -6029,6 +6194,7 @@ export class TaskManager extends EventEmitter {
       updatedAt: now(),
       status: 'SUCCEEDED',
       queueReason: null,
+      mode: sessionMode(source.mode),
       projectId: source.projectId,
       externalReadProjectKey: source.externalReadProjectKey || (source.sourcePath && externalProjectIdentity({ path: source.sourcePath })),
       prompt: opening ? (opening.data?.text ?? opening.message ?? '') : source.prompt,
@@ -6230,6 +6396,12 @@ export class TaskManager extends EventEmitter {
   // same commandId+payload is replayed from the ledger instead of executed a
   // second time; the same id with different content is a CONFLICT.
   async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
+    return this.#messageWithAdmission(id, text, mode, files, uploadToken, opts, send => this.#admit(send, id));
+  }
+
+  async #messageWithAdmission(id, text, mode, files, uploadToken, opts, admit) {
+    if (readOnlySession(this.tasks.get(id)) && (files.length || uploadToken)) throw Object.assign(new Error('Read-only sessions do not support attachments'), { code: 'INPUT_INVALID' });
+    if (readOnlySession(this.tasks.get(id)) && /^[!\/]/.test(String(text).trimStart())) throw Object.assign(new Error('Commands disabled in read-only sessions'), { code: 'INPUT_INVALID' });
     if (uploadToken) await this.uploads.authorize(uploadToken, { taskId: id, projectId: this.tasks.get(id)?.projectId, actor: opts.uploadActor });
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     // Who sent it: carried into the queue entry and the USER_MESSAGE event, so a
@@ -6241,12 +6413,12 @@ export class TaskManager extends EventEmitter {
     // running and the model answers the new text next. Only the model itself or
     // STOP ends a command.
     const send = async () => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
-    if (!commandId) return this.#admit(send, id);
+    if (!commandId) return admit(send);
     return this.#withCommand(
       commandId,
       opts && opts.clientId ? String(opts.clientId) : null,
       () => this.#payloadHash(id, text, mode, files, uploadToken, opts.now === true, opts.queue === true),
-      () => this.#admit(send, id),
+      () => admit(send),
     );
   }
 
@@ -6450,6 +6622,7 @@ export class TaskManager extends EventEmitter {
   }
 
   async #deliverMessage(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
+    if (readOnlySession(this.tasks.get(id)) && ((files || []).length || staged.length || uploadToken || /^[!\/]/.test(String(text).trimStart()))) throw Object.assign(new Error('Commands and attachments disabled in read-only sessions'), { code: 'INPUT_INVALID' });
     const deliveryStartedAt = Date.now();
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
@@ -6517,7 +6690,7 @@ export class TaskManager extends EventEmitter {
       // before it ever started has none yet, so its files wait with the prompt
       // (in memory, next to the upload staging) and are staged at delivery,
       // when the workspace is real.
-      const stageNow = Boolean(task.workspacePath);
+      const stageNow = !readOnlySession(task) && Boolean(task.workspacePath);
       const pendingId = crypto.randomUUID();
       const attached = stageNow ? await stageFiles(task, this.store.taskDir(id), incomingFiles) : [];
       if (attached.length) {
@@ -6564,10 +6737,10 @@ export class TaskManager extends EventEmitter {
     // Fresh state, taken right before delivering: this decides steer vs prompt.
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    const baseline = streaming ? null : await snapshotWorkspace(task.workspacePath);
+    const baseline = streaming ? null : (readOnlySession(task) ? null : await snapshotWorkspace(task.workspacePath));
     // A prompt delivered from the queue was staged when it was accepted: reusing
     // those records keeps one copy on disk and one entry in task.attachments.
-    const attached = staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles);
+    const attached = readOnlySession(task) ? [] : (staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles));
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
     // Расширенческую команду Pi нельзя ставить в очередь: отправленная как
     // steer/follow-up, пока агент работает, она отвечает «Extension command "/nudge"

@@ -1,3 +1,4 @@
+import { readOnlySession } from './session-capabilities.mjs';
 // Follow Plan service (PLAN-FOLLOW-01, FP-05A): the only place where the
 // controller touches the running TaskBridge.
 //
@@ -130,6 +131,14 @@ export class FollowPlanService {
     this.limits = config.followPlan?.limits || {};
   }
 
+  #mutate(taskId, action, wait = false) {
+    // Standalone service adapters may not own sessions. TaskManager always uses
+    // its shared per-task admission, including calls made outside HTTP routes.
+    return this.manager.withSessionAdmission
+      ? this.manager.withSessionAdmission(String(taskId), action, { wait })
+      : action();
+  }
+
   get enabled() {
     return this.config.followPlan?.enabled === true;
   }
@@ -166,7 +175,7 @@ export class FollowPlanService {
     };
   }
 
-  #follower(task) {
+  #follower(task, send = null) {
     // Lazily bound: recover()/pause()/stop() must work even before a workspace
     // exists, and only reading/writing the file needs one.
     const plans = {
@@ -185,7 +194,7 @@ export class FollowPlanService {
         // turn starts after the prompt is delivered, so any id known here belongs
         // to the previous turn — and evidence must come from the turn that ran the
         // step (see #checkEvidence).
-        const result = await this.manager.message(taskId, message, 'auto', [], null, { commandId, clientId: CONTROL_CLIENT });
+        const result = await (send || this.manager.message.bind(this.manager))(taskId, message, 'auto', [], null, { commandId, clientId: CONTROL_CLIENT });
         return { id: commandId, queued: Boolean(result?.pendingPrompts?.length) };
       },
       cancel: async ({ taskId, commandId }) => this.manager.cancel(taskId, { commandId: `${commandId}:stop`, hard: true })
@@ -262,7 +271,7 @@ export class FollowPlanService {
     const task = this.#task(taskId);
     const binding = this.store.getPlanBinding(task.id);
     const status = {
-      enabled: this.enabled,
+      enabled: this.enabled && !readOnlySession(task),
       taskId: task.id,
       attached: Boolean(binding?.path),
       state: binding?.state || 'NOT_ATTACHED',
@@ -362,9 +371,14 @@ export class FollowPlanService {
 
   // --- control -------------------------------------------------------------
 
-  async attach({ taskId, path, commandId, clientId, expectedHash = null }) {
+  async attach(input) {
+    return this.#mutate(input.taskId, send => this.#attach(input, send));
+  }
+
+  async #attach({ taskId, path, commandId, clientId, expectedHash = null }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const relPath = this.#relativePath(task, path);
     // The same guarantee as import: a confirmation belongs to the text the
     // operator saw, so attach refuses a file edited after the preview instead of
@@ -405,19 +419,25 @@ export class FollowPlanService {
    * защищены — их нельзя потерять незаметной правкой.
    */
   async writeContent(input) {
-    this.#assertEnabled();
-    const task = this.#task(input.taskId);
-    const binding = this.store.getPlanBinding(task.id);
-    if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
-    return withPlanWriteLock(path.resolve(task.workspacePath, binding.path), () => this.#writeContent(input));
+    return this.#mutate(input.taskId, send => this.#writeContent(input, send));
   }
 
-  async #writeContent({ taskId, content, expectedRevision = null, expectedHash = null, allowGoalChange = false, commandId, clientId }) {
+  async #writeContent(input) {
+    this.#assertEnabled();
+    const task = this.#task(input.taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
+    const binding = this.store.getPlanBinding(task.id);
+    if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
+    return withPlanWriteLock(path.resolve(task.workspacePath, binding.path), () => this.#writeContentLocked(input));
+  }
+
+  async #writeContentLocked({ taskId, content, expectedRevision = null, expectedHash = null, allowGoalChange = false, commandId, clientId }) {
     this.#assertEnabled();
     if (!Number.isInteger(expectedRevision) || !expectedHash) {
       throw reject('PLAN_REVISION_CONFLICT', 'Для сохранения нужны ревизия и хэш исходного черновика. Откройте файл заново.');
     }
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
     if (['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) throw reject('PLAN_BLOCKED', 'Сначала приостановите выполнение плана.');
@@ -649,9 +669,14 @@ export class FollowPlanService {
    * не так, а исходник останется нетронутым. CAS по хэшу и запрет молчаливой
    * перезаписи другого файла повторяют правила import/attach.
    */
-  async saveFile({ taskId, path: relPath, content, expectedHash = null, overwrite = false }) {
+  async saveFile(input) {
+    return this.#mutate(input.taskId, send => this.#saveFile(input, send));
+  }
+
+  async #saveFile({ taskId, path: relPath, content, expectedHash = null, overwrite = false }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const target = this.#relativePath(task, relPath);
     if (!/\.(md|markdown)$/i.test(target)) throw reject('PLAN_INVALID', 'План — это файл .md или .markdown.');
     const text = String(content ?? '');
@@ -765,9 +790,14 @@ export class FollowPlanService {
    * проекте (`path`). Управляемый план пишется как есть; свободный Markdown —
    * только после `confirmImport`, и тогда он преобразуется в управляемый.
    */
-  async importPlan({ taskId, path: relPath = null, name = null, contentBase64 = null, confirmImport = false, overwrite = false, expectedHash = null, commandId, clientId }) {
+  async importPlan(input) {
+    return this.#mutate(input.taskId, send => this.#importPlan(input, send));
+  }
+
+  async #importPlan({ taskId, path: relPath = null, name = null, contentBase64 = null, confirmImport = false, overwrite = false, expectedHash = null, commandId, clientId }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     let target;
     let text;
     if (contentBase64 != null) {
@@ -839,7 +869,7 @@ export class FollowPlanService {
       await fs.mkdir(path.dirname(absolute), { recursive: true });
       await writePlanAtomic({ file: absolute, text: toWrite, expectedHash: current == null ? null : planHash(current) });
     }
-    const attached = await this.attach({ taskId: task.id, path: target, commandId, clientId });
+    const attached = await this.#attach({ taskId: task.id, path: target, commandId, clientId });
     if (imported) {
       await this.#publish(task.id, 'PLAN_REVISED', `Импортировано шагов: ${imported.steps}`, { path: target, ...imported, commandId, clientId });
     }
@@ -896,9 +926,14 @@ export class FollowPlanService {
     return name;
   }
 
-  async start({ taskId, expectedRevision, commandId, clientId }) {
+  async start(input) {
+    return this.#mutate(input.taskId, send => this.#start(input, send));
+  }
+
+  async #start({ taskId, expectedRevision, commandId, clientId }, send) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
     const epoch = this.store.planCancelEpoch(task.id);
@@ -909,23 +944,33 @@ export class FollowPlanService {
       throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`,
         { problems: [`expected ${expectedRevision}`, `actual ${file.plan.revision}`] });
     }
-    const result = await this.#follower(task).start({ taskId: task.id, commandId });
+    const result = await this.#follower(task, send).start({ taskId: task.id, commandId });
     await this.#report(task.id, result, { commandId, clientId });
     if (result.code === 'PLAN_BUDGET_EXCEEDED') throw reject(result.code, result.message);
     return this.status(task.id);
   }
 
-  async pause({ taskId, commandId, clientId }) {
+  async pause(input) {
+    return this.#mutate(input.taskId, send => this.#pause(input, send));
+  }
+
+  async #pause({ taskId, commandId, clientId }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const result = this.#follower(task).pause({ taskId: task.id });
     await this.#report(task.id, result, { commandId, clientId });
     return this.status(task.id);
   }
 
-  async resume({ taskId, expectedRevision, commandId, clientId, renewTimeBudget = false, renewBudget = false }) {
+  async resume(input) {
+    return this.#mutate(input.taskId, send => this.#resume(input, send));
+  }
+
+  async #resume({ taskId, expectedRevision, commandId, clientId, renewTimeBudget = false, renewBudget = false }, send) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
     const epoch = this.store.planCancelEpoch(task.id);
@@ -936,16 +981,21 @@ export class FollowPlanService {
         throw reject('PLAN_REVISION_CONFLICT', `Ревизия плана ${file.plan.revision}, ожидалась ${expectedRevision}.`);
       }
     }
-    const result = await this.#follower(task).resume({ taskId: task.id, renewTimeBudget, renewBudget });
+    const result = await this.#follower(task, send).resume({ taskId: task.id, renewTimeBudget, renewBudget });
     await this.#report(task.id, result, { commandId, clientId });
     if (result.code === 'PLAN_BUDGET_EXCEEDED') throw reject(result.code, result.message);
     return this.status(task.id);
   }
 
-  async stop({ taskId, commandId, clientId }) {
+  async stop(input) {
+    return this.#mutate(input.taskId, send => this.#stop(input, send));
+  }
+
+  async #stop({ taskId, commandId, clientId }) {
     // STOP stays available even with the flag off: an operator must always be
     // able to end a cycle that is already running.
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     this.pendingDispatches.delete(task.id);
     const result = await this.#follower(task).stop({ taskId: task.id });
     await this.#report(task.id, result, { commandId, clientId });
@@ -953,9 +1003,14 @@ export class FollowPlanService {
   }
 
   /** A human edit through the API: same CAS rules as the follower's own writes. */
-  async patch({ taskId, expectedRevision, expectedHash, changes, commandId, clientId }) {
+  async patch(input) {
+    return this.#mutate(input.taskId, send => this.#patch(input, send));
+  }
+
+  async #patch({ taskId, expectedRevision, expectedHash, changes, commandId, clientId }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
     const updated = await this.#plans(task).update({
@@ -984,9 +1039,14 @@ export class FollowPlanService {
    * исходный файл проекта, а отключение привязки и удаление файла не одно и то же.
    * Кнопки удаления в интерфейсе нет именно поэтому, а не по недосмотру.
    */
-  async detach({ taskId, commandId, clientId }) {
+  async detach(input) {
+    return this.#mutate(input.taskId, send => this.#detach(input, send));
+  }
+
+  async #detach({ taskId, commandId, clientId }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
     if (binding.state === 'RUNNING_STEP' || binding.state === 'REVIEWING') {
@@ -1006,9 +1066,14 @@ export class FollowPlanService {
    * (the only way a conflict is cleared without losing text); `dismiss` returns to
    * idle without touching the file.
    */
-  async reconcile({ taskId, expectedRevision, action, commandId, clientId }) {
+  async reconcile(input) {
+    return this.#mutate(input.taskId, send => this.#reconcile(input, send));
+  }
+
+  async #reconcile({ taskId, expectedRevision, action, commandId, clientId }) {
     this.#assertEnabled();
     const task = this.#task(taskId);
+    if (readOnlySession(task)) throw reject('INPUT_INVALID', 'Follow Plan mutations disabled in read-only sessions');
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) throw reject('PLAN_NOT_ATTACHED', 'План не подключён.');
     if (action === 'adopt_external') {
@@ -1032,9 +1097,13 @@ export class FollowPlanService {
    * no longer matches), so an SSE reconnect or a duplicated frame cannot start
    * another cycle.
    */
-  async turnSettled({ taskId, commandId = null, checkpoint = null, aborted = false, seq = null, toolCalls = [] }) {
+  async turnSettled(input) {
+    return this.#mutate(input.taskId, send => this.#turnSettled(input, send), true);
+  }
+
+  async #turnSettled({ taskId, commandId = null, checkpoint = null, aborted = false, seq = null, toolCalls = [] }) {
     const task = this.manager.getTask(String(taskId));
-    if (!task) return { code: 'IGNORED', reason: 'task gone' };
+    if (!task || readOnlySession(task)) return { code: 'IGNORED', reason: 'task unavailable or read-only' };
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path) return { code: 'IGNORED', reason: 'plan not attached' };
     if (binding.state !== 'RUNNING_STEP' && binding.state !== 'REVIEWING') {
@@ -1162,19 +1231,23 @@ export class FollowPlanService {
    * The turn's terminal event is durable: now the prepared hop may go out. If the
    * turn failed, cancelled or the plan was detached in between, nothing is sent.
    */
-  async turnCommitted({ taskId }) {
+  async turnCommitted(input) {
+    return this.#mutate(input.taskId, send => this.#turnCommitted(input, send), true);
+  }
+
+  async #turnCommitted({ taskId }, send) {
     const pending = this.pendingDispatches.get(String(taskId));
     if (!pending) return { code: 'IGNORED', reason: 'no prepared hop' };
     this.pendingDispatches.delete(String(taskId));
     const task = this.manager.getTask(String(taskId));
-    if (!task) return { code: 'IGNORED', reason: 'task gone' };
+    if (!task || readOnlySession(task)) return { code: 'IGNORED', reason: 'task unavailable or read-only' };
     const binding = this.store.getPlanBinding(task.id);
     if (!binding?.path || !['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) {
       return { code: 'IGNORED', reason: `state ${binding?.state || 'none'}` };
     }
     let result;
     try {
-      result = await this.#follower(task).dispatchPending({ taskId: task.id, pending });
+      result = await this.#follower(task, send).dispatchPending({ taskId: task.id, pending });
     } catch (error) {
       this.store.savePlanBinding({ ...binding, state: 'PAUSED_REVIEW', dispatchCommandId: null, dispatchStepId: null, updatedAt: new Date(this.now()).toISOString() });
       await this.#publish(task.id, 'PLAN_PAUSED', `Следующий шаг не отправлен: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' });
@@ -1189,7 +1262,13 @@ export class FollowPlanService {
    * known, so the plan pauses for the operator. Re-sending it would repeat a
    * possible side effect.
    */
-  async turnFailed({ taskId, commandId = null, reason = 'FAILED' }) {
+  async turnFailed(input) {
+    return this.#mutate(input.taskId, send => this.#turnFailed(input, send), true);
+  }
+
+  async #turnFailed({ taskId, commandId = null, reason = 'FAILED' }) {
+    const task = this.manager.getTask(String(taskId));
+    if (!task || readOnlySession(task)) return { code: 'IGNORED', reason: 'task unavailable or read-only' };
     // A hop prepared for a turn that never committed must not be sent later.
     this.pendingDispatches.delete(String(taskId));
     this.settledTurns.delete(String(taskId));
@@ -1265,13 +1344,17 @@ export class FollowPlanService {
   async recoverAll() {
     const results = [];
     for (const task of this.manager.listTasks() || []) {
-      const binding = this.store.getPlanBinding(task.id);
-      if (!binding?.path) continue;
-      if (binding.state !== 'RUNNING_STEP' && binding.state !== 'REVIEWING') continue;
       try {
-        const result = this.#follower(task).recover({ taskId: task.id });
-        results.push(result);
-        await this.#report(task.id, result, {});
+        const result = await this.#mutate(task.id, async () => {
+          const current = this.#task(task.id);
+          if (readOnlySession(current)) return null;
+          const binding = this.store.getPlanBinding(task.id);
+          if (!binding?.path || !['RUNNING_STEP', 'REVIEWING'].includes(binding.state)) return null;
+          const recovered = this.#follower(current).recover({ taskId: task.id });
+          await this.#report(task.id, recovered, {});
+          return recovered;
+        });
+        if (result) results.push(result);
       } catch (error) {
         results.push({ taskId: task.id, code: error.code || 'INTERNAL_ERROR', message: error.message });
       }

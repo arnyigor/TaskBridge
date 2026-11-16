@@ -1,3 +1,4 @@
+import { readOnlySession } from '../session-capabilities.mjs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -238,6 +239,7 @@ export class ExternalFilesService {
     return { entries: entries.slice(0, 100), checkedDirectories: checked, truncated: truncated || queue.length > 0 || entries.length >= 100 };
   }
   async prepare(taskId, body, actor) {
+    if (readOnlySession(this.manager.getTask(taskId))) throw fail('INPUT_INVALID', 'Attachments disabled in read-only sessions');
     const project = this.taskProject(taskId);
     const projectId = project.id;
     const root = this.root(projectId, body.rootId, 'attach-file');

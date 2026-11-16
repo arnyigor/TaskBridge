@@ -362,6 +362,19 @@ export class PiRpcSession extends EventEmitter {
     return this.request({ type: 'abort' }, timeoutMs, { bumpOnFrames: false });
   }
 
+  async killTreeAndWait(timeoutMs = 10000) {
+    if (!this.proc || this.closed) return;
+    const closed = new Promise((resolve, reject) => {
+      const onClose = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        this.proc.removeListener('close', onClose);
+        reject(Object.assign(new Error('Pi termination not confirmed'), { code: 'BUSY' }));
+      }, timeoutMs);
+      this.proc.once('close', onClose);
+    });
+    await Promise.all([this.killTree(), closed]);
+  }
+
   async killTree() {
     if (!this.proc?.pid || this.proc.exitCode != null || this.proc.signalCode != null) return;
     // A signal request and the OS close event are different moments. Retire

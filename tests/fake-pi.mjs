@@ -41,7 +41,8 @@ const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
 if (process.env.FAKE_PI_DUMP_ARGS) {
   fs.writeFileSync(process.env.FAKE_PI_DUMP_ARGS, JSON.stringify({
     argv: process.argv.slice(2),
-    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('TASKBRIDGE_MEDIA_')))
+    pid: process.pid,
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => /^TASKBRIDGE_(MEDIA_|PLAN_|SESSION_MODE$|APPROVAL_|EXTERNAL_)/.test(key)))
   }));
 }
 const argValue = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; };

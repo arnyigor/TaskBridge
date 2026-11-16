@@ -31,6 +31,7 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -347,6 +348,50 @@ class FilePanelTest {
         onNodeWithText("Скачать").performClick()
         waitUntil(timeoutMillis = 5_000) { platform.saved.isNotEmpty() }
         assertEquals(readme, platform.saved.single().second.decodeToString())
+        http.close()
+    }
+
+    @Test
+    fun thePhoneShowsSaveFeedbackOnlyAfterTheWriteCompletes() = runComposeUiTest {
+        val (chat, http) = session()
+        val completed = CompletableDeferred<Result<String>>()
+        val started = CompletableDeferred<Unit>()
+        val platform = object : PlatformServices by DesktopPlatformServices() {
+            override suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String?, open: Boolean): Result<String> {
+                started.complete(Unit)
+                return completed.await()
+            }
+        }
+        val tabs = FileTabs()
+        tabs.open(FileTarget.Workspace("README.md"))
+        setContent { Panel(tabs, chat, width = 600.dp, platform = platform) }
+        awaitSeen("План панели")
+        onNodeWithText("Скачать").performClick()
+        waitUntil(timeoutMillis = 5_000) { started.isCompleted }
+        assertTrue(onAllNodesWithText("Сохранено: README.md").fetchSemanticsNodes().isEmpty())
+        completed.complete(Result.success("Сохранено: README.md"))
+        // Inline notice plus a sheet-local snackbar, independent of OS notifications.
+        waitUntil(timeoutMillis = 5_000) {
+            onAllNodesWithText("Сохранено: README.md").fetchSemanticsNodes().size == 2
+        }
+        http.close()
+    }
+
+    @Test
+    fun thePhoneShowsSaveErrorsInASnackbar() = runComposeUiTest {
+        val (chat, http) = session()
+        val platform = object : PlatformServices by DesktopPlatformServices() {
+            override suspend fun saveFile(name: String, bytes: ByteArray, mimeType: String?, open: Boolean): Result<String> =
+                Result.failure(IllegalStateException("Нет места для файла"))
+        }
+        val tabs = FileTabs()
+        tabs.open(FileTarget.Workspace("README.md"))
+        setContent { Panel(tabs, chat, width = 600.dp, platform = platform) }
+        awaitSeen("План панели")
+        onNodeWithText("Скачать").performClick()
+        waitUntil(timeoutMillis = 5_000) {
+            onAllNodesWithText("Нет места для файла").fetchSemanticsNodes().size == 2
+        }
         http.close()
     }
 

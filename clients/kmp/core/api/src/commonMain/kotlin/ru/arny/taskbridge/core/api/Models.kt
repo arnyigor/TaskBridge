@@ -1578,6 +1578,8 @@ data class TurnState(
 @Serializable
 data class Task(
     val id: String,
+    val mode: String = "agent",
+    val planReports: List<PlanReport> = emptyList(),
     val title: String? = null,
     val prompt: String? = null,
     val projectId: String? = null,
@@ -1599,6 +1601,12 @@ data class Task(
     val workspacePath: String? = null,
     val workspaceTrusted: Boolean = false,
     val pendingPrompts: List<PendingPrompt> = emptyList(),
+    /**
+     * RUNNING — проверка проекта ещё выполняет команды с правами агента. Пока она
+     * идёт, режим менять нельзя: сервер ответит «Сессия занята», и интерфейс обязан
+     * показать то же состояние, что и он.
+     */
+    val verificationStatus: String? = null,
     val files: List<FileRef> = emptyList(),
     val outputFiles: List<FileRef> = emptyList(),
     val lastUsage: Usage? = null,
@@ -1706,6 +1714,7 @@ data class UploadResult(val token: String, val files: List<FileRef> = emptyList(
 
 @Serializable
 data class CreateTaskRequest(
+    val mode: String = "agent",
     val projectId: String,
     val prompt: String,
     val title: String? = null,
@@ -2300,3 +2309,9 @@ enum class NativeImportMode(val wire: String, val label: String) {
     Clone("clone", "Копия"),
     TakeOver("take-over", "Забрать оригинал"),
 }
+
+@Serializable
+data class PlanReport(val version: Int, val name: String = "", val createdAt: String? = null, val markdown: String? = null)
+
+@Serializable
+data class PlanHandoffRequest(val version: Int, val model: ModelSelection, val commandId: String, val confirmed: Boolean = true)

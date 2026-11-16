@@ -861,6 +861,14 @@ class ChatSession(
         _state.update { s -> s.copy(approvals = s.approvals.filterNot { it.approvalId == approvalId }) }
     }
 
+    fun setSessionMode(mode: String) = act("session-mode") {
+        val updated = api.setSessionMode(taskId, mode)
+        mutex.withLock {
+            reducer?.syncTask(updated)
+            _state.update { it.copy(task = updated, chat = reducer?.snapshot() ?: it.chat) }
+        }
+    }
+
     fun compact() = act("compact", "Контекст сжимается…") { api.compact(taskId) }
 
     /** Kills the session's Pi; the next message restarts it from the saved session file. */
