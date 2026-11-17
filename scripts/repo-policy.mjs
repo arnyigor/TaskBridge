@@ -275,8 +275,13 @@ if (MODE === 'paths') {
   } else {
     const fields = stdout.split(String.fromCharCode(0)).filter(Boolean);
     const entries = [];
-    for (let index = 0; index + 1 < fields.length; index += 2) {
-      entries.push({ status: fields[index], relative: normalizePath(fields[index + 1]) });
+    // A rename or a copy carries THREE fields (status, old path, new path): the
+    // pairs shift by one from there on, and the policy would read "M" as a path.
+    for (let index = 0; index < fields.length;) {
+      const status = fields[index];
+      const isPair = status.startsWith('R') || status.startsWith('C');
+      entries.push({ status, relative: normalizePath(fields[index + (isPair ? 2 : 1)]) });
+      index += isPair ? 3 : 2;
     }
     notes.push(`staged files: ${entries.length}`);
 

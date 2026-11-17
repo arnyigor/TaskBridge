@@ -262,3 +262,23 @@ test('a policy change together with its own test is fine', async t => {
   const result = await policy(root, ['--staged']);
   assert.equal(result.code, 0, result.output);
 });
+
+test('a rename is read as one entry, not as a stray status letter', async t => {
+  // `git diff --name-status -z` reports a rename as THREE fields (status, old,
+  // new). Pairing blindly by two made the next status letter look like a path
+  // ("M is not an allowed path") and refused a perfectly ordinary commit.
+  const root = await tempDir(t);
+  await git(root, ['init', '-q']);
+  await write(root, 'docs/old-name.md', 'the same content that survives the rename\n');
+  await write(root, 'src/server.mjs', 'baseline\n');
+  await git(root, ['add', '-A']);
+  await commit(root, 'baseline');
+
+  await git(root, ['mv', 'docs/old-name.md', 'docs/new-name.md']);
+  await write(root, 'src/server.mjs', 'changed\n');
+  await git(root, ['add', '-A']);
+
+  const result = await policy(root, ['--staged']);
+  assert.equal(result.code, 0, result.output);
+  assert.doesNotMatch(result.output, /M is not an allowed path/);
+});
