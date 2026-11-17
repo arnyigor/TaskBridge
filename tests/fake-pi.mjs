@@ -41,8 +41,7 @@ const sessionFile = sessionArg >= 0 ? process.argv[sessionArg + 1] : null;
 if (process.env.FAKE_PI_DUMP_ARGS) {
   fs.writeFileSync(process.env.FAKE_PI_DUMP_ARGS, JSON.stringify({
     argv: process.argv.slice(2),
-    pid: process.pid,
-    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => /^TASKBRIDGE_(MEDIA_|PLAN_|SESSION_MODE$|APPROVAL_|EXTERNAL_)/.test(key)))
+    env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('TASKBRIDGE_MEDIA_')))
   }));
 }
 const argValue = name => { const i = process.argv.indexOf(name); return i >= 0 ? process.argv[i + 1] : null; };
@@ -93,70 +92,6 @@ async function approvalGate(toolCallId, toolName, args) {
 // The answer arrives as several deltas a few ms apart, like a streamed
 // response: that is what lets TaskBridge measure TG from usage (output tokens
 // over the time the deltas actually spanned).
-// --- Follow Plan stand-in ---------------------------------------------------
-// Parses the FOLLOW PLAN instruction and builds the checkpoint a compliant model
-// would send. Returns null when the instruction is not a normal step (the audit
-// turn, for instance) or the plan cannot be read — the controller must then ask
-// once and pause, which the tests exercise separately.
-function followPlanCheckpoint(message, proofRef = null) {
-  const file = /`([^`]+\.md)`/.exec(message);
-  const planId = /planId\s+(p-[\w-]+)/.exec(message);
-  const revision = /revision\s+(\d+)/.exec(message);
-  // «cycle c-1).» — the instruction ends the parenthesis, so the id is matched by
-  // its own shape rather than by "everything up to a space".
-  const cycleId = /cycle\s+(c-[\w-]+)/.exec(message);
-  const stepId = /Текущий шаг:\s*(S-\d+)/.exec(message);
-  const runId = /прогона[^:]*:\s*([0-9a-f-]{36})/i.exec(message);
-  if (!file || !planId || !revision || !cycleId || !stepId) return null;
-  let text;
-  try { text = fs.readFileSync(file[1], 'utf8'); } catch { return null; }
-  const statuses = [...text.matchAll(/^###\s+(S-\d+)\s*\|\s*([A-Z_]+)/gm)].map(match => ({ id: match[1], status: match[2] }));
-  if (!statuses.some(step => step.id === stepId[1])) return null;
-  // Один разбор заголовка текущего шага: он же решает про медленный ход,
-  // повторный settle и отсутствие checkpoint.
-  const headingLine = text.split('\n').find(line => line.startsWith(`### ${stepId[1]}`)) || '';
-  if (headingLine.includes('slow')) planSlow = true;
-  if (headingLine.includes('double-settle')) planDoubleSettle = true;
-  const left = statuses.filter(step => step.id !== stepId[1] && step.status !== 'DONE' && step.status !== 'SKIPPED');
-  // `finding-P1` в заголовке шага: этот ход «находит» связанный дефект — так
-  // проверяется автоправка плана (FP-04/FP-05D) на уровне HTTP.
-  const finding = /finding-(P\d)/.exec(text.split('\n').find(line => line.startsWith(`### ${stepId[1]}`)) || '');
-  if (headingLine.includes('no-checkpoint')) return null;
-  const findings = finding
-    ? [{ id: 'F-900', priority: finding[1], blocking: finding[1] === 'P0' || finding[1] === 'P1', summary: 'дефект, найденный в шаге' }]
-    : [];
-  // `manual-only` в заголовке шага: модель присылает только описание сверки —
-  // так проверяется правило «manual допустим там, где план не даёт проверки».
-  if (headingLine.includes('manual-only')) {
-    return {
-      planId: planId[1],
-      revision: Number(revision[1]),
-      cycleId: cycleId[1],
-      decision: left.length ? 'CONTINUE' : 'COMPLETE',
-      completedStepIds: [stepId[1]],
-      evidence: [{ stepId: stepId[1], kind: 'manual', summary: 'fixture: сверено вручную по документам' }],
-      findings: []
-    };
-  }
-  const evidence = [
-    ...(runId
-      ? [{ stepId: stepId[1], kind: 'run', ref: runId[1], summary: 'fixture: шаг выполнен' }]
-      : [{ stepId: stepId[1], kind: 'file', ref: file[1], summary: 'fixture: шаг выполнен' }]),
-    // …and the proof tool call actually emitted for this same turn.
-    ...(proofRef ? [{ stepId: stepId[1], kind: 'command', ref: proofRef, summary: 'fixture: инструмент отработал без ошибки' }] : [])
-  ];
-  return {
-    // The runner turns this into a failed tool end and drops the field.
-    ...(headingLine.includes('checkpoint-error') ? { __failed: true } : {}),
-    planId: planId[1],
-    revision: Number(revision[1]),
-    cycleId: cycleId[1],
-    decision: left.length ? 'CONTINUE' : 'COMPLETE',
-    completedStepIds: [stepId[1]],
-    evidence,
-    findings
-  };
-}
 
 function finish(text, fail = false, errorMessage = 'Fixture model error', thinking = null) {
   // `stream-many` answers are long: one delta per character, so a client can
@@ -219,20 +154,12 @@ function finish(text, fail = false, errorMessage = 'Fixture model error', thinki
 //                 engine chunking slowly, where the pause IS generation time
 let deaf = false;
 let tailAfterAbort = false;
-// A step whose heading says `slow` takes 10 s in the fixture: the STOP test needs
-// a turn that is still running when the operator presses the button.
-let planSlow = false;
-// Repeats `agent_settled` after the turn: the shape a reconnect or a duplicated
-// frame produces. The controller must not start another cycle from it.
-let planDoubleSettle = false;
 function faultOf(message) {
   const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|heavy-mixed|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
   streaming = true;
-  planSlow = false;
-  planDoubleSettle = false;
   turn += 1;
   send({ type: 'agent_start' });
   const user = { role: 'user', content: [{ type: 'text', text: message }] };
@@ -745,33 +672,6 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
       send({ type: 'tool_execution_start', toolCallId: `write-${turn}`, toolName: 'write', args: { path: 'result.png' } });
       send({ type: 'tool_execution_end', toolCallId: `write-${turn}`, toolName: 'write', isError: false, result: { content: [{ type: 'text', text: 'wrote result.png' }] } });
     }
-    // --- Follow Plan (FP-05) -------------------------------------------------
-    // The controller sends an instruction that names the plan file, the planId,
-    // the revision, the cycle and the current step (src/application/plan-follower.mjs).
-    // This stand-in acts like a model that does the step and then reports a
-    // checkpoint: it reads the plan from the workspace, marks the named step done
-    // and says COMPLETE only when nothing is left open. Evidence cites the run id
-    // the instruction names, which is exactly what the server verifies.
-    if (command.message.includes('FOLLOW PLAN')) {
-      const checkpoint = followPlanCheckpoint(command.message, `proof-${turn}`);
-      if (checkpoint) {
-        // The step's proof is a tool call of THIS turn: the production path has to
-        // carry its id and outcome from TaskManager all the way to the receipt.
-        send({ type: 'tool_execution_start', toolCallId: `proof-${turn}`, toolName: 'bash', args: { command: 'echo fixture-proof' } });
-        send({ type: 'tool_execution_end', toolCallId: `proof-${turn}`, toolName: 'bash', isError: false, result: { content: [{ type: 'text', text: 'fixture-proof' }] } });
-        send({ type: 'tool_execution_start', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint', args: checkpoint });
-        // `checkpoint-error`: the tool itself fails, so the claim was never
-        // delivered as a result and must not move the cycle (CP-02).
-        // `no-checkpoint`: the turn simply has none (CP-07).
-        const failed = checkpoint.__failed === true;
-        delete checkpoint.__failed;
-        send({
-          type: 'tool_execution_end', toolCallId: `plan-${turn}`, toolName: 'taskbridge_plan_checkpoint',
-          isError: failed,
-          ...(failed ? { errorMessage: 'fixture: checkpoint tool failed' } : { result: { content: [{ type: 'text', text: 'Checkpoint received' }] } })
-        });
-      }
-    }
     // A provider that answers with a JSON error envelope (as Pi forwards it
     // verbatim) is a separate case from a plain-text failure.
     const modelError = command.message.includes('model-error-json')
@@ -780,14 +680,6 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     const thinkingText = command.message.includes('think') ? 'Сначала взвешу варианты, потом отвечу.' : null;
     pending = setTimeout(() => {
       finish(command.message.includes('stream-many') ? `Ответ ${turn}: ${'поток '.repeat(20)}` : `Ответ ${turn}`, command.message.includes('model-error'), modelError, thinkingText);
-      // Duplicates of the settled frame arrive AFTER the turn ended — the shape a
-      // reconnect or a duplicated delivery produces, never a mid-turn event.
-      if (planDoubleSettle) {
-        setTimeout(() => {
-          send({ type: 'agent_settled' });
-          send({ type: 'agent_settled' });
-        }, 100);
-      }
-    }, command.message.includes('slow') || planSlow ? 10000 : 80);
+    }, command.message.includes('slow') ? 10000 : 80);
   }
 });

@@ -354,13 +354,11 @@ class SessionList(
         title: String?,
         files: List<UploadFile>,
         commandId: String,
-        mode: String = "agent",
     ): Result<Task> = runCatching {
         val upload = if (files.isNotEmpty()) api.upload(files) else null
         val task = api.createTask(
             CreateTaskRequest(
                 projectId = projectId,
-                mode = mode,
                 prompt = prompt.trim(),
                 title = title?.trim()?.takeIf { it.isNotEmpty() },
                 model = model?.id?.let { ModelSelection(model.provider, it) },

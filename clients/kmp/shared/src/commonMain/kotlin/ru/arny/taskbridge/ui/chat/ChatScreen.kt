@@ -105,7 +105,6 @@ import ru.arny.taskbridge.core.api.LocalModelMetrics
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
-import ru.arny.taskbridge.core.api.SCRATCH_PROJECT_ID
 import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.ProviderWait
 import ru.arny.taskbridge.core.api.QuickAction
@@ -191,8 +190,6 @@ fun ChatScreen(
 ) {
     val session = remember(taskId) { connection.chat(taskId) }
     val state by session.state.collectAsState()
-    // Follow Plan: одно состояние на иконку композитора и карточку над ним.
-    val planState = rememberFollowPlanState(connection.api, taskId, state.chat.version)
     val sessionListState = rememberVisibleSessionList(connection)
     // Деньги за ответ считаются на клиенте: ставки и расписание пика приходят
     // с /api/info вместе со статусом провайдера, курс рубля — оттуда же.
@@ -355,23 +352,6 @@ fun ChatScreen(
     val displayState = task?.let { displayStateOf(it) } ?: DisplayState.UNKNOWN
     val working = displayState == DisplayState.WORKING || displayState == DisplayState.WAITING_USER
     val historyLocked = working || displayState == DisplayState.QUEUED
-    // Почему режим нельзя сменить прямо сейчас. Сервер отказывает в смене, пока в
-    // рабочей папке работают команды агента: идущий ход, очередь, проверка
-    // проекта. Причина показывается в самом меню — молча неактивный чип ничего
-    // не объясняет.
-    val modeBlocked = when {
-        task == null -> "Сессия ещё не загружена"
-        historyLocked -> "Идёт ответ — дождитесь завершения"
-        task.verificationStatus == "RUNNING" -> "Идёт проверка проекта — дождитесь её конца"
-        task.pendingPrompts.isNotEmpty() -> "В очереди есть сообщения — отправьте или удалите их"
-        "session-mode" in state.busy -> "Переключаю режим…"
-        else -> null
-    }
-    val planBlocked = when {
-        task?.projectId == null || task.projectId == SCRATCH_PROJECT_ID -> "Планированию нужен проект"
-        files.isNotEmpty() -> "Уберите вложения: планирование их не принимает"
-        else -> null
-    }
 
     fun send(mode: SendMode) {
         val text = draft.text
@@ -537,45 +517,6 @@ fun ChatScreen(
 
                 Modifier.padding(padding).fillMaxSize().imePadding(),
             ) {
-                if (state.task?.mode == "chat") {
-                    Text("Архивный режим Chat · только чтение. Можно перейти в Агент или Планирование.")
-                }
-                if (state.task?.mode == "plan") {
-                    state.task?.planReports?.forEach { report ->
-                        var shown by remember(report.version) { mutableStateOf<String?>(null) }
-                        var failure by remember(report.version) { mutableStateOf<String?>(null) }
-                        var confirm by remember(report.version) { mutableStateOf(false) }
-                        var agentModel by remember(report.version) { mutableStateOf(state.task?.model) }
-                        var agentCatalog by remember(report.version) { mutableStateOf<ru.arny.taskbridge.core.api.ModelCatalog?>(null) }
-                        LaunchedEffect(confirm) { if (confirm) runCatching { connection.api.models() }.onSuccess { agentCatalog = it } }
-                        val handoffId = remember(report.version) { graph.newId() }
-                        Row {
-                            TextButton(onClick = { scope.launch {
-                                runCatching { connection.api.planReport(taskId, report.version) }
-                                    .onSuccess { shown = it.markdown }.onFailure { failure = it.message }
-                            } }) { Text("Отчёт v${report.version}") }
-                            TextButton(onClick = { confirm = true }) { Text("Передать Agent…") }
-                        }
-                        shown?.let { Text(it, maxLines = 20) }
-                        failure?.let { Text(it) }
-                        if (confirm) androidx.compose.material3.AlertDialog(
-                            onDismissRequest = { confirm = false },
-                            title = { Text("Создать Agent и начать реализацию?") },
-                            text = { Column {
-                                Text("Выберите модель Agent. Исходный Plan сохранится.")
-                                ru.arny.taskbridge.ui.sessions.ModelPicker(agentCatalog, agentModel, graph.settings, onPick = { agentModel = it })
-                            } },
-                            confirmButton = { TextButton(onClick = { scope.launch {
-                                val model = agentModel
-                                val modelId = model?.id
-                                if (modelId == null) failure = "Сначала выберите модель сессии"
-                                else runCatching { connection.api.planHandoff(taskId, ru.arny.taskbridge.core.api.PlanHandoffRequest(report.version, ru.arny.taskbridge.core.api.ModelSelection(model.provider, modelId), handoffId)) }
-                                    .onSuccess { confirm = false; onOpenSession(it.id) }.onFailure { failure = it.message }
-                            } }) { Text("Подтвердить") } },
-                            dismissButton = { TextButton(onClick = { confirm = false }) { Text("Отмена") } },
-                        )
-                    }
-                }
                 if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
                 LinkBanner(state.link, onRetry = { session.reconnectNow() })
                 // Сессия хранит журнал кадров (вывод инструментов) и вложения: гигабайты
@@ -720,8 +661,6 @@ fun ChatScreen(
                         }
                     },
                     top = {
-                        // Follow Plan: карточка плана над полем ввода; сама иконка
-                        // режима живёт в ряду композитора (planButton).
                         DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, visible = visible, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
                             QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
@@ -738,49 +677,24 @@ fun ChatScreen(
                             )
                         }
                     },
-                    planButton = {
-                        if (sessionListState.info?.followPlan?.enabled == true && (task?.mode ?: "agent") == "agent") FollowPlanIcon(
-                            state = planState,
-                            api = connection.api,
-                            newId = graph::newId,
-                            scope = scope,
-                            projectPath = task?.workspacePath,
-                            platformKind = platform.kind,
-                            onOpenPlan = { path -> openFile(FileTarget.Workspace(path)) },
-                            onCopy = platform::copyText,
-                            onNotice = { message -> scope.launch { snackbar.showSnackbar(message) } },
-                        )
-                    },
-                    modeButton = {
-                        if (task != null) SessionModeChip(
-                            mode = task.mode,
-                            // Выбор режима — событие ввода: меняется следующее сообщение.
-                            // Правило «только в простое» прежнее, но причина видна в меню.
-                            onPick = { mode -> session.setSessionMode(mode) },
-                            blocked = modeBlocked,
-                            planBlocked = planBlocked,
-                            collapseKey = state.chat.items.size,
-                        )
-                    },
-                    readOnly = (task?.mode ?: "agent") == "plan",
                     value = draft,
                     onValueChange = { next ->
                         val paste = pastedTextDraft(draft.text, next.text, graph.nowIso())
-                        draft = if ((task?.mode ?: "agent") != "agent") next else paste.caret
+                        draft = paste.caret
                             ?.let { TextFieldValue(paste.text, TextRange(it.coerceIn(0, paste.text.length))) }
                             ?: next
-                        paste.attached?.takeIf { (task?.mode ?: "agent") == "agent" }?.let { attached ->
+                        paste.attached?.let { attached ->
                             files = files + attached
                             scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
                         }
                     },
                     files = files,
-                    quickActions = if ((task?.mode ?: "agent") == "agent") quickActions else emptyList(),
+                    quickActions = quickActions,
                     onQuickAction = { action -> draft = draft.withSlashCommand(action.insertText) },
                     fileCompletions = { session.workspaceFiles().getOrNull()?.entries ?: emptyList() },
                     onRemoveFile = { files = files - it },
-                    onAttach = { if ((task?.mode ?: "agent") == "agent") fileSourcesOpen = true else scope.launch { snackbar.showSnackbar("Вложения недоступны в режиме только чтения") } },
-                    onPaste = { pasted -> if ((task?.mode ?: "agent") != "agent") scope.launch { snackbar.showSnackbar("Вложения недоступны в режиме только чтения") } else if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
+                    onAttach = { fileSourcesOpen = true },
+                    onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
                     working = working,
                     enterSends = graph.settings.enterSends && platform.kind == "desktop",
                     enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,

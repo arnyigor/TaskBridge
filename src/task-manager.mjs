@@ -1,5 +1,3 @@
-import { fileURLToPath } from 'node:url';
-import { sessionMode, readOnlySession } from './session-capabilities.mjs';
 import { restoreSessions, preflightSession } from './application/session-recovery.mjs';
 import { EventEmitter } from 'node:events';
 import { TerminalPublication } from './domain/terminal-publication.mjs';
@@ -9,11 +7,9 @@ import { CommandCoordinator } from './application/command-coordinator.mjs';
 import crypto from 'node:crypto';
 import fsSync from 'node:fs';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { resolvePiCommand } from './pi-command.mjs';
 import { PiRpcSession } from './pi-rpc.mjs';
-import { piOneShotArgs, spawnPi } from './pi-oneshot.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
@@ -53,7 +49,7 @@ import { contextFingerprint, validateResume, describeChanges } from './resume/re
 import { PiMemoryMdProvider, resumeMemoryQueries, memoryCollisions, INDEX_BUDGET_TOKENS, GLOBAL_BUDGET_TOKENS } from './memory/project-memory-provider.mjs';
 import { memoryMetrics } from './memory/memory-metrics.mjs';
 import { MERGE_THRESHOLD_DEFAULT, findMergeCandidates, mergeProposalText } from './memory/memory-consolidator.mjs';
-import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency, providerCheckStatus, completeOnce } from './model-probe.mjs';
+import { PROBE_DEFAULTS, ProbeCooldown, probeAvailability, probeLatency, providerCheckStatus } from './model-probe.mjs';
 import { WakeChannel } from './wake-channel.mjs';
 import { apiKey as providerApiKey } from './provider-models.mjs';
 import { listProposals, createProposal, acceptProposal, rejectProposal, validateProposal, proposalCounts } from './memory/memory-proposals.mjs';
@@ -165,9 +161,6 @@ const WorkItem = {
 function shortId() { return crypto.randomUUID().replaceAll('-', '').slice(0, 12); }
 // The command that produced a prompt, as recorded on its queue entry and its
 // USER_MESSAGE. Absent fields are left out rather than stored as null.
-// The Follow Plan checkpoint tool (pi-extension/taskbridge-follow-plan.js). Its
-// call is the machine-readable result of a cycle; see #handlePiEvent.
-const PLAN_CHECKPOINT_TOOL = 'taskbridge_plan_checkpoint';
 
 function originOf(commandId, clientId, deviceId) {
   const origin = {};
@@ -496,7 +489,6 @@ export class TaskManager extends EventEmitter {
     this.commandLedger = this.commandCoordinator.cache;
     this.admitting = false;
     this.admissionKeys = new Set();
-    this.admissionCompletions = new Map();
     // Task id whose pending prompt the pump is delivering right now (delegating
     // delivery). Read by sendPendingNow to refuse cutting into it.
     this.dispatching = null;
@@ -1695,7 +1687,6 @@ export class TaskManager extends EventEmitter {
    * живое состояние Git, а не поток текста от модели.
    */
   async #checkpointStart(task) {
-    if (readOnlySession(task)) return null;
     if (task.checkpoint) return task.checkpoint;
     if (!task.workspacePath) return null;
     task.checkpoint = {
@@ -2464,65 +2455,12 @@ export class TaskManager extends EventEmitter {
   async #admit(action, key = 'global') {
     if (this.admissionKeys.has(key)) throw Object.assign(new Error('Другой запрос этой сессии ещё отправляется. Повторите позже.'), { code: 'BUSY' });
     this.admissionKeys.add(key);
-    let release;
-    this.admissionCompletions.set(key, new Promise(resolve => { release = resolve; }));
     this.admitting = true;
     try { return await action(); }
     finally {
       this.admissionKeys.delete(key);
       this.admitting = this.admissionKeys.size > 0;
-      this.admissionCompletions.delete(key);
-      release();
     }
-  }
-
-  // FollowPlan owns this task's admission until every awaited mutation finishes.
-  // The scoped sender reuses that admission, but keeps message validation and
-  // the command ledger. It cannot be used after the operation has returned.
-  async withSessionAdmission(id, action, { wait = false } = {}) {
-    id = String(id);
-    // Internal turn hooks cannot ask a client to retry: wait behind the current
-    // operation, then re-read mode/binding under admission instead of losing it.
-    while (wait && this.admissionKeys.has(id)) await this.admissionCompletions.get(id);
-    return this.#admit(async () => {
-      let active = true;
-      const admit = send => {
-        if (!active) throw Object.assign(new Error('Admission expired'), { code: 'BUSY' });
-        return send();
-      };
-      try {
-        return await action((...args) => this.#messageWithAdmission(...args, admit));
-      } finally { active = false; }
-    }, String(id));
-  }
-
-  async planReport(id, version) {
-    // Read-only: saved reports stay readable while the next Plan turn runs.
-    const task = this.tasks.get(id);
-    if (!task || this.deleted.has(id)) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
-    if (task.mode !== 'plan') throw Object.assign(new Error('Not a Plan session'), { code: 'INPUT_INVALID' });
-    if (version == null) return { versions: task.planReports || [] };
-    const report = task.planReports?.find(r => r.version === Number(version));
-    if (!report) throw Object.assign(new Error('Report not found'), { code: 'NOT_FOUND' });
-    const markdown = await fs.readFile(path.join(this.store.taskDir(id), 'artifacts', report.name), 'utf8');
-    return { ...report, markdown };
-  }
-
-  async handoffPlan(id, input = {}) {
-    if (input.confirmed !== true || !input.commandId || !input.model) throw Object.assign(new Error('Confirm handoff and select Agent model'), { code: 'INPUT_INVALID' });
-    const source = this.#mutableTask(id);
-    const report = await this.planReport(id, input.version);
-    if (!report.markdown) throw Object.assign(new Error('Select report version'), { code: 'INPUT_INVALID' });
-    // Stable identity survives retries and server restart, including a lost HTTP response.
-    const requestedId = 'plan-agent-' + crypto.createHash('sha256').update(`${id}:${input.commandId}`).digest('hex').slice(0, 32);
-    const existing = this.tasks.get(requestedId);
-    if (existing) return this.#publicTask(existing);
-    return this.createTask({ projectId: source.projectId, mode: 'agent', model: input.model,
-      title: `${source.title || 'Plan'} (Agent)`,
-      prompt: `Implement the user-confirmed Plan report v${report.version}. Independently inspect the current project before changing files. This is Markdown context, not an executable Follow Plan.
-
-${report.markdown}`,
-    }, { requestedId, commandId: requestedId });
   }
 
   async createTask(input, options = {}) {
@@ -2612,10 +2550,6 @@ ${report.markdown}`,
   #piEnv(launch = null) {
     const env = { ...(this.config.pi?.env || {}) };
     if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
-    // Python под Windows при пайпе пишет stdout в cp1251, а tool-логи сессии
-    // декодируются как UTF-8 — кириллица превращается в U+FFFD (наблюдено
-    // 2026-11-16). Python 3.7+ умеет UTF-8 mode, если переменная задана.
-    if (!env.PYTHONUTF8) env.PYTHONUTF8 = '1';
     if (launch) Object.assign(env, launch.env);
     else Object.assign(env, this.mcp.launch().env);
     return Object.keys(env).length ? env : undefined;
@@ -2701,9 +2635,6 @@ ${report.markdown}`,
   }
 
   async #createTask(input, options) {
-    const mode = sessionMode(input.mode);
-    if (readOnlySession({ mode }) && /^[!\/]/.test(String(input.prompt || '').trimStart())) throw Object.assign(new Error('Commands disabled in read-only sessions'), { code: 'INPUT_INVALID' });
-    if (readOnlySession({ mode }) && ((input.files || []).length || input.uploadToken)) throw Object.assign(new Error('Read-only sessions do not support attachments'), { code: 'INPUT_INVALID' });
     const requestedId = options.requestedId;
     if (requestedId !== undefined && (typeof requestedId !== 'string' || !/^[A-Za-z0-9_-]{1,120}$/.test(requestedId))) {
       throw Object.assign(new Error('Некорректный cloud taskId.'), { code: 'INPUT_INVALID' });
@@ -2762,7 +2693,6 @@ ${report.markdown}`,
       status: 'QUEUED',
       queueReason: waitingReason,
       projectId,
-      mode,
       externalReadProjectKey: externalProjectIdentity(this.projects.get(projectId)),
       prompt,
       // A session may be named when it is created (a resumed one is «<задача>
@@ -2808,8 +2738,6 @@ ${report.markdown}`,
   }
 
   async importSession(input) {
-    // Native import's `mode` is clone/take-over, not a session capability.
-    if (sessionMode(input.sessionMode) !== 'agent') throw Object.assign(new Error('Pi import requires Agent mode'), { code: 'INPUT_INVALID' });
     return this.#admit(() => this.nativeSessions.importSession(input));
   }
 
@@ -2865,14 +2793,13 @@ ${report.markdown}`,
     // on the preceding snapshot until the terminal event has been persisted.
     const pendingTerminal = this.#terminalPublication.snapshot(task);
     if (pendingTerminal && !includeUnpublished) return pendingTerminal;
-    const { _planAnswer, _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
+    const { _incomingFiles, _modelError, _baseline, _turn, _turnEvidence, _turnTools, _preflightNote, _cancelEpoch, _attemptId, _nativeLease, _uploadToken,
       _firstDeltaAt, _lastDeltaAt, _promptStartedAt, _promptMs, _firstTokenAt, _lastProgressAt, _modelFrameAt,
       _turnStartedAt, _turnStartedMono, _turnFirstTokenAt, _turnFirstTokenMono, _turnStartSeq, _turnMessageSeq, _turnMeasuredTg, _turnMessageCount,
-      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _verificationsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
+      _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
     return {
       ...safe,
-      mode: sessionMode(task.mode),
       turnMetrics: task.turnMetrics || null,
       // Шаг C-B: версия снимка — seq последнего событие-факта этой сессии. Клиент
       // сравнивает её со своим курсором и не даёт старому GET откатить «лицо» хода
@@ -3185,7 +3112,7 @@ ${report.markdown}`,
       // starts while this turn finalizes must not overwrite them.
       const turn = this.#beginTurn(task);
       ownedTurn = turn;
-      const baseline = (readOnlySession(task) ? null : await snapshotWorkspace(task.workspacePath));
+      const baseline = await snapshotWorkspace(task.workspacePath);
       if (task.status === 'CANCELLED' || this.deleted.has(task.id) || this.runtimes.get(task.id)?.cancelRequested) {
         await pi.killTree();
         return;
@@ -3252,12 +3179,6 @@ ${report.markdown}`,
   }
 
   async #prepareWorkspace(task) {
-    if (readOnlySession(task)) {
-      const project = this.projects.get(task.projectId);
-      if (!project) throw new Error('Plan requires a project');
-      const root = await fs.realpath(project.path);
-      return { workspacePath: root, sourcePath: root, worktree: false, baseCommit: null };
-    }
     let prepared;
     // A resumed session may be told to reuse the working copy the previous one
     // left behind (MR-04). Only a TaskBridge-managed worktree qualifies: anything
@@ -3278,7 +3199,6 @@ ${report.markdown}`,
   }
 
   #buildPrompt(task) {
-    if (readOnlySession(task)) return task.prompt;
     // A Pi command must arrive as the whole message: Pi resolves «/skill:…» and
     // «/prompt:…» itself, and an appended instruction block would turn the command
     // into a sentence.
@@ -3302,8 +3222,7 @@ ${report.markdown}`,
 
   async #createPi(task, sessionFile) {
     const sessionDir = path.join(this.dataRoot, 'pi-sessions', task.id);
-    const restricted = readOnlySession(task);
-    const mcpLaunch = restricted ? { args: ['--no-mcp'], mode: 'disabled' } : await this.#mcpLaunch(task);
+    const mcpLaunch = await this.#mcpLaunch(task);
     if (mcpLaunch.ignored === 'inherit' && task?.mcp?.disabledServers?.length) {
       // Named instead of silently dropped: in inherit mode Pi reads its own file
       // and TaskBridge has no way to scope it.
@@ -3311,14 +3230,9 @@ ${report.markdown}`,
         'Режим MCP «inherit»: отключённые для этой сессии серверы не применяются, Pi использует свою конфигурацию',
         { mode: mcpLaunch.mode, servers: task.mcp.disabledServers }, false).catch(() => {});
     }
-    const args = [...(restricted ? [] : (this.config.pi?.args || [])), ...this.#selectionArgs(task), ...mcpLaunch.args];
+    const args = [...(this.config.pi?.args || []), ...this.#selectionArgs(task), ...mcpLaunch.args];
     const env = { ...(this.#piEnv(mcpLaunch) || {}) };
-    // Never inherit capability tokens or a previous read-only launch's mode/root.
-    for (const key of Object.keys({ ...process.env, ...env })) {
-      if (/^TASKBRIDGE_(PLAN_|SESSION_MODE$|EXTERNAL_|APPROVAL_|MEDIA_|CONTEXT_)/.test(key)) env[key] = undefined;
-    }
     let externalCapability = null;
-    if (!restricted) {
     if (this.externalFilesIssue && this.externalFilesUrl && this.externalFilesExtensionPath) {
       await fs.access(this.externalFilesExtensionPath);
       externalCapability = this.externalFilesIssue(task.id);
@@ -3383,9 +3297,6 @@ ${report.markdown}`,
         console.error(`[TaskBridge] media extension is missing: ${this.mediaExtensionPath}`);
       }
     }
-    // Follow Plan (FP-05A): the checkpoint tool the model reports through. Loaded
-    // only when the mode is enabled, so a session without plans does not carry a
-    // tool nobody uses.
     // Context budget: old bulky tool results are replaced by a reference on each
     // request (docs/context-compaction-best-practices.md, practice 1). Off with
     // `pi.contextBudget.enabled: false`; the persisted history is never touched,
@@ -3404,24 +3315,6 @@ ${report.markdown}`,
       } else {
         console.error(`[TaskBridge] context budget extension is missing: ${this.contextBudgetExtensionPath}`);
       }
-    }
-    if (this.config.followPlan?.enabled === true && this.followPlanExtensionPath) {
-      const available = await fs.access(this.followPlanExtensionPath).then(() => true, () => false);
-      if (available) {
-        args.push('-e', this.followPlanExtensionPath);
-        const logPath = path.join(this.dataRoot, 'follow-plan-checkpoints.ndjson');
-        env.TASKBRIDGE_PLAN_CHECKPOINT_LOG = logPath;
-      } else {
-        console.error(`[TaskBridge] follow-plan extension is missing: ${this.followPlanExtensionPath}`);
-      }
-    }
-    } else {
-      args.push('--no-context-files', '--no-themes', '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-builtin-tools', '-e', fileURLToPath(new URL('../pi-extension/taskbridge-plan.js', import.meta.url)));
-      // --no-extensions also drops the built-in llama.cpp provider (Pi 1.5.1
-      // docs/settings.md); it registers models, not tools, so local models stay usable.
-      if (task.requestedModel?.provider === 'llama.cpp') args.push('-e', 'builtin:llama.cpp');
-      env.TASKBRIDGE_PLAN_ROOT = task.workspacePath;
-      env.TASKBRIDGE_SESSION_MODE = task.mode;
     }
     const pi = new PiRpcSession({
       command: resolvePiCommand({ config: this.config }).command,
@@ -3532,62 +3425,6 @@ ${report.markdown}`,
    * Результат НЕ пишется в ModelLatency: там статистика настоящих ходов, и подмешивать
    * к ней пробу на «ping» значило бы врать в оценке «модель обычно отвечает за N с».
    */
-  /**
-   * Один ответ модели без инструментов и без Run (FP-UX-04E: проверка плана).
-   *
-   * Работает через того же провайдера, что и ход сессии, но это НЕ ход: очередь,
-   * command ledger и follow-plan-шаги не затрагиваются, а неудача возвращается как
-   * `ok: false` — обычное подключение валидного плана от неё не зависит.
-   */
-  async askModelOnce({ taskId = null, prompt = '', maxTokens = 400, timeoutMs = 30_000 } = {}) {
-    const task = taskId ? this.getTask(String(taskId)) : null;
-    if (taskId && !task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
-    const providerId = String(task?.model?.provider || '');
-    const modelId = String(task?.model?.id || '');
-    if (!providerId || !modelId) {
-      return { ok: false, code: 'MODEL_UNKNOWN', message: 'у сессии нет выбранной модели' };
-    }
-    const target = await this.#probeTarget(providerId, modelId);
-    // Подписочные провайдеры (ChatGPT/Codex и подобные) работают через OAuth Pi и
-    // адреса chat-completions не имеют: в чате модель отвечает, а отдельный вопрос
-    // упирается в «у провайдера нет адреса» (живой отчёт 2026-10-27). Тогда берём
-    // локальную модель — только loopback, чтобы текст не ушёл в облако мимо
-    // выбранного оператором провайдера, — и честно называем её в ответе.
-    let chosen = target.ok
-      ? { baseUrl: target.baseUrl, apiKey: target.apiKey, provider: providerId, model: modelId, local: null }
-      : null;
-    if (!chosen) {
-      // Первый путь для подписки — Pi в режиме --print: та же модель и тот же
-      // доступ, что в чате, только без инструментов и без сессии. Проверено на
-      // живом проекте: план из 7 шагов собран моделью openai-codex/gpt-6.1-sol.
-      const oneShot = await this.#piOneShot({ provider: providerId, model: modelId, prompt, timeoutMs });
-      if (oneShot.ok) {
-        return { ...oneShot, provider: providerId, model: modelId, local: false, viaPi: true, fellBackFrom: `${providerId}/${modelId}` };
-      }
-      const fallback = await this.#localFallbackTarget();
-      if (!fallback) {
-        return {
-          ok: false, code: target.code, message: target.message,
-          subscription: target.code === 'NO_ENDPOINT' || target.code === 'MODEL_UNKNOWN',
-          piCode: oneShot.code
-        };
-      }
-      chosen = { ...fallback, local: true, fellBackFrom: `${providerId}/${modelId}` };
-    }
-    const result = await completeOnce({
-      baseUrl: chosen.baseUrl, id: chosen.model, apiKey: chosen.apiKey, prompt, maxTokens, timeoutMs
-    });
-    if (chosen.fellBackFrom) {
-      return { ...result, provider: chosen.provider, model: chosen.model, local: true, fellBackFrom: chosen.fellBackFrom };
-    }
-    // `local` — не догадка: цель найдена среди локальных серверов/роутера, значит
-    // текст не уходит наружу (это и показывается оператору).
-    const external = this.localServers.find(providerId);
-    const local = Boolean(external && external.model === modelId)
-      || Boolean(this.localServers.find(modelId))
-      || localProviderIds(this.config.localRuntime || {}, this.localServers.servers).has(providerId);
-    return { ...result, provider: providerId, model: modelId, local };
-  }
 
   async probeModel({ provider = null, id = null, mode = 'availability' } = {}) {
     const providerId = String(provider || '').trim();
@@ -3682,89 +3519,6 @@ ${report.markdown}`,
    * llama.cpp-роутер (с его ключом) или провайдер из Pi-каталога. Отказ вместо
    * догадки: нет адреса или ключа — код NO_ENDPOINT/NO_KEY.
    */
-  /**
-   * Локальная модель на замену подписочной: только loopback-адреса и только
-   * провайдер с непустым каталогом (иначе неизвестно, что просить). Облачные
-   * провайдеры здесь не рассматриваются намеренно.
-   */
-  async #localFallbackTarget() {
-    let doc;
-    try {
-      doc = JSON.parse(await fs.readFile(path.join(piAgentDir(process.env), 'models.json'), 'utf8'));
-    } catch {
-      return null;
-    }
-    for (const [id, entry] of Object.entries(doc?.providers || {})) {
-      const baseUrl = String(entry?.baseUrl || '');
-      if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?(\/|$)/.test(baseUrl)) continue;
-      const model = (Array.isArray(entry.models) ? entry.models : [])
-        .map(item => String(item?.id || ''))
-        .find(Boolean);
-      if (!model) continue;
-      return { provider: id, model, baseUrl, apiKey: providerApiKey(entry.apiKey, process.env) };
-    }
-    return null;
-  }
-
-  /**
-   * Один ответ модели без сессии и без инструментов: `pi --print`. Нужен для
-   * подписочных провайдеров (OAuth), у которых нет адреса chat-completions, — в чате
-   * такая модель отвечает, а прямой HTTP-запрос к ней невозможен.
-   *
-   * Задание уходит файлом в --append-system-prompt, а не аргументом: текст плана
-   * содержит кавычки и переводы строк, и командная строка Windows их не переживает.
-   */
-  async #piOneShot({ provider, model, prompt, timeoutMs = 120_000 }) {
-    const started = Date.now();
-    const budget = Math.max(timeoutMs, 120_000);
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tb-oneshot-'));
-    const promptFile = path.join(dir, 'prompt.txt');
-    await fs.writeFile(promptFile, String(prompt || ''), 'utf8');
-    try {
-      const args = piOneShotArgs({ provider, model, promptFile });
-      return await new Promise(resolve => {
-        let out = '';
-        let err = '';
-        let settled = false;
-        const finish = value => {
-          if (settled) return;
-          settled = true;
-          resolve(value);
-        };
-        const proc = spawnPi(args, { cwd: dir });
-        const timer = setTimeout(() => {
-          try { proc.kill(); } catch {}
-          finish({ ok: false, code: 'TIMEOUT', ms: Date.now() - started, message: 'модель не ответила за отведённое время' });
-        }, budget);
-        proc.stdout.on('data', chunk => { out += chunk; });
-        proc.stderr.on('data', chunk => { err += chunk; });
-        proc.on('error', error => {
-          clearTimeout(timer);
-          finish({ ok: false, code: 'UNREACHABLE', ms: Date.now() - started, message: String(error?.message || error) });
-        });
-        proc.on('close', code => {
-          clearTimeout(timer);
-          const text = out.trim();
-          if (text) {
-            finish({ ok: true, text, ms: Date.now() - started });
-            return;
-          }
-          // Хвост stderr — единственное, что объясняет мгновенный отказ Pi.
-          const tail = err.split(/[\r\n]+/).filter(Boolean).slice(-2).join(' ').slice(0, 300);
-          finish({
-            ok: false,
-            code: code === 0 ? 'EMPTY' : 'HTTP_ERROR',
-            ms: Date.now() - started,
-            exitCode: code,
-            message: tail || undefined
-          });
-        });
-      });
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
   async #probeTarget(providerId, modelId = null) {
     // Strata и другие externalServers — НЕ llama.cpp router: у каждого свой port.
     // Ищем и по provider, и по model, как в телеметрии рабочего хода.
@@ -4795,39 +4549,10 @@ ${report.markdown}`,
     if (stopped?.cancelRequested === true) {
       if (frame.type === 'agent_settled') {
         this.#resolveSettle(task.id);
-        this.#notifyPlanSettled(task, stopped);
       }
       return;
     }
-    // Follow Plan reads its checkpoint from the ordinary tool frame: the arguments
-    // are already validated by Pi against the tool's schema, so no second channel
-    // and no parsing of the assistant's prose is involved.
-    // Evidence levels need to know whether a tool call of THIS turn finished well
-    // (FP-UX-02F): a tool result is a system fact, a sentence in the checkpoint is not.
-    if (frame.type === 'tool_execution_start') {
-      task._turnToolCalls = task._turnToolCalls || new Map();
-      task._turnToolCalls.set(String(frame.toolCallId || ''), { name: String(frame.toolName || 'tool'), isError: null });
-    }
-    if (frame.type === 'tool_execution_end' && task._turnToolCalls?.has(String(frame.toolCallId || ''))) {
-      const call = task._turnToolCalls.get(String(frame.toolCallId || ''));
-      call.isError = frame.isError === false ? false : true;
-      call.exitCode = frame.result?.details?.exitCode ?? frame.result?.exitCode ?? null;
-    }
-    if (frame.type === 'tool_execution_start' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL) {
-      task._planCheckpoint = frame.args && typeof frame.args === 'object' ? frame.args : null;
-      // Чей это ход: settle обязан получить команду ТОГО хода, который прислал
-      // checkpoint. Вклинившееся сообщение перезаписывает runtime.commandId, и
-      // раньше checkpoint планового хода отклонялся как «другая команда»
-      // (воспроизведено на стенде: steering во время шага).
-      task._planCheckpointCommandId = (runtime ?? this.runtimes.get(task.id))?.commandId || null;
-    }
-    // A checkpoint whose tool ended with an error was never delivered to the
-    // model as a result: Pi reports the failure, so the claim is not evidence and
-    // the turn counts as "settled without a checkpoint" (CP-02).
-    if (frame.type === 'tool_execution_end' && String(frame.toolName || '') === PLAN_CHECKPOINT_TOOL && frame.isError === true) {
-      task._planCheckpoint = null;
-      task._planCheckpointCommandId = null;
-    }
+    // Живой кадр
     // Живой кадр = фаза PROGRESS. Публикуется один раз на ход (дальше только
     // обновление _lastProgressAt в снимке), чтобы не дублировать кадры в ленту.
     if (task._turnPhase !== 'PROGRESS') await this.#turnStateEvent(task, 'PROGRESS');
@@ -4979,7 +4704,6 @@ ${report.markdown}`,
       await this.store.save(this.#publicTask(task));
     }
     if (frame.type === 'message_end' && frame.message?.role === 'assistant') {
-      if (task.mode === 'plan') task._planAnswer = (frame.message.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
       task._turnMessageCount = (task._turnMessageCount || 0) + 1;
       // Pi names the model but not always the provider, and never says whether the
       // engine is local. Both are facts the server already knows; guessing them on
@@ -5020,7 +4744,6 @@ ${report.markdown}`,
 
     if (frame.type === 'agent_settled') {
       this.#resolveSettle(task.id);
-      this.#notifyPlanSettled(task, runtime);
     }
   }
 
@@ -5138,16 +4861,10 @@ ${report.markdown}`,
     const turn = (runtime?.turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
-    if (task.mode === 'plan') task._planAnswer = '';
-    // A checkpoint belongs to the turn that reported it; the next turn must not
-    // inherit it (the tool call for the new turn has not happened yet).
-    task._planCheckpoint = null;
     task._turnEvidence = [];
     // Инструменты, выполненные в этом ходу: решение о безопасном автоповторе
     // после 413 принимается только по счётчику текущего хода (MEDIA-09D).
     task._turnTools = 0;
-    // Follow Plan: tool calls of THIS turn, for the evidence level (FP-UX-02F).
-    task._turnToolCalls = new Map();
     // Шаг C-A: фаза хода начинается с диспетчеризации. Поле сбрасывается, а не
     // ставится в DISPATCHING: публикацию делает #turnStateEvent в точке отправки
     // (иначе дедупликация съела бы первое событие хода).
@@ -5237,24 +4954,6 @@ ${report.markdown}`,
     if (task._modelError) return this.#fail(task, Object.assign(new Error(task._modelError), { code: 'MODEL_ERROR' }), turn);
     // The turn completed: the in-flight marker is spent (see #deliverMessage).
     if (task.inFlightPrompt) { task.inFlightPrompt = null; await this.store.save(this.#publicTask(task)).catch(() => {}); }
-    if (readOnlySession(task)) {
-      if (task.mode === 'plan') {
-        const version = (task.planReports?.length || 0) + 1;
-        const name = `plan-report-v${version}.md`;
-        await this.store.writeArtifact(task.id, name, task._planAnswer || task.assistantText || '');
-        task.planReports = [...(task.planReports || []), { version, name, createdAt: now() }];
-      }
-      task.verification = [];
-      task.verificationStatus = 'NOT_APPLICABLE';
-      this.#terminalPublication.hold(task, this.#publicTask(task));
-      task.status = 'SUCCEEDED';
-      task.current = task.mode === 'plan' ? 'Plan report ready' : 'Chat answer ready';
-      task.updatedAt = now();
-      await this.#turnStateEvent(task, 'SETTLED');
-      await this.#event(task, 'TASK_SUCCEEDED', task.current);
-      await this.store.save(this.#publicTask(task));
-      return;
-    }
     await this.#setStatus(task, 'VERIFYING', 'Collecting diff and changed files');
     const gitState = await collectGitStateForCompletion(task.workspacePath);
     // STOP can arrive while Git is being inspected. Do not resume finalizing
@@ -5350,7 +5049,6 @@ ${report.markdown}`,
   // Project verification is advisory and detached (see #verifyAndFinalize): it
   // must never change the task outcome, hold the slot or delay the next message.
   #runVerification(task, commands, turn) {
-    task._verificationsRunning = (task._verificationsRunning || 0) + 1;
     const running = (async () => {
       try {
         const verification = await runVerification(commands, task.workspacePath, (result) => {
@@ -5371,16 +5069,7 @@ ${report.markdown}`,
         });
         await this.#writeResult(task).catch(() => {});
       } catch (error) {
-        if (!this.deleted.has(task.id)) {
-          // The run itself threw (missing workspace, spawn failure): without this
-          // the status stayed RUNNING for ever, and `setSessionMode` answered
-          // "Сессия занята" to every attempt to change the mode.
-          if (turn == null || task._turn === turn) task.verificationStatus = 'INTERRUPTED';
-          await this.store.save(this.#publicTask(task)).catch(() => {});
-          await this.#event(task, 'VERIFICATION_ERROR', error.message).catch(() => {});
-        }
-      } finally {
-        task._verificationsRunning--;
+        if (!this.deleted.has(task.id)) await this.#event(task, 'VERIFICATION_ERROR', error.message).catch(() => {});
       }
     })();
     running.catch(() => {});
@@ -5540,8 +5229,6 @@ ${report.markdown}`,
     const runtime = this.runtimes.get(task.id);
     if (runtime?.cancelFinalizing) return runtime.cancelFinalizing;
     const pending = this.#writeCancelled(task, forTurn ?? task._turn);
-    // A cancelled turn is not a settle either: Follow Plan pauses for review.
-    this.#notifyPlanFailed(task, 'CANCELLED');
     if (runtime) runtime.cancelFinalizing = pending;
     return pending;
   }
@@ -5996,52 +5683,6 @@ ${report.markdown}`,
   // responding) this is the routine exit — the message probe answers "hung Pi"
   // and fails, so a hung session is otherwise at the mercy of a server restart,
   // which is the emergency exit that hits every session.
-  async setSessionMode(id, value) {
-    if (value == null) throw Object.assign(new Error('Session mode required'), { code: 'INPUT_INVALID' });
-    const mode = sessionMode(value);
-    return this.#admit(async () => {
-      const task = this.tasks.get(id);
-      if (!task || this.deleted.has(id)) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
-      const current = this.runtimes.get(id);
-      const binding = this.store.getPlanBinding(id);
-      if (['RUNNING_STEP', 'REVIEWING'].includes(binding?.state)) throw Object.assign(new Error('Сначала остановите Follow Plan.'), { code: 'BUSY' });
-      if (!RUN_TERMINAL.has(task.status) || task.inFlightPrompt || task._starting || task._compacting
-        || task.verificationStatus === 'RUNNING' || task._verificationsRunning
-        || task._toolsRunning || task.pendingPrompts?.length || task._incomingFiles?.length || task._uploadToken) {
-        throw Object.assign(new Error('Сессия занята — дождитесь завершения и отправки очереди.'), { code: 'BUSY' });
-      }
-      if (current && !current.retired && !current.pi.closed) {
-        const state = await current.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
-        if (state?.isStreaming || state?.isCompacting) throw Object.assign(new Error('Сессия занята.'), { code: 'BUSY' });
-      }
-      if (sessionMode(task.mode) === mode && !current?.retired) return this.#publicTask(task);
-      // Fail closed: retire before killing, wait for the OS close, and only then
-      // persist new permissions. Keep the retired runtime on any failure so a
-      // retry cannot skip the termination barrier. History/native lease stay put.
-      if (current) {
-        current.retired = true;
-        current.cancelRequested = true;
-        await current.eventChain;
-        await current.pi.killTreeAndWait();
-        this.#resolveSettle(id);
-        if (this.runtimes.get(id) === current) this.runtimes.delete(id);
-      } else if (task.piPid) {
-        throw Object.assign(new Error('Runtime ownership unknown; recover session before changing mode'), { code: 'BUSY' });
-      }
-      this.approvalTokens.delete(id);
-      task.piPid = null;
-      task.piStartedAt = null;
-      task.mode = mode;
-      task._planAnswer = '';
-      task._planCheckpoint = null;
-      task.updatedAt = now();
-      await this.store.save(this.#publicTask(task));
-      await this.#event(task, 'SESSION_MODE_CHANGED', `Режим сессии: ${mode}`, { mode });
-      // Lazy recreation uses the same native session file on the next message.
-      return this.#publicTask(task);
-    }, id);
-  }
-
   async restartSession(id) {
     return this.#admit(() => this.#restartSession(id), id);
   }
@@ -6194,7 +5835,6 @@ ${report.markdown}`,
       updatedAt: now(),
       status: 'SUCCEEDED',
       queueReason: null,
-      mode: sessionMode(source.mode),
       projectId: source.projectId,
       externalReadProjectKey: source.externalReadProjectKey || (source.sourcePath && externalProjectIdentity({ path: source.sourcePath })),
       prompt: opening ? (opening.data?.text ?? opening.message ?? '') : source.prompt,
@@ -6396,12 +6036,6 @@ ${report.markdown}`,
   // same commandId+payload is replayed from the ledger instead of executed a
   // second time; the same id with different content is a CONFLICT.
   async message(id, text, mode = 'auto', files = [], uploadToken = null, opts = {}) {
-    return this.#messageWithAdmission(id, text, mode, files, uploadToken, opts, send => this.#admit(send, id));
-  }
-
-  async #messageWithAdmission(id, text, mode, files, uploadToken, opts, admit) {
-    if (readOnlySession(this.tasks.get(id)) && (files.length || uploadToken)) throw Object.assign(new Error('Read-only sessions do not support attachments'), { code: 'INPUT_INVALID' });
-    if (readOnlySession(this.tasks.get(id)) && /^[!\/]/.test(String(text).trimStart())) throw Object.assign(new Error('Commands disabled in read-only sessions'), { code: 'INPUT_INVALID' });
     if (uploadToken) await this.uploads.authorize(uploadToken, { taskId: id, projectId: this.tasks.get(id)?.projectId, actor: opts.uploadActor });
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     // Who sent it: carried into the queue entry and the USER_MESSAGE event, so a
@@ -6413,12 +6047,12 @@ ${report.markdown}`,
     // running and the model answers the new text next. Only the model itself or
     // STOP ends a command.
     const send = async () => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
-    if (!commandId) return admit(send);
+    if (!commandId) return this.#admit(send, id);
     return this.#withCommand(
       commandId,
       opts && opts.clientId ? String(opts.clientId) : null,
       () => this.#payloadHash(id, text, mode, files, uploadToken, opts.now === true, opts.queue === true),
-      () => admit(send),
+      () => this.#admit(send, id),
     );
   }
 
@@ -6437,57 +6071,8 @@ ${report.markdown}`,
   // does not change the live command response shape.
   commandStatus(commandId) { return this.commandCoordinator.status(commandId); }
 
-  // --- Follow Plan (FP-05A) ------------------------------------------------
-  // The controller (src/follow-plan-service.mjs) hangs off these three seams and
-  // nothing else: it uses the ordinary message path, the ordinary event log and
-  // the settle boundary. TaskManager keeps owning Pi, the queue and STOP.
-  setFollowPlanHooks(hooks) {
-    this.followPlanHooks = hooks && typeof hooks.turnSettled === 'function' ? hooks : null;
-  }
-
-  async publishFollowPlanEvent(taskId, type, message, data = {}) {
-    const task = this.tasks.get(String(taskId));
-    if (!task) return false;
-    await this.#event(task, type, message, data, false);
-    return true;
-  }
-
   // A control command must be idempotent like any other: the caller passes its
   // commandId and the ledger replays or refuses a repeat.
-  async withCommandId(commandId, clientId, payload, fn) {
-    const id = String(commandId || '').trim();
-    if (!id) throw Object.assign(new Error('Команда Follow Plan требует commandId.'), { code: 'INPUT_INVALID' });
-    return this.#withCommand(id, clientId ? String(clientId) : null, () => this.#payloadHash(payload), fn);
-  }
-
-  // Called when Pi reaches a settled boundary: once per command, with whatever
-  // checkpoint the turn reported. Never awaited by the event chain — a dispatch
-  // of the next step must not hold up the frames of the finished one.
-  #notifyPlanSettled(task, runtime) {
-    const hooks = this.followPlanHooks;
-    const checkpoint = task._planCheckpoint || null;
-    const ownerCommandId = task._planCheckpointCommandId || null;
-    task._planCheckpoint = null;
-    task._planCheckpointCommandId = null;
-    if (!hooks) return;
-    // The table of this turn's tool calls travels with the settle: the controller
-    // uses it to tell a verified result from a reported one.
-    const toolCalls = [...(task._turnToolCalls || new Map())].map(([id, value]) => ({ id, name: value.name, isError: value.isError, exitCode: value.exitCode }));
-    Promise.resolve(hooks.turnSettled({
-      taskId: task.id,
-      // Команда хода-владельца checkpoint важнее текущей: поздний settle и
-      // вклинившееся сообщение не должны отбирать подтверждение у своего хода.
-      commandId: (checkpoint && ownerCommandId) || runtime?.commandId || null,
-      checkpoint,
-      toolCalls,
-      aborted: runtime?.cancelRequested === true,
-      seq: task._turn ?? null
-    })).catch(error => {
-      this.#event(task, 'PLAN_PAUSED', `Follow Plan: ${error.message}`, { code: error.code || 'INTERNAL_ERROR' }, false).catch(() => {});
-    });
-  }
-
-
   #payloadHash(...args) {
     return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
   }
@@ -6622,7 +6207,6 @@ ${report.markdown}`,
   }
 
   async #deliverMessage(id, text, mode, files, uploadToken, { immediate = false, queue = false, fromQueue = false, staged = [], announce = true, origin = null, pendingId: deliveredPendingId = null } = {}) {
-    if (readOnlySession(this.tasks.get(id)) && ((files || []).length || staged.length || uploadToken || /^[!\/]/.test(String(text).trimStart()))) throw Object.assign(new Error('Commands and attachments disabled in read-only sessions'), { code: 'INPUT_INVALID' });
     const deliveryStartedAt = Date.now();
     const task = this.tasks.get(id);
     if (!task) throw Object.assign(new Error('Сессия не найдена.'), { code: 'NOT_FOUND' });
@@ -6690,7 +6274,7 @@ ${report.markdown}`,
       // before it ever started has none yet, so its files wait with the prompt
       // (in memory, next to the upload staging) and are staged at delivery,
       // when the workspace is real.
-      const stageNow = !readOnlySession(task) && Boolean(task.workspacePath);
+      const stageNow = Boolean(task.workspacePath);
       const pendingId = crypto.randomUUID();
       const attached = stageNow ? await stageFiles(task, this.store.taskDir(id), incomingFiles) : [];
       if (attached.length) {
@@ -6737,10 +6321,10 @@ ${report.markdown}`,
     // Fresh state, taken right before delivering: this decides steer vs prompt.
     const streaming = Boolean(state?.isStreaming);
     if (state?.isCompacting) throw Object.assign(new Error('Сейчас выполняется сжатие контекста.'), { code: 'BUSY' });
-    const baseline = streaming ? null : (readOnlySession(task) ? null : await snapshotWorkspace(task.workspacePath));
+    const baseline = streaming ? null : await snapshotWorkspace(task.workspacePath);
     // A prompt delivered from the queue was staged when it was accepted: reusing
     // those records keeps one copy on disk and one entry in task.attachments.
-    const attached = readOnlySession(task) ? [] : (staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles));
+    const attached = staged.length ? staged : await stageFiles(task, this.store.taskDir(id), incomingFiles);
     if (uploadToken) await this.uploads.discard(uploadToken).catch(() => {});
     // Расширенческую команду Pi нельзя ставить в очередь: отправленная как
     // steer/follow-up, пока агент работает, она отвечает «Extension command "/nudge"
@@ -6831,9 +6415,8 @@ ${report.markdown}`,
       await this.store.save(this.#publicTask(task));
       // announce:false = the message is already in history (regeneration), so a
       // second USER_MESSAGE would show the operator's own line twice.
-      // Which command owns this turn: the Follow Plan settle hook must ignore a
-      // repeated `agent_settled` of an older command instead of treating it as a
-      // turn that lost its checkpoint.
+      // Which command owns this turn: a repeated `agent_settled` of an older
+      // command must not be taken for the current turn.
       if (runtime) runtime.commandId = origin?.commandId || null;
       if (announce) {
         await this.#event(task, 'USER_MESSAGE', userText, {
@@ -6882,9 +6465,6 @@ ${report.markdown}`,
         try {
           await settled;
           if (!runtime.cancelRequested && !['CANCELLED', 'FAILED'].includes(task.status)) await this.#verifyAndFinalize(task, { turn, baseline });
-          // Only now is the turn's terminal event durable: Follow Plan may send the
-          // next step. A failed finalize throws above and nothing is dispatched.
-          this.#notifyPlanCommitted(task);
         } catch (error) { await this.#fail(task, error); }
         finally {
           // A newer turn may already own the session: a follow-up accepted while
@@ -7248,27 +6828,6 @@ ${report.markdown}`,
     });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
-    // A failed turn settles nothing: Follow Plan must pause for review instead of
-    // believing its step is still running (RC-03, a permanent 413).
-    this.#notifyPlanFailed(task, task.errorCode || 'FAILED');
-  }
-
-  // The turn is durably finished (TASK_SUCCEEDED written): the prepared next hop
-  // may go out. Never called on the failure path.
-  #notifyPlanCommitted(task) {
-    const hooks = this.followPlanHooks;
-    if (!hooks || typeof hooks.turnCommitted !== 'function') return;
-    Promise.resolve(hooks.turnCommitted({ taskId: task.id, commandId: this.runtimes.get(task.id)?.commandId || null }))
-      .catch(() => {});
-  }
-
-  // The cycle cannot continue after a turn that produced no result: the plan is
-  // paused for the operator, never re-sent.
-  #notifyPlanFailed(task, reason) {
-    const hooks = this.followPlanHooks;
-    if (!hooks || typeof hooks.turnFailed !== 'function') return;
-    Promise.resolve(hooks.turnFailed({ taskId: task.id, commandId: this.runtimes.get(task.id)?.commandId || null, reason }))
-      .catch(() => {});
   }
 
   async #event(task, type, message, data = {}, persistTask = true) {

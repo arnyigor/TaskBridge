@@ -37,14 +37,9 @@ data class ApiInfo(
     val scheduler: SchedulerInfo? = null,
     val engine: LocalEngineInfo? = null,
     val local: LocalRuntimeInfo? = null,
-    /** Что этот сервер умеет в плановом API: старый сервер без `browse` честно называет себя старым. */
-    val followPlan: FollowPlanInfo? = null,
     /** RAM/CPU/GPU машины — то, по чему видно, что модель читается в память. */
     val system: SystemMetrics? = null,
 )
-
-@Serializable
-data class FollowPlanInfo(val enabled: Boolean = false, val capabilities: List<String> = emptyList())
 
 @Serializable
 data class LocalEngineInfo(
@@ -1578,8 +1573,6 @@ data class TurnState(
 @Serializable
 data class Task(
     val id: String,
-    val mode: String = "agent",
-    val planReports: List<PlanReport> = emptyList(),
     val title: String? = null,
     val prompt: String? = null,
     val projectId: String? = null,
@@ -1601,12 +1594,6 @@ data class Task(
     val workspacePath: String? = null,
     val workspaceTrusted: Boolean = false,
     val pendingPrompts: List<PendingPrompt> = emptyList(),
-    /**
-     * RUNNING — проверка проекта ещё выполняет команды с правами агента. Пока она
-     * идёт, режим менять нельзя: сервер ответит «Сессия занята», и интерфейс обязан
-     * показать то же состояние, что и он.
-     */
-    val verificationStatus: String? = null,
     val files: List<FileRef> = emptyList(),
     val outputFiles: List<FileRef> = emptyList(),
     val lastUsage: Usage? = null,
@@ -1714,7 +1701,6 @@ data class UploadResult(val token: String, val files: List<FileRef> = emptyList(
 
 @Serializable
 data class CreateTaskRequest(
-    val mode: String = "agent",
     val projectId: String,
     val prompt: String,
     val title: String? = null,
@@ -1743,234 +1729,6 @@ data class MessageRequest(
     val files: List<UploadedFileId>? = null,
     val commandId: String? = null,
     val clientId: String? = null,
-)
-
-// --- Follow Plan (PLAN-FOLLOW-01) -------------------------------------------
-// Один Markdown-файл — источник истины по содержанию и статусам шагов; сервер
-// держит только техсостояние цикла. Клиент ничего не решает сам: карточка
-// показывает то, что прислал сервер, и отправляет команды с ревизией.
-
-@Serializable
-data class PlanContent(val path: String, val revision: Int, val hash: String, val content: String)
-
-@Serializable
-data class PlanStep(
-    val id: String,
-    val status: String,
-    val priority: String? = null,
-    val title: String? = null,
-    /** Краткое подтверждение, записанное в файл (полный лог — в чате). */
-    val result: String? = null,
-)
-
-@Serializable
-data class PlanFinding(
-    val id: String,
-    val priority: String? = null,
-    val state: String? = null,
-    val summary: String? = null,
-)
-
-/** Состояние файла плана, отдельно от состояния привязки и текущего цикла. */
-@Serializable
-data class PlanFileInfo(
-    val open: Int = 0,
-    val blocking: Int = 0,
-    val revision: Int? = null,
-    val complete: Boolean = false,
-)
-
-@Serializable
-data class PlanProgress(
-    val done: Int = 0,
-    val total: Int = 0,
-)
-
-@Serializable
-data class PlanCheckpointSummary(
-    val at: String? = null,
-    val decision: String? = null,
-    val completed: List<String> = emptyList(),
-    val findings: Int = 0,
-    val evidence: Int = 0,
-    val rejectedEvidence: List<String> = emptyList(),
-)
-
-@Serializable
-data class PlanFileError(
-    val code: String? = null,
-    val message: String? = null,
-    val problems: List<String> = emptyList(),
-)
-
-@Serializable
-data class PlanPauseReason(val code: String? = null, val message: String? = null)
-
-/** GET /api/tasks/:id/plan — состояние режима «По плану» для этой сессии. */
-@Serializable
-data class PlanStatus(
-    val enabled: Boolean = false,
-    val taskId: String? = null,
-    val attached: Boolean = false,
-    /** NOT_ATTACHED, IDLE, RUNNING_STEP, REVIEWING, PAUSED_REVIEW, PAUSED, COMPLETED. */
-    val state: String = "NOT_ATTACHED",
-    val planId: String? = null,
-    val path: String? = null,
-    val revision: Int? = null,
-    val hash: String? = null,
-    val cycleId: String? = null,
-    val cycleNumber: Int? = null,
-    val stepId: String? = null,
-    /** Где сейчас сама Pi-сессия (DISPATCHING/PROGRESS/…), отдельно от состояния плана. */
-    val stage: String? = null,
-    val updatedAt: String? = null,
-    val lastCheckpoint: PlanCheckpointSummary? = null,
-    val pauseReason: PlanPauseReason? = null,
-    val conflict: Boolean = false,
-    val title: String? = null,
-    val goal: String? = null,
-    val progress: PlanProgress? = null,
-    /** Состояние самого файла: открытые шаги и блокирующие находки. */
-    val file: PlanFileInfo? = null,
-    val steps: List<PlanStep> = emptyList(),
-    val findings: List<PlanFinding> = emptyList(),
-    val fileError: PlanFileError? = null,
-)
-
-/** Ответ `plan/inspect`: управляемый план или предпросмотр импорта. */
-@Serializable
-data class PlanPreviewStep(val id: String, val title: String? = null, val status: String? = null)
-
-@Serializable
-data class PlanPreview(
-    val steps: List<PlanPreviewStep> = emptyList(),
-    val unmapped: List<String> = emptyList(),
-    val problems: List<String> = emptyList(),
-    /** Будущий управляемый файл для показа: на диск он до подтверждения не идёт. */
-    val content: String = "",
-)
-
-@Serializable
-data class PlanInspection(
-    val path: String? = null,
-    val managed: Boolean = false,
-    val problems: List<String> = emptyList(),
-    val steps: Int = 0,
-    val revision: Int? = null,
-    val goal: String? = null,
-    val replaces: String? = null,
-    val alreadyAttached: Boolean = false,
-    val freeForm: Boolean = false,
-    val preview: PlanPreview? = null,
-    /**
-     * Вердикт сервера (FP-UX-04D): VALID_MANAGED, CONVERTIBLE, NOT_A_PLAN, INVALID.
-     * Пустая строка у сервера постарше — клиент выводит вердикт из managed/preview.
-     */
-    val verdict: String = "",
-    val reason: String? = null,
-    /** Хэш показанного текста: подтверждение сверяется с ним (внешняя правка). */
-    val hash: String? = null,
-)
-
-/** Один найденный Markdown-файл проекта (POST /plan/scan). */
-@Serializable
-data class PlanScanFile(
-    val name: String = "",
-    val path: String = "",
-    val size: Long = 0,
-    val modifiedAt: String? = null,
-    /** Предварительная догадка по голове файла: VALID_MANAGED, CONVERTIBLE или null. */
-    val classification: String? = null,
-)
-
-/**
- * Результат сканирования проекта. `partial` означает, что сработал лимит глубины,
- * количества или времени: список неполный, и это сказано словами, а не умолчано.
- */
-@Serializable
-data class PlanScanResult(
-    val path: String = "",
-    val query: String = "",
-    val files: List<PlanScanFile> = emptyList(),
-    val total: Int = 0,
-    val partial: Boolean = false,
-    val elapsedMs: Long = 0,
-    val enabled: Boolean = true,
-)
-
-/** Совет модели по выбранному файлу (POST /plan/ai-review): не вердикт, а мнение. */
-@Serializable
-data class PlanAiReview(
-    val path: String? = null,
-    val truncated: Boolean = false,
-    val charsSent: Int = 0,
-    val structural: PlanAiStructural? = null,
-    val ai: PlanAiVerdict? = null,
-    val model: PlanAiModel? = null,
-    val ms: Long? = null,
-)
-
-@Serializable
-data class PlanAiStructural(val verdict: String = "", val reason: String? = null, val problems: List<String> = emptyList())
-
-@Serializable
-data class PlanAiVerdict(val verdict: String = "UNCLEAR", val looksLikePlan: Boolean? = null, val reasons: List<String> = emptyList())
-
-@Serializable
-data class PlanAiModel(val provider: String? = null, val id: String? = null, val local: Boolean = false)
-
-/** Один элемент ленивого браузера проекта (GET /plan/browse). */
-@Serializable
-data class PlanBrowseEntry(val name: String, val path: String, val isFile: Boolean = false)
-
-@Serializable
-data class PlanBrowseListing(
-    val path: String = "",
-    val parent: String? = null,
-    val entries: List<PlanBrowseEntry> = emptyList(),
-)
-
-/** Текст выбранного файла проекта для правки формата (GET /plan/read-file). */
-@Serializable
-data class PlanFileText(
-    val path: String = "",
-    val text: String = "",
-    val hash: String = "",
-)
-
-/**
- * Черновик управляемого плана, собранный моделью из свободного текста
- * (POST /plan/ai-draft). Сервер ничего не пишет: текст показывается оператору.
- */
-@Serializable
-data class PlanAiDraft(
-    val path: String = "",
-    val text: String = "",
-    val verdict: String = "",
-    val steps: Int = 0,
-    val goal: String? = null,
-    val truncated: Boolean = false,
-    val charsSent: Int = 0,
-    val model: PlanAiModel? = null,
-    val ms: Long? = null,
-)
-
-/** Результат сохранения исправленного плана (POST /plan/save-file). */
-@Serializable
-data class PlanSavedFile(
-    val path: String = "",
-    val hash: String = "",
-    val revision: Int = 0,
-    /** VALID_MANAGED — сервер принял текст как управляемый план. */
-    val verdict: String = "",
-    val steps: Int = 0,
-)
-
-@Serializable
-data class PlanImportResult(
-    val status: PlanStatus? = null,
-    val needsConfirmation: Boolean = false,
-    val inspection: PlanInspection? = null,
 )
 
 /** The id of Scratch: a session without a project. */
@@ -2309,9 +2067,3 @@ enum class NativeImportMode(val wire: String, val label: String) {
     Clone("clone", "Копия"),
     TakeOver("take-over", "Забрать оригинал"),
 }
-
-@Serializable
-data class PlanReport(val version: Int, val name: String = "", val createdAt: String? = null, val markdown: String? = null)
-
-@Serializable
-data class PlanHandoffRequest(val version: Int, val model: ModelSelection, val commandId: String, val confirmed: Boolean = true)

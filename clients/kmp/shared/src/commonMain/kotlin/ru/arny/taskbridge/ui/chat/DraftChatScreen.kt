@@ -30,7 +30,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
-import ru.arny.taskbridge.core.api.SCRATCH_PROJECT_ID
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
@@ -64,12 +63,7 @@ fun DraftChatScreen(
     var sending by remember(draft) { mutableStateOf(false) }
     var model by remember(draft) { mutableStateOf<ModelRef?>(draft.model) }
     var catalog by remember(draft) { mutableStateOf<ModelCatalog?>(null) }
-    var mode by remember(draft) { mutableStateOf("agent") }
-    val canPlan = draft.projectId != SCRATCH_PROJECT_ID && files.isEmpty()
-    val pickFiles = rememberFilePicker { picked -> if (mode == "agent" && !sending) files = files + picked }
-    fun attachmentNotice() {
-        scope.launch { snackbar.showSnackbar("Вложения недоступны в режиме планирования") }
-    }
+    val pickFiles = rememberFilePicker { picked -> files = files + picked }
     val setup = listOfNotNull(draft.projectName, model?.label?.takeIf { it != "—" }, draft.thinking?.let { thinkingLabel(it) }).joinToString(" · ")
 
     LaunchedEffect(draft.commandId) {
@@ -79,13 +73,9 @@ fun DraftChatScreen(
 
     fun send() {
         if (sending || (text.text.isBlank() && files.isEmpty())) return
-        if (mode == "plan" && (!canPlan || text.text.trimStart().startsWith("/") || text.text.trimStart().startsWith("!"))) {
-            scope.launch { snackbar.showSnackbar("Для планирования нужен проект и текст без команд и вложений") }
-            return
-        }
         sending = true
         scope.launch {
-            connection.sessions.create(draft.projectId, text.text.ifBlank { "Посмотри приложенные файлы" }, model, draft.thinking, draft.title, files, draft.commandId, mode = mode)
+            connection.sessions.create(draft.projectId, text.text.ifBlank { "Посмотри приложенные файлы" }, model, draft.thinking, draft.title, files, draft.commandId)
                 .onSuccess { onCreated(it.id) }
                 .onFailure { snackbar.showSnackbar(messageOf(it)) }
             sending = false
@@ -108,15 +98,8 @@ fun DraftChatScreen(
         contentWindowInsets = WindowInsets(0),
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize().imePadding()) {
-            Text(
-                if (mode == "plan") "Только чтение · без команд и вложений"
-                else if (!canPlan) "Для планирования выберите проект и уберите вложения"
-                else "Режим можно выбрать до первого сообщения",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
-            )
             Box(Modifier.weight(1f).fillMaxWidth()) {
-                EmptyState(AppIcons.Chat, if (mode == "plan") "Что спланировать?" else "Что сделать агенту?", "$setup\nСессия появится на компьютере с первым сообщением.")
+                EmptyState(AppIcons.Chat, "Что сделать агенту?", "$setup\nСессия появится на компьютере с первым сообщением.")
             }
             Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 val sessionListState by connection.sessions.state.collectAsState()
@@ -129,29 +112,19 @@ fun DraftChatScreen(
                 value = text,
                 onValueChange = { next ->
                     val paste = pastedTextDraft(text.text, next.text, graph.nowIso())
-                    text = if (mode == "plan") next else paste.caret
+                    text = paste.caret
                         ?.let { TextFieldValue(paste.text, TextRange(it.coerceIn(0, paste.text.length))) }
                         ?: next
-                    paste.attached?.takeIf { mode == "agent" }?.let { attached ->
+                    paste.attached?.let { attached ->
                         files = files + attached
                         scope.launch { snackbar.showSnackbar("Большой вставленный текст прикреплён файлом") }
                     }
                 },
                 files = files,
                 onRemoveFile = { files = files - it },
-                onAttach = { if (mode == "agent") pickFiles() else attachmentNotice() },
-                onPaste = { pasted -> if (mode == "plan") attachmentNotice() else if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
+                onAttach = pickFiles,
+                onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
                 working = false,
-                modeButton = {
-                    SessionModeChip(
-                        mode = mode,
-                        onPick = { mode = it },
-                        blocked = if (sending) "Сессия создаётся…" else null,
-                        planBlocked = if (canPlan) null else "Планированию нужен проект и текст без вложений",
-                        collapseKey = sending,
-                    )
-                },
-                readOnly = mode == "plan",
                 enterSends = graph.settings.enterSends && graph.platform.kind == "desktop",
                 enabled = !sending,
                 onSend = { send() },

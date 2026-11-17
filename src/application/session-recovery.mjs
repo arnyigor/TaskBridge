@@ -73,9 +73,9 @@ export async function restoreSessions(previous, { store, enqueue, restorePending
       }
       // A verification that was RUNNING when the process stopped has no owner in
       // a fresh process: the shell died with it. Left as RUNNING, it made
-      // `setSessionMode` refuse that session for ever ("Сессия занята"), long
-      // after the checks were over. The result is genuinely unknown, so it is
-      // marked as interrupted rather than as passed or failed.
+      // stale verification records block session switching for ever. The result
+      // is genuinely unknown, so it is marked as interrupted rather than as
+      // passed or failed.
       if (task.verificationStatus === 'RUNNING') {
         task.verificationStatus = 'INTERRUPTED';
         await store.save(task).catch(() => {});

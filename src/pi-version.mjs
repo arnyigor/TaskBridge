@@ -30,12 +30,7 @@ import { spawn } from 'node:child_process';
 // 1.4.0 (2026-10-22): the same RPC surface re-run on the installed 1.4.0 by
 // experiments/pi-hooks/compat-check.mjs — get_state, prompt, set_model, steer,
 // follow_up, compact, abort (settled, isStreaming false) and restart of the
-// saved session all pass — plus the Follow Plan surface (FP-00,
-// experiments/pi-hooks/follow-plan-compat.mjs): a custom `registerTool` tool is
-// callable by the model with its arguments intact, `turn_end` and
-// `agent_before_settle` fire, one `agent_before_settle` continue gives exactly
-// one extra model request, and `agent_settled.aborted` is true after /abort.
-// Contract: docs/follow-plan-pi-1.4.0-contract.md.
+// saved session all pass.
 export const SUPPORTED_PI = Object.freeze({ min: '0.85.0', below: '1.5.0' });
 
 // `pi --version` has printed both "0.85.1" and "pi 0.85.1"; take the first

@@ -1,6 +1,6 @@
 // Контракт состояния сессии (S-002, docs/session-state-contract.md): два
 // независимых клиента на одном сервере обязаны видеть одно и то же состояние
-// чата и плана, а второй поток событий не должен создавать второй запуск.
+// чата, а второй поток событий не должен создавать второй запуск.
 //
 // Здесь проверяются инварианты I-1…I-5 из документа. Это не UI-тесты: клиенты
 // изображаются двумя независимыми HTTP-сессиями с разными clientId — именно так
@@ -10,28 +10,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { startFixture } from './server-fixture.mjs';
-
-const PLAN = `---
-taskbridge_plan: 1
-plan_id: p-contract
-revision: 1
-goal: "Контракт состояния: два шага"
----
-
-# План: контракт состояния
-
-## Шаги
-
-### S-001 | TODO | P1 | Первый шаг
-**Критерии:** шаг виден обоим клиентам.
-**Проверка:** read PLAN.md
-
-### S-002 | TODO | P1 | Второй шаг
-**Критерии:** шаг виден обоим клиентам.
-**Проверка:** read PLAN.md
-
-## Обнаруженные проблемы
-`;
 
 /** Независимый клиент: своё соединение, свой clientId, свой журнал команд. */
 function client(fixture, clientId) {
@@ -59,31 +37,15 @@ async function waitSettled(call, taskId) {
   throw new Error('сессия не завершила ход');
 }
 
-/** Поля, которые обязаны совпасть у двух клиентов (контракт §1). */
-const planShape = plan => ({
-  attached: plan.attached,
-  state: plan.state,
-  path: plan.path,
-  revision: plan.revision,
-  hash: plan.hash,
-  stepId: plan.stepId,
-  progress: plan.progress,
-  findings: (plan.findings || []).map(finding => finding.id).sort()
-});
-
-test('I-1/I-2: two independent clients see the same chat and plan state', { timeout: 90000 }, async t => {
-  const fixture = await startFixture(undefined, { root: { followPlan: { enabled: true } } });
+test('I-1: two independent clients see the same chat state', { timeout: 90000 }, async t => {
+  const fixture = await startFixture();
   t.after(() => fixture.close());
-  await fs.writeFile(path.join(fixture.root, 'PLAN.md'), PLAN, 'utf8');
 
   const phone = client(fixture, 'client-phone');
   const desktop = client(fixture, 'client-desktop');
 
   const created = await phone.call('/api/tasks', { projectId: 'fixture', prompt: 'контракт состояния' });
   await waitSettled(phone.call, created.id);
-
-  // Привязка плана сделана ОДНИМ клиентом — второй обязан её видеть.
-  await phone.call(`/api/tasks/${created.id}/plan/attach`, { path: 'PLAN.md', commandId: 'attach-a' });
 
   const [taskA, taskB] = await Promise.all([
     desktop.call(`/api/tasks/${created.id}`),
@@ -92,24 +54,9 @@ test('I-1/I-2: two independent clients see the same chat and plan state', { time
   assert.equal(taskA.status, taskB.status, 'статус одинаков у обоих клиентов');
   assert.equal(taskA.snapshotSeq, taskB.snapshotSeq, 'snapshotSeq одинаков');
   assert.equal(taskA.turnState?.phase ?? null, taskB.turnState?.phase ?? null);
-
-  const [planA, planB] = await Promise.all([
-    desktop.call(`/api/tasks/${created.id}/plan`),
-    phone.call(`/api/tasks/${created.id}/plan`)
-  ]);
-  assert.deepEqual(planShape(planA), planShape(planB), 'план одинаков у обоих клиентов');
-  assert.equal(planA.attached, true);
-  assert.equal(planA.path, 'PLAN.md');
-  assert.equal(planA.progress.total, 2);
-
-  // Отключение, сделанное вторым клиентом, обязано быть видно первому.
-  await desktop.call(`/api/tasks/${created.id}/plan/detach`, { commandId: 'detach-b' });
-  const afterDetach = await phone.call(`/api/tasks/${created.id}/plan`);
-  assert.equal(afterDetach.attached, false, 'detach второго клиента виден первому');
-  assert.equal(afterDetach.state, 'NOT_ATTACHED');
 });
 
-test('I-3: the event log has one monotonic seq sequence for every reader', { timeout: 90000 }, async t => {
+test('I-2: the event log has one monotonic seq sequence for every reader', { timeout: 90000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const phone = client(fixture, 'client-phone');
@@ -138,7 +85,7 @@ test('I-3: the event log has one monotonic seq sequence for every reader', { tim
   assert.ok(snapshot.snapshotSeq >= first[first.length - 1], 'snapshotSeq не отстаёт от журнала');
 });
 
-test('I-4: a different store is a different identity, so caches cannot be reused', { timeout: 120000 }, async t => {
+test('I-3: a different store is a different identity, so caches cannot be reused', { timeout: 120000 }, async t => {
   const first = await startFixture();
   const second = await startFixture();
   t.after(() => Promise.all([first.close(), second.close()]));
@@ -159,7 +106,7 @@ test('I-4: a different store is a different identity, so caches cannot be reused
   assert.notEqual(after.bootId, before.bootId, 'bootId меняется при рестарте');
 });
 
-test('I-5: a second event stream does not create a second run', { timeout: 90000 }, async t => {
+test('I-4: a second event stream does not create a second run', { timeout: 90000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const phone = client(fixture, 'client-phone');

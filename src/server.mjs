@@ -1,4 +1,3 @@
-import { readOnlySession } from './session-capabilities.mjs';
 import http from 'node:http';
 import https from 'node:https';
 import path from 'node:path';
@@ -21,7 +20,6 @@ import { TaskStore } from './task-store.mjs';
 import { TaskManager, briefTask } from './task-manager.mjs';
 import { ExternalFilesService } from './external-files/service.mjs';
 import { createExternalRoutes, externalActor } from './external-files/routes.mjs';
-import { FollowPlanService } from './follow-plan-service.mjs';
 import { AccessControl, lanAllowed, isTailnetIp, LAN_CLOSED_WARNING } from './auth.mjs';
 import { contentType, containedExistingAncestor, containedFile, forbiddenFile, isPrivatePath, realpathNamed, serveFile, FILE_LIMITS } from './files.mjs';
 import { openLocalPath, runLocalScript, runShellCommand } from './open-local.mjs';
@@ -160,29 +158,7 @@ manager.mediaExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-medi
 // Context budget: old bulky tool results become references on each request
 // (pi-extension/taskbridge-context-budget.js). No model call, history untouched.
 manager.contextBudgetExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-context-budget.js');
-// Follow Plan checkpoint tool (FP-05A): only loaded when followPlan.enabled.
-manager.followPlanExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-follow-plan.js');
 await manager.init();
-// Follow Plan (PLAN-FOLLOW-01, FP-05A): a controller over the dispatch that
-// already exists. The flag stays off until the FP-06 acceptance; with it off the
-// control routes refuse and nothing generates on its own.
-const followPlan = new FollowPlanService({
-  manager, store, config,
-  // Optional AI check (FP-UX-04E): a plain question to the session's model, no
-  // tools and no Run. Absent → the button reports «недоступно» and attach works.
-  askModel: typeof manager.askModelOnce === 'function' ? input => manager.askModelOnce(input) : null
-});
-manager.setFollowPlanHooks({
-  turnSettled: input => followPlan.turnSettled(input),
-  // A failed turn (403/413/… or a cancelled one) settles nothing: the plan pauses.
-  turnFailed: input => followPlan.turnFailed(input),
-  // The next step is sent only after the previous turn's terminal event is durable.
-  turnCommitted: input => followPlan.turnCommitted(input)
-});
-if (followPlan.enabled) {
-  // Nothing is re-sent after a restart: a dispatched-but-unsettled cycle pauses.
-  followPlan.recoverAll().catch(error => console.error(`[TaskBridge] Follow Plan recovery failed: ${error.message}`));
-}
 // Router mode is meant to be always-on: the process is a cheap supervisor that
 // only loads models on demand. Start it eagerly so the model picker and the UI
 // can discover local models right away; a failure must not stop the server.
@@ -1726,15 +1702,6 @@ async function handleRequest(req, res) {
         },
         apiVersion: API_VERSION,
         storeId: store.storeId,
-        // Which parts of the plan API this build actually serves. A client that
-        // knows its own list can say «сервер старше приложения», instead of
-        // showing a bare 404 from a route this server does not have (FP-UX-02G).
-        followPlan: {
-          enabled: followPlan.enabled,
-          capabilities: followPlan.enabled
-            ? ['status', 'attach', 'detach', 'browse', 'scan', 'inspect', 'import', 'read-file', 'save-file', 'ai-draft', 'content', 'start', 'pause', 'resume', 'stop', 'reconcile', 'ai-review']
-            : []
-        },
         // «Pi отсутствует» и «Pi несовместим» — разные состояния: по одному
         // version нельзя понять, чего именно не хватает.
         pi: { ...pi, source: piCommand.source, state: piRuntimeState(pi) },
@@ -2135,130 +2102,6 @@ async function handleRequest(req, res) {
       if (req.method === 'DELETE') return json(res, 200, await manager.forgetRecap(id));
     }
 
-    // Follow Plan: status is readable with the flag off (the UI needs to know why
-    // the toggle is disabled); every mutating route is a commandId command and a
-    // CAS on the plan revision.
-    const planRoute = pathname.match(/^\/api\/tasks\/([^/]+)\/plan(?:\/(attach|detach|browse|scan|ai-review|ai-draft|inspect|import|read-file|save-file|content|start|pause|resume|stop|reconcile))?$/);
-    if (planRoute) {
-      const planTaskId = decodeURIComponent(planRoute[1]);
-      const action = planRoute[2] || null;
-      if (readOnlySession(manager.getTask(planTaskId)) && req.method !== 'GET') throw Object.assign(new Error('Follow Plan mutations disabled in read-only mode'), { code: 'INPUT_INVALID' });
-      if (!manager.getTask(planTaskId)) return errorJson(res, 404, Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' }));
-      if (!action && req.method === 'GET') return json(res, 200, await followPlan.status(planTaskId));
-      if (action === 'content' && req.method === 'GET') {
-        return json(res, 200, await followPlan.content({ taskId: planTaskId }));
-      }
-      if (action === 'read-file' && req.method === 'GET') {
-        // Только чтение выбранного файла проекта: нужно, чтобы оператор мог
-        // исправить формат до подключения, не выходя из диалога.
-        return json(res, 200, await followPlan.readFile({
-          taskId: planTaskId, path: url.searchParams.get('path') || ''
-        }));
-      }
-      if (action === 'browse' && req.method === 'GET') {
-        // A read-only listing: one directory per request, no recursive scan, no
-        // commandId. It has to be answered before the POST-only guard below —
-        // otherwise the phone sees «Not found» (real report, 2026-10-23).
-        return json(res, 200, await followPlan.browse({ taskId: planTaskId, path: url.searchParams.get('path') || '' }));
-      }
-      const body = await readJson(req).catch(() => ({}));
-      if (action === 'scan' && req.method === 'POST') {
-        // Read-only search of the session workspace (FP-UX-04B): no commandId,
-        // no plan write, no Pi. Bounded by plan-scan.mjs, so a huge project
-        // answers with `partial: true` instead of hanging.
-        return json(res, 200, await followPlan.scan({
-          taskId: planTaskId, query: body.query ?? '', limit: body.limit ?? null
-        }));
-      }
-      if (action === 'ai-draft' && req.method === 'POST') {
-        // Модель собирает управляемый план из свободного текста; ничего не пишется.
-        return json(res, 200, await followPlan.aiDraft({
-          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null,
-          contentBase64: body.contentBase64 ?? null, hint: body.hint ?? ''
-        }));
-      }
-      if (action === 'ai-review' && req.method === 'POST') {
-        // Advisory only: no commandId, no plan write, no Run. The model is asked
-        // once, by an explicit click, and its answer never replaces the verdict.
-        return json(res, 200, await followPlan.aiReview({
-          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null, contentBase64: body.contentBase64 ?? null
-        }));
-      }
-      const command = (fn) => manager.withCommandId(body.commandId, body.clientId, [action || 'patch', planTaskId, body], () => fn());
-      if (action === 'save-file') {
-        // Правка формата: пишет только валидный управляемый план, CAS по хэшу.
-        return json(res, 200, await command(() => followPlan.saveFile({
-          taskId: planTaskId, path: body.path, content: body.content,
-          expectedHash: body.expectedHash || null, overwrite: body.overwrite === true,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (!action && req.method === 'PATCH') {
-        return json(res, 200, await command(() => followPlan.patch({
-          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
-          expectedHash: body.expectedHash || null, changes: body.changes,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (req.method !== 'POST') return errorJson(res, 404, Object.assign(new Error('Not found'), { code: 'NOT_FOUND' }));
-      if (action === 'attach') {
-        return json(res, 200, await command(() => followPlan.attach({
-          taskId: planTaskId, path: body.path, expectedHash: body.expectedHash || null,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (action === 'inspect') {
-        // A preview, not a command: nothing is written, so no commandId is spent on it.
-        return json(res, 200, await followPlan.inspect({
-          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null, contentBase64: body.contentBase64 ?? null
-        }));
-      }
-      if (action === 'content') {
-        return json(res, 200, await command(() => followPlan.writeContent({
-          taskId: planTaskId, content: body.content, expectedRevision: body.expectedRevision ?? null,
-          expectedHash: body.expectedHash || null, allowGoalChange: body.allowGoalChange === true,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (action === 'import') {
-        return json(res, 200, await command(() => followPlan.importPlan({
-          taskId: planTaskId, path: body.path ?? null, name: body.name ?? null,
-          contentBase64: body.contentBase64 ?? null, confirmImport: body.confirmImport === true,
-          overwrite: body.overwrite === true, expectedHash: body.expectedHash || null,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (action === 'detach') {
-        return json(res, 200, await command(() => followPlan.detach({ taskId: planTaskId, commandId: body.commandId, clientId: body.clientId })));
-      }
-      if (action === 'start') {
-        return json(res, 200, await command(() => followPlan.start({
-          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (action === 'pause') {
-        return json(res, 200, await command(() => followPlan.pause({ taskId: planTaskId, commandId: body.commandId, clientId: body.clientId })));
-      }
-      if (action === 'resume') {
-        return json(res, 200, await command(() => followPlan.resume({
-          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null,
-          renewTimeBudget: body.renewTimeBudget === true,
-          renewBudget: body.renewBudget === true,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-      if (action === 'stop') {
-        return json(res, 200, await command(() => followPlan.stop({ taskId: planTaskId, commandId: body.commandId, clientId: body.clientId })));
-      }
-      if (action === 'reconcile') {
-        return json(res, 200, await command(() => followPlan.reconcile({
-          taskId: planTaskId, expectedRevision: body.expectedRevision ?? null, action: body.action,
-          commandId: body.commandId, clientId: body.clientId
-        })));
-      }
-    }
-
     let match = pathname.match(/^\/api\/tasks\/([^/]+)$/);
     if (req.method === 'GET' && match) {
       const task = manager.getTask(match[1]);
@@ -2495,13 +2338,6 @@ async function handleRequest(req, res) {
         thinkingLevel: body.thinkingLevel || null,
       }));
     }
-
-    match = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-reports(?:\/(\d+))?$/);
-    if (req.method === 'GET' && match) return json(res, 200, await manager.planReport(match[1], match[2]));
-    match = pathname.match(/^\/api\/tasks\/([^/]+)\/mode$/);
-    if (req.method === 'POST' && match) return json(res, 200, await manager.setSessionMode(match[1], (await readJson(req)).mode));
-    match = pathname.match(/^\/api\/tasks\/([^/]+)\/plan-handoff$/);
-    if (req.method === 'POST' && match) return json(res, 201, await manager.handoffPlan(match[1], await readJson(req)));
 
     // Switching between the answers of one exchange: a reading preference, so
     // nothing is rewritten and no model is asked.
@@ -2863,9 +2699,7 @@ async function handleRequest(req, res) {
       // They are answers about that command, not server faults: a 5xx would make
       // a retrying client treat them as an outage. ACCEPTED (still in flight) is
       // the one worth repeating later — the repeat returns the saved result.
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED', 'REVISION_CONFLICT',
-        // Follow Plan: these are answers about the plan, not server faults.
-        'PLAN_BUSY', 'PLAN_BLOCKED', 'PLAN_CHECKPOINT_REJECTED', 'PLAN_REVISION_CONFLICT', 'PLAN_BUDGET_EXCEEDED', 'PLAN_NO_PROGRESS', 'PLAN_UNKNOWN_OUTCOME', 'FOLLOW_PLAN_DISABLED', 'PLAN_FILE_EXISTS'].includes(error.code) ? 409
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED', 'REVISION_CONFLICT'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429

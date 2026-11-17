@@ -10,9 +10,6 @@
 turn-instructions.js   расширение: хук + команда /tb-profile
 broken-extension.js    расширение, падающее в хуке (проверка ошибки)
 run-poc.mjs            стенд: настоящий Pi в RPC, 7 сценариев, отчёт JSON
-follow-plan-compat.mjs стенд FP-00: extension-tool, turn_end/agent_before_settle,
-                       abort (STOP) и очередь на реальном Pi 1.4.0
-follow-plan-checkpoint-fixture.js  fixture-расширение для этого стенда
 ```
 
 Запуск:
@@ -51,19 +48,3 @@ node experiments/pi-hooks/integration-check.mjs --mode legacy --model deepseek/d
 `config.json` и agent-dir создаются внутри `<out>`, операторские не читаются.
 
 Выводы и ограничения — `docs/pi-hooks-feasibility.md`.
-
-Поверхность Follow Plan (extension-tool, `turn_end`, `agent_before_settle`,
-`agent_settled.aborted`, очередь, STOP) на Pi 1.4.0:
-
-```bash
-node experiments/pi-hooks/follow-plan-compat.mjs --model deepseek/deepseek-flash --out .local/fp-00/run3
-```
-
-Контракт и результаты — `docs/follow-plan-pi-1.4.0-contract.md`.
-
-Любое расширение проверяется тем же стендом через `--extension`; проверки журнала
-хуков и контрольного хода относятся только к fixture и в этом случае пропускаются:
-
-```bash
-MSYS_NO_PATHCONV=1 node experiments/pi-hooks/follow-plan-compat.mjs   --extension pi-extension/taskbridge-follow-plan.js --model deepseek/deepseek-flash --out .local/fp-02/prod
-```
