@@ -1,10 +1,13 @@
 package ru.arny.taskbridge.core.client
 
 import ru.arny.taskbridge.core.api.Project
+import ru.arny.taskbridge.core.api.ProjectOverview
+import ru.arny.taskbridge.core.api.ProjectSummary
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
 import ru.arny.taskbridge.core.client.sessions.SessionAlerts
+import ru.arny.taskbridge.core.client.sessions.FolderSortBy
 import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.core.api.RuntimeInfo
 import ru.arny.taskbridge.core.client.sessions.activityOf
@@ -63,6 +66,42 @@ class SessionStateTest {
         assertEquals(listOf("new"), state.groups("задача new").flatMap { it.sessions }.map { it.id })
         assertEquals(1, state.waitingCount)
         assertEquals(1, state.workingCount)
+    }
+
+    /** Сортировка и закрепление касаются папок, а не сессий внутри них. */
+    @Test
+    fun foldersAreSortedAndPinnedAboveTheRest() {
+        val state = SessionListState(
+            tasks = listOf(
+                task("b", "SUCCEEDED", "2026-09-24T09:00:00.000Z", project = "beta"),
+                task("a", "SUCCEEDED", "2026-09-24T11:00:00.000Z", project = "alpha"),
+                task("work", "RUNNING", "2026-09-24T08:00:00.000Z", project = "gamma"),
+                task("arch", "SUCCEEDED", project = "archive"),
+            ),
+            projects = listOf(Project("alpha", "alpha"), Project("beta", "beta"), Project("gamma", "gamma"), Project("archive", "archive")),
+            overview = ProjectOverview(
+                projects = listOf(
+                    ProjectSummary("alpha", "alpha"),
+                    ProjectSummary("beta", "beta"),
+                    ProjectSummary("gamma", "gamma"),
+                    ProjectSummary("archive", "archive", archived = true),
+                ),
+            ),
+        )
+        // По активности: папка с работающей сессией выше, архивной папки нет вовсе.
+        assertEquals(listOf("gamma", "alpha", "beta"), state.groups().map { it.projectId })
+        // По имени: только имя решает порядок.
+        assertEquals(listOf("alpha", "beta", "gamma"), state.groups(sortBy = FolderSortBy.NAME).map { it.projectId })
+        // Закреплённая — всегда сверху, в любом порядке сортировки.
+        val pinned = state.copy(overview = state.overview?.copy(projects = state.dashboardProjects.map { if (it.id == "beta") it.copy(pinned = true) else it }))
+        assertEquals(listOf("beta", "gamma", "alpha"), pinned.groups().map { it.projectId })
+        assertEquals(listOf("beta", "alpha", "gamma"), pinned.groups(sortBy = FolderSortBy.NAME).map { it.projectId })
+        // Заход внутрь проекта с дашборда не прячет папку, даже если она в архиве.
+        assertEquals(listOf("archive"), state.groups(projectId = "archive").map { it.projectId })
+        // Поиск не воскрешает архив.
+        assertTrue(state.groups(query = "архив не найден").isEmpty())
+        assertTrue(state.isRegisteredProject("alpha"))
+        assertFalse(state.isRegisteredProject("nope"))
     }
 
     /** Строка активной сессии называет папку проекта, а не первое сообщение и не путь. */

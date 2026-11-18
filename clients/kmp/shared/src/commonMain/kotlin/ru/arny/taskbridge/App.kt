@@ -134,7 +134,7 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             onOpen = { navigator.openChat(it) },
             onDraft = { navigator.openDraft(it) },
             onSettings = { navigator.push(Screen.Settings) },
-            onProjects = { navigator.push(Screen.Projects) },
+            onArchive = { navigator.push(Screen.Archive) },
         )
         is Screen.Sessions -> SessionsScreen(
             graph, connection,
@@ -143,7 +143,7 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             onOpen = { navigator.openChat(it) },
             onDraft = { navigator.openDraft(it) },
             onSettings = { navigator.push(Screen.Settings) },
-            onProjects = { navigator.push(Screen.Projects) },
+            onArchive = { navigator.push(Screen.Archive) },
             onClearProject = { navigator.reset(Screen.Sessions()) },
         )
         Screen.Projects -> ProjectsScreen(
@@ -151,6 +151,13 @@ private fun NarrowLayout(graph: AppGraph, connection: AppGraph.Connected, naviga
             onOpenProject = { navigator.openProject(it) },
             onOpenAllSessions = { navigator.reset(Screen.Sessions()) },
             onSettings = { navigator.push(Screen.Settings) },
+        )
+        Screen.Archive -> ProjectsScreen(
+            graph, connection,
+            onOpenProject = { navigator.openProject(it) },
+            onOpenAllSessions = { navigator.reset(Screen.Sessions()) },
+            onSettings = { navigator.push(Screen.Settings) },
+            archiveOnly = true,
         )
         is Screen.Project -> ProjectWorkspaceScreen(
             graph, connection, screen.projectId,
@@ -197,12 +204,23 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
     val processesOpen = navigator.current == Screen.Processes
     val mcpOpen = navigator.current == Screen.Mcp
     val projectsOpen = navigator.current == Screen.Projects || navigator.current is Screen.Project
+    // «Архив» в широкой раскладке живёт в той же левой колонке: это тот же список папок,
+    // только отфильтрованный по архиву.
+    val archiveOpen = navigator.current == Screen.Archive
     val projectOpen = navigator.current as? Screen.Project
     Row(Modifier.fillMaxSize()) {
         Box(Modifier.width(360.dp).fillMaxHeight()) {
             // The left pane is the navigation level the operator is on: the dashboard,
             // or the sessions of one project — never both at once.
-            if (projectsOpen) {
+            if (archiveOpen) {
+                ProjectsScreen(
+                    graph, connection,
+                    onOpenProject = { navigator.openProject(it) },
+                    onOpenAllSessions = { navigator.reset(Screen.Sessions()) },
+                    onSettings = { navigator.push(Screen.Settings) },
+                    archiveOnly = true,
+                )
+            } else if (projectsOpen) {
                 ProjectsScreen(
                     graph, connection,
                     onOpenProject = { navigator.openProject(it) },
@@ -217,7 +235,7 @@ private fun WideLayout(graph: AppGraph, connection: AppGraph.Connected, navigato
                     onOpen = { navigator.openChat(it) },
                     onDraft = { navigator.openDraft(it) },
                     onSettings = { navigator.push(Screen.Settings) },
-                    onProjects = { navigator.push(Screen.Projects) },
+                    onArchive = { navigator.push(Screen.Archive) },
                     onClearProject = { navigator.reset(Screen.Sessions()) },
                 )
             }

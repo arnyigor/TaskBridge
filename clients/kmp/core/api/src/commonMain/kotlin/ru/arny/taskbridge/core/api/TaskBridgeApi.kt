@@ -109,8 +109,12 @@ class TaskBridgeApi(
     suspend fun auth(): AuthStatus = get("/api/auth", AuthStatus.serializer())
 
     /** Restarts the whole TaskBridge process (202 at once, the relaunch is detached); running sessions are cut. */
-    suspend fun restartServer() {
-        send(HttpMethod.Post, "/api/server/restart", buildJsonObject { put("confirm", true) })
+    /**
+     * Просит сервер перезапуститься. Ответить он может и не успеть — процесс уже убивает
+     * себя, поэтому таймаут здесь короткий: успех решает новый bootId, а не ответ на POST.
+     */
+    suspend fun restartServer(timeoutMs: Long = 10_000) {
+        send(HttpMethod.Post, "/api/server/restart", buildJsonObject { put("confirm", true) }, timeoutMs)
     }
 
     /** Powers off the machine the server runs on; the cancel countdown lives in the UI, not on the server. */

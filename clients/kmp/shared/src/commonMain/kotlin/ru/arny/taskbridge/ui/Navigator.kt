@@ -25,6 +25,9 @@ sealed interface Screen {
     /** The project dashboard: every project, its sessions, pinned and archived. */
     @Serializable
     data object Projects : Screen
+    /** Только архивные папки: главный вход в него — меню ⋮ списка сессий. */
+    @Serializable
+    data object Archive : Screen
     /** One project's operational memory: Work Items, sessions and recurring work. */
     @Serializable
     data class Project(val projectId: String) : Screen

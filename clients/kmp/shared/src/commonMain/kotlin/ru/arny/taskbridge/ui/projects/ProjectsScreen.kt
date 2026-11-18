@@ -130,6 +130,8 @@ fun ProjectsScreen(
     onOpenProject: (String) -> Unit,
     onOpenAllSessions: () -> Unit,
     onSettings: () -> Unit,
+    /** Экран «Архив»: только убранные папки и возврат из архива. */
+    archiveOnly: Boolean = false,
 ) {
     val state by connection.sessions.state.collectAsState()
     val online by connection.online.collectAsState()
@@ -143,8 +145,8 @@ fun ProjectsScreen(
 
     val overview = state.overview
     val sections = projectSections(state.dashboardProjects, query)
-    val pinned = sections.pinned
-    val active = sections.active
+    val pinned = if (archiveOnly) emptyList() else sections.pinned
+    val active = if (archiveOnly) emptyList() else sections.active
     val archived = sections.archived
 
     fun preferences(project: ProjectSummary, pinned: Boolean? = null, archivedFlag: Boolean? = null) {
@@ -160,7 +162,7 @@ fun ProjectsScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Проекты") },
+                title = { Text(if (archiveOnly) "Архив" else "Проекты") },
                 navigationIcon = {
                     IconButton(onClick = onOpenAllSessions) { Icon(AppIcons.Back, "Все сессии") }
                 },
@@ -196,11 +198,16 @@ fun ProjectsScreen(
             }
             when {
                 state.loading && overview == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-                overview != null && state.dashboardProjects.isEmpty() -> EmptyState(
+                overview != null && state.dashboardProjects.isEmpty() && !archiveOnly -> EmptyState(
                     AppIcons.Folder,
                     "Проектов пока нет",
                     "Зарегистрируйте папку проекта — и сессии начнут собираться вокруг неё.",
                     action = { TextButton(onClick = onSettings) { Text("Настройки") } },
+                )
+                overview != null && sections.total == 0 && archiveOnly -> EmptyState(
+                    AppIcons.Archive,
+                    "Архив пуст",
+                    "Здесь появятся папки, убранные из списка сессий.",
                 )
                 overview != null && sections.total == 0 -> EmptyState(AppIcons.Search, "Ничего не найдено", "Измените запрос.")
                 else -> LazyColumn(
@@ -236,16 +243,20 @@ fun ProjectsScreen(
                     }
                     if (archived.isNotEmpty()) {
                         item(key = "archive-header") {
-                            Row(
-                                Modifier.fillMaxWidth().clickable { showArchive = !showArchive }.padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
+                            if (archiveOnly) {
                                 Text("Архив (${archived.size})", style = MaterialTheme.typography.titleSmall)
-                                Spacer(Modifier.width(6.dp))
-                                Text(if (showArchive) "свернуть" else "показать", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            } else {
+                                Row(
+                                    Modifier.fillMaxWidth().clickable { showArchive = !showArchive }.padding(vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text("Архив (${archived.size})", style = MaterialTheme.typography.titleSmall)
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(if (showArchive) "свернуть" else "показать", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                                }
                             }
                         }
-                        if (showArchive) {
+                        if (showArchive || archiveOnly) {
                             items(archived, key = { "archived:${it.id}" }) { project ->
                                 ProjectRow(project, busy = busyProject == project.id, nowMillis = graph.nowMillis(), platform = platform, onOpen = { onOpenProject(project.id) }, onPin = { preferences(project, pinned = !project.pinned) }, onArchive = { preferences(project, archivedFlag = !project.archived) })
                             }

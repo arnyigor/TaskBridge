@@ -29,6 +29,27 @@ import ru.arny.taskbridge.core.api.UploadFile
 
 data class SessionGroup(val projectId: String, val title: String, val sessions: List<Task>)
 
+/**
+ * Порядок папок проектов в списке сессий. Закреплённые папки всегда выше
+ * остальных — в этом и смысл закрепления — поэтому [sortBy] решает только
+ * порядок незакреплённых.
+ */
+enum class FolderSortBy {
+    /** Сначала папки, где работа ждёт оператора или идёт, затем по свежести. */
+    ACTIVITY,
+    /** По алфавиту имени папки. */
+    NAME;
+
+    val stored: String get() = name.lowercase()
+
+    companion object {
+        fun ofStored(value: String?): FolderSortBy = when (value) {
+            "name" -> NAME
+            else -> ACTIVITY
+        }
+    }
+}
+
 /** Сессии без проекта: своя папка в списке. */
 internal const val SCRATCH_TITLE = "Без проекта"
 
@@ -63,6 +84,17 @@ data class SessionListState(
     /** The dashboard's order: the server already pinned-first, archived in place. */
     val dashboardProjects: List<ProjectSummary> get() = overview?.projects.orEmpty()
 
+    /** Закреплённые проекты: их папки стоят в списке сессий выше остальных. */
+    val pinnedProjectIds: Set<String>
+        get() = dashboardProjects.filter { it.pinned && !it.archived }.mapTo(mutableSetOf()) { it.id }
+
+    /** Архивные проекты: их папки в общем списке не показываются, а живут в «Архиве». */
+    val archivedProjectIds: Set<String>
+        get() = dashboardProjects.filter { it.archived }.mapTo(mutableSetOf()) { it.id }
+
+    /** Проект известен реестру: только у такого есть закрепление и архив. */
+    fun isRegisteredProject(projectId: String): Boolean = dashboardProjects.any { it.id == projectId }
+
     /**
      * Название папки сессии — только имя папки проекта, без пути.
      * В реестре иногда записан полный путь, а в заголовке строки он не нужен.
@@ -73,14 +105,42 @@ data class SessionListState(
         return folderNameOf(projects.firstOrNull { it.id == id }?.displayName ?: id)
     }
 
-    fun groups(query: String = "", projectId: String? = null): List<SessionGroup> {
+    /**
+     * [base] — уже отсортированный список ([sorted]): экран считает его один раз в remember.
+     * [sortBy] задаёт порядок *папок* (сессии внутри папки всегда сверху важные);
+     * [projectId] — заход внутрь одного проекта с дашборда: тогда архив не скрывается,
+     * иначе папка исчезла бы прямо из-под ног.
+     */
+    fun groups(
+        query: String = "",
+        projectId: String? = null,
+        sortBy: FolderSortBy = FolderSortBy.ACTIVITY,
+        base: List<Task> = sorted,
+    ): List<SessionGroup> {
         val needle = query.trim().lowercase()
-        return sorted
+        val archived = if (projectId == null) archivedProjectIds else emptySet()
+        val pinned = pinnedProjectIds
+        val filtered = base
             .filter { projectId == null || (it.projectId ?: SCRATCH_PROJECT_ID) == projectId }
+            .filter { (it.projectId ?: SCRATCH_PROJECT_ID) !in archived }
             .filter { needle.isEmpty() || it.displayTitle.lowercase().contains(needle) || it.prompt.orEmpty().lowercase().contains(needle) }
+        return filtered
             .groupBy { it.projectId ?: SCRATCH_PROJECT_ID }
-            .map { (id, list) -> SessionGroup(id, folderName(id), list) }
-            .sortedBy { group -> group.sessions.minOf { displayStateOf(it).order.coerceAtMost(3) } * 1_000 + (projects.indexOfFirst { it.id == group.projectId }.takeIf { it >= 0 } ?: 999) }
+            .map { (id, list) ->
+                val order = list.minOf { displayStateOf(it).order.coerceAtMost(3) }
+                val index = projects.indexOfFirst { it.id == id }.takeIf { it >= 0 } ?: 999
+                Triple(SessionGroup(id, folderName(id), list), order, index)
+            }
+            // Закреплённая папка — сразу под блоком активных сессий; внутри каждой
+            // половины решает выбранная сортировка. Индекс в реестре — чтобы при равной
+            // активности порядок не скакал от опроса к опросу.
+            .sortedWith(
+                compareByDescending<Triple<SessionGroup, Int, Int>> { it.first.projectId in pinned }
+                    .thenBy { if (sortBy == FolderSortBy.NAME) 0 else it.second }
+                    .thenBy { if (sortBy == FolderSortBy.NAME) it.first.title.lowercase() else "" }
+                    .thenBy { it.third },
+            )
+            .map { it.first }
     }
 }
 
@@ -307,7 +367,12 @@ class SessionList(
      * скрытым процессом через [startLocalServer], без консольного окна; Android
      * в этом случае сразу сообщает, что сервер надо запустить на компьютере.
      */
-    suspend fun restartServer(timeoutMillis: Long = 120_000, stepMillis: Long = 700): Result<Unit> = runCatching {
+    suspend fun restartServer(
+        timeoutMillis: Long = 120_000,
+        stepMillis: Long = 700,
+        /** Сколько ждать ответ на сам POST: сервер обычно умирает, не ответив. */
+        kickTimeoutMillis: Long = 10_000,
+    ): Result<Unit> = runCatching {
         val before = runCatching { api.info().bootId }.getOrNull()
         if (before == null) {
             val launch = startLocalServer
@@ -318,7 +383,11 @@ class SessionList(
             )
             launch()
         } else {
-            api.restartServer()
+            // Сервер убивает себя, не успев ответить: ждать ответ дольше таймаута соединения
+            // бессмысленно — раньше это висело как «Перезапуск сервера…» до 180 с.
+            // Поэтому просьба отправляется без разбора ответа: успех решает новый bootId
+            // в опросе ниже, а он ограничен timeoutMillis.
+            runCatching { api.restartServer(kickTimeoutMillis) }
         }
         val back = withTimeoutOrNull(timeoutMillis) {
             while (true) {
@@ -333,7 +402,9 @@ class SessionList(
         }
         if (back == null) throw IllegalStateException("Сервер не вернулся за ${timeoutMillis / 1000} с — проверьте логи TaskBridge на компьютере")
         infoTick = 0 // a new process: read its info and projects again
-        refresh()
+        // Перезапуск уже случился; неудача первой загрузки списка — не причина сообщать
+        // «сервер не перезапустился».
+        runCatching { refresh() }
     }
 
     private var cachedModels: ModelCatalog? = null

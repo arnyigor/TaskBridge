@@ -28,6 +28,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -72,6 +73,7 @@ import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.SessionGroup
+import ru.arny.taskbridge.core.client.sessions.FolderSortBy
 import ru.arny.taskbridge.core.client.sessions.activityOf
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
@@ -95,7 +97,8 @@ fun SessionsScreen(
     onSettings: () -> Unit,
     /** Narrowed to one project when the dashboard drilled into it (MR-01). */
     projectId: String? = null,
-    onProjects: (() -> Unit)? = null,
+    /** «Архив»: проекты, убранные из списка, живут на своём экране. */
+    onArchive: (() -> Unit)? = null,
     /** Leaves the drill-down: the list of every session again. */
     onClearProject: (() -> Unit)? = null,
 ) {
@@ -118,13 +121,26 @@ fun SessionsScreen(
     var selectingOlder by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     var restarting by remember { mutableStateOf(false) }
+    // Сортировка касается папок проектов: сессии внутри папки всегда стоят «сначала те, кому
+    // нужно внимание», и это не настройка, а смысл списка.
+    var sortBy by remember { mutableStateOf(FolderSortBy.ofStored(graph.settings.sessionsSortBy)) }
+    var listMenu by remember { mutableStateOf(false) }
     // Relative times ("5 мин") move on their own.
     var now by remember { mutableLongStateOf(graph.nowMillis()) }
     // Отбор и группировка считаются по данным списка, а не по каждому кадру/перерисовке:
     // открытый диалог, поиск или переключение темы больше не заставляют заново сортировать
     // все сессии и раскладывать их по папкам.
-    val groups = remember(state.tasks, state.projects, query, projectId) { state.groups(query, projectId) }
-    val activeTasks = remember(state.tasks) { state.sorted.filter { displayStateOf(it).active } }
+    // Один проход по всему списку: и сортировка, и счётчики для шапки считаются при смене
+    // данных, а не при каждой перерисовке экрана. Раньше `state.sorted` был геттером и
+    // сортировал весь список на каждое чтение (список, его группы и оба счётчика).
+    val sortedTasks = remember(state.tasks) { state.sorted }
+    val pinnedProjects = remember(state.overview) { state.pinnedProjectIds }
+    val groups = remember(sortedTasks, state.projects, state.overview, query, projectId, sortBy) {
+        state.groups(query, projectId, sortBy, base = sortedTasks)
+    }
+    val activeTasks = remember(sortedTasks) { sortedTasks.filter { displayStateOf(it).active } }
+    val waitingCount = remember(state.tasks) { state.waitingCount }
+    val workingCount = remember(state.tasks) { state.workingCount }
     val visibleTasks = remember(groups) { groups.flatMap { it.sessions } }
     val visibleIds = remember(visibleTasks) { visibleTasks.mapTo(mutableSetOf()) { it.id } }
     LaunchedEffect(Unit) { while (true) { delay(30_000); now = graph.nowMillis() } }
@@ -154,21 +170,30 @@ fun SessionsScreen(
                         else -> Column {
                             // Drilled into a project (MR-01): the title says which one,
                             // and «Все сессии» in the actions leaves the narrow view.
-                            Text(projectId?.let { id -> state.projects.firstOrNull { it.id == id }?.displayName ?: id } ?: "Сессии")
+                            // Обе строки в одну линию: иначе на телефоне, где в шапке
+                            // семь иконок, название переносится по буквам и шапка вырастает.
+                            Text(
+                                projectId?.let { id -> state.projects.firstOrNull { it.id == id }?.displayName ?: id } ?: "Сессии",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                             val summary = buildList {
-                                if (state.waitingCount > 0) add("ждут: ${state.waitingCount}")
-                                if (state.workingCount > 0) add("работают: ${state.workingCount}")
+                                if (waitingCount > 0) add("ждут: $waitingCount")
+                                if (workingCount > 0) add("работают: $workingCount")
                             }.joinToString(" · ")
-                            if (summary.isNotEmpty()) Text(summary, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (summary.isNotEmpty()) Text(
+                                summary,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                     }
                 },
                 actions = {
                     if (!selecting && projectId != null && onClearProject != null) {
                         TextButton(onClick = onClearProject) { Text("Все сессии") }
-                    }
-                    if (!selecting && onProjects != null) {
-                        IconButton(onClick = onProjects) { Icon(AppIcons.Folder, "Проекты") }
                     }
                     if (selecting) {
                         IconButton(onClick = { selectedIds = visibleIds; if (selectedIds.isNotEmpty()) selecting = true }, enabled = visibleIds.isNotEmpty()) {
@@ -184,20 +209,47 @@ fun SessionsScreen(
                             Icon(AppIcons.Close, "Выйти из выбора")
                         }
                     } else {
-                        IconButton(onClick = { searching = !searching; if (!searching) query = "" }) {
-                            Icon(if (searching) AppIcons.Close else AppIcons.Search, "Поиск")
+                        // На телефоне в шапке остались только два частых действия: перезапуск
+                        // сервера и настройки. Поиск, выбор, сортировка и архив — в меню ⋮:
+                        // каждая иконка здесь отнимает у заголовка 48 dp, и с шестью
+                        // иконками «Сессии» превращались в «Сесс…» (393 dp экран).
+                        IconButton(onClick = { confirmRestart = true }, enabled = !restarting) {
+                            Icon(AppIcons.Refresh, "Перезапустить сервер")
                         }
-                        IconButton(onClick = { selecting = true }) {
-                            Icon(AppIcons.Check, "Выбрать сессии")
-                        }
-                        // One tap flips what is on screen now; "как в системе" stays in Settings.
-                        val dark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-                        IconButton(onClick = { graph.changeTheme(if (dark) "light" else "dark") }) {
-                            Icon(if (dark) AppIcons.Sun else AppIcons.Moon, if (dark) "Светлая тема" else "Тёмная тема")
-                        }
-                        // Restarts the TaskBridge process, as the web header does: the way out of a stuck state.
-                        IconButton(onClick = { confirmRestart = true }, enabled = !restarting) { Icon(AppIcons.Refresh, "Перезапустить сервер") }
                         IconButton(onClick = onSettings) { Icon(AppIcons.Settings, "Настройки") }
+                        Box {
+                            IconButton(onClick = { listMenu = true }) {
+                                Icon(AppIcons.More, "Ещё")
+                            }
+                            DropdownMenu(expanded = listMenu, onDismissRequest = { listMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("Поиск") },
+                                    leadingIcon = { Icon(AppIcons.Search, null) },
+                                    onClick = { listMenu = false; searching = true },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Выбрать сессии") },
+                                    leadingIcon = { Icon(AppIcons.Check, null) },
+                                    onClick = { listMenu = false; selecting = true },
+                                )
+                                if (onArchive != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Архив") },
+                                        leadingIcon = { Icon(AppIcons.Folder, null) },
+                                        onClick = { listMenu = false; onArchive() },
+                                    )
+                                }
+                                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                                SessionMenuSection("Порядок папок")
+                                FolderSortBy.entries.forEach { option ->
+                                    SessionMenuChoice(folderSortLabel(option), sortBy == option) {
+                                        listMenu = false
+                                        sortBy = option
+                                        graph.settings.sessionsSortBy = option.stored
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
             )
@@ -249,6 +301,7 @@ fun SessionsScreen(
                         now = now,
                         graph = graph,
                         attention = attention,
+                        pinnedProjectIds = pinnedProjects,
                         folderName = { task -> state.folderName(task.projectId) },
                         drilledDown = projectId != null,
                         onOpen = onOpen,
@@ -264,6 +317,20 @@ fun SessionsScreen(
                         onClearFinished = { clearing = it },
                         onSelectGroup = { group -> selecting = true; selectedIds = group.sessions.mapTo(mutableSetOf()) { it.id } },
                         onSelectFinished = { group -> selecting = true; selectedIds = group.sessions.filter(::finished).mapTo(mutableSetOf()) { it.id } },
+                        canManageFolder = { id -> state.isRegisteredProject(id) },
+                        onPin = { group ->
+                            val pinned = group.projectId in pinnedProjects
+                            scope.launch {
+                                connection.sessions.setProjectPreferences(group.projectId, pinned = !pinned)
+                                    .onFailure { snackbar.showSnackbar(messageOf(it)) }
+                            }
+                        },
+                        onArchive = { group ->
+                            scope.launch {
+                                connection.sessions.setProjectPreferences(group.projectId, archived = true)
+                                    .onFailure { snackbar.showSnackbar(messageOf(it)) }
+                            }
+                        },
                     )
                 }
             }
@@ -335,10 +402,15 @@ fun SessionsScreen(
                         confirmRestart = false
                         restarting = true
                         scope.launch {
-                            connection.sessions.restartServer()
-                                .onSuccess { snackbar.showSnackbar(if (wasOnline) "Сервер перезапущен" else "Сервер запущен") }
-                                .onFailure { snackbar.showSnackbar(messageOf(it)) }
-                            restarting = false
+                            try {
+                                connection.sessions.restartServer()
+                                    .onSuccess { snackbar.showSnackbar(if (wasOnline) "Сервер перезапущен" else "Сервер запущен") }
+                                    .onFailure { snackbar.showSnackbar(messageOf(it)) }
+                            } finally {
+                                // Флаг обязан сброситься даже при отмене корутины: иначе баннер
+                                // «Перезапуск сервера…» остаётся навсегда, а кнопка — недоступной.
+                                restarting = false
+                            }
                         }
                     }) {
                         Text(
@@ -415,8 +487,13 @@ fun SessionsScreen(
                     selecting = false
                     selectedIds = emptySet()
                     scope.launch {
-                        val failed = ids.count { id ->
-                            connection.sessions.delete(id).also { connection.closeChat(id) }.isFailure
+                        var failed = 0
+                        for ((index, id) in ids.withIndex()) {
+                            // Сессии удаляются на сервере по одной (там гаснет рантайм,
+                            // чистится диск и БД), так что удаление полпапки — не мгновенное
+                            // дело; без промежуточного сообщения это выглядит как «не работает».
+                            if (ids.size > 1) snackbar.showSnackbar("Удаляю ${index + 1} из ${ids.size}…")
+                            if (connection.sessions.delete(id).also { connection.closeChat(id) }.isFailure) failed++
                         }
                         snackbar.showSnackbar(if (failed == 0) "Удалено сессий: ${ids.size}" else "Не удалось удалить: $failed из ${ids.size}")
                     }
@@ -479,6 +556,8 @@ private fun SessionList(
     now: Long,
     graph: AppGraph,
     attention: Set<String>,
+    /** Закреплённые проекты: их папки помечены и стоят сверху. */
+    pinnedProjectIds: Set<String>,
     /** Имя папки проекта: в активных сессиях оно в заголовке строки, а не первое сообщение. */
     folderName: (Task) -> String,
     /** Оператор зашёл внутрь одного проекта с дашборда: его папка открыта, пока её не сложили. */
@@ -493,6 +572,12 @@ private fun SessionList(
     onClearFinished: (SessionGroup) -> Unit,
     onSelectGroup: (SessionGroup) -> Unit,
     onSelectFinished: (SessionGroup) -> Unit,
+    /** Закрепить/открепить папку проекта: закреплённые всегда выше. */
+    onPin: (SessionGroup) -> Unit,
+    /** Убрать папку в архив: она уходит из списка в «Архив». */
+    onArchive: (SessionGroup) -> Unit,
+    /** Проект известен реестру: только у такого есть закрепление и архив. */
+    canManageFolder: (String) -> Boolean,
 ) {
     // Folders do not open on their own: activity, a selected session or an unread alert
     // no longer unfolds a folder (the header counters and the pulsing news icon report it
@@ -526,6 +611,8 @@ private fun SessionList(
                 FolderHeader(
                     group, open,
                     alerted = group.sessions.any { it.id in attention },
+                    pinned = group.projectId in pinnedProjectIds,
+                    manageable = canManageFolder(group.projectId),
                     onToggle = {
                         toggled[group.projectId] = !open
                         graph.settings.setFolderExpanded(group.projectId, !open)
@@ -534,6 +621,8 @@ private fun SessionList(
                     onClearFinished = { onClearFinished(group) },
                     onSelectGroup = { onSelectGroup(group) },
                     onSelectFinished = { onSelectFinished(group) },
+                    onPin = { onPin(group) },
+                    onArchive = { onArchive(group) },
                 )
             }
             if (!open) continue
@@ -554,6 +643,33 @@ private fun SessionList(
             }
         }
     }
+}
+
+private fun folderSortLabel(value: FolderSortBy): String = when (value) {
+    FolderSortBy.ACTIVITY -> "Сначала активные"
+    FolderSortBy.NAME -> "По имени"
+}
+
+@Composable
+private fun SessionMenuSection(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 2.dp),
+    )
+}
+
+/** Выбранный вариант помечен галочкой там, где у пункта обычно стоит иконка. */
+@Composable
+private fun SessionMenuChoice(text: String, checked: Boolean, onPick: () -> Unit) {
+    DropdownMenuItem(
+        text = { Text(text) },
+        leadingIcon = {
+            if (checked) Icon(AppIcons.Check, null, modifier = Modifier.size(18.dp)) else Spacer(Modifier.size(18.dp))
+        },
+        onClick = onPick,
+    )
 }
 
 @Composable
@@ -650,11 +766,17 @@ private fun FolderHeader(
     group: SessionGroup,
     open: Boolean,
     alerted: Boolean,
+    /** Закреплённая папка: стоит выше остальных и помечена значком. */
+    pinned: Boolean,
+    /** Проект есть в реестре: только тогда у папки есть закрепление и архив. */
+    manageable: Boolean,
     onToggle: () -> Unit,
     onNewHere: () -> Unit,
     onClearFinished: () -> Unit,
     onSelectGroup: () -> Unit,
     onSelectFinished: () -> Unit,
+    onPin: () -> Unit,
+    onArchive: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
     val colors = LocalStatusColors.current
@@ -687,6 +809,10 @@ private fun FolderHeader(
                 modifier = Modifier.size(16.dp),
             )
             Spacer(Modifier.width(8.dp))
+            if (pinned) {
+                Icon(AppIcons.Pin, "Папка закреплена", Modifier.size(13.dp), tint = MaterialTheme.colorScheme.primary)
+                Spacer(Modifier.width(4.dp))
+            }
             Text(
                 group.title,
                 style = MaterialTheme.typography.labelLarge,
@@ -710,6 +836,18 @@ private fun FolderHeader(
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                     DropdownMenuItem(text = { Text("Новая сессия здесь") }, leadingIcon = { Icon(AppIcons.Add, null) }, onClick = { menu = false; onNewHere() })
+                    if (manageable) {
+                        DropdownMenuItem(
+                            text = { Text(if (pinned) "Открепить папку" else "Закрепить папку") },
+                            leadingIcon = { Icon(AppIcons.Pin, null) },
+                            onClick = { menu = false; onPin() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("В архив") },
+                            leadingIcon = { Icon(AppIcons.Archive, null) },
+                            onClick = { menu = false; onArchive() },
+                        )
+                    }
                     DropdownMenuItem(text = { Text("Выбрать все в папке (${group.sessions.size})") }, leadingIcon = { Icon(AppIcons.Check, null) }, onClick = { menu = false; onSelectGroup() })
                     val finishedCount = group.sessions.count { finished(it) }
                     DropdownMenuItem(text = { Text("Выбрать завершённые ($finishedCount)") }, leadingIcon = { Icon(AppIcons.Check, null) }, enabled = finishedCount > 0, onClick = { menu = false; onSelectFinished() })

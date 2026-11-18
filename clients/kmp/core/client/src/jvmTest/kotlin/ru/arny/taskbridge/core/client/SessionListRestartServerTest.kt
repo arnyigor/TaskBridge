@@ -127,6 +127,42 @@ class SessionListRestartServerTest {
         scope.cancel()
     }
 
+    /**
+     * Сервер принял просьбу и умер, не ответив: раньше клиент ждал этот POST до 180 с,
+     * и в приложении оставался баннер «Перезапуск сервера…». Успех обязан решать
+     * новый bootId, а не ответ на сам POST.
+     */
+    @Test
+    fun aRestartCountsEvenWhenTheServerDiesBeforeAnswering() = runBlocking {
+        val api = TaskBridgeApi(
+            HttpClient(MockEngine { request ->
+                val json = headersOf(HttpHeaders.ContentType, "application/json")
+                when {
+                    request.url.encodedPath == "/api/server/restart" -> {
+                        restartCalled += 1
+                        kotlinx.coroutines.awaitCancellation()
+                    }
+                    request.url.encodedPath == "/api/info" -> {
+                        if (restartCalled > 0) boot = "boot-2"
+                        respond("""{"bootId":"$boot"}""", HttpStatusCode.OK, json)
+                    }
+                    request.url.encodedPath == "/api/tasks" -> respond("[]", HttpStatusCode.OK, json)
+                    request.url.encodedPath == "/api/projects" -> respond("[]", HttpStatusCode.OK, json)
+                    else -> respond("""{"version":1}""", HttpStatusCode.OK, json)
+                }
+            }),
+            SimpleConnection("http://pc:8787"),
+        )
+        val sessionList = SessionList(api, scope, clockMillis = { 0 })
+        val started = kotlinx.coroutines.Dispatchers.Default
+        val result = kotlinx.coroutines.withTimeout(20_000) {
+            sessionList.restartServer(timeoutMillis = 5_000, stepMillis = 10, kickTimeoutMillis = 200)
+        }
+        assertTrue(result.isSuccess, "перезапуск должен закончиться по новому bootId: ${result.exceptionOrNull()}")
+        assertEquals(1, restartCalled)
+        scope.cancel()
+    }
+
     @Test
     fun theDialogIsOnlyPromisedAHiddenStartWhenItCanWork() {
         assertTrue(sessions({ }).canStartLocalServer(), "лаунчер с найденным каталогом — обещаем запуск")

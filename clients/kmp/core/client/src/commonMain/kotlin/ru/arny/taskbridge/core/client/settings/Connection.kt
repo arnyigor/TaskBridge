@@ -80,6 +80,11 @@ class AppSettings(
         get() = store.get("lastSessionId")
         set(value) = store.put("lastSessionId", value)
 
+    /** Порядок папок проектов в списке сессий: «activity» / «name». */
+    var sessionsSortBy: String
+        get() = store.get("sessionsSortBy") ?: "activity"
+        set(value) = store.put("sessionsSortBy", value)
+
     /** A project folder the user folded or unfolded by hand on the sessions list; null = never touched. */
     fun folderExpanded(projectId: String): Boolean? = store.get("folder:$projectId")?.toBooleanStrictOrNull()
 

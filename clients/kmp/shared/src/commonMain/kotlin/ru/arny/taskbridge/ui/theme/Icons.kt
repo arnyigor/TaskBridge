@@ -64,6 +64,10 @@ object AppIcons {
     val Computer = lineIcon("computer", "M2 3h20v14H2z", "M8 21h8", "M12 17v4")
     val Power = lineIcon("power", "M18.36 6.64a9 9 0 1 1-12.73 0", "M12 2v10")
     val Folder = lineIcon("folder", "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z")
+    /** Кнопка-канцелярская: закреплённая папка/сессия. */
+    val Pin = lineIcon("pin", "M9 4h6l-1 6 4 4H6l4-4-1-6z", "M12 14v7")
+    /** Архив: коробка со крышкой. */
+    val Archive = lineIcon("archive", "M3 8h18v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8z", "M2 4h20v4H2z", "M10 12h4")
     val ArrowDown = lineIcon("arrowDown", "M12 5v14", "M19 12l-7 7-7-7")
     val File = lineIcon("file", "M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z", "M13 2v7h7")
     val Layers = lineIcon("layers", "M12 2L2 7l10 5 10-5-10-5z", "M2 17l10 5 10-5", "M2 12l10 5 10-5")
