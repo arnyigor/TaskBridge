@@ -723,7 +723,9 @@ test('/api/info exposes normalized provider statuses and keeps legacy DeepSeek d
   t.after(() => fixture.close());
 
   const info = await fixture.api('/api/info');
-  assert.deepEqual(Object.keys(info.providerStatuses).sort(), ['deepseek', 'openai-codex', 'routerai', 'wormsoft']);
+  assert.deepEqual(Object.keys(info.providerStatuses).sort(), ['deepseek', 'openai-codex', 'opencode-go', 'openrouter', 'routerai', 'wormsoft']);
+  assert.equal(info.providerStatuses['opencode-go'].reason, 'not-fetched');
+  assert.equal(info.providerStatuses.openrouter.reason, 'not-fetched');
   assert.equal(info.providerStatuses.deepseek.available, false);
   assert.equal(info.providerStatuses.wormsoft.available, false);
   assert.equal(info.providerStatuses.routerai.available, false);

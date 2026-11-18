@@ -43,13 +43,14 @@ import { createInvocationNotifier } from './automation/invocation-notifier.mjs';
 import { buildMachineHeartbeat } from './domain/machine-state.mjs';
 import { piAgentDir, readPiSettings, imagesBlocked } from './pi-settings.mjs';
 import { PiProviderProfiles } from './providers/pi-provider-profiles.mjs';
+import { ModelVisibility, filterHidden } from './model-visibility.mjs';
 import { ModelProfiles } from './providers/model-profiles.mjs';
 import { listQuickActions } from './pi-quick-actions.mjs';
 import { listProcesses, listGpuProcesses, gpuSummary, systemRam } from './process-info.mjs';
 import { createCleanupPreview, executeCleanup, getCleanupResultByCommand, cleanupHistory } from './cleanup.mjs';
 import { killProcess, killProcessesByRuntime } from './process-kill.mjs';
 import { readSystemMetrics } from './system-metrics.mjs';
-import { consumeOpenAiReset, readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenAiCodexStatus } from './provider-status.mjs';
+import { consumeOpenAiReset, readProviderStatuses, readWormsoftStatus, readRouterAiStatus, readOpenRouterStatus, readOpenCodeGoStatus, readOpenAiCodexStatus } from './provider-status.mjs';
 import { readDeepseekCost } from './deepseek-cost.mjs';
 import { PiVersionProbe } from './pi-version.mjs';
 import { resolvePiCommand, piRuntimeState } from './pi-command.mjs';
@@ -83,7 +84,7 @@ const build = await (async () => {
 
 const config = await loadConfig(rootDir);
 const providerRefreshes = new Map();
-const providerProfiles = new PiProviderProfiles({ agentDir: piAgentDir() });
+const providerProfiles = new PiProviderProfiles({ agentDir: piAgentDir(), catalogPeek: () => manager.modelCatalog?.lastKnown?.() ?? manager.modelCatalog?.peek?.() });
 // Пресеты модели — отдельный файл рядом с models.json (шаг 03): конфиг Pi не трогаем.
 const modelProfiles = new ModelProfiles({ agentDir: piAgentDir() });
 
@@ -131,6 +132,7 @@ const store = new TaskStore(dataRoot, {
   busyTimeoutMs: config.server?.sqlite?.busyTimeoutMs
 });
 const manager = new TaskManager(config, dataRoot, store);
+const modelVisibility = new ModelVisibility({ dataRoot });
 const access = new AccessControl(config.server?.auth, dataRoot);
 await access.init();
 const externalFiles = new ExternalFilesService({ manager, dataRoot });
@@ -1328,7 +1330,7 @@ async function handleRequest(req, res) {
     // never generate more than one provider read per 20 seconds.
     if (req.method === 'POST' && pathname === '/api/providers/refresh') {
       const { provider } = await readJson(req);
-      if (!['wormsoft', 'routerai', 'deepseek', 'openai-codex'].includes(provider)) {
+      if (!['wormsoft', 'routerai', 'openrouter', 'opencode-go', 'deepseek', 'openai-codex'].includes(provider)) {
         throw Object.assign(new Error('Неизвестный провайдер.'), { code: 'INPUT_INVALID' });
       }
       const last = providerRefreshes.get(provider);
@@ -1338,6 +1340,8 @@ async function handleRequest(req, res) {
       const promise = (async () => {
         if (provider === 'wormsoft') return readWormsoftStatus(config.providerStatus?.wormsoft, options);
         if (provider === 'routerai') return readRouterAiStatus(config.providerStatus?.routerai, options);
+        if (provider === 'opencode-go') return readOpenCodeGoStatus(config.providerStatus?.opencodeGo, options);
+        if (provider === 'openrouter') return readOpenRouterStatus(config.providerStatus?.openrouter, options);
         if (provider === 'openai-codex') return readOpenAiCodexStatus(config.providerStatus?.openaiCodex, options);
         const status = await readDeepseekCost(config.deepseek, options);
         return { ...status, provider: 'deepseek', label: 'DeepSeek', kind: 'balance' };
@@ -1401,7 +1405,29 @@ async function handleRequest(req, res) {
 
     if (req.method === 'GET' && pathname === '/api/models') {
       const refresh = url.searchParams.get('refresh') === '1';
-      return json(res, 200, await manager.listModels({ refresh }));
+      const catalog = await manager.listModels({ refresh });
+      // Скрытые провайдеры/модели убираются здесь: выбор модели и управление
+      // строятся по этому ответу и не должны знать о скрытии вовсе.
+      const { hidden } = await modelVisibility.read();
+      return json(res, 200, { ...catalog, models: filterHidden(catalog.models, hidden) });
+    }
+
+    // Список скрытых провайдеров и моделей (та же зона доступа, что у редактора
+    // провайдеров: локально и у спаренных устройств).
+    if (pathname === '/api/model-visibility') {
+      if (!access.local(req) && !access.device(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Для управления списком скрытых подключите устройство по коду с компьютера.'), { code: 'ORIGIN_FORBIDDEN' }));
+      }
+      if (req.method === 'GET') return json(res, 200, await modelVisibility.read());
+      if (req.method === 'PUT') {
+        const body = await readJson(req);
+        try {
+          return json(res, 200, await modelVisibility.replace(body, body?.revision));
+        } catch (error) {
+          if (error?.code === 'REVISION_CONFLICT') return errorJson(res, 409, error);
+          throw error;
+        }
+      }
     }
 
     if (req.method === 'GET' && pathname === '/api/local') {

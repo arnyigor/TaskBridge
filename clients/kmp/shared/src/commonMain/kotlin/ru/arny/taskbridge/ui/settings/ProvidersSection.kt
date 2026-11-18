@@ -66,13 +66,16 @@ internal fun ProviderRow(status: ProviderStatus, refreshing: Boolean, onRefresh:
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Отмена") } },
         )
     }
+    // Строки без читателя не обновляются: сервер не знает такой провайдер,
+    // клик был бы тихим отказом.
+    val refreshable = status.reason != "no-reader"
     Row(
-        Modifier.fillMaxWidth().clickable(enabled = !refreshing, onClick = onRefresh).padding(horizontal = 16.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().clickable(enabled = refreshable && !refreshing, onClick = onRefresh).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
             Text(status.label ?: status.provider ?: "Провайдер", style = MaterialTheme.typography.bodyMedium)
-            Text(providerStatusText(status), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(providerStatusTextShared(status), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (status.provider == "openai-codex" && (status.resetCredits?.available ?: 0) > 0) {
                 TextButton(onClick = { confirmReset = true }, enabled = !refreshing && status.available && !status.stale) {
                     Text(if (refreshing) "Выполняется…" else "Использовать сброс")
@@ -85,12 +88,45 @@ internal fun ProviderRow(status: ProviderStatus, refreshing: Boolean, onRefresh:
             }
         }
         if (refreshing) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-        else Icon(AppIcons.Refresh, "Обновить данные провайдера", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        else if (refreshable) Icon(AppIcons.Refresh, "Обновить данные провайдера", Modifier.size(20.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
-private fun providerStatusText(status: ProviderStatus): String {
+private fun limitOrder(key: String): Int = when (key) {
+    "fiveHour", "rolling" -> 0
+    "weekly" -> 1
+    "monthly" -> 2
+    else -> 3
+}
+
+private fun limitLabel(key: String): String = when (key) {
+    "fiveHour", "rolling" -> "5 ч"
+    "weekly" -> "7 дн."
+    "monthly" -> "мес."
+    else -> key
+}
+
+private fun formatResetTime(iso: String): String {
+    // java.util.Date(String) не умеет ISO-8601 с 'T'/'Z' — на Android это падает
+    // IllegalArgumentException прямо в композиции. java.time.Instant доступен с API 26,
+    // minSdk 24 — поэтому парсим безопасно; если не распознали, сброс не показываем.
+    val at = try { java.time.Instant.parse(iso) } catch (_: Exception) { return "" }
+    val now = java.time.Instant.now()
+    // Часы:минуты, а за пределами суток — календарная дата.
+    val pattern = if (at.toEpochMilli() - now.toEpochMilli() < 24 * 60 * 60 * 1000) "HH:mm" else "d MMM"
+    return java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault())
+        .apply { timeZone = java.util.TimeZone.getDefault() }
+        .format(java.util.Date.from(at))
+}
+
+internal fun providerStatusTextShared(status: ProviderStatus): String {
     if (!status.available) return when (status.reason) {
+        "no-reader" -> listOfNotNull(
+            status.modelCount?.let { "$it " + if (it == 1) "модель" else if (it in 2..4) "модели" else "моделей" },
+            // Баланса у такого провайдера ждать неоткуда (нет читателя статуса),
+            // поэтому упоминание баланса только мешает — особенно у локальных.
+            if (status.kind == "local") "локальный" else null,
+        ).joinToString(" · ")
         "no-key" -> "Ключ не настроен"
         "no-auth" -> "Вход Codex не найден"
         "not-fetched" -> "Нажмите, чтобы получить данные"
@@ -111,10 +147,15 @@ private fun providerStatusText(status: ProviderStatus): String {
         return parts.joinToString(" · ") + rub + runway + stale
     }
     if (status.limits.isNotEmpty()) {
-        val fiveHour = status.limits["fiveHour"]?.remainingPercent?.let { "5 ч: ${number(it)}%" }
-        val weekly = status.limits["weekly"]?.remainingPercent?.let { "7 дн.: ${number(it)}%" }
+        // Окна идут в фиксированном порядке: 5 ч → 7 дн. → месяц → остальные.
+        val windows = status.limits.entries
+            .sortedBy { limitOrder(it.key) }
+            .mapNotNull { (key, limit) ->
+                limit.remainingPercent?.let { "${limitLabel(key)}: ${number(it)}%" } +
+                    limit.resetAt?.let { formatResetTime(it).takeIf { t -> t.isNotEmpty() }?.let { t -> " (сброс $t)" } }
+            }
         val credits = status.resetCredits?.available?.let { "сбросов: $it" }
-        return listOfNotNull(fiveHour, weekly, credits).joinToString(" · ").ifBlank { "Данные получены" } + stale
+        return (windows + listOfNotNull(credits)).joinToString(" · ").ifBlank { "Данные получены" } + stale
     }
     return "Данные получены$stale"
 }
@@ -469,6 +510,20 @@ internal fun providerModelCounts(models: List<ModelRef>): List<Pair<String, Int>
         .sortedWith(compareByDescending<Pair<String, Int>> { it.second }.thenBy { it.first })
 
 /** Имя строки провайдера: у локальных — до первого дефиса (`strata-iq3s` → `strata`). */
+/**
+ * Строки управления провайдерами: только те, у кого есть читатель статуса
+ * (реальные балансы). Провайдеры каталога без читателя не добавляются:
+ * строка-заглушка с одним счётчиком моделей ничего не даёт — баланс не
+ * проверить, управление недоступно, а сами модели и так выбираются в пикере.
+ */
+internal fun mergedProviderRows(
+    statuses: Map<String, ProviderStatus>,
+    catalogModels: List<ModelRef>,
+): List<ProviderStatus> {
+    val rows = statuses.values.sortedBy { it.label ?: it.provider ?: "" }.toMutableList()
+    return rows
+}
+
 internal fun providerRowLabel(model: ModelRef): String {
     val provider = model.provider ?: return "другие"
     if (!model.local) return provider

@@ -159,7 +159,10 @@ async function readDocument(file) {
 
 export class PiProviderProfiles {
   #writing = Promise.resolve();
-  constructor({ agentDir, env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  constructor({ agentDir, env = process.env, fetchImpl = globalThis.fetch, catalogPeek = null } = {}) {
+    // Встроенные провайдеры Pi (anthropic, google, openai, …) живут не в models.json,
+    // а в каталоге Pi. Для списка редактора их отдаём read-only из каталога.
+    this.catalogPeek = catalogPeek;
     if (!agentDir) throw new Error('PiProviderProfiles requires agentDir');
     this.file = path.join(agentDir, 'models.json');
     this.env = env;
@@ -169,6 +172,24 @@ export class PiProviderProfiles {
   async list() {
     const { doc, revision } = await readDocument(this.file);
     const providers = Object.entries(doc.providers).map(([id, entry]) => publicView(id, entry, this.env));
+    // Встроенные провайдеры каталога Pi: только чтение, правке models.json не подлежат.
+    const known = new Set(Object.keys(doc.providers));
+    const catalog = this.catalogPeek?.();
+    const byProvider = new Map();
+    for (const model of catalog?.models || []) {
+      const id = model?.provider;
+      if (!id || known.has(id)) continue;
+      if (!byProvider.has(id)) byProvider.set(id, []);
+      byProvider.get(id).push(model);
+    }
+    for (const [id, models] of byProvider) {
+      providers.push({
+        id, name: id, managed: false, builtin: true,
+        baseUrl: null, api: null, keyEnv: '', auth: 'builtin',
+        models: models.map((m) => ({ id: String(m.id || '') })),
+        modelCount: models.length,
+      });
+    }
     providers.sort((a, b) => Number(b.managed) - Number(a.managed) || a.id.localeCompare(b.id));
     return { revision, providers };
   }

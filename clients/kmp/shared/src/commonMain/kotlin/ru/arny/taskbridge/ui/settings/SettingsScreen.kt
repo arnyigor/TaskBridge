@@ -271,25 +271,19 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                     val catalog = agentState.models
-                    val modelCounts = providerModelCounts(catalog?.models.orEmpty())
-                    var providersExpanded by rememberSaveable { mutableStateOf(false) }
                     Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
                         Row(
-                            Modifier.fillMaxWidth().clickable { providersExpanded = !providersExpanded }.padding(12.dp),
+                            Modifier.fillMaxWidth().padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Column(Modifier.weight(1f)) {
                                 Text("Каталог моделей", style = MaterialTheme.typography.titleSmall)
                                 Text(
-                                    if (catalog == null) "Загрузка…" else "${catalog.models.size} моделей · ${modelCounts.size} провайдеров",
+                                    if (catalog == null) "Загрузка…" else "${catalog.models.size} моделей · ${providerModelCounts(catalog.models).size} провайдеров",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                             }
-                            Icon(
-                                if (providersExpanded) AppIcons.ChevronUp else AppIcons.ChevronDown,
-                                if (providersExpanded) "Свернуть провайдеров" else "Показать провайдеров",
-                            )
                         }
                         catalog?.defaultModel?.let { model ->
                             Text(
@@ -299,23 +293,6 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                                 maxLines = 2, overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
                             )
-                        }
-                        if (providersExpanded) {
-                            FlowRow(
-                                Modifier.padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                verticalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                modelCounts.forEach { (provider, count) ->
-                                    Surface(
-                                        shape = MaterialTheme.shapes.small,
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                    ) {
-                                        Text("$provider · $count", style = MaterialTheme.typography.labelMedium,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
-                                    }
-                                }
-                            }
                         }
                     }
 
@@ -391,7 +368,8 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                         Spacer(Modifier.width(8.dp))
                         Text("Обновить каталог моделей")
                     }
-                    val providers = agentState.providerStatuses.values.sortedBy { it.label ?: it.provider }
+                    // Строки управления = провайдеры с балансами + все провайдеры каталога.
+                    val providers = mergedProviderRows(agentState.providerStatuses, catalogModels)
                     if (providers.isEmpty()) {
                         Text("Данные ещё не загружены", modifier = Modifier.padding(16.dp), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     } else {

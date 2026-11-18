@@ -259,6 +259,86 @@ export async function readRouterAiStatus(config = {}, options = {}) {
   });
 }
 
+// OpenCode Go: единственный публичный эндпоинт подписки, подтверждён реальным
+// ответом продакшна (исследование в github.com/pistonex/opencode-go-usage,
+// docs/RESEARCH.md). Баланса и "use balance" в API нет — только проценты окон
+// и дата сброса. Без подписки Go API отвечает 403 EntitlementError.
+export function parseOpenCodeGoUsage(payload) {
+  const usage = payload?.usage;
+  if (!usage || typeof usage !== 'object') return null;
+  const limits = {};
+  for (const [key, window] of Object.entries(usage)) {
+    if (!window || typeof window !== 'object') continue;
+    const usedPercent = Number(window.percent);
+    const resetAt = typeof window.resetsAt === 'string' && Number.isFinite(Date.parse(window.resetsAt))
+      ? new Date(window.resetsAt).toISOString() : null;
+    if (!Number.isFinite(usedPercent) && !resetAt) continue;
+    limits[key] = {
+      usedPercent: Number.isFinite(usedPercent) ? usedPercent : null,
+      remainingPercent: Number.isFinite(usedPercent) ? Math.max(0, 100 - usedPercent) : null,
+      windowSeconds: null,
+      resetAt,
+    };
+  }
+  return Object.keys(limits).length ? limits : null;
+}
+
+export async function readOpenCodeGoStatus(config = {}, options = {}) {
+  const env = options.env || process.env;
+  const key = apiKey(config, env, 'OPENCODE_API_KEY');
+  if (!key) return { provider: 'opencode-go', available: false, reason: 'no-key' };
+  const url = String(config.url || 'https://opencode.ai/zen/go/v1/usage');
+  const fetchImpl = options.fetch || fetch;
+  const timeoutMs = Number(config.timeoutMs || options.timeoutMs || 10000);
+  const cacheMs = Number(config.cacheMs || DEFAULT_CACHE_MS);
+  return cached('opencode-go', key, cacheMs, options, async () => {
+    const parsed = parseOpenCodeGoUsage(await fetchJson(fetchImpl, url, key, timeoutMs));
+    if (!parsed) throw new Error('unexpected usage payload');
+    return {
+      provider: 'opencode-go',
+      label: 'OpenCode Go',
+      kind: 'subscription',
+      available: true,
+      asOf: new Date().toISOString(),
+      limits: parsed,
+    };
+  });
+}
+
+// OpenRouter: GET /api/v1/key answers for the key itself (limit, limit_remaining,
+// usage). Field names follow OpenRouter's public docs and were NOT verified
+// against a live response here. A key without a spend limit has no "remaining".
+export function parseOpenRouterKey(payload) {
+  const data = payload?.data;
+  if (!data || typeof data !== 'object') return null;
+  if (data.limit == null || data.limit_remaining == null) return { credits: null };
+  const credits = Number(data.limit_remaining);
+  return Number.isFinite(credits) ? { credits } : null;
+}
+
+export async function readOpenRouterStatus(config = {}, options = {}) {
+  const env = options.env || process.env;
+  const key = apiKey(config, env, 'OPENROUTER_API_KEY');
+  if (!key) return { provider: 'openrouter', available: false, reason: 'no-key' };
+  const url = String(config.url || 'https://openrouter.ai/api/v1/key');
+  const fetchImpl = options.fetch || fetch;
+  const timeoutMs = Number(config.timeoutMs || options.timeoutMs || 10000);
+  const cacheMs = Number(config.cacheMs || DEFAULT_CACHE_MS);
+  return cached('openrouter', key, cacheMs, options, async () => {
+    const parsed = parseOpenRouterKey(await fetchJson(fetchImpl, url, key, timeoutMs));
+    if (!parsed) throw new Error('unexpected key payload');
+    if (parsed.credits == null) throw new Error('У ключа не задан лимит расходов');
+    return {
+      provider: 'openrouter',
+      label: 'OpenRouter',
+      kind: 'credits',
+      available: true,
+      asOf: new Date().toISOString(),
+      credits: parsed.credits,
+    };
+  });
+}
+
 function normalizeOpenAiLimit(value) {
   if (!value || typeof value !== 'object') return null;
   const usedRaw = value.used_percent ?? value.usedPercent;
@@ -428,10 +508,12 @@ export async function readOpenAiCodexStatus(config = {}, options = {}) {
  */
 export async function readProviderStatuses(config = {}, options = {}) {
   const statusConfig = config.providerStatus || {};
-  const [deepseek, wormsoft, routerai, openaiCodex] = await Promise.all([
+  const [deepseek, wormsoft, routerai, openrouter, opencodeGo, openaiCodex] = await Promise.all([
     readDeepseekCost(config.deepseek, options),
     readWormsoftStatus(statusConfig.wormsoft, options),
     readRouterAiStatus(statusConfig.routerai, options),
+    readOpenRouterStatus(statusConfig.openrouter, options),
+    readOpenCodeGoStatus(statusConfig.opencodeGo, options),
     readOpenAiCodexStatus(statusConfig.openaiCodex, options),
   ]);
   return {
@@ -449,6 +531,8 @@ export async function readProviderStatuses(config = {}, options = {}) {
     },
     wormsoft,
     routerai,
+    openrouter,
+    'opencode-go': opencodeGo,
     'openai-codex': openaiCodex,
   };
 }

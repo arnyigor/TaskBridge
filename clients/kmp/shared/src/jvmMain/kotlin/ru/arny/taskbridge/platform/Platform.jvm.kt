@@ -242,6 +242,15 @@ class DesktopServerLauncher(private val store: KeyValueStore) : LocalServerLaunc
             "Каталог TaskBridge (scripts/start-lan.mjs) не найден — задайте настройку server.root в настройках. " +
                 "Проверено: " + checkedPathList(store.get("server.root"), anchors()),
         )
+        // The elevated scheduled task is the single privileged way into the
+        // machine. Spawning start-lan.mjs here (a non-elevated UI child) would
+        // produce a server that cannot stop elevated models or an elevated
+        // orphan on the public port — the mixed-rights failure of 2026-11-18.
+        // Only use the task when it points at THIS root; otherwise fall back.
+        if (startViaScheduledTask(root)) {
+            writeStartLog(root, "сервер запущен задачей планировщика TaskBridge (с правами администратора)")
+            return@withContext
+        }
         // Комплектный Node важнее PATH: у конечного пользователя Node может
         // отсутствовать или стоять другой версии. Порядок выбора описан в
         // resolveNodeCommand.
@@ -284,6 +293,45 @@ class DesktopServerLauncher(private val store: KeyValueStore) : LocalServerLaunc
                 "Не удалось запустить сервер:\n" + readableOutput(output.toString()) +
                     "\n\nПолные логи: ${startLogPath(root)}, ${File(serverDataDir(root), "lan-app.log")}",
             )
+        }
+    }
+
+    /**
+     * The scheduled task `TaskBridge` runs the pair with RunLevel=Highest. It is
+     * used only when its XML names this root (the portable copy and the repo each
+     * have their own), so a stale task can never start a different installation.
+     */
+    private fun startViaScheduledTask(root: File): Boolean {
+        if (!isWindowsOs()) return false
+        val port = lanPublicPort(serverDataDir(root)) ?: 8787
+        if (healthAnswers(port)) return true
+        val xml = schtasks("/query", "/tn", "TaskBridge", "/xml") ?: return false
+        val expected = root.absolutePath.replace('\\', '/').trimEnd('/')
+        if (!xml.replace('\\', '/').contains("$expected/", ignoreCase = true) &&
+            !xml.replace('\\', '/').contains("$expected\"", ignoreCase = true)
+        ) return false
+        if (schtasks("/run", "/tn", "TaskBridge") == null) return false
+        val deadline = System.currentTimeMillis() + 180_000
+        while (System.currentTimeMillis() < deadline) {
+            if (healthAnswers(port)) return true
+            Thread.sleep(500)
+        }
+        return false
+    }
+
+    /** schtasks stdout on exit 0, null on failure/timeout. */
+    private fun schtasks(vararg args: String): String? {
+        return try {
+            val process = ProcessBuilder(listOf("schtasks") + args)
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().readText()
+            if (!process.waitFor(15, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                null
+            } else if (process.exitValue() == 0) output else null
+        } catch (_: Exception) {
+            null
         }
     }
 

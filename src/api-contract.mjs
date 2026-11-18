@@ -89,6 +89,8 @@ export const API_ROUTES = [
   { method: 'GET', path: '/api/invocations', summary: 'invocation history (?recipeId, ?scheduleId, ?status, ?limit): scheduledAt, startedAt, finishedAt, status, verification, sessionId, workspaceRef' },
   { method: 'GET', path: '/api/invocations/:id', summary: 'one invocation' },
   { method: 'POST', path: '/api/models/probe', summary: 'short model check by button: {provider, id, mode: availability|latency}. availability is a free /models round-trip (no tokens); latency is one max_tokens=1 streamed request measured to the first chunk and aborted (tokensUsed: 1). Failures are data with their own codes (UNREACHABLE, TIMEOUT, AUTH, RATE_LIMITED, MODEL_NOT_FOUND, MODEL_UNKNOWN, NO_KEY, NO_ENDPOINT, PROVIDER_ERROR, COOLDOWN)' },
+  { method: 'GET', path: '/api/model-visibility', summary: 'hidden providers/models (the model picker and the provider panel skip them)' },
+  { method: 'PUT', path: '/api/model-visibility', summary: 'replace the hidden list (revision-checked, backed up)' },
   { method: 'GET', path: '/api/models', summary: "Pi's model catalogue (?refresh=1 to re-ask and sync modelSync.providers' model lists first)" },
 
   // --- clients --------------------------------------------------------------

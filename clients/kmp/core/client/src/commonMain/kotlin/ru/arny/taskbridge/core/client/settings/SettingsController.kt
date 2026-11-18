@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelVisibility
 import ru.arny.taskbridge.core.api.ModelProfile
 import ru.arny.taskbridge.core.api.ModelProbeResult
 import ru.arny.taskbridge.core.api.ModelRef
@@ -354,7 +355,15 @@ class SettingsController(private val api: TaskBridgeApi, private val scope: Coro
         if (_state.value.modelsLoading) return
         _state.update { it.copy(modelsLoading = true, error = null) }
         scope.launch {
-            runCatching { api.models(refresh) }
+            runCatching {
+                val catalog = api.models(refresh)
+                // Скрытые провайдеры/модели не показываются и здесь: иначе строки
+                // «N моделей» на вкладке «Модели» считали спрятанные записи.
+                val visibility = runCatching { api.modelVisibility() }.getOrNull()
+                if (visibility == null) catalog else catalog.copy(
+                    models = catalog.models.filterNot { visibility.filters(it.provider, it.id) },
+                )
+            }
                 .onSuccess { models -> _state.update { it.copy(models = models) } }
                 .onFailure { failure -> _state.update { it.copy(error = humanizeError(failure.message)) } }
             _state.update { it.copy(modelsLoading = false) }

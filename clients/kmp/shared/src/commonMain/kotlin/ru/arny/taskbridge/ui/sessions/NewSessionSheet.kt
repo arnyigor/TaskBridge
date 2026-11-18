@@ -51,6 +51,7 @@ import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ProviderStatus
 import ru.arny.taskbridge.core.client.settings.AppSettings
 import ru.arny.taskbridge.ui.chat.liveLocalContextWindow
+import ru.arny.taskbridge.ui.settings.providerStatusTextShared
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import androidx.compose.material3.IconButton
 import ru.arny.taskbridge.core.api.Project
@@ -334,24 +335,16 @@ private fun ModelCapabilityIcons(model: ModelRef) {
     }
 }
 
+// Строка окон и балансов в выборе модели — общая для всех провайдеров, у которых
+// сервер прислал статус (openai-codex, opencode-go, wormsoft, deepseek, routerai,
+// openrouter). Текст совпадает с настройками: тот же провайдер — те же данные.
 private fun openAiCodexWindowText(model: ModelRef, info: ApiInfo?): String? {
-    if (model.provider != "openai-codex") return null
     val status = info?.providerStatuses?.get(model.provider)
         ?: info?.providerStatuses?.values?.firstOrNull { it.provider == model.provider }
         ?: return null
-    if (!status.available) return null
-    val fiveHour = openAiCodexWindow(status, "fiveHour", "5 ч")
-    val weekly = openAiCodexWindow(status, "weekly", "7 дн.")
-    val resets = status.resetCredits?.available?.let { "сбросов: $it" }
-    val text = listOfNotNull(fiveHour, weekly, resets).joinToString(" · ")
-    return text.ifBlank { null }?.let { if (status.stale) "$it · устарело" else it }
+    val text = providerStatusTextShared(status)
+    return text?.let { if (status.stale) "$it · устарело" else it }
 }
-
-private fun openAiCodexWindow(status: ProviderStatus, key: String, label: String): String? =
-    status.limits[key]?.remainingPercent?.let { "$label: ${formatOpenAiPercent(it)}% осталось" }
-
-private fun formatOpenAiPercent(value: Double): String =
-    if (value % 1.0 == 0.0) value.roundToInt().toString() else value.toString()
 
 // «первый токен ≈ 2.1 с · 5 зап.» — measured TTFT for the model (catalog.latency,
 // keyed by ModelRef.key). Cloud models are the main reason to look at it: they

@@ -14,6 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadConfig } from '../src/config.mjs';
+import { freeTaskBridgePort, portProblemText } from '../src/lan-ports.mjs';
 
 const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -157,27 +158,80 @@ async function startServer(config, timeoutMs = 15000) {
   return false;
 }
 
-async function stopServer(timeoutMs = 9000) {
+function operatorStopFile() { return path.join(dataRoot(), 'operator-stop.json'); }
+function clearOperatorStop() { try { fs.rmSync(operatorStopFile(), { force: true }); } catch { /* absent */ } }
+// `taskbridge stop` means "stay down": without this marker the watchdog would
+// bring the server back on its next tick, which is the opposite of the command.
+function markOperatorStop() {
+  try { fs.writeFileSync(operatorStopFile(), JSON.stringify({ at: new Date().toISOString(), pid: process.pid })); } catch { /* best effort */ }
+}
+
+// A restart worker owns data/lan-restart.lock while it runs. A watchdog that
+// starts a rival pair in that window would race the very restart it is meant
+// to protect; it looks again next tick instead.
+function restartInFlight() {
+  try {
+    const file = path.join(dataRoot(), 'lan-restart.lock');
+    const age = Date.now() - fs.statSync(file).mtimeMs;
+    if (age > 180_000) return false;
+    const holder = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return alive(Number(holder?.pid)) || age < 30_000;
+  } catch { return false; }
+}
+
+/** Watchdog entrypoint: up and healthy → 0; otherwise start the pair. */
+async function cmdEnsure(config) {
+  if (fs.existsSync(operatorStopFile())) {
+    log('server was stopped by the operator (taskbridge stop) — the watchdog leaves it alone');
+    return 0;
+  }
+  if (await portReady(effectiveUrl(config), 1500)) return 0;
+  if (restartInFlight()) {
+    log('a restart is in progress — the watchdog waits for the next tick');
+    return 0;
+  }
+  log('server is not answering — starting LAN mode');
+  clearOperatorStop();
+  return (await startLan(config)) ? 0 : 1;
+}
+
+async function stopServer(config, timeoutMs = 9000) {
   // readLan(), not runningLan(): a half-dead pair (app crashed, detached proxy
   // outlived it and still holds the public port) must still be stopped, or the
   // next start fails with EADDRINUSE. The LAN stop tolerates dead pids.
   const lan = readLan();
+  const port = Number(lan?.publicPort || config.server?.port || 8787);
   if (lan && Number.isSafeInteger(lan.appPid) && Number.isSafeInteger(lan.proxyPid)) {
     log(`stopping LAN mode: app PID ${lan.appPid}, proxy PID ${lan.proxyPid}`);
     // The proxy goes first: while it still forwards, the app would answer a
-    // request that is about to be cut off.
-    const child = spawn(process.execPath, ['scripts/start-lan.mjs', 'stop'], { cwd: ROOT_DIR, stdio: ['ignore', 'inherit', 'inherit'] });
-    await new Promise((resolve) => child.on('close', resolve));
+    // request that is about to be cut off. The script owns port verification:
+    // it also finds a proxy that lan.json never mentioned and refuses to claim
+    // success while one survives.
+    const code = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ['scripts/start-lan.mjs', 'stop'], { cwd: ROOT_DIR, stdio: ['ignore', 'inherit', 'inherit'] });
+      child.on('error', () => resolve(1));
+      child.on('close', resolve);
+    });
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && (alive(lan.appPid) || alive(lan.proxyPid))) await new Promise((r) => setTimeout(r, 200));
     for (const pid of [lan.proxyPid, lan.appPid]) {
       if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} log(`PID ${pid} forced (SIGKILL)`); }
     }
-    log('stopped');
-    return;
+    if (code === 0) { markOperatorStop(); log('stopped'); return true; }
+    log('stop reported a problem (see above)');
+    return false;
   }
   const holder = runningLock();
-  if (!holder) { log('no running server to stop'); return; }
+  if (!holder) {
+    // No lock and no pair state, but the public port may still belong to a
+    // proxy from an older run. Kill only an identified TaskBridge listener;
+    // a foreign process stays and is named.
+    const result = await freeTaskBridgePort(port, { isOurs: (pid) => isProxyPid(pid) });
+    if (result.status === 'free') { log('no running server to stop'); return true; }
+    if (result.status === 'freed') { markOperatorStop(); log(`stopped stale proxy PID ${result.ours.join(', ')}`); return true; }
+    console.error(`taskbridge: ${portProblemText(port, result)}`);
+    return false;
+  }
   log(`stopping server PID ${holder.pid}`);
   if (process.platform === 'win32') {
     // Windows has no SIGTERM: process.kill() terminates the server outright, so
@@ -195,6 +249,18 @@ async function stopServer(timeoutMs = 9000) {
   while (Date.now() < deadline && alive(holder.pid)) await new Promise((r) => setTimeout(r, 200));
   if (alive(holder.pid)) { try { process.kill(holder.pid, 'SIGKILL'); } catch {} log('forced (SIGKILL)'); }
   else log('stopped');
+  const result = await freeTaskBridgePort(port, { isOurs: (pid) => isProxyPid(pid) });
+  if (result.status === 'failed' || result.status === 'blocked') {
+    console.error(`taskbridge: ${portProblemText(port, result)}`);
+    return false;
+  }
+  markOperatorStop();
+  return true;
+}
+
+function isProxyPid(pid) {
+  const lan = readLan();
+  return Number(lan?.proxyPid) === Number(pid);
 }
 
 // --- local models -----------------------------------------------------------
@@ -334,6 +400,7 @@ commands:
   start [--monolith]  start the server (default: LAN mode — the app on loopback
                 plus the LAN proxy; --monolith keeps the old daemon)
   stop          stop whatever is running (LAN mode or single process)
+  ensure        start the pair only if it is not answering (watchdog entry)
   models [list] list llama.cpp router presets (from models.ini) and their status
   models load <id>    load a preset (blocks until ready)
   models unload <id>  unload a preset
@@ -363,11 +430,13 @@ try {
     case 'status': await cmdStatus(config); break;
     case 'doctor': process.exit(await cmdDoctor(config)); break;
     case 'start': {
+      clearOperatorStop();
       const ok = wantsMonolith() ? await startServer(config) : await startLan(config);
       process.exit(ok ? 0 : 1);
       break;
     }
-    case 'stop': await stopServer(); break;
+    case 'stop': process.exitCode = await stopServer(config) ? 0 : 1; break;
+    case 'ensure': process.exit(await cmdEnsure(config));
     case 'models': await cmdModels(config, arg, subArg); break;
     default:
       console.error(`unknown command: ${command}`);

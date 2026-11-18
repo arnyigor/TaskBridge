@@ -715,6 +715,26 @@ class TaskBridgeApi(
     suspend fun providerProfiles(): ProviderProfilesPage =
         get("/api/provider-profiles", ProviderProfilesPage.serializer())
 
+    /** Скрытые провайдеры/модели + ревизия списка; правка уходит только со своей ревизией. */
+    suspend fun modelVisibility(): ModelVisibility =
+        get("/api/model-visibility", ModelVisibility.serializer())
+
+    suspend fun saveModelVisibility(
+        revision: String,
+        hiddenProviders: List<String>,
+        hiddenModels: List<String>,
+    ): ModelVisibility =
+        call(
+            HttpMethod.Put,
+            "/api/model-visibility",
+            ModelVisibility.serializer(),
+            buildJsonObject {
+                put("revision", revision)
+                put("hiddenProviders", kotlinx.serialization.json.JsonArray(hiddenProviders.map { JsonPrimitive(it) }))
+                put("hiddenModels", kotlinx.serialization.json.JsonArray(hiddenModels.map { JsonPrimitive(it) }))
+            },
+        )
+
     /** Создать или обновить управляемую запись `tb-*`. Вместо ключа — только имя переменной окружения. */
     suspend fun saveProviderProfile(
         revision: String,

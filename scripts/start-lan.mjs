@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { lanAllowed } from '../src/auth.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { isTaskBridgeProcess } from '../src/instance-lock.mjs';
+import { freeTaskBridgePort, portProblemText } from '../src/lan-ports.mjs';
 
 // Where the proxy really listens (R1.1): without auth it stays on loopback.
 const proxyHost = config => {
@@ -83,6 +84,21 @@ async function waitForProxy(proxy, readyFile, port, host) {
     } catch { /* proxy has not bound yet */ }
     await sleep(250);
   }
+  return false;
+}
+
+// A pair state file can be missing while its proxy still owns the public port
+// (2026-11-18: the user's lan.json was gone, an elevated proxy answered 502 on
+// 8787, and start/stop both lied about it). Reclaim the port by identity before
+// launching anything, so the new proxy never races a leftover one.
+async function reclaimPublicPort(port) {
+  const result = await freeTaskBridgePort(port, { isOurs: (pid) => proxyAlive(pid) });
+  if (result.status === 'free') return true;
+  if (result.status === 'freed') {
+    console.warn(`[lan] freed stale TaskBridge proxy PID ${result.ours.join(', ')} on port ${port}`);
+    return true;
+  }
+  console.error(`[lan] ${portProblemText(port, result)}`);
   return false;
 }
 
@@ -204,6 +220,7 @@ async function reconcileExisting() {
       return 1;
     }
     if (existing?.proxyPid && proxyAlive(existing.proxyPid)) killTree(existing.proxyPid);
+    if (!(await reclaimPublicPort(lock.publicPort))) return 1;
     const config = await loadConfig(ROOT);
     const lanHost = proxyHost(config);
     const proxy = await launchProxy(lock.internalPort, lock.publicPort, lanHost, 'start-lan proxy (recovery)');
@@ -237,6 +254,7 @@ async function start() {
   const internalPort = await freePort();
   const appLog = path.join(DATA, 'lan-app.log');
   fs.mkdirSync(DATA, { recursive: true });
+  if (!(await reclaimPublicPort(publicPort))) return 1;
 
   // The app: full TaskBridge, loopback only, TLS left to the proxy, and told the
   // public port so the links it prints (and /api/info) point at the proxy.
@@ -298,6 +316,7 @@ async function runForeground() {
   const lanHost = proxyHost(config);
   const internalPort = await freePort();
   fs.mkdirSync(DATA, { recursive: true });
+  if (!(await reclaimPublicPort(publicPort))) return 1;
 
   const app = spawn(process.execPath, ['src/server.mjs'], {
     cwd: ROOT,
@@ -363,7 +382,7 @@ async function status() {
   return appUp && proxyUp && answers && authoritative ? 0 : 1;
 }
 
-function stop() {
+async function stop() {
   const state = readState();
   const lock = readLock();
   const stopped = [];
@@ -373,6 +392,22 @@ function stop() {
     killTree(state.appPid);
     stopped.push(`stale app ${state.appPid}`);
   }
+
+  // The state file is not proof the port is free: a proxy that outlived its app,
+  // or one whose command line is unreadable (elevated), is not in `state` at all.
+  // Removing lan.json in that situation is how a later start lost the port and
+  // looped on EADDRINUSE. Keep the file unless the port is verified free.
+  const config = await loadConfig(ROOT).catch(() => ({}));
+  const port = Number(process.env.LAN_PORT || state?.publicPort || config.server?.port || 8787);
+  const result = await freeTaskBridgePort(port, { isOurs: (pid) => proxyAlive(pid) });
+  if (result.ours.length) stopped.push(`proxy ${result.ours.join(', ')}`);
+  if (result.status === 'failed') {
+    console.error(`[lan] ${portProblemText(port, result)}`);
+    console.error('[lan] состояние пары сохранено — следующий запуск увидит тот же порт');
+    return 1;
+  }
+  if (result.status === 'blocked') console.warn(`[lan] ${portProblemText(port, result)}`);
+
   try { fs.unlinkSync(STATE); } catch { /* already gone */ }
   console.log(stopped.length ? `[lan] stopped (${stopped.join(', ')})` : '[lan] not running');
   return 0;
