@@ -296,6 +296,8 @@ data class ProviderStatus(
     val usage: ProviderUsage? = null,
     val limits: Map<String, ProviderLimit> = emptyMap(),
     val resetCredits: ProviderResetCredits? = null,
+    /** Сколько моделей провайдера в каталоге Pi (клиент заполняет для строк без читателя баланса). */
+    val modelCount: Int? = null,
 )
 
 @Serializable data class ProviderRates(
@@ -424,6 +426,8 @@ data class ProviderProfile(
     val id: String = "",
     /** Правку сервер разрешает только записи, которую создал сам TaskBridge (ID `tb-*`). */
     val managed: Boolean = false,
+    /** Провайдер встроенного каталога Pi (anthropic, google, …): только чтение, в models.json его нет. */
+    val builtin: Boolean = false,
     /** Человеческое название из формы; null — запись названа только ID. */
     val name: String? = null,
     val baseUrl: String? = null,
@@ -482,6 +486,20 @@ data class ProviderProfilesPage(
     val providers: List<ProviderProfile> = emptyList(),
     val removed: List<String> = emptyList(),
 )
+
+/** Скрытые провайдеры и модели: выбор модели и управление их не показывают. */
+@Serializable
+data class ModelVisibility(
+    val revision: String = "",
+    val hiddenProviders: List<String> = emptyList(),
+    val hiddenModels: List<String> = emptyList(),
+) {
+    /** Каталог Pi без скрытых записей: провайдер целиком или отдельная модель `provider/id`. */
+    fun filters(provider: String?, id: String?): Boolean {
+        val p = provider.orEmpty()
+        return p in hiddenProviders || "$p/${id.orEmpty()}" in hiddenModels
+    }
+}
 
 /** Модель из `GET {baseUrl}/models` провайдера — то, что предлагает мастер подключения. */
 @Serializable

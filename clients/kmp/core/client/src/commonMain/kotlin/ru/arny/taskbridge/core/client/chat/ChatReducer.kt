@@ -357,7 +357,19 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
         val running = turns.filter { it.role == Role.ASSISTANT && (it.active || it.status.isEmpty()) }
         for (turn in turns) {
-            if (turn.role != Role.ASSISTANT || turn.id.startsWith("assistant-pending-")) continue
+            if (turn.role != Role.ASSISTANT) continue
+            if (turn.id.startsWith("assistant-pending-")) {
+                // Ход завершился, так и не подтвердив отправку (отмена до первого
+                // сообщения модели, отвал SSE и т.п.): pending-заглушка не должна
+                // крутиться «Ожидается подтверждение отправки» вечно.
+                if (turn.active || turn.status.isEmpty()) {
+                    turn.status = "FAILED"
+                    turn.error = turn.error ?: humanError ?: "Ответ не получен: ход завершился до первого сообщения модели"
+                }
+                turn.active = false
+                turn.final = true
+                continue
+            }
             // DONE (from agent_settled) is interim: the run's real terminal
             // event (cancelled, failed) replaces it.
             val interim = turn.status.isEmpty() || turn.status == "DONE"

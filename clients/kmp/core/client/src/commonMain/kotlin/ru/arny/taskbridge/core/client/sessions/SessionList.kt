@@ -23,6 +23,7 @@ import ru.arny.taskbridge.core.api.CreateTaskRequest
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ModelSelection
+import ru.arny.taskbridge.core.api.ModelVisibility
 import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.ProjectOverview
 import ru.arny.taskbridge.core.api.ProjectPreferences
@@ -413,12 +414,23 @@ class SessionList(
     }
 
     private var cachedModels: ModelCatalog? = null
+    private var cachedVisibility: ModelVisibility? = null
 
     /** Show the last catalogue immediately while the server refreshes it. */
     fun peekModels(): ModelCatalog? = cachedModels
 
     suspend fun models(refresh: Boolean = false): Result<ModelCatalog> = runCatching {
-        api.models(refresh).also { cachedModels = it }
+        val catalog = api.models(refresh)
+        // Скрытые провайдеры/модели не показываются в выборе модели: фильтр — здесь,
+        // чтобы покрыть все пикеры сразу (чат, новая сессия, повтор с параметрами).
+        // Редактор models.json берёт профили напрямую и фильтр не затрагивает.
+        cachedVisibility = runCatching { api.modelVisibility() }.getOrNull() ?: cachedVisibility
+        val visibility = cachedVisibility
+        val filtered = if (visibility == null) catalog else catalog.copy(
+            models = catalog.models.filterNot { visibility.filters(it.provider, it.id) },
+        )
+        cachedModels = filtered
+        filtered
     }
 
     /** Creates a session; files go up first and travel with the first prompt. */

@@ -37,6 +37,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -46,9 +47,11 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import ru.arny.taskbridge.AppGraph
+import ru.arny.taskbridge.core.api.ModelVisibility
 import ru.arny.taskbridge.core.client.settings.ModelRawDraft
 import ru.arny.taskbridge.core.client.settings.ProviderRawDraft
 import ru.arny.taskbridge.ui.theme.AppIcons
@@ -76,12 +79,34 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
     var providerDialog by remember { mutableStateOf(false) }
     var expandedProvider by rememberSaveable { mutableStateOf<String?>(null) }
     var providerToDelete by remember { mutableStateOf<String?>(null) }
+    // Скрытые провайдеры/модели: убраны из выбора модели и управления — вернуть можно здесь.
+    var visibility by remember { mutableStateOf(ModelVisibility()) }
+    var showHidden by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { runCatching { connection.api.modelVisibility() }.onSuccess { visibility = it } }
+    val setVisibility: (ModelVisibility) -> Unit = { next ->
+        visibility = next
+        scope.launch {
+            runCatching { connection.api.saveModelVisibility(next.revision, next.hiddenProviders, next.hiddenModels) }
+                .onSuccess { visibility = it }
+        }
+    }
+    val toggleProviderHidden: (String) -> Unit = { id ->
+        val hidden = if (id in visibility.hiddenProviders) visibility.hiddenProviders - id else visibility.hiddenProviders + id
+        setVisibility(visibility.copy(hiddenProviders = hidden))
+    }
+    val toggleModelHidden: (String, String) -> Unit = { providerId, modelId ->
+        val key = "$providerId/$modelId"
+        val hidden = if (key in visibility.hiddenModels) visibility.hiddenModels - key else visibility.hiddenModels + key
+        setVisibility(visibility.copy(hiddenModels = hidden))
+    }
     LaunchedEffect(Unit) { if (state.providers.isEmpty()) controller.load() }
     // Ревизия models.json нужна форме подключения: сохранение без неё сервер
     // не принимает, и без этой загрузки кнопка «Сохранить» молча ничего не делала бы.
     LaunchedEffect(Unit) { connection.settingsController.loadProviderProfiles() }
 
     val visible = state.providers.filter { provider ->
+        if (!showHidden && provider.id in visibility.hiddenProviders) return@filter false
         val text = query.trim()
         text.isEmpty() || provider.id.contains(text, true) ||
             provider.name?.contains(text, true) == true || provider.models.any { it.id.contains(text, true) }
@@ -102,6 +127,15 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                         Icon(AppIcons.Add, "Добавить подключение")
                     }
                     TextButton(onClick = onOpenLocalModels) { Text("Локальные") }
+                    // Без этого переключателя скрытый провайдер исчезал из списка
+                    // навсегда: показать скрытые было физически нечем.
+                    IconButton(onClick = { showHidden = !showHidden }, enabled = visibility.hiddenProviders.isNotEmpty() || visibility.hiddenModels.isNotEmpty()) {
+                        Icon(
+                            if (showHidden) AppIcons.Eye else AppIcons.EyeOff,
+                            if (showHidden) "Скрыть скрытые записи" else "Показать скрытые записи",
+                            tint = if (showHidden) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     IconButton(onClick = { controller.load() }, enabled = !state.loading) {
                         Icon(AppIcons.Refresh, "Обновить")
                     }
@@ -141,7 +175,9 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                         if (expanded) expandedProvider = null
                         else {
                             expandedProvider = provider.id
-                            controller.openProvider(provider.id)
+                            // Встроенным провайдерам из каталога Pi raw-профиль не нужен:
+                            // их не правят, модели уже лежат в элементе списка.
+                            if (!provider.builtin) controller.openProvider(provider.id)
                         }
                     }
                     Column(Modifier.fillMaxWidth()) {
@@ -151,6 +187,7 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                                 .padding(horizontal = 12.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            val providerHidden = provider.id in visibility.hiddenProviders
                             Column(Modifier.weight(1f)) {
                                 // Человеческое название — заголовком, ID — подписью: искать
                                 // «мой шлюз» в списке из одних слагов было невозможно.
@@ -173,7 +210,13 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                                     listOfNotNull(
                                         provider.api ?: "api по умолчанию",
                                         "${provider.modelCount} мод.",
-                                        if (provider.managed) "TaskBridge" else "вручную",
+                                        // Пометка, чтобы в режиме показа скрытых видно, какие записи спрятаны.
+                                        if (providerHidden) "скрыт" else null,
+                                        when {
+                                            provider.builtin -> "встроенный каталог · только чтение"
+                                            provider.managed -> "TaskBridge"
+                                            else -> "вручную"
+                                        },
                                     ).joinToString(" · "),
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -188,29 +231,67 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                                     if (expanded) "Свернуть модели ${provider.id}" else "Раскрыть модели ${provider.id}",
                                 )
                             }
-                            IconButton(onClick = {
-                                // Управляемая запись (`tb-*`) правится формой с моделями,
-                                // а не сырым JSON: раньше в это место вела только кнопка
-                                // на удалённом разделе настроек, и правка сводилась к JSON.
-                                if (provider.managed) {
-                                    connection.settingsController.editProvider(provider)
-                                } else {
-                                    controller.openProvider(provider.id)
-                                    providerDialog = true
-                                }
-                            }, enabled = !state.saving && !state.loading) {
-                                Icon(AppIcons.Edit, "Запись ${provider.id}", Modifier.size(18.dp))
+                            IconButton(onClick = { toggleProviderHidden(provider.id) }) {
+                                Icon(
+                                    if (providerHidden) AppIcons.EyeOff else AppIcons.Eye,
+                                    if (providerHidden) "Показать провайдера ${provider.id}" else "Скрыть провайдера ${provider.id}",
+                                    Modifier.size(18.dp),
+                                    tint = if (providerHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
-                            IconButton(
-                                onClick = { providerToDelete = provider.id },
-                                enabled = !state.saving && !state.loading,
-                            ) {
-                                Icon(AppIcons.Delete, "Удалить провайдера ${provider.id}", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
+                            if (!provider.builtin) {
+                                IconButton(onClick = {
+                                    // Управляемая запись (`tb-*`) правится формой с моделями,
+                                    // а не сырым JSON: раньше в это место вела только кнопка
+                                    // на удалённом разделе настроек, и правка сводилась к JSON.
+                                    if (provider.managed) {
+                                        connection.settingsController.editProvider(provider)
+                                    } else {
+                                        controller.openProvider(provider.id)
+                                        providerDialog = true
+                                    }
+                                }, enabled = !state.saving && !state.loading) {
+                                    Icon(AppIcons.Edit, "Запись ${provider.id}", Modifier.size(18.dp))
+                                }
+                                IconButton(
+                                    onClick = { providerToDelete = provider.id },
+                                    enabled = !state.saving && !state.loading,
+                                ) {
+                                    Icon(AppIcons.Delete, "Удалить провайдера ${provider.id}", Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
+                                }
                             }
                         }
-                        if (expanded && state.selectedProvider == provider.id) {
+                        if (expanded && provider.builtin) {
+                            // Read-only список моделей встроенного провайдера: правка и тест
+                            // недоступны, потому что записи в models.json не существует.
+                            provider.models
+                                .filter { showHidden || "${provider.id}/${it.id}" !in visibility.hiddenModels }
+                                .forEach { profileModel ->
+                                Row(
+                                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(profileModel.id, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                    val modelHidden = "${provider.id}/${profileModel.id}" in visibility.hiddenModels
+                                    IconButton(onClick = { toggleModelHidden(provider.id, profileModel.id) }) {
+                                        Icon(
+                                            if (modelHidden) AppIcons.EyeOff else AppIcons.Eye,
+                                            if (modelHidden) "Показать модель ${profileModel.id}" else "Скрыть модель ${profileModel.id}",
+                                            Modifier.size(16.dp),
+                                            tint = if (modelHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (expanded && !provider.builtin && state.selectedProvider == provider.id) {
                             if (state.loading) CircularProgressIndicator(Modifier.padding(12.dp).size(20.dp))
-                            state.models.forEach { model ->
+                            state.models
+                                .filter { model ->
+                                    val id = (model["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                                    showHidden || "${provider.id}/$id" !in visibility.hiddenModels
+                                }
+                                .forEach { model ->
                                 val modelId = (model["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
                                 val probe = state.modelProbes[provider.id to modelId]
                                 Row(
@@ -239,6 +320,15 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                                     }
                                     IconButton(onClick = { controller.openModel(modelId) }) {
                                         Icon(AppIcons.Edit, "Изменить $modelId", Modifier.size(18.dp))
+                                    }
+                                    val modelHidden = "${provider.id}/$modelId" in visibility.hiddenModels
+                                    IconButton(onClick = { toggleModelHidden(provider.id, modelId) }) {
+                                        Icon(
+                                            if (modelHidden) AppIcons.EyeOff else AppIcons.Eye,
+                                            if (modelHidden) "Показать модель $modelId" else "Скрыть модель $modelId",
+                                            Modifier.size(16.dp),
+                                            tint = if (modelHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
                                     }
                                 }
                             }
