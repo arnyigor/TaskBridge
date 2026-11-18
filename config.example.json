@@ -53,6 +53,9 @@
       "mode": "hook"
     }
   },
+  "delivery": {
+    "stallMs": 120000
+  },
   "memory": {
     "projectMemoryRoot": null,
     "indexBudgetTokens": 2000,

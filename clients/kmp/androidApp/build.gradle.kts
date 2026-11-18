@@ -28,7 +28,7 @@ android {
         applicationId = "ru.arny.taskbridge"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 16
+        versionCode = 17
         versionName = providers.gradleProperty("taskbridgeVersion").get()
     }
     packaging {

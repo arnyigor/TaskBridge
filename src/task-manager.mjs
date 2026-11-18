@@ -446,6 +446,7 @@ export class TaskManager extends EventEmitter {
       indexPath: path.join(dataRoot, 'memory-index.db'),
     });
     this.memoryConsolidationTimer = null;
+    this.stallTimer = null;
     this.memoryConsolidationRunning = false;
     this.#startMemoryConsolidationScheduler();
     this.tasks = new Map();
@@ -721,6 +722,8 @@ export class TaskManager extends EventEmitter {
     await this.#sweepOrphans();
     await this.#killOrphanPis(previous);
     if (this.queue.length) this.#schedulePump();
+    // Only after the restored sessions are in `tasks`: the watchdog reads them.
+    this.#startStallWatchdog();
   }
 
   #memoryConsolidationSettings() {
@@ -823,6 +826,7 @@ export class TaskManager extends EventEmitter {
     this.closing = true;
     try { this.memoryProvider?.closeIndex(); } catch { /* индекс — кэш, его потеря не важна */ }
     if (this.memoryConsolidationTimer) { clearInterval(this.memoryConsolidationTimer); this.memoryConsolidationTimer = null; }
+    if (this.stallTimer) { clearInterval(this.stallTimer); this.stallTimer = null; }
     this.queuePump.stopPolling();
     await this.#drainPump(2000);
     // A queued #event write that is still pending here would fire after the
@@ -4273,15 +4277,30 @@ export class TaskManager extends EventEmitter {
     task.model = this.#taskModel(applied
       ? { id: applied.id, provider: applied.provider, contextWindow: applied.contextWindow ?? null, maxTokens: applied.maxTokens ?? null }
       : { id: targetModelId, provider: model.provider, contextWindow: null, maxTokens: null });
-    const nextState = await runtime.pi.getState().catch(() => null);
+    // The switch is acknowledged, but a Pi that stops answering right after it is
+    // a trap: it stays in `runtimes` looking alive and the NEXT prompt is
+    // swallowed with no frame at all (2026-11-17, three sessions, every time after
+    // a switch). The selection stays applied — it is persisted anyway — the dead
+    // process is simply retired so the next turn starts a fresh one.
+    let hungAfterSwitch = false;
+    const nextState = await runtime.pi.getState().catch(async error => {
+      if (['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) {
+        hungAfterSwitch = true;
+        await this.#retireRuntime(task, runtime);
+      }
+      return null;
+    });
     task.thinkingLevelActual = nextState?.thinkingLevel ?? task.thinkingLevelActual ?? null;
     task.updatedAt = now();
     await this.store.save(this.#publicTask(task));
-    const note = interrupted === 'compaction' ? ' (прервано сжатие контекста)' : interrupted ? ' (прерван текущий ответ)' : '';
+    const note = hungAfterSwitch
+      ? ' (Pi перезапустится со следующим сообщением)'
+      : interrupted === 'compaction' ? ' (прервано сжатие контекста)' : interrupted ? ' (прерван текущий ответ)' : '';
     await this.#event(task, 'MODEL_SWITCH', `Модель: ${model.provider}/${task.requestedModel.id}${note}`, {
       provider: model.provider,
       modelId: task.requestedModel.id,
-      ...(interrupted ? { interrupted } : {})
+      ...(interrupted ? { interrupted } : {}),
+      ...(hungAfterSwitch ? { runtimeRetired: true } : {})
     });
     return this.#publicTask(task);
   }
@@ -6312,11 +6331,26 @@ export class TaskManager extends EventEmitter {
     // делает отправку бессмысленной (STAB-02A).
     const epochAtStart = task._cancelEpoch || 0;
     if (this.#usesLocalRuntime(task) && !(await this.local.isReady())) await this.local.ensureRunning();
-    const runtime = await this.#ensureSession(task);
+    const runtimeAtStart = await this.#ensureSession(task);
     // STOP мог прийти, пока поднималась сессия (в том числе на старте снятого
     // с очереди продолжения): отменённый текст больше не отправляем (STAB-02A).
     if (this.#cancelledDuring(task, epochAtStart)) return this.#publicTask(task);
-    const state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
+    // #ensureSession reuses a live runtime on the strength of `pi.closed` and
+    // `canSend()`; a process that stopped answering passes both and swallows the
+    // prompt. Nothing has been sent yet at this point, so the honest move is to
+    // retire it and start a fresh one instead of failing the operator's message
+    // (2026-11-17: the same text had to be sent again by hand).
+    let runtime = runtimeAtStart;
+    let state;
+    try {
+      state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
+    } catch (error) {
+      if (!['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code) || this.#cancelledDuring(task, epochAtStart)) throw error;
+      await this.#retireRuntime(task, runtime);
+      runtime = await this.#ensureSession(task);
+      if (this.#cancelledDuring(task, epochAtStart)) return this.#publicTask(task);
+      state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
+    }
     if (this.#cancelledDuring(task, epochAtStart)) return this.#publicTask(task);
     // Fresh state, taken right before delivering: this decides steer vs prompt.
     const streaming = Boolean(state?.isStreaming);
@@ -6382,6 +6416,10 @@ export class TaskManager extends EventEmitter {
     // A fresh operator message re-arms the automatic 413 recovery; the internal
     // continuation of that recovery (announce:false) must not.
     if (announce) task.mediaRecovery = false;
+    // A fresh operator message re-arms the silence watchdog's one automatic
+    // re-delivery; the internal re-delivery of that recovery (fromQueue) must not,
+    // otherwise a mute Pi would replay the text for ever.
+    if (announce && !fromQueue) task._stallRecoveries = 0;
     await this.store.save(this.#publicTask(task)).catch(() => {});
     if (!streaming) await this.#turnStateEvent(task, 'DISPATCHING');
     const dispatchedAt = Date.now();
@@ -6733,8 +6771,11 @@ export class TaskManager extends EventEmitter {
 
   // A dead RPC process must not remain the owner of the session/model slot.
   // Do not retire PI_RPC_SLOW: events prove it is still doing useful work.
-  async #recoverRpcFailure(task, error) {
-    if (!task || !['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) return;
+  // PI_STALLED is the silence watchdog below: the process is alive enough to hold
+  // a pipe but has produced nothing for the whole stall window, so it is dead for
+  // every practical purpose.
+  async #recoverRpcFailure(task, error, { requeuePrompt = true } = {}) {
+    if (!task || !['PI_RPC_HUNG', 'PI_RPC_EXITED', 'PI_STALLED'].includes(error?.code)) return;
     const runtime = this.runtimes.get(task.id);
     if (runtime) {
       runtime.retired = true;
@@ -6751,8 +6792,85 @@ export class TaskManager extends EventEmitter {
     task._compactingSince = 0;
     this.#releaseSlot(task.id);
     if (task.pendingUiRequest) await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'rpc_failed' });
-    await this.#fail(task, error);
+    await this.#fail(task, error, task._turn ?? null, { requeuePrompt });
     this.#schedulePump();
+  }
+
+  // The same retire, without failing the turn: used before a delivery is even
+  // attempted and after a model switch, where there is nothing to fail.
+  async #retireRuntime(task, runtime) {
+    if (!runtime || runtime.retired) return;
+    runtime.retired = true;
+    runtime.cancelRequested = true;
+    task._turn = (task._turn || 0) + 1;
+    await runtime.pi.killTree().catch(() => {});
+    this.#resolveSettle(task.id);
+    if (this.runtimes.get(task.id) === runtime) this.runtimes.delete(task.id);
+    task.piPid = null;
+    task.piStartedAt = null;
+  }
+
+  #stallSettings() {
+    const cfg = this.config?.delivery || {};
+    const stallMs = Number(cfg.stallMs) > 0 ? Number(cfg.stallMs) : 120_000;
+    return { stallMs, everyMs: Math.max(100, Math.min(15_000, Math.floor(stallMs / 4))) };
+  }
+
+  #startStallWatchdog() {
+    if (this.stallTimer) return;
+    const { everyMs } = this.#stallSettings();
+    this.stallTimer = setInterval(() => {
+      this.#checkStalledTurns().catch(error => console.warn('[TaskBridge] stall watchdog failed:', error?.message || error));
+    }, everyMs);
+    this.stallTimer.unref?.();
+  }
+
+  // Pi answers `prompt` and then says nothing at all: no agent_start, no deltas,
+  // no tool frames. Nothing else times this out — the run stayed RUNNING and the
+  // operator cancelled by hand minutes later (2026-11-17, repeated on three
+  // sessions right after a model switch). The turn is failed with a code that
+  // says what happened, and #fail puts the text back into the queue, so the next
+  // pump delivers it into a fresh process instead of asking the operator to send
+  // the same message again.
+  async #checkStalledTurns(nowMs = Date.now()) {
+    if (this.closing) return;
+    const { stallMs } = this.#stallSettings();
+    for (const [id, runtime] of [...this.runtimes]) {
+      const task = this.tasks.get(id);
+      if (!task || this.deleted.has(id)) continue;
+      if (task.status !== 'RUNNING') continue;
+      if (runtime.retired || runtime.cancelRequested) continue;
+      // A running tool may legitimately print nothing for minutes: the stall is
+      // about a model that never starts, not about a slow command.
+      if ((task._toolsRunning || 0) > 0) continue;
+      if (task.pendingUiRequest) continue;
+      const since = task._lastProgressAt || 0;
+      if (!since || nowMs - since < stallMs) continue;
+      // Once per delivery: a second tick must not fail the re-queued delivery,
+      // while the re-delivered turn gets a fresh attempt id and is watched again.
+      const attemptKey = task._attemptId || `turn:${task._turn}`;
+      if (task._stallHandledAttempt === attemptKey) continue;
+      task._stallHandledAttempt = attemptKey;
+      const seconds = Math.round(stallMs / 1000);
+      // One automatic re-delivery per operator message: a Pi that is mute for a
+      // systemic reason must not replay the same text for ever. The second
+      // silence is reported and left to the operator.
+      const attempts = (task._stallRecoveries || 0) + 1;
+      task._stallRecoveries = attempts;
+      const requeue = attempts <= 1;
+      const error = Object.assign(
+        new Error(requeue
+          ? `Pi молчит ${seconds} с после отправки — ход остановлен, сообщение вернётся в очередь.`
+          : `Pi снова молчит ${seconds} с — ход остановлен. Отправьте сообщение заново.`),
+        { code: 'PI_STALLED', retryable: requeue }
+      );
+      await this.#event(task, 'STALL_DETECTED', error.message, { stallMs, silentMs: nowMs - since, requeue }, false).catch(() => {});
+      await this.#recoverRpcFailure(task, error, { requeuePrompt: requeue });
+      // The text is in the queue again; the operator asked for an answer, not for
+      // a line to press. Delivered at once into a fresh process, fire-and-forget
+      // because a delivery is a whole turn.
+      if (requeue) setImmediate(() => this.sendPendingNow(task.id).catch(() => {}));
+    }
   }
 
   // A message Pi accepted into its own queue (a steer) but that never got

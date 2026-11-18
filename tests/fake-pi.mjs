@@ -154,8 +154,16 @@ function finish(text, fail = false, errorMessage = 'Fixture model error', thinki
 //                 engine chunking slowly, where the pause IS generation time
 let deaf = false;
 let tailAfterAbort = false;
+// FAKE_PI_MUTE_AFTER_MODEL: the process acknowledges `set_model` and then stops
+// answering `get_state`. That is the shape seen on 2026-11-17 — the switch
+// worked, the next prompt went into a process that answered nothing.
+let muteState = false;
+// `mute`: the process acks the prompt and then emits NOTHING — not even
+// agent_start. That is the shape that left a turn RUNNING until the operator
+// cancelled by hand (2026-11-17). Every delivery is mute, so the test also
+// proves the watchdog re-queues the text once and then stops instead of looping.
 function faultOf(message) {
-  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|deaf-stream|abort-tail|deaf|child|notices|heavy-mixed|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
+  const match = String(message || '').match(/fault-(queue-crash|crash|garbage|utf8|hang|mute|deaf-stream|abort-tail|deaf|child|notices|heavy-mixed|provider-incompatible|provider-wait|provider-flap|provider-give-up|slow-stream)/);
   return match ? match[1] : null;
 }
 function startTurn(message) {
@@ -190,6 +198,8 @@ async function runFault(fault, command, respond) {
       return;
     }
   }
+  // Silence before anything at all: the ack above is the only sign of life.
+  if (fault === 'mute') return;
   startTurn(command.message);
   if (fault === 'crash') {
     process.stderr.write('fake-pi: simulated crash during a tool call\n');
@@ -452,6 +462,8 @@ async function runFault(fault, command, respond) {
 readline.createInterface({ input: process.stdin }).on('line', async line => {
   const command = JSON.parse(line);
   const respond = (data = {}, success = true) => send({ type: 'response', id: command.id, command: command.type, success, data, ...(!success ? { error: 'Fixture rejected prompt' } : {}) });
+  // Mutism is sticky and answers nothing at all: a timeout is what the server sees.
+  if (command.type === 'get_state' && muteState) return;
   if (command.type === 'get_state') return respond(state());
   // Pi's own context estimate. FAKE_PI_CONTEXT_TOKENS pins it so a test can put
   // the session over a context limit on purpose; otherwise it is derived from
@@ -508,7 +520,9 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
   if (command.type === 'set_thinking_level') { thinkingLevel = command.level; return respond(); }
   if (command.type === 'set_model') {
     model = { provider: command.provider, id: command.modelId, contextWindow: 8000, maxTokens: 512 };
-    return respond(model);
+    const answer = respond(model);
+    if (process.env.FAKE_PI_MUTE_AFTER_MODEL === '1') muteState = true;
+    return answer;
   }
   if (command.type === 'set_auto_compaction') { automatic = command.enabled; return respond(); }
   if (command.type === 'compact') {
