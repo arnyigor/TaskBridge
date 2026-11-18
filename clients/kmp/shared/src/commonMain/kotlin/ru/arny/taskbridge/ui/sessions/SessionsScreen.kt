@@ -118,6 +118,8 @@ fun SessionsScreen(
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var deletingSelected by remember { mutableStateOf<Set<String>?>(null) }
+    /** Сколько сессий уже удалено из выбранных; null — удаления сейчас нет. */
+    var deleteProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var selectingOlder by remember { mutableStateOf(false) }
     var confirmRestart by remember { mutableStateOf(false) }
     var restarting by remember { mutableStateOf(false) }
@@ -272,6 +274,17 @@ fun SessionsScreen(
                     icon = AppIcons.Refresh,
                     color = LocalStatusColors.current.working,
                 )
+            }
+            deleteProgress?.let { (done, total) ->
+                // Баннер, а не snackbar: сообщения в очереди подменяют друг друга, и счётчик
+                // прыгал с «9 из 18» сразу на «23 из 28» — понять, идёт ли удаление, было нельзя.
+                if (done < total) {
+                    Banner(
+                        text = "Удаляю $done из $total… сервер гасит движок каждой сессии",
+                        icon = AppIcons.Delete,
+                        color = LocalStatusColors.current.working,
+                    )
+                }
             }
             val error = state.error
             if (error != null) {
@@ -487,13 +500,15 @@ fun SessionsScreen(
                     selecting = false
                     selectedIds = emptySet()
                     scope.launch {
+                        deleteProgress = 0 to ids.size
                         var failed = 0
-                        for ((index, id) in ids.withIndex()) {
-                            // Сессии удаляются на сервере по одной (там гаснет рантайм,
-                            // чистится диск и БД), так что удаление полпапки — не мгновенное
-                            // дело; без промежуточного сообщения это выглядит как «не работает».
-                            if (ids.size > 1) snackbar.showSnackbar("Удаляю ${index + 1} из ${ids.size}…")
-                            if (connection.sessions.delete(id).also { connection.closeChat(id) }.isFailure) failed++
+                        try {
+                            failed = connection.sessions.deleteMany(ids) { id, done, failedNow ->
+                                connection.closeChat(id)
+                                deleteProgress = done + failedNow to ids.size
+                            }
+                        } finally {
+                            deleteProgress = null
                         }
                         snackbar.showSnackbar(if (failed == 0) "Удалено сессий: ${ids.size}" else "Не удалось удалить: $failed из ${ids.size}")
                     }

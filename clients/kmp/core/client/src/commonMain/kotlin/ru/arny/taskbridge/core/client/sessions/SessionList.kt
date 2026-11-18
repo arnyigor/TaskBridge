@@ -4,12 +4,17 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withTimeoutOrNull
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
@@ -448,6 +453,32 @@ class SessionList(
     fun forget(taskId: String) {
         hidden.update { it + taskId }
         _state.update { s -> s.copy(tasks = s.tasks.filterNot { it.id == taskId }) }
+    }
+
+    /** Удаляет сразу несколько сессий. Сервер на каждую гасит движок Pi, чистит диск и БД,
+     *  поэтому строгая очередь из двадцати сессий растягивалась на минуты: пачки по несколько
+     *  штук перекрывают ожидание. [onDeleted] зовётся после каждой — экран по ней закрывает
+     *  чат и показывает прогресс. Возвращает число неудач. */
+    suspend fun deleteMany(
+        ids: Collection<String>,
+        concurrency: Int = 3,
+        onDeleted: (id: String, done: Int, failed: Int) -> Unit = { _, _, _ -> },
+    ): Int = coroutineScope {
+        val gate = Semaphore(concurrency.coerceAtLeast(1))
+        var done = 0
+        var failed = 0
+        ids.map { id ->
+            async {
+                gate.withPermit {
+                    val failure = delete(id).isFailure
+                    // Счётчики трогаются только здесь — на UI-потоке вызывающего — иначе
+                    // два одновременных удаления теряли бы одно из приращений.
+                    if (failure) failed++ else done++
+                    onDeleted(id, done, failed)
+                }
+            }
+        }.awaitAll()
+        failed
     }
 
     /** Hides the session at once; "not found" means it is already gone, which is success. */
