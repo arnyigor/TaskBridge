@@ -1716,6 +1716,10 @@ private fun OutboxRow(message: OutgoingMessage, onRetry: () -> Unit, onEdit: () 
 
 @Composable
 private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: ChatSession, graph: AppGraph, send: (SendMode) -> Unit, onDialog: (ChatDialog) -> Unit, onViewFile: (FileTarget) -> Unit, onClose: () -> Unit, onContinueRequested: (String) -> Unit = {}) {
+    // Результаты действий приходят из фонового потока (Dispatchers.Default):
+    // запись состояния диалога (закрытие, сброс ожидания) обязана идти через UI-скоуп,
+    // иначе на десктопе диалог после успешной отправки не закрывается.
+    val uiScope = rememberCoroutineScope()
     when (dialog) {
         null -> Unit
         is ChatDialog.EditMessage -> TextEditDialog(
@@ -1727,7 +1731,11 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             // при NOT_ALLOWED (отмена ещё идёт), сетевой ошибке или таймауте правка
             // остаётся в редакторе и её можно повторить.
             onConfirm = { text, onDone ->
-                session.editMessage(dialog.turnId, text, onAccepted = { onDone(true) }, onFailed = { onDone(false) })
+                session.editMessage(
+                    dialog.turnId, text,
+                    onAccepted = { uiScope.launch { onDone(true) } },
+                    onFailed = { uiScope.launch { onDone(false) } },
+                )
             },
             onDismiss = onClose,
         )
@@ -1756,7 +1764,11 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
                     }
                 },
                 onConfirm = { text, onDone ->
-                    session.editAnswer(dialog.turnId, text, asVariant, onAccepted = { onDone(true) }, onFailed = { onDone(false) })
+                    session.editAnswer(
+                        dialog.turnId, text, asVariant,
+                        onAccepted = { uiScope.launch { onDone(true) } },
+                        onFailed = { uiScope.launch { onDone(false) } },
+                    )
                 },
                 onDismiss = onClose,
             )
@@ -1854,7 +1866,7 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             confirm = "Сохранить",
             singleLine = true,
             onConfirm = { text, onDone ->
-                session.rename(text, onAccepted = { onDone(true) }, onFailed = { onDone(false) })
+                session.rename(text, onAccepted = { uiScope.launch { onDone(true) } }, onFailed = { uiScope.launch { onDone(false) } })
             },
             onDismiss = onClose,
         )
