@@ -561,9 +561,20 @@ test('edit over HTTP rewrites the message in place and re-runs everything below 
   const user = before.filter(e => e.type === 'USER_MESSAGE').at(-1);
 
   await api(`/api/tasks/${id}/turns/user-${user.seq}/edit`, { text: 'второе (исправлено)' });
-  assert.equal((await terminal(api, id)).status, 'SUCCEEDED', fixture.logs());
+  // The delivery now runs in the background (the dialog must not hang on a
+  // ~20 s session restart); the task may still look terminal while Pi boots.
+  const marker = (await api(`/api/tasks/${id}/events?limit=0`)).find(e => e.type === 'TURN_TRUNCATED');
+  assert.equal(marker.data.reason, 'edit');
+  const deadline = Date.now() + 15_000;
+  let after = null;
+  while (Date.now() < deadline) {
+    after = await api(`/api/tasks/${id}/events?limit=0`);
+    if (after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT')) break;
+    after = null;
+    await new Promise(r => setTimeout(r, 200));
+  }
+  assert.ok(after, 'the model answered again — ' + fixture.logs());
 
-  const after = await api(`/api/tasks/${id}/events?limit=0`);
   // The message keeps its own place (same event, same seq) with the edited text,
   // so the stored history — and Pi's rebuilt session — carry what was sent.
   assert.equal(after.filter(e => e.type === 'USER_MESSAGE').length, 1, 'not duplicated');
@@ -572,12 +583,14 @@ test('edit over HTTP rewrites the message in place and re-runs everything below 
   assert.equal(same.data.text, 'второе (исправлено)');
   assert.equal(same.message, 'второе (исправлено)');
   // Everything below it was wiped, and the model ran again on the new text.
-  const marker = after.find(e => e.type === 'TURN_TRUNCATED');
-  assert.equal(marker.data.reason, 'edit');
   assert.equal(marker.data.fromSeq, user.seq + 1);
   assert.equal(marker.data.keepUser, true);
   assert.ok(after.some(e => e.type === 'TURN_EDITED' && e.data.text === 'второе (исправлено)'), 'live clients learn the new text');
   assert.ok(after.some(e => e.seq > marker.seq && e.type === 'PI_EVENT'), 'the model answered again');
+
+  // The background delivery is still streaming: history mutations wait for the
+  // session to settle (the client surfaces the standard NOT_ALLOWED meanwhile).
+  await terminal(api, id);
 
   // An answer CAN be edited: as a branch it becomes another variant of the same
   // exchange, and the model is not asked. An empty edit is still refused.

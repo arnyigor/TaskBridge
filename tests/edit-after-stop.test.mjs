@@ -52,11 +52,15 @@ test('a failed delivery after edit keeps the text in the queue, not lost', async
   const userSeq = events0.find(e => e.type === 'USER_MESSAGE').seq;
   await f.manager.cancel('a', { hard: true });
 
-  // Delivery refuses (e.g. session start fails): the message must not be lost
-  // silently — #editTurn propagates the failure to the caller.
+  // Delivery refuses (e.g. session start fails): editTurn now answers right after
+  // the truncation and delivers in the background — the failure must not lose the
+  // text and must not block the caller (dialog) on a ~20 s session restart.
   f.runtime.pi.prompt = async () => { throw new Error('rpc down'); };
   f.runtime.pi.getState = async () => { throw new Error('rpc down'); };
-  await assert.rejects(() => f.manager.editTurn('a', { turnId: `user-${userSeq}`, text: 'исправленный вопрос' }));
+  const accepted = await f.manager.editTurn('a', { turnId: `user-${userSeq}`, text: 'исправленный вопрос' });
+  assert.ok(accepted, 'the edit itself is accepted immediately');
+  await new Promise(r => setImmediate(r));
+  await new Promise(r => setImmediate(r));
   // And the caller may retry: the turn is still editable and the text survives.
   f.runtime.pi.prompt = async text => { f.sent.push(text); };
   f.runtime.pi.getState = async () => ({ isStreaming: false });

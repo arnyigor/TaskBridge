@@ -5593,7 +5593,17 @@ export class TaskManager extends EventEmitter {
     // Live clients are told about the corrected text (the row above keeps its
     // cursor, so their stream would otherwise never notice the change).
     await this.#event(task, 'TURN_EDITED', 'Сообщение отредактировано и отправлено заново.', { id: value, text: edited, role: 'user' });
-    return this.#message(id, edited, 'auto', [], null, { immediate: true, announce: false });
+    // Отвечаем сразу после подтверждения правки: после STOP живая сессия
+    // перезапускается до ~20 с (STOPPED→STARTING→IDLE, живой журнал 2026-11-19),
+    // и держать HTTP (и открытый диалог правки) на всё это время — значит
+    // показывать оператору «ничего не происходит». Доставка уходит в фон: её
+    // отказ виден клиенту событиями (ход с ошибкой), текст остаётся в очереди
+    // и может быть повторён (регресс-тест edit-after-stop).
+    this.#message(id, edited, 'auto', [], null, { immediate: true, announce: false })
+      .catch(error => {
+        console.error(`[edit-resend] delivery failed: ${error?.message || error}`);
+      });
+    return { ok: true, turnId: value, role: 'user', branch: false };
   }
 
   // "Regenerate as a variant": the same question is put to the model again, but
