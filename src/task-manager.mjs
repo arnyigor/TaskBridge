@@ -4886,7 +4886,7 @@ export class TaskManager extends EventEmitter {
   // whether a newer turn has already taken the session over.
   #beginTurn(task) {
     const runtime = this.runtimes.get(task.id);
-    const turn = (runtime?.turn || 0) + 1;
+    const turn = Math.max(runtime?.turn || 0, task._turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
     task._turnEvidence = [];
