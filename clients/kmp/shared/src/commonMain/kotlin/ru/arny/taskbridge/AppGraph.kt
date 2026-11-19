@@ -273,10 +273,19 @@ class AppGraph(val platform: PlatformServices) {
                         state.tasks.count { displayStateOf(it) == DisplayState.WORKING || displayStateOf(it) == DisplayState.QUEUED },
                     )
                     if (!state.loading) {
-                        val reachable = state.error !is ApiError.Unreachable
-                        val recovered = !_online.value && reachable
-                        _online.value = reachable
-                        if (recovered) chats.values.forEach { it.reconnectNow() }
+                        val failure = state.error
+                        if (failure is ApiError.Unreachable) {
+                            // Один неудавшийся GET списка не решает за всю связь: смена сети,
+                            // обрыв одного сокета при живом сервере — обычное дело. Официальное
+                            // состояние ссылка подтверждает health-пробой, а не молча гасится.
+                            if (_online.value) refreshHostReachability()
+                        } else {
+                            // Список получен (или ошибка прикладная, не «нет связи»):
+                            // сервер отвечает, ссылка жива.
+                            val recovered = !_online.value
+                            _online.value = true
+                            if (recovered) chats.values.forEach { it.reconnectNow() }
+                        }
                     }
                 }
             }
@@ -351,9 +360,21 @@ class AppGraph(val platform: PlatformServices) {
             }
         }
 
+        /** Порядковый номер пробы связи: поздний ответ старой пробы не решает за новую. */
+        private var reachabilityProbe = 0
+
         private suspend fun refreshHostReachability() {
-            _online.value = api.health()
-            reportLinkOnce()
+            // Внешние вызовы пересекаются (heal-цикл, смена сети, ошибка списка).
+            // Внутри последовательность обновлений не должна описывать связь по
+            // устаревшему ответу: старая проба, вернувшаяся после новой с отказом,
+            // вернула бы живое приложение в Offline. Результат учитывается,
+            // только если проба — самая свежая.
+            val attempt = ++reachabilityProbe
+            val healthy = api.health()
+            if (attempt == reachabilityProbe) {
+                _online.value = healthy
+                reportLinkOnce()
+            }
         }
 
         /**
