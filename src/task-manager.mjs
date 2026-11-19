@@ -6079,12 +6079,28 @@ export class TaskManager extends EventEmitter {
     // running and the model answers the new text next. Only the model itself or
     // STOP ends a command.
     const send = async () => this.#message(id, text, mode, files, uploadToken, { immediate: opts.now === true, queue: opts.queue === true, origin });
-    if (!commandId) return this.#admit(send, id);
+    // Слот #admit занят всей доставкой (перезапуск Pi после STOP ~20-30 с),
+    // поэтому мгновенный повтор после отмены незасланного сообщения получал
+    // BUSY и падал красным (живой отчёт 2026-11-19, веб). Сообщение ждёт
+    // освобождения слота до 30 с: оно валидно, просто не сейчас. Без commandId
+    // повтор всё равно безопасен: первая доставка ещё не начала RPC.
+    const admitSend = () => this.#admit(send, id);
+    const sendWithWait = async () => {
+      const deadline = Date.now() + 30_000;
+      for (;;) {
+        try { return await admitSend(); }
+        catch (error) {
+          if (error?.code !== 'BUSY' || Date.now() >= deadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    };
+    if (!commandId) return sendWithWait();
     return this.#withCommand(
       commandId,
       opts && opts.clientId ? String(opts.clientId) : null,
       () => this.#payloadHash(id, text, mode, files, uploadToken, opts.now === true, opts.queue === true),
-      () => this.#admit(send, id),
+      sendWithWait,
     );
   }
 
