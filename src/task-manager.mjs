@@ -7011,6 +7011,11 @@ export class TaskManager extends EventEmitter {
       if (change) await this.#recordEvent(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason: type }, false);
     }
     const event = { at: now(), taskId: task.id, type, message, data };
+    // Терминальные события несут номер поколения и на конверте: клиенты и тесты
+    // сверяют envelope.turn с data.turn — два источника одного факта недопустимы.
+    if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) {
+      event.turn = Number.isFinite(task._turn) ? task._turn : null;
+    }
     // Ход закончился — будим устройства (телефон в локальной сети): уведомление
     // придёт за секунды, а не с ближайшим фоновым опросом. Fire-and-forget:
     // промах — штатный сон устройства, запасной канал остаётся.
