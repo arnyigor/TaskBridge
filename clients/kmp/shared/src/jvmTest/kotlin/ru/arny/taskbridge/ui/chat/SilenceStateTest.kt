@@ -52,11 +52,11 @@ class SilenceStateTest {
     }
 
     @Test
-    fun `an unanswered provider request is named as the first-token wait`() {
+    fun `silence is named the same regardless of the first token`() {
+        // Подпись «Ждём первый токен …» убрана: таймер один — общее молчание хода.
         val s = silenceState(task().copy(turnState = TurnState(phase = "DISPATCHING", turn = 3, silentMs = 180_000L, waitingModelMs = 180_000L)))!!
-        assertEquals("Ждём первый токен 3:00", s.label)
+        assertEquals("Модель молчит 3:00", s.label)
         assertEquals(180_000L, s.waitingModelMs)
-        // Поток уже открыт — прежняя подпись про молчание модели.
         assertEquals("Модель молчит 3:00", silenceState(task())!!.label)
         assertNull(silenceState(task())!!.waitingModelMs)
     }

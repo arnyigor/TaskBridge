@@ -10,12 +10,12 @@ internal fun assistantStreamPhaseLabel(answer: ChatItem.Assistant, turnState: Tu
     answer.thinking.isNotBlank() -> "Получаем размышления модели"
     turnState?.phase == "DISPATCHING" -> "Передаём запрос в Pi"
     turnState?.phase == "ACKED" -> "Pi принял запрос"
-    turnState?.waitingModelMs != null ->
-        "Запрос у провайдера модели · ждём первый токен ${mmss(turnState.waitingModelMs)}"
-    // Кадры Pi идут, но видимого вывода ещё нет: скорее всего скрытые размышления.
-    turnState != null -> "Модель отвечает без видимого вывода (возможно, скрытые размышления)"
+    // Кадры Pi идут, но видимого вывода нет. Наличие живого кадра не означает,
+    // что модель уже отвечает: кадром может быть системное событие, старт хода
+    // или работа инструментов — причину не утверждаем.
+    turnState != null -> "Pi обрабатывает запрос · ждём ответ модели"
     else -> "Сообщение передано · ожидается ответ агента"
 }
 
-/** M:SS without hours: banners show waits shorter than an hour. */
+/** M:SS without hours: silence display waits shorter than an hour. */
 internal fun mmss(ms: Long): String = "${ms / 60000}:${(ms % 60000 / 1000).toString().padStart(2, '0')}"

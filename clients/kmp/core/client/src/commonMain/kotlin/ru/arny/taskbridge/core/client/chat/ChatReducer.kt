@@ -359,15 +359,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         for (turn in turns) {
             if (turn.role != Role.ASSISTANT) continue
             if (turn.id.startsWith("assistant-pending-")) {
-                // Ход завершился, так и не подтвердив отправку (отмена до первого
-                // сообщения модели, отвал SSE и т.п.): pending-заглушка не должна
-                // крутиться «Ожидается подтверждение отправки» вечно.
-                if (turn.active || turn.status.isEmpty()) {
-                    turn.status = "FAILED"
-                    turn.error = turn.error ?: humanError ?: "Ответ не получен: ход завершился до первого сообщения модели"
-                }
-                turn.active = false
-                turn.final = true
+                // Терминал чужого (уже завершённого) хода не вправе объявлять
+                // неподтверждённую заглушку нового запроса ошибкой: её судьбу
+                // решают события доставки — USER_MESSAGE (reconcile), removeOptimistic
+                // при постановке в очередь или отказ доставки в ChatSession.
                 continue
             }
             // DONE (from agent_settled) is interim: the run's real terminal

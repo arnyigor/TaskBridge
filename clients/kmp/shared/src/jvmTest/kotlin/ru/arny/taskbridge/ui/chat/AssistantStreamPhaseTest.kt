@@ -105,12 +105,12 @@ class AssistantStreamPhaseWaitTest {
         assertEquals("Передаём запрос в Pi", assistantStreamPhaseLabel(assistant, TurnState(phase = "DISPATCHING")))
         assertEquals("Pi принял запрос", assistantStreamPhaseLabel(assistant, TurnState(phase = "ACKED")))
         assertEquals(
-            "Запрос у провайдера модели · ждём первый токен 2:05",
+            "Pi обрабатывает запрос · ждём ответ модели",
             assistantStreamPhaseLabel(assistant, TurnState(phase = "PROGRESS", waitingModelMs = 125_000L)),
         )
         // Поток открыт, но видимого вывода нет — причину не утверждаем.
         assertEquals(
-            "Модель отвечает без видимого вывода (возможно, скрытые размышления)",
+            "Pi обрабатывает запрос · ждём ответ модели",
             assistantStreamPhaseLabel(assistant, TurnState(phase = "PROGRESS")),
         )
     }

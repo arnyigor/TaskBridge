@@ -118,6 +118,33 @@ class ChatDeliveryRegressionTest {
         assertTrue(reducer.snapshot().items.filterIsInstance<ChatItem.User>().last().delivery.startsWith("Принято сервером"))
     }
 
+    @Test fun aForeignTerminalCannotTouchAConfirmedPendingEither() {
+        // acknowledge только ставит текст доставки: чужой терминал (TASK_SUCCEEDED
+        // предыдущего хода) не должен ни закрыть pending-ответ, ни подменить доставку.
+        val reducer = ChatReducer(task.copy(status = "RUNNING"))
+        reducer.addOptimistic("cmd", "новый запрос")
+        reducer.acknowledge("cmd")
+        reducer.syncTask(task.copy(status = "SUCCEEDED"))
+        val assistant = reducer.snapshot().items.filterIsInstance<ChatItem.Assistant>().last()
+        assertTrue(assistant.active, "pending остаётся живым до reconcile")
+        assertFalse(assistant.final)
+    }
+
+    @Test fun ownDeliveryFailureEndsThePendingBubbleWithoutEndlessWaiting() {
+        // Собственный отказ доставки (removeOptimistic — постановка в серверную
+        // очередь или возврат текста в composer): заглушки обязаны исчезнуть,
+        // «Ожидается подтверждение отправки» не должно висеть вечно.
+        val reducer = ChatReducer(task.copy(status = "SUCCEEDED"))
+        reducer.addOptimistic("cmd", "новый запрос")
+        assertTrue(reducer.hasOptimistic("cmd"))
+        reducer.removeOptimistic("cmd")
+        assertFalse(reducer.hasOptimistic("cmd"))
+        assertEquals(
+            emptyList(),
+            reducer.snapshot().items.filter { it.id.startsWith("assistant-pending-") || it.id.startsWith("user-pending-") }.map { it.id },
+        )
+    }
+
     @Test fun errorMessageEndsAnimationEvenWithoutSettledFrame() {
         val reducer = ChatReducer(task)
         reducer.frame(1, """{"type":"message_start","message":{"role":"assistant"}}""")

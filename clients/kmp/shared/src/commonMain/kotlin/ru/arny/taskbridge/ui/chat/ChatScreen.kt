@@ -2847,9 +2847,9 @@ internal fun chatEscape(dialogOpen: Boolean, searchOpen: Boolean, filesOpen: Boo
  */
 data class SilenceState(val totalMs: Long, val stage: String?, val waitingModelMs: Long? = null) {
     // waitingModelMs != null — запрос ещё не начал отвечать потоком (нет ни одного
-    // кадра ответа): причина не «модель молчит», а «первый токен не пришёл».
+    // кадра ответа); подпись одна в обоих случаях, таймер общий — молчание хода.
     val label: String
-        get() = if (waitingModelMs != null) "Ждём первый токен ${mmss(waitingModelMs)}" else "Модель молчит ${mmss(totalMs)}"
+        get() = "Модель молчит ${mmss(totalMs)}"
 }
 
 internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceState? {
