@@ -272,14 +272,20 @@ fun AssistantMessage(
                         item.text.isNotBlank() && item.text.trim() != item.error?.trim() -> CompositionLocalProvider(LocalOpenFile provides onOpenPath, LocalSearchItemId provides item.id) {
                             SelectionContainer { MarkdownView(item.text, onCopy = onCopyText) }
                         }
-                        item.active && item.error == null -> Column {
-                            TypingIndicator()
-                            Muted(when {
+                        item.active && item.error == null -> {
+                            val caption = when {
                                 item.id.startsWith("assistant-pending-") -> "Ожидается подтверждение отправки"
-                                item.tools.any { it.state == ToolState.RUNNING } -> "Агент выполняет команды"
+                                // Работающие инструменты и так видны (строки инструментов)
+                                // и продублированы в нижней статусной панели — вторая
+                                // одинаковая подпись «Агент выполняет команды» лишня.
+                                item.tools.any { it.state == ToolState.RUNNING } -> null
                                 item.thinking.isNotBlank() || item.tools.isNotEmpty() -> "Агент работает · итоговый ответ ещё не получен"
                                 else -> assistantStreamPhaseLabel(item, turnState)
-                            })
+                            }
+                            Column {
+                                TypingIndicator()
+                                caption?.let { Muted(it) }
+                            }
                         }
                         item.cutOff -> Muted("Запрос прерван")
                         item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null && item.segmentActions && item.id == item.canonicalId) Muted("Без текста")
@@ -309,6 +315,12 @@ fun AssistantMessage(
         // Расход за ответ — строкой под текстом: в мете (время · статус) она уже не
         // помещается, а на телефоне мета и так занимает свою строку. По нажатию
         // раскрывается таблица: одновременно открыт максимум один блок (id держит экран).
+        // Пустой оборванный/неудавшийся ход не рисует каркас «пустого сообщения»:
+        // без текста, размышлений и инструментов остаются только строка ошибки
+        // и «Запрос прерван» (жалоба оператора 2026-11-19).
+        val hasVisibleOutput = item.text.isNotBlank() || item.thinking.isNotBlank() || item.tools.isNotEmpty()
+        val silentTurn = !hasVisibleOutput &&
+            (item.error != null || item.status == "FAILED" || item.cutOff || item.status == "CANCELLED")
         val answerStatus = when {
             item.partial -> "Часть истории"
             item.cutOff -> "Прервано"
@@ -317,7 +329,7 @@ fun AssistantMessage(
             item.final && (item.status == "SUCCEEDED" || item.status == "DONE") -> "Готово"
             else -> null
         }
-        if (item.segmentActions && !item.active) usageDetails?.let { details ->
+        if (item.segmentActions && !item.active && !silentTurn) usageDetails?.let { details ->
             ResourceUsageBlock(
                 details = details,
                 expanded = usageExpanded,
@@ -333,7 +345,7 @@ fun AssistantMessage(
             )
         }
         val showActions = !desktop || hovered || buttonMenu || actions.regenerate != null
-        if (item.segmentActions && (item.final || !item.active)) {
+        if (item.segmentActions && !silentTurn && (item.final || !item.active)) {
             val meta: @Composable () -> Unit = {
                 item.variants?.let { variants ->
                     IconButton(onClick = { onSelectVariant(variants.index - 1) }, enabled = variants.index > 0, modifier = Modifier.size(28.dp)) {

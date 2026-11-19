@@ -22,6 +22,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
+import ru.arny.taskbridge.core.client.chat.AnswerUsage
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -117,6 +118,42 @@ class ChatErrorTest {
         onNodeWithText("Закрыть").performClick()
         onNodeWithText(providerNotice).assertDoesNotExist()
         onNodeWithText("Подробнее").assertIsDisplayed()
+    }
+
+    @Test
+    fun anEmptyFailedAnswerShowsOnlyTheErrorRowWithoutAFrame() = runComposeUiTest {
+        // Регресс 2026-11-19: после остановки/срыва хода без вывода оставался
+        // пустой каркас — чип «Использование», мета «время · Ошибка» и кнопки
+        // под ним. Для хода без текста, размышлений и инструментов должен
+        // остаться только строка ошибки.
+        val details = UsageDetails(
+            text = "Использование 4 с",
+            usage = AnswerUsage(hit = 0, miss = 0, out = 0, cacheWrite = 0),
+            metrics = null,
+            modelId = "",
+            local = false,
+            peak = false,
+            multiplier = 1.0,
+            cost = null,
+        )
+        setContent {
+            MaterialTheme {
+                Box(Modifier.width(320.dp)) {
+                    AssistantMessage(
+                        item = answer(text = "", error = "Pi снова молчит 120 с — ход остановлен."),
+                        time = "20:20 · 4 с · Ошибка",
+                        actions = MessageActions(copy = {}, regenerate = {}),
+                        onCopyText = {}, loadToolOutput = { error("unused") }, onOpenPath = {},
+                        onSelectVariant = {}, onOpenFile = { _, _ -> }, loadFile = { error("unused") },
+                        loadWorkspaceFile = { error("unused") },
+                        usageDetails = details,
+                    )
+                }
+            }
+        }
+        onNodeWithText("Не удалось получить ответ").assertIsDisplayed()
+        onNodeWithText("Использование 4 с").assertDoesNotExist()
+        onNodeWithText("20:20 · 4 с · Ошибка").assertDoesNotExist()
     }
 
     @Test
