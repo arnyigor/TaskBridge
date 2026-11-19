@@ -268,6 +268,44 @@ async function start() {
   const reconciled = await reconcileExisting();
   if (reconciled !== null) return reconciled;
 
+  // Частично сломанная прежняя пара: reconcile не смог (например, app мёртв,
+  // а proxy жив). Старт не вправе оставлять её процессы рядом с новыми —
+  // именно так накапливались orphan-серверы (2026-11-19/20: 7 лишних
+  // server.mjs и 2 proxy/supervisor после серии неудачных рестартов).
+  // Убивается только ПРОВЕРЕННЫЙ наш процесс, не отвечающий health-ом.
+  const stale = readState();
+  if (stale) {
+    if (stale.appPid && isTaskBridgeProcess(stale.appPid, 'server.mjs') && !(await health(stale.internalPort))) {
+      killTree(stale.appPid);
+      console.log(`[lan] остановлен сломанный app-сервер ${stale.appPid} из прежней пары`);
+    }
+    if (stale.proxyPid && isTaskBridgeProcess(stale.proxyPid, 'proxy.mjs') && !(await health(stale.publicPort))) {
+      killTree(stale.proxyPid);
+      console.log(`[lan] остановлен сломанный proxy ${stale.proxyPid} из прежней пары`);
+    }
+    try { fs.unlinkSync(STATE); } catch { /* gone */ }
+  }
+
+  // Единый владелец жизненного цикла: ручной старт и супервизор не должны
+  // перезапускать пару одновременно (lan-restart.lock — тот же замок, что
+  // использует restart-lan-now).
+  const activeRestart = readJsonSafe(path.join(DATA, 'lan-restart.lock'));
+  if (activeRestart?.pid && isTaskBridgeProcess(activeRestart.pid, 'restart-lan-now.mjs')) {
+    console.error('[lan] restart already in progress — пропускаю старт, попробуйте позже.');
+    return 1;
+  }
+  const lockFile = path.join(DATA, 'lan-restart.lock');
+  fs.mkdirSync(DATA, { recursive: true });
+  fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  try {
+    return await startPair();
+  } finally {
+    try { fs.unlinkSync(lockFile); } catch { /* gone */ }
+  }
+}
+
+async function startPair() {
+
   const config = await loadConfig(ROOT);
   // LAN_PORT is how a smoke run stands next to a live server instead of fighting
   // it for the configured port.
