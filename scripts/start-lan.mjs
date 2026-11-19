@@ -55,6 +55,8 @@ function killTree(pid) {
   } catch { /* already gone */ }
 }
 
+const readJsonSafe = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
+
 function freePort() {
   return new Promise((resolve, reject) => {
     const probe = net.createServer();
@@ -210,6 +212,7 @@ async function reconcileExisting() {
       && await health(existing.internalPort) && await health(existing.publicPort)) {
     console.log(`[lan] already running: app ${existing.appPid}, proxy ${existing.proxyPid}`);
     console.log(`[lan] http://127.0.0.1:${existing.publicPort}`);
+    ensureSupervisor();
     return 0;
   }
 
@@ -231,6 +234,7 @@ async function reconcileExisting() {
     }, null, 2));
     console.log(`[lan] recovered pair: app ${lock.pid}, proxy ${proxy.pid}`);
     console.log(`[lan] http://127.0.0.1:${lock.publicPort}`);
+    ensureSupervisor();
     return 0;
   }
 
@@ -240,6 +244,24 @@ async function reconcileExisting() {
   if (existing?.appPid && serverAlive(existing.appPid)) killTree(existing.appPid);
   try { fs.unlinkSync(STATE); } catch { /* absent */ }
   return null;
+}
+
+
+function ensureSupervisor() {
+  // После reconcile (жилая пара/восстановление) супервизор тоже нужен:
+  // без него молчаливая смерть app-сервера снова оставит телефон без связи.
+  try {
+    const supervisor = spawnDetached({
+      file: process.execPath,
+      args: ['scripts/lan-supervisor.mjs'],
+      log: path.join(DATA, 'lan-supervisor.log'),
+    });
+    console.log(`[lan] supervisor ${supervisor.pid} (data/lan-supervisor.log)`);
+    return supervisor;
+  } catch (error) {
+    console.warn(`[lan] supervisor not started: ${error?.message || error}`);
+    return null;
+  }
 }
 
 async function start() {
@@ -301,6 +323,10 @@ async function start() {
   console.log(`[lan] app   ${app.pid}  -> 127.0.0.1:${internalPort}  (the only door: loopback)`);
   console.log(`[lan] proxy ${proxy.pid} -> ${lanHost}:${publicPort}       (${lanHost === '127.0.0.1' ? 'LAN closed: server.auth.enabled is false' : 'this is what the phone opens'})`);
   console.log(`[lan] http://127.0.0.1:${publicPort}`);
+  // Авария 2026-11-19: detached-пара жила без присмотра — молчаливая смерть
+  // app-сервера оставляла прокси указывать на мёртвый upstream ~40 минут.
+  // Супервизор рестартирует пару по стандартному жизненному циклу.
+  ensureSupervisor();
   console.log(`[lan] pids in ${DATA}/lan.json, logs ${DATA}/lan-*.log`);
   return 0;
 }
@@ -386,6 +412,14 @@ async function stop() {
   const state = readState();
   const lock = readLock();
   const stopped = [];
+  // Супервизор не должен рестартить пару, которую остановили руками: убивается
+  // первым, его pid-файл чистится, чтобы новый старт породил нового.
+  const supervisor = readJsonSafe(path.join(DATA, 'lan-supervisor.json'));
+  if (supervisor?.pid) {
+    killTree(supervisor.pid);
+    stopped.push(`supervisor ${supervisor.pid}`);
+    try { fs.unlinkSync(path.join(DATA, 'lan-supervisor.json')); } catch { /* gone */ }
+  }
   if (state?.proxyPid && proxyAlive(state.proxyPid)) { killTree(state.proxyPid); stopped.push(`proxy ${state.proxyPid}`); }
   if (lock?.pid && serverAlive(lock.pid)) { killTree(lock.pid); stopped.push(`app ${lock.pid}`); }
   if (state?.appPid && state.appPid !== lock?.pid && serverAlive(state.appPid)) {
