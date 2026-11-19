@@ -312,6 +312,17 @@ async function start() {
 
 async function startPair() {
 
+  // P0 изоляция (инцидент 2026-11-20): тестовый экземпляр с собственным
+  // каталогом данных не имеет права занимать боевой порт из config — укажите
+  // LAN_PORT. Без этого проверка песочница молча забирала 8787.
+  const dataDirOverride = process.env.TASKBRIDGE_DATA_DIR
+    && path.resolve(process.env.TASKBRIDGE_DATA_DIR) !== path.join(ROOT, 'data');
+  if (dataDirOverride && !process.env.LAN_PORT) {
+    console.error('[lan] изолированный каталог данных (TASKBRIDGE_DATA_DIR) требует LAN_PORT: ' +
+      'тестовый экземпляр не может занимать боевой порт.');
+    return 1;
+  }
+
   const config = await loadConfig(ROOT);
   // LAN_PORT is how a smoke run stands next to a live server instead of fighting
   // it for the configured port.

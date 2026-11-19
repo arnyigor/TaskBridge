@@ -75,6 +75,15 @@ async function writeFailure(error) {
   await fs.writeFile(reportPath, message, 'utf8').catch(() => {});
 }
 
+// P0 изоляция: рестарт тестового экземпляра (свой каталог данных) обязан
+// держать свой LAN_PORT — иначе рестарт уводил пару на боевой порт.
+const dataDirOverride = process.env.TASKBRIDGE_DATA_DIR
+  && path.resolve(process.env.TASKBRIDGE_DATA_DIR) !== path.join(ROOT, 'data');
+if (dataDirOverride && !process.env.LAN_PORT && !process.argv.includes('--dry-run')) {
+  console.error('[lan] изолированный каталог данных (TASKBRIDGE_DATA_DIR) требует LAN_PORT.');
+  process.exit(1);
+}
+
 const acquired = await acquireRestartLock();
 if (!acquired) process.exit(0); // another accepted request already owns the restart
 

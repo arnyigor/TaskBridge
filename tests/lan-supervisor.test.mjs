@@ -77,6 +77,24 @@ test('a dead app is restarted on the pair own public port, not the configured on
   await new Promise(resolve => { cleanup.on('exit', resolve); setTimeout(resolve, 30_000); });
 });
 
+test('an isolated data dir without LAN_PORT refuses to start instead of taking the production port', { timeout: 60_000 }, async t => {
+  // P0 изоляция (инцидент 2026-11-20): песочница без LAN_PORT забирала боевой
+  // порт 8787. Контракт: старт отклоняется, боевая пара не тронута.
+  const dir = sandbox(t);
+  const before = await fetch('http://127.0.0.1:8787/api/health', { signal: AbortSignal.timeout(3000) })
+    .then(r => r.status).catch(() => 0);
+  const result = spawn(process.execPath, ['scripts/start-lan.mjs', 'start'], {
+    cwd: root,
+    env: { ...process.env, TASKBRIDGE_DATA_DIR: dir },   // LAN_PORT намеренно не задан
+    stdio: 'ignore',
+  });
+  const code = await new Promise(resolve => { result.on('exit', resolve); setTimeout(() => resolve(-1), 20_000); });
+  assert.equal(code, 1, 'старт без LAN_PORT отклоняется');
+  const after = await fetch('http://127.0.0.1:8787/api/health', { signal: AbortSignal.timeout(3000) })
+    .then(r => r.status).catch(() => 0);
+  assert.equal(after, before, 'боевой порт не меняется');
+});
+
 test('a missing lan.json for several ticks means stop — the supervisor exits', { timeout: 30_000 }, async t => {
   const dir = sandbox(t);
   writeState(dir, { appPid: 1, proxyPid: 1, internalPort: 55555, publicPort: 8792, startedAt: '2026-01-01T00:00:00Z' });

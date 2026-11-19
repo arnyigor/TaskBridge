@@ -161,6 +161,10 @@ class AppGraph(val platform: PlatformServices) {
 
     inner class Connected(val baseUrl: String) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        /** Адрес отвечает ДРУГИМ экземпляром TaskBridge (чужая база): fail-closed —
+         *  сохранённый storeId не подменяется, кэш и курсоры остаются при старом
+         *  хранилище, состояние видно оператору (инцидент 2026-11-20). */
+        val storeMismatch = MutableStateFlow(false)
         private val http = platform.httpClient(baseUrl)
         val api = TaskBridgeApi(http, StoredConnection(settings, baseUrl))
         val sessions = SessionList(
@@ -254,8 +258,13 @@ class AppGraph(val platform: PlatformServices) {
                     val info = state.info
                     settingsController.syncProviderStatuses(info?.providerStatuses.orEmpty())
                     // A different database (restored or recreated): nothing cached here is valid.
-                    if (info?.storeId != null && info.storeId != settings.storeId) {
-                        settings.storeId = info.storeId
+                    // Fail-closed (P0 изоляция, инцидент 2026-11-20): чужой storeId НЕ
+                    // подменяет сохранённый и виден оператору; подмена случалась молча,
+                    // и клиент объявлял рабочие сессии удалёнными.
+                    if (info?.storeId != null) {
+                        val known = settings.storeId
+                        if (known == null) settings.storeId = info.storeId
+                        else storeMismatch.value = known != info.storeId
                     }
                     val projectNames = state.projects.associate { it.id to it.displayName }
                     for (alert in alerts.update(state.tasks, projectNames)) {

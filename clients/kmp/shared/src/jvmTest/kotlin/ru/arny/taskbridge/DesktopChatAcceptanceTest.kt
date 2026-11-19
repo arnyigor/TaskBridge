@@ -145,6 +145,54 @@ class DesktopChatAcceptanceTest {
         }
     }
 
+    @Test
+    fun aForeignStoreIdIsNotSilentlyAdoptedAndIsSurfacedToTheOperator() = runComposeUiTest {
+        // P0 Production/Test Isolation (инцидент 2026-11-20): клиент подключился к
+        // ТЕСТОВОМУ экземпляру на боевом адресе, молча принял его storeId и объявил
+        // сессии удалёнными. Контракт: чужой storeId не подменяет сохранённый,
+        // состояние видимo оператору, кэш/курсоры остаются при старом хранилище.
+        val fixture = ProcessBuilder("node", "tests/fixture-server.mjs")
+            .directory(File(System.getProperty("taskbridge.repo")))
+            .redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        val output = fixture.inputStream.bufferedReader()
+        val input = fixture.outputStream.bufferedWriter()
+        fun fixtureLine(): String = CompletableFuture.supplyAsync { output.readLine() }
+            .get(30, TimeUnit.SECONDS) ?: error("fixture output closed")
+        var graph: AppGraph? = null
+        try {
+            val ready = fixtureLine()
+            val base = TaskBridgeJson.parseToJsonElement(ready).jsonObject.getValue("base").jsonPrimitive.content
+            // Клиент «помнит» другой экземпляр: первое подключение к фикстуре — чужая база.
+            val memory = MemorySettings().apply {
+                put("serverUrl", base)
+                put("storeId", "expected-production-store")
+            }
+            val desktop = DesktopPlatformServices(store = memory)
+            val platform = object : PlatformServices by desktop {
+                override val secrets: SecretStore = memory
+                override fun chatPersistence(serverUrl: String): ChatPersistence = NoopChatPersistence
+            }
+            val app = AppGraph(platform)
+            graph = app
+            val connection = app.connection ?: error("isolated connection missing")
+            val task = runBlocking { connection.api.createTask(CreateTaskRequest(projectId = "fixture", prompt = "foreign store acceptance")) }
+            val chat = connection.chat(task.id)
+            setContent { App(app, openTaskId = task.id) }
+            waitUntil(timeoutMillis = 30_000) { chat.state.value.link == LinkState.Live }
+            waitUntil(timeoutMillis = 15_000) { app.connection?.storeMismatch?.value == true }
+            assertEquals("expected-production-store", memory.get("storeId"),
+                "чужой storeId не должен подменять сохранённый")
+        } finally {
+            graph?.disconnect()
+            graph?.scope?.cancel()
+            input.close()
+            if (!fixture.waitFor(15, TimeUnit.SECONDS)) {
+                fixture.destroy()
+                check(fixture.waitFor(5, TimeUnit.SECONDS)) { "fixture did not terminate" }
+            }
+        }
+    }
+
     private class MemorySettings : KeyValueStore, SecretStore {
         private val values = ConcurrentHashMap<String, String>()
         override fun get(key: String): String? = values[key]

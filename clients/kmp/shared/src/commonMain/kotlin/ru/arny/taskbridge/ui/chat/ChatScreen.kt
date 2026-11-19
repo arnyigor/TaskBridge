@@ -518,6 +518,11 @@ fun ChatScreen(
                 Modifier.padding(padding).fillMaxSize().imePadding(),
             ) {
                 if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
+                if (connection.storeMismatch.value) Banner(
+                    text = "Подключён другой экземпляр TaskBridge — эта история не с этого компьютера",
+                    icon = AppIcons.Offline,
+                    color = LocalStatusColors.current.failed,
+                )
                 LinkBanner(state.link, onRetry = { session.reconnectNow() })
                 // Сессия хранит журнал кадров (вывод инструментов) и вложения: гигабайты
                 // набираются незаметно. Предупреждение — только текст, ничего не удаляется.
