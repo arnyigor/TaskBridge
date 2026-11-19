@@ -713,6 +713,12 @@ export class TaskManager extends EventEmitter {
       restorePendingFiles: id => this.#restorePendingFiles(id),
       onRestored: task => {
         this.tasks.set(task.id, task);
+        // Номер поколения хода должен переживать рестарт: _turn не персистится
+        // (publicTask его вырезает), но в turnState.turn он был сохранён.
+        // Без восстановления после рестарта нумерация начиналась бы заново —
+        // два разных хода получили бы одинаковый номер и атрибуция терминалов
+        // по поколению сломалась бы в другую сторону.
+        task._turn = Math.max(task._turn || 0, task.turnState?.turn || 0);
         task._runtimeState = this.#runtimeFacts(task).state;
       },
       continuePrompt: CONTINUE_PROMPT,

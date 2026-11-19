@@ -84,6 +84,42 @@ class EditLifecycleTest {
     }
 
     @Test
+    fun `full history recovery after edit-resend keeps one correct answer`() {
+        // Матрица: STOP → TURN_TRUNCATED → TURN_EDITED → новый ход → SSE-обрыв →
+        // загрузка журнала → старый терминал → reconnect → ответ нового хода.
+        val reducer = reducer()
+        val live = listOf(
+            userMessage(100, "12:00:00", "вопрос", 5),
+            terminal("TASK_CANCELLED", 110, "12:00:20", 5),
+            turnTruncated(120, "12:00:30", fromSeq = 101),
+            event(121, "TURN_EDITED", "12:00:31", TaskBridgeJson.parseToJsonElement(
+                """{"id": "user-100", "text": "исправлено", "role": "user"}""") as JsonObject),
+        )
+        for (e in live) reducer.apply(e)
+
+        // SSE вернулся: клиент перечитывает журнал (новый редьюсер — холодный старт)
+        // и получает снимок RUNNING нового поколения.
+        val reconnect = reducer()
+        for (e in live) reconnect.apply(e)
+        reconnect.syncTask(task.copy(status = "RUNNING", turnState = TurnState(phase = "PROGRESS", turn = 6)))
+
+        // Поздний терминал старого поколения доезжает после reconnect.
+        reconnect.apply(terminal("TASK_CANCELLED", 200, "12:01:00", 5))
+        val answer = assistants(reconnect).last()
+        assertFalse(answer.final, "старый терминал после reconnect не закрывает новый ход")
+        assertTrue(answer.active)
+
+        // Ответ нового хода доезжает и завершается успешно.
+        reconnect.apply(terminal("TASK_SUCCEEDED", 210, "12:02:00", 6))
+        val done = assistants(reconnect).last()
+        assertEquals("SUCCEEDED", done.status)
+        assertEquals(null, done.error)
+        assertTrue(reconnect.snapshot().items.filterIsInstance<ChatItem.Assistant>()
+            .none { it.final && it.error != null && it.text.isBlank() },
+            "пустой FAILED-блок не появляется")
+    }
+
+    @Test
     fun `a successful resent answer leaves no empty FAILED block`() {
         val reducer = reducer()
         reducer.apply(userMessage(100, "12:00:00", "вопрос", 5))
