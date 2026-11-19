@@ -5599,7 +5599,7 @@ export class TaskManager extends EventEmitter {
     // показывать оператору «ничего не происходит». Доставка уходит в фон: её
     // отказ виден клиенту событиями (ход с ошибкой), текст остаётся в очереди
     // и может быть повторён (регресс-тест edit-after-stop).
-    this.#message(id, edited, 'auto', [], null, { immediate: true, announce: false })
+    this.#message(id, edited, 'auto', [], null, { queue: true, announce: false })
       .catch(error => {
         console.error(`[edit-resend] delivery failed: ${error?.message || error}`);
       });
