@@ -286,11 +286,17 @@ async function start() {
     try { fs.unlinkSync(STATE); } catch { /* gone */ }
   }
 
-  // Единый владелец жизненного цикла: ручной старт и супервизор не должны
-  // перезапускать пару одновременно (lan-restart.lock — тот же замок, что
-  // использует restart-lan-now).
+  // Единый владелец жизненного цикла: независимый параллельный старт
+  // отклоняется, а дочерний старт самого рестарт-воркера — авторизован:
+  // restart-lan-now держит замок весь цикл и сам вызывает start; отказ ребёнку
+  // означал бы «stop выполнен, пара не поднята» (дедлок, ревью 2026-11-20).
+  // Владение доказывается токеном: рестарт-воркер кладёт свой pid в env,
+  // дети наследуют его, и замок подтверждается совпадением.
   const activeRestart = readJsonSafe(path.join(DATA, 'lan-restart.lock'));
-  if (activeRestart?.pid && isTaskBridgeProcess(activeRestart.pid, 'restart-lan-now.mjs')) {
+  const ownerPid = Number(process.env.TASKBRIDGE_LIFECYCLE_OWNER || 0);
+  const ownerAuthorized = ownerPid > 0 && activeRestart?.pid === ownerPid
+    && isTaskBridgeProcess(activeRestart.pid, 'restart-lan-now.mjs');
+  if (activeRestart?.pid && !ownerAuthorized) {
     console.error('[lan] restart already in progress — пропускаю старт, попробуйте позже.');
     return 1;
   }

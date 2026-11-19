@@ -79,6 +79,9 @@ const acquired = await acquireRestartLock();
 if (!acquired) process.exit(0); // another accepted request already owns the restart
 
 try {
+  // Дочерние start-lan авторизуются этим токеном: замок держится весь цикл,
+  // и child start обязан знать, что его вызвал владелец замка.
+  process.env.TASKBRIDGE_LIFECYCLE_OWNER = String(process.pid);
   const before = await readJson(STATE).catch(() => null);
   if (process.argv.includes('--dry-run')) {
     console.log(`dry-run: app=${before?.appPid ?? 'none'} proxy=${before?.proxyPid ?? 'none'} ports ${before?.internalPort ?? '?'}->${before?.publicPort ?? '?'}`);
