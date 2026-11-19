@@ -86,8 +86,12 @@ async function main() {
         if (deadTicks >= DEAD_TICKS && !restarting) {
           restarting = true;
           log(`app ${state.appPid} / proxy ${state.proxyPid} dead (app alive=${appAlive}, proxy alive=${proxyAlive}) — restarting the pair`);
+          // Пара, запущенная с LAN_PORT, при рестарте обязана остаться на своём
+          // публичном порту: без этого старт берёт порт из config и пара переезжает
+          // (проверено в песочнице 2026-11-19).
           const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
+            env: { ...process.env, LAN_PORT: String(state.publicPort) },
           });
           worker.unref();
           // Restart-lan-now rewrites lan.json and spawns a new supervisor.
@@ -105,6 +109,7 @@ async function main() {
           log(`app ${state.appPid} answers nothing on ${state.internalPort} for ${unhealthyTicks * (TICK_MS / 1000)} s — restarting the pair`);
           const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
+            env: { ...process.env, LAN_PORT: String(state.publicPort) },
           });
           worker.unref();
           continue;
