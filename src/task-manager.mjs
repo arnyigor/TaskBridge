@@ -5030,7 +5030,7 @@ export class TaskManager extends EventEmitter {
     // client that polls the status must never receive TASK_SUCCEEDED as a late
     // event (that ordering race flaked tests/server.test.mjs).
     await this.#turnStateEvent(task, 'SETTLED');
-    await this.#event(task, 'TASK_SUCCEEDED', task.current);
+    await this.#event(task, 'TASK_SUCCEEDED', task.current, { turn: Number.isFinite(turn) ? turn : null });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
     if (commands.length) this.#runVerification(task, commands, turn);
@@ -5283,7 +5283,7 @@ export class TaskManager extends EventEmitter {
     task.current = 'Cancelled';
     task.updatedAt = now();
     await this.#turnStateEvent(task, 'CANCELLED');
-    await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
+    await this.#event(task, 'TASK_CANCELLED', 'Task cancelled', { turn: Number.isFinite(task._turn) ? task._turn : null });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task);
   }

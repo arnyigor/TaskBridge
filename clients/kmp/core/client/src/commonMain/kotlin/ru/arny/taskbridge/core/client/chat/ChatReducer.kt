@@ -92,6 +92,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         var clientId: String? = null,
         var commandId: String? = null,
         var mode: String? = null,
+        /** Номер хода из USER_MESSAGE (data.turn): терминалы обязаны сверяться
+         *  с ним, а не со временем — клеминал чужого поколения приходит и позже. */
+        var turnNo: Long? = null,
         var delivery: String = "Передано агенту",
         val compactionBoundaries: MutableList<CompactionBoundary> = mutableListOf(),
         val compactionNotice: Boolean = false,
@@ -305,7 +308,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         version++
     }
 
-    private fun addUser(text: String, files: List<FileRef>, id: String, at: String? = null, preservePrevious: Boolean = false, origin: TaskEvent? = null) {
+    private fun addUser(text: String, files: List<FileRef>, id: String, at: String? = null, preservePrevious: Boolean = false, origin: TaskEvent? = null, turnNo: Long? = null) {
         if (!preservePrevious && current.role == Role.ASSISTANT && !current.final && current.id.isNotEmpty()) {
             current.active = false
             current.superseded = true
@@ -326,12 +329,12 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             delivery = if (preservePrevious) "Принято Pi · ждёт применения" else "Принято Pi · ждём ответ модели",
         )
         val key = if (id == "initial") 0L else id.toLong()
-        current = Turn(id = "assistant-$id", role = Role.ASSISTANT, variantKey = key, userAt = at)
+        current = Turn(id = "assistant-$id", role = Role.ASSISTANT, variantKey = key, userAt = at, turnNo = turnNo)
         turns += current
         variants[key] = Variants(mutableListOf("assistant-$id"), "assistant-$id")
     }
 
-    private fun finish(status: String, error: String? = null, at: String? = null) {
+    private fun finish(status: String, error: String? = null, at: String? = null, turnNo: Long? = null) {
         val humanError = error?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }
         // Legacy terminal events/polls may contain only the generic wrapper.
         // Keep the concrete cause already recovered from Pi's message_end.
@@ -341,9 +344,41 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         fun cutOff(turn: Turn) = !answered(turn) && (turn.superseded || status == "CANCELLED")
         fun labelFor(turn: Turn) = if (turn.error != null || cutOff(turn)) "FAILED" else status
 
+        // Привязка по поколению хода надёжнее времени: терминал чужого поколения
+        // (STOP/SUCCEEDED, дошедший после TURN_TRUNCATED) не имеет права закрывать
+        // новый ход (живой отчёт 2026-11-19: правка → повтор → ложная ошибка).
+        // 1) Свежая заглушка после правки (без доставки) и терминал другого
+        //    поколения: номер заглушки неизвестен/иной — чужой терминал закрывает
+        //    предыдущий ответ.
+        // 2) Известны оба номера и они совпали — терминал своего поколения.
+        val freshPlaceholder = current.at == null && current.userAt == null && current.status.isEmpty()
+        val generationMismatch = if (current.turnNo != null) turnNo != current.turnNo else freshPlaceholder
+        if (turnNo != null && generationMismatch) {
+            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
+            if (previous != null) {
+                previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
+                if (humanError != null) previous.error = errorFor(previous)
+                previous.endedAt = previous.endedAt ?: at
+                previous.final = true
+                for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
+            }
+            return
+        }
+        val currentNo = current.turnNo
+        if (turnNo != null && currentNo != null && turnNo < currentNo) {
+            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
+            if (previous != null) {
+                previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
+                if (humanError != null) previous.error = errorFor(previous)
+                previous.endedAt = previous.endedAt ?: at
+                previous.final = true
+                for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
+            }
+            return
+        }
         // A late settle that predates the CURRENT prompt belongs to the previous answer.
         val currentStart = current.at ?: current.userAt
-        if (at != null && currentStart != null && before(at, currentStart)) {
+        if (turnNo == null && at != null && currentStart != null && before(at, currentStart)) {
             val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
             if (previous != null) {
                 previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
@@ -367,6 +402,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             }
             // DONE (from agent_settled) is interim: the run's real terminal
             // event (cancelled, failed) replaces it.
+            if (turn.turnNo != null && turnNo != null && turn.turnNo != turnNo) continue
             val interim = turn.status.isEmpty() || turn.status == "DONE"
             if (turn.active || (interim && !turn.superseded)) turn.status = labelFor(turn)
             turn.active = false
@@ -374,7 +410,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             for (tool in turn.tools) if (tool.state == "run") tool.state = "interrupted"
         }
         current.status = if (humanError != null || current.error != null || cutOff(current)) "FAILED" else status
+        current.active = false
         current.final = true
+        // Терминнал новее последнего известного номера — события были пропущены:
+        // усыновляем номер, чтобы следующие терминалы сверялись корректно.
+        if (turnNo != null && current.turnNo == null) current.turnNo = turnNo
         if (humanError != null) current.error = errorFor(current)
         if (at != null) for (turn in running.ifEmpty { listOf(current) }) {
             if (before(at, turn.at)) continue
@@ -443,7 +483,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (keepUser) {
             while (turns.isNotEmpty() && turns.last().role != Role.USER) forget(turns.removeAt(turns.lastIndex))
             val seed = turns.lastOrNull()?.let { seqOf(it)?.toString() } ?: "initial"
-            current = Turn(id = "assistant-$seed", role = Role.ASSISTANT, active = !deleting, variantKey = seed.toLongOrNull() ?: 0L)
+            current = Turn(id = "assistant-$seed", role = Role.ASSISTANT, active = !deleting, variantKey = seed.toLongOrNull() ?: 0L, turnNo = null)
+            // Повторная доставка после правки нумерует ход позже (announce:false):
+            // пока номер неизвестен, чужие терминалы не вправе закрывать ход.
             if (!deleting) turns += current
         } else {
             current = turns.lastOrNull { it.role == Role.ASSISTANT }
@@ -543,7 +585,12 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 mergeTurnMetrics(metrics)
             }
             "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
-                finish(event.type.removePrefix("TASK_"), if (event.type == "TASK_FAILED") event.message else null, event.at)
+                finish(
+                    event.type.removePrefix("TASK_"),
+                    if (event.type == "TASK_FAILED") event.message else null,
+                    event.at,
+                    event.data.long("turn"),
+                )
             // Output of a slash extension command (/nudge status, ...): Pi runs it
             // locally and delivers the answer as a notify UI request — shown as a
             // note row, otherwise the command would execute silently.
@@ -595,15 +642,16 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 assistant.variantKey = event.seq
                 assistant.active = true
                 assistant.userAt = event.at
+                assistant.turnNo = event.data.long("turn")
                 current = assistant
                 variants[event.seq] = Variants(mutableListOf("assistant-${event.seq}"), "assistant-${event.seq}")
             } else {
                 turns.remove(optimistic)
-                addUser(text, files, event.seq.toString(), event.at, preservePrevious, event)
+                addUser(text, files, event.seq.toString(), event.at, preservePrevious, event, event.data.long("turn"))
                 current.active = true
             }
         } else {
-            addUser(text, files, event.seq.toString(), event.at, preservePrevious, event)
+            addUser(text, files, event.seq.toString(), event.at, preservePrevious, event, event.data.long("turn"))
             current.active = true
         }
     }
@@ -891,6 +939,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         messageOpen = false
     }
 
+    /** Нумерация текущего хода без USER_MESSAGE (announce:false после правки):
+     *  снимок/snapshot сообщает номер поколения, с которым сверяются терминалы. */
+    internal fun renumberCurrentTurn(turnNo: Long?) {
+        if (current.turnNo == null) current.turnNo = turnNo
+        version++
+    }
+
     /** Folds the task's own status in (it arrives with the task, not as an event). */
     fun syncTask(task: Task, initial: Boolean = false) {
         if (!initialPromptAccepted && turns.count { it.role == Role.USER } == 1) {
@@ -912,8 +967,12 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 current.thinking = task.thinkingText.orEmpty()
             }
         }
-        if (task.status !in ACTIVE_STATUSES) finish(task.status, task.error)
-        else if (initial && !current.final) current.active = true
+        if (task.status in ACTIVE_STATUSES) {
+            renumberCurrentTurn(task.turnState?.turn)
+            if (!current.final) current.active = true
+        } else {
+            finish(task.status, task.error, null, task.turnState?.turn)
+        }
         if (!current.final) current.status = task.status
         version++
     }
