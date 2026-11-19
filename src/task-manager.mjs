@@ -6082,13 +6082,13 @@ export class TaskManager extends EventEmitter {
     // Слот #admit занят всей доставкой (перезапуск Pi после STOP ~20-30 с),
     // поэтому мгновенный повтор после отмены незасланного сообщения получал
     // BUSY и падал красным (живой отчёт 2026-11-19, веб). Сообщение ждёт
-    // освобождения слота до 30 с: оно валидно, просто не сейчас. Без commandId
-    // повтор всё равно безопасен: первая доставка ещё не начала RPC.
-    const admitSend = () => this.#admit(send, id);
+    // освобождения слота (по умолчанию 30 с): оно валидно, просто не сейчас.
+    // Без commandId повтор всё равно безопасен: первая доставка ещё не начала RPC.
+    const admitWaitMs = Number(opts.admitWaitMs ?? 30_000);
     const sendWithWait = async () => {
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + admitWaitMs;
       for (;;) {
-        try { return await admitSend(); }
+        try { return await this.#admit(send, id); }
         catch (error) {
           if (error?.code !== 'BUSY' || Date.now() >= deadline) throw error;
           await new Promise(resolve => setTimeout(resolve, 1000));
