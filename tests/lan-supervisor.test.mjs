@@ -81,10 +81,24 @@ test('a missing lan.json for several ticks means stop — the supervisor exits',
   const dir = sandbox(t);
   writeState(dir, { appPid: 1, proxyPid: 1, internalPort: 55555, publicPort: 8792, startedAt: '2026-01-01T00:00:00Z' });
   const child = spawnSupervisor(t, dir);
-  await sleep(1000);
-  assert.equal(child.exitCode, null, 'still watching while the state exists');
+  // Под нагрузкой полного CI тики могут запаздывать: ждём выхода вместо
+  // фиксированной паузы, но не принимаем ранний выход за успех.
+  const deadline = Date.now() + 10_000;
+  let observedRunning = false;
+  while (Date.now() < deadline) {
+    if (child.exitCode === null) { observedRunning = true; break; }
+    await sleep(100);
+  }
+  assert.ok(observedRunning, 'still watching while the state exists');
   try { fs.unlinkSync(path.join(dir, 'lan.json')); } catch { /* none */ }
-  // 3 ticks * 300 ms + запас.
-  await sleep(2500);
+  // 3 ticks * 300 ms + запас: тоже поллингом, а не фиксированной паузой.
+  const stopped = await new Promise(resolve => {
+    const deadline2 = Date.now() + 15_000;
+    const timer = setInterval(() => {
+      if (child.exitCode !== null) { clearInterval(timer); resolve(true); }
+      else if (Date.now() > deadline2) { clearInterval(timer); resolve(false); }
+    }, 100);
+  });
   assert.equal(child.exitCode, 0, 'supervisor exits cleanly after an intentional stop');
+  assert.ok(stopped, 'exited within the deadline');
 });
