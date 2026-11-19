@@ -27,6 +27,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 /** The production desktop composition, with isolated settings and a real disposable server. */
 @OptIn(ExperimentalTestApi::class)
@@ -85,6 +86,58 @@ class DesktopChatAcceptanceTest {
             graph?.disconnect()
             graph?.scope?.cancel()
             input.close() // fixture owns and removes only its generated temp directory
+            if (!fixture.waitFor(15, TimeUnit.SECONDS)) {
+                fixture.destroy()
+                check(fixture.waitFor(5, TimeUnit.SECONDS)) { "fixture did not terminate" }
+            }
+        }
+    }
+
+    @Test
+    fun anSseOutageWithAliveHealthKeepsTheGlobalOnlineAndReconnectsTheSession() = runComposeUiTest {
+        // Регресс BUG-03 (матрица стабилизации): обрыв SSE — состояние ОДНОЙ сессии
+        // (Reconnecting), а не глобального Offline. Глобальный флаг решает health-
+        // проба: сервер жив → _online остаётся true, после восстановления SSE
+        // сессия возвращается в Live без ложного «Нет связи».
+        val fixture = ProcessBuilder("node", "tests/fixture-server.mjs")
+            .directory(File(System.getProperty("taskbridge.repo")))
+            .redirectError(ProcessBuilder.Redirect.INHERIT).start()
+        val output = fixture.inputStream.bufferedReader()
+        val input = fixture.outputStream.bufferedWriter()
+        fun fixtureLine(): String = CompletableFuture.supplyAsync { output.readLine() }
+            .get(30, TimeUnit.SECONDS) ?: error("fixture output closed")
+        var graph: AppGraph? = null
+        try {
+            val ready = fixtureLine()
+            val base = TaskBridgeJson.parseToJsonElement(ready).jsonObject.getValue("base").jsonPrimitive.content
+            val memory = MemorySettings().apply { put("serverUrl", base) }
+            val desktop = DesktopPlatformServices(store = memory)
+            val platform = object : PlatformServices by desktop {
+                override val secrets: SecretStore = memory
+                override fun chatPersistence(serverUrl: String): ChatPersistence = NoopChatPersistence
+            }
+            val app = AppGraph(platform)
+            graph = app
+            val connection = app.connection ?: error("isolated connection missing")
+            val task = runBlocking { connection.api.createTask(CreateTaskRequest(projectId = "fixture", prompt = "SSE outage acceptance")) }
+            val chat = connection.chat(task.id)
+            setContent { App(app, openTaskId = task.id) }
+            waitUntil(timeoutMillis = 30_000) { chat.state.value.link == LinkState.Live }
+            assertTrue(app.connection?.online?.value == true, "healthy server must be online before the outage")
+
+            // SSE уходит на 3 с; /api/health в этот момент отвечает (процесс жив).
+            input.write("down 3000\n")
+            input.flush()
+            waitUntil(timeoutMillis = 10_000) { chat.state.value.link != LinkState.Live }
+            assertTrue(app.connection?.online?.value == true, "SSE outage must not flip the global online — " +
+                "the health probe decides, not one failed stream")
+            assertEquals("up", fixtureLine())
+            waitUntil(timeoutMillis = 30_000) { chat.state.value.link == LinkState.Live }
+            assertTrue(app.connection?.online?.value == true)
+        } finally {
+            graph?.disconnect()
+            graph?.scope?.cancel()
+            input.close()
             if (!fixture.waitFor(15, TimeUnit.SECONDS)) {
                 fixture.destroy()
                 check(fixture.waitFor(5, TimeUnit.SECONDS)) { "fixture did not terminate" }

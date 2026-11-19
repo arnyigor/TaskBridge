@@ -314,7 +314,13 @@ class AppGraph(val platform: PlatformServices) {
                 it.state
                     .map { state -> state.link::class.simpleName to (state.link as? LinkState.Degraded)?.reason }
                     .distinctUntilChanged()
-                    .collect { reportLinkOnce() }
+                    .collect { (state, _) ->
+                        // Восстановившийся поток — самое свежее доказательство связи:
+                        // поднимаем глобальный флаг сразу, не дожидаясь следующего
+                        // такта heal-цикла (иначе «сессия Live — глобально Offline»).
+                        if (state == "Live" && !_online.value) _online.value = true
+                        reportLinkOnce()
+                    }
             }
         }
 
