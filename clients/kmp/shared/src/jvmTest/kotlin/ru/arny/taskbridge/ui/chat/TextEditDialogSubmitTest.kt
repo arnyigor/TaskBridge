@@ -27,7 +27,7 @@ class TextEditDialogSubmitTest {
                         hint = null,
                         initial = initial,
                         confirm = "Отправить заново",
-                        onConfirm = onConfirm,
+                        onConfirm = { text, onDone -> onConfirm(text); onDone(true) },
                         onDismiss = onDismiss,
                     )
                 }

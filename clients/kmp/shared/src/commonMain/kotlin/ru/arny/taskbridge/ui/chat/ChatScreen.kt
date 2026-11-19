@@ -1723,7 +1723,12 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             hint = "Ответы после этого сообщения будут удалены, и агент ответит заново.",
             initial = dialog.text,
             confirm = "Отправить заново",
-            onConfirm = { session.editMessage(dialog.turnId, it); onClose() },
+            // Диалог закрывается только после подтверждения сервера (BUG-02):
+            // при NOT_ALLOWED (отмена ещё идёт), сетевой ошибке или таймауте правка
+            // остаётся в редакторе и её можно повторить.
+            onConfirm = { text, onDone ->
+                session.editMessage(dialog.turnId, text, onAccepted = { onDone(true) }, onFailed = { onDone(false) })
+            },
             onDismiss = onClose,
         )
         is ChatDialog.EditAnswer -> {
@@ -1750,7 +1755,9 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
                         )
                     }
                 },
-                onConfirm = { session.editAnswer(dialog.turnId, it, asVariant); onClose() },
+                onConfirm = { text, onDone ->
+                    session.editAnswer(dialog.turnId, text, asVariant, onAccepted = { onDone(true) }, onFailed = { onDone(false) })
+                },
                 onDismiss = onClose,
             )
         }
@@ -1846,7 +1853,9 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             initial = state.task?.title ?: state.task?.displayTitle.orEmpty(),
             confirm = "Сохранить",
             singleLine = true,
-            onConfirm = { session.rename(it); onClose() },
+            onConfirm = { text, onDone ->
+                session.rename(text, onAccepted = { onDone(true) }, onFailed = { onDone(false) })
+            },
             onDismiss = onClose,
         )
         ChatDialog.ModelSettings -> ModelSheet(state, session, graph, onDialog = onDialog, onViewFile = onViewFile, onClose = onClose)
@@ -2726,18 +2735,33 @@ internal fun TextEditDialog(
     hint: String?,
     initial: String,
     confirm: String,
-    onConfirm: (String) -> Unit,
+    /** [onDone] обязателен к вызову ровно один раз: true — сервер принял правку и
+     *  диалог закрывается, false — отказ (NOT_ALLOWED, сеть, таймаут), диалог остаётся
+     *  открытым с текстом, повторная отправка разрешена. */
+    onConfirm: (String, (Boolean) -> Unit) -> Unit,
     onDismiss: () -> Unit,
     singleLine: Boolean = false,
     extra: (@Composable () -> Unit)? = null,
 ) {
     var text by remember { mutableStateOf(initial) }
+    // Повторная отправка защищена от дублей: пока ждём ответ сервера, новый сабмит
+    // невозможен; отказ сбрасывает флаг и разрешает повтор. Флаг вне Compose-снапшотов:
+    // onDone приходит из корутины runner'а, а не из UI-потока.
+    val awaiting = remember(initial) { booleanArrayOf(false) }
     // KeyDown repeats while the key is held: the action must run once, not once per event.
-    var submitted by remember(initial) { mutableStateOf(false) }
     val submit: () -> Unit = {
-        if (!submitted && text.isNotBlank()) {
-            submitted = true
-            onConfirm(text)
+        if (!awaiting[0] && text.isNotBlank()) {
+            awaiting[0] = true
+            onConfirm(text) { accepted ->
+                if (accepted) {
+                    // Успех терминален: диалог закрывается, и удержание Ctrl+Enter
+                    // больше не может отправить текст второй раз.
+                    awaiting[0] = true
+                    onDismiss()
+                } else {
+                    awaiting[0] = false
+                }
+            }
         }
     }
     if (singleLine) {
@@ -2745,7 +2769,7 @@ internal fun TextEditDialog(
             onDismissRequest = onDismiss,
             title = { Text(title) },
             text = { OutlinedTextField(text, { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
-            confirmButton = { TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) { Text(confirm) } },
+            confirmButton = { TextButton(onClick = { submit() }, enabled = text.isNotBlank()) { Text(confirm) } },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
         )
         return

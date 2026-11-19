@@ -887,7 +887,11 @@ class ChatSession(
 
     fun setAutoCompaction(enabled: Boolean) = act("autoCompaction") { api.setAutoCompaction(taskId, enabled) }
 
-    fun rename(title: String) = act("rename") { api.rename(taskId, title.trim()) }
+    fun rename(
+        title: String,
+        onAccepted: () -> Unit = {},
+        onFailed: () -> Unit = {},
+    ) = act("rename", block = { api.rename(taskId, title.trim()) }, onAccepted = onAccepted, onFailed = onFailed)
 
     fun delete() = act("delete") {
         // "Not found": deleted already (another device, an earlier tap) — the outcome asked for.
@@ -902,9 +906,22 @@ class ChatSession(
 
     fun clear() = act("clear") { api.clear(taskId) }
 
-    fun editMessage(turnId: String, text: String) = act("edit:$turnId") { api.editTurn(taskId, turnId, text) }
+    /** Диалог правки закрывается только по onAccepted: отказ сервера (NOT_ALLOWED при
+     *  ещё не завершённой отмене, сеть, таймаут) оставляет диалог открытым с текстом. */
+    fun editMessage(
+        turnId: String,
+        text: String,
+        onAccepted: () -> Unit = {},
+        onFailed: () -> Unit = {},
+    ) = act("edit:$turnId", block = { api.editTurn(taskId, turnId, text) }, onAccepted = onAccepted, onFailed = onFailed)
 
-    fun editAnswer(turnId: String, text: String, asVariant: Boolean) = act("edit:$turnId") { api.editTurn(taskId, turnId, text, branch = asVariant) }
+    fun editAnswer(
+        turnId: String,
+        text: String,
+        asVariant: Boolean,
+        onAccepted: () -> Unit = {},
+        onFailed: () -> Unit = {},
+    ) = act("edit:$turnId", block = { api.editTurn(taskId, turnId, text, branch = asVariant) }, onAccepted = onAccepted, onFailed = onFailed)
 
     fun deleteFrom(turnId: String) = act("delete:$turnId") { api.deleteTurn(taskId, turnId) }
 
@@ -976,8 +993,15 @@ class ChatSession(
 
     suspend fun openFileOnComputer(fileId: String, reveal: Boolean): Result<Unit> = runCatching { api.openFile(taskId, fileId, reveal) }
 
-    private fun act(key: String, startNotice: String? = null, concurrent: Boolean = false, block: suspend () -> Unit) {
-        actions.run(key, startNotice, concurrent, block)
+    private fun act(
+        key: String,
+        startNotice: String? = null,
+        concurrent: Boolean = false,
+        onAccepted: () -> Unit = {},
+        onFailed: () -> Unit = {},
+        block: suspend () -> Unit,
+    ) {
+        actions.run(key, startNotice, concurrent, onAccepted, onFailed, block)
     }
 
     private fun notice(error: ApiError) {

@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { fixture } from './helpers/manager-fixture.mjs';
+
+// BUG-02: STOP → правка → повторная отправка.
+//
+// Приёмка: после STOP исправленный запрос отправляется ровно один раз;
+// история обрезается и текст заменяется; отказ доставки не теряет текст.
+test('stop → edit → resend sends the edited prompt exactly once', async t => {
+  const f = await fixture(t, true);
+  // Ход «в полёте»: USER_MESSAGE уже в журнале, Pi стримит ответ.
+  await f.store.appendEvent('a', { type: 'USER_MESSAGE', message: 'первый вопрос', data: { text: 'первый вопрос' } });
+  const events0 = await f.store.readEvents('a', 0);
+  const userSeq = events0.find(e => e.type === 'USER_MESSAGE')?.seq;
+  assert.ok(userSeq, 'user turn exists in the journal');
+
+  // 1. STOP.
+  const cancelled = await f.manager.cancel('a', { hard: true });
+  assert.equal(cancelled.status, 'CANCELLED');
+  assert.equal(f.runtime.retired, true, 'the stopped runtime is retired');
+
+  // The next turn must start on a fresh runtime (like a session restart): fake Pi.
+  const fresh = {
+    pi: { closed: false, getState: async () => ({ isStreaming: false }), prompt: async text => { f.sent.push(text); }, sendFollowUp: async text => { f.sent.push(text); }, abort: async () => {}, killTree: async () => {} },
+    eventChain: Promise.resolve(), settleResolvers: [], cancelRequested: false,
+  };
+  f.manager.runtimes.set('a', fresh);
+
+  // 2. Edit the user turn.
+  const edited = await f.manager.editTurn('a', { turnId: `user-${userSeq}`, text: 'исправленный вопрос' });
+  assert.ok(edited, 'edit accepted');
+
+  // 3. The edited prompt must have reached Pi exactly once.
+  for (let i = 0; i < 200 && !f.sent.length; i++) await new Promise(r => setTimeout(r, 10));
+  assert.deepEqual(f.sent.filter(x => x.trim() === 'исправленный вопрос'), ['исправленный вопрос'], `sent: ${JSON.stringify(f.sent)}`);
+
+  // 4. The journal keeps the edit marker and a new USER_MESSAGE for the resent prompt.
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.ok(events.some(e => e.type === 'TURN_EDITED'), events.map(e => e.type).join(','));
+  assert.ok(events.some(e => e.type === 'USER_MESSAGE' && e.message === 'исправленный вопрос'), events.map(e => e.type).join(','));
+
+  // Let the detached settle path finish instead of leaving a 12h timer behind.
+  for (const waiter of fresh.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(r => setTimeout(r, 5));
+  await new Promise(r => setImmediate(r));
+});
+
+test('a failed delivery after edit keeps the text in the queue, not lost', async t => {
+  const f = await fixture(t, false);
+  await f.store.appendEvent('a', { type: 'USER_MESSAGE', message: 'первый вопрос', data: { text: 'первый вопрос' } });
+  const events0 = await f.store.readEvents('a', 0);
+  const userSeq = events0.find(e => e.type === 'USER_MESSAGE').seq;
+  await f.manager.cancel('a', { hard: true });
+
+  // Delivery refuses (e.g. session start fails): the message must not be lost
+  // silently — #editTurn propagates the failure to the caller.
+  f.runtime.pi.prompt = async () => { throw new Error('rpc down'); };
+  f.runtime.pi.getState = async () => { throw new Error('rpc down'); };
+  await assert.rejects(() => f.manager.editTurn('a', { turnId: `user-${userSeq}`, text: 'исправленный вопрос' }));
+  // And the caller may retry: the turn is still editable and the text survives.
+  f.runtime.pi.prompt = async text => { f.sent.push(text); };
+  f.runtime.pi.getState = async () => ({ isStreaming: false });
+  const retry = await f.manager.editTurn('a', { turnId: `user-${userSeq}`, text: 'исправленный вопрос' });
+  assert.ok(retry, 'retry after failed delivery is accepted');
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(r => setTimeout(r, 5));
+  await new Promise(r => setImmediate(r));
+});
