@@ -50,7 +50,7 @@ sealed class ApiError(open val message: String) {
      * repeating the same command would only replay the same refusal.
      */
     val transient: Boolean
-        get() = this is Unreachable || this is RateLimited || this is CommandInFlight || (this is Other && status in 502..504)
+        get() = this is Unreachable || this is RateLimited || this is CommandInFlight || this is Busy || (this is Other && status in 502..504)
 }
 
 class ApiException(val error: ApiError) : Exception(error.message)

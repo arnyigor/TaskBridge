@@ -20,6 +20,24 @@ import kotlin.test.assertFailsWith
 
 class CommandDeliveryTest {
     @Test
+    fun sessionBusyIsRetriedInsteadOfFailingTheOutboxEntry() = runBlocking<Unit> {
+        // Отмена ещё не отправленного сообщения не снимает серверный слот #admit:
+        // мгновенный повтор получает BUSY («Другой запрос ещё отправляется»).
+        // Это переходящая ошибка — повтор с короткой паузой, а не красный отказ.
+        var calls = 0
+        val http = HttpClient(MockEngine {
+            if (calls++ == 0) respond("{\"error\":\"Другой запрос этой сессии ещё отправляется.\",\"code\":\"BUSY\"}",
+                HttpStatusCode.Conflict, headersOf(HttpHeaders.ContentType, "application/json"))
+            else respond("{}", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        })
+        try {
+            val delivery = CommandDelivery(TaskBridgeApi(http, SimpleConnection("http://pc")), "t") { _, _ -> 0L }
+            val result = delivery.run<Unit>("c", { _, _ -> }) { }
+            assertEquals(DeliveryOutcome.Delivered(Unit), result)
+        } finally { http.close() }
+    }
+
+    @Test
     fun cancellationDuringHistoryReconciliationIsNeverConvertedIntoUnknownOutcome() = runBlocking<Unit> {
         val http = HttpClient(MockEngine { throw CancellationException("history cancelled") })
         try {
