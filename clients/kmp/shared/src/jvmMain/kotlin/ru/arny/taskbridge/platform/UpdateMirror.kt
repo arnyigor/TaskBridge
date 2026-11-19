@@ -23,9 +23,19 @@ object UpdateMirror {
     val protectedFileNames: List<String> = listOf("config.json")
 
     /**
+     * Собственный мусор обновлятора: старые файлы, переименованные rename-dance
+     * (`vcruntime140.old-1-0.dll`-подобные). Их нельзя отдавать под удаление `/MIR`:
+     * пока держатель (например llama-server с загруженной из runtime DLL) не отпустил
+     * файл, попытка его удалить даёт robocopy код 8 — и следующее обновление снова
+     * «падает» на файлах, которые вообще не нужно было трогать. Подчищаются они
+     * отдельно, когда держатель их отпустил (скрипт после успешного запуска).
+     */
+    val updaterLeftoverFilePatterns: List<String> = listOf("*.old-*")
+
+    /**
      * Значения для PowerShell-параметров скрипта обновления; разделитель — точка
      * с запятой, скрипт превращает их в `/XD …` и `/XF …`.
      */
     fun excludedDirSpec(): String = protectedDirNames.joinToString(";")
-    fun excludedFileSpec(): String = protectedFileNames.joinToString(";")
+    fun excludedFileSpec(): String = (protectedFileNames + updaterLeftoverFilePatterns).joinToString(";")
 }

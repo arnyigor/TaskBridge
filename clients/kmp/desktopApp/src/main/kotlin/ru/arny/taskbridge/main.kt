@@ -50,6 +50,9 @@ fun main() {
     SingleInstance.listen { showRequests.value += 1 }
     val packagedVersion = object {}.javaClass.getResourceAsStream("/taskbridge-version.txt")
         ?.bufferedReader()?.use { it.readText().trim() }.orEmpty()
+    // Первая ступень маркера готовности (BUG-04C): процесс захватил SingleInstance-лок.
+    // Обновлятор после запуска нового EXE ждёт именно этот маркер, а не «жив 4 секунды».
+    DesktopUpdater.StartupMarker.write(DesktopUpdater.installDir(), packagedVersion, windowShown = false)
         // Compose в режиме выделения прокручивает каждый скролл-контейнер над курсором
         // (SelectionManager.bringDraggedPositionIntoView). В reverseLayout-ленте чата это
         // рывком уводит её к последнему сообщению, как только начинаешь выделять текст,
@@ -164,7 +167,9 @@ fun main() {
             },
         ) {
             // Another launch asked for this window: out of the tray / minimized, to the front.
-            LaunchedEffect(shows) {
+            // Вторая ступень маркера готовности: главное окно реально создано.
+            LaunchedEffect(window) {
+                DesktopUpdater.StartupMarker.write(installDir, packagedVersion, windowShown = true)
                 if (shows > 0) {
                     window.isMinimized = false
                     window.toFront()

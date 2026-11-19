@@ -35,7 +35,13 @@ class UpdateMirrorTest {
     @Test
     fun thePowerShellSpecsAreSemicolonSeparatedNames() {
         assertEquals(UpdateMirror.protectedDirNames.joinToString(";"), UpdateMirror.excludedDirSpec())
-        assertEquals(UpdateMirror.protectedFileNames.joinToString(";"), UpdateMirror.excludedFileSpec())
+        assertEquals(
+            (UpdateMirror.protectedFileNames + UpdateMirror.updaterLeftoverFilePatterns).joinToString(";"),
+            UpdateMirror.excludedFileSpec(),
+        )
+        // Собственный мусор rename-dance не должен попадать под удаление /MIR:
+        // пока держатель не отпустил переименованный файл, robocopy даёт код 8.
+        assertTrue("*.old-*" in UpdateMirror.excludedFileSpec())
         assertTrue(UpdateMirror.excludedDirSpec().split(';').none { it.contains('/') || it.contains(File.separator) })
     }
 }
