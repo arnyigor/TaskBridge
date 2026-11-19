@@ -26,9 +26,14 @@ const STATE = path.join(DATA, 'lan.json');
 const SELF_FILE = path.join(DATA, 'lan-supervisor.json');
 const RESTART_LOCK = path.join(DATA, 'lan-restart.lock');
 const LOG = path.join(DATA, 'lan-supervisor.log');
-const TICK_MS = 5000;
-const DEAD_TICKS = 2;            // 10 s of a missing process before a restart
-const UNHEALTHY_TICKS = 12;      // 60 s of a dead health before a restart
+// Всё перекрываемо env: интеграционные тесты гоняют супервизора с секундными
+// порогами вместо минутных боевых (боевые значения — по умолчанию).
+const TICK_MS = Number(process.env.LAN_SUPERVISOR_TICK_MS) || 5000;
+const DEAD_TICKS = Number(process.env.LAN_SUPERVISOR_DEAD_TICKS) || 2;        // 10 s
+const UNHEALTHY_TICKS = Number(process.env.LAN_SUPERVISOR_UNHEALTHY_TICKS) || 12; // 60 s
+const BACKOFF_MS = Number(process.env.LAN_SUPERVISOR_BACKOFF_MS) || 120000;   // crash-loop: 2 мин
+const BACKOFF_WINDOW_MS = Number(process.env.LAN_SUPERVISOR_BACKOFF_WINDOW_MS) || 600000; // 10 мин
+const BACKOFF_AFTER = Number(process.env.LAN_SUPERVISOR_BACKOFF_AFTER) || 3;  // 3 рестарта за окно
 const log = text => fs.appendFileSync(LOG, `${new Date().toISOString()} ${text}\n`, 'utf8');
 
 const readJson = file => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } };
@@ -58,6 +63,9 @@ async function main() {
   let deadTicks = 0;
   let unhealthyTicks = 0;
   let restarting = false;
+  let backoffUntil = 0;
+  const restartTimes = [];
+  let restartSeenStartedAt = null;
   for (;;) {
     await new Promise(resolve => setTimeout(resolve, TICK_MS));
     try {
@@ -77,6 +85,13 @@ async function main() {
         continue;
       }
       missingTicks = 0;
+      // Новая пара (restart-lan-now переписал lan.json) — флаг рестарта погашен.
+      if (restartSeenStartedAt && state.startedAt !== restartSeenStartedAt) {
+        restarting = false;
+        restartSeenStartedAt = null;
+        deadTicks = 0;
+        unhealthyTicks = 0;
+      }
 
       const appAlive = await alive(state.appPid, 'server.mjs');
       const proxyAlive = await alive(state.proxyPid, 'proxy.mjs');
@@ -84,7 +99,20 @@ async function main() {
         deadTicks += 1;
         unhealthyTicks = 0;
         if (deadTicks >= DEAD_TICKS && !restarting) {
+          // Crash-loop: слишком частые авторестарты — пауза, а не бесконечный цикл.
+          restartTimes.push(Date.now());
+          while (restartTimes.length && restartTimes[0] < Date.now() - BACKOFF_WINDOW_MS) restartTimes.shift();
+          if (restartTimes.length > BACKOFF_AFTER) {
+            backoffUntil = Date.now() + BACKOFF_MS;
+            log(`restart loop detected (${restartTimes.length} in window) — backing off ${Math.round(BACKOFF_MS / 1000)} s`);
+            continue;
+          }
+          if (Date.now() < backoffUntil) continue;
           restarting = true;
+          restartSeenStartedAt = state.startedAt;
+          // Вычеркнуть себя: restart-lan-now делает stop, а stop убивает
+          // супервизора из lan-supervisor.json — иначе рестарт убивает смотрящего.
+          try { fs.unlinkSync(SELF_FILE); } catch { /* gone */ }
           log(`app ${state.appPid} / proxy ${state.proxyPid} dead (app alive=${appAlive}, proxy alive=${proxyAlive}) — restarting the pair`);
           // Пара, запущенная с LAN_PORT, при рестарте обязана остаться на своём
           // публичном порту: без этого старт берёт порт из config и пара переезжает
@@ -93,6 +121,7 @@ async function main() {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
             env: { ...process.env, LAN_PORT: String(state.publicPort) },
           });
+          worker.on('error', error => log(`restart worker spawn failed: ${error?.message || error}`));
           worker.unref();
           // Restart-lan-now rewrites lan.json and spawns a new supervisor.
           continue;
@@ -105,12 +134,23 @@ async function main() {
       if (!healthy) {
         unhealthyTicks += 1;
         if (unhealthyTicks >= UNHEALTHY_TICKS && !restarting) {
+          restartTimes.push(Date.now());
+          while (restartTimes.length && restartTimes[0] < Date.now() - BACKOFF_WINDOW_MS) restartTimes.shift();
+          if (restartTimes.length > BACKOFF_AFTER) {
+            backoffUntil = Date.now() + BACKOFF_MS;
+            log(`restart loop detected (${restartTimes.length} in window) — backing off ${Math.round(BACKOFF_MS / 1000)} s`);
+            continue;
+          }
+          if (Date.now() < backoffUntil) continue;
           restarting = true;
+          restartSeenStartedAt = state.startedAt;
+          try { fs.unlinkSync(SELF_FILE); } catch { /* gone */ }
           log(`app ${state.appPid} answers nothing on ${state.internalPort} for ${unhealthyTicks * (TICK_MS / 1000)} s — restarting the pair`);
           const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
             env: { ...process.env, LAN_PORT: String(state.publicPort) },
           });
+          worker.on('error', error => log(`restart worker spawn failed: ${error?.message || error}`));
           worker.unref();
           continue;
         }
