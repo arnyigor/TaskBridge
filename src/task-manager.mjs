@@ -4548,6 +4548,9 @@ export class TaskManager extends EventEmitter {
     // считает от последнего признака жизни модели, а не от последнего
     // отрисованного сообщения.
     task._lastProgressAt = Date.now();
+    // Хоть один кадр от Pi — доказательство, что процесс жив и говорит. По нему
+    // watchdog отличает медленную генерацию от зависшего RPC (см. #checkStalledTurns).
+    task._piFramesSeen = (task._piFramesSeen || 0) + 1;
     await this.store.appendRaw(task.id, 'pi-events.jsonl', JSON.stringify(frame) + '\n').catch(() => {});
     // Ход закрыт: длительность фиксируется ДО публикации терминального статуса,
     // иначе снимок задачи уйдёт клиенту без неё. Событие TURN_METRICS нужно не
@@ -6855,7 +6858,13 @@ export class TaskManager extends EventEmitter {
       if ((task._toolsRunning || 0) > 0) continue;
       if (task.pendingUiRequest) continue;
       const since = task._lastProgressAt || 0;
-      if (!since || nowMs - since < stallMs) continue;
+      // Pi жив, если он хоть раз говорил в этой задаче: тогда долгая тишина —
+      // это медленная генерация или долгий инструмент, а не зависший RPC. Раньше
+      // ход после тяжёлого bash убивался ровно через 120 с тишины, хотя модель
+      // легально ждала первый токен от провайдера (живой отчёт 2026-11-19, PSB).
+      // Для говорящего Pi порог в 5 раз выше, для никогда не говорившего — прежние.
+      const budget = (task._piFramesSeen || 0) > 0 ? stallMs * 5 : stallMs;
+      if (!since || nowMs - since < budget) continue;
       // Once per delivery: a second tick must not fail the re-queued delivery,
       // while the re-delivered turn gets a fresh attempt id and is watched again.
       const attemptKey = task._attemptId || `turn:${task._turn}`;

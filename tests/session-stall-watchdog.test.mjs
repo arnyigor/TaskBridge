@@ -62,6 +62,33 @@ test('a mute Pi is stopped by the silence watchdog and the prompt is re-delivere
   assert.deepEqual(final.pendingPrompts, [], 'очередь пуста: бесконечного цикла нет');
 });
 
+test('a Pi that already talked gets a long silence budget instead of the cold-start one', { timeout: 90_000 }, async t => {
+  // Регресс 2026-11-19 (PSB): ход после тяжёлого bash убивался ровно через
+  // stallMs тишины, хотя модель легально ждала первый токен от провайдера.
+  // Watchdog обязан отличать «никогда не говоривший Pi» от «говорил и думает»:
+  // для второго бюджет в 5 раз больше.
+  const fixture = await startFixture(undefined, { root: { delivery: { stallMs: 400 } } });
+  t.after(() => fixture.close());
+  const api = fixture.api;
+
+  // Первый ход живой — процесс доказал, что умеет говорить.
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'обычный первый вопрос' });
+  assert.equal((await waitTerminal(api, created.id)).status, 'SUCCEEDED', fixture.logs());
+
+  // Второй ход молчит: старый порог (400 мс) обязан быть превышен, но ход
+  // не должен признаваться зависшим раньше 5 * 400 = 2000 мс.
+  await api(`/api/tasks/${created.id}/message`, { text: 'fault-mute второй' });
+  await sleep(1_200);
+  const early = (await api(`/api/tasks/${created.id}/events?tail=100`)).events;
+  assert.equal(early.filter(event => event.type === 'STALL_DETECTED').length, 0,
+    'живой Pi не срывается на короткой тишине — ' + fixture.logs());
+
+  // Дальше прежняя защита работает: настоящая тишина всё равно ловится.
+  const failed = await waitTerminal(api, created.id, { timeoutMs: 30_000 });
+  assert.equal(failed.status, 'FAILED');
+  assert.equal(failed.errorCode, 'PI_STALLED');
+});
+
 test('a turn that keeps sending frames is never treated as stalled', { timeout: 60_000 }, async t => {
   const fixture = await startFixture(undefined, { root: { delivery: { stallMs: 1000 } } });
   t.after(() => fixture.close());
