@@ -28,7 +28,9 @@ test('a database keeps its storeId across reopening', async t => {
   assert.equal(again.storeId, id);
 });
 
-test('a restored backup has its own storeId, so clients drop their seq cache', async t => {
+test('a regular backup keeps the store identity; clone() mints a new one', async t => {
+  // Ревью 2026-11-20: штатное восстановление не должно выглядеть как
+  // «другой экземпляр» — backup сохраняет store_id, clone() создаёт новый.
   const stores = [];
   const dir = await tempDir(t, stores);
   const store = new TaskStore(dir);
@@ -39,8 +41,16 @@ test('a restored backup has its own storeId, so clients drop their seq cache', a
   await fs.copyFile(file, path.join(restoredDir, 'taskbridge.db'));
   const restored = new TaskStore(restoredDir);
   stores.push(restored);
-  assert.ok(restored.storeId);
-  assert.notEqual(restored.storeId, store.storeId);
+  assert.equal(restored.storeId, store.storeId, 'backup/restore сохраняет идентичность хранилища');
+
+  const cloneFile = await store.clone(path.join(dir, 'backups', 'clone.db'));
+  const cloneDir = path.join(dir, 'cloned');
+  await fs.mkdir(cloneDir);
+  await fs.copyFile(cloneFile, path.join(cloneDir, 'taskbridge.db'));
+  const cloned = new TaskStore(cloneDir);
+  stores.push(cloned);
+  assert.ok(cloned.storeId);
+  assert.notEqual(cloned.storeId, store.storeId, 'clone() — самостоятельный экземпляр с новой идентичностью');
 });
 
 test('/api/info reports the storeId and the Pi version', { timeout: 30000 }, async t => {
