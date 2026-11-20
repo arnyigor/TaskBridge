@@ -28,7 +28,7 @@
 1. `core/client/.../ChatActionRunner.kt:60` — **TooGenericExceptionCaught**: общий `catch (Exception)` → `ApiError.Unreachable` «нет связи» — может маскировать реальные ошибки (после фикса BUG-P0 диалогового пути; нужен раздельный catch по классам ошибок).
 2. `core/client/.../ChatSession.kt:376` — **TooGenericExceptionCaught** в цикле доставки.
 3. `core/client/.../ChatSession.kt:490` — **SwallowedException**: проглоченная ошибка без лога.
-4. `core/api/.../TaskBridgeApi.kt:1263,1284,1314,1342` — generic catch + swallowed timeout в HTTP-обёртках: потеря причины «Нет связи» (гипотеза BUG-P0 из аудита №1) — адресно проверить и уточнить классы.
+4. ✅ ПРОВЕРЕНО 2026-11-20, изменений не требуется: generic catch в `TaskBridgeApi.kt` — это транспортная обёртка SSE/HTTP: `ApiException` и `CancellationException` пробрасываются как есть, обёртка в `Unreachable(cause)` применяется только к реальным транспортным отказам (не-Api исключениям) и сохраняет причину в `cause`. Классификация корректна, менять поведение без отдельной задачи нельзя.
 5. `core/client/.../RemoteFilesController.kt:104,119` — generic catch вокруг мутаций файлов.
 6. `core/client/.../SessionList.kt:385,409` — **UseCheckOrError** (`error()`) в путях восстановления — проверить текст отказов.
 7. `core/client/.../ChatReducer.kt` — 0 критичных Detekt, но: класс обязателен к сохранению поведения — покрыт реплей-тестами (EditResendTextLossTest, EditLifecycleTest, EditResendReplayTest). Любое изменение — только с их прогоном.
