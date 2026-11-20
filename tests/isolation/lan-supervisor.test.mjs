@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
+const root = path.resolve(fileURLToPath(new URL('../..', import.meta.url))); // tests/isolation -> корень репозитория
 const SUPERVISOR = path.join(root, 'scripts', 'lan-supervisor.mjs');
 
 const sandbox = t => {
@@ -62,13 +62,12 @@ const matrix = enabled ? test : test.skip;
 // Полный цикл: дедлайн теста обязан покрывать собственный бюджет пары
 // (stop + APP_START_TIMEOUT_MS до 60 с), иначе воркер ещё поднимает app,
 // а тест уже сдался — источник нестабильности, не гонка handover.
-// Блокер автотеста (установлено 2026-11-20): внутри node test-runner
-// detached-спавн супервизора не стартует вовсе (в каталоге фикстуры нет
-// SELF_FILE/лога, тогда как идентичный спавн вне тест-раннера работает).
-// Условия детерминизма готовы: LAN_SUPERVISOR_RESTART_CMD + harness-restart
-// (владение каталогом/портами проверяется, боевые порты недостижимы).
-// Следующий шаг — исследование окружения спавна в test-runner'е.
-test.skip('a dead app is restarted by the supervisor through the harness and no fixture process is left', { timeout: 60_000 }, async t => {
+// Полный цикл детерминирован: корень репозитория (root) был неверным после
+// переноса теста в tests/isolation (все спавны били в tests/…). Причиной
+// «нестабильности» до этого были: неверный root, дедлайн теста меньше
+// бюджета старта пары и семантика exit при stop. Изолированность —
+// harness-restart (владение каталогом/портами проверяется).
+matrix('a dead app is restarted by the supervisor through the harness and no fixture process is left', { timeout: 60_000 }, async t => {
   // Детерминированный полный цикл на минимальной паре (без полного TaskBridge):
   // app погиб -> супервизор обнаружил -> harness-restart поднял новую пару
   // на её же порту -> health 200 -> старых процессов нет.
