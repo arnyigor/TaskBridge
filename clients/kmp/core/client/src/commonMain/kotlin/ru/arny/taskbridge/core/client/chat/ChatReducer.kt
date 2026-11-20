@@ -688,7 +688,24 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 current.usageEventSeqs += event.seq
                 markAnswerRunning(current, event.at)
             }
-            "message_start" -> if (frame.obj("message")?.str("role") == "user") {
+            // Реальный Pi в RPC-режиме кладёт текст ответа в content message_start
+            // (53 симв. первой части пропадали: журнал 2026-11-20 — text_delta
+            // отсутствуют вовсе). Монотонное применение content, чтобы message_end
+            // с полным текстом той же части не удвоил его.
+            "message_start" -> if (frame.obj("message")?.str("role") == "assistant") {
+                messageTurn ?: current.let { sink ->
+                    for (part in (frame.obj("message")?.get("content") as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()) {
+                        val kind = part.str("type")
+                        if (kind != "text" && kind != "thinking") continue
+                        val incoming = part.str(kind).orEmpty()
+                        val currentText = if (kind == "text") sink.text else sink.thinking
+                        val merged = if (kind == "text") filterMcpAdapterNoise(currentText + incoming) else currentText + incoming
+                        if (merged.length > currentText.length) {
+                            if (kind == "text") sink.text = merged else sink.thinking = merged
+                        }
+                    }
+                }
+            } else if (frame.obj("message")?.str("role") == "user") {
                 val text = (frame.obj("message")?.get("content") as? JsonArray)
                     ?.mapNotNull { it as? JsonObject }
                     ?.filter { it.str("type") == "text" }
