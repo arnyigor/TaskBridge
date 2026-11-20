@@ -2765,10 +2765,14 @@ internal fun TextEditDialog(
     // невозможен; отказ сбрасывает флаг и разрешает повтор. Флаг вне Compose-снапшотов:
     // onDone приходит из корутины runner'а, а не из UI-потока.
     val awaiting = remember(initial) { booleanArrayOf(false) }
+    // Видимое ожидание: после STOP сервер ждёт завершения остановки (секунды), и без
+    // индикатора оператор видел «ничего не происходит» или ошибку вместо отправки.
+    var sending by remember(initial) { mutableStateOf(false) }
     // KeyDown repeats while the key is held: the action must run once, not once per event.
     val submit: () -> Unit = {
         if (!awaiting[0] && text.isNotBlank()) {
             awaiting[0] = true
+            sending = true
             onConfirm(text) { accepted ->
                 if (accepted) {
                     // Успех терминален: диалог закрывается, и удержание Ctrl+Enter
@@ -2777,6 +2781,7 @@ internal fun TextEditDialog(
                     onDismiss()
                 } else {
                     awaiting[0] = false
+                    sending = false
                 }
             }
         }
@@ -2786,7 +2791,7 @@ internal fun TextEditDialog(
             onDismissRequest = onDismiss,
             title = { Text(title) },
             text = { OutlinedTextField(text, { text = it }, singleLine = true, modifier = Modifier.fillMaxWidth()) },
-            confirmButton = { TextButton(onClick = { submit() }, enabled = text.isNotBlank()) { Text(confirm) } },
+            confirmButton = { TextButton(onClick = { submit() }, enabled = text.isNotBlank() && !sending) { Text(if (sending) "Отправка…" else confirm) } },
             dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } },
         )
         return
@@ -2807,7 +2812,7 @@ internal fun TextEditDialog(
         maxWidth = 760,
         footer = {
             TextButton(onClick = onDismiss) { Text("Отмена") }
-            Button(onClick = { submit() }, enabled = text.isNotBlank()) { Text(confirm) }
+            Button(onClick = { submit() }, enabled = text.isNotBlank() && !sending) { Text(if (sending) "Отправка…" else confirm) }
         },
     ) {
         OutlinedTextField(

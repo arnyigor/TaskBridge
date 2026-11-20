@@ -70,3 +70,35 @@ test('a failed delivery after edit keeps the text in the queue, not lost', async
   for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(r => setTimeout(r, 5));
   await new Promise(r => setImmediate(r));
 });
+
+// Правка сразу после STOP: сессия ещё в CANCELLING (abort может идти секунды),
+// и раньше editTurn отвергался NOT_ALLOWED «Сессия сейчас работает» — оператор
+// видел ошибку вместо «отправлено». Теперь правка ждёт завершения STOP.
+test('edit while the stop is still settling waits and is accepted', async t => {
+  const f = await fixture(t, true);
+  await f.store.appendEvent('a', { type: 'USER_MESSAGE', message: 'первый вопрос', data: { text: 'первый вопрос' } });
+  const userSeq = (await f.store.readEvents('a', 0)).find(e => e.type === 'USER_MESSAGE').seq;
+
+  let releaseAbort;
+  const abortGate = new Promise(resolve => { releaseAbort = resolve; });
+  f.runtime.pi.abort = async () => { await abortGate; };
+
+  const stopping = f.manager.cancel('a', { hard: false });
+  await new Promise(r => setTimeout(r, 100));
+  assert.equal(f.manager.tasks.get('a').status, 'CANCELLING', 'STOP ещё идёт');
+
+  const edited = f.manager.editTurn('a', { turnId: `user-${userSeq}`, text: 'исправленный вопрос' });
+  setTimeout(releaseAbort, 200); // STOP завершается, пока правка ждёт
+
+  await assert.doesNotReject(() => edited, 'правка во время STOP не отвергается');
+  assert.equal((await edited).ok, true);
+  await stopping.catch(() => {});
+
+  const events = (await f.store.readEvents('a', 0)).filter(e => e.type !== 'RUNTIME_STATE');
+  assert.ok(events.some(e => e.type === 'TURN_EDITED'), events.map(e => e.type).join(','));
+  assert.ok(events.some(e => e.type === 'USER_MESSAGE' && e.message === 'исправленный вопрос'), events.map(e => e.type).join(','));
+
+  for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  for (let i = 0; i < 200 && f.manager.activeTaskId; i++) await new Promise(r => setTimeout(r, 5));
+  await new Promise(r => setImmediate(r));
+});

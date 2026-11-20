@@ -5426,8 +5426,36 @@ export class TaskManager extends EventEmitter {
   async cancel(id, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     const hard = opts?.hard === true;
-    if (!commandId) return this.#cancel(id, { hard });
-    return this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id, { hard }));
+    // Пока STOP идёт, сессия остаётся в CANCELLING (abort RPC — до abortTimeoutMs).
+    // Правка, пришедшая в это окно, раньше отвергалась NOT_ALLOWED, и оператор
+    // видел ошибку вместо «отправляется»; теперь она ждёт этот промис.
+    const task = this.tasks.get(id);
+    let settle = null;
+    if (task && !task._stopSettled) {
+      task._stopSettled = new Promise(resolve => { settle = resolve; });
+    }
+    try {
+      if (!commandId) return await this.#cancel(id, { hard });
+      return await this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id, { hard }));
+    } finally {
+      if (settle) { settle(); delete task._stopSettled; }
+    }
+  }
+
+  /** Правка, пришедшая во время STOP, ждёт его завершения (ограниченно), а не
+   *  отвергается: «Сессия сейчас работает» после нажатого STOP — это ошибка
+   *  вместо ожидаемой отправки. Другие рабочие статусы по-прежнему отказывают. */
+  async #waitWhileStopping(id) {
+    const task = this.tasks.get(id);
+    const pending = task?._stopSettled;
+    if (!pending || task.status !== 'CANCELLING') return;
+    const budget = Number(this.config.pi?.abortTimeoutMs || 10000) + 5000;
+    let timer = null;
+    try {
+      await Promise.race([pending, new Promise(resolve => { timer = setTimeout(resolve, budget); timer.unref?.(); })]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   // "Repeat message": permanently removes the last failed exchange (the
@@ -5579,6 +5607,7 @@ export class TaskManager extends EventEmitter {
   // edited text is put to the model as a fresh prompt. It is not an in-place
   // cosmetic correction: the old answer was produced for the old text.
   async editTurn(id, { turnId, text, branch = false }) {
+    await this.#waitWhileStopping(id);
     return this.#admit(() => this.#editTurn(id, turnId, text, branch), id);
   }
 
