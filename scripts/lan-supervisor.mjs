@@ -129,7 +129,11 @@ async function main() {
           // Пара, запущенная с LAN_PORT, при рестарте обязана остаться на своём
           // публичном порту: без этого старт берёт порт из config и пара переезжает
           // (проверено в песочнице 2026-11-19).
-          const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
+          // Изолированный harness (тесты) подменяет команду рестарта: минимальная пара
+          // вместо полного TaskBridge (детерминизм, см. tests/isolation).
+          const restartCmd = process.env.LAN_SUPERVISOR_RESTART_CMD || 'scripts/restart-lan-now.mjs --delay-ms=0';
+          const restartParts = restartCmd.split(' ');
+          const worker = spawn(process.execPath, [path.join(root, restartParts[0]), ...restartParts.slice(1)], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
             env: {
               ...process.env,
@@ -163,7 +167,9 @@ async function main() {
           restarting = true;
           restartSeenStartedAt = state.startedAt;
           log(`app ${state.appPid} answers nothing on ${state.internalPort} for ${unhealthyTicks * (TICK_MS / 1000)} s — restarting the pair`);
-          const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
+          const restartCmd = process.env.LAN_SUPERVISOR_RESTART_CMD || 'scripts/restart-lan-now.mjs --delay-ms=0';
+          const restartParts = restartCmd.split(' ');
+          const worker = spawn(process.execPath, [path.join(root, restartParts[0]), ...restartParts.slice(1)], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
             env: {
               ...process.env,
