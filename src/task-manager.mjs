@@ -918,7 +918,7 @@ export class TaskManager extends EventEmitter {
       try {
         if (this.runtimes.size || this.queue.length || this.admitting) return;
         this.store.maintenanceCheckpoint().then(result => {
-          if (result.checkpointed) console.log(`[storage] WAL ${Math.round(result.walBytes / 1048576)} МБ → ${Math.round((result.afterBytes || 0) / 1048576)} МБ (checkpoint)`);
+          if (result.reason) console.log(`[storage] WAL maintenance skipped: ${result.reason}`);
         }).catch(() => {});
       } catch { /* плановое обслуживание не должно падать */ }
     }, everyMs);

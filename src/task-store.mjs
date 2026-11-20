@@ -341,17 +341,44 @@ export class TaskStore {
    *  PASSIVE не блокирует активных читателей/SSE; TRUNCATE — только после
    *  успешного PASSIVE (когда читателей нет). Возвращает размеры для метрик. */
   async maintenanceCheckpoint(maxWalBytes = 256 * 1024 * 1024) {
+    const metrics = { at: new Date().toISOString(), walBytes: 0, checkpointed: false, reason: null, busy: null, log: null, checkpointed_pages: null, afterBytes: null };
     const walFile = `${this.dbPath}-wal`;
-    let walBytes = 0;
-    try { walBytes = fs.statSync(walFile).size; } catch { return { walBytes: 0, checkpointed: false, reason: 'no wal' }; }
-    if (walBytes < maxWalBytes) return { walBytes, checkpointed: false, reason: 'below threshold' };
+    try { metrics.walBytes = fs.statSync(walFile).size; } catch {
+      metrics.reason = 'no wal';
+      console.log('[storage]', JSON.stringify(metrics));
+      return { walBytes: 0, checkpointed: false, reason: 'no wal' };
+    }
+    if (metrics.walBytes < maxWalBytes) {
+      metrics.reason = 'below threshold';
+      console.log('[storage]', JSON.stringify(metrics));
+      return { walBytes: metrics.walBytes, checkpointed: false, reason: 'below threshold' };
+    }
+    // PASSIVE может отработать без ошибки, но НЕ перенести часть страниц:
+    // проверяем busy И соотношение log/checkpointed (ревью 2026-11-20).
     const passive = this.db.exec('PRAGMA wal_checkpoint(PASSIVE);');
-    const busy = Number(passive?.[0]?.busy || 0);
-    if (busy) return { walBytes, checkpointed: false, reason: 'readers active' };
-    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
-    let afterBytes = 0;
-    try { afterBytes = fs.statSync(walFile).size; } catch { /* truncated */ }
-    return { walBytes, checkpointed: true, afterBytes };
+    const row = passive?.[0] || [];
+    metrics.busy = Number(row.busy ?? row[0] ?? 0);
+    metrics.log = Number(row.log ?? row[1] ?? 0);
+    metrics.checkpointed_pages = Number(row.checkpointed ?? row[2] ?? 0);
+    if (metrics.busy > 0 || metrics.log !== metrics.checkpointed_pages) {
+      metrics.reason = 'readers active / pages not fully transferred';
+      console.log('[storage]', JSON.stringify(metrics));
+      return { walBytes: metrics.walBytes, checkpointed: false, reason: metrics.reason };
+    }
+    // Между PASSIVE и TRUNCATE могут появиться новые читатели: TRUNCATE сам
+    // вернёт busy-признак в первой строке (не выбрасывает исключение).
+    const truncate = this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    const trow = truncate?.[0] || [];
+    const tBusy = Number(trow.busy ?? trow[0] ?? 0);
+    if (tBusy > 0) {
+      metrics.reason = 'truncate refused (new readers appeared)';
+      console.log('[storage]', JSON.stringify(metrics));
+      return { walBytes: metrics.walBytes, checkpointed: false, reason: metrics.reason };
+    }
+    metrics.checkpointed = true;
+    try { metrics.afterBytes = fs.statSync(walFile).size; } catch { metrics.afterBytes = 0; }
+    console.log('[storage]', JSON.stringify(metrics));
+    return { walBytes: metrics.walBytes, checkpointed: true, afterBytes: metrics.afterBytes };
   }
 
   #meta(key) {
