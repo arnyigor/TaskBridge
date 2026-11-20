@@ -74,6 +74,11 @@ async function main() {
         log('replaced by a newer supervisor, exiting');
         return 0;
       }
+      // Фикстура/ручная чистка удалила каталог: уходим, пару не трогая.
+      if (!fs.existsSync(SELF_FILE)) {
+        log('self registration file removed — exiting without touching the pair');
+        return 0;
+      }
       const lock = readJson(RESTART_LOCK);
       if (lock?.pid && await alive(lock.pid, 'restart-lan-now.mjs')) continue; // a restart is running
 
@@ -98,6 +103,16 @@ async function main() {
       if (!appAlive || !proxyAlive) {
         deadTicks += 1;
         unhealthyTicks = 0;
+        // Проверка принадлежности (P0 изоляция): процесс жив, но НЕ отвечает
+        // на внутреннем порту этой пары — это чужой процесс с тем же именем,
+        // а не наш сервер. Рестарт здесь убил бы чужой экземпляр (инцидент
+        // 2026-11-20: тестовый супервизор выбрал боевой порт). Диагностика
+        // вместо убийства.
+        if (appAlive && state.internalPort && !(await health(state.internalPort))) {
+          log(`app ${state.appPid} жив, но не отвечает на ${state.internalPort} — чужой экземпляр, рестарт отменён`);
+          deadTicks = 0;
+          continue;
+        }
         if (deadTicks >= DEAD_TICKS && !restarting) {
           // Crash-loop: слишком частые авторестарты — пауза, а не бесконечный цикл.
           restartTimes.push(Date.now());
@@ -110,16 +125,19 @@ async function main() {
           if (Date.now() < backoffUntil) continue;
           restarting = true;
           restartSeenStartedAt = state.startedAt;
-          // Вычеркнуть себя: restart-lan-now делает stop, а stop убивает
-          // супервизора из lan-supervisor.json — иначе рестарт убивает смотрящего.
-          try { fs.unlinkSync(SELF_FILE); } catch { /* gone */ }
           log(`app ${state.appPid} / proxy ${state.proxyPid} dead (app alive=${appAlive}, proxy alive=${proxyAlive}) — restarting the pair`);
           // Пара, запущенная с LAN_PORT, при рестарте обязана остаться на своём
           // публичном порту: без этого старт берёт порт из config и пара переезжает
           // (проверено в песочнице 2026-11-19).
           const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
-            env: { ...process.env, LAN_PORT: String(state.publicPort) },
+            env: {
+              ...process.env,
+              LAN_PORT: String(state.publicPort),
+              // stop внутри рестарта не должен убивать смотрящего: новая пара
+              // порождает замену, старый уходит по «replaced».
+              TASKBRIDGE_LIFECYCLE_SUPERVISOR: String(process.pid),
+            },
           });
           worker.on('error', error => log(`restart worker spawn failed: ${error?.message || error}`));
           worker.unref();
@@ -144,11 +162,14 @@ async function main() {
           if (Date.now() < backoffUntil) continue;
           restarting = true;
           restartSeenStartedAt = state.startedAt;
-          try { fs.unlinkSync(SELF_FILE); } catch { /* gone */ }
           log(`app ${state.appPid} answers nothing on ${state.internalPort} for ${unhealthyTicks * (TICK_MS / 1000)} s — restarting the pair`);
           const worker = spawn(process.execPath, [path.join(root, 'scripts', 'restart-lan-now.mjs'), '--delay-ms=0'], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
-            env: { ...process.env, LAN_PORT: String(state.publicPort) },
+            env: {
+              ...process.env,
+              LAN_PORT: String(state.publicPort),
+              TASKBRIDGE_LIFECYCLE_SUPERVISOR: String(process.pid),
+            },
           });
           worker.on('error', error => log(`restart worker spawn failed: ${error?.message || error}`));
           worker.unref();

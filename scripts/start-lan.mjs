@@ -470,10 +470,16 @@ async function stop() {
   // Супервизор не должен рестартить пару, которую остановили руками: убивается
   // первым, его pid-файл чистится, чтобы новый старт породил нового.
   const supervisor = readJsonSafe(path.join(DATA, 'lan-supervisor.json'));
-  if (supervisor?.pid) {
+  // Рестарт, инициированный супервизором, не убивает смотрящего: новая пара
+  // порождает замену, старый уходит по «replaced by a newer supervisor».
+  const ownRestart = Number(process.env.TASKBRIDGE_LIFECYCLE_SUPERVISOR || 0) > 0
+    && supervisor?.pid === Number(process.env.TASKBRIDGE_LIFECYCLE_SUPERVISOR);
+  if (supervisor?.pid && !ownRestart) {
     killTree(supervisor.pid);
     stopped.push(`supervisor ${supervisor.pid}`);
     try { fs.unlinkSync(path.join(DATA, 'lan-supervisor.json')); } catch { /* gone */ }
+  } else if (ownRestart) {
+    stopped.push(`supervisor ${supervisor?.pid} (handed over)`);
   }
   if (state?.proxyPid && proxyAlive(state.proxyPid)) { killTree(state.proxyPid); stopped.push(`proxy ${state.proxyPid}`); }
   if (lock?.pid && serverAlive(lock.pid)) { killTree(lock.pid); stopped.push(`app ${lock.pid}`); }
