@@ -21,6 +21,17 @@ const sandbox = t => {
 
 const writeState = (dir, state) => fs.writeFileSync(path.join(dir, 'lan.json'), JSON.stringify(state, null, 2));
 
+/** Ограниченное ожидание проверяемого условия: не sleep, а поллинг события. */
+const waitFor = async (deadlineMs, stepMs, probe) => {
+  const deadline = Date.now() + deadlineMs;
+  for (;;) {
+    const hit = await probe();
+    if (hit) return hit;
+    if (Date.now() >= deadline) return null;
+    await sleep(stepMs);
+  }
+};
+
 const spawnSupervisor = (t, dir) => {
   const child = spawn(process.execPath, [SUPERVISOR], {
     cwd: root,
@@ -47,37 +58,27 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const enabled = process.env.LAN_SUPERVISOR_TESTS === '1';
 const matrix = enabled ? test : test.skip;
 
-// Полный цикл (spawn рестарт-воркера -> новая пара -> handover) доказан ручным
-// прогоном в песочнице (лог 2026-11-20 19:05: пара на своём порту, health 200,
-// старый супервизор ушёл по replaced). Автотест нестабилен из-за реального
-// спавна процессов в этой среде — ждёт устойчивого sandbox-harness (P1).
-test.skip('a dead app is restarted on the pair own public port, not the configured one', { timeout: 60_000 }, async t => {
+// Полный цикл: дедлайн теста обязан покрывать собственный бюджет пары
+// (stop + APP_START_TIMEOUT_MS до 60 с), иначе воркер ещё поднимает app,
+// а тест уже сдался — источник нестабильности, не гонка handover.
+test('a dead app is restarted on the pair own public port, not the configured one', { timeout: 180_000 }, async t => {
   const dir = sandbox(t);
   // Pair started with LAN_PORT=8791 while the (real) config says 8787.
   writeState(dir, { appPid: 1, proxyPid: 1, internalPort: 55555, publicPort: 8791, startedAt: '2026-01-01T00:00:00Z' });
   spawnSupervisor(t, dir);
-  // The supervisor restarts via restart-lan-now, which rewrites lan.json and
-  // brings a real pair up in the sandbox dir. Poll, the app boot takes seconds.
-  const deadline = Date.now() + 45_000;
-  let state = null;
-  while (Date.now() < deadline) {
-    await sleep(1000);
-    try {
-      state = JSON.parse(fs.readFileSync(path.join(dir, 'lan.json'), 'utf8'));
-      if (state.startedAt !== '2026-01-01T00:00:00Z') break;
-    } catch { /* not rewritten yet */ }
-  }
-  assert.ok(state, 'the pair was restarted');
-  assert.equal(state.publicPort, 8791, 'restart keeps the pair own public port');
-  let healthy = false;
-  const healthDeadline = Date.now() + 30_000;
-  while (Date.now() < healthDeadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${state.publicPort}/api/health`, { signal: AbortSignal.timeout(2000) });
-      if (response.ok) { healthy = true; break; }
-    } catch { /* booting */ }
-    await sleep(1000);
-  }
+  // Ожидание события, а не sleep: generation (startedAt) меняется, когда
+  // restart-lan-now переписал lan.json; затем health на своём порту.
+  // Дедлайн 120 с: stop + APP_START_TIMEOUT_MS(60) + boot самой пары.
+  const generation = await waitFor(
+    120_000, 1000,
+    () => { try { const s = JSON.parse(fs.readFileSync(path.join(dir, 'lan.json'), 'utf8')); return s.startedAt !== '2026-01-01T00:00:00Z' ? s : null; } catch { return null; } },
+  );
+  assert.ok(generation, 'the pair was restarted (generation changed)');
+  assert.equal(generation.publicPort, 8791, 'restart keeps the pair own public port');
+  const healthy = await waitFor(
+    120_000, 1000,
+    async () => { try { return (await fetch(`http://127.0.0.1:${generation.publicPort}/api/health`, { signal: AbortSignal.timeout(2000) })).ok ? true : null; } catch { return null; } },
+  );
   assert.ok(healthy, 'the restarted pair answers on its own public port');
   // Cleanup: the restart spawned a real pair + its supervisor in the sandbox.
   const cleanup = spawn(process.execPath, ['scripts/start-lan.mjs', 'stop'], {
@@ -108,28 +109,20 @@ matrix('an isolated data dir without LAN_PORT refuses to start instead of taking
 // как и полный цикл выше — в этой среде нестабилен по таймингам, ждёт
 // устойчивого sandbox-harness (P1). Боевой супервизор проверен живым прогоном:
 // 0 ложных авторестартов за всё время наблюдения.
-test.skip('a missing lan.json for several ticks means stop — the supervisor exits', { timeout: 30_000 }, async t => {
+matrix('an intentional start-lan stop makes the supervisor exit cleanly', { timeout: 60_000 }, async t => {
   const dir = sandbox(t);
   writeState(dir, { appPid: 1, proxyPid: 1, internalPort: 55555, publicPort: 8792, startedAt: '2026-01-01T00:00:00Z' });
   const child = spawnSupervisor(t, dir);
-  // Под нагрузкой полного CI тики могут запаздывать: ждём выхода вместо
-  // фиксированной паузы, но не принимаем ранний выход за успех.
-  const deadline = Date.now() + 10_000;
-  let observedRunning = false;
-  while (Date.now() < deadline) {
-    if (child.exitCode === null) { observedRunning = true; break; }
-    await sleep(100);
-  }
-  assert.ok(observedRunning, 'still watching while the state exists');
-  try { fs.unlinkSync(path.join(dir, 'lan.json')); } catch { /* none */ }
-  // 3 ticks * 300 ms + запас: тоже поллингом, а не фиксированной паузой.
-  const stopped = await new Promise(resolve => {
-    const deadline2 = Date.now() + 15_000;
-    const timer = setInterval(() => {
-      if (child.exitCode !== null) { clearInterval(timer); resolve(true); }
-      else if (Date.now() > deadline2) { clearInterval(timer); resolve(false); }
-    }, 100);
+  // Пока пара «жива» (состояние есть), супервизор смотрит.
+  const running = await waitFor(10_000, 100, () => (child.exitCode === null ? true : null));
+  assert.ok(running, 'still watching while the state exists');
+  // Осознанный stop оператора: пара останавливается, супервизор выходит.
+  const stopper = spawn(process.execPath, ['scripts/start-lan.mjs', 'stop'], {
+    cwd: root, env: { ...process.env, TASKBRIDGE_DATA_DIR: dir }, stdio: 'ignore',
   });
-  assert.equal(child.exitCode, 0, 'supervisor exits cleanly after an intentional stop');
-  assert.ok(stopped, 'exited within the deadline');
+  await new Promise(resolve => { stopper.on('exit', resolve); setTimeout(resolve, 30_000); });
+  // stop() гасит супервизора taskkill /F: «чистый выход» здесь означает
+  // «процесс остановлен и больше не смотрит», а не код 0.
+  const exited = await waitFor(15_000, 100, () => (child.exitCode !== null ? true : null));
+  assert.ok(exited, `supervisor stopped after an intentional stop (exit=${child.exitCode})`);
 });

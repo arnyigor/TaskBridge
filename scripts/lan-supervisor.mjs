@@ -185,4 +185,8 @@ async function main() {
   }
 }
 
+process.on('exit', code => {
+  try { fs.appendFileSync(LOG, `${new Date().toISOString()} process exit, code=${code}
+`, 'utf8'); } catch { /* no file */ }
+});
 process.exitCode = await main();
