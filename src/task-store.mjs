@@ -318,18 +318,24 @@ export class TaskStore {
 
   // Consistent snapshot while the server keeps running (VACUUM INTO). The target
   // must not exist, so callers use a unique file name.
-  async backup(target) {
+  /** Backup/Restore сохраняет ИДЕНТИЧНОСТЬ хранилища (store_id копируется —
+   *  восстановление той же истории; ревью 2026-11-20: штатное восстановление
+   *  не должно выглядеть как «другой экземпляр»). Отдельный режим clone()
+   *  создаёт самостоятельный экземпляр со случайным store_id. */
+  async backup(target, { clone = false } = {}) {
     const file = path.resolve(target);
     await fsp.mkdir(path.dirname(file), { recursive: true });
     this.db.exec(`VACUUM INTO '${file.replaceAll("'", "''")}'`);
-    // A backup is a different history from the moment it is taken: once it is
-    // restored, the live database has moved on and its seq values no longer
-    // match. Give the copy its own storeId so clients notice the restore.
     const copy = new DatabaseSync(file);
     try {
-      copy.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('store_id', crypto.randomUUID());
+      if (clone) copy.prepare('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run('store_id', crypto.randomUUID());
     } finally { copy.close(); }
     return file;
+  }
+
+  /** Clone: копия базы с НОВОЙ идентичностью — самостоятельный экземпляр. */
+  async clone(target) {
+    return this.backup(target, { clone: true });
   }
 
   async checkpoint() {
