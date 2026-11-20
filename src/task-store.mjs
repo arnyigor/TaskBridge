@@ -336,6 +336,24 @@ export class TaskStore {
     this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
   }
 
+  /** P1 SQLite/WAL: файл WAL рос до 3,1 ГБ — транкейт-чекпоинт выполнялся
+   *  только при удалении задачи/бэкапе, между ними WAL не уменьшался никогда.
+   *  PASSIVE не блокирует активных читателей/SSE; TRUNCATE — только после
+   *  успешного PASSIVE (когда читателей нет). Возвращает размеры для метрик. */
+  async maintenanceCheckpoint(maxWalBytes = 256 * 1024 * 1024) {
+    const walFile = `${this.dbPath}-wal`;
+    let walBytes = 0;
+    try { walBytes = fs.statSync(walFile).size; } catch { return { walBytes: 0, checkpointed: false, reason: 'no wal' }; }
+    if (walBytes < maxWalBytes) return { walBytes, checkpointed: false, reason: 'below threshold' };
+    const passive = this.db.exec('PRAGMA wal_checkpoint(PASSIVE);');
+    const busy = Number(passive?.[0]?.busy || 0);
+    if (busy) return { walBytes, checkpointed: false, reason: 'readers active' };
+    this.db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+    let afterBytes = 0;
+    try { afterBytes = fs.statSync(walFile).size; } catch { /* truncated */ }
+    return { walBytes, checkpointed: true, afterBytes };
+  }
+
   #meta(key) {
     return this.db.prepare('SELECT value FROM meta WHERE key = ?').get(key)?.value ?? null;
   }

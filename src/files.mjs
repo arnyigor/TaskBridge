@@ -237,10 +237,17 @@ function gitIgnored(cwd, names) {
   });
 }
 
+// Гигантские OUTPUT_FILES-события раздували журнал (одно — 3,8 МБ: 13 467
+// предупреждений «не сохранён» с полными путями, живой пример 2026-11-20).
+// Предупреждения агрегируются: первые MAX_OUTPUT_WARNINGS дословно, дальше —
+// сводка с количеством, чтобы событие оставалось компактным и читаемым.
+const MAX_OUTPUT_WARNINGS = 20;
+
 export async function captureOutputs(task, taskDir, baseline) {
   if (!baseline) return { files: [], warnings: [] };
   const after = await snapshotWorkspace(task.workspacePath);
   const files = [], warnings = [];
+  let skippedTotal = 0;
   let totalBytes = 0;
   if (baseline.truncated || after.truncated) warnings.push('Рабочая папка слишком велика: список результатов может быть неполным.');
   await fs.mkdir(path.join(taskDir, 'files'), { recursive: true });
@@ -254,7 +261,8 @@ export async function captureOutputs(task, taskDir, baseline) {
   for (const [name, stat] of changed) {
     if (ignored.has(name)) continue;
     if (files.length >= 100 || stat.size > FILE_LIMITS.outputBytes || totalBytes + stat.size > FILE_LIMITS.outputTotalBytes) {
-      warnings.push(`Файл ${name} не сохранён: превышен лимит результатов.`);
+      skippedTotal += 1;
+      if (warnings.length < MAX_OUTPUT_WARNINGS) warnings.push(`Файл ${name} не сохранён: превышен лимит результатов.`);
       continue;
     }
     const id = crypto.randomUUID();
@@ -266,6 +274,8 @@ export async function captureOutputs(task, taskDir, baseline) {
       files.push({ id, name: path.basename(name), path: name, size, mimeType: contentType(name), direction: 'output', createdAt: new Date().toISOString() });
     } catch (error) { warnings.push(`Не удалось сохранить ${name}: ${error.message}`); }
   }
+  const truncatedWarnings = Math.max(0, skippedTotal - warnings.length);
+  if (truncatedWarnings > 0) warnings.push(`… ещё ${truncatedWarnings} файл(ов) не сохранено: превышен лимит результатов (список сокращён).`);
   return { files, warnings };
 }
 

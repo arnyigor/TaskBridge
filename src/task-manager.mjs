@@ -726,6 +726,7 @@ export class TaskManager extends EventEmitter {
     });
     if (trimmed) await this.store.vacuum().catch(() => {});
     else await this.#maybeVacuum();
+    this.#scheduleWalMaintenance();
     await this.#sweepOrphans();
     await this.#killOrphanPis(previous);
     if (this.queue.length) this.#schedulePump();
@@ -907,6 +908,23 @@ export class TaskManager extends EventEmitter {
   // rewrite of a multi-gigabyte file. Threshold is configurable; 512 MiB matches
   // the observed steady state where a stale 2 GiB file still weighs more than
   // the sessions it holds.
+  /** P1 SQLite/WAL: периодическое обслуживание WAL (раз в 30 минут, при простое).
+   *  PASSIVE-чекпоинт не блокирует читателей; TRUNCATE — только если PASSIVE
+   *  прошёл без занятых читателей. Безусловного чекпоинта после каждого хода
+   *  нет (требование ревью 2026-11-20). */
+  #scheduleWalMaintenance() {
+    const everyMs = Number(this.config.storage?.walMaintenanceEveryMs) || 30 * 60_000;
+    const timer = setInterval(() => {
+      try {
+        if (this.runtimes.size || this.queue.length || this.admitting) return;
+        this.store.maintenanceCheckpoint().then(result => {
+          if (result.checkpointed) console.log(`[storage] WAL ${Math.round(result.walBytes / 1048576)} МБ → ${Math.round((result.afterBytes || 0) / 1048576)} МБ (checkpoint)`);
+        }).catch(() => {});
+      } catch { /* плановое обслуживание не должно падать */ }
+    }, everyMs);
+    timer.unref?.();
+  }
+
   async #maybeVacuum() {
     const thresholdMb = Number(this.config.storage?.vacuumThresholdMb) || 512;
     if (this.runtimes.size || this.queue.length || this.admitting) return;
