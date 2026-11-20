@@ -1,0 +1,8 @@
+# TaskBridge Detekt config (Phase A audit, 2026-11-20).
+# Baseline: detekt-baseline.xml — все существующие на 20.11 нарушения.
+# Новые нарушения показываются и блокируют; существующие не прячутся.
+build:
+  maxIssues: 0
+config:
+  validation: true
+  warningsAsErrors: false
