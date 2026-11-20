@@ -286,6 +286,17 @@ fun SessionsScreen(
                     )
                 }
             }
+            // Чужое хранилище важнее пустого списка (P0 изоляция, инцидент
+            // 2026-11-20): «Подключён другой экземпляр» не должен прятаться за
+            // «Пока ни одной сессии» и не должен приниматься за удаление сессий.
+            val mismatch = connection.storeMismatch.value
+            if (mismatch) Banner(
+                text = "Подключён другой экземпляр TaskBridge — история не с этого компьютера",
+                icon = AppIcons.Offline,
+                color = MaterialTheme.colorScheme.error,
+                action = "Повторить",
+                onAction = { connection.sessions.refresh() },
+            )
             val error = state.error
             if (error != null) {
                 val since = state.updatedAtMillis?.let { " · данные на ${graph.platform.formatClock(it)}" }.orEmpty()
@@ -301,6 +312,11 @@ fun SessionsScreen(
                 when {
                     state.loading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                     groups.isEmpty() && query.isNotBlank() -> EmptyState(AppIcons.Search, "Ничего не найдено", "Попробуйте другое слово.")
+                    groups.isEmpty() && mismatch -> EmptyState(
+                        AppIcons.Offline,
+                        "Подключён другой экземпляр TaskBridge",
+                        "Сессии этого компьютера не показаны: хранилище не совпадает с подтверждённым.",
+                    )
                     groups.isEmpty() -> EmptyState(
                         AppIcons.Chat,
                         "Пока ни одной сессии",
