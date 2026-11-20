@@ -719,6 +719,7 @@ export class TaskManager extends EventEmitter {
         // два разных хода получили бы одинаковый номер и атрибуция терминалов
         // по поколению сломалась бы в другую сторону.
         task._turn = Math.max(task._turn || 0, task.turnState?.turn || 0);
+        task._turnOpened = task._turn;
         task._runtimeState = this.#runtimeFacts(task).state;
       },
       continuePrompt: CONTINUE_PROMPT,
@@ -4889,6 +4890,11 @@ export class TaskManager extends EventEmitter {
     const turn = Math.max(runtime?.turn || 0, task._turn || 0) + 1;
     if (runtime) runtime.turn = turn;
     task._turn = turn;
+    // Номер, с которым ход ОТКРЫЛСЯ: терминалы публикуют его, а не текущий
+    // task._turn — вклинившееся сообщение/очередь/ensureSession раздували
+    // номер терминала (живой журнал 2026-11-20: SUCCEEDED повторного ответа
+    // опубликован с turn=18 вместо 17).
+    task._turnOpened = turn;
     task._turnEvidence = [];
     // Инструменты, выполненные в этом ходу: решение о безопасном автоповторе
     // после 413 принимается только по счётчику текущего хода (MEDIA-09D).
@@ -5036,7 +5042,7 @@ export class TaskManager extends EventEmitter {
     // client that polls the status must never receive TASK_SUCCEEDED as a late
     // event (that ordering race flaked tests/server.test.mjs).
     await this.#turnStateEvent(task, 'SETTLED');
-    await this.#event(task, 'TASK_SUCCEEDED', task.current, { turn: Number.isFinite(turn) ? turn : null });
+    await this.#event(task, 'TASK_SUCCEEDED', task.current, { turn: Number.isFinite(task._turnOpened) ? task._turnOpened : (Number.isFinite(turn) ? turn : null) });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task).catch(() => {});
     if (commands.length) this.#runVerification(task, commands, turn);
@@ -5289,7 +5295,7 @@ export class TaskManager extends EventEmitter {
     task.current = 'Cancelled';
     task.updatedAt = now();
     await this.#turnStateEvent(task, 'CANCELLED');
-    await this.#event(task, 'TASK_CANCELLED', 'Task cancelled', { turn: Number.isFinite(task._turn) ? task._turn : null });
+    await this.#event(task, 'TASK_CANCELLED', 'Task cancelled', { turn: Number.isFinite(task._turnOpened) ? task._turnOpened : (Number.isFinite(task._turn) ? task._turn : null) });
     await this.store.save(this.#publicTask(task));
     await this.#writeResult(task);
   }
@@ -6979,7 +6985,7 @@ export class TaskManager extends EventEmitter {
       // Which turn really failed. A failure written while the operator was
       // already sending the next message gets a LATER seq and a later `at` than
       // that message, so neither can attribute it; the turn number can.
-      turn: Number.isFinite(turn) ? turn : null,
+      turn: Number.isFinite(task._turnOpened) ? task._turnOpened : (Number.isFinite(turn) ? turn : null),
       // «Ответ не завершён» alone hid the fact that the answer had already been
       // found by a tool (§7.2 of the 1.3 plan). The rows are in the chat; this
       // field lets a client summarise them without reparsing tool output.
