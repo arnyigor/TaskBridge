@@ -139,6 +139,20 @@ export async function consoleEncoding() {
   return cachedConsoleEncoding;
 }
 
+// chcp changes the console code page, not the Windows ANSI page used by some
+// native programs (and Python without UTF-8 mode) when writing to a pipe.
+let cachedAnsiEncoding;
+function windowsAnsiEncoding() {
+  return cachedAnsiEncoding ??= (async () => {
+    try {
+      const { stdout } = await execute('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Text.Encoding]::Default.CodePage'], { windowsHide: true, timeout: 3000 });
+      const page = stdout.trim();
+      if (/^\d{3,5}$/.test(page)) return new TextDecoder(page === '65001' ? 'utf-8' : `cp${page}`).encoding;
+    } catch { /* PowerShell or this code page can be unavailable. */ }
+    return consoleEncoding();
+  })();
+}
+
 // How to run a file as a script, by extension, per platform. Kept separate from
 // execution so the mapping is testable without launching anything. An unknown
 // extension returns null: guessing an interpreter would be worse than saying no.
@@ -184,7 +198,7 @@ export function shellCommand(command, { platform = process.platform, scriptPath 
 export async function runShellCommand(command, {
   cwd, platform = process.platform, timeoutMs = SCRIPT_TIMEOUT_MS, maxBytes = SHELL_MAX_BYTES,
   run = execute, writeFile = fs.writeFile, removeFile = fs.rm, tempDir = os.tmpdir(), makeId = () => crypto.randomUUID(),
-  outputEncoding = null
+  outputEncoding = null, legacyEncoding = windowsAnsiEncoding
 } = {}) {
   const text = String(command || '').trim();
   if (!text) throw fail('INPUT_INVALID', 'Пустая команда.');
@@ -197,28 +211,35 @@ export async function runShellCommand(command, {
   if (platform === 'win32') {
     // `@echo off` so the batch's own lines are not echoed back. `chcp 65001`
     // makes cmd read this UTF-8 batch correctly (so a Cyrillic path or argument
-    // survives) and makes cmd and PowerShell emit UTF-8 — otherwise a pipe gets
-    // the OEM code page and Cyrillic comes back as mojibake. CRLF keeps cmd
-    // happy on every Windows build.
+    // survives) and makes cmd emit UTF-8. Some child processes do not honor
+    // the console code page; decode their output below. CRLF keeps cmd happy.
     scriptPath = path.join(tempDir, `taskbridge-cmd-${makeId()}.cmd`);
     await writeFile(scriptPath, `@echo off\r\nchcp 65001 >nul\r\n${text}\r\n`, 'utf8');
     cleanup = () => removeFile(scriptPath, { force: true }).catch(() => {});
   }
 
   const decoder = new TextDecoder(outputEncoding || 'utf-8');
+  const strictUtf8 = platform === 'win32' && !outputEncoding ? new TextDecoder('utf-8', { fatal: true }) : null;
+  const decode = async value => {
+    if (strictUtf8) {
+      try { return decodeConsoleBytes(value, strictUtf8); }
+      catch { return decodeConsoleBytes(value, new TextDecoder(await legacyEncoding())); }
+    }
+    return decodeConsoleBytes(value, decoder);
+  };
   const plan = shellCommand(text, { platform, scriptPath });
   const options = { cwd: cwd || process.cwd(), windowsHide: true, timeout: timeoutMs, maxBuffer: maxBytes, encoding: 'buffer', env: process.env };
   try {
     const { stdout, stderr } = await run(plan.command, plan.args, options);
-    return { exitCode: 0, stdout: decodeConsoleBytes(stdout, decoder), stderr: decodeConsoleBytes(stderr, decoder), timedOut: false };
+    return { exitCode: 0, stdout: await decode(stdout), stderr: await decode(stderr), timedOut: false };
   } catch (error) {
     if (error.stdout === undefined && error.stderr === undefined) {
       throw fail('SHELL_RUN_FAILED', `Не удалось выполнить команду: ${error.message}`);
     }
     return {
       exitCode: typeof error.code === 'number' ? error.code : null,
-      stdout: decodeConsoleBytes(error.stdout, decoder),
-      stderr: decodeConsoleBytes(error.stderr, decoder),
+      stdout: await decode(error.stdout),
+      stderr: await decode(error.stderr),
       timedOut: error.killed === true || error.signal === 'SIGTERM'
     };
   } finally {

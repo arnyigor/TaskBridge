@@ -193,3 +193,28 @@ test('shell output is decoded, so raw bytes never reach the UI as mojibake', asy
   });
   assert.equal(legacy.stdout, 'Текущая', 'an OEM stream decodes with its code page');
 });
+
+test('Windows shell accepts UTF-8 and falls back to ANSI for a child that ignores chcp', async () => {
+  // The Russian Windows ANSI page is 1251 even when cmd uses UTF-8.
+  const ansi = Buffer.concat([Buffer.from('installed.json '), Buffer.from('eee1edeee2ebb8ed', 'hex')]);
+  const expected = 'installed.json обновлён';
+  let probes = 0;
+  const options = {
+    platform: 'win32', writeFile: async () => {}, removeFile: async () => {},
+    legacyEncoding: async () => { probes++; return 'windows-1251'; }
+  };
+  const utf8 = Buffer.from('Basalt: текущая версия 0.5.0');
+  const success = await runShellCommand('x', {
+    ...options, run: async () => ({ stdout: ansi, stderr: utf8 })
+  });
+  assert.equal(success.stdout, expected);
+  assert.equal(success.stderr, utf8.toString());
+  assert.equal(probes, 1, 'only the invalid UTF-8 stream needs a fallback');
+
+  const failed = await runShellCommand('x', {
+    ...options, run: async () => { throw Object.assign(new Error('exit 3'), { code: 3, stdout: utf8, stderr: ansi }); }
+  });
+  assert.equal(failed.exitCode, 3);
+  assert.equal(failed.stdout, utf8.toString());
+  assert.equal(failed.stderr, expected);
+});
