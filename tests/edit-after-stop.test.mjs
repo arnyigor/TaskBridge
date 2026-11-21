@@ -71,6 +71,30 @@ test('a failed delivery after edit keeps the text in the queue, not lost', async
   await new Promise(r => setImmediate(r));
 });
 
+test('edit waits for hard STOP even before the status changes to CANCELLING', async t => {
+  const f = await fixture(t, true);
+  await f.store.appendEvent('a', { type: 'USER_MESSAGE', message: 'вопрос', data: { text: 'вопрос' } });
+  const userSeq = (await f.store.readEvents('a', 0)).find(e => e.type === 'USER_MESSAGE').seq;
+  let startKill, finishKill;
+  const killing = new Promise(resolve => { startKill = resolve; });
+  const killGate = new Promise(resolve => { finishKill = resolve; });
+  f.pi.killTree = async () => { startKill(); await killGate; };
+
+  const stop = f.manager.cancel('a', { hard: true, commandId: 'stop-test' });
+  await killing;
+  // Editing an answer hits the same guard without starting a new Pi session.
+  const edit = f.manager.editTurn('a', { turnId: `assistant-${userSeq}`, text: 'исправленный ответ' });
+  try {
+    assert.equal(f.task.status, 'RUNNING');
+    const state = await Promise.race([edit, new Promise(resolve => setImmediate(() => resolve('waiting')))]);
+    assert.equal(state, 'waiting');
+  } finally {
+    finishKill();
+    await stop;
+  }
+  assert.equal((await edit).ok, true);
+});
+
 // Правка сразу после STOP: сессия ещё в CANCELLING (abort может идти секунды),
 // и раньше editTurn отвергался NOT_ALLOWED «Сессия сейчас работает» — оператор
 // видел ошибку вместо «отправлено». Теперь правка ждёт завершения STOP.

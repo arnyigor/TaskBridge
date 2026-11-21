@@ -5441,9 +5441,8 @@ export class TaskManager extends EventEmitter {
   async cancel(id, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
     const hard = opts?.hard === true;
-    // Пока STOP идёт, сессия остаётся в CANCELLING (abort RPC — до abortTimeoutMs).
-    // Правка, пришедшая в это окно, раньше отвергалась NOT_ALLOWED, и оператор
-    // видел ошибку вместо «отправляется»; теперь она ждёт этот промис.
+    // Правка ждёт этот промис с начала STOP. Жёсткий STOP убивает процессы
+    // до записи CANCELLING, так что одного статуса для проверки недостаточно.
     const task = this.tasks.get(id);
     let settle = null;
     if (task && !task._stopSettled) {
@@ -5461,9 +5460,8 @@ export class TaskManager extends EventEmitter {
    *  отвергается: «Сессия сейчас работает» после нажатого STOP — это ошибка
    *  вместо ожидаемой отправки. Другие рабочие статусы по-прежнему отказывают. */
   async #waitWhileStopping(id) {
-    const task = this.tasks.get(id);
-    const pending = task?._stopSettled;
-    if (!pending || task.status !== 'CANCELLING') return;
+    const pending = this.tasks.get(id)?._stopSettled;
+    if (!pending) return;
     const budget = Number(this.config.pi?.abortTimeoutMs || 10000) + 5000;
     let timer = null;
     try {
