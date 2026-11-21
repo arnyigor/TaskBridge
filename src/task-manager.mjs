@@ -4272,10 +4272,20 @@ export class TaskManager extends EventEmitter {
       return this.#persistModelSelection(task, model, targetModelId);
     }
     const runtime = await this.#ensureSession(task);
-    const state = await runtime.pi.getState().catch(async error => {
-      await this.#recoverRpcFailure(task, error);
-      throw error;
-    });
+    // Диагностический get_state НЕ идёт коротким универсальным бюджетом: у только что
+    // запущенного Pi первый ответ занимал 9—13 с, а 60 с — бюджет его же readiness-пробы.
+    // На отказе RPC выбор модели СОХРАНЯЕТСЯ (молчащий Pi не должен стоить ни выбора,
+    // ни идущего хода): раньше здесь вызывался #recoverRpcFailure — активный ход падал,
+    // процесс убивался, а оператор видел «Pi RPC timeout for get_state».
+    let state = null;
+    try {
+      state = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS);
+    } catch (error) {
+      if (!['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) throw error;
+      // Ход идёт — runtime принадлежит ему, судьбу решает его собственный watchdog.
+      if (!this.#turnInFlight(task)) await this.#retireRuntime(task, runtime);
+      return this.#persistModelSelection(task, model, targetModelId);
+    }
     // A busy session must not lock the operator into the wrong model. Moving a
     // history larger than the new window onto a smaller-context model is the
     // case that hurts: the next prompt is refused for overflow and the session
@@ -4308,7 +4318,7 @@ export class TaskManager extends EventEmitter {
     // a switch). The selection stays applied — it is persisted anyway — the dead
     // process is simply retired so the next turn starts a fresh one.
     let hungAfterSwitch = false;
-    const nextState = await runtime.pi.getState().catch(async error => {
+    const nextState = await runtime.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(async error => {
       if (['PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) {
         hungAfterSwitch = true;
         await this.#retireRuntime(task, runtime);
@@ -4328,6 +4338,11 @@ export class TaskManager extends EventEmitter {
       ...(hungAfterSwitch ? { runtimeRetired: true } : {})
     });
     return this.#publicTask(task);
+  }
+
+  /** Идёт ли ход, которому принадлежит runtime (историю и процесс не трогаем). */
+  #turnInFlight(task) {
+    return this.activeTaskIds.has(task.id) || !RUN_TERMINAL.has(task.status);
   }
 
   // The selection is stored, not applied: there is no live Pi to take it (the

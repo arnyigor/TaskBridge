@@ -1472,15 +1472,21 @@ test('a slow but live RPC is not killed on send failure', async t => {
 });
 
 
-test('changing model also retires an unresponsive session instead of hiding the RPC failure', async t => {
+// P0 2026-11-20: молчащий Pi больше не «прячет» и не разрушает выбор модели.
+// Раньше диагностический get_state с 15 с превращал переключение в PI_RPC_HUNG:
+// процесс убивался, а сессия становилась FAILED, и выбранная модель терялась.
+// Теперь выбор сохраняется для следующего запуска, исправный ход не трогается,
+// а неотвечающий процесс выводится из runtime-таблицы.
+test('changing model on an unresponsive session keeps the selection and retires the runtime', async t => {
   const f = await fixture(t);
   f.pi.getState = async () => { throw Object.assign(new Error('Pi stopped responding'), { code: 'PI_RPC_HUNG' }); };
   let killed = 0;
   f.pi.killTree = async () => { killed++; };
-  await assert.rejects(() => f.manager.setModel('a', 'remote', 'model'), { code: 'PI_RPC_HUNG' });
-  assert.equal(killed, 1);
+  const task = await f.manager.setModel('a', 'remote', 'model');
+  assert.deepEqual(task.requestedModel, { provider: 'remote', id: 'model' }, 'выбор сохранён, а не потерян');
+  assert.equal(killed, 1, 'неотвечающий процесс выведен, следующий запуск будет свежим');
   assert.equal(f.manager.runtimes.has('a'), false);
-  assert.equal(f.manager.getTask('a').status, 'FAILED');
+  assert.notEqual(f.manager.getTask('a').status, 'FAILED', 'диагностический get_state не валит сессию');
 });
 
 // Предохранитель к сборщику осиротевших Pi. 2026-10-14: замер производительности
