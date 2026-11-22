@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -88,7 +88,26 @@ gate('REL-SRE-01: after all owned Node processes die, the external ensure restor
   const env = { TASKBRIDGE_DATA_DIR: dir, LAN_PORT: String(port), LAN_HOST: '127.0.0.1', LAN_TLS: 'off' };
   const productionBefore = readJson(path.join(productionData, 'lan.json'));
   const productionHealthBefore = await health(8787, 5000);
+  const report = {
+    scenario: 'REL-SRE-01',
+    startedAt: new Date().toISOString(),
+    status: 'running',
+    productionBefore: { appPid: productionBefore?.appPid ?? null, proxyPid: productionBefore?.proxyPid ?? null },
+    staging: { dataDir: dir, publicPort: port },
+    cycles: [],
+  };
+  const writeReport = () => {
+    try {
+      const outDir = path.join(root, '.local', 'reliability-gate');
+      fs.mkdirSync(outDir, { recursive: true });
+      const text = JSON.stringify(report, null, 2);
+      fs.writeFileSync(path.join(outDir, 'latest.json'), text);
+      fs.writeFileSync(path.join(outDir, `rel-sre-01-${report.startedAt.replaceAll(':', '-')}.json`), text);
+    } catch { /* diagnostics must not fail the gate */ }
+  };
   t.after(async () => {
+    report.finishedAt = new Date().toISOString();
+    writeReport();
     await stopStaging(dir, port);
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -140,6 +159,15 @@ gate('REL-SRE-01: after all owned Node processes die, the external ensure restor
     assert.ok(watchdog?.lastRecoveryAt, `cycle ${cycle}: lastRecoveryAt was not recorded`);
     assert.ok(watchdog?.bootId, `cycle ${cycle}: watchdog state has no bootId`);
     assert.ok(watchdog?.storeId, `cycle ${cycle}: watchdog state has no storeId`);
+    report.cycles.push({
+      cycle,
+      appPid: restored.appPid,
+      proxyPid: restored.proxyPid,
+      bootId: restoredInfo.bootId,
+      storeId: restoredInfo.storeId,
+      lastRecoveryAt: watchdog.lastRecoveryAt,
+      health: await health(port),
+    });
 
     // 5. Exactly one listener for app and proxy, owned by the restored PIDs.
     const listenPids = (await import('../src/lan-ports.mjs')).listeningPids;
@@ -152,6 +180,9 @@ gate('REL-SRE-01: after all owned Node processes die, the external ensure restor
   const productionAfter = readJson(path.join(productionData, 'lan.json'));
   assert.equal(productionAfter?.appPid, productionBefore?.appPid, 'production app PID changed during the gate');
   assert.equal(productionAfter?.proxyPid, productionBefore?.proxyPid, 'production proxy PID changed during the gate');
+  report.status = 'passed';
+  report.productionAfter = { appPid: productionAfter?.appPid ?? null, proxyPid: productionAfter?.proxyPid ?? null };
+  writeReport();
 });
 
 gate('a foreign listener makes ensure fail safely and exit nonzero', { timeout: 120_000 }, async t => {
