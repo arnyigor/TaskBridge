@@ -64,6 +64,15 @@ export async function listeningPids(port) {
   return parsePosixListeningPids(ss);
 }
 
+/** True when `pid` itself is one of the listeners on `port`. */
+export async function pidOwnsPort(pid, port) {
+  const wanted = Number(pid);
+  const wantedPort = Number(port);
+  if (!Number.isSafeInteger(wanted) || wanted <= 0) return false;
+  if (!Number.isSafeInteger(wantedPort) || wantedPort <= 0) return false;
+  return (await listeningPids(wantedPort)).includes(wanted);
+}
+
 /** True when the port answers as a TaskBridge proxy (any response carries the id). */
 export async function taskBridgeProxyOn(port, timeoutMs = 1500) {
   try {

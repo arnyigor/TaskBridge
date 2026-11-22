@@ -9,7 +9,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { isTaskBridgeProcess } from '../src/instance-lock.mjs';
+import { processOwnership, OWNERSHIP } from '../src/instance-lock.mjs';
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -45,7 +45,10 @@ async function acquireRestartLock() {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       const holder = await readJson(RESTART_LOCK).catch(() => null);
-      if (isTaskBridgeProcess(Number(holder?.pid), 'restart-lan-now.mjs')) return false;
+      const ownership = processOwnership(Number(holder?.pid), 'restart-lan-now.mjs');
+      // Unknown is not stale: an elevated restart worker's command line is
+      // unreadable here, and breaking its lock would start a rival pair.
+      if (ownership === OWNERSHIP.OURS || ownership === OWNERSHIP.UNKNOWN) return false;
       await fs.rm(RESTART_LOCK, { force: true });
     }
   }
@@ -78,7 +81,7 @@ async function writeFailure(error) {
 // P0 изоляция: рестарт тестового экземпляра (свой каталог данных) обязан
 // держать свой LAN_PORT — иначе рестарт уводил пару на боевой порт.
 const dataDirOverride = process.env.TASKBRIDGE_DATA_DIR
-  && path.resolve(process.env.TASKBRIDGE_DATA_DIR) !== path.join(ROOT, 'data');
+  && path.resolve(process.env.TASKBRIDGE_DATA_DIR) !== path.join(root, 'data');
 if (dataDirOverride && !process.env.LAN_PORT && !process.argv.includes('--dry-run')) {
   console.error('[lan] изолированный каталог данных (TASKBRIDGE_DATA_DIR) требует LAN_PORT.');
   process.exit(1);

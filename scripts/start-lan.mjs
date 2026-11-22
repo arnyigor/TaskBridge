@@ -22,8 +22,8 @@ import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { lanAllowed } from '../src/auth.mjs';
 import { loadConfig } from '../src/config.mjs';
-import { isTaskBridgeProcess } from '../src/instance-lock.mjs';
-import { freeTaskBridgePort, portProblemText } from '../src/lan-ports.mjs';
+import { isTaskBridgeProcess, processOwnership, OWNERSHIP } from '../src/instance-lock.mjs';
+import { freeTaskBridgePort, pidOwnsPort, portProblemText, taskBridgeProxyOn } from '../src/lan-ports.mjs';
 
 // Where the proxy really listens (R1.1): without auth it stays on loopback.
 const proxyHost = config => {
@@ -46,6 +46,26 @@ function readState() {
 
 const serverAlive = pid => isTaskBridgeProcess(pid, 'server.mjs');
 const proxyAlive = pid => isTaskBridgeProcess(pid, 'proxy.mjs');
+
+// Liveness when the command line is unreadable (an elevated watchdog-started
+// pair): the PID must own the port this state file names and the endpoint must
+// answer. This is evidence for status/reconcile only — never for kill. A kill
+// still requires `serverAlive`/`proxyAlive`, i.e. a proven command line.
+async function serverPresent(pid, internalPort) {
+  if (!pid) return false;
+  if (serverAlive(pid)) return true;
+  if (processOwnership(pid, 'server.mjs') !== OWNERSHIP.UNKNOWN) return false;
+  if (!internalPort || !(await pidOwnsPort(pid, internalPort))) return false;
+  return health(internalPort);
+}
+
+async function proxyPresent(pid, publicPort) {
+  if (!pid) return false;
+  if (proxyAlive(pid)) return true;
+  if (processOwnership(pid, 'proxy.mjs') !== OWNERSHIP.UNKNOWN) return false;
+  if (!publicPort || !(await pidOwnsPort(pid, publicPort))) return false;
+  return taskBridgeProxyOn(publicPort);
+}
 
 function killTree(pid) {
   if (!pid) return;
@@ -207,7 +227,9 @@ async function launchProxy(internalPort, publicPort, lanHost, label = 'start-lan
 async function reconcileExisting() {
   const existing = readState();
   const lock = readLock();
-  if (existing && serverAlive(existing.appPid) && proxyAlive(existing.proxyPid)
+  const appUp = existing ? await serverPresent(existing.appPid, existing.internalPort) : false;
+  const proxyUp = existing ? await proxyPresent(existing.proxyPid, existing.publicPort) : false;
+  if (existing && appUp && proxyUp
       && (!lock || lock.pid === existing.appPid)
       && await health(existing.internalPort) && await health(existing.publicPort)) {
     console.log(`[lan] already running: app ${existing.appPid}, proxy ${existing.proxyPid}`);
@@ -216,7 +238,7 @@ async function reconcileExisting() {
     return 0;
   }
 
-  if (lock && serverAlive(lock.pid)) {
+  if (lock && await serverPresent(lock.pid, lock.internalPort)) {
     if (lock.mode !== 'lan' || !Number.isSafeInteger(lock.internalPort) || !Number.isSafeInteger(lock.publicPort)
         || !await health(lock.internalPort)) {
       console.error(`[lan] TaskBridge PID ${lock.pid} owns ${DATA}, but it has no recoverable LAN metadata. Stop it once, then start again.`);
@@ -445,15 +467,15 @@ async function status() {
   const state = readState();
   const lock = readLock();
   if (!state) {
-    if (lock && serverAlive(lock.pid)) {
+    if (lock && await serverPresent(lock.pid, lock.internalPort)) {
       console.log(`[lan] app ${lock.pid} is up, pair state is missing`);
       return 1;
     }
     console.log('[lan] not running (no lan.json)');
     return 1;
   }
-  const appUp = serverAlive(state.appPid);
-  const proxyUp = proxyAlive(state.proxyPid);
+  const appUp = await serverPresent(state.appPid, state.internalPort);
+  const proxyUp = await proxyPresent(state.proxyPid, state.publicPort);
   const answers = await health(state.publicPort);
   const authoritative = !lock || lock.pid === state.appPid;
   console.log(`[lan] app   ${state.appPid} ${appUp ? 'up' : 'DOWN'} (127.0.0.1:${state.internalPort})`);
@@ -467,6 +489,7 @@ async function stop() {
   const state = readState();
   const lock = readLock();
   const stopped = [];
+  const unknown = [];
   // Супервизор не должен рестартить пару, которую остановили руками: убивается
   // первым, его pid-файл чистится, чтобы новый старт породил нового.
   const supervisor = readJsonSafe(path.join(DATA, 'lan-supervisor.json'));
@@ -475,17 +498,38 @@ async function stop() {
   const ownRestart = Number(process.env.TASKBRIDGE_LIFECYCLE_SUPERVISOR || 0) > 0
     && supervisor?.pid === Number(process.env.TASKBRIDGE_LIFECYCLE_SUPERVISOR);
   if (supervisor?.pid && !ownRestart) {
-    killTree(supervisor.pid);
-    stopped.push(`supervisor ${supervisor.pid}`);
-    try { fs.unlinkSync(path.join(DATA, 'lan-supervisor.json')); } catch { /* gone */ }
+    const ownership = processOwnership(supervisor.pid, 'lan-supervisor.mjs');
+    if (ownership === OWNERSHIP.OURS) {
+      killTree(supervisor.pid);
+      stopped.push(`supervisor ${supervisor.pid}`);
+      try { fs.unlinkSync(path.join(DATA, 'lan-supervisor.json')); } catch { /* gone */ }
+    } else if (ownership === OWNERSHIP.UNKNOWN) {
+      // Stop must not become a kill-by-PID of something we cannot identify.
+      console.error(`[lan] supervisor PID ${supervisor.pid}: владение не подтверждено (command line недоступна). ` +
+        'Остановите пару из elevated-консоли или через задачу TaskBridge.');
+      return 1;
+    } else if (ownership === OWNERSHIP.DEAD || ownership === OWNERSHIP.FOREIGN) {
+      try { fs.unlinkSync(path.join(DATA, 'lan-supervisor.json')); } catch { /* gone */ }
+    }
   } else if (ownRestart) {
     stopped.push(`supervisor ${supervisor?.pid} (handed over)`);
   }
-  if (state?.proxyPid && proxyAlive(state.proxyPid)) { killTree(state.proxyPid); stopped.push(`proxy ${state.proxyPid}`); }
-  if (lock?.pid && serverAlive(lock.pid)) { killTree(lock.pid); stopped.push(`app ${lock.pid}`); }
-  if (state?.appPid && state.appPid !== lock?.pid && serverAlive(state.appPid)) {
-    killTree(state.appPid);
-    stopped.push(`stale app ${state.appPid}`);
+
+  const proxyOwner = state?.proxyPid ? processOwnership(state.proxyPid, 'proxy.mjs') : OWNERSHIP.DEAD;
+  if (proxyOwner === OWNERSHIP.OURS) { killTree(state.proxyPid); stopped.push(`proxy ${state.proxyPid}`); }
+  else if (proxyOwner === OWNERSHIP.UNKNOWN) unknown.push(`proxy ${state.proxyPid}`);
+  const appOwner = lock?.pid ? processOwnership(lock.pid, 'server.mjs') : OWNERSHIP.DEAD;
+  if (appOwner === OWNERSHIP.OURS) { killTree(lock.pid); stopped.push(`app ${lock.pid}`); }
+  else if (appOwner === OWNERSHIP.UNKNOWN) unknown.push(`app ${lock.pid}`);
+  if (state?.appPid && state.appPid !== lock?.pid) {
+    const staleOwner = processOwnership(state.appPid, 'server.mjs');
+    if (staleOwner === OWNERSHIP.OURS) { killTree(state.appPid); stopped.push(`stale app ${state.appPid}`); }
+    else if (staleOwner === OWNERSHIP.UNKNOWN) unknown.push(`stale app ${state.appPid}`);
+  }
+  if (unknown.length) {
+    console.error(`[lan] ${unknown.join(', ')}: владение не подтверждено — не завершаю. ` +
+      'Состояние пары сохранено; используйте elevated-консоль или задачу TaskBridge.');
+    return 1;
   }
 
   // The state file is not proof the port is free: a proxy that outlived its app,

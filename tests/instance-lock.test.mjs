@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-import { acquireInstanceLock, imageNameOf } from '../src/instance-lock.mjs';
+import { acquireInstanceLock, classifyCommandLine, entrypointMatches, imageNameOf, processOwnership } from '../src/instance-lock.mjs';
 
 // Инцидент 2026-10-05: кнопка «Запустить сервер» отвечала «TaskBridge уже запущен
 // (PID 13220)», когда такого процесса уже не было. Блокировка хранит только PID, а
@@ -67,4 +67,19 @@ test('имя образа берётся только из строки проц
   // Русская локаль: для несуществующего PID tasklist печатает сообщение, а не строку процесса
   assert.equal(imageNameOf('ИНФОРМАЦИЯ: нет задач, соответствующих заданным условиям.'), null);
   assert.equal(imageNameOf(''), null);
+});
+
+test('нечитаемая командная строка — это unknown, а не доказательство владения', () => {
+  // 2026-11-22: watchdog запустил пару с повышенными правами, а `start-lan
+  // status` из обычной консоли не смог прочитать CommandLine. Раньше это
+  // трактовалось как «наш процесс» — и разрешало kill по одному PID. Теперь
+  // unknown не равно ours: для статуса нужна портовая улика, для kill — строка.
+  assert.equal(classifyCommandLine('', 'server.mjs'), 'unknown');
+  assert.equal(classifyCommandLine('   ', 'server.mjs'), 'unknown');
+  assert.equal(classifyCommandLine(null, 'server.mjs'), 'unknown');
+  assert.equal(classifyCommandLine('node G:\\Taskbridge\\src\\server.mjs', 'server.mjs'), 'ours');
+  assert.equal(classifyCommandLine('node /opt/taskbridge/src/server.mjs', 'server.mjs'), 'ours');
+  assert.equal(classifyCommandLine('node G:\\Taskbridge\\src\\proxy.mjs', 'server.mjs'), 'foreign');
+  assert.equal(entrypointMatches('', 'server.mjs'), false, 'unknown must not pass the strict kill check');
+  assert.equal(processOwnership(999999, 'server.mjs'), 'dead');
 });

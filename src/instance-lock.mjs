@@ -3,19 +3,54 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
+// Ownership is deliberately three-valued. `isTaskBridgeProcess()` answers the
+// strict question ("is this provably our entrypoint?") and is the only answer a
+// kill decision may use. A non-elevated caller cannot read the command line of
+// an elevated TaskBridge process, so that case is `unknown`, never `ours` and
+// never `foreign`: killing it could hit an unrelated process, while deleting its
+// data-directory lock could start a second server on the same SQLite file.
+//
+// Liveness for status uses stronger, independent evidence: the PID must own the
+// expected listening port and the endpoint must answer. That corroboration lives
+// in scripts/start-lan.mjs (ports) and src/lan-ports.mjs, not here.
+export const OWNERSHIP = Object.freeze({
+  OURS: 'ours',
+  FOREIGN: 'foreign',
+  UNKNOWN: 'unknown',
+  DEAD: 'dead',
+});
+
+/** Classify a readable command line; an empty one is unknown, not proof. */
+export function classifyCommandLine(commandLine, entrypoint) {
+  const command = String(commandLine ?? '').trim();
+  if (!command) return OWNERSHIP.UNKNOWN;
+  return command.replaceAll('\\', '/').includes(entrypoint.replaceAll('\\', '/'))
+    ? OWNERSHIP.OURS
+    : OWNERSHIP.FOREIGN;
+}
+
+/** Strict: true only when the command line proves this is our entrypoint. */
+export function entrypointMatches(commandLine, entrypoint) {
+  return classifyCommandLine(commandLine, entrypoint) === OWNERSHIP.OURS;
+}
+
 // process.kill(pid, 0) throws ESRCH when the process is gone and EPERM when it
 // exists but belongs to another user (still alive for our purposes).
-// A live PID is not proof that OUR server is alive: Windows reuses numbers, and this
-// machine runs dozens of node processes (2026-10-05: «TaskBridge уже запущен (PID 13220)»
-// about a PID that no longer belonged to TaskBridge, so the button could not start the
-// server). Identity is the command line — the lock is taken only by src/server.mjs.
-export function isTaskBridgeProcess(pid, entrypoint = 'server.mjs') {
-  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+export function processOwnership(pid, entrypoint = 'server.mjs') {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return OWNERSHIP.DEAD;
   try { process.kill(pid, 0); }
-  catch (error) {
-    if (error.code !== 'EPERM') return false;
-  }
-  return isNodeProcess(pid) && hasEntrypoint(pid, entrypoint);
+  catch (error) { if (error.code !== 'EPERM') return OWNERSHIP.DEAD; }
+
+  const node = isNodeProcess(pid);
+  if (!node) return OWNERSHIP.FOREIGN;
+  const command = readCommandLine(pid);
+  if (command === null || command === '') return OWNERSHIP.UNKNOWN;
+  return classifyCommandLine(command, entrypoint);
+}
+
+/** True only for a proven TaskBridge process; unknown and foreign are false. */
+export function isTaskBridgeProcess(pid, entrypoint = 'server.mjs') {
+  return processOwnership(pid, entrypoint) === OWNERSHIP.OURS;
 }
 
 // Returns true when the PID exists and its image name looks like a node/
@@ -52,25 +87,23 @@ export function imageNameOf(csvOutput) {
 
 // A reused PID is the reason a dead server can look alive: the lock stores a PID,
 // Windows hands that number to an unrelated process, and the image check alone
-// cannot tell them apart. The command line can: lifecycle operations act only on
-// the exact TaskBridge entrypoint recorded in their state.
-function hasEntrypoint(pid, entrypoint) {
+// cannot tell them apart. The command line can. `null` means the query failed;
+// `''` means the process exists but exposes no command line (elevation). Both are
+// unknown and must not be used as evidence of ownership or of staleness.
+function readCommandLine(pid) {
   try {
     if (process.platform !== 'win32') {
-      const command = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+      return execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
         encoding: 'utf8', timeout: 5000,
       }).trim();
-      return command.includes(entrypoint);
     }
     const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
       `(Get-CimInstance Win32_Process -Filter \"ProcessId=${pid}\" -ErrorAction SilentlyContinue).CommandLine`], {
       encoding: 'utf8', timeout: 8000, windowsHide: true,
     });
-    const command = out.trim();
-    if (!command) return false;
-    return command.replaceAll('\\', '/').includes(entrypoint.replaceAll('\\', '/'));
+    return out.trim();
   } catch {
-    return true; // cannot inspect it: refuse to treat the lock as stale
+    return null;
   }
 }
 
@@ -96,8 +129,16 @@ export function acquireInstanceLock(dataRoot, details = {}) {
     let holder = null;
     try { holder = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { /* unreadable lock: treat as stale */ }
     const pid = Number(holder?.pid);
-    if (pid !== process.pid && isTaskBridgeProcess(pid)) {
-      throw Object.assign(new Error(`TaskBridge уже запущен (PID ${pid}). Остановите его и повторите.`), { code: 'ALREADY_RUNNING' });
+    const ownership = processOwnership(pid);
+    // Unknown is not stale. Removing this lock would let a second server open the
+    // same SQLite file next to a live instance whose command line we merely could
+    // not read. Refuse and name the PID instead.
+    if (pid !== process.pid && (ownership === OWNERSHIP.OURS || ownership === OWNERSHIP.UNKNOWN)) {
+      const message = ownership === OWNERSHIP.UNKNOWN
+        ? `TaskBridge PID ${pid} держит каталог данных, но его командная строка недоступна. ` +
+          'Владение не подтверждено, lock не удаляю. Проверьте процесс вручную.'
+        : `TaskBridge уже запущен (PID ${pid}). Остановите его и повторите.`;
+      throw Object.assign(new Error(message), { code: 'ALREADY_RUNNING' });
     }
     try { fs.rmSync(file, { force: true }); } catch { /* best effort */ }
     try {

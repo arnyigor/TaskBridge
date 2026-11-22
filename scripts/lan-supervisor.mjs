@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isTaskBridgeProcess } from '../src/instance-lock.mjs';
+import { isTaskBridgeProcess, processOwnership, OWNERSHIP } from '../src/instance-lock.mjs';
 
 const root = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DATA = process.env.TASKBRIDGE_DATA_DIR ? path.resolve(process.env.TASKBRIDGE_DATA_DIR) : path.join(root, 'data');
@@ -41,6 +41,13 @@ const alive = async (pid, marker) => {
   if (!pid) return false;
   try { return await import('../src/instance-lock.mjs').then(m => m.isTaskBridgeProcess(pid, marker)); }
   catch { return false; }
+};
+// Tri-state: a live PID with an unreadable command line is not proof of death.
+// Restarting then would race a pair we cannot see (elevated watchdog instance).
+const ownership = async (pid, marker) => {
+  if (!pid) return OWNERSHIP.DEAD;
+  try { return await import('../src/instance-lock.mjs').then(m => m.processOwnership(pid, marker)); }
+  catch { return OWNERSHIP.UNKNOWN; }
 };
 const health = async port => {
   try {
@@ -66,6 +73,7 @@ async function main() {
   let backoffUntil = 0;
   const restartTimes = [];
   let restartSeenStartedAt = null;
+  let unknownLoggedFor = null;
   for (;;) {
     await new Promise(resolve => setTimeout(resolve, TICK_MS));
     try {
@@ -98,8 +106,21 @@ async function main() {
         unhealthyTicks = 0;
       }
 
-      const appAlive = await alive(state.appPid, 'server.mjs');
-      const proxyAlive = await alive(state.proxyPid, 'proxy.mjs');
+      const appOwnership = await ownership(state.appPid, 'server.mjs');
+      const proxyOwnership = await ownership(state.proxyPid, 'proxy.mjs');
+      if (appOwnership === OWNERSHIP.UNKNOWN || proxyOwnership === OWNERSHIP.UNKNOWN) {
+        const key = `${state.appPid}/${state.proxyPid}`;
+        if (unknownLoggedFor !== key) {
+          unknownLoggedFor = key;
+          log(`app ${state.appPid} / proxy ${state.proxyPid}: владелец не подтверждён (command line недоступна) — не трогаю пару`);
+        }
+        deadTicks = 0;
+        unhealthyTicks = 0;
+        continue;
+      }
+      unknownLoggedFor = null;
+      const appAlive = appOwnership === OWNERSHIP.OURS;
+      const proxyAlive = proxyOwnership === OWNERSHIP.OURS;
       if (!appAlive || !proxyAlive) {
         deadTicks += 1;
         unhealthyTicks = 0;
