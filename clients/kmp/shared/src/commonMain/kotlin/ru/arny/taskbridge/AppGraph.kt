@@ -172,11 +172,11 @@ class AppGraph(val platform: PlatformServices) {
             api, scope, clockMillis = { nowMillis() },
             // Раздел 4.3: в фоне список опрашивается только пока идёт работа, и реже
             // при экономии энергии — иначе телефон греется и садится на пустых запросах.
-            inForeground = { platform.inForeground },
+            inForeground = { platform.maintainsConnection },
             powerSave = { platform.powerSaveMode },
             // Если единственная работа уже видна через SSE, список нужен лишь как
             // редкий контрольный снимок, а не второй канал каждые 5 секунд.
-            streamedTaskId = { visibleSession.takeIf { platform.inForeground } },
+            streamedTaskId = { visibleSession.takeIf { platform.maintainsConnection } },
             startLocalServer = platform.localServerLauncher?.let { launcher -> { launcher.start() } },
             // Проверяется в момент нажатия, а не при создании графа: каталог можно задать в настройках уже после подключения.
             localServerAvailable = { platform.localServerLauncher?.available() == true },
@@ -356,7 +356,7 @@ class AppGraph(val platform: PlatformServices) {
 
         private fun syncChatStreaming(joinBarriers: List<ChatSession> = emptyList()) {
             val snapshot = chats
-            val target = visibleSession.takeIf { platform.inForeground }?.let(snapshot::get)
+            val target = visibleSession.takeIf { platform.maintainsConnection }?.let(snapshot::get)
             streamTargets.trySend(ChatStreamTarget(target, snapshot.values.toList() + joinBarriers))
         }
 
@@ -438,13 +438,13 @@ class AppGraph(val platform: PlatformServices) {
         private suspend fun healOfflineLink() {
             var attempt = 0
             while (true) {
-                val visible = platform.inForeground
+                val active = platform.maintainsConnection
                 if (_online.value) {
                     attempt = 0
-                    delay(linkIdleDelayMs(visible))
+                    delay(linkIdleDelayMs(active))
                     continue
                 }
-                delay(offlineRetryDelayMs(attempt, visible))
+                delay(offlineRetryDelayMs(attempt, active))
                 attempt += 1
                 refreshHostReachability()
                 if (_online.value) wakeUp() else sessions.refresh()

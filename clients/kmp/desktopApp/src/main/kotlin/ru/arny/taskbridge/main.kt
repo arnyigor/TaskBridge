@@ -25,6 +25,7 @@ import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberTrayState
 import androidx.compose.ui.window.rememberWindowState
+import java.awt.Frame
 import java.awt.event.WindowAdapter
 import java.awt.event.WindowEvent
 import kotlinx.coroutines.channels.Channel
@@ -184,19 +185,41 @@ fun main() {
                 window.addWindowFocusListener(object : WindowAdapter() {
                     override fun windowGainedFocus(e: WindowEvent?) {
                         platform.foreground = true
+                        platform.connectionAllowed = true
                         graph.connection?.wakeUp()
                     }
 
                     override fun windowLostFocus(e: WindowEvent?) {
+                        // Focus is not lifecycle: switching to another window must
+                        // not tear down SSE. Only the tray/minimize state does.
                         platform.foreground = false
                         graph.connection?.appVisibilityChanged()
+                    }
+
+                    override fun windowStateChanged(e: WindowEvent?) {
+                        val minimized = (e?.newState ?: 0) and Frame.ICONIFIED != 0
+                        if (minimized) {
+                            platform.connectionAllowed = false
+                            platform.foreground = false
+                            graph.connection?.appVisibilityChanged()
+                        } else {
+                            // Restoring the window wakes the graph immediately; the old
+                            // stream is allowed to reconnect without a `show` request.
+                            platform.connectionAllowed = true
+                            graph.connection?.appVisibilityChanged()
+                            graph.connection?.wakeUp()
+                        }
                     }
                 })
             }
             LaunchedEffect(visible) {
                 if (!visible) {
                     platform.foreground = false
+                    platform.connectionAllowed = false
                     graph.connection?.appVisibilityChanged()
+                } else {
+                    platform.connectionAllowed = true
+                    graph.connection?.wakeUp()
                 }
             }
             // Updates belong to the tray menu; an overlay here intercepts the chat menu.

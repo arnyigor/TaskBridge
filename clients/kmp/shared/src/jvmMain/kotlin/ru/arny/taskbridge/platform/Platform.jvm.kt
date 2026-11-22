@@ -135,10 +135,19 @@ class DesktopPlatformServices(
     @Volatile
     var foreground: Boolean = true
 
+    /**
+     * Window visible (focus is irrelevant): Desktop must keep one SSE and the
+     * task list polling. The desktop window listener clears this only while the
+     * window is minimized; restoring it wakes the graph.
+     */
+    @Volatile
+    var connectionAllowed: Boolean = true
+
     /** Set by the desktop app to post a tray notification. */
     var notifier: ((SessionAlert) -> Unit)? = null
 
     override val inForeground: Boolean get() = foreground
+    override val maintainsConnection: Boolean get() = connectionAllowed
 
     override fun httpClient(baseUrl: String?): HttpClient = HttpClient(OkHttp) {
         engine {

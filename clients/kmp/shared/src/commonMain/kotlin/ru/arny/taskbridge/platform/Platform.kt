@@ -55,6 +55,16 @@ interface PlatformServices {
     val inForeground: Boolean
 
     /**
+     * Whether SSE and polling must stay alive even when [inForeground] is false.
+     *
+     * Android keeps the Activity lifecycle/battery policy: the default is
+     * [inForeground]. Desktop has no Activity pause: losing window focus is not a
+     * reason to tear down SSE. It keeps this true while the window is visible and
+     * false while minimized, so a server restart is picked up without `show`.
+     */
+    val maintainsConnection: Boolean get() = inForeground
+
+    /**
      * Режим экономии энергии устройства (Android: `PowerManager.isPowerSaveMode`).
      * Нужен, чтобы удлинять фоновый опрос, когда система уже сказала, что батарея
      * важнее свежести (раздел 4.3 плана). По умолчанию — выключен.
