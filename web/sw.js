@@ -51,7 +51,7 @@ self.addEventListener('fetch', (event) => {
 // alone, so the payload arrives readable here and nowhere in between.
 self.addEventListener('push', (event) => {
   let data = {};
-  try { data = event.data ? event.data.json() : {}; } catch (error) { data = {}; }
+  try { data = event.data ? event.data.json() : {}; } catch { data = {}; }
   const title = data.title || 'TaskBridge';
   event.waitUntil(self.registration.showNotification(title, {
     body: data.body || '',

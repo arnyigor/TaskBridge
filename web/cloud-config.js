@@ -24,7 +24,7 @@
     var deviceToken = params.get('t');
     if (!machineId || !deviceToken) return null;
     var record = { machineId: machineId, deviceToken: deviceToken, url: params.get('r') || '', pairedAt: new Date().toISOString() };
-    try { localStorage.setItem(KEY, JSON.stringify(record)); } catch (error) { return null; }
+    try { localStorage.setItem(KEY, JSON.stringify(record)); } catch { return null; }
     // Drop the credential out of the address bar (and out of history) as soon
     // as it is stored, then continue into the app itself.
     history.replaceState(null, '', '/');
@@ -33,7 +33,7 @@
 
   var saved = claimPairingLink();
   if (!saved) {
-    try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (error) { saved = null; }
+    try { saved = JSON.parse(localStorage.getItem(KEY) || 'null'); } catch { saved = null; }
   }
 
   if (local(location.hostname)) return;

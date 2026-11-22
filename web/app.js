@@ -4,7 +4,7 @@ import { catalogStateText, renderCapabilityChips, renderEmptyState, renderGroupH
 import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
 import { selectTransport } from './transport.mjs';
-import { createCommandClient, newCommandId } from './command-client.mjs';
+import { createCommandClient } from './command-client.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
 import { marked } from './vendor/marked.js';
 import DOMPurify from './vendor/purify.mjs';
@@ -345,10 +345,6 @@ const MESSAGE_COPY_TITLES = ['Скопировать сообщение', 'Ск�
 // буфере остались бы пустые абзацы, а счётчик считал бы то, чего в буфере нет.
 function selectedMessages(texts) {
   return texts.map(text => String(text ?? '').trim()).filter(Boolean);
-}
-
-function selectedMessagesText(texts) {
-  return selectedMessages(texts).join('\n\n');
 }
 
 function messageCopyButton(turn) {
@@ -2020,7 +2016,6 @@ function beginEditAnswer(node, turn) {
   host.insertBefore(box, view.nextSibling);
   const close = () => { box.remove(); view.classList.remove('hidden'); };
   const reopen = (message) => {
-    area.value = area.value;
     view.classList.add('hidden');
     host.insertBefore(box, view.nextSibling);
     note.textContent = message;
@@ -2598,7 +2593,9 @@ function maybeNotify(t) {
   lastNotifiedStatus.set(t.id, t.status);
   if (!previous || previous === t.status || ACTIVE_STATUSES.has(t.status) || !notifyEnabled()) return;
   const title = t.status === 'SUCCEEDED' ? 'Готово' : t.status === 'FAILED' ? 'Ошибка' : 'Остановлено';
-  try { new Notification(`TaskBridge: ${title}`, { body: (t.title || t.prompt || '').slice(0, 120), tag: t.id }); } catch {}
+  // A blocked or unsupported Notification API must not break the panel: the badge
+  // and the window title still show the state.
+  try { new Notification(`TaskBridge: ${title}`, { body: (t.title || t.prompt || '').slice(0, 120), tag: t.id }); } catch { /* notifications are optional */ }
 }
 
 // One generation runs at a time, so "Стоп" must reach the session that actually
@@ -3033,8 +3030,6 @@ async function refreshTask() {
 // использованием и давностью, бюджет и предупреждение о переполнении, глобальные
 // знания. Запись — только через гейт предложений: у панели нет кнопки «сохранить».
 
-let memoryLoadedFor = null;
-
 function memoryAge(iso) {
   const at = Date.parse(iso || '');
   if (!Number.isFinite(at)) return null;
@@ -3169,7 +3164,6 @@ async function loadMemoryPanel() {
     const memory = await api(`/api/projects/${encodeURIComponent(projectId)}/memory`);
     const proposals = await api(`/api/projects/${encodeURIComponent(projectId)}/memory/proposals`).catch(() => ({ proposals: [] }));
     const consolidation = await api(`/api/projects/${encodeURIComponent(projectId)}/memory/consolidation`).catch(() => null);
-    memoryLoadedFor = projectId;
     renderMemoryPanel(memory, proposals, consolidation);
   } catch (e) {
     $('memorySummary').textContent = `Не удалось прочитать память: ${e.message}`;
@@ -3203,8 +3197,6 @@ async function memoryProposalAction(action, proposalId, button) {
 
 const memoryPanel = $('memoryPanel');
 if (memoryPanel) memoryPanel.addEventListener('toggle', () => { if (memoryPanel.open) loadMemoryPanel(); });
-
-let workspaceFilesLoadedFor = null;
 
 // Строки `git status --porcelain` (« M file.txt», «?? new.js») — то, что оператор
 // читает как «что изменил агент», без отдельного дерева и без второго запроса diff.
@@ -3294,7 +3286,6 @@ async function loadWorkspaceFiles() {
   if (!taskId) { renderWorkspaceFiles(null); return; }
   try {
     const list = await api(`/api/tasks/${encodeURIComponent(taskId)}/workspace-files`);
-    workspaceFilesLoadedFor = taskId;
     renderWorkspaceFiles(list);
     await loadChangedFiles();
   } catch (e) {
@@ -3648,7 +3639,10 @@ async function loadArtifacts(timeoutMs = null) {
         openFileViewer({ url, name: a.textContent });
       };
     }
-  } catch {}
+  } catch {
+    // The artifact list is a convenience next to the answer: a failed read keeps
+    // the previous one in place instead of an error box over the chat.
+  }
 }
 
 /* ---------------- composer / actions ---------------- */
@@ -4718,7 +4712,9 @@ async function renderPairedDevices() {
 // does not even show the permission prompt. The web-push machinery on the
 // machine and in sw.js was left intact on purpose: bringing notifications back
 // is returning the button (#notifyButton) and the handler that used to switch
-// `subscribeToPush` / `unsubscribeFromPush` on — both are kept below, unused.
+// `subscribeToPush` on — it still runs whenever notifications are enabled. The
+// off switch (and `unsubscribeFromPush`, which lived only for it) comes back with
+// the button; the server side of /api/push/unsubscribe is untouched.
 //
 // The browser never lets a page revoke its own notification permission, so when
 // the button comes back the on/off switch belongs to TaskBridge itself:
@@ -4758,15 +4754,6 @@ async function subscribeToPush() {
   });
   await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: subscription.toJSON(), name: navigator.userAgent.slice(0, 60) }) });
   return subscription;
-}
-
-async function unsubscribeFromPush() {
-  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-  const registration = await navigator.serviceWorker.ready;
-  const subscription = await registration.pushManager.getSubscription();
-  if (!subscription) return;
-  await api('/api/push/unsubscribe', { method: 'POST', body: JSON.stringify({ endpoint: subscription.endpoint }) }).catch(() => {});
-  await subscription.unsubscribe().catch(() => {});
 }
 
 
@@ -5195,15 +5182,6 @@ async function serverIsUp() {
   catch { return false; }
 }
 
-async function waitUntil(predicate, timeoutMs, stepMs = 700) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await predicate()) return true;
-    if (Date.now() >= deadline) return false;
-    await new Promise(resolve => setTimeout(resolve, stepMs));
-  }
-}
-
 function showRestart({ title, detail, retry, spinning = true }) {
   if (spinning) $('serverRestartButton').classList.add('restarting');
   else $('serverRestartButton').classList.remove('restarting');
@@ -5454,7 +5432,10 @@ function savePendingModel() {
     else localStorage.removeItem('taskbridge.pendingModel');
     if (pendingThinking) localStorage.setItem('taskbridge.pendingThinking', pendingThinking);
     else localStorage.removeItem('taskbridge.pendingThinking');
-  } catch {}
+  } catch {
+    // Private mode or a full quota: losing the draft choice is cheaper than
+    // breaking the composer.
+  }
 }
 
 // Фильтры пикера живут только в памяти страницы: это способ найти модель сейчас,
