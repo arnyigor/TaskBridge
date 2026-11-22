@@ -508,7 +508,7 @@
       "role": "assistant",
       "text": "",
       "thinking": "",
-      "status": "FAILED",
+      "status": "CANCELLED",
       "active": false,
       "final": true,
       "error": null,

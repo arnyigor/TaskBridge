@@ -337,7 +337,10 @@ fun ChatScreen(
         session.effects.collect { effect ->
             when (effect) {
                 is ChatEffect.Notice -> snackbar.showSnackbar(effect.message)
-                is ChatEffect.RestoreComposer -> draft = TextFieldValue(effect.text)
+                is ChatEffect.RestoreComposer -> {
+                    draft = TextFieldValue(listOf(draft.text, effect.text).filter { it.isNotBlank() }.joinToString("\n\n"))
+                    files = files + effect.files
+                }
                 is ChatEffect.OpenSession -> onOpenSession(effect.taskId)
                 ChatEffect.Deleted -> {
                     connection.sessions.forget(taskId)
@@ -1832,9 +1835,9 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             confirm = "Остановить",
             destructive = true,
             onConfirm = {
-                session.cancel(hard = true)
-                // Отменённые отправки вернутся в поле ввода эффектом RestoreComposer.
+                // Stop local delivery before asking the server to stop the run.
                 session.releaseStuckSends()
+                session.cancel(hard = true)
                 onClose()
             },
             onDismiss = onClose,

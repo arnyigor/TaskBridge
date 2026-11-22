@@ -3,6 +3,7 @@ package ru.arny.taskbridge.core.client.session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
@@ -135,7 +136,7 @@ data class ChatSessionState(
 /** One-shot things the screen reacts to (a snackbar, text back into the composer, navigation). */
 sealed interface ChatEffect {
     data class Notice(val message: String) : ChatEffect
-    data class RestoreComposer(val text: String) : ChatEffect
+    data class RestoreComposer(val text: String, val files: List<UploadFile> = emptyList()) : ChatEffect
     data class OpenSession(val taskId: String) : ChatEffect
     data object Deleted : ChatEffect
 }
@@ -170,6 +171,8 @@ class ChatSession(
     private val persistenceMutex = Mutex()
     private val deliveryMutex = Mutex()
     private val delivering = mutableSetOf<String>()
+    private val deliveryJobs = MutableStateFlow<Map<String, Job>>(emptyMap())
+    private val outgoingFiles = MutableStateFlow<Map<String, List<UploadFile>>>(emptyMap())
     private val commandDelivery = CommandDelivery(api, taskId, ::backoff)
     private var reducer: ChatReducer? = null
     private var oldestSeq: Long? = null
@@ -229,6 +232,7 @@ class ChatSession(
         refreshJob?.cancel()
         cachePersistJob?.cancel()
         olderJob?.cancel()
+        for (delivery in deliveryJobs.value.values) delivery.cancel()
         // The owning Connected scope is cancelled immediately after close(). Use an
         // independent non-cancellable job so the final cache snapshot is not lost.
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -583,25 +587,54 @@ class ChatSession(
         if (clean.isEmpty() && files.isEmpty()) return
         val commandId = ids()
         val message = OutgoingMessage(commandId, clean, files.map { it.name }, mode, if (files.isEmpty()) OutgoingMessage.Status.Sending else OutgoingMessage.Status.Uploading)
+        outgoingFiles.update { it + (commandId to files) }
         _state.update { it.copy(outbox = it.outbox + message) }
-        scope.launch {
+        launchDelivery(message, files)
+    }
+
+    private fun launchDelivery(message: OutgoingMessage, files: List<UploadFile>): Job? {
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             // Durable before network: a process death cannot lose an accepted tap.
             saveOutbox()
             mutex.withLock {
                 reducer?.let { chat ->
-                    chat.addOptimistic(commandId, clean.ifEmpty { "Прикреплённые файлы" }, files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) }, now())
+                    if (!chat.hasOptimistic(message.commandId)) chat.addOptimistic(message.commandId, message.text.ifEmpty { "Прикреплённые файлы" }, files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) }, now())
                     _state.update { s -> s.copy(chat = chat.snapshot()) }
                 }
             }
             deliverIfIdle(message, files)
         }
+        // A reconnect must not replace the handle of an in-flight HTTP request.
+        while (true) {
+            val jobs = deliveryJobs.value
+            if (closed || _state.value.outbox.none { it.commandId == message.commandId }) {
+                job.cancel()
+                return null
+            }
+            if (message.commandId in jobs) {
+                job.cancel()
+                return jobs[message.commandId]
+            }
+            if (deliveryJobs.compareAndSet(jobs, jobs + (message.commandId to job))) break
+        }
+        job.invokeOnCompletion {
+            deliveryJobs.update { jobs -> if (jobs[message.commandId] === job) jobs - message.commandId else jobs }
+        }
+        // Release can win between the membership check and registration.
+        if (closed || _state.value.outbox.none { it.commandId == message.commandId }) job.cancel() else job.start()
+        return job
     }
 
     /** Try a failed or unknown message again. An unknown one gets a new command id: the old one may have landed. */
     fun retry(commandId: String) {
         val message = _state.value.outbox.firstOrNull { it.commandId == commandId } ?: return
+        val files = outgoingFiles.value[commandId].orEmpty()
+        if (message.fileNames.isNotEmpty() && files.isEmpty()) {
+            _effects.tryEmit(ChatEffect.Notice("Повторно выберите файлы перед отправкой"))
+            return
+        }
         dismiss(commandId)
-        send(message.text, emptyList(), message.mode)
+        send(message.text, files, message.mode)
     }
 
     /**
@@ -621,7 +654,10 @@ class ChatSession(
         val pending = _state.value.outbox
         if (pending.isEmpty()) return emptyList()
         val ids = pending.map { it.commandId }.toSet()
+        val files = ids.flatMap { outgoingFiles.value[it].orEmpty() }
         _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId in ids }) }
+        for (id in ids) deliveryJobs.value[id]?.cancel()
+        outgoingFiles.update { it - ids }
         scope.launch {
             saveOutbox()
             for (id in ids) dropOptimistic(id)
@@ -629,12 +665,17 @@ class ChatSession(
         val texts = pending.map { it.text }
         // Текст возвращается оператору существующим каналом эффектов: UI не должен
         // сам знать, как отменённая отправка возвращается в поле ввода.
-        _effects.tryEmit(ChatEffect.RestoreComposer(texts.joinToString("\n\n")))
+        _effects.tryEmit(ChatEffect.RestoreComposer(texts.joinToString("\n\n"), files))
+        if (pending.any { it.status != OutgoingMessage.Status.Uploading }) {
+            _effects.tryEmit(ChatEffect.Notice("Отправка остановлена на устройстве. Сервер мог уже принять сообщение — проверьте историю перед повтором."))
+        }
         return texts
     }
 
     fun dismiss(commandId: String) {
         _state.update { it.copy(outbox = it.outbox.filterNot { m -> m.commandId == commandId }) }
+        deliveryJobs.value[commandId]?.cancel()
+        outgoingFiles.update { it - commandId }
         scope.launch { saveOutbox(); dropOptimistic(commandId) }
     }
 
@@ -647,6 +688,8 @@ class ChatSession(
             fileIds = upload.files.mapNotNull { it.id }.map { ru.arny.taskbridge.core.api.UploadedFileId(it) }
             setStatus(message.commandId, OutgoingMessage.Status.Sending)
         }
+        // Cancelling the upload must never fall through to message delivery.
+        kotlinx.coroutines.currentCoroutineContext().ensureActive()
         val request = MessageRequest(
             text = message.text,
             mode = if (message.mode == SendMode.STEER) "steer" else "auto",
@@ -671,6 +714,7 @@ class ChatSession(
     }
 
     private suspend fun onDelivered(commandId: String, text: String, task: Task) {
+        outgoingFiles.update { it - commandId }
         // A server that does not record commandId on queue entries (older builds)
         // still parks the message: then the entry is ours by its text.
         val queued = task.pendingPrompts.any { it.commandId == commandId } ||
@@ -724,6 +768,7 @@ class ChatSession(
     }
 
     private fun removeFromOutbox(commandId: String) {
+        outgoingFiles.update { it - commandId }
         _state.update { s -> s.copy(outbox = s.outbox.filterNot { it.commandId == commandId }) }
         persistOutbox()
     }
@@ -742,7 +787,8 @@ class ChatSession(
     private suspend fun resumeOutbox(messages: List<OutgoingMessage>) {
         for (message in messages) {
             if (message.fileNames.isNotEmpty()) continue
-            deliverIfIdle(message, emptyList())
+            // Preserve outbox order, including when several reconnects race.
+            launchDelivery(message, emptyList())?.join()
         }
     }
 
@@ -845,7 +891,28 @@ class ChatSession(
      * чата — нажать ещё раз. Сервер к повторной отмене терпим: на терминальном
      * статусе он отвечает сразу, а на живом — повторяет остановку.
      */
-    fun cancel(hard: Boolean = false) = act("cancel", concurrent = true) { api.cancel(taskId, ids(), hard = hard) }
+    fun cancel(hard: Boolean = false) = act("cancel", concurrent = true) {
+        mutex.withLock {
+            reducer?.setStopping(true)
+            _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
+        }
+        val cursor = mutex.withLock { reducer?.cursor ?: 0L }
+        try {
+            val stopped = api.cancel(taskId, ids(), hard = hard)
+            mutex.withLock {
+                val chat = reducer
+                if (chat != null && chat.cursor != cursor) return@withLock
+                val merged = mergeTaskSnapshot(_state.value.task, stopped, chat?.cursor ?: cursor)
+                chat?.syncTask(merged)
+                _state.update { it.copy(task = merged) }
+            }
+        } finally {
+            mutex.withLock {
+                reducer?.setStopping(false)
+                _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
+            }
+        }
+    }
 
     fun sendPendingNow(pendingId: String) = act("pending:$pendingId") { api.sendPendingNow(taskId, pendingId) }
 
@@ -913,7 +980,22 @@ class ChatSession(
         text: String,
         onAccepted: () -> Unit = {},
         onFailed: () -> Unit = {},
-    ) = act("edit:$turnId", block = { api.editTurn(taskId, turnId, text) }, onAccepted = onAccepted, onFailed = onFailed)
+    ) = act("edit:$turnId", block = {
+        mutex.withLock {
+            reducer?.setActionStatus(turnId, "SENDING")
+            _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
+        }
+        try {
+            api.editTurn(taskId, turnId, text)
+            // TURN_TRUNCATED replaces the answer and clears the transient status.
+        } catch (error: Throwable) {
+            mutex.withLock {
+                reducer?.setActionStatus(turnId, null)
+                _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
+            }
+            throw error
+        }
+    }, onAccepted = onAccepted, onFailed = onFailed)
 
     fun editAnswer(
         turnId: String,

@@ -100,6 +100,13 @@ export function turnInstructions(profile = EXPLORE, { files = [] } = {}) {
   return lines.join('\n');
 }
 
+// Keep the marker and path lines compatible with old journal entries and both chat clients.
+export function attachmentNote(paths) {
+  return paths.length
+    ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${paths.map(file => `- ${file}`).join('\n')}`
+    : '';
+}
+
 /**
  * The text sent to Pi for one turn: the operator's own words, then the notes.
  * `files` are workspace-relative paths of attachments staged for this turn.

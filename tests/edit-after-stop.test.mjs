@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { fixture } from './helpers/manager-fixture.mjs';
 
 // BUG-02: STOP → правка → повторная отправка.
@@ -93,6 +95,59 @@ test('edit waits for hard STOP even before the status changes to CANCELLING', as
     await stop;
   }
   assert.equal((await edit).ok, true);
+});
+
+for (const queued of [false, true]) {
+  test(`editing a message preserves its staged attachment (${queued ? 'queued' : 'direct'})`, async t => {
+    const f = await fixture(t, false);
+    const file = { id: 'f', name: 'note.txt', path: 'note.txt', size: 5, kind: 'attachment' };
+    await fs.writeFile(path.join(f.root, file.path), 'hello');
+    f.task.files = [file];
+    f.task.attachments = [file];
+    await f.store.appendEvent('a', { type: 'USER_MESSAGE', message: 'old', data: { text: 'old', files: [file] } });
+    const seq = (await f.store.readEvents('a', 0)).find(e => e.type === 'USER_MESSAGE').seq;
+    f.state.isStreaming = queued;
+    assert.equal((await f.manager.editTurn('a', { turnId: `user-${seq}`, text: 'edited' })).ok, true);
+    for (let i = 0; i < 200 && !(queued ? f.task.pendingPrompts?.length : f.sent.length); i++) await new Promise(r => setTimeout(r, 5));
+    const text = queued ? f.task.pendingPrompts[0].text : f.sent[0];
+    assert.match(text, /edited/);
+    assert.equal(text.split('note.txt').length - 1, 1, 'the prompt names the file exactly once');
+    if (queued) assert.deepEqual(f.task.pendingPrompts[0].files.map(f => f.id), ['f']);
+    assert.equal(f.task.attachments.length, 1, 'no duplicate staging');
+    const original = (await f.store.readEvents('a', 0)).find(e => e.seq === seq);
+    assert.equal(original.data.files[0].id, 'f');
+    for (const waiter of f.runtime.settleResolvers.splice(0)) { clearTimeout(waiter.timer); waiter.resolve(); }
+  });
+}
+
+test('initial edits keep stable file ownership across repeated edits and cancelled queue files', async t => {
+  const f = await fixture(t, false);
+  const initial = { id: 'initial', name: 'initial.txt', path: 'initial.txt', kind: 'attachment' };
+  const unrelated = { id: 'queued', name: 'queued.txt', path: 'queued.txt', kind: 'attachment' };
+  f.task.initialFiles = [initial];
+  f.task.files = [initial, unrelated];
+  f.task.attachments = [initial, unrelated];
+  f.state.isStreaming = true; // Keep the resent prompt queued for inspection.
+  await fs.writeFile(path.join(f.root, initial.path), 'initial');
+  for (const text of ['edit one', 'edit two']) {
+    assert.equal((await f.manager.editTurn('a', { turnId: 'user-initial', text })).ok, true);
+    for (let i = 0; i < 200 && !f.task.pendingPrompts?.some(p => p.text.startsWith(text)); i++) await new Promise(r => setTimeout(r, 5));
+    const pending = f.task.pendingPrompts.find(p => p.text.startsWith(text));
+    assert.deepEqual(pending.files.map(file => file.id), ['initial']);
+    assert.match(pending.text, /initial\.txt/);
+    assert.doesNotMatch(pending.text, /queued\.txt/);
+    await f.manager.cancel('a', { hard: true });
+    // A fresh runtime may be started after STOP; keep it busy for the next edit.
+    f.pi.closed = false;
+    f.manager.runtimes.set('a', f.runtime);
+  }
+});
+
+test('legacy initial attachments with unknown ownership are not silently resent', async t => {
+  const f = await fixture(t, false);
+  f.task.files = [{ id: 'unknown', path: 'unknown.txt' }];
+  await assert.rejects(() => f.manager.editTurn('a', { turnId: 'user-initial', text: 'edit' }), /исходные вложения/);
+  assert.equal(f.task.prompt, 'original');
 });
 
 // Правка сразу после STOP: сессия ещё в CANCELLING (abort может идти секунды),

@@ -287,6 +287,7 @@ fun AssistantMessage(
                                 caption?.let { Muted(it) }
                             }
                         }
+                        item.status == "SENDING" || item.status == "STOPPING" || item.status == "CANCELLED" -> Unit
                         item.cutOff -> Muted("Запрос прерван")
                         item.thinking.isNotBlank() || item.tools.isNotEmpty() -> if (item.final && item.error == null && item.segmentActions && item.id == item.canonicalId) Muted("Без текста")
                         item.final && item.error == null -> ChatErrorStatus(
@@ -294,6 +295,11 @@ fun AssistantMessage(
                             onCopy = { onCopyText("Ответ не был получен.") },
                             onRetry = actions.regenerate,
                         )
+                    }
+                    when (item.status) {
+                        "SENDING" -> Muted("Отправляется…")
+                        "STOPPING" -> Muted("Останавливается…")
+                        "CANCELLED" -> Muted("Запрос отменён")
                     }
                     if (item.active && item.text.isNotBlank() && item.error == null) TypingIndicator()
                     // Turn output files (created and merely viewed by tools) stay in the

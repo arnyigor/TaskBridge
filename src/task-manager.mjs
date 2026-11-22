@@ -40,7 +40,7 @@ import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs'
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 import { piAgentDir } from './pi-settings.mjs';
-import { buildTurnPrompt, detectProfile, resolveTurnInstructionsMode, turnInstructions } from './prompt-builder.mjs';
+import { attachmentNote, buildTurnPrompt, detectProfile, resolveTurnInstructionsMode, turnInstructions } from './prompt-builder.mjs';
 import { deriveRecap, readSavedRecap, writeRecap, removeRecap, reconcileVerification, RECAP_MD } from './resume/recap.mjs';
 import { buildResumeContext, sessionSummary, WORKSPACE_STRATEGIES, MEMORY_MODES } from './resume/resume-builder.mjs';
 import { buildResumePreview } from './resume/resume-preview.mjs';
@@ -2578,6 +2578,7 @@ export class TaskManager extends EventEmitter {
   // (PI_MCP_CONFIG_MODE), not just the file passed to --mcp-config.
   #piEnv(launch = null) {
     const env = { ...(this.config.pi?.env || {}) };
+    if (!env.PYTHONUTF8) env.PYTHONUTF8 = '1';
     if (this.localModels?.enabled && !env.LLAMA_BASE_URL) env.LLAMA_BASE_URL = this.localModels.baseUrl;
     if (launch) Object.assign(env, launch.env);
     else Object.assign(env, this.mcp.launch().env);
@@ -3222,6 +3223,7 @@ export class TaskManager extends EventEmitter {
     }
 
     const files = await stageFiles({ ...task, ...prepared }, this.store.taskDir(task.id), task._incomingFiles || []);
+    task.initialFiles = files;
     if (files.length) { task.files = files; task.attachments = [...(task.attachments || []), ...files]; }
     if (task._uploadToken) { await this.uploads.discard(task._uploadToken).catch(() => {}); delete task._uploadToken; }
     return prepared;
@@ -5654,6 +5656,14 @@ export class TaskManager extends EventEmitter {
       throw Object.assign(new Error('Переотправить можно только сообщение оператора.'), { code: 'INPUT_INVALID' });
     }
     const { fromSeq, dropInitial } = this.#turnSequences(value);
+    const events = await this.store.readEvents(id, 0);
+    const own = events.find(event => event.seq === fromSeq);
+    // Queued/cancelled attachments also live in task.files; they must never be
+    // mistaken for files of the initial prompt after its history is truncated.
+    if (dropInitial && !Array.isArray(task.initialFiles) && task.files?.length) {
+      throw Object.assign(new Error('Не удалось определить исходные вложения старой сессии. Отправьте новое сообщение и выберите файлы заново.'), { code: 'NOT_ALLOWED' });
+    }
+    const attached = dropInitial ? (task.initialFiles || []) : (own?.data?.files || []);
     if (dropInitial) {
       // The session's first prompt has no event of its own: it lives in
       // task.prompt, so that is what gets corrected — and the whole log is cut.
@@ -5661,7 +5671,6 @@ export class TaskManager extends EventEmitter {
       task.prompt = edited;
       await this.store.save(this.#publicTask(task));
     } else {
-      const own = (await this.store.readEvents(id, 0)).find(event => event.seq === fromSeq);
       await this.#truncateFrom(task, fromSeq + 1, { keepUser: true, reason: 'edit', text: edited });
       if (own) await this.store.updateEventData(id, fromSeq, { message: edited, data: { ...(own.data || {}), text: edited } });
     }
@@ -5674,7 +5683,7 @@ export class TaskManager extends EventEmitter {
     // показывать оператору «ничего не происходит». Доставка уходит в фон: её
     // отказ виден клиенту событиями (ход с ошибкой), текст остаётся в очереди
     // и может быть повторён (регресс-тест edit-after-stop).
-    this.#message(id, edited, 'auto', [], null, { queue: true, announce: false })
+    this.#message(id, edited + attachmentNote(attached.map(file => file.path)), 'auto', [], null, { queue: true, announce: false, staged: attached })
       .catch(error => {
         console.error(`[edit-resend] delivery failed: ${error?.message || error}`);
       });
@@ -6396,8 +6405,8 @@ export class TaskManager extends EventEmitter {
       // when the workspace is real.
       const stageNow = Boolean(task.workspacePath);
       const pendingId = crypto.randomUUID();
-      const attached = stageNow ? await stageFiles(task, this.store.taskDir(id), incomingFiles) : [];
-      if (attached.length) {
+      const attached = staged.length ? staged : stageNow ? await stageFiles(task, this.store.taskDir(id), incomingFiles) : [];
+      if (attached.length && !staged.length) {
         task.attachments = [...(task.attachments || []), ...attached];
         task.files = [...(task.files || []), ...attached.map(metadata)];
       }
@@ -6405,9 +6414,7 @@ export class TaskManager extends EventEmitter {
       if (!stageNow && ((files || []).length || uploadToken)) {
         await this.#savePendingFiles(id, pendingId, { files: files || [], uploadToken: uploadToken || null });
       }
-      const note = attached.length
-        ? '\n\nAdditional files from the phone are in .taskbridge-input/:\n' + attached.map(f => `- ${f.path}`).join('\n')
-        : '';
+      const note = staged.length ? '' : attachmentNote(attached.map(f => f.path));
       // Several messages may wait for one session; they are delivered in order.
       // The files are staged already; the delivered turn must carry them too,
       // otherwise the chat shows a raw .taskbridge-input path instead of the

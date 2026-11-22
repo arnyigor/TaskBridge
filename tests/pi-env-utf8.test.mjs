@@ -1,20 +1,28 @@
-// PYTHONUTF8 в env запуска Pi: сессии порождали Python-потомков, которые под
-// Windows писали кириллицу в cp1251, и tool-логи декодировались в U+FFFD.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 
-test('#piEnv sets PYTHONUTF8=1 and respects an explicit config value', async () => {
-  // #piEnv приватен; проверяем через shape-заглушку, повторяющую логику?
-  // Нет — честнее вызвать через инстанс нельзя без тяжёлых зависимостей, поэтому
-  // фиксируем контракт на минимальном фасаде: та же функция-логика вынесена в
-  // task-manager как приватный метод, здесь проверяем инвариант интеграции,
-  // читая исходник на наличие дефолта ПОСЛЕ копирования config.pi.env.
-  const src = await (await import('node:fs/promises')).readFile(new URL('../src/task-manager.mjs', import.meta.url), 'utf8');
-  const m = src.match(/#piEnv\(launch = null\) \{[\s\S]*?\n  \}/);
-  assert.ok(m, '#piEnv найден');
-  const body = m[0];
-  const copyIdx = body.indexOf('...(this.config.pi?.env || {})');
-  const utf8Idx = body.indexOf("!env.PYTHONUTF8");
-  assert.ok(utf8Idx > copyIdx, 'PYTHONUTF8 задаётся после копирования config.pi.env (явное значение приоритетно)');
-  assert.match(body, /env\.PYTHONUTF8 = '1'/);
+// Exercise the production private method without starting a real agent/session.
+const source = await fs.readFile(new URL('../src/task-manager.mjs', import.meta.url), 'utf8');
+const method = source.match(/#piEnv\(launch = null\) \{[\s\S]*?\n  \}/)?.[0];
+assert.ok(method, '#piEnv exists');
+const piEnv = new Function(`return ({${method.replace('#piEnv', 'piEnv')}}).piEnv`)();
+const envFor = env => piEnv.call({ config: { pi: { env } }, mcp: { launch: () => ({ env: {} }) } });
+
+test('Pi Python UTF-8 default is inherited and an explicit configuration wins', () => {
+  assert.equal(envFor({}).PYTHONUTF8, '1');
+  assert.equal(envFor({ PYTHONUTF8: '0' }).PYTHONUTF8, '0');
+  assert.equal(envFor({ PYTHONIOENCODING: 'cp1251' }).PYTHONIOENCODING, 'cp1251');
+});
+
+test('Windows Python child writes readable UTF-8 to stdout and stderr', { skip: process.platform !== 'win32' }, t => {
+  const env = { ...process.env, ...envFor({}) };
+  delete env.PYTHONIOENCODING;
+  const result = spawnSync('python', ['-c', String.raw`import sys; print('installed.json \u043e\u0431\u043d\u043e\u0432\u043b\u0451\u043d'); print('Basalt: \u0442\u0435\u043a\u0443\u0449\u0430\u044f 0.5.0', file=sys.stderr); sys.exit(3)`], { env, timeout: 5000 });
+  if (result.error?.code === 'ENOENT') return t.skip('Python is not installed');
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 3);
+  assert.equal(result.stdout.toString('utf8').trim(), 'installed.json обновлён');
+  assert.equal(result.stderr.toString('utf8').trim(), 'Basalt: текущая 0.5.0');
 });

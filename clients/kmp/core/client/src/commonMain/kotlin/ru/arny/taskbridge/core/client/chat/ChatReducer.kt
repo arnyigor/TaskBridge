@@ -152,6 +152,23 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var piUserTurn: Turn? = null
     private var mcpNotice: String? = null
     private var compactionStartNote: Turn? = null
+    private val actionStatuses = mutableMapOf<String, String>()
+
+    /** A transient action hides an old error without destroying replayed history. */
+    fun setActionStatus(turnId: String, status: String?) {
+        val answerId = if (turnId.startsWith("user-")) {
+            val key = turnId.removePrefix("user-").let { if (it == "initial") 0L else it.toLongOrNull() }
+            key?.let { variants[it]?.selected } ?: turnId.replaceFirst("user-", "assistant-")
+        } else turnId
+        if (status == null) actionStatuses.remove(answerId) else actionStatuses[answerId] = status
+        version++
+    }
+
+    fun setStopping(stopping: Boolean) {
+        actionStatuses.entries.removeAll { it.value == "STOPPING" }
+        if (stopping) actionStatuses[current.id] = "STOPPING"
+        version++
+    }
 
     /** Bumped on every change, so the UI can tell snapshots apart cheaply. */
     var version: Long = 0
@@ -342,7 +359,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             turn.error ?: humanError else humanError
         fun answered(turn: Turn) = turn.text.isNotBlank()
         fun cutOff(turn: Turn) = !answered(turn) && (turn.superseded || status == "CANCELLED")
-        fun labelFor(turn: Turn) = if (turn.error != null || cutOff(turn)) "FAILED" else status
+        fun labelFor(turn: Turn): String {
+            if (status == "CANCELLED" && ABORT.containsMatchIn(turn.error.orEmpty())) turn.error = null
+            return when {
+                turn.error != null -> "FAILED"
+                status == "CANCELLED" -> "CANCELLED"
+                cutOff(turn) -> "FAILED"
+                else -> status
+            }
+        }
 
         // Привязка по поколению хода надёжнее времени: терминал чужого поколения
         // (STOP/SUCCEEDED, дошедший после TURN_TRUNCATED) не имеет права закрывать
@@ -354,9 +379,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val freshPlaceholder = current.at == null && current.userAt == null && current.status.isEmpty()
         val generationMismatch = if (current.turnNo != null) turnNo != current.turnNo else freshPlaceholder
         if (turnNo != null && generationMismatch) {
-            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
+            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current && it.turnNo == turnNo }
             if (previous != null) {
-                previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
+                previous.status = if (humanError != null) "FAILED" else labelFor(previous)
+                previous.active = false
                 if (humanError != null) previous.error = errorFor(previous)
                 previous.endedAt = previous.endedAt ?: at
                 previous.final = true
@@ -366,9 +392,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
         val currentNo = current.turnNo
         if (turnNo != null && currentNo != null && turnNo < currentNo) {
-            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
+            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current && it.turnNo == turnNo }
             if (previous != null) {
-                previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
+                previous.status = if (humanError != null) "FAILED" else labelFor(previous)
+                previous.active = false
                 if (humanError != null) previous.error = errorFor(previous)
                 previous.endedAt = previous.endedAt ?: at
                 previous.final = true
@@ -381,7 +408,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (turnNo == null && at != null && currentStart != null && before(at, currentStart)) {
             val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
             if (previous != null) {
-                previous.status = if (humanError != null || previous.error != null || cutOff(previous)) "FAILED" else status
+                previous.status = if (humanError != null) "FAILED" else labelFor(previous)
+                previous.active = false
                 if (humanError != null) previous.error = errorFor(previous)
                 previous.endedAt = previous.endedAt ?: at
                 previous.final = true
@@ -409,7 +437,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             turn.final = true
             for (tool in turn.tools) if (tool.state == "run") tool.state = "interrupted"
         }
-        current.status = if (humanError != null || current.error != null || cutOff(current)) "FAILED" else status
+        current.status = if (humanError != null) "FAILED" else labelFor(current)
         current.active = false
         current.final = true
         // Терминнал новее последнего известного номера — события были пропущены:
@@ -463,6 +491,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     private fun truncateTurns(fromSeq: Long, dropInitial: Boolean, keepUser: Boolean, deleting: Boolean = false) {
         if (fromSeq < 0) return
+        actionStatuses.clear()
         fun seqOf(turn: Turn): Long? {
             val prefix = when (turn.role) { Role.USER -> "user-"; Role.NOTE -> "note-"; Role.ASSISTANT -> "assistant-" }
             return if (turn.id.startsWith(prefix)) turn.id.removePrefix(prefix).toLongOrNull() else null
@@ -567,14 +596,20 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 keepUser = data.bool("keepUser") == true,
                 deleting = data.str("reason") == "delete",
             )
-            "TURN_EDITED" -> turns.firstOrNull { it.id == data.str("id") }?.text = data.str("text").orEmpty()
+            "TURN_EDITED" -> {
+                actionStatuses.remove(data.str("id"))
+                turns.firstOrNull { it.id == data.str("id") }?.text = data.str("text").orEmpty()
+            }
             "TURN_VARIANT_START" -> startVariant(data)
             "TURN_VARIANT_SELECTED" -> selectVariant(data.long("turnSeq") ?: 0L, "assistant-${data.str("variantId")}")
             "STATUS" -> {
                 val status = data.str("status")
                 if (status != null && status in ACTIVE_STATUSES) {
-                    current.active = true
-                    current.status = status
+                    // Verification follows agent_settled: it must not restart typing.
+                    if (!current.final) {
+                        current.active = true
+                        current.status = status
+                    }
                 } else finish(status ?: "DONE")
             }
             // Files the agent left in the workspace: they belong to the answer that made them.
@@ -910,17 +945,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             turn.thinking = thinkingEnd
         }
         if (stopReason != null) turn.stopReason = stopReason
-        if (errorMessage != null || aborted) {
-            // The model answered in this message: an empty abort/error marker that
-            // follows the answer is the run being stopped, not a broken answer — the
-            // answer above it keeps its text and its status. A real aborted answer
-            // carries its own text and keeps its error (ChatDeliveryRegressionTest).
-            if (markerText.isNotEmpty() || turn.text.isBlank()) {
-                turn.error = humanizeError(errorMessage).ifEmpty { "Request was aborted" }
-            }
+        // An abort is a cancellation, with or without partial text. Keep genuine
+        // failures already recorded, but never turn the abort marker into an error.
+        if (!aborted && errorMessage != null && (markerText.isNotEmpty() || turn.text.isBlank())) {
+            turn.error = humanizeError(errorMessage)
         }
         if (orphan != null) {
-            turn.status = "FAILED"
+            turn.status = if (turn.error != null) "FAILED" else "CANCELLED"
             turn.active = false
             turn.final = true
             turn.endedAt = turn.endedAt ?: event.at
@@ -1096,12 +1127,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                     val variantInfo = if (entry != null && entry.ids.size > 1 && turn.id in entry.ids) {
                         VariantInfo(turnSeq = turn.variantKey!!, index = entry.ids.indexOf(turn.id), ids = entry.ids.toList())
                     } else null
+                    val action = actionStatuses[turn.id]
                     ChatItem.Assistant(
                         id = turn.id, text = turn.text, thinking = turn.thinking,
                         tools = turn.tools.map { ToolCall(it.id, it.name, it.label, ToolState.of(it.state), it.imagePath, it.progress, it.changePreview) },
-                        active = turn.active, status = turn.status, error = turn.error, final = turn.final,
+                        active = action == null && turn.active && !turn.final,
+                        status = action ?: turn.status, error = if (action == null) turn.error else null,
+                        final = action == null && turn.final,
                         at = turn.at, endedAt = turn.endedAt, partial = turn.partial, superseded = turn.superseded,
-                        stopReason = turn.stopReason, variants = variantInfo, files = turn.files,
+                        stopReason = if (action == null) turn.stopReason else null, variants = variantInfo, files = turn.files,
                         usage = turn.usage, usageModel = turn.usageModel, usageIsLocal = turn.usageIsLocal,
                         turnMetrics = turn.turnMetrics, metricsSegments = turn.metricsSegments,
                         generatingToolCall = turn.active && turn.generatingToolCall,
