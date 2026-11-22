@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="utf-8"?>
+<baseline version="1.0">
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/client/chat/ChatReducer.kt">
+        <error line="31" column="161" source="standard:max-line-length" />
+        <error line="267" column="161" source="standard:max-line-length" />
+        <error line="334" column="160" source="standard:max-line-length" />
+        <error line="561" column="161" source="standard:max-line-length" />
+        <error line="591" column="161" source="standard:max-line-length" />
+        <error line="759" column="161" source="standard:max-line-length" />
+        <error line="764" column="161" source="standard:max-line-length" />
+        <error line="868" column="161" source="standard:max-line-length" />
+        <error line="1066" column="161" source="standard:max-line-length" />
+        <error line="1115" column="161" source="standard:max-line-length" />
+        <error line="1116" column="161" source="standard:max-line-length" />
+        <error line="1158" column="161" source="standard:max-line-length" />
+        <error line="1232" column="160" source="standard:max-line-length" />
+    </file>
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/client/chat/SubagentProgress.kt">
+        <error line="40" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/client/markdown/Markdown.kt">
+        <error line="146" column="161" source="standard:max-line-length" />
+        <error line="154" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/client/remotefiles/RemoteFilesController.kt">
+        <error line="74" column="161" source="standard:max-line-length" />
+        <error line="140" column="161" source="standard:max-line-length" />
+        <error line="155" column="161" source="standard:max-line-length" />
+        <error line="168" column="161" source="standard:max-line-length" />
+        <error line="210" column="161" source="standard:max-line-length" />
+        <error line="220" column="161" source="standard:max-line-length" />
+        <error line="243" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/client/session/ChatSession.kt">
+        <error line="364" column="161" source="standard:max-line-length" />
+        <error line="573" column="161" source="standard:max-line-length" />
+        <error line="624" column="161" source="standard:max-line-length" />
+        <error line="638" column="161" source="standard:max-line-length" />
+        <error line="650" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/client/sessions/SessionAlerts.kt">
+        <error line="44" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatActionStateTest.kt">
+        <error line="56" column="161" source="standard:max-line-length" />
+        <error line="68" column="161" source="standard:max-line-length" />
+        <error line="99" column="161" source="standard:max-line-length" />
+        <error line="105" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatCompactionTest.kt">
+        <error line="73" column="161" source="standard:max-line-length" />
+        <error line="119" column="160" source="standard:max-line-length" />
+        <error line="253" column="161" source="standard:max-line-length" />
+        <error line="274" column="161" source="standard:max-line-length" />
+        <error line="327" column="161" source="standard:max-line-length" />
+        <error line="341" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatDeliveryRegressionTest.kt">
+        <error line="26" column="161" source="standard:max-line-length" />
+        <error line="101" column="161" source="standard:max-line-length" />
+        <error line="167" column="161" source="standard:max-line-length" />
+        <error line="199" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatReducerGoldenTest.kt">
+        <error line="64" column="161" source="standard:max-line-length" />
+        <error line="290" column="161" source="standard:max-line-length" />
+        <error line="334" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatSendCancellationTest.kt">
+        <error line="77" column="161" source="standard:max-line-length" />
+        <error line="102" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatSessionIntegrationTest.kt">
+        <error line="76" column="160" source="standard:max-line-length" />
+        <error line="84" column="161" source="standard:max-line-length" />
+        <error line="85" column="161" source="standard:max-line-length" />
+        <error line="127" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatStopStateTest.kt">
+        <error line="42" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatStreamingLifecycleTest.kt">
+        <error line="72" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ChatTimelineTest.kt">
+        <error line="74" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/EditResendTextLossTest.kt">
+        <error line="54" column="161" source="standard:max-line-length" />
+        <error line="59" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/LifecycleTailReplayTest.kt">
+        <error line="29" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/MarkdownTest.kt">
+        <error line="44" column="161" source="standard:max-line-length" />
+        <error line="80" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/MessageUsageTest.kt">
+        <error line="253" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/ProjectWorkspaceTest.kt">
+        <error line="88" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/RemoteFilesControllerTest.kt">
+        <error line="20" column="161" source="standard:max-line-length" />
+        <error line="30" column="161" source="standard:max-line-length" />
+        <error line="54" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/SessionListDeleteTest.kt">
+        <error line="32" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/client/SessionStateTest.kt">
+        <error line="27" column="161" source="standard:max-line-length" />
+        <error line="28" column="161" source="standard:max-line-length" />
+        <error line="35" column="161" source="standard:max-line-length" />
+    </file>
+</baseline>

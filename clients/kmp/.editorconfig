@@ -1,0 +1,48 @@
+# Static analysis settings shared by both Gradle builds (clients/kmp and
+# clients/kmp/core).
+#
+# The code was written in the Android Studio style: a signature or call that fits
+# on one line stays on one line. ktlint's default (ktlint_official) wants one
+# element per line and reports ~9 000 purely cosmetic findings, so the layout
+# rules that encode that choice are switched off. What stays on are the rules
+# that find real problems: imports, naming, redundancy, empty blocks, string
+# templates, unused/duplicate declarations.
+#
+# Everything the disabled rules would still have flagged is frozen in
+# config/ktlint-baseline.xml, so a *new* violation fails the build while the old
+# layout debt does not get rewritten wholesale.
+root = true
+
+[*.{kt,kts}]
+ktlint_code_style = android_studio
+max_line_length = 160
+ij_kotlin_allow_trailing_comma = true
+ij_kotlin_allow_trailing_comma_on_call_site = true
+# Compose composables and test names use capitalised factory-like names on purpose.
+ktlint_standard_function-naming = disabled
+
+# Dependents of `wrapping` must go together: ktlint refuses to load a rule whose
+# dependency is missing, so the whole family is listed.
+ktlint_standard_argument-list-wrapping = disabled
+ktlint_standard_parameter-list-wrapping = disabled
+ktlint_standard_function-signature = disabled
+ktlint_standard_class-signature = disabled
+ktlint_standard_function-literal = disabled
+ktlint_standard_statement-wrapping = disabled
+ktlint_standard_multiline-expression-wrapping = disabled
+ktlint_standard_multiline-if-else = disabled
+ktlint_standard_if-else-wrapping = disabled
+ktlint_standard_chain-method-continuation = disabled
+ktlint_standard_binary-expression-wrapping = disabled
+ktlint_standard_property-wrapping = disabled
+ktlint_standard_wrapping = disabled
+ktlint_standard_trailing-comma-on-call-site = disabled
+ktlint_standard_trailing-comma-on-declaration-site = disabled
+
+# Compose and kotlin.test are normally imported with a wildcard; the official
+# samples do the same. `no-unused-imports` still catches leftovers, and expanding
+# ~30 wildcards into hundreds of lines would be churn without a defect.
+ktlint_standard_no-wildcard-imports = disabled
+# main.kt is the JVM entry-point name, and a one-declaration file like Icons.kt is
+# a deliberate grouping. Neither is a mistake worth renaming a file over.
+ktlint_standard_filename = disabled

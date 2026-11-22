@@ -42,6 +42,7 @@
     "lint:js": "eslint web/*.js web/sw.js --no-config-lookup --config scripts/eslint.config.mjs"
   },
   "devDependencies": {
+    "eslint": "^9.39.5",
     "linkedom": "^0.18.13"
   },
   "dependencies": {

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<baseline version="1.0">
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/api/Models.kt">
+        <error line="566" column="160" source="standard:max-line-length" />
+    </file>
+    <file name="src/commonMain/kotlin/ru/arny/taskbridge/core/api/TaskBridgeApi.kt">
+        <error line="242" column="161" source="standard:max-line-length" />
+        <error line="245" column="161" source="standard:max-line-length" />
+        <error line="253" column="160" source="standard:max-line-length" />
+        <error line="254" column="161" source="standard:max-line-length" />
+        <error line="260" column="161" source="standard:max-line-length" />
+        <error line="265" column="161" source="standard:max-line-length" />
+        <error line="506" column="161" source="standard:max-line-length" />
+        <error line="701" column="161" source="standard:max-line-length" />
+        <error line="1293" column="160" source="standard:max-line-length" />
+        <error line="1302" column="161" source="standard:max-line-length" />
+        <error line="1329" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/api/ContextReportApiTest.kt">
+        <error line="22" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/api/RecipesApiTest.kt">
+        <error line="86" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/api/RemoteFilesApiTest.kt">
+        <error line="39" column="161" source="standard:max-line-length" />
+        <error line="59" column="161" source="standard:max-line-length" />
+    </file>
+    <file name="src/jvmTest/kotlin/ru/arny/taskbridge/core/api/TaskBridgeApiTest.kt">
+        <error line="92" column="161" source="standard:max-line-length" />
+        <error line="155" column="161" source="standard:max-line-length" />
+        <error line="156" column="161" source="standard:max-line-length" />
+        <error line="157" column="161" source="standard:max-line-length" />
+        <error line="198" column="161" source="standard:max-line-length" />
+    </file>
+</baseline>
