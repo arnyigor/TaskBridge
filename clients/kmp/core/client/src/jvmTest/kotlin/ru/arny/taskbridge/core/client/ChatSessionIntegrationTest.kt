@@ -74,7 +74,11 @@ class ChatSessionIntegrationTest {
 
     private fun api() = TaskBridgeApi(http, SimpleConnection(base, clientId = "android-itest"))
 
-    private fun session(taskId: String) = ChatSession(api(), taskId, scope, ids = { UUID.randomUUID().toString() }, now = { java.time.Instant.now().toString() })
+    private fun session(taskId: String) = ChatSession(
+        api(), taskId, scope,
+        ids = { UUID.randomUUID().toString() },
+        now = { java.time.Instant.now().toString() },
+    )
 
     private suspend fun ChatSession.await(what: String, timeoutMillis: Long = 20_000, check: (ChatSessionState) -> Boolean): ChatSessionState =
         kotlinx.coroutines.withTimeoutOrNull(timeoutMillis) {
@@ -82,8 +86,18 @@ class ChatSessionIntegrationTest {
             state.value
         } ?: throw AssertionError(buildString {
             val s = state.value
-            append("timed out: $what\n link=${s.link} loading=${s.loading} status=${s.task?.status} pending=${s.task?.pendingPrompts?.map { it.text }}\n outbox=${s.outbox}\n")
-            s.chat.items.forEach { append("  ${it.id} ${(it as? ChatItem.User)?.text ?: (it as? ChatItem.Assistant)?.let { a -> "${a.text}|${a.status}|active=${a.active}|final=${a.final}" }}\n") }
+            append(
+                "timed out: $what\n link=${s.link} loading=${s.loading} " +
+                    "status=${s.task?.status} pending=${s.task?.pendingPrompts?.map { it.text }}\n " +
+                    "outbox=${s.outbox}\n",
+            )
+            s.chat.items.forEach { item ->
+                val label = (item as? ChatItem.User)?.text
+                    ?: (item as? ChatItem.Assistant)?.let { answer ->
+                        "${answer.text}|${answer.status}|active=${answer.active}|final=${answer.final}"
+                    }
+                append("  ${item.id} $label\n")
+            }
         })
 
     private fun ChatSessionState.idle() = task != null && task.status in setOf("SUCCEEDED", "FAILED", "CANCELLED") && task.pendingPrompts.isEmpty()
@@ -125,7 +139,13 @@ class ChatSessionIntegrationTest {
 
         // A follow-up: optimistic bubble, then the server's, never two.
         chat.send("второй вопрос")
-        state = chat.await("follow-up answered") { it.idle() && it.users().size == 2 && it.answers().size == 2 && it.answers().last().final && it.outbox.isEmpty() }
+        state = chat.await("follow-up answered") {
+            it.idle() &&
+                it.users().size == 2 &&
+                it.answers().size == 2 &&
+                it.answers().last().final &&
+                it.outbox.isEmpty()
+        }
         assertEquals(listOf(false, false), state.users().map { it.pending })
         assertEquals("android-itest", state.users().last().clientId)
 
