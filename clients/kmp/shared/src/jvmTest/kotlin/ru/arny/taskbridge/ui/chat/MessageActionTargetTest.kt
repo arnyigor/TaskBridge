@@ -3,8 +3,8 @@ package ru.arny.taskbridge.ui.chat
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertWidthIsAtLeast
@@ -14,8 +14,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
-import ru.arny.taskbridge.core.client.chat.ChatItem
 import kotlin.test.Test
+import ru.arny.taskbridge.core.client.chat.ChatItem
 
 /**
  * Телефонный вид ответа по требованию оператора (2026-10-29):

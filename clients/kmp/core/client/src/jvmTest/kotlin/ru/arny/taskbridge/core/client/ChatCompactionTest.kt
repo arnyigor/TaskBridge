@@ -1,5 +1,10 @@
 package ru.arny.taskbridge.core.client
 
+import java.io.File
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.buildJsonObject
@@ -9,11 +14,6 @@ import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
-import java.io.File
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertTrue
 
 class ChatCompactionTest {
     @Serializable

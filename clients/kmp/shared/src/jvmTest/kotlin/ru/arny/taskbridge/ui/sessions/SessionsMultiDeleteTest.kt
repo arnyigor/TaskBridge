@@ -18,13 +18,13 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.platform.PlatformServices
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 /**
  * Удаление нескольких сессий, выбранных в папке: каждое выделение обязано дойти

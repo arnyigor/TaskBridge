@@ -1,17 +1,17 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import ru.arny.taskbridge.core.api.CompositionActive
 import ru.arny.taskbridge.core.api.CompositionCompaction
 import ru.arny.taskbridge.core.api.CompositionHistory
 import ru.arny.taskbridge.core.api.CompositionTotals
 import ru.arny.taskbridge.core.api.ContextPostCompaction
-import ru.arny.taskbridge.core.api.SessionComposition
 import ru.arny.taskbridge.core.api.ContextUsage
+import ru.arny.taskbridge.core.api.SessionComposition
 import ru.arny.taskbridge.core.api.SessionContextReport
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 /**
  * CTX-03: измерение, оценка и отсутствие данных — три разных состояния. Экран

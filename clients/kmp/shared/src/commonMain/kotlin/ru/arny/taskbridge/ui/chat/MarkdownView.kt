@@ -3,9 +3,6 @@ package ru.arny.taskbridge.ui.chat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.text.selection.DisableSelection
-import androidx.compose.ui.input.pointer.PointerIcon
-import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,28 +19,24 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.key
-import androidx.compose.runtime.produceState
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
-import io.ktor.http.decodeURLPart
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,15 +45,15 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.layout.Layout
-import androidx.compose.ui.text.TextLayoutResult
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.unit.Constraints
-import androidx.compose.ui.unit.em
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -69,8 +62,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.sp
+import io.ktor.http.decodeURLPart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import ru.arny.taskbridge.core.client.markdown.Markdown
 import ru.arny.taskbridge.core.client.markdown.MdAlign
 import ru.arny.taskbridge.core.client.markdown.MdBlock
@@ -249,23 +248,23 @@ fun CodeBlock(language: String?, code: String, onCopy: (String) -> Unit, modifie
         // press for selection, so only the icon of «Копировать» reacted. The header
         // is chrome, not content: no selection in it.
         DisableSelection {
-        Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 2.dp).height(34.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                language?.takeIf { it.isNotBlank() } ?: "код",
-                style = MaterialTheme.typography.labelMedium,
-                color = muted,
-                modifier = Modifier.weight(1f),
-            )
-            if (lines > 1) Text("$lines стр.", style = MaterialTheme.typography.labelSmall, color = muted.copy(alpha = 0.7f))
-            Row(
-                Modifier.clip(RoundedCornerShape(8.dp)).pointerHoverIcon(PointerIcon.Hand).clickable { onCopy(code); copied = true }.padding(horizontal = 8.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(if (copied) AppIcons.Check else AppIcons.Copy, null, Modifier.size(14.dp), tint = muted)
-                Spacer(Modifier.width(4.dp))
-                Text(if (copied) "Скопировано" else "Копировать", style = MaterialTheme.typography.labelMedium, color = muted)
+            Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 2.dp).height(34.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    language?.takeIf { it.isNotBlank() } ?: "код",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = muted,
+                    modifier = Modifier.weight(1f),
+                )
+                if (lines > 1) Text("$lines стр.", style = MaterialTheme.typography.labelSmall, color = muted.copy(alpha = 0.7f))
+                Row(
+                    Modifier.clip(RoundedCornerShape(8.dp)).pointerHoverIcon(PointerIcon.Hand).clickable { onCopy(code); copied = true }.padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(if (copied) AppIcons.Check else AppIcons.Copy, null, Modifier.size(14.dp), tint = muted)
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (copied) "Скопировано" else "Копировать", style = MaterialTheme.typography.labelMedium, color = muted)
+                }
             }
-        }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         Text(
@@ -336,7 +335,7 @@ private fun TableBlock(table: MdBlock.Table, fixedColumns: Boolean = false) {
                 val minColumn = 72.dp.roundToPx()
                 // File table pages share equal widths, independent of which rows are visible.
                 val desired = if (fixedColumns) IntArray(columns) { (available / columns).coerceIn(minColumn, maxColumn) }
-                    else IntArray(columns) { c -> rows.indices.maxOf { r -> measurables[r * columns + c].maxIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn) }
+                else IntArray(columns) { c -> rows.indices.maxOf { r -> measurables[r * columns + c].maxIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn) }
                 val floor = if (fixedColumns) desired else IntArray(columns) { c -> minOf(desired[c], maxOf(minColumn, rows.indices.maxOf { r -> measurables[r * columns + c].minIntrinsicWidth(Int.MAX_VALUE) }.coerceAtMost(maxColumn / 2))) }
                 val widths = fitColumns(desired, floor, available)
                 val placeables = measurables.mapIndexed { i, m -> m.measure(Constraints.fixedWidth(widths[i % columns])) }

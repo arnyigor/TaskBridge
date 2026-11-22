@@ -31,6 +31,7 @@ private val PRIVATE_PART = Regex("^(?:\\.git|\\.pi|\\.ssh|\\.aws|\\.codex|node_m
 private val SECRET_PART = Regex("^(?:\\.env(?:\\..*)?|secret(?:s)?(?:\\..*)?|credentials(?:\\..*)?|config\\.json|server-auth\\.json|auth\\.json)$", RegexOption.IGNORE_CASE)
 private val SECRET_EXT = Regex("\\.(?:pem|key|p12|pfx|jks|keystore)$", RegexOption.IGNORE_CASE)
 private val ABORT = Regex("abort", RegexOption.IGNORE_CASE)
+
 // Pi announces a connected MCP surface as "MCP: 4 servers connected (48 tools)", and
 // "MCP: 2/4 servers connected (35 tools)" when a startup server failed; the count is part
 // of the wording, so it is matched here and the notice is shown in the session sheet
@@ -150,6 +151,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var textSeparator = ""
     private var separatorApplied = false
     private var initialPromptAccepted = false
+
     /** Pi may accept several steers before answering any of them. Its user frame
      * identifies which accepted prompt the following assistant frame belongs to. */
     private val piUsersSeen = mutableSetOf<String>()
@@ -357,6 +359,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     private fun finish(status: String, error: String? = null, at: String? = null, turnNo: Long? = null): Boolean {
         val humanError = error?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }
+
         // Legacy terminal events/polls may contain only the generic wrapper.
         // Keep the concrete cause already recovered from Pi's message_end.
         fun errorFor(turn: Turn) = if (humanError?.removeSuffix(".").equals("Provider returned error", ignoreCase = true))
@@ -581,7 +584,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         if (oldestSeq == null) oldestSeq = event.seq
         version++
         val window = windowStart
-        val targetsWindow = window != null && event.type == "TURN_METRICS" &&
+        val targetsWindow = window != null &&
+            event.type == "TURN_METRICS" &&
             listOfNotNull(event.data.long("messageEventSeq"), event.data.long("startEventSeq"))
                 .any(window.usageEventSeqs::contains)
         if (window != null && (targetsWindow || windowRecording || current === window || messageTurn === window || executionTurn === window || orphanMessage?.turn === window || window.tools.any { it.id == event.piFrame?.str("toolCallId") })) {

@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -10,9 +13,6 @@ import ru.arny.taskbridge.core.client.session.CACHE_BUDGET_CHARS
 import ru.arny.taskbridge.core.client.session.cacheWeight
 import ru.arny.taskbridge.core.client.session.jsonWeight
 import ru.arny.taskbridge.core.client.session.trimCacheToBudget
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * Вес события для бюджета кэша (стабильность, 2026-10-14).

@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonPrimitive
 internal fun subagentProgress(result: JsonObject?, args: JsonObject?): String? {
     fun JsonObject.text(key: String): String = (this[key] as? JsonPrimitive)?.takeIf { it.isString }?.content.orEmpty()
     fun compact(value: String): String = value.replace(Regex("\\s+"), " ").trim().take(180)
+
     // What a call is about: «read src/app.js», «bash npm test» — the name alone said nothing.
     fun call(x: JsonObject): String {
         val a = x["arguments"] as? JsonObject
@@ -30,7 +31,7 @@ internal fun subagentProgress(result: JsonObject?, args: JsonObject?): String? {
                 val content = (m["content"] as? JsonArray)?.filterIsInstance<JsonObject>().orEmpty()
                 val calls = content.filter { it.text("type") == "toolCall" }.map(::call).filter { it.isNotEmpty() }
                 activity = if (calls.isNotEmpty()) "вызов: " + calls.take(3).joinToString(", ")
-                    else compact(content.filter { it.text("type") == "text" }.joinToString(" ") { it.text("text") })
+                else compact(content.filter { it.text("type") == "text" }.joinToString(" ") { it.text("text") })
             }
             if (activity.isNotEmpty()) break
         }

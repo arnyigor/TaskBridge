@@ -1,9 +1,9 @@
 package ru.arny.taskbridge.ui.sessions
 
-import ru.arny.taskbridge.core.api.ModelRef
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.api.ModelRef
 
 /**
  * Уровень размышлений сопоставляется с картой КОНКРЕТНОЙ модели, а не с общим
@@ -22,6 +22,7 @@ class ThinkingLevelsTest {
     )
     private val plain = ModelRef(provider = "deepseek", id = "deepseek-flash", reasoning = true, thinkingLevels = listOf("off", "minimal", "low", "medium", "high"))
     private val catalogLevels = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
+
     // Каталог без записей: проверяется только откат на общий список.
     private val catalog = ru.arny.taskbridge.core.api.ModelCatalog(thinkingLevels = catalogLevels)
 

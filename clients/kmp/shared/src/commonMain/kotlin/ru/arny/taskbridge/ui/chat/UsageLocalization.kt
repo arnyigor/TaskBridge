@@ -1,8 +1,8 @@
 package ru.arny.taskbridge.ui.chat
 
 import androidx.compose.runtime.Composable
-import org.jetbrains.compose.resources.stringResource
 import org.jetbrains.compose.resources.pluralStringResource
+import org.jetbrains.compose.resources.stringResource
 import taskbridge.shared.generated.resources.*
 
 internal expect fun usageInteger(value: Long, languageTag: String): String

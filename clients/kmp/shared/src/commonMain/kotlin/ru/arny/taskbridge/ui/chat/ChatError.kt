@@ -65,8 +65,11 @@ internal fun errorTimeline(items: List<ChatItem>, groupNotices: Boolean = true):
         }
         // Provider notes can follow the assistant placeholder which later becomes the final answer.
         val answer = (items.getOrNull(index) as? ChatItem.Assistant) ?: precedingAnswer
-        val recovered = answer != null && answer.final && answer.error == null &&
-            answer.text.isNotBlank() && answer.status in setOf("DONE", "SUCCEEDED")
+        val recovered = answer != null &&
+            answer.final &&
+            answer.error == null &&
+            answer.text.isNotBlank() &&
+            answer.status in setOf("DONE", "SUCCEEDED")
         groups[first.id] = ProviderNoticeGroup(notes, recovered)
     }
     return ErrorTimeline(visible, groups)
@@ -94,7 +97,7 @@ internal fun ChatErrorStatus(
         else -> "Не удалось получить ответ"
     }
     val color = if (retrying) MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (recovered) 0.7f else 1f)
-        else MaterialTheme.colorScheme.error
+    else MaterialTheme.colorScheme.error
     Row(
         modifier.fillMaxWidth().heightIn(min = 48.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),

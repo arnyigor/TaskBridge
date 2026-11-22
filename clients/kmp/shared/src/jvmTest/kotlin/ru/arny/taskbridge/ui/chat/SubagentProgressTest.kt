@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -9,9 +12,6 @@ import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ToolState
 import ru.arny.taskbridge.core.client.chat.subagentProgress
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class SubagentProgressTest {
     private fun obj(value: String) = Json.parseToJsonElement(value).jsonObject

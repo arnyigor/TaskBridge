@@ -6,6 +6,10 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,10 +20,6 @@ import kotlinx.coroutines.withTimeout
 import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.ChatSession
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /** Section 4.3: retained chats must not retain one SSE socket each. */
 class ChatStreamingLifecycleTest {

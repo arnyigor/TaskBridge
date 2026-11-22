@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui.settings
 
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runTest
 
 /**
  * Подтверждение выключения/перезагрузки компьютера: отсчёт, отмена и ошибка.

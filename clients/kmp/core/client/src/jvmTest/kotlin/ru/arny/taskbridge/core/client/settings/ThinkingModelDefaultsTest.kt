@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.core.client.settings
 
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Пресет, который форма отправляет вместе с новым подключением.

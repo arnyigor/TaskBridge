@@ -1,5 +1,10 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeJson
@@ -7,11 +12,6 @@ import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ToolState
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 class ChatStopStateTest {
     private val task = Task(id = "t", prompt = "question", status = "RUNNING")

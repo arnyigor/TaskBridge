@@ -1,8 +1,8 @@
 package ru.arny.taskbridge
 
-import ru.arny.taskbridge.core.client.sessions.SessionAlert
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import ru.arny.taskbridge.core.client.sessions.SessionAlert
 
 /**
  * Верх уведомления — одна строка: проект идёт первым, иначе по сессии не видно,

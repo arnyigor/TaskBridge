@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.client.sessions.BACKGROUND_ACTIVE_INTERVAL_MS
-import ru.arny.taskbridge.core.client.sessions.sessionPollIntervalMillis
-import ru.arny.taskbridge.core.client.sessions.shouldPoll
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.sessions.BACKGROUND_ACTIVE_INTERVAL_MS
+import ru.arny.taskbridge.core.client.sessions.sessionPollIntervalMillis
+import ru.arny.taskbridge.core.client.sessions.shouldPoll
 
 /**
  * Раздел 4.3 плана («расход батареи на Android» — запрос оператора 2026-10-14).

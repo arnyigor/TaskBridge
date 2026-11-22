@@ -230,7 +230,7 @@ private fun McpServerCard(
         }
         if (expanded) {
             server.health?.let { health ->
-                val suffix = listOfNotNull(health.latencyMs?.let { "${it} мс" }, health.statusCode?.let { "HTTP $it" }, health.error).joinToString(" · ")
+                val suffix = listOfNotNull(health.latencyMs?.let { "$it мс" }, health.statusCode?.let { "HTTP $it" }, health.error).joinToString(" · ")
                 Text("${health.state}${suffix.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}", style = MaterialTheme.typography.bodySmall, color = if (health.state == "error") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp))
             }
             (server.url ?: server.command)?.let { endpoint ->

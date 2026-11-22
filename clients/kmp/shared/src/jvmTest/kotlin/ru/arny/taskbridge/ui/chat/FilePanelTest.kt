@@ -10,18 +10,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.performScrollToNode
-import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -31,6 +31,9 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -40,9 +43,6 @@ import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.platform.PlatformServices
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * The docked file panel on real bytes: a file opened from the chat is read through
@@ -286,7 +286,7 @@ class FilePanelTest {
     }
 
     @Test
-    fun thePanelTakesWidthFromTheChatInsteadOfCoveringIt() = runComposeUiTest {        val (chat, http) = session()
+    fun thePanelTakesWidthFromTheChatInsteadOfCoveringIt() = runComposeUiTest { val (chat, http) = session()
         val tabs = FileTabs()
         tabs.open(FileTarget.Workspace("README.md"))
         setContent { Panel(tabs, chat) }

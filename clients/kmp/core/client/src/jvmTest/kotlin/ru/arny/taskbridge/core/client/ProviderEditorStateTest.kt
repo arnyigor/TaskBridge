@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.client.settings.ProviderEditorState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.settings.ProviderEditorState
 
 /**
  * Форма подключения провайдера: проверяется то, что решает, уйдёт ли запись в

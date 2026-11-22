@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.client.session.OutgoingMessage
-import ru.arny.taskbridge.core.client.session.SendMode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.client.session.OutgoingMessage
+import ru.arny.taskbridge.core.client.session.SendMode
 
 /**
  * Строка отправки над полем ввода.

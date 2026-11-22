@@ -8,9 +8,9 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
+import kotlin.test.*
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
-import kotlin.test.*
 
 class RemoteFilesApiTest {
     @Test
@@ -19,7 +19,7 @@ class RemoteFilesApiTest {
         val api = TaskBridgeApi(HttpClient(MockEngine { request ->
             requests += request
             val json = if (request.url.encodedPath.endsWith("preview")) """{"name":"a.txt","mimeType":"text/plain","text":"sample"}"""
-                else """{"rootId":"r","path":"folder/a & b","entries":[],"nextCursor":"100"}"""
+            else """{"rootId":"r","path":"folder/a & b","entries":[],"nextCursor":"100"}"""
             respond(json, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }), SimpleConnection("http://pc:8787"))
         assertEquals("100", api.remoteBrowse("p 1", "r+1", "folder/a & b", "20").nextCursor)
@@ -56,7 +56,7 @@ class RemoteFilesApiTest {
         val api = TaskBridgeApi(HttpClient(MockEngine { request ->
             requests += request
             respond(if (request.url.encodedPath.endsWith("revoke")) """{"revision":4,"roots":[],"requests":[]}"""
-                else """{"token":"snapshot-token","files":[{"id":"file-id","name":"a.txt"}]}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+            else """{"token":"snapshot-token","files":[{"id":"file-id","name":"a.txt"}]}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
         }), SimpleConnection("http://pc:8787"))
         val prepared = api.prepareRemoteAttachment("chat", "root", "a.txt", 3, "snapshot-command")
         assertEquals("snapshot-token", prepared.token)

@@ -1,8 +1,8 @@
 package ru.arny.taskbridge.ui.settings
 
-import ru.arny.taskbridge.ui.models.contextLabel
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import ru.arny.taskbridge.ui.models.contextLabel
 
 /**
  * Контекст локальной модели — шестизначное число (131072, 262144): без разрядов

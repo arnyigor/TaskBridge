@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui
 
 import androidx.compose.runtime.saveable.SaverScope
-import ru.arny.taskbridge.core.api.ModelRef
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.ModelRef
 
 class NavigatorRestoreTest {
     private val saveScope = SaverScope { value ->

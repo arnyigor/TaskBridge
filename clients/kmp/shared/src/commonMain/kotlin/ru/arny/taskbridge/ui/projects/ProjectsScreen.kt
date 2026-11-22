@@ -52,11 +52,11 @@ import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ProjectOverview
 import ru.arny.taskbridge.core.api.ProjectSummary
 import ru.arny.taskbridge.core.client.session.describe
-import ru.arny.taskbridge.ui.sessions.messageOf
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.common.sinceLabel
+import ru.arny.taskbridge.ui.sessions.messageOf
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 

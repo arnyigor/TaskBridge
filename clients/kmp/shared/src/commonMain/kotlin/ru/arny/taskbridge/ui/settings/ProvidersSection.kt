@@ -175,7 +175,6 @@ internal fun providerDraftText(result: ProviderDraftCheck): String = when (resul
     ).joinToString(" · ")
 }
 
-
 /**
  * Можно ли нажать «Сохранить».
  *

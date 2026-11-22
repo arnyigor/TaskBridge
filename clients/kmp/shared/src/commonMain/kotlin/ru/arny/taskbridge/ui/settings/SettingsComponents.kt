@@ -1,5 +1,6 @@
 package ru.arny.taskbridge.ui.settings
 
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -13,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.ScrollState
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -29,10 +29,10 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.ui.common.SectionTitle
 import ru.arny.taskbridge.ui.theme.AppIcons
-import kotlin.math.roundToInt
 
 /**
  * Карточка раздела настроек: заголовок с пояснением и содержимое с общими отступами.

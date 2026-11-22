@@ -1,11 +1,11 @@
 package ru.arny.taskbridge
 
-import ru.arny.taskbridge.platform.UpdateMirror
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
+import ru.arny.taskbridge.platform.UpdateMirror
 
 /**
  * Applies a staged portable build over the running installation and restarts.
@@ -79,6 +79,7 @@ object DesktopUpdater {
         }
         digest.digest().joinToString("") { "%02x".format(it) }
     }.getOrNull()
+
     /** The install directory (the one holding TaskBridge.exe), or null outside a portable layout. */
     fun installDir(): Path? =
         ProcessHandle.current().info().command().orElse(null)

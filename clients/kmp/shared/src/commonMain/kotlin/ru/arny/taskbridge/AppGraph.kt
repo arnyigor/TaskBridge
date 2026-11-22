@@ -3,16 +3,18 @@ package ru.arny.taskbridge
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import kotlin.time.Clock
+import kotlin.uuid.Uuid
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
@@ -31,8 +33,6 @@ import ru.arny.taskbridge.core.client.settings.SettingsController
 import ru.arny.taskbridge.core.client.settings.StoredConnection
 import ru.arny.taskbridge.core.client.settings.savedAddressNeedsPairing
 import ru.arny.taskbridge.platform.PlatformServices
-import kotlin.time.Clock
-import kotlin.uuid.Uuid
 
 /** Ни одна попытка связи не стоит чаще 3 с; дальше — с потолком 30 с. */
 internal const val OFFLINE_RETRY_MIN_MS = 3_000L
@@ -161,6 +161,7 @@ class AppGraph(val platform: PlatformServices) {
 
     inner class Connected(val baseUrl: String) {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
         /** Адрес отвечает ДРУГИМ экземпляром TaskBridge (чужая база): fail-closed —
          *  сохранённый storeId не подменяется, кэш и курсоры остаются при старом
          *  хранилище, состояние видно оператору (инцидент 2026-11-20). */
@@ -181,12 +182,15 @@ class AppGraph(val platform: PlatformServices) {
             localServerAvailable = { platform.localServerLauncher?.available() == true },
         )
         val settingsController = SettingsController(api, scope)
+
         /** Редактор models.json (аналог Pi Manager): своя панель, своя ревизия. */
         val piModelsController = PiModelsController(api, scope)
         private val persistence = platform.chatPersistence(baseUrl)
+
         // Copy-on-write: UI, network callbacks and the stream actor may read snapshots
         // concurrently, but no iterator ever observes a mutating HashMap.
         private var chats: Map<String, ChatSession> = emptyMap()
+
         /**
          * Serializes chat switches: the old socket is joined before the next opens.
          * Lifecycle commands are never conflated: a close command carries the removed

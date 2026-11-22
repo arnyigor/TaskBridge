@@ -3,13 +3,13 @@ package ru.arny.taskbridge.ui.chat
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
-import ru.arny.taskbridge.core.client.chat.ChatItem
-import ru.arny.taskbridge.core.client.chat.ToolCall
-import ru.arny.taskbridge.core.client.chat.ToolState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.chat.ChatItem
+import ru.arny.taskbridge.core.client.chat.ToolCall
+import ru.arny.taskbridge.core.client.chat.ToolState
 
 /**
  * Поиск по сессии без устройства: что считается совпадением, в каком порядке идут

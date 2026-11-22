@@ -150,7 +150,10 @@ data class ToolCall(
 )
 
 enum class ToolState {
-    RUNNING, DONE, ERROR, INTERRUPTED;
+    RUNNING,
+    DONE,
+    ERROR,
+    INTERRUPTED;
 
     companion object {
         fun of(value: String) = when (value) {

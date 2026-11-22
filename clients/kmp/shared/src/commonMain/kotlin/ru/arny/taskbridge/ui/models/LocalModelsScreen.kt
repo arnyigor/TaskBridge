@@ -58,6 +58,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
@@ -73,7 +74,6 @@ import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.SectionTitle
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
-import kotlin.math.roundToInt
 
 /**
  * Отдельный экран «Локальные модели»: управление — это действие (найти →

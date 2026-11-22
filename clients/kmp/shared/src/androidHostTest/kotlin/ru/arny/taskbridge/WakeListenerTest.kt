@@ -1,6 +1,5 @@
 package ru.arny.taskbridge
 
-import ru.arny.taskbridge.platform.WakeListener
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.CountDownLatch
@@ -9,6 +8,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.platform.WakeListener
 
 /**
  * Свой push в локальной сети (4.3): сервер POST-ит `/wake` на приёмник телефона,

@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.Project
-import ru.arny.taskbridge.core.api.Task
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.api.Project
+import ru.arny.taskbridge.core.api.Task
 
 /**
  * Путь проекта в шапке чата.

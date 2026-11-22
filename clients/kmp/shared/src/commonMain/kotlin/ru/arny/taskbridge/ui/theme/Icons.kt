@@ -44,6 +44,7 @@ object AppIcons {
     val Eye = lineIcon("eye", "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z")
     val EyeOff = lineIcon("eye-off", "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94", "M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19", "M14.12 14.12a3 3 0 1 1-4.24-4.24", "M1 1l22 22")
     val Fork = lineIcon("fork", "M6 3v12", "M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 9a9 9 0 0 1-9 9")
+
     // The same mark mirrored: a branch taken backwards in the log — the history
     // from a message on, not the history up to it.
     val ForkFrom = lineIcon("forkFrom", "M18 3v12", "M6 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M18 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z", "M6 9a9 9 0 0 0 9 9")
@@ -66,8 +67,10 @@ object AppIcons {
     val Computer = lineIcon("computer", "M2 3h20v14H2z", "M8 21h8", "M12 17v4")
     val Power = lineIcon("power", "M18.36 6.64a9 9 0 1 1-12.73 0", "M12 2v10")
     val Folder = lineIcon("folder", "M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z")
+
     /** Кнопка-канцелярская: закреплённая папка/сессия. */
     val Pin = lineIcon("pin", "M9 4h6l-1 6 4 4H6l4-4-1-6z", "M12 14v7")
+
     /** Архив: коробка со крышкой. */
     val Archive = lineIcon("archive", "M3 8h18v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8z", "M2 4h20v4H2z", "M10 12h4")
     val ArrowDown = lineIcon("arrowDown", "M12 5v14", "M19 12l-7 7-7-7")

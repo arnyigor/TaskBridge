@@ -52,14 +52,14 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ModelVisibility
+import ru.arny.taskbridge.core.client.settings.ModelProbeState
 import ru.arny.taskbridge.core.client.settings.ModelRawDraft
 import ru.arny.taskbridge.core.client.settings.ProviderRawDraft
-import ru.arny.taskbridge.ui.theme.AppIcons
-import ru.arny.taskbridge.ui.theme.MonoStyle
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.settings.ProviderDialogs
 import ru.arny.taskbridge.ui.settings.modelProbeResultText
-import ru.arny.taskbridge.core.client.settings.ModelProbeState
+import ru.arny.taskbridge.ui.theme.AppIcons
+import ru.arny.taskbridge.ui.theme.MonoStyle
 
 /**
  * Редактор models.json — аналог Pi Manager.
@@ -108,8 +108,10 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
     val visible = state.providers.filter { provider ->
         if (!showHidden && provider.id in visibility.hiddenProviders) return@filter false
         val text = query.trim()
-        text.isEmpty() || provider.id.contains(text, true) ||
-            provider.name?.contains(text, true) == true || provider.models.any { it.id.contains(text, true) }
+        text.isEmpty() ||
+            provider.id.contains(text, true) ||
+            provider.name?.contains(text, true) == true ||
+            provider.models.any { it.id.contains(text, true) }
     }
 
     Scaffold(
@@ -267,22 +269,22 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                             provider.models
                                 .filter { showHidden || "${provider.id}/${it.id}" !in visibility.hiddenModels }
                                 .forEach { profileModel ->
-                                Row(
-                                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Text(profileModel.id, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                    val modelHidden = "${provider.id}/${profileModel.id}" in visibility.hiddenModels
-                                    IconButton(onClick = { toggleModelHidden(provider.id, profileModel.id) }) {
-                                        Icon(
-                                            if (modelHidden) AppIcons.EyeOff else AppIcons.Eye,
-                                            if (modelHidden) "Показать модель ${profileModel.id}" else "Скрыть модель ${profileModel.id}",
-                                            Modifier.size(16.dp),
-                                            tint = if (modelHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Text(profileModel.id, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                        val modelHidden = "${provider.id}/${profileModel.id}" in visibility.hiddenModels
+                                        IconButton(onClick = { toggleModelHidden(provider.id, profileModel.id) }) {
+                                            Icon(
+                                                if (modelHidden) AppIcons.EyeOff else AppIcons.Eye,
+                                                if (modelHidden) "Показать модель ${profileModel.id}" else "Скрыть модель ${profileModel.id}",
+                                                Modifier.size(16.dp),
+                                                tint = if (modelHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
-                            }
                         }
                         if (expanded && !provider.builtin && state.selectedProvider == provider.id) {
                             if (state.loading) CircularProgressIndicator(Modifier.padding(12.dp).size(20.dp))
@@ -292,46 +294,46 @@ fun PiModelsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                                     showHidden || "${provider.id}/$id" !in visibility.hiddenModels
                                 }
                                 .forEach { model ->
-                                val modelId = (model["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
-                                val probe = state.modelProbes[provider.id to modelId]
-                                Row(
-                                    Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(modelId, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        val details = listOfNotNull(
-                                            (model["name"] as? JsonPrimitive)?.contentOrNull,
-                                            (model["contextWindow"] as? JsonPrimitive)?.contentOrNull?.let { "ctx $it" },
-                                            (model["maxTokens"] as? JsonPrimitive)?.contentOrNull?.let { "out $it" },
-                                            if ((model["reasoning"] as? JsonPrimitive)?.contentOrNull == "true") "reasoning" else null,
-                                        ).joinToString(" · ")
-                                        if (details.isNotEmpty()) {
-                                            Text(details, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                        }
-                                        ModelProbeFeedback(probe)
-                                    }
-                                    TextButton(
-                                        onClick = { controller.testModel(modelId) },
-                                        enabled = !state.saving && probe?.loading != true,
+                                    val modelId = (model["id"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+                                    val probe = state.modelProbes[provider.id to modelId]
+                                    Row(
+                                        Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
                                     ) {
-                                        if (probe?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                                        else Text("Проверить (1 токен)")
-                                    }
-                                    IconButton(onClick = { controller.openModel(modelId) }) {
-                                        Icon(AppIcons.Edit, "Изменить $modelId", Modifier.size(18.dp))
-                                    }
-                                    val modelHidden = "${provider.id}/$modelId" in visibility.hiddenModels
-                                    IconButton(onClick = { toggleModelHidden(provider.id, modelId) }) {
-                                        Icon(
-                                            if (modelHidden) AppIcons.EyeOff else AppIcons.Eye,
-                                            if (modelHidden) "Показать модель $modelId" else "Скрыть модель $modelId",
-                                            Modifier.size(16.dp),
-                                            tint = if (modelHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
+                                        Column(Modifier.weight(1f)) {
+                                            Text(modelId, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            val details = listOfNotNull(
+                                                (model["name"] as? JsonPrimitive)?.contentOrNull,
+                                                (model["contextWindow"] as? JsonPrimitive)?.contentOrNull?.let { "ctx $it" },
+                                                (model["maxTokens"] as? JsonPrimitive)?.contentOrNull?.let { "out $it" },
+                                                if ((model["reasoning"] as? JsonPrimitive)?.contentOrNull == "true") "reasoning" else null,
+                                            ).joinToString(" · ")
+                                            if (details.isNotEmpty()) {
+                                                Text(details, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                            ModelProbeFeedback(probe)
+                                        }
+                                        TextButton(
+                                            onClick = { controller.testModel(modelId) },
+                                            enabled = !state.saving && probe?.loading != true,
+                                        ) {
+                                            if (probe?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                            else Text("Проверить (1 токен)")
+                                        }
+                                        IconButton(onClick = { controller.openModel(modelId) }) {
+                                            Icon(AppIcons.Edit, "Изменить $modelId", Modifier.size(18.dp))
+                                        }
+                                        val modelHidden = "${provider.id}/$modelId" in visibility.hiddenModels
+                                        IconButton(onClick = { toggleModelHidden(provider.id, modelId) }) {
+                                            Icon(
+                                                if (modelHidden) AppIcons.EyeOff else AppIcons.Eye,
+                                                if (modelHidden) "Показать модель $modelId" else "Скрыть модель $modelId",
+                                                Modifier.size(16.dp),
+                                                tint = if (modelHidden) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
                                     }
                                 }
-                            }
                         }
                         HorizontalDivider()
                     }
@@ -470,121 +472,121 @@ private fun ModelCard(
             }
         },
     ) {
-            Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (tab == 0) {
-                    Text("Контекст", style = MaterialTheme.typography.labelLarge)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(32_000L, 64_000L, 100_000L, 128_000L, 256_000L).forEach { tokens ->
-                            FilterChip(
-                                selected = draft.contextWindow == tokens.toString(),
-                                onClick = { onContextPreset(tokens) },
-                                enabled = !saving,
-                                label = { Text("${tokens / 1000}K") },
-                            )
-                        }
-                    }
-                    OutlinedTextField(
-                        draft.contextWindow,
-                        { onChange(draft.copy(contextWindow = it.filter(Char::isDigit))) },
-                        label = { Text("contextWindow") }, singleLine = true, enabled = !saving,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text("Выход", style = MaterialTheme.typography.labelLarge)
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        listOf(4_000L, 8_000L, 16_000L, 32_000L).forEach { tokens ->
-                            FilterChip(
-                                selected = draft.maxTokens == tokens.toString(),
-                                onClick = { onOutputPreset(tokens) },
-                                enabled = !saving,
-                                label = { Text("${tokens / 1000}K") },
-                            )
-                        }
-                    }
-                    OutlinedTextField(
-                        draft.maxTokens,
-                        { onChange(draft.copy(maxTokens = it.filter(Char::isDigit))) },
-                        label = { Text("maxTokens") }, singleLine = true, enabled = !saving,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        draft.id, { onChange(draft.copy(id = it)) },
-                        label = { Text("id") }, singleLine = true, enabled = !saving,
-                        textStyle = MonoStyle, modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        draft.name, { onChange(draft.copy(name = it)) },
-                        label = { Text("name") }, singleLine = true, enabled = !saving,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        draft.api, { onChange(draft.copy(api = it)) },
-                        label = { Text("api override") }, placeholder = { Text("openai-completions") },
-                        singleLine = true, enabled = !saving, modifier = Modifier.fillMaxWidth(),
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(draft.reasoning, { onChange(draft.copy(reasoning = it)) }, enabled = !saving)
-                        Text("reasoning")
-                    }
-                    OutlinedTextField(
-                        draft.input, { onChange(draft.copy(input = it)) },
-                        label = { Text("input (через запятую)") }, placeholder = { Text("text, image") },
-                        singleLine = true, enabled = !saving, modifier = Modifier.fillMaxWidth(),
-                    )
-                    KeyValueField("samplingParams", draft.samplingParams, saving) { onChange(draft.copy(samplingParams = it)) }
-                    KeyValueField("thinkingLevelMap", draft.thinkingLevelMap, saving) { onChange(draft.copy(thinkingLevelMap = it)) }
-                    KeyValueField("compat", draft.compat, saving) { onChange(draft.copy(compat = it)) }
-                    KeyValueField("настройки TaskBridge", draft.settings, saving) { onChange(draft.copy(settings = it)) }
-                    KeyValueField("прочие поля модели", draft.extra, saving) { onChange(draft.copy(extra = it)) }
-                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
-                    // Пресеты: именованные наборы полей модели в model-profiles.json.
-                    // «Применить» только подставляет значения; в models.json они уходят по «Сохранить».
-                    Text("Пресеты", style = MaterialTheme.typography.labelLarge)
-                    if (presets.isEmpty()) {
-                        Text(
-                            "Нет. Заполните поля и сохраните набор под именем — например «Быстрый».",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (tab == 0) {
+                Text("Контекст", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(32_000L, 64_000L, 100_000L, 128_000L, 256_000L).forEach { tokens ->
+                        FilterChip(
+                            selected = draft.contextWindow == tokens.toString(),
+                            onClick = { onContextPreset(tokens) },
+                            enabled = !saving,
+                            label = { Text("${tokens / 1000}K") },
                         )
                     }
-                    presets.forEach { preset ->
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Text(preset.name, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            TextButton(onClick = { onApplyPreset(preset.id) }, enabled = !saving) { Text("Применить") }
-                            IconButton(onClick = { onDeletePreset(preset.id) }, enabled = !saving && !presetBusy) {
-                                Icon(AppIcons.Delete, "Удалить пресет ${preset.name}", Modifier.size(18.dp))
-                            }
-                        }
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(
-                            presetName, onPresetName,
-                            label = { Text("Имя пресета") }, singleLine = true, enabled = !saving,
-                            modifier = Modifier.weight(1f),
+                }
+                OutlinedTextField(
+                    draft.contextWindow,
+                    { onChange(draft.copy(contextWindow = it.filter(Char::isDigit))) },
+                    label = { Text("contextWindow") }, singleLine = true, enabled = !saving,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text("Выход", style = MaterialTheme.typography.labelLarge)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(4_000L, 8_000L, 16_000L, 32_000L).forEach { tokens ->
+                        FilterChip(
+                            selected = draft.maxTokens == tokens.toString(),
+                            onClick = { onOutputPreset(tokens) },
+                            enabled = !saving,
+                            label = { Text("${tokens / 1000}K") },
                         )
-                        TextButton(onClick = onSavePreset, enabled = !saving && !presetBusy && presetName.isNotBlank()) {
-                            Text("Сохранить")
-                        }
                     }
-                } else {
+                }
+                OutlinedTextField(
+                    draft.maxTokens,
+                    { onChange(draft.copy(maxTokens = it.filter(Char::isDigit))) },
+                    label = { Text("maxTokens") }, singleLine = true, enabled = !saving,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    draft.id, { onChange(draft.copy(id = it)) },
+                    label = { Text("id") }, singleLine = true, enabled = !saving,
+                    textStyle = MonoStyle, modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    draft.name, { onChange(draft.copy(name = it)) },
+                    label = { Text("name") }, singleLine = true, enabled = !saving,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    draft.api, { onChange(draft.copy(api = it)) },
+                    label = { Text("api override") }, placeholder = { Text("openai-completions") },
+                    singleLine = true, enabled = !saving, modifier = Modifier.fillMaxWidth(),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(draft.reasoning, { onChange(draft.copy(reasoning = it)) }, enabled = !saving)
+                    Text("reasoning")
+                }
+                OutlinedTextField(
+                    draft.input, { onChange(draft.copy(input = it)) },
+                    label = { Text("input (через запятую)") }, placeholder = { Text("text, image") },
+                    singleLine = true, enabled = !saving, modifier = Modifier.fillMaxWidth(),
+                )
+                KeyValueField("samplingParams", draft.samplingParams, saving) { onChange(draft.copy(samplingParams = it)) }
+                KeyValueField("thinkingLevelMap", draft.thinkingLevelMap, saving) { onChange(draft.copy(thinkingLevelMap = it)) }
+                KeyValueField("compat", draft.compat, saving) { onChange(draft.copy(compat = it)) }
+                KeyValueField("настройки TaskBridge", draft.settings, saving) { onChange(draft.copy(settings = it)) }
+                KeyValueField("прочие поля модели", draft.extra, saving) { onChange(draft.copy(extra = it)) }
+                HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                // Пресеты: именованные наборы полей модели в model-profiles.json.
+                // «Применить» только подставляет значения; в models.json они уходят по «Сохранить».
+                Text("Пресеты", style = MaterialTheme.typography.labelLarge)
+                if (presets.isEmpty()) {
                     Text(
-                        "Объект модели целиком. «Применить» разложит его по полям формы; «Сохранить» отправит только поля формы.",
+                        "Нет. Заполните поля и сохраните набор под именем — например «Быстрый».",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    OutlinedTextField(
-                        raw, { raw = it },
-                        label = { Text("JSON") }, minLines = 10, enabled = !saving,
-                        textStyle = MonoStyle, modifier = Modifier.fillMaxWidth(),
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TextButton(onClick = { onApplyRaw(raw) }, enabled = !saving) { Text("Применить к полям") }
-                        TextButton(onClick = { raw = rawJson() }, enabled = !saving) { Text("Сбросить") }
+                }
+                presets.forEach { preset ->
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(preset.name, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        TextButton(onClick = { onApplyPreset(preset.id) }, enabled = !saving) { Text("Применить") }
+                        IconButton(onClick = { onDeletePreset(preset.id) }, enabled = !saving && !presetBusy) {
+                            Icon(AppIcons.Delete, "Удалить пресет ${preset.name}", Modifier.size(18.dp))
+                        }
                     }
                 }
-                problem?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        presetName, onPresetName,
+                        label = { Text("Имя пресета") }, singleLine = true, enabled = !saving,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = onSavePreset, enabled = !saving && !presetBusy && presetName.isNotBlank()) {
+                        Text("Сохранить")
+                    }
+                }
+            } else {
+                Text(
+                    "Объект модели целиком. «Применить» разложит его по полям формы; «Сохранить» отправит только поля формы.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    raw, { raw = it },
+                    label = { Text("JSON") }, minLines = 10, enabled = !saving,
+                    textStyle = MonoStyle, modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onApplyRaw(raw) }, enabled = !saving) { Text("Применить к полям") }
+                    TextButton(onClick = { raw = rawJson() }, enabled = !saving) { Text("Сбросить") }
+                }
             }
+            problem?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        }
     }
     if (confirmDelete) {
         AlertDialog(

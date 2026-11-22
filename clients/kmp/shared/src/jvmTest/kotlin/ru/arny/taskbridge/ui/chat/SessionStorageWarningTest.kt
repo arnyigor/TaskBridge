@@ -1,9 +1,9 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.SessionStorage
 import kotlin.test.Test
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.SessionStorage
 
 /**
  * Предупреждение «сессия занимает много места». Порог считает сервер

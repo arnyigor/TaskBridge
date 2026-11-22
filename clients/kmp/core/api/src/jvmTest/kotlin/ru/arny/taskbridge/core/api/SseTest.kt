@@ -7,23 +7,23 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ByteReadChannel
-import io.ktor.utils.io.writer
 import io.ktor.utils.io.writeFully
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
-import kotlinx.coroutines.TimeoutCancellationException
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.withTimeout
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.filterIsInstance
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.runBlocking
+import io.ktor.utils.io.writer
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 
 class SseTest {
     private fun parseAll(text: String): List<SseMessage> {

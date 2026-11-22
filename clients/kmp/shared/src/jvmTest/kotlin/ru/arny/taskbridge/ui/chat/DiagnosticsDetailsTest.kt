@@ -1,5 +1,9 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+import kotlin.time.Instant
 import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
@@ -9,10 +13,6 @@ import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatSnapshot
 import ru.arny.taskbridge.core.client.session.ChatSessionState
 import ru.arny.taskbridge.core.client.session.LinkState
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
-import kotlin.time.Instant
 
 /**
  * Текст панели «Диагностика».

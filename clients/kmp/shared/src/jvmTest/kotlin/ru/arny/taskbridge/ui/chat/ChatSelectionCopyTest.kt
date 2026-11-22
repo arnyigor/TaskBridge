@@ -21,10 +21,10 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.text.input.TextFieldValue
-import ru.arny.taskbridge.core.client.chat.ChatItem
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import ru.arny.taskbridge.core.client.chat.ChatItem
 
 /**
  * Выделение текста в чате на десктопе.

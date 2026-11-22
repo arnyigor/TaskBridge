@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.ui.models
 
-import ru.arny.taskbridge.core.api.LocalModelEntry
-import ru.arny.taskbridge.core.api.LocalVisionChange
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.api.LocalModelEntry
+import ru.arny.taskbridge.core.api.LocalVisionChange
 
 /**
  * Строка модели на телефоне показывает состояние точкой, подписью и кнопкой —

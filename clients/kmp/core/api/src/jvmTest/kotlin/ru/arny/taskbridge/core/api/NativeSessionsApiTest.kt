@@ -9,10 +9,10 @@ import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.content.TextContent
 import io.ktor.http.headersOf
-import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import kotlinx.coroutines.runBlocking
 
 /**
  * Импорт сессий Pi (паритет с вебом, раздел 2.11 плана): список групп, предпросмотр

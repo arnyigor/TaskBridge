@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.awaitCancellation
@@ -7,9 +10,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import ru.arny.taskbridge.core.client.session.ChatActionRunner
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ChatActionRunnerTest {

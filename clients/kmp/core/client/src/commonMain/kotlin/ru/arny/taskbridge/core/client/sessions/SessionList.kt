@@ -3,9 +3,9 @@ package ru.arny.taskbridge.core.client.sessions
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -43,6 +43,7 @@ data class SessionGroup(val projectId: String, val title: String, val sessions: 
 enum class FolderSortBy {
     /** Сначала папки, где работа ждёт оператора или идёт, затем по свежести. */
     ACTIVITY,
+
     /** По алфавиту имени папки. */
     NAME;
 
@@ -278,7 +279,7 @@ class SessionList(
         job = null
     }
 
-        /**
+    /**
      * Свежая телеметрия движка (`/api/info`) без перезагрузки списка.
      *
      * Фаза модели («reading the prompt» у Strata), прогресс чтения промпта и PP/TG живут

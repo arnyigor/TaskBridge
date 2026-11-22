@@ -1,14 +1,14 @@
 package ru.arny.taskbridge.core.client
 
 import java.io.File
+import kotlin.test.Test
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.*
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
-import kotlin.test.Test
-import kotlin.test.assertTrue
 
 // Temporary private capture probe; replace with a minimal anonymized regression.
 class LifecycleTailReplayTest {

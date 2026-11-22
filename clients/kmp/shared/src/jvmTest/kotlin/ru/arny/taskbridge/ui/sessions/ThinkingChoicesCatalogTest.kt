@@ -1,11 +1,11 @@
 package ru.arny.taskbridge.ui.sessions
 
-import ru.arny.taskbridge.core.api.ModelCatalog
-import ru.arny.taskbridge.core.api.ModelRef
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.ModelCatalog
+import ru.arny.taskbridge.core.api.ModelRef
 
 /**
  * Уровни размышлений, когда у задачи нет своей карты модели.

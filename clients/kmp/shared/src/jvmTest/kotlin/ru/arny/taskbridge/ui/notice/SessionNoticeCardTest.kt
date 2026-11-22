@@ -4,11 +4,11 @@ import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
-import ru.arny.taskbridge.core.client.sessions.SessionAlert
-import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 
 /**
  * Жалоба оператора 2026-10-22: «не переходит при клике, приложение было свёрнуто».

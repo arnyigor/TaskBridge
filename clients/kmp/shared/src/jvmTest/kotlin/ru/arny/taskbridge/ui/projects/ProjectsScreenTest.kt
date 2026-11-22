@@ -1,14 +1,14 @@
 package ru.arny.taskbridge.ui.projects
 
-import ru.arny.taskbridge.core.api.ProjectOverview
-import ru.arny.taskbridge.core.api.ProjectOverviewTotals
-import ru.arny.taskbridge.core.api.Invocation
-import ru.arny.taskbridge.core.api.ProjectSummary
-import ru.arny.taskbridge.core.api.ScheduleSpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.Invocation
+import ru.arny.taskbridge.core.api.ProjectOverview
+import ru.arny.taskbridge.core.api.ProjectOverviewTotals
+import ru.arny.taskbridge.core.api.ProjectSummary
+import ru.arny.taskbridge.core.api.ScheduleSpec
 
 /**
  * Логика дашборда без Compose (MR-01): какие секции получаются, что написано под

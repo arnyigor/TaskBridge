@@ -6,6 +6,7 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlin.test.*
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -14,7 +15,6 @@ import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.session.ChatSession
-import kotlin.test.*
 
 class ChatActionStateTest {
     private val headers = headersOf(HttpHeaders.ContentType, "application/json")

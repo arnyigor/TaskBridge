@@ -1,5 +1,10 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.CompactionInfo
 import ru.arny.taskbridge.core.api.CompactionLast
@@ -9,11 +14,6 @@ import ru.arny.taskbridge.core.api.LocalRuntimeInfo
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.Usage
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNull
-import kotlin.test.assertTrue
 
 /**
  * Окно контекста сессии с локальной моделью берётся из живого статуса TaskBridge, а

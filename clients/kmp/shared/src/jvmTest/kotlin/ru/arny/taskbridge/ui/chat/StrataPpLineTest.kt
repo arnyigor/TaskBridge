@@ -1,9 +1,9 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.LocalModelMetrics
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.api.LocalModelMetrics
 
 /**
  * Диагностика чата объясняет отсутствие PP у внешнего сервера (Strata): промпт

@@ -1,15 +1,15 @@
 package ru.arny.taskbridge.core.api
 
-import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.int
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 class FixtureParsingTest {
     private fun <T> parse(name: String, serializer: kotlinx.serialization.KSerializer<T>): T =

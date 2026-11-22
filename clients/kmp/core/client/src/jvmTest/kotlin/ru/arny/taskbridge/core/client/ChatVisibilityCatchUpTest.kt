@@ -7,6 +7,10 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ByteChannel
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -18,10 +22,6 @@ import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.session.ChatSession
-import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.atomic.AtomicInteger
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 /**
  * Возврат к чату обязан сам сверить версию с сервером.
@@ -66,7 +66,7 @@ class ChatVisibilityCatchUpTest {
                 // Открытый и молчащий поток: кадра, который запустил бы сверку, нет.
                 path.endsWith("/stream") -> respond(silent, HttpStatusCode.OK, sse)
                 path.endsWith("/approvals") -> respond("[]", HttpStatusCode.OK, json)
-                else -> respond("""{"id":"t","status":"RUNNING","snapshotSeq":${snapshot}}""", HttpStatusCode.OK, json)
+                else -> respond("""{"id":"t","status":"RUNNING","snapshotSeq":$snapshot}""", HttpStatusCode.OK, json)
             }
         })
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)

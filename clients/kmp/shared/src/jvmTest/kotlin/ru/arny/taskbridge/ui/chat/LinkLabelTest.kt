@@ -1,11 +1,11 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.ApiError
-import ru.arny.taskbridge.core.client.session.LinkState
-import ru.arny.taskbridge.core.client.session.describe
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import ru.arny.taskbridge.core.api.ApiError
+import ru.arny.taskbridge.core.client.session.LinkState
+import ru.arny.taskbridge.core.client.session.describe
 
 /**
  * Панель «Диагностика» печатает состояние связи словами. После появления DEGRADED

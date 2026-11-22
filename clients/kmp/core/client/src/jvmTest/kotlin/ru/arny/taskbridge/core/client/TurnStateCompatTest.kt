@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.api.Task
-import ru.arny.taskbridge.core.api.TaskBridgeJson
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.api.Task
+import ru.arny.taskbridge.core.api.TaskBridgeJson
 
 /** Additive turn-state fields must remain compatible with old server snapshots. */
 class TurnStateCompatTest {

@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.time.Instant
 import ru.arny.taskbridge.core.api.ProviderPeakRules
 import ru.arny.taskbridge.core.api.ProviderRate
 import ru.arny.taskbridge.core.api.ProviderTariff
 import ru.arny.taskbridge.core.api.TurnMetrics
 import ru.arny.taskbridge.core.client.chat.AnswerUsage
 import ru.arny.taskbridge.ui.common.parseIsoMillis
-import kotlin.time.Instant
 
 /**
  * Подпись под ответом модели: сколько токенов, сколько денег и был ли это пик.

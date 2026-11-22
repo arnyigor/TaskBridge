@@ -9,13 +9,13 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
+import java.util.Locale
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
 import ru.arny.taskbridge.core.api.TurnMetrics
 import ru.arny.taskbridge.core.client.chat.AnswerUsage
 import ru.arny.taskbridge.core.client.chat.ChatItem
-import kotlin.test.Test
-import kotlin.test.BeforeTest
-import kotlin.test.AfterTest
-import java.util.Locale
 
 /**
  * Блок ресурсов под ответом: свёрнутая подпись с временем, метка пика и
@@ -24,7 +24,9 @@ import java.util.Locale
 @OptIn(ExperimentalTestApi::class)
 class MessageUsageLineRenderTest {
     private val previousLocale = Locale.getDefault()
+
     @BeforeTest fun useRussian() { Locale.setDefault(Locale.forLanguageTag("ru-RU")) }
+
     @AfterTest fun restoreLocale() { Locale.setDefault(previousLocale) }
 
     private fun answer() = ChatItem.Assistant(

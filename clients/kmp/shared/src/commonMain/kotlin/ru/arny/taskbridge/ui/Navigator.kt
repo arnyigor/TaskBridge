@@ -2,8 +2,8 @@ package ru.arny.taskbridge.ui
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.setValue
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -25,9 +25,11 @@ sealed interface Screen {
     /** The project dashboard: every project, its sessions, pinned and archived. */
     @Serializable
     data object Projects : Screen
+
     /** Только архивные папки: главный вход в него — меню ⋮ списка сессий. */
     @Serializable
     data object Archive : Screen
+
     /** One project's operational memory: Work Items, sessions and recurring work. */
     @Serializable
     data class Project(val projectId: String) : Screen
@@ -38,17 +40,22 @@ sealed interface Screen {
 
     @Serializable
     data class Chat(val taskId: String) : Screen
+
     /** A new session not yet on the PC: it is created by its first message. */
     @Serializable
     data class Draft(val draft: SessionDraft) : Screen
+
     @Serializable
     data object Settings : Screen
+
     /** Управление локальными моделями: рабочий экран, а не настройка. */
     @Serializable
     data object LocalModels : Screen
+
     /** Редактор models.json — аналог Pi Manager: провайдеры, модели, их поля. */
     @Serializable
     data object PiModels : Screen
+
     /** Процессы машины с сервером: список, память и kill. */
     @Serializable
     data object Processes : Screen

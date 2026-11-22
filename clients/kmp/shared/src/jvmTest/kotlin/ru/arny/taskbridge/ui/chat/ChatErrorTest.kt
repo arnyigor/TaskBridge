@@ -22,12 +22,12 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
-import ru.arny.taskbridge.core.client.chat.AnswerUsage
-import ru.arny.taskbridge.core.client.chat.ChatItem
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.chat.AnswerUsage
+import ru.arny.taskbridge.core.client.chat.ChatItem
 
 @OptIn(ExperimentalTestApi::class)
 class ChatErrorTest {

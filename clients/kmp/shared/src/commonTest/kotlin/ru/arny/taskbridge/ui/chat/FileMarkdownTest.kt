@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.client.markdown.Markdown
-import ru.arny.taskbridge.core.client.markdown.MdBlock
-import ru.arny.taskbridge.core.client.markdown.MdRun
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.markdown.Markdown
+import ru.arny.taskbridge.core.client.markdown.MdBlock
+import ru.arny.taskbridge.core.client.markdown.MdRun
 
 class FileMarkdownTest {
     @Test

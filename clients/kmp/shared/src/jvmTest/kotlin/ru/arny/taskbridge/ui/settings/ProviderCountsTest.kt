@@ -1,8 +1,8 @@
 package ru.arny.taskbridge.ui.settings
 
-import ru.arny.taskbridge.core.api.ModelRef
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import ru.arny.taskbridge.core.api.ModelRef
 
 /**
  * Список провайдеров в настройках показывает один ПК, а не список Pi-провайдеров:

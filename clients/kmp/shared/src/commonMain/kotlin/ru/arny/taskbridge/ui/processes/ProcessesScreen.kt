@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -41,8 +40,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
+import kotlin.math.roundToLong
+import kotlin.time.Clock
+import kotlin.time.ExperimentalTime
 import kotlin.uuid.Uuid
+import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.CleanupPlan
 import ru.arny.taskbridge.core.api.CleanupResult
@@ -51,9 +53,6 @@ import ru.arny.taskbridge.core.api.ProcessEntry
 import ru.arny.taskbridge.core.api.ResourceSnapshot
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.theme.AppIcons
-import kotlin.math.roundToLong
-import kotlin.time.Clock
-import kotlin.time.ExperimentalTime
 
 private val NODE_NAMES = setOf("node", "nodejs")
 private val PYTHON_NAMES = setOf("python", "python3", "py")
@@ -61,7 +60,11 @@ private val JAVA_NAMES = setOf("java", "javaw", "javac", "jshell")
 
 /** Фильтры списка: все, только GPU-процессы или одна runtime-группа. */
 private enum class ProcessFilter(val label: String) {
-    ALL("Все"), GPU("GPU"), NODE("Node"), PYTHON("Python"), JAVA("Java"),
+    ALL("Все"),
+    GPU("GPU"),
+    NODE("Node"),
+    PYTHON("Python"),
+    JAVA("Java"),
 }
 
 private fun processBaseName(entry: ProcessEntry): String =

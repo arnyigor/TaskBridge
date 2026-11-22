@@ -404,6 +404,7 @@ private fun PanelActions(target: FileTarget, session: ChatSession, platform: Pla
     var open by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     fun tell(message: String) = state.setNotice(message)
+
     // The dock is what a phone in landscape or a tablet shows instead of the sheet:
     // without this item those users cannot keep a file at all.
     fun download() {

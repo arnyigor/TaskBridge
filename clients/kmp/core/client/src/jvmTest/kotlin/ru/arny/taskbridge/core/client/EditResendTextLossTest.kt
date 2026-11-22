@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -8,9 +11,6 @@ import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * RED-тест BUG-P0 (журнал b2451ed63c8b, 2026-11-20): после Edit→Resend ход
@@ -50,7 +50,7 @@ class EditResendTextLossTest {
             if (event.type == "PI_EVENT") {
                 val pi = (event.data as? kotlinx.serialization.json.JsonObject)?.get("pi") as? kotlinx.serialization.json.JsonObject
                 val pt = pi?.get("type")?.jsonPrimitive?.content
-                if (pt in listOf("message_start","message_end","agent_start","turn_start")) {
+                if (pt in listOf("message_start", "message_end", "agent_start", "turn_start")) {
                     println("DBG seq=" + event.seq + " PI:" + pt + " role=" + ((pi?.get("message") as? kotlinx.serialization.json.JsonObject)?.get("role")?.jsonPrimitive?.content ?: "-") +
                         " -> last text=" + cur?.text?.length + " id=" + cur?.id + " active=" + cur?.active)
                     continue

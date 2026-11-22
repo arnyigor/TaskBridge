@@ -6,17 +6,17 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.io.IOException
+import kotlin.test.Test
+import kotlin.test.assertFalse
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.settings.ConnectResult
 import ru.arny.taskbridge.core.client.settings.checkConnection
 import ru.arny.taskbridge.core.client.settings.savedAddressNeedsPairing
-import java.io.IOException
-import kotlin.test.Test
-import kotlin.test.assertFalse
-import kotlin.test.assertIs
-import kotlin.test.assertTrue
 
 class ConnectionCheckTest {
 

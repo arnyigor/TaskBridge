@@ -1,9 +1,9 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.client.markdown.Markdown
 import kotlin.system.measureNanoTime
 import kotlin.test.Test
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.markdown.Markdown
 
 class LargeMarkdownTest {
     @Test

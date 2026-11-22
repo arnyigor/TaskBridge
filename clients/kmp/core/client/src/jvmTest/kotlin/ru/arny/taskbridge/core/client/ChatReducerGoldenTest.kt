@@ -1,5 +1,9 @@
 package ru.arny.taskbridge.core.client
 
+import java.io.File
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -10,10 +14,6 @@ import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ToolState
-import java.io.File
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 // The Kotlin reducer must build exactly the turns web/chat-state.mjs builds
 // from the same events. The golden files come from real sessions on fake-pi.

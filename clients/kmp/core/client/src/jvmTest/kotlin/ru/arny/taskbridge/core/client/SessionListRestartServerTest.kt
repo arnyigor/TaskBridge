@@ -7,6 +7,9 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -15,9 +18,6 @@ import kotlinx.coroutines.runBlocking
 import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.sessions.SessionList
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * «Перезапустить сервер» когда он недоступен: desktop-клиент запускает сервер
@@ -61,7 +61,6 @@ class SessionListRestartServerTest {
         startLocalServer = launcher,
         localServerAvailable = { available },
     )
-
 
     @Test
     fun aStoppedServerIsStartedLocallyWithoutConsole() = runBlocking {

@@ -21,6 +21,10 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -36,10 +40,6 @@ import ru.arny.taskbridge.core.client.session.ChatSessionState
 import ru.arny.taskbridge.core.client.session.LinkState
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * Поиск на настоящей ленте: строка поиска считает совпадения, а переход доводит

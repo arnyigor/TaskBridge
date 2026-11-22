@@ -1,9 +1,9 @@
 package ru.arny.taskbridge.ui.settings
 
-import ru.arny.taskbridge.core.api.ModelProbeResult
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.ModelProbeResult
 
 class ModelProbeResultTextTest {
     @Test

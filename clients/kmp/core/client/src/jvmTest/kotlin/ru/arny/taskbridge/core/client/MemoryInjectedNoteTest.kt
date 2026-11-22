@@ -1,13 +1,13 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 /**
  * Этап M2: факт инъекции памяти показывается в ленте чата — оператор видит, что

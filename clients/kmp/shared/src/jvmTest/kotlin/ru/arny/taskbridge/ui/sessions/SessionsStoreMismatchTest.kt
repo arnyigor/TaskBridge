@@ -16,15 +16,15 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.core.client.settings.SecretStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.platform.PlatformServices
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * P0 Production/Test Isolation (инцидент 2026-11-20): клиент подключился к

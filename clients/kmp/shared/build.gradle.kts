@@ -12,25 +12,25 @@ kotlin {
     jvm()
 
     android {
-       namespace = "ru.arny.taskbridge.shared"
-       compileSdk = libs.versions.android.compileSdk.get().toInt()
-       buildToolsVersion = "37.0.0"
-       minSdk = libs.versions.android.minSdk.get().toInt()
+        namespace = "ru.arny.taskbridge.shared"
+        compileSdk = libs.versions.android.compileSdk.get().toInt()
+        buildToolsVersion = "37.0.0"
+        minSdk = libs.versions.android.minSdk.get().toInt()
 
-       compilerOptions {
-           jvmTarget = JvmTarget.JVM_11
-       }
-       androidResources {
-           enable = true
-       }
-       withHostTest {
-           isIncludeAndroidResources = true
-       }
-       withDeviceTestBuilder {
-           sourceSetTreeName = "test"
-       }.configure {
-           instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-       }
+        compilerOptions {
+            jvmTarget = JvmTarget.JVM_11
+        }
+        androidResources {
+            enable = true
+        }
+        withHostTest {
+            isIncludeAndroidResources = true
+        }
+        withDeviceTestBuilder {
+            sourceSetTreeName = "test"
+        }.configure {
+            instrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        }
     }
 
     compilerOptions {

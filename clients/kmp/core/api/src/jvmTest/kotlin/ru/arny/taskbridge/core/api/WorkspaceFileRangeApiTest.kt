@@ -6,11 +6,11 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
-import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlinx.coroutines.runBlocking
 
 /**
  * Пункт 162 плана: клик по ссылке `src/a.kt#L120-L140` в ответе агента должен

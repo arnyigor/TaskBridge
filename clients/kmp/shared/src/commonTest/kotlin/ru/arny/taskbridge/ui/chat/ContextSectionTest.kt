@@ -1,12 +1,11 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.ContextCompaction
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.core.api.ContextLimit
 import ru.arny.taskbridge.core.api.ContextSource
 import ru.arny.taskbridge.core.api.ContextUsage
 import ru.arny.taskbridge.core.api.SessionContextReport
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 class ContextSectionTest {
 

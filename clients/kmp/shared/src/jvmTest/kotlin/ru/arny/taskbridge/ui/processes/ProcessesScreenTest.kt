@@ -1,11 +1,10 @@
 package ru.arny.taskbridge.ui.processes
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.core.api.CleanupGpuDelta
 import ru.arny.taskbridge.core.api.CleanupResult
 import ru.arny.taskbridge.core.api.ProcessEntry
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 // Панель процессов без Compose: форматы и сортировка — чистые функции файла
 // экрана, так же проверены карточки «Локальных моделей» (LocalModelCardTest).

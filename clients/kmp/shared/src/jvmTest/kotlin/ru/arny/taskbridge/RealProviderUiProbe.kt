@@ -2,32 +2,32 @@ package ru.arny.taskbridge
 
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
-import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.v2.runComposeUiTest
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import ru.arny.taskbridge.core.client.chat.ChatItem
-import ru.arny.taskbridge.core.api.CreateTaskRequest
-import ru.arny.taskbridge.core.api.ModelSelection
-import ru.arny.taskbridge.core.api.TaskBridgeJson
-import ru.arny.taskbridge.core.client.session.NoopChatPersistence
-import ru.arny.taskbridge.core.client.settings.KeyValueStore
-import ru.arny.taskbridge.core.client.settings.SecretStore
-import ru.arny.taskbridge.platform.DesktopPlatformServices
-import ru.arny.taskbridge.platform.PlatformServices
 import java.io.File
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlin.test.assertTrue
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import ru.arny.taskbridge.core.api.CreateTaskRequest
+import ru.arny.taskbridge.core.api.ModelSelection
+import ru.arny.taskbridge.core.api.TaskBridgeJson
+import ru.arny.taskbridge.core.client.chat.ChatItem
+import ru.arny.taskbridge.core.client.session.NoopChatPersistence
+import ru.arny.taskbridge.core.client.settings.KeyValueStore
+import ru.arny.taskbridge.core.client.settings.SecretStore
+import ru.arny.taskbridge.platform.DesktopPlatformServices
+import ru.arny.taskbridge.platform.PlatformServices
 
 /** Manual live-provider probe, with no @Test: offline CI must never send inference requests. */
 @OptIn(ExperimentalTestApi::class)
@@ -78,8 +78,10 @@ object RealProviderUiProbe {
                 check(chat.state.value.task?.status != "FAILED") { "provider failed: ${chat.state.value.task?.errorCode} ${chat.state.value.task?.error.orEmpty()}" }
                 val answers = chat.state.value.chat.items.filterIsInstance<ChatItem.Assistant>()
                 val answer = answers.lastOrNull()
-                chat.state.value.task?.status == "SUCCEEDED" && answers.size > initialAnswerCount &&
-                    answer?.final == true && answer.text.isNotBlank() &&
+                chat.state.value.task?.status == "SUCCEEDED" &&
+                    answers.size > initialAnswerCount &&
+                    answer?.final == true &&
+                    answer.text.isNotBlank() &&
                     onAllNodes(renderedAnswer(answer.text)).fetchSemanticsNodes().isNotEmpty()
             }
             val finalAnswer = chat.state.value.chat.items.filterIsInstance<ChatItem.Assistant>().last().text

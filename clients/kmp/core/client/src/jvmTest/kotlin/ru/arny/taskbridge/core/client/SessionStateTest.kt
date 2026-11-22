@@ -1,24 +1,24 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.api.Project
-import ru.arny.taskbridge.core.api.ProjectOverview
-import ru.arny.taskbridge.core.api.ProjectSummary
-import ru.arny.taskbridge.core.api.Task
-import ru.arny.taskbridge.core.client.sessions.DisplayState
-import ru.arny.taskbridge.core.client.sessions.SessionAlert
-import ru.arny.taskbridge.core.client.sessions.SessionAlerts
-import ru.arny.taskbridge.core.client.sessions.FolderSortBy
-import ru.arny.taskbridge.core.client.sessions.SessionListState
-import ru.arny.taskbridge.core.api.RuntimeInfo
-import ru.arny.taskbridge.core.client.sessions.activityOf
-import ru.arny.taskbridge.core.client.sessions.displayStateOf
-import ru.arny.taskbridge.core.client.sessions.folderNameOf
-import ru.arny.taskbridge.core.client.settings.normalizeServerUrl
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.Project
+import ru.arny.taskbridge.core.api.ProjectOverview
+import ru.arny.taskbridge.core.api.ProjectSummary
+import ru.arny.taskbridge.core.api.RuntimeInfo
+import ru.arny.taskbridge.core.api.Task
+import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.core.client.sessions.FolderSortBy
+import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.core.client.sessions.SessionAlerts
+import ru.arny.taskbridge.core.client.sessions.SessionListState
+import ru.arny.taskbridge.core.client.sessions.activityOf
+import ru.arny.taskbridge.core.client.sessions.displayStateOf
+import ru.arny.taskbridge.core.client.sessions.folderNameOf
+import ru.arny.taskbridge.core.client.settings.normalizeServerUrl
 
 class SessionStateTest {
 

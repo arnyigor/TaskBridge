@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TurnState
 import ru.arny.taskbridge.core.api.mergeTaskSnapshot
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 /**
  * Шаг C-B: гонка «GET метаданных vs SSE». Снимок версионирован snapshotSeq (seq

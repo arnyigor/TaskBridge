@@ -15,6 +15,10 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -28,10 +32,6 @@ import ru.arny.taskbridge.core.client.session.ChatSessionState
 import ru.arny.taskbridge.core.client.session.LinkState
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * Прокрутка настоящего [MessageList] (production-лента с настоящими ChatItem и
@@ -151,7 +151,6 @@ class MessageListScrollTest {
         waitForIdle()
         assertEquals(visibleInside, visible(listState), "огромный отчёт сдвинул вид")
         println("PROBE big-insert first=${listState.firstVisibleItemIndex}/${listState.firstVisibleItemScrollOffset}")
-
     }
 
     private fun visible(state: LazyListState): List<String> =

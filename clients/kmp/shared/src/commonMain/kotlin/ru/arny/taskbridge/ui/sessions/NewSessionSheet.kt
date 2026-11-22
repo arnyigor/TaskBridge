@@ -2,8 +2,6 @@ package ru.arny.taskbridge.ui.sessions
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
@@ -15,21 +13,22 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,29 +39,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 import io.ktor.http.Url
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.ModelCatalog
 import ru.arny.taskbridge.core.api.ModelLatency
 import ru.arny.taskbridge.core.api.ModelRef
-import ru.arny.taskbridge.core.api.ProviderStatus
-import ru.arny.taskbridge.core.client.settings.AppSettings
-import ru.arny.taskbridge.ui.chat.liveLocalContextWindow
-import ru.arny.taskbridge.ui.settings.providerStatusTextShared
-import ru.arny.taskbridge.ui.theme.LocalStatusColors
-import androidx.compose.material3.IconButton
 import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.SCRATCH_PROJECT_ID
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.client.settings.AppSettings
 import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.SessionDraft
+import ru.arny.taskbridge.ui.chat.liveLocalContextWindow
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.formatBytes
+import ru.arny.taskbridge.ui.settings.providerStatusTextShared
 import ru.arny.taskbridge.ui.theme.AppIcons
+import ru.arny.taskbridge.ui.theme.LocalStatusColors
 
 @Composable
 fun NewSessionSheet(
@@ -98,9 +95,10 @@ fun NewSessionSheet(
     val commandId = remember { graph.newId() }
     val pick = rememberFilePicker { picked -> files = files + picked }
     val visibleProjects = projects + listOfNotNull(addedProject).filterNot { added -> projects.any { it.id == added.id } }
-    val localDesktop = graph.platform.kind == "desktop" && runCatching {
-        Url(connection.baseUrl).host.lowercase() in setOf("localhost", "127.0.0.1", "::1", "[::1]")
-    }.getOrDefault(false)
+    val localDesktop = graph.platform.kind == "desktop" &&
+        runCatching {
+            Url(connection.baseUrl).host.lowercase() in setOf("localhost", "127.0.0.1", "::1", "[::1]")
+        }.getOrDefault(false)
 
     LaunchedEffect(Unit) {
         connection.sessions.models().onSuccess { loaded ->

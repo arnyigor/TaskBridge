@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.client.chat.ToolCall
-import ru.arny.taskbridge.core.client.chat.ToolState
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.chat.ToolCall
+import ru.arny.taskbridge.core.client.chat.ToolState
 
 class ToolTextTest {
 

@@ -6,18 +6,20 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
-import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.builtins.ListSerializer
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -37,9 +39,6 @@ import ru.arny.taskbridge.core.client.session.NoopChatPersistence
 import ru.arny.taskbridge.core.client.session.OLDER_PAGE_LIMIT
 import ru.arny.taskbridge.core.client.session.lightenEvent
 import ru.arny.taskbridge.core.client.session.trimCacheToBudget
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * The paged history of one chat.
@@ -426,9 +425,7 @@ class ChatHistoryPagingTest {
                 api, "t", scope,
                 ids = { "id" }, now = { "2026-10-11T00:00:00Z" },
                 persistence = object : ChatPersistence by NoopChatPersistence {
-                    override suspend fun saveChat(taskId: String, value: CachedChat) {
-                        throw OutOfMemoryError("simulated: the encoder could not allocate")
-                    }
+                    override suspend fun saveChat(taskId: String, value: CachedChat): Unit = throw OutOfMemoryError("simulated: the encoder could not allocate")
                 },
             )
             session.start()

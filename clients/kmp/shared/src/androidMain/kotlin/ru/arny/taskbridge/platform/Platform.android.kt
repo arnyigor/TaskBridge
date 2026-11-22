@@ -10,11 +10,11 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
-import android.net.Uri
 import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -27,46 +27,46 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
+import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.core.view.WindowCompat
 import androidx.core.content.FileProvider
+import androidx.core.view.WindowCompat
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
-import ru.arny.taskbridge.core.api.UploadFile
-import ru.arny.taskbridge.core.client.sessions.SessionAlert
-import ru.arny.taskbridge.core.client.session.CachedChat
-import ru.arny.taskbridge.core.client.session.ChatPersistence
-import ru.arny.taskbridge.core.client.session.PersistedOutgoing
-import ru.arny.taskbridge.core.client.settings.KeyValueStore
-import ru.arny.taskbridge.core.client.settings.SecretStore
-import ru.arny.taskbridge.core.api.TaskBridgeJson
-import ru.arny.taskbridge.alertTitle
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.serialization.builtins.ListSerializer
 import java.io.File
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.KeyStore
-import javax.crypto.Cipher
-import javax.net.SocketFactory
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
+import javax.crypto.spec.GCMParameterSpec
+import javax.net.SocketFactory
 import kotlin.system.exitProcess
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.builtins.ListSerializer
+import ru.arny.taskbridge.alertTitle
+import ru.arny.taskbridge.core.api.TaskBridgeJson
+import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.client.session.CachedChat
+import ru.arny.taskbridge.core.client.session.ChatPersistence
+import ru.arny.taskbridge.core.client.session.PersistedOutgoing
+import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.core.client.settings.KeyValueStore
+import ru.arny.taskbridge.core.client.settings.SecretStore
 
 class SharedPreferencesStore(context: Context) : KeyValueStore {
     private val prefs = context.getSharedPreferences("taskbridge", Context.MODE_PRIVATE)
@@ -83,11 +83,11 @@ class AndroidKeystoreSecretStore(context: Context) : SecretStore {
     override fun get(key: String): String? {
         synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
         val value = runCatching {
-        val packed = Base64.decode(prefs.getString(key, null) ?: return null, Base64.NO_WRAP)
-        require(packed.size > 12)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, packed, 0, 12))
-        cipher.doFinal(packed.copyOfRange(12, packed.size)).decodeToString()
+            val packed = Base64.decode(prefs.getString(key, null) ?: return null, Base64.NO_WRAP)
+            require(packed.size > 12)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, packed, 0, 12))
+            cipher.doFinal(packed.copyOfRange(12, packed.size)).decodeToString()
         }.getOrNull()
         synchronized(cache) { cache[key] = value }
         return value
@@ -184,9 +184,10 @@ class AndroidPlatformServices(
      * заряд»). Погашенный экран — это фон, что бы ни говорил жизненный цикл.
      */
     override val inForeground: Boolean
-        get() = foreground && runCatching {
-            (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
-        }.getOrDefault(true)
+        get() = foreground &&
+            runCatching {
+                (context.getSystemService(Context.POWER_SERVICE) as PowerManager).isInteractive
+            }.getOrDefault(true)
 
     /** Экономия энергии: система уже просит не будить телефон без нужды (раздел 4.3). */
     override val powerSaveMode: Boolean
@@ -265,9 +266,9 @@ class AndroidPlatformServices(
 
     private fun ConnectivityManager.hasUsableNetwork(): Boolean = allNetworks.any { network ->
         val caps = getNetworkCapabilities(network) ?: return@any false
-        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-            || caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)
-            || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }
 
     override fun copyText(text: String) {
@@ -286,6 +287,7 @@ class AndroidPlatformServices(
             context, alert.taskId.hashCode(), launchIntent(alert.taskId),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+
         @Suppress("DEPRECATION")
         val builder = if (Build.VERSION.SDK_INT >= 26) android.app.Notification.Builder(context, channel) else android.app.Notification.Builder(context)
         val notification = builder
@@ -378,9 +380,10 @@ class AndroidPlatformServices(
             context, 0, downloadOpenIntent(uri, mimeType),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+
         @Suppress("DEPRECATION")
         val builder = if (Build.VERSION.SDK_INT >= 26) android.app.Notification.Builder(context, CHANNEL_DOWNLOADS)
-            else android.app.Notification.Builder(context)
+        else android.app.Notification.Builder(context)
         val notification = builder
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("Файл сохранён")

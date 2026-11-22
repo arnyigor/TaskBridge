@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.Task
@@ -8,9 +11,6 @@ import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ToolState
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 class ChatTimelineTest {
     private val task = Task(id = "timeline", status = "RUNNING", prompt = "Question")

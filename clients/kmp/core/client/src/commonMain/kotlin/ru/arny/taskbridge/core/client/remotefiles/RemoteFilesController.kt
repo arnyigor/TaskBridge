@@ -1,5 +1,6 @@
 package ru.arny.taskbridge.core.client.remotefiles
 
+import kotlin.uuid.Uuid
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -11,7 +12,6 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.core.api.*
-import kotlin.uuid.Uuid
 
 /** Memory only: no file bytes, preview or upload token enter ChatPersistence. */
 data class RemoteFilesState(
@@ -100,8 +100,7 @@ class RemoteFilesController(
                     if (epoch != generation || !allowed()) return@launch
                     mutable.update { it.copy(settings = settings) }
                     if (settings.requests.none { it.status == "PENDING" }) return@launch
-                } catch (cancel: CancellationException) { throw cancel }
-                catch (failure: Throwable) {
+                } catch (cancel: CancellationException) { throw cancel } catch (failure: Throwable) {
                     mutable.update { it.copy(error = error(failure), preview = null) }
                     return@launch
                 }
@@ -114,17 +113,14 @@ class RemoteFilesController(
         val epoch = generation
         mutable.update { it.copy(loading = loading, busy = !loading, error = null) }
         work = scope.launch {
-            try { block(epoch) }
-            catch (cancel: CancellationException) { throw cancel }
-            catch (failure: Throwable) {
+            try { block(epoch) } catch (cancel: CancellationException) { throw cancel } catch (failure: Throwable) {
                 if (epoch == generation) {
                     mutable.update { it.copy(error = error(failure), preview = null) }
                     // Never silently retry a mutation with a different revision.
                     try {
                         val settings = api.externalRead(state.value.projectId)
                         if (epoch == generation) mutable.update { it.copy(settings = settings) }
-                    } catch (cancel: CancellationException) { throw cancel }
-                    catch (_: Throwable) { /* retain the original failure */ }
+                    } catch (cancel: CancellationException) { throw cancel } catch (_: Throwable) { /* retain the original failure */ }
                 }
             } finally {
                 if (epoch == generation) {

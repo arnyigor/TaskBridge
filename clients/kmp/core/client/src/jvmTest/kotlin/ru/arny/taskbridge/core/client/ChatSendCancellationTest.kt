@@ -5,14 +5,15 @@ import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
-import io.ktor.http.headersOf
 import io.ktor.http.content.TextContent
+import io.ktor.http.headersOf
+import kotlin.test.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
@@ -20,11 +21,10 @@ import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.client.session.ChatEffect
-import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.core.client.session.ChatPersistence
+import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.core.client.session.NoopChatPersistence
 import ru.arny.taskbridge.core.client.session.PersistedOutgoing
-import kotlin.test.*
 
 class ChatSendCancellationTest {
     @Test fun closeCancelsAnInFlightUploadWithoutSendingTheMessage() = runBlocking<Unit> {

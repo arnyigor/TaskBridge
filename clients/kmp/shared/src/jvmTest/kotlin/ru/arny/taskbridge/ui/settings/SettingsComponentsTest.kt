@@ -15,11 +15,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
-import ru.arny.taskbridge.ui.theme.AppIcons
-import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.ui.theme.AppIcons
+import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 
 /**
  * Поведение переделанных настроек — на настоящей композиции, без сервера:
@@ -39,14 +39,14 @@ class SettingsComponentsTest {
                 Column(Modifier.fillMaxWidth()) {
                     SettingsIndex(scroll, offsets)
                     Column(Modifier.fillMaxWidth().verticalScroll(scroll)) {
-                    SettingsSectionHeader("Это устройство", offsets)
-                    Spacer(Modifier.height(600.dp))
-                    SettingsSectionHeader("Агент и очередь", offsets)
-                    Spacer(Modifier.height(600.dp))
-                    SettingsSectionHeader("Балансы и лимиты провайдеров", offsets)
-                    Spacer(Modifier.height(600.dp))
-                    SettingsSectionHeader("Питание и подключение", offsets)
-                    Spacer(Modifier.height(600.dp))
+                        SettingsSectionHeader("Это устройство", offsets)
+                        Spacer(Modifier.height(600.dp))
+                        SettingsSectionHeader("Агент и очередь", offsets)
+                        Spacer(Modifier.height(600.dp))
+                        SettingsSectionHeader("Балансы и лимиты провайдеров", offsets)
+                        Spacer(Modifier.height(600.dp))
+                        SettingsSectionHeader("Питание и подключение", offsets)
+                        Spacer(Modifier.height(600.dp))
                     }
                 }
             }

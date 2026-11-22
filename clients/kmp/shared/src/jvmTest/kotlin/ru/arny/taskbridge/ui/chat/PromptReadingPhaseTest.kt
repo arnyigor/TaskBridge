@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.LocalModelEntry
-import ru.arny.taskbridge.core.api.LocalModelMetrics
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.LocalModelEntry
+import ru.arny.taskbridge.core.api.LocalModelMetrics
 
 /**
  * STAB-STATUS-01: какой строке живого движка верить и когда показывать «Модель

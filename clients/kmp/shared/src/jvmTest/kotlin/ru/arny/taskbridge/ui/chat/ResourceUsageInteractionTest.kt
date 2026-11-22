@@ -6,20 +6,22 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.key.Key
-import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
-import ru.arny.taskbridge.core.api.TurnMetrics
-import ru.arny.taskbridge.core.client.chat.AnswerUsage
 import java.util.Locale
 import kotlin.test.*
+import ru.arny.taskbridge.core.api.TurnMetrics
+import ru.arny.taskbridge.core.client.chat.AnswerUsage
 
 @OptIn(ExperimentalTestApi::class)
 class ResourceUsageInteractionTest {
     private val previousLocale = Locale.getDefault()
+
     @BeforeTest fun useRussian() { Locale.setDefault(Locale.forLanguageTag("ru-RU")) }
+
     @AfterTest fun restoreLocale() { Locale.setDefault(previousLocale) }
 
     private val details = UsageDetails(

@@ -1,8 +1,8 @@
 package ru.arny.taskbridge.ui.sessions
 
-import ru.arny.taskbridge.core.api.NativeSession
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import ru.arny.taskbridge.core.api.NativeSession
 
 /**
  * Поиск в списке сессий папки (диалог «Новая сессия» → «Продолжить сессию Pi»).

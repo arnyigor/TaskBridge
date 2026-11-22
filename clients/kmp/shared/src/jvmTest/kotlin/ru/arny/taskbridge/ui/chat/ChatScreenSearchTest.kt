@@ -21,13 +21,13 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.utils.io.ByteChannel
 import io.ktor.utils.io.writeStringUtf8
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.test.Test
+import kotlin.test.assertTrue
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.platform.PlatformServices
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.test.Test
-import kotlin.test.assertTrue
 
 /**
  * Поиск на настоящем экране сессии: стрелки в строке поиска должны переводить

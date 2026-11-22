@@ -1,9 +1,9 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.client.settings.AppSettings
-import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import ru.arny.taskbridge.core.client.settings.AppSettings
+import ru.arny.taskbridge.core.client.settings.KeyValueStore
 
 class FavoriteModelsTest {
     private val map = mutableMapOf<String, String>()

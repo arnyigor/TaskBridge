@@ -47,6 +47,7 @@ class WatchService : Service() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+
         @Suppress("DEPRECATION")
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, AndroidPlatformServices.CHANNEL_WATCH) else Notification.Builder(this)
         return builder
@@ -61,7 +62,9 @@ class WatchService : Service() {
     companion object {
         private const val NOTIFICATION_ID = 42
         private const val EXTRA_ACTIVE = "active"
+
         @Volatile private var running = false
+
         @Volatile private var lastActive = 0
 
         /** Called on every list update: runs while something is active, stops otherwise. */

@@ -3,8 +3,8 @@ package ru.arny.taskbridge.ui.settings
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,7 +24,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -42,15 +41,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.ui.common.InfoRow
-import ru.arny.taskbridge.ui.sessions.ModelPicker
 import ru.arny.taskbridge.ui.mcp.mcpModes
 import ru.arny.taskbridge.ui.mcp.mcpSummary
+import ru.arny.taskbridge.ui.sessions.ModelPicker
 import ru.arny.taskbridge.ui.theme.AppIcons
-import kotlinx.coroutines.delay
 
 @Composable
 fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -> Unit, onDisconnected: () -> Unit, onOpenLocalModels: () -> Unit, onOpenProcesses: () -> Unit, onOpenPiModels: () -> Unit = {}, onOpenMcp: () -> Unit = {}) {
@@ -330,9 +329,9 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                             Spacer(Modifier.height(8.dp))
                             OutlinedButton(
                                 onClick = { modelToProbe?.let(connection.settingsController::probeModel) },
-                                enabled = modelToProbe?.provider?.isNotBlank() == true
-                                    && modelToProbe?.id?.isNotBlank() == true
-                                    && probe?.loading != true,
+                                enabled = modelToProbe?.provider?.isNotBlank() == true &&
+                                    modelToProbe?.id?.isNotBlank() == true &&
+                                    probe?.loading != true,
                             ) {
                                 if (probe?.loading == true) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                                 else Icon(AppIcons.Refresh, "Проверить модель", Modifier.size(18.dp))
@@ -432,10 +431,10 @@ fun SettingsScreen(graph: AppGraph, connection: AppGraph.Connected, onBack: () -
                         onExit = { graph.platform.exitApp() },
                         onModalChange = { powerModal = it },
                     )
+                }
             }
         }
-            }
-        }
+    }
 
     // Форма подключения — одно место на оба экрана: здесь и в «Модели Pi».
     ProviderDialogs(connection)

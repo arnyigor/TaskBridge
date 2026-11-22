@@ -1,15 +1,17 @@
 package ru.arny.taskbridge.core.client.session
 
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
-import kotlinx.coroutines.CoroutineScope
+import kotlin.random.Random
 import kotlin.time.TimeSource
-import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,35 +20,30 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.Approval
+import ru.arny.taskbridge.core.api.ContextSummary
 import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.api.MessageRequest
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.SessionContextReport
-import ru.arny.taskbridge.core.api.ContextSummary
 import ru.arny.taskbridge.core.api.StreamItem
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.api.TaskEvent
-import ru.arny.taskbridge.core.api.mergeTaskSnapshot
 import ru.arny.taskbridge.core.api.ToolOutput
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.api.WorkspaceFileListing
+import ru.arny.taskbridge.core.api.mergeTaskSnapshot
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ChatSnapshot
-import kotlin.random.Random
 
 /** How a message is delivered while the agent is busy (docs/api-contract.md, /message). */
 enum class SendMode {
@@ -179,6 +176,7 @@ class ChatSession(
     val effects: SharedFlow<ChatEffect> = _effects.asSharedFlow()
 
     private val mutex = Mutex()
+
     /** Serial owner for the socket: cancel-and-join always finishes before a replacement starts. */
     private val streamLifecycleMutex = Mutex()
     private val persistenceMutex = Mutex()
@@ -483,7 +481,7 @@ class ChatSession(
             // Двухуровневый health (план 4.2): поток мог умереть при живом сервере.
             // Проба короткая: она идёт на пути переподключения и не должна его тормозить.
             val serverAlive = if (error != null && !error.transient && error !is ApiError.Other) null
-                else api.health(timeoutMs = HEALTH_PROBE_TIMEOUT_MS)
+            else api.health(timeoutMs = HEALTH_PROBE_TIMEOUT_MS)
             attempt += 1
             val wait = backoff(attempt, serverRetry)
             _state.update {
@@ -493,7 +491,7 @@ class ChatSession(
         }
     }
 
-    private fun backoff(attempt: Int, floor: Long): Long {        if (attempt <= 1) return floor.coerceAtMost(1500)
+    private fun backoff(attempt: Int, floor: Long): Long { if (attempt <= 1) return floor.coerceAtMost(1500)
         val base = (500L shl (attempt - 1).coerceAtMost(5)).coerceAtMost(5_000)
         val jitter = (base * 0.2 * (random.nextDouble() * 2 - 1)).toLong()
         return (base + jitter).coerceIn(500, 5_000)
@@ -579,12 +577,12 @@ class ChatSession(
         scheduleCachePersist(immediate = event.shouldFlushCacheImmediately())
         if (event.type.startsWith("APPROVAL_")) scope.launch { loadApprovals() }
         val frameType = event.piFrame?.get("type")?.toString()?.trim('"')
-        if (event.type != "PI_EVENT"
-            || frameType == "agent_settled"
-            || frameType == "compaction_start"
-            || frameType == "auto_compaction_start"
-            || frameType == "compaction_end"
-            || frameType == "auto_compaction_end"
+        if (event.type != "PI_EVENT" ||
+            frameType == "agent_settled" ||
+            frameType == "compaction_start" ||
+            frameType == "auto_compaction_start" ||
+            frameType == "compaction_end" ||
+            frameType == "auto_compaction_end"
         ) refreshRequests.trySend(Unit)
     }
 
@@ -790,27 +788,25 @@ class ChatSession(
      * is waited for, an unknown outcome is checked against the history, and a
      * final refusal gives the text back.
      */
-    private suspend fun <T> withRetries(commandId: String, block: suspend () -> T): T? {
-        return when (val outcome = commandDelivery.run(commandId, { attempt, reason ->
-            setStatus(commandId, OutgoingMessage.Status.Retrying(attempt, reason))
-        }, block)) {
-            is DeliveryOutcome.Delivered -> outcome.value
-            DeliveryOutcome.Confirmed -> {
-                removeFromOutbox(commandId)
-                refreshRequests.trySend(Unit)
-                null
-            }
-            DeliveryOutcome.Unknown -> {
-                setStatus(commandId, OutgoingMessage.Status.Unknown)
-                dropOptimistic(commandId)
-                refreshRequests.trySend(Unit)
-                null
-            }
-            is DeliveryOutcome.Refused -> {
-                setStatus(commandId, OutgoingMessage.Status.Failed(outcome.error.message))
-                dropOptimistic(commandId)
-                null
-            }
+    private suspend fun <T> withRetries(commandId: String, block: suspend () -> T): T? = when (val outcome = commandDelivery.run(commandId, { attempt, reason ->
+        setStatus(commandId, OutgoingMessage.Status.Retrying(attempt, reason))
+    }, block)) {
+        is DeliveryOutcome.Delivered -> outcome.value
+        DeliveryOutcome.Confirmed -> {
+            removeFromOutbox(commandId)
+            refreshRequests.trySend(Unit)
+            null
+        }
+        DeliveryOutcome.Unknown -> {
+            setStatus(commandId, OutgoingMessage.Status.Unknown)
+            dropOptimistic(commandId)
+            refreshRequests.trySend(Unit)
+            null
+        }
+        is DeliveryOutcome.Refused -> {
+            setStatus(commandId, OutgoingMessage.Status.Failed(outcome.error.message))
+            dropOptimistic(commandId)
+            null
         }
     }
 
@@ -889,15 +885,15 @@ class ChatSession(
 
     private fun TaskEvent.shouldFlushCacheImmediately(): Boolean {
         val frameType = piFrame?.get("type")?.toString()?.trim('"')
-        return type == "USER_MESSAGE"
-            || type == "TASK_SUCCEEDED"
-            || type == "TASK_FAILED"
-            || type == "TASK_CANCELLED"
-            || type.startsWith("APPROVAL_")
-            || frameType == "message_end"
-            || frameType == "agent_settled"
-            || frameType == "compaction_end"
-            || frameType == "auto_compaction_end"
+        return type == "USER_MESSAGE" ||
+            type == "TASK_SUCCEEDED" ||
+            type == "TASK_FAILED" ||
+            type == "TASK_CANCELLED" ||
+            type.startsWith("APPROVAL_") ||
+            frameType == "message_end" ||
+            frameType == "agent_settled" ||
+            frameType == "compaction_end" ||
+            frameType == "auto_compaction_end"
     }
 
     private suspend fun persistCache() {
@@ -942,7 +938,7 @@ class ChatSession(
      * чата — нажать ещё раз. Сервер к повторной отмене терпим: на терминальном
      * статусе он отвечает сразу, а на живом — повторяет остановку.
      */
-    fun cancel(hard: Boolean = false): Unit {
+    fun cancel(hard: Boolean = false) {
         val commandId = ids()
         recordLifecycle("stop-clicked", commandId)
         return act("cancel", concurrent = true) {

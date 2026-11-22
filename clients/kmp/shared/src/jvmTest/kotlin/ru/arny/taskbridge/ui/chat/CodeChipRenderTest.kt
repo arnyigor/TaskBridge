@@ -22,11 +22,10 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
-import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
-import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 
 // The look of inline code and of a selection is pixels, not state: render the
 // answer headless and read them.
@@ -130,9 +129,11 @@ class CodeChipRenderTest {
         val selected = scene.pixels()
         scene.close()
         var blue = 0
-        for (yy in chip.top..chip.bottom) for (xx in chip.left..chip.right) {
-            val c = selected.at(xx, yy)
-            if (c.blue - c.red > 0.1f) blue++
+        for (yy in chip.top..chip.bottom) {
+            for (xx in chip.left..chip.right) {
+                val c = selected.at(xx, yy)
+                if (c.blue - c.red > 0.1f) blue++
+            }
         }
         assertTrue(blue > 0, "the highlight reaches the code chip ($blue px)")
     }
@@ -151,9 +152,11 @@ class CodeChipRenderTest {
             val image = scene.pixels()
             scene.close()
             var blue = 0
-            for (yy in 0 until height) for (xx in 0 until width) {
-                val c = image.at(xx, yy)
-                if (c.blue - c.red > 0.1f) blue++
+            for (yy in 0 until height) {
+                for (xx in 0 until width) {
+                    val c = image.at(xx, yy)
+                    if (c.blue - c.red > 0.1f) blue++
+                }
             }
             assertTrue(blue > 200, "dark=$dark: a blue selection ($blue px)")
         }

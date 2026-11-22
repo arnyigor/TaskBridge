@@ -12,15 +12,15 @@ import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
-import ru.arny.taskbridge.core.client.sessions.DisplayState
-import ru.arny.taskbridge.ui.sessions.attentionPulse
-import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlin.time.DurationUnit
 import kotlin.time.toDuration
+import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.ui.sessions.attentionPulse
+import ru.arny.taskbridge.ui.theme.TaskBridgeTheme
 
 /**
  * Индикаторы не должны рисоваться вечно.

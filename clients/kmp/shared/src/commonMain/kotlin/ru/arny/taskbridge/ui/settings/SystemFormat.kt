@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.ui.settings
 
+import kotlin.math.roundToInt
 import ru.arny.taskbridge.core.api.SystemCpu
 import ru.arny.taskbridge.core.api.SystemGpu
 import ru.arny.taskbridge.core.api.SystemRam
 import ru.arny.taskbridge.ui.common.formatBytes
-import kotlin.math.roundToInt
 
 /**
  * Подписи железа для настроек: «сколько ГБ», «сколько ядер», «сколько ватт».
@@ -46,4 +46,3 @@ internal fun gpuLabel(gpu: SystemGpu): String {
 internal fun number(value: Double?): String = value?.let {
     if (it % 1.0 == 0.0) it.toLong().toString() else ((it * 100).toLong() / 100.0).toString()
 } ?: "—"
-

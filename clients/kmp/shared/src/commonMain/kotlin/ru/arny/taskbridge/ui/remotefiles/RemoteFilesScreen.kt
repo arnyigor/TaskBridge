@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleStartEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlin.io.encoding.Base64
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.api.RemoteFilePreview
 import ru.arny.taskbridge.core.client.remotefiles.RemoteFilesController
@@ -20,7 +21,6 @@ import ru.arny.taskbridge.core.client.remotefiles.RemoteFilesEvent
 import ru.arny.taskbridge.core.client.remotefiles.RemoteFilesState
 import ru.arny.taskbridge.ui.chat.decodeImage
 import ru.arny.taskbridge.ui.theme.AppIcons
-import kotlin.io.encoding.Base64
 
 private val permissionLabels = linkedMapOf(
     "browse" to "Просматривать список файлов",

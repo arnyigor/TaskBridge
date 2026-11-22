@@ -1,13 +1,13 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.api.ApiError
-import ru.arny.taskbridge.core.client.session.HEALTH_PROBE_TIMEOUT_MS
-import ru.arny.taskbridge.core.client.session.LinkState
-import ru.arny.taskbridge.core.client.session.linkAfterStreamFailure
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.ApiError
+import ru.arny.taskbridge.core.client.session.HEALTH_PROBE_TIMEOUT_MS
+import ru.arny.taskbridge.core.client.session.LinkState
+import ru.arny.taskbridge.core.client.session.linkAfterStreamFailure
 
 /**
  * Двухуровневый health (план 4.2): оборванный поток при живом сервере — это

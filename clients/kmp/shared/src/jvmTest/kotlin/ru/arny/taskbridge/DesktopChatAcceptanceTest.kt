@@ -8,6 +8,13 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.v2.runComposeUiTest
+import java.io.File
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.jsonObject
@@ -21,13 +28,6 @@ import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.core.client.settings.SecretStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.platform.PlatformServices
-import java.io.File
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.TimeUnit
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /** The production desktop composition, with isolated settings and a real disposable server. */
 @OptIn(ExperimentalTestApi::class)

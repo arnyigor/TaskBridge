@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui.settings
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.core.api.ApiInfo
 import ru.arny.taskbridge.core.api.LocalEngineInfo
 import ru.arny.taskbridge.core.api.LocalModelEntry
 import ru.arny.taskbridge.core.api.LocalModelMetrics
 import ru.arny.taskbridge.core.api.LocalRuntimeInfo
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 /**
  * Строка «Локальная модель» в «Состоянии компьютера».

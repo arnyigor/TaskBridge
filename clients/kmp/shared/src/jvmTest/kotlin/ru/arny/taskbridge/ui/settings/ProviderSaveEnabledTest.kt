@@ -1,10 +1,10 @@
 package ru.arny.taskbridge.ui.settings
 
-import ru.arny.taskbridge.core.client.settings.ProviderEditorState
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.settings.ProviderEditorState
 
 /**
  * Кнопка «Сохранить» в форме подключения.

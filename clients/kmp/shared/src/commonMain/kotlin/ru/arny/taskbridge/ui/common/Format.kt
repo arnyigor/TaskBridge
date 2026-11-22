@@ -1,7 +1,7 @@
 package ru.arny.taskbridge.ui.common
 
-import ru.arny.taskbridge.platform.PlatformServices
 import kotlin.time.Instant
+import ru.arny.taskbridge.platform.PlatformServices
 
 fun parseIsoMillis(iso: String?): Long? = iso?.let { runCatching { Instant.parse(it).toEpochMilliseconds() }.getOrNull() }
 
@@ -29,7 +29,7 @@ fun timeRange(platform: PlatformServices, startIso: String?, endIso: String?): S
     val seconds = (end - start) / 1000
     val duration = when {
         seconds < 1 -> ""
-        seconds < 60 -> " · ${seconds} с"
+        seconds < 60 -> " · $seconds с"
         else -> " · ${seconds / 60} мин ${seconds % 60} с"
     }
     return first + duration

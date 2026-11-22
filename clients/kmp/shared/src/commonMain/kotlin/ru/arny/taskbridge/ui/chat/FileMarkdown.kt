@@ -103,7 +103,8 @@ internal fun prepareFileMarkdown(blocks: List<MdBlock>): FileMarkdownDocument {
             }
             val headerParts = rowParts(block.header)
             val rows = headerParts.drop(1) + block.rows.flatMap { rowParts(it) }
-            if (rows.size <= FILE_TABLE_ROWS && headerParts.size == 1 &&
+            if (rows.size <= FILE_TABLE_ROWS &&
+                headerParts.size == 1 &&
                 block.header.all { cell -> cell.sumOf { it.text.length } <= cellLimit } &&
                 block.rows.all { row -> row.all { cell -> cell.sumOf { it.text.length } <= cellLimit } }) {
                 listOf(FileMarkdownItem(block))

@@ -6,6 +6,9 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import ru.arny.taskbridge.core.api.ApiError
@@ -14,9 +17,6 @@ import ru.arny.taskbridge.core.api.SimpleConnection
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.client.session.CommandDelivery
 import ru.arny.taskbridge.core.client.session.DeliveryOutcome
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 
 class CommandDeliveryTest {
     @Test

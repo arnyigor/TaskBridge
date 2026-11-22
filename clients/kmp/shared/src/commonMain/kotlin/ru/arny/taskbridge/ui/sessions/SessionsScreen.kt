@@ -59,23 +59,22 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import ru.arny.taskbridge.AppGraph
-import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
-import ru.arny.taskbridge.core.client.sessions.SessionGroup
 import ru.arny.taskbridge.core.client.sessions.FolderSortBy
+import ru.arny.taskbridge.core.client.sessions.SessionGroup
 import ru.arny.taskbridge.core.client.sessions.activityOf
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
+import ru.arny.taskbridge.ui.SessionDraft
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
@@ -118,6 +117,7 @@ fun SessionsScreen(
     var selecting by remember { mutableStateOf(false) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var deletingSelected by remember { mutableStateOf<Set<String>?>(null) }
+
     /** Сколько сессий уже удалено из выбранных; null — удаления сейчас нет. */
     var deleteProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var selectingOlder by remember { mutableStateOf(false) }

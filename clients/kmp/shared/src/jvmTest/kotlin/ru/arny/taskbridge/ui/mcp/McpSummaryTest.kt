@@ -1,11 +1,11 @@
 package ru.arny.taskbridge.ui.mcp
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.core.api.McpCollision
 import ru.arny.taskbridge.core.api.McpHealth
 import ru.arny.taskbridge.core.api.McpServer
 import ru.arny.taskbridge.core.api.McpStatus
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 // Сводка MCP в «Настройках» — единственное, что видно до перехода на экран
 // серверов. Если она врёт про режим или прячет ошибку, человек не заходит туда,

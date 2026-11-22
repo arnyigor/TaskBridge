@@ -16,13 +16,13 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.test.Test
+import kotlin.test.assertTrue
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.platform.PlatformServices
-import java.util.concurrent.ConcurrentHashMap
-import kotlin.test.Test
-import kotlin.test.assertTrue
 
 /**
  * Шапка списка на узком экране телефона. Регрессия 2026-11-18: к шести иконкам

@@ -1,5 +1,8 @@
 package ru.arny.taskbridge.core.client
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.Task
@@ -8,9 +11,6 @@ import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.client.chat.AnswerUsage
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertNull
 
 /**
  * Токены ответа: Pi присылает `usage` в каждом `message_end`, а один ответ — это

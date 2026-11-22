@@ -1,12 +1,12 @@
 package ru.arny.taskbridge.ui.processes
 
-import ru.arny.taskbridge.core.api.CleanupPlan
-import ru.arny.taskbridge.core.api.CleanupResult
-import ru.arny.taskbridge.core.api.TaskBridgeJson
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.api.CleanupPlan
+import ru.arny.taskbridge.core.api.CleanupResult
+import ru.arny.taskbridge.core.api.TaskBridgeJson
 
 // Разбор ответов /api/system/cleanup/* проверяется здесь, а не в :core:api:
 // shared компилирует исходники core через srcDir, его jvmTest запускается

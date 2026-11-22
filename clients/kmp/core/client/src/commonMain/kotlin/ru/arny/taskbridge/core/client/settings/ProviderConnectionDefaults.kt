@@ -1,11 +1,10 @@
 package ru.arny.taskbridge.core.client.settings
 
+import io.ktor.http.Url
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
-
-import io.ktor.http.Url
 
 val providerApis = linkedMapOf(
     "openai-completions" to "OpenAI Chat Completions",
@@ -104,8 +103,11 @@ fun providerEndpoint(raw: String): ProviderEndpoint? = runCatching {
     val host = url.host.removeSurrounding("[", "]").lowercase()
     require(host.isNotBlank())
     val ipv4 = host.split('.').mapNotNull(String::toIntOrNull).takeIf { it.size == 4 && it.all { n -> n in 0..255 } }
-    val localV4 = ipv4 != null && (ipv4[0] == 127 || ipv4[0] == 10 ||
-        (ipv4[0] == 172 && ipv4[1] in 16..31) || (ipv4[0] == 192 && ipv4[1] == 168))
+    val localV4 = ipv4 != null &&
+        (ipv4[0] == 127 ||
+            ipv4[0] == 10 ||
+            (ipv4[0] == 172 && ipv4[1] in 16..31) ||
+            (ipv4[0] == 192 && ipv4[1] == 168))
     require(ipv4 == null || !(ipv4[0] == 0 || ipv4[0] >= 224 || (ipv4[0] == 169 && ipv4[1] == 254)))
     require(host == "::1" || !Regex("^(fe80:|fc|fd|ff|::)").containsMatchIn(host))
     val local = localV4 || host == "localhost" || host == "::1"

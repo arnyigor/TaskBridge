@@ -1,11 +1,11 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.api.Task
-import ru.arny.taskbridge.core.api.TurnState
-import ru.arny.taskbridge.core.api.RuntimeInfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import ru.arny.taskbridge.core.api.RuntimeInfo
+import ru.arny.taskbridge.core.api.Task
+import ru.arny.taskbridge.core.api.TurnState
 
 /**
  * Шаг C-A: баннер молчания в KMP-чате. silentMs считает сервер, порог — 120 с,

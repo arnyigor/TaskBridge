@@ -2,51 +2,51 @@ package ru.arny.taskbridge.platform
 
 import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
+import androidx.compose.runtime.remember
 import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
-import androidx.compose.runtime.remember
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
-import ru.arny.taskbridge.core.api.UploadFile
-import ru.arny.taskbridge.core.client.sessions.SessionAlert
-import ru.arny.taskbridge.core.client.session.CachedChat
-import ru.arny.taskbridge.core.client.session.ChatPersistence
-import ru.arny.taskbridge.core.client.session.PersistedOutgoing
-import ru.arny.taskbridge.core.client.settings.KeyValueStore
-import ru.arny.taskbridge.core.client.settings.SecretStore
-import ru.arny.taskbridge.core.api.TaskBridgeJson
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flowOf
-import kotlinx.serialization.builtins.ListSerializer
 import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
-import java.awt.Toolkit
 import java.awt.Image
+import java.awt.Toolkit
 import java.awt.datatransfer.Clipboard
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
-import javax.imageio.ImageIO
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.text.SimpleDateFormat
+import java.util.Base64
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import java.util.prefs.Preferences
-import kotlin.concurrent.thread
-import java.util.Base64
+import javax.imageio.ImageIO
 import javax.swing.JFileChooser
+import kotlin.concurrent.thread
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.builtins.ListSerializer
+import ru.arny.taskbridge.core.api.TaskBridgeJson
+import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.client.session.CachedChat
+import ru.arny.taskbridge.core.client.session.ChatPersistence
+import ru.arny.taskbridge.core.client.session.PersistedOutgoing
+import ru.arny.taskbridge.core.client.sessions.SessionAlert
+import ru.arny.taskbridge.core.client.settings.KeyValueStore
+import ru.arny.taskbridge.core.client.settings.SecretStore
 
 /** java.util.prefs: per-user, survives restarts, no files to manage. */
 class PreferencesStore(node: String = "ru/arny/taskbridge") : KeyValueStore {
@@ -320,19 +320,17 @@ class DesktopServerLauncher(private val store: KeyValueStore) : LocalServerLaunc
     }
 
     /** schtasks stdout on exit 0, null on failure/timeout. */
-    private fun schtasks(vararg args: String): String? {
-        return try {
-            val process = ProcessBuilder(listOf("schtasks") + args)
-                .redirectErrorStream(true)
-                .start()
-            val output = process.inputStream.bufferedReader().readText()
-            if (!process.waitFor(15, TimeUnit.SECONDS)) {
-                process.destroyForcibly()
-                null
-            } else if (process.exitValue() == 0) output else null
-        } catch (_: Exception) {
+    private fun schtasks(vararg args: String): String? = try {
+        val process = ProcessBuilder(listOf("schtasks") + args)
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().readText()
+        if (!process.waitFor(15, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
             null
-        }
+        } else if (process.exitValue() == 0) output else null
+    } catch (_: Exception) {
+        null
     }
 
     private fun startLogPath(root: File): File = File(serverDataDir(root), "lan-client-start.log")

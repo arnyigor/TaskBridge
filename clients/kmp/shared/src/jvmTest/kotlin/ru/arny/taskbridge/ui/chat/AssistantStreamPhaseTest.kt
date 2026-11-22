@@ -1,15 +1,15 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.test.*
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.Task
-import ru.arny.taskbridge.core.api.TurnState
 import ru.arny.taskbridge.core.api.TaskBridgeJson
 import ru.arny.taskbridge.core.api.TaskEvent
+import ru.arny.taskbridge.core.api.TurnState
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ChatReducer
 import ru.arny.taskbridge.core.client.chat.ToolState
-import kotlin.test.*
 
 class AssistantStreamPhaseTest {
     private val task = Task(id = "phase", status = "RUNNING", prompt = "question")

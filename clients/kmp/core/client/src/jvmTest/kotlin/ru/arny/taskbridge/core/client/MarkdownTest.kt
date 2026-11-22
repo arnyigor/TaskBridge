@@ -1,14 +1,14 @@
 package ru.arny.taskbridge.core.client
 
-import ru.arny.taskbridge.core.client.markdown.MdAlign
-import ru.arny.taskbridge.core.client.markdown.MdBlock
-import ru.arny.taskbridge.core.client.markdown.MdRun
-import ru.arny.taskbridge.core.client.markdown.Markdown
-import ru.arny.taskbridge.core.client.markdown.plainText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.markdown.Markdown
+import ru.arny.taskbridge.core.client.markdown.MdAlign
+import ru.arny.taskbridge.core.client.markdown.MdBlock
+import ru.arny.taskbridge.core.client.markdown.MdRun
+import ru.arny.taskbridge.core.client.markdown.plainText
 
 class MarkdownTest {
     @Test
@@ -66,7 +66,7 @@ class MarkdownTest {
 
     @Test
     fun anUnclosedFenceWhileStreaming() {
-        val code = Markdown.parse("Смотри:\n```bash\nnpm test\nnpm run") .last()
+        val code = Markdown.parse("Смотри:\n```bash\nnpm test\nnpm run").last()
         assertIs<MdBlock.Code>(code)
         assertEquals(false, code.closed)
         assertEquals("npm test\nnpm run", code.code)

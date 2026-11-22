@@ -144,7 +144,7 @@ class TaskBridgeRootFinderTest {
      * ходили всего на четыре кандидата: эта проверка ловит и первое, и второе.
      */
     @Test
-    fun codeAnchorReachesTheRepoRoot() {        val anchor = codeLocation(TaskBridgeRootFinderTest::class.java)
+    fun codeAnchorReachesTheRepoRoot() { val anchor = codeLocation(TaskBridgeRootFinderTest::class.java)
         assertNotNull(anchor, "у класса нет каталога с кодом")
         val found = findTaskBridgeRoot(null, listOf(anchor))
         assertNotNull(found, "вверх от $anchor не найден корень TaskBridge")

@@ -5,16 +5,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
 import ru.arny.taskbridge.core.api.McpStatus
 import ru.arny.taskbridge.core.api.ModelCatalog
-import ru.arny.taskbridge.core.api.ModelVisibility
-import ru.arny.taskbridge.core.api.ModelProfile
 import ru.arny.taskbridge.core.api.ModelProbeResult
 import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.ProviderCheck
@@ -76,7 +69,8 @@ data class ProviderEditorState(
     val ready: Boolean get() = providerIdPattern.matches(id.trim()) &&
         providerEndpoint(baseUrl) != null &&
         (keyEnv.isBlank() || Regex("[A-Z][A-Z0-9_]{0,95}").matches(keyEnv.trim())) &&
-        (providerEndpoint(baseUrl)?.local == true || keyEnv.isNotBlank()) && modelIds.size in 1..100
+        (providerEndpoint(baseUrl)?.local == true || keyEnv.isNotBlank()) &&
+        modelIds.size in 1..100
 
     companion object {
         /** Текущие модели сохранённого подключения (только чтение) — берутся из профиля.

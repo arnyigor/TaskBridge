@@ -1,8 +1,8 @@
 package ru.arny.taskbridge.ui.sessions
 
-import ru.arny.taskbridge.core.api.ModelRef
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import ru.arny.taskbridge.core.api.ModelRef
 
 /**
  * Перенос уровня размышлений при смене модели в форме новой сессии.

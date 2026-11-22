@@ -2,6 +2,16 @@ package ru.arny.taskbridge.core.client
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import java.io.BufferedReader
+import java.io.File
+import java.io.InputStreamReader
+import java.util.UUID
+import java.util.concurrent.TimeUnit
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -20,16 +30,6 @@ import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.core.client.session.ChatSessionState
 import ru.arny.taskbridge.core.client.session.LinkState
 import ru.arny.taskbridge.core.client.session.SendMode
-import java.io.BufferedReader
-import java.io.File
-import java.io.InputStreamReader
-import java.util.UUID
-import java.util.concurrent.TimeUnit
-import kotlin.test.AfterTest
-import kotlin.test.BeforeTest
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
 
 /**
  * ChatSession against a real TaskBridge on fake-pi (tests/fixture-server.mjs),

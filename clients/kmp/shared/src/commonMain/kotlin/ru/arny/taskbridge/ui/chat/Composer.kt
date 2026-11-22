@@ -10,8 +10,8 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -54,13 +54,11 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import ru.arny.taskbridge.core.api.QuickAction
-import androidx.compose.ui.draganddrop.DragAndDropEvent
-import androidx.compose.ui.draganddrop.DragAndDropTarget
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.api.WorkspaceFileEntry
+import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.platform.fileDropTarget
 import ru.arny.taskbridge.platform.rememberClipboardFiles
-import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.theme.AppIcons
 

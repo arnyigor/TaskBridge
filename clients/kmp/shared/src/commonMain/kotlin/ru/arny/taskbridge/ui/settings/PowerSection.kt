@@ -26,12 +26,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
-import ru.arny.taskbridge.ui.theme.AppIcons
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import ru.arny.taskbridge.ui.theme.AppIcons
 
 /**
  * Что делает одна кнопка питания: всё отличие между «выключить» и «перезагрузить»

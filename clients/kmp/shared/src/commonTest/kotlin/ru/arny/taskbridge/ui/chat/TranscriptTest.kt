@@ -1,11 +1,11 @@
 package ru.arny.taskbridge.ui.chat
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
 import ru.arny.taskbridge.core.api.FileRef
 import ru.arny.taskbridge.core.client.chat.ChatItem
 import ru.arny.taskbridge.core.client.chat.ToolCall
 import ru.arny.taskbridge.core.client.chat.ToolState
-import kotlin.test.Test
-import kotlin.test.assertEquals
 
 class TranscriptTest {
 
