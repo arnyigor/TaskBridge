@@ -72,7 +72,6 @@ class SessionsStoreMismatchTest {
 
         // Список загрузился и знает, что storeId чужой.
         waitUntil(timeoutMillis = 10_000) { infoCalls > 0 }
-        println("DBG info=" + connection.sessions.state.value.info?.storeId + " known=" + store.get("storeId") + " mismatch=" + connection.storeMismatch.value + " err=" + connection.sessions.state.value.error)
         waitUntil(timeoutMillis = 10_000) { connection.storeMismatch.value }
         assertTrue(connection.storeMismatch.value, "чужой storeId обнаружен")
         onAllNodesWithText("Подключён другой экземпляр TaskBridge")[0].assertIsDisplayed()
