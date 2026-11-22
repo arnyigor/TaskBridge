@@ -27,7 +27,10 @@ subprojects {
     plugins.withId("io.gitlab.arturbosch.detekt") {
         extensions.configure<io.gitlab.arturbosch.detekt.extensions.DetektExtension>("detekt") {
             config.setFrom(rootProject.files("config/analysis/detekt-config.yml"))
-            baseline = rootProject.file("config/analysis/detekt-baseline.xml")
+            // One baseline per Gradle module: entries are line- and signature-based,
+            // so sharing a single file across modules means rewriting paths and
+            // merging XML by hand. `./gradlew detektBaseline` writes it in place.
+            baseline = project.file("config/detekt-baseline.xml")
             buildUponDefaultConfig = true
             parallel = true
             // KMP modules keep their sources under src/<target>/kotlin, not src/main.

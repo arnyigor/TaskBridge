@@ -1,0 +1,15 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>MagicNumber:MainActivity.kt$MainActivity$33</ID>
+    <ID>MagicNumber:TaskBridgeApplication.kt$TaskBridgeApplication$24</ID>
+    <ID>MagicNumber:WatchService.kt$WatchService$26</ID>
+    <ID>MagicNumber:WatchService.kt$WatchService$29</ID>
+    <ID>MagicNumber:WatchService.kt$WatchService.Companion$26</ID>
+    <ID>MaxLineLength:TaskBridgeApplication.kt$TaskBridgeApplication$.</ID>
+    <ID>MaxLineLength:WatchService.kt$WatchService$.</ID>
+    <ID>MaxLineLength:WatchService.kt$WatchService$val</ID>
+    <ID>MaxLineLength:WatchService.kt$WatchService.Companion$if (Build.VERSION.SDK_INT &gt;= 26) context.startForegroundService(intent) else context.startService(intent)</ID>
+  </CurrentIssues>
+</SmellBaseline>

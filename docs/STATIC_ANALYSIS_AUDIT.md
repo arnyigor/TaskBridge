@@ -4,8 +4,8 @@
 
 ## 1. Конфигурации
 
-- `config/analysis/detekt-config.yml` + `clients/kmp/config/analysis/detekt-baseline.xml` (2269 существующих нарушений зафиксированы; `maxIssues: 0` — **новые нарушения блокируют**, старые не прячутся). CLI-команда:
-  `java -jar detekt-cli.jar --input <source sets> --baseline clients/kmp/config/analysis/detekt-baseline.xml`
+- `config/analysis/detekt-config.yml` — общий конфиг правил; baseline теперь **по модулю**: `clients/kmp/<module>/config/detekt-baseline.xml` и `clients/kmp/core/<module>/config/detekt-baseline.xml` (2269 существующих нарушений зафиксированы; `maxIssues: 0` — **новые нарушения блокируют**, старые не прячутся). Проверка: `./gradlew detekt` в `clients/kmp` и в `clients/kmp/core`; перегенерация — `./gradlew detektBaseline`. Прежний общий baseline удалён: записи линейные и привязаны к сигнатуре, поэтому один файл на несколько модулей требовал ручного сведения путей. CLI-команда:
+  `java -jar detekt-cli.jar --input <source sets> --baseline clients/kmp/<module>/config/detekt-baseline.xml`
 - `eslint.config.mjs` + `npm run lint:js` (web/*.js, flat config, recommended-правила).
 - ktlint CLI — используется как внешний инструмент (отчёт в `.local/analysis/ktlint-report.txt`), в Gradle не встроен.
 - Android Lint: `./gradlew :androidApp:lintDebug` (отчёт `androidApp/build/reports/lint-results-debug.txt`).

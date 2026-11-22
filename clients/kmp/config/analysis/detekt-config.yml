@@ -1,8 +1,16 @@
 # TaskBridge Detekt config (Phase A audit, 2026-11-20).
-# Baseline: detekt-baseline.xml — все существующие на 20.11 нарушения.
-# Новые нарушения показываются и блокируют; существующие не прячутся.
+# Baseline: <module>/config/detekt-baseline.xml — по одному файлу на Gradle-модуль
+# (записи линейные и привязаны к сигнатуре, поэтому общий файл не переносится
+# между модулями). Все существующие нарушения зафиксированы, `maxIssues: 0`
+# означает: новое нарушение блокирует, старое не прячется.
 build:
   maxIssues: 0
 config:
   validation: true
   warningsAsErrors: false
+
+naming:
+  FunctionNaming:
+    # Compose composables are capitalised on purpose (Compose convention, and the
+    # compiler treats them as such); flagging them made ~170 baseline entries noise.
+    ignoreAnnotated: ['Composable']

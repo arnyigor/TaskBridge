@@ -1,0 +1,17 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:main.kt$@OptIn(ExperimentalFoundationApi::class) fun main()</ID>
+    <ID>LongMethod:main.kt$@OptIn(ExperimentalFoundationApi::class) fun main()</ID>
+    <ID>MagicNumber:DesktopUpdater.kt$DesktopUpdater$1024</ID>
+    <ID>MagicNumber:DesktopUpdater.kt$DesktopUpdater$64</ID>
+    <ID>MagicNumber:SingleInstance.kt$SingleInstance$1000</ID>
+    <ID>MagicNumber:SingleInstance.kt$SingleInstance$5</ID>
+    <ID>MagicNumber:SingleInstance.kt$SingleInstance$500</ID>
+    <ID>MagicNumber:main.kt$1180f</ID>
+    <ID>MagicNumber:main.kt$5_000</ID>
+    <ID>MagicNumber:main.kt$820f</ID>
+    <ID>MayBeConst:DesktopUpdater.kt$DesktopUpdater$/** Признак готовности нового экземпляра (BUG-04C): pid, версия и отметка окна. */ internal val readyMarkerName = "app-ready.txt"</ID>
+  </CurrentIssues>
+</SmellBaseline>

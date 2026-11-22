@@ -1,0 +1,149 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:ApiError.kt$fun apiErrorOf(status: Int, body: String?): ApiError</ID>
+    <ID>CyclomaticComplexMethod:TaskBridgeApi.kt$TaskBridgeApi$fun stream(id: String, after: Long, idleTimeoutMillis: Long = 45_000): Flow&lt;StreamItem&gt;</ID>
+    <ID>LargeClass:TaskBridgeApi.kt$TaskBridgeApi</ID>
+    <ID>LongParameterList:TaskBridgeApi.kt$TaskBridgeApi$( projectId: String, query: String? = null, status: String? = null, sort: String? = null, limit: Int? = null, offset: Int? = null, )</ID>
+    <ID>LongParameterList:TaskBridgeApi.kt$TaskBridgeApi$( revision: String, id: String, baseUrl: String, keyEnv: String, models: List&lt;String&gt;, api: String = "openai-completions", /** Поля, которые получат НОВЫЕ модели этого подключения (reasoning и т.д.). */ modelDefaults: JsonObject? = null, /** Человеческое название записи: сервер пишет его после метки владения. */ name: String? = null, )</ID>
+    <ID>LongParameterList:TaskBridgeApi.kt$TaskBridgeApi$( revision: String, id: String?, name: String, providerId: String, modelId: String, settings: JsonObject, )</ID>
+    <ID>LongParameterList:TaskBridgeApi.kt$TaskBridgeApi$(projectId: String, requestId: String, approved: Boolean, path: String, revision: Long, commandId: String)</ID>
+    <ID>MagicNumber:ApiError.kt$401</ID>
+    <ID>MagicNumber:ApiError.kt$403</ID>
+    <ID>MagicNumber:ApiError.kt$404</ID>
+    <ID>MagicNumber:ApiError.kt$409</ID>
+    <ID>MagicNumber:ApiError.kt$429</ID>
+    <ID>MagicNumber:ApiError.kt$ApiError$502</ID>
+    <ID>MagicNumber:ApiError.kt$ApiError$504</ID>
+    <ID>MagicNumber:Models.kt$FileLimits$1024</ID>
+    <ID>MagicNumber:Models.kt$FileLimits$128L</ID>
+    <ID>MagicNumber:Models.kt$FileLimits$16L</ID>
+    <ID>MagicNumber:Models.kt$FileLimits$64L</ID>
+    <ID>MagicNumber:Models.kt$NativeSession$8</ID>
+    <ID>MagicNumber:Models.kt$Task$120</ID>
+    <ID>MagicNumber:TaskBridgeApi.kt$TaskBridgeApi$1000</ID>
+    <ID>MagicNumber:TaskBridgeApi.kt$TaskBridgeApi$180_000L</ID>
+    <ID>MagicNumber:TaskBridgeApi.kt$TaskBridgeApi$1_048_576</ID>
+    <ID>MagicNumber:TaskBridgeApi.kt$TaskBridgeApi$200</ID>
+    <ID>MagicNumber:TaskBridgeApi.kt$TaskBridgeApi$30_000L</ID>
+    <ID>MaxLineLength:ApiError.kt$ApiError$get() = this is Unreachable || this is RateLimited || this is CommandInFlight || this is Busy || (this is Other &amp;&amp; status in 502..504)</ID>
+    <ID>MaxLineLength:ApiError.kt$val envelope = body?.let { runCatching { TaskBridgeJson.decodeFromString(ErrorEnvelope.serializer(), it) }.getOrNull() }</ID>
+    <ID>MaxLineLength:ContextReportApiTest.kt$ContextReportApiTest$else</ID>
+    <ID>MaxLineLength:ContextReportApiTest.kt$ContextReportApiTest$val old = TaskBridgeJson.decodeFromString(SessionContextReport.serializer(), """{"taskId":"old","sources":[]}""")</ID>
+    <ID>MaxLineLength:ContextReportApiTest.kt$ContextReportApiTest$val unavailable = TaskBridgeJson.decodeFromString(ContextSummary.serializer(), """{"available":false,"reason":"No compaction"}""")</ID>
+    <ID>MaxLineLength:FixtureParsingTest.kt$FixtureParsingTest$assertEquals("Тестовая сессия", parse("projects.json", ListSerializer(Project.serializer())).single().displayName)</ID>
+    <ID>MaxLineLength:FixtureParsingTest.kt$FixtureParsingTest$assertIs&lt;ApiError.CommandInFlight&gt;(apiErrorOf(409, """{"error":"Команда уже выполняется.","code":"ACCEPTED"}"""))</ID>
+    <ID>MaxLineLength:FixtureParsingTest.kt$FixtureParsingTest$val nullData = TaskBridgeJson.decodeFromString(TaskEvent.serializer(), """{"seq":1,"type":"STATUS","data":null}""")</ID>
+    <ID>MaxLineLength:FixtureParsingTest.kt$FixtureParsingTest$val task = TaskBridgeJson.decodeFromString(Task.serializer(), """{"id":"t","status":"HIBERNATED","runtime":{"state":"LIVE"}}""")</ID>
+    <ID>MaxLineLength:LinkReportApiTest.kt$LinkReportApiTest$val api = api("""{"clientId":"android-42","state":"degraded"}""") { seenPath, seenBody -&gt; path = seenPath; payload = seenBody }</ID>
+    <ID>MaxLineLength:Models.kt$McpHealth</ID>
+    <ID>MaxLineLength:Models.kt$RecipeParameter$val defaultBoolean: Boolean get() = (`default` as? kotlinx.serialization.json.JsonPrimitive)?.content?.toBooleanStrictOrNull() ?: false</ID>
+    <ID>MaxLineLength:Models.kt$RecipeParameter$val defaultNumber: Double? get() = (`default` as? kotlinx.serialization.json.JsonPrimitive)?.content?.toDoubleOrNull()</ID>
+    <ID>MaxLineLength:Models.kt$RunRecipe$val</ID>
+    <ID>MaxLineLength:Models.kt$Task$/** On-disk footprint of the session (task folder + Pi session + workspace), absent when the server did not compute it. */</ID>
+    <ID>MaxLineLength:Models.kt$Task$/** Метрики хода: начало/конец, длительность, TTFT и скорость генерации. Считаются сервером, клиент только отображает. null — ход без данных (старая история). */</ID>
+    <ID>MaxLineLength:NativeSessionsApiTest.kt$NativeSessionsApiTest$val client = api { HttpStatusCode.BadRequest to """{"error":{"code":"NOT_FOUND","message":"Сессия не найдена"}}""" }</ID>
+    <ID>MaxLineLength:ProjectDashboardApiTest.kt$ProjectDashboardApiTest$"http://pc:8787/api/projects/p%201/sessions?q=%D0%B2%D1%82%D0%BE%D1%80%D0%BE%D0%B9%20%D0%B2%D0%BE%D0%BF%D1%80%D0%BE%D1%81"</ID>
+    <ID>MaxLineLength:ProjectDashboardApiTest.kt$ProjectDashboardApiTest$TaskBridgeApi(HttpClient(MockEngine { request -&gt; requests += request; handler(request) }), SimpleConnection("http://pc:8787"))</ID>
+    <ID>MaxLineLength:ProjectDashboardApiTest.kt$ProjectDashboardApiTest$private</ID>
+    <ID>MaxLineLength:ProjectDashboardApiTest.kt$ProjectDashboardApiTest$respond(ByteReadChannel(text), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType to listOf("application/json")))</ID>
+    <ID>MaxLineLength:ProjectDashboardApiTest.kt$ProjectDashboardApiTest$val page = api.projectSessions("p 1", query = "второй вопрос", status = "SUCCEEDED", sort = "created", limit = 5, offset = 10)</ID>
+    <ID>MaxLineLength:RecipesApiTest.kt$RecipesApiTest$TaskBridgeApi(HttpClient(MockEngine { request -&gt; requests += request; handler(request) }), SimpleConnection("http://pc:8787"))</ID>
+    <ID>MaxLineLength:RecipesApiTest.kt$RecipesApiTest$assertEquals("http://pc:8787/api/recipes", requests.single().url.toString(), "без фильтра лишнего параметра нет")</ID>
+    <ID>MaxLineLength:RecipesApiTest.kt$RecipesApiTest$assertEquals(listOf("area", "attempts", "base_ref", "run_tests"), one.orderedParameters.map { it.first }, "параметры идут по имени")</ID>
+    <ID>MaxLineLength:RecipesApiTest.kt$RecipesApiTest$parameters = mapOf("area" to RecipeParameter(type = "enum", values = listOf("all", "android"), `default` = kotlinx.serialization.json.JsonPrimitive("all")))</ID>
+    <ID>MaxLineLength:RecipesApiTest.kt$RecipesApiTest$private</ID>
+    <ID>MaxLineLength:RecipesApiTest.kt$RecipesApiTest$respond(ByteReadChannel(text), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType to listOf("application/json")))</ID>
+    <ID>MaxLineLength:RemoteFilesApiTest.kt$RemoteFilesApiTest$else</ID>
+    <ID>MaxLineLength:RemoteFilesApiTest.kt$RemoteFilesApiTest$respond("""{"id":"q","projectId":"p","status":"PENDING","requestedPath":null}""", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))</ID>
+    <ID>MaxLineLength:RemoteFilesApiTest.kt$RemoteFilesApiTest$val</ID>
+    <ID>MaxLineLength:RerunApiTest.kt$RerunApiTest$TaskBridgeApi(HttpClient(MockEngine { request -&gt; requests += request; handler(request) }), SimpleConnection("http://pc:8787"))</ID>
+    <ID>MaxLineLength:RerunApiTest.kt$RerunApiTest$respond(ByteReadChannel(text), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType to listOf("application/json")))</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$TaskBridgeApi(HttpClient(MockEngine { request -&gt; requests += request; handler(request) }), SimpleConnection("http://pc:8787"))</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$api2.updateSchedule("sc-1", ScheduleRequest(parameters = buildJsonObject { put("run_tests", JsonPrimitive(true)) }))</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$assertEquals("09:00", body["spec"]?.jsonObject?.get("at")?.jsonPrimitive?.content, "тело запроса: ${created.bodyText()}")</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$assertEquals("2026-10-14T12:00:00.000Z", TaskBridgeJson.parseToJsonElement(request.bodyText()).jsonObject["now"]!!.jsonPrimitive.content)</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$assertEquals("daily", body["spec"]?.jsonObject?.get("kind")?.jsonPrimitive?.content, "тело запроса: ${created.bodyText()}")</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$private</ID>
+    <ID>MaxLineLength:SchedulesApiTest.kt$SchedulesApiTest$respond(ByteReadChannel(text), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType to listOf("application/json")))</ID>
+    <ID>MaxLineLength:SseTest.kt$SseTest$bytes.toList().chunked(7).forEach { chunk -&gt; channel.writeFully(chunk.toByteArray(), 0, chunk.size); channel.flush() }</ID>
+    <ID>MaxLineLength:SseTest.kt$SseTest$val engine = MockEngine { respond(ByteReadChannel("""{"error":"Task not found","code":"NOT_FOUND"}"""), HttpStatusCode.NotFound) }</ID>
+    <ID>MaxLineLength:SseTest.kt$SseTest$val expected = parseAll(Fixtures.text("stream-replay.sse")).map { TaskBridgeJson.decodeFromString(TaskEvent.serializer(), it.data) }</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$"/api/native-sessions/preview?projectId=${projectId.encodeURLParameter()}&amp;key=${sessionKey.encodeURLParameter()}"</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$/** Opens (or reveals in the file manager) a workspace file with its app on the PC; only a client on the PC itself may. */</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$?:</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$TaskBridgeJson.encodeToJsonElement(MessageRequest.serializer(), request.copy(clientId = request.clientId ?: connection.clientId))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$acceptanceCriteria?.let { list -&gt; put("acceptanceCriteria", kotlinx.serialization.json.buildJsonArray { list.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }) }</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$append(HttpHeaders.ContentDisposition, "filename=\"${file.name.replace("\\", "_").replace("\"", "'")}\"")</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Delete, "/api/tasks/${id.path()}/pending" + (pendingId?.let { "?pendingId=${it.encodeURLParameter()}" } ?: ""), Task.serializer())</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Patch, "/api/recipes/${id.encodeURLPathPart()}", RunRecipe.serializer(), RecipeJson.request(request))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Patch, "/api/schedules/${id.encodeURLPathPart()}", Schedule.serializer(), ScheduleJson.request(request))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/mcp/definitions", McpStatus.serializer(), buildJsonObject { put("name", name); put("remove", true) })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/mcp/health", McpStatus.serializer(), buildJsonObject { server?.let { put("server", it) } })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/projects/local-register", Project.serializer(), buildJsonObject { put("path", path) })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/schedules/${id.encodeURLPathPart()}/run", Invocation.serializer(), buildJsonObject {})</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/tasks", Task.serializer(), TaskBridgeJson.encodeToJsonElement(CreateTaskRequest.serializer(), request.withClient()))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/tasks/${id.path()}/pending/send", Task.serializer(), buildJsonObject { pendingId?.let { put("pendingId", it) } })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/tasks/${id.path()}/thinking", Task.serializer(), buildJsonObject { put("level", level) })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$call(HttpMethod.Post, "/api/tasks/${id.path()}/workspace/trust", Task.serializer(), buildJsonObject { put("confirm", true) })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get("/api/hf/repo?repo=" + repo.encodeURLParameter() + "&amp;revision=" + revision.encodeURLParameter(), HfRepoInfo.serializer())</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get("/api/project-browser" + (path?.let { "?path=${it.encodeURLParameter()}" } ?: ""), ProjectFolderListing.serializer())</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get("/api/projects/${projectId.encodeURLPathPart()}/remote-files/preview?rootId=${rootId.encodeURLParameter()}&amp;path=${path.encodeURLParameter()}", RemoteFilePreview.serializer())</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get("/api/projects/${projectId.encodeURLPathPart()}/remote-files/search?rootId=${rootId.encodeURLParameter()}&amp;q=${query.encodeURLParameter()}", RemoteFileSearch.serializer())</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get("/api/quick-actions" + (taskId?.let { "?taskId=${it.encodeURLParameter()}" } ?: ""), ListSerializer(QuickAction.serializer()))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$get("/api/tasks/${id.path()}/events?tail=$tail" + (before?.let { "&amp;before=$it" } ?: ""), EventWindow.serializer())</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$if (body != null) setBody(TextContent(TaskBridgeJson.encodeToString(kotlinx.serialization.json.JsonElement.serializer(), body), ContentType.Application.Json))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$private suspend</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$put("files", kotlinx.serialization.json.buildJsonArray { files.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$put("pids", kotlinx.serialization.json.JsonArray(pids.map { kotlinx.serialization.json.JsonPrimitive(it) }))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$runCatching { send(HttpMethod.Get, "/api/health", timeoutMs = timeoutMs).status.isSuccess() }.getOrDefault(false)</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$send</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$send(HttpMethod.Post, "/api/tasks/${id.path()}/regenerate", buildJsonObject { turnId?.let { put("turnId", it) } })</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$suspend</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$suspend fun invocation(id: String): Invocation</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$tags?.let { list -&gt; put("tags", kotlinx.serialization.json.buildJsonArray { list.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } }) }</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$throw ApiException(ApiError.Other(response.status.value, "DECODE", "Неожиданный ответ сервера: ${error.message}"))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$throw ApiException(ApiError.Other(response.status.value, "RESPONSE_TOO_LARGE", "Ответ сервера слишком большой (${bytes.size / 1_048_576} МБ) — откройте сессию заново."))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$throw ApiException(ApiError.Unreachable("Поток молчит дольше ${idleTimeoutMillis / 1000} с"))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$throw ApiException(ApiError.Unreachable("Сервер не ответил вовремя. Исход команды уточняется по истории.", error))</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi$val event = runCatching { TaskBridgeJson.decodeFromString(TaskEvent.serializer(), message.data) }.getOrNull()</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi.RecipeJson$(element as kotlinx.serialization.json.JsonObject).filterValues { it !is kotlinx.serialization.json.JsonNull }</ID>
+    <ID>MaxLineLength:TaskBridgeApi.kt$TaskBridgeApi.ScheduleJson$(element as kotlinx.serialization.json.JsonObject).filterValues { it !is kotlinx.serialization.json.JsonNull }</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$"""{"id":"speed","metrics":{"pp":321.5,"tg":47.25,"inputTokens":1200,"outputTokens":96,"promptMs":3733,"ms":2032,"source":"mixed","ppSource":"ttft-estimate","tgSource":"usage","ppApproximate":true}}"""</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$"/api/mcp" -&gt; json("""{"mode":"managed","servers":[{"name":"serena","transport":"stdio","tools":[{"name":"search","description":"Find symbols"}]}]}""")</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$"/api/mcp/tools" -&gt; json("""{"mode":"managed","servers":[{"name":"serena","transport":"stdio","excludeTools":["search"],"tools":[{"name":"search"}]}]}""")</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$"/api/project-browser" -&gt; json("""{"path":"G:\\AIModels","parent":null,"entries":[{"name":"Other","path":"G:\\AIModels\\Other"}]}""")</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$"/api/project-browser/register" -&gt; json("""{"id":"other","name":"Other","path":"G:\\AIModels\\Other"}""", HttpStatusCode.Created)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$"/api/providers/refresh" -&gt; json("""{"wormsoft":{"provider":"wormsoft","available":true,"kind":"subscription","subscription":{"plan":"paid","remaining":700,"total":1000}}}""")</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$HttpHeaders.SetCookie to listOf("taskbridge_session=123.abc.sig; Path=/; HttpOnly; SameSite=Strict; Max-Age=2678400")</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$assertEquals("""{"code":"123456","deviceName":"android-1a2b3c4d","clientKind":"android"}""", requests.first().bodyText())</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$assertEquals("G:\\Elsewhere", TaskBridgeJson.parseToJsonElement(requests.single().bodyText()).jsonObject["path"]?.jsonPrimitive?.content)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$assertEquals("false", TaskBridgeJson.parseToJsonElement(requests.last().bodyText()).jsonObject["enabled"]?.jsonPrimitive?.content)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$assertEquals("wormsoft", TaskBridgeJson.parseToJsonElement(requests.first().bodyText()).jsonObject["provider"]?.jsonPrimitive?.content)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$assertEquals(path, TaskBridgeJson.parseToJsonElement(requests.last().bodyText()).jsonObject["path"]?.jsonPrimitive?.content)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$else -&gt; json("""{"processes":[{"pid":1284,"name":"llama-server.exe","memoryBytes":16090427392,"startedAt":1791087506389,"commandLine":"llama-server --port 54107"}]}""")</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$if</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$json("""{"error":"«explorer.exe» — системный процесс, панель его не убивает.","code":"PROTECTED"}""", HttpStatusCode.Forbidden)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$private</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$request.url.encodedPath != "/api/processes" -&gt; json("""{"error":"Not found"}""", HttpStatusCode.NotFound)</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$respond(ByteReadChannel(text), status, headersOf(HttpHeaders.ContentType to listOf("application/json"), *headers))</ID>
+    <ID>MaxLineLength:TaskBridgeApiTest.kt$TaskBridgeApiTest$val api = api { json(Fixtures.text("error-conflict.json").let { TaskBridgeJson.parseToJsonElement(it).jsonObject["body"].toString() }, HttpStatusCode.Conflict) }</ID>
+    <ID>MaxLineLength:WorkItemsApiTest.kt$WorkItemsApiTest$TaskBridgeApi(HttpClient(MockEngine { request -&gt; requests += request; handler(request) }), SimpleConnection("http://pc:8787"))</ID>
+    <ID>MaxLineLength:WorkItemsApiTest.kt$WorkItemsApiTest$assertEquals("http://pc:8787/api/work-items", requests.single().url.toString(), "без фильтров лишних параметров нет")</ID>
+    <ID>MaxLineLength:WorkItemsApiTest.kt$WorkItemsApiTest$else -&gt; json("""{"items":[{"id":"wi-1","projectId":"p 1","title":"Задача","status":"IN_PROGRESS","relation":"implementation"}]}""")</ID>
+    <ID>MaxLineLength:WorkItemsApiTest.kt$WorkItemsApiTest$private</ID>
+    <ID>MaxLineLength:WorkItemsApiTest.kt$WorkItemsApiTest$respond(ByteReadChannel(text), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType to listOf("application/json")))</ID>
+    <ID>ReturnCount:Models.kt$@Suppress("unused") fun mergeTaskSnapshot(previous: Task?, next: Task, appliedCursor: Long): Task</ID>
+    <ID>ReturnCount:Sse.kt$SseParser$fun feed(rawLine: String): SseMessage?</ID>
+    <ID>SwallowedException:TaskBridgeApi.kt$TaskBridgeApi$error: Exception</ID>
+    <ID>SwallowedException:TaskBridgeApi.kt$TaskBridgeApi$timeout: TimeoutCancellationException</ID>
+    <ID>TooGenericExceptionCaught:TaskBridgeApi.kt$TaskBridgeApi$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:TaskBridgeApi.kt$TaskBridgeApi$error: Throwable</ID>
+    <ID>TooManyFunctions:TaskBridgeApi.kt$TaskBridgeApi</ID>
+    <ID>WildcardImport:RemoteFilesApiTest.kt$import kotlin.test.*</ID>
+    <ID>WildcardImport:RemoteFilesApiTest.kt$import kotlinx.serialization.json.*</ID>
+  </CurrentIssues>
+</SmellBaseline>
