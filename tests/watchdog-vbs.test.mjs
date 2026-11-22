@@ -51,6 +51,21 @@ test('rendered watchdog VBS really runs node and captures its output', { skip: !
   }
 });
 
+test('rendered VBS propagates a failed health result to Task Scheduler', { skip: !windows }, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tb-watchdog-exit-'));
+  try {
+    fs.mkdirSync(path.join(root, 'bin'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'bin', 'taskbridge.mjs'), 'process.exit(7);\n');
+    const vbs = path.join(root, 'watchdog.vbs');
+    fs.writeFileSync(vbs, renderWatchdogVbs({ root, node: process.execPath, log: path.join(root, 'watchdog.log') }), 'ascii');
+
+    const result = spawnSync(wscript, ['//B', vbs], { timeout: 30000, windowsHide: true });
+    assert.equal(result.status, 7, 'LastTaskResult must reflect the ensure/probe failure, not VBS startup');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('setup script delegates to the tested renderer instead of an inline cmd line', () => {
   const setup = fs.readFileSync(fileURLToPath(new URL('../scripts/taskbridge-task-setup.ps1', import.meta.url)), 'utf8');
   assert.match(setup, /watchdog-vbs\.mjs/);

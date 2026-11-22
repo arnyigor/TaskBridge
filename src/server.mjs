@@ -32,6 +32,7 @@ import { trimStreamingDeltas, lightenEvent } from './event-trim.mjs';
 import { windowByTurns, capEventsByBytes } from './event-window.mjs';
 import { multipartBoundary } from './multipart.mjs';
 import { acquireInstanceLock } from './instance-lock.mjs';
+import { watchdogStateForInfo } from './watchdog-state.mjs';
 import { resolveCloudConfig, validateCloudConfig } from './cloud/cloud-config.mjs';
 import { CloudWorker } from './cloud/cloud-worker.mjs';
 import { CloudClient } from './cloud/cloud-client.mjs';
@@ -1733,6 +1734,9 @@ async function handleRequest(req, res) {
           nextAt: nextRestartAt(autoRestartConfig, { startedAt: serverStartedAt })?.toISOString() ?? null,
           state: autoRestartState,
         },
+        // Independent watchdog evidence: when it last ran, what it last saw, and
+        // when it last restored a dead pair. Null until the first scheduled tick.
+        watchdog: watchdogStateForInfo(dataRoot),
         apiVersion: API_VERSION,
         storeId: store.storeId,
         // «Pi отсутствует» и «Pi несовместим» — разные состояния: по одному

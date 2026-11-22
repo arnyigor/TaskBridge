@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadConfig } from '../src/config.mjs';
 import { freeTaskBridgePort, portProblemText } from '../src/lan-ports.mjs';
+import { recordWatchdogCheck } from '../src/watchdog-state.mjs';
 
 const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -61,7 +62,9 @@ function wantsMonolith() { return process.argv.slice(2).includes('--monolith'); 
 
 function effectiveUrl(config) {
   const lan = runningLan();
-  const port = lan ? lan.publicPort : (config.server?.port ?? 8787);
+  // LAN_PORT is the isolated-instance contract (start-lan uses the same order):
+  // a watchdog for a staging copy must probe staging, never production 8787.
+  const port = Number(process.env.LAN_PORT || lan?.publicPort || config.server?.port || 8787);
   return `http://127.0.0.1:${port}`;
 }
 
@@ -126,7 +129,7 @@ async function cmdDoctor(config) {
 
 async function startLan(config, timeoutMs = 25000) {
   const running = runningLan();
-  if (running) {
+  if (running && await portReady(effectiveUrl(config), 1500)) {
     log(`LAN mode already running (app ${running.appPid}, proxy ${running.proxyPid})`);
     return true;
   }
@@ -179,20 +182,58 @@ function restartInFlight() {
   } catch { return false; }
 }
 
-/** Watchdog entrypoint: up and healthy → 0; otherwise start the pair. */
+// A real TaskBridge, not just any listener: health alone can be a foreign
+// process; /api/info with a storeId proves which database is answering.
+async function probeBridge(config) {
+  const url = effectiveUrl(config);
+  try {
+    const health = await fetch(`${url}/api/health`, { signal: AbortSignal.timeout(4000) });
+    if (!health.ok) return { ok: false, status: health.status, error: `health HTTP ${health.status}`, url };
+    let info = null;
+    try {
+      const response = await fetch(`${url}/api/info`, { signal: AbortSignal.timeout(4000) });
+      if (response.ok) info = await response.json();
+    } catch { /* reported as missing identity below */ }
+    if (!info?.storeId) return { ok: false, status: health.status, error: 'TaskBridge /api/info did not identify a store', url };
+    return { ok: true, status: health.status, bootId: info.bootId || null, storeId: info.storeId, url };
+  } catch (error) {
+    return { ok: false, error: error?.message || String(error), url };
+  }
+}
+
+/** Watchdog entrypoint: probe, recover if needed, record, and exit by real health. */
 async function cmdEnsure(config) {
   if (fs.existsSync(operatorStopFile())) {
     log('server was stopped by the operator (taskbridge stop) — the watchdog leaves it alone');
+    recordWatchdogCheck(dataRoot(), { healthy: false, skipped: 'operator-stop', error: null });
     return 0;
   }
-  if (await portReady(effectiveUrl(config), 1500)) return 0;
-  if (restartInFlight()) {
-    log('a restart is in progress — the watchdog waits for the next tick');
-    return 0;
+  let probe = await probeBridge(config);
+  let recovered = false;
+  if (!probe.ok) {
+    if (restartInFlight()) {
+      log('a restart is in progress — the watchdog waits for the next tick');
+      recordWatchdogCheck(dataRoot(), { healthy: false, status: probe.status, skipped: 'restart-in-flight', error: probe.error });
+      return 0;
+    }
+    log('server is not answering — starting LAN mode');
+    clearOperatorStop();
+    recovered = await startLan(config);
+    probe = await probeBridge(config);
   }
-  log('server is not answering — starting LAN mode');
-  clearOperatorStop();
-  return (await startLan(config)) ? 0 : 1;
+  recordWatchdogCheck(dataRoot(), {
+    healthy: probe.ok,
+    status: probe.status,
+    bootId: probe.bootId,
+    storeId: probe.storeId,
+    error: probe.ok ? null : probe.error,
+    recovered,
+  });
+  if (!probe.ok) {
+    log(`server did not answer after ensure: ${probe.error || 'unknown error'}`);
+    return 1;
+  }
+  return 0;
 }
 
 async function stopServer(config, timeoutMs = 9000) {
@@ -436,7 +477,11 @@ try {
       break;
     }
     case 'stop': process.exitCode = await stopServer(config) ? 0 : 1; break;
-    case 'ensure': process.exit(await cmdEnsure(config));
+    // exitCode, not exit(): process.exit() while a socket/timer is still closing
+    // trips a libuv assertion on Windows (0xC0000409, UV_HANDLE_CLOSING), which
+    // the scheduled task would report as a watchdog failure even though the probe
+    // succeeded. Let the event loop drain and exit with the recorded code.
+    case 'ensure': process.exitCode = await cmdEnsure(config); break;
     case 'models': await cmdModels(config, arg, subArg); break;
     default:
       console.error(`unknown command: ${command}`);

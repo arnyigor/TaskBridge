@@ -26,7 +26,12 @@ export function renderWatchdogVbs({ root, node, log }) {
   return [
     'Set sh = CreateObject("WScript.Shell")',
     `sh.CurrentDirectory = "${root}"`,
-    `sh.Run "${command}", 0, True`,
+    // Propagate the command's real exit code: `taskbridge ensure` now returns
+    // nonzero when `/api/health` + `/api/info` do not identify a live TaskBridge.
+    // Without WScript.Quit the task would report 0 no matter what happened.
+    // VBScript requires parentheses when a function's return value is assigned.
+    `rc = sh.Run("${command}", 0, True)`,
+    'WScript.Quit rc',
     '',
   ].join('\r\n');
 }
