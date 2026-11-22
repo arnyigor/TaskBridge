@@ -4,7 +4,6 @@ import android.app.Application
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
-import android.os.Build
 import ru.arny.taskbridge.platform.AndroidPlatformServices
 
 /**
@@ -32,12 +31,11 @@ class TaskBridgeApplication : Application() {
         // Wi-Fi back, or a switch between networks: reconnect now instead of
         // waiting out the backoff.
         val connectivity = getSystemService(ConnectivityManager::class.java)
-        if (Build.VERSION.SDK_INT >= 24) {
-            connectivity?.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
-                override fun onAvailable(network: Network) {
-                    graph.connection?.wakeUp()
-                }
-            })
-        }
+        // minSdk is 24, so the callback API is always there (lint: ObsoleteSdkInt).
+        connectivity?.registerDefaultNetworkCallback(object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                graph.connection?.wakeUp()
+            }
+        })
     }
 }

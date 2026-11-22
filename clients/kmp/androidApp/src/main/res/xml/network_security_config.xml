@@ -6,6 +6,8 @@
   self-signed certificate works too (the address can be https://…:8443) once
   certificate pinning is added (KMP plan 3.7).
 -->
-<network-security-config>
-    <base-config cleartextTrafficPermitted="true" />
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!-- Cleartext is deliberate here (see the comment above): suppressing the
+         check records that decision instead of leaving a permanent warning. -->
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration" />
 </network-security-config>

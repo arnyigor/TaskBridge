@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  local.properties is written by Android Studio/AGP on every machine and is not
+  versioned, so its property escaping says nothing about this codebase. The check
+  stays enabled everywhere else.
+-->
+<lint>
+    <issue id="PropertyEscape">
+        <ignore path="**/local.properties" />
+    </issue>
+</lint>
