@@ -16,6 +16,7 @@ import { spawn } from 'node:child_process';
 import { loadConfig } from '../src/config.mjs';
 import { freeTaskBridgePort, portProblemText } from '../src/lan-ports.mjs';
 import { recordWatchdogCheck } from '../src/watchdog-state.mjs';
+import { isTaskBridgeProcess, processOwnership, OWNERSHIP } from '../src/instance-lock.mjs';
 
 const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -255,8 +256,15 @@ async function stopServer(config, timeoutMs = 9000) {
     });
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && (alive(lan.appPid) || alive(lan.proxyPid))) await new Promise((r) => setTimeout(r, 200));
-    for (const pid of [lan.proxyPid, lan.appPid]) {
-      if (alive(pid)) { try { process.kill(pid, 'SIGKILL'); } catch {} log(`PID ${pid} forced (SIGKILL)`); }
+    for (const [pid, entrypoint] of [[lan.proxyPid, 'proxy.mjs'], [lan.appPid, 'server.mjs']]) {
+      if (!alive(pid)) continue;
+      const ownership = processOwnership(pid, entrypoint);
+      if (ownership === OWNERSHIP.OURS) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
+        log(`PID ${pid} forced (SIGKILL)`);
+      } else if (ownership === OWNERSHIP.UNKNOWN) {
+        log(`PID ${pid}: владение не подтверждено — принудительно не завершаю`);
+      }
     }
     if (code === 0) { markOperatorStop(); log('stopped'); return true; }
     log('stop reported a problem (see above)');
@@ -274,6 +282,11 @@ async function stopServer(config, timeoutMs = 9000) {
     return false;
   }
   log(`stopping server PID ${holder.pid}`);
+  if (processOwnership(holder.pid, 'server.mjs') !== OWNERSHIP.OURS) {
+    console.error(`taskbridge: PID ${holder.pid} держит lock, но владение не подтверждено — не завершаю. ` +
+      'Проверьте процесс вручную или остановите его из elevated-консоли.');
+    return false;
+  }
   if (process.platform === 'win32') {
     // Windows has no SIGTERM: process.kill() terminates the server outright, so
     // it never runs its shutdown and a busy Pi (plus the pytest/gradle it
@@ -301,7 +314,7 @@ async function stopServer(config, timeoutMs = 9000) {
 
 function isProxyPid(pid) {
   const lan = readLan();
-  return Number(lan?.proxyPid) === Number(pid);
+  return Number(lan?.proxyPid) === Number(pid) && isTaskBridgeProcess(pid, 'proxy.mjs');
 }
 
 // --- local models -----------------------------------------------------------
