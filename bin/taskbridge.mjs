@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { loadConfig } from '../src/config.mjs';
 import { freeTaskBridgePort, portProblemText } from '../src/lan-ports.mjs';
-import { recordWatchdogCheck } from '../src/watchdog-state.mjs';
+import { recordWatchdogCheck, readWatchdogState, recoveryBackoffMs } from '../src/watchdog-state.mjs';
 import { isTaskBridgeProcess, processOwnership, OWNERSHIP } from '../src/instance-lock.mjs';
 
 const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -196,7 +196,13 @@ async function probeBridge(config) {
       if (response.ok) info = await response.json();
     } catch { /* reported as missing identity below */ }
     if (!info?.storeId) return { ok: false, status: health.status, error: 'TaskBridge /api/info did not identify a store', url };
-    return { ok: true, status: health.status, bootId: info.bootId || null, storeId: info.storeId, url };
+    let sseOk = false;
+    try {
+      const sse = await fetch(`${url}/api/health/sse`, { signal: AbortSignal.timeout(4000) });
+      const body = sse.ok ? await sse.text() : '';
+      sseOk = sse.ok && /text\/event-stream/i.test(sse.headers.get('content-type') || '') && /event:\s*ready/u.test(body);
+    } catch { /* recorded as sseHealthy=false below */ }
+    return { ok: true, sseOk, status: health.status, bootId: info.bootId || null, storeId: info.storeId, url };
   } catch (error) {
     return { ok: false, error: error?.message || String(error), url };
   }
@@ -212,6 +218,16 @@ async function cmdEnsure(config) {
   let probe = await probeBridge(config);
   let recovered = false;
   if (!probe.ok) {
+    const state = readWatchdogState(dataRoot());
+    const retryAt = Date.parse(state?.nextRetryAt || '');
+    if (Number.isFinite(retryAt) && retryAt > Date.now()) {
+      log(`recovery backoff until ${new Date(retryAt).toISOString()} — not retrying yet`);
+      recordWatchdogCheck(dataRoot(), {
+        healthy: false, status: probe.status, error: state?.lastError || probe.error,
+        skipped: 'backoff',
+      });
+      return 0;
+    }
     if (restartInFlight()) {
       log('a restart is in progress — the watchdog waits for the next tick');
       recordWatchdogCheck(dataRoot(), { healthy: false, status: probe.status, skipped: 'restart-in-flight', error: probe.error });
@@ -222,12 +238,23 @@ async function cmdEnsure(config) {
     recovered = await startLan(config);
     probe = await probeBridge(config);
   }
+  let consecutiveFailures = 0;
+  let nextRetryAt = null;
+  if (!probe.ok) {
+    consecutiveFailures = (Number(readWatchdogState(dataRoot())?.consecutiveFailures) || 0) + 1;
+    nextRetryAt = new Date(Date.now() + recoveryBackoffMs(consecutiveFailures)).toISOString();
+  }
   recordWatchdogCheck(dataRoot(), {
     healthy: probe.ok,
+    sseHealthy: probe.sseOk,
     status: probe.status,
     bootId: probe.bootId,
     storeId: probe.storeId,
-    error: probe.ok ? null : probe.error,
+    consecutiveFailures,
+    nextRetryAt,
+    error: probe.ok
+      ? (probe.sseOk === false ? 'SSE probe failed while HTTP API answered' : null)
+      : probe.error,
     recovered,
   });
   if (!probe.ok) {

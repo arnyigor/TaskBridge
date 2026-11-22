@@ -1111,6 +1111,19 @@ async function handleRequest(req, res) {
     if (req.method === 'GET' && pathname === '/api/health') {
       return json(res, 200, { status: 'ok' });
     }
+    // Deep transport probe: HTTP liveness alone does not prove that the SSE
+    // path works. This endpoint emits one real event and closes, so the
+    // watchdog can distinguish «API answers» from «events flow».
+    if (req.method === 'GET' && pathname === '/api/health/sse') {
+      res.writeHead(200, {
+        'content-type': 'text/event-stream; charset=utf-8',
+        'cache-control': 'no-cache',
+        'connection': 'keep-alive',
+        'x-taskbridge-boot-id': bootId,
+      });
+      res.end(`event: ready\ndata: ${JSON.stringify({ bootId, storeId: store.storeId })}\n\n`);
+      return;
+    }
 
     // --- interactive tool approvals (§52–§55) --------------------------------
     // The Pi extension is a local process without a session cookie, so these two

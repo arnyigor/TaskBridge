@@ -12,6 +12,12 @@ import path from 'node:path';
 
 export const WATCHDOG_STATE_FILE = 'watchdog-state.json';
 
+/** Recovery retry: 3 min, 6, 12, 24, then cap 30 min. */
+export function recoveryBackoffMs(consecutiveFailures) {
+  const failures = Math.max(1, Number(consecutiveFailures) || 1);
+  return Math.min(3 * 60 * 1000 * (2 ** (failures - 1)), 30 * 60 * 1000);
+}
+
 export function watchdogStatePath(dataRoot) {
   return path.join(dataRoot, WATCHDOG_STATE_FILE);
 }
@@ -47,6 +53,15 @@ export function recordWatchdogCheck(dataRoot, patch = {}) {
   const previous = readWatchdogState(dataRoot) || {};
   const at = new Date().toISOString();
   const healthy = patch.healthy === true;
+  const skipped = Boolean(patch.skipped);
+  const previousFailures = Number(previous.consecutiveFailures) || 0;
+  const consecutiveFailures = healthy
+    ? 0
+    : skipped
+      ? previousFailures
+      : Number.isInteger(patch.consecutiveFailures)
+        ? patch.consecutiveFailures
+        : previousFailures + 1;
   const next = {
     ...previous,
     lastCheckAt: at,
@@ -54,7 +69,14 @@ export function recordWatchdogCheck(dataRoot, patch = {}) {
     status: Number.isInteger(patch.status) ? patch.status : null,
     bootId: patch.bootId || null,
     storeId: patch.storeId || null,
-    lastError: patch.error ? String(patch.error) : null,
+    sseHealthy: typeof patch.sseHealthy === 'boolean' ? patch.sseHealthy : (previous.sseHealthy ?? null),
+    consecutiveFailures,
+    nextRetryAt: healthy
+      ? null
+      : (patch.nextRetryAt ?? (skipped ? (previous.nextRetryAt ?? null) : null)),
+    lastError: patch.error
+      ? String(patch.error)
+      : (skipped ? (previous.lastError ?? null) : null),
   };
   if (healthy) next.lastHealthyAt = at;
   if (healthy && patch.recovered === true) next.lastRecoveryAt = at;
