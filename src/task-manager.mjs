@@ -6419,6 +6419,14 @@ export class TaskManager extends EventEmitter {
         await this.#savePendingFiles(id, pendingId, { files: files || [], uploadToken: uploadToken || null });
       }
       const note = staged.length ? '' : attachmentNote(attached.map(f => f.path));
+      // REL-01E: один и тот же текст не должен ждать в очереди дважды. Журнал
+      // 2026-11-22 08:18: медленная доставка (молчаливый холодный старт Pi) —
+      // оператор отправил повторно, сервер запарковал обе копии, помпа доставила
+      // одну prompt'ом и вторую steer'ом. Явный отказ вместо молчаливого дубля.
+      const queuedText = (userText + note).trim();
+      if ((task.pendingPrompts || []).some(p => p.text?.trim() === queuedText)) {
+        throw Object.assign(new Error('Такой текст уже стоит в очереди этой сессии — доставка идёт по порядку.'), { code: 'ALREADY_QUEUED' });
+      }
       // Several messages may wait for one session; they are delivered in order.
       // The files are staged already; the delivered turn must carry them too,
       // otherwise the chat shows a raw .taskbridge-input path instead of the

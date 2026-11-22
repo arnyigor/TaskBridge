@@ -70,11 +70,14 @@ test('the queued «Отправить сейчас» targets one pendingId and s
   assert.ok(!types.includes('TASK_CANCELLED'), types.join(','));
 });
 
-test('pending IDs select identical messages and stale actions never affect another entry', async t => {
+// REL-01E: identical texts no longer queue twice (a parked duplicate was
+// delivered twice, journal 2026-11-22 08:18). The id-targeting invariant these
+// entries exercised is covered with distinct texts.
+test('pending IDs select messages and stale actions never affect another entry', async t => {
   const f = await fixture(t, true);
   f.manager.activeTaskId = 'a';
-  await f.manager.message('a', 'same', 'auto', [], null, { queue: true });
-  await f.manager.message('a', 'same', 'auto', [], null, { queue: true });
+  await f.manager.message('a', 'same-1', 'auto', [], null, { queue: true });
+  await f.manager.message('a', 'same-2', 'auto', [], null, { queue: true });
   const [first, second] = f.task.pendingPrompts;
   await f.manager.dropPending('a', second.id);
   await f.manager.dropPending('a', second.id);
@@ -83,7 +86,7 @@ test('pending IDs select identical messages and stale actions never affect anoth
   assert.deepEqual(f.task.pendingPrompts.map(p => p.id), [first.id]);
   await f.manager.sendPendingNow('a', first.id);
   await f.manager.sendPendingNow('a', first.id);
-  assert.deepEqual(f.sent, ['same']);
+  assert.deepEqual(f.sent, ['same-1']);
 });
 
 test('dropping a follow-up before the workspace exists preserves the initial queued task', async t => {
@@ -227,6 +230,25 @@ test('accepted steering stores user text and attachment metadata separately', as
   assert.equal(messages[0].data.files[0].name, 'file.txt');
   assert.equal(messages[0].data.files[0].size, 1);
   assert.match(f.sent[0], /Additional files/);
+  assert.match(f.sent[0], /Use Pi's built-in `read` tool/);
+});
+
+test('a queued chat attachment keeps its path and gets the workspace read hint on delivery', async t => {
+  const f = await fixture(t, true);
+  f.manager.activeTaskId = 'a';
+  await f.manager.message('a', 'посмотри фото', 'auto', [{ name: 'photo.jpg', size: 3, base64: '/9j/' }], null, { queue: true });
+  const [pending] = f.task.pendingPrompts;
+  const [file] = pending.files;
+  assert.equal(file.name, 'photo.jpg');
+  await f.manager.sendPendingNow('a', pending.id);
+  assert.equal(f.sent.length, 1);
+  const delivered = f.sent[0];
+  assert.equal(delivered.split(file.path).length, 2, 'staged path is listed exactly once');
+  assert.match(delivered, /Use Pi's built-in `read` tool/);
+  assert.match(delivered, /Do not use `taskbridge_external_open` for chat attachments/);
+  const messages = (await f.store.readEvents('a', 0)).filter(e => e.type === 'USER_MESSAGE');
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].data.files[0].id, file.id);
 });
 
 test('a second submission is rejected while the first admission is still pending', async t => {
