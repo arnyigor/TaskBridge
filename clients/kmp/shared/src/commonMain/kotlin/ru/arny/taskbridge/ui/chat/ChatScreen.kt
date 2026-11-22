@@ -1,28 +1,24 @@
 package ru.arny.taskbridge.ui.chat
 
-import ru.arny.taskbridge.core.client.session.DraftAutosave
-
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -30,6 +26,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -78,23 +75,20 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.roundToInt
-import ru.arny.taskbridge.core.client.chat.ACTIVE_STATUSES
-import ru.arny.taskbridge.core.client.chat.ToolState
-import kotlinx.coroutines.flow.first
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import ru.arny.taskbridge.AppGraph
-import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.ApiInfo
@@ -107,19 +101,22 @@ import ru.arny.taskbridge.core.api.ModelRef
 import ru.arny.taskbridge.core.api.PendingPrompt
 import ru.arny.taskbridge.core.api.Project
 import ru.arny.taskbridge.core.api.ProviderWait
-import ru.arny.taskbridge.core.api.QuickAction
 import ru.arny.taskbridge.core.api.SessionStorage
 import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.UploadFile
+import ru.arny.taskbridge.core.client.chat.ACTIVE_STATUSES
 import ru.arny.taskbridge.core.client.chat.ChatItem
+import ru.arny.taskbridge.core.client.chat.ToolState
 import ru.arny.taskbridge.core.client.session.ChatEffect
 import ru.arny.taskbridge.core.client.session.ChatSession
 import ru.arny.taskbridge.core.client.session.ChatSessionState
+import ru.arny.taskbridge.core.client.session.DraftAutosave
 import ru.arny.taskbridge.core.client.session.LinkState
 import ru.arny.taskbridge.core.client.session.OutgoingMessage
 import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
+import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.sessions.stageLabel
 import ru.arny.taskbridge.platform.PlatformServices
@@ -128,9 +125,9 @@ import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
 import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
-import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.TypingPhase
+import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.common.formatMoment
 import ru.arny.taskbridge.ui.common.humanDuration
 import ru.arny.taskbridge.ui.common.parseIsoMillis
@@ -138,16 +135,16 @@ import ru.arny.taskbridge.ui.common.sinceLabel
 import ru.arny.taskbridge.ui.common.sourceLabel
 import ru.arny.taskbridge.ui.common.timeRange
 import ru.arny.taskbridge.ui.sessions.FieldLabel
+import ru.arny.taskbridge.ui.sessions.ModelChooser
 import ru.arny.taskbridge.ui.sessions.ModelPicker
+import ru.arny.taskbridge.ui.sessions.ThinkingPicker
+import ru.arny.taskbridge.ui.sessions.catalogEntry
 import ru.arny.taskbridge.ui.sessions.formatLatencyMs
 import ru.arny.taskbridge.ui.sessions.latencyFor
 import ru.arny.taskbridge.ui.sessions.modelLatencyLabel
-import ru.arny.taskbridge.ui.sessions.ModelChooser
-import ru.arny.taskbridge.ui.sessions.ThinkingPicker
-import ru.arny.taskbridge.ui.sessions.catalogEntry
 import ru.arny.taskbridge.ui.sessions.thinkingChoices
-import ru.arny.taskbridge.ui.sessions.thinkingLevelsShown
 import ru.arny.taskbridge.ui.sessions.thinkingLabel
+import ru.arny.taskbridge.ui.sessions.thinkingLevelsShown
 import ru.arny.taskbridge.ui.theme.AppIcons
 import ru.arny.taskbridge.ui.theme.LocalStatusColors
 import ru.arny.taskbridge.ui.theme.MonoStyle
@@ -156,8 +153,10 @@ import ru.arny.taskbridge.ui.theme.MonoStyle
 internal sealed interface ChatDialog {
     data class EditMessage(val turnId: String, val text: String) : ChatDialog
     data class EditAnswer(val turnId: String, val text: String) : ChatDialog
+
     /** [withAnswer]: started from an answer — the log is linear, so its question goes too. */
     data class DeleteFrom(val turnId: String, val withAnswer: Boolean = false) : ChatDialog
+
     /**
      * Действия над историей спрашивают подтверждение: строка иконок на телефоне плотная,
      * и промах по соседней кнопке стартовал ход молча (оператор 2026-10-29).
@@ -412,6 +411,7 @@ fun ChatScreen(
         else -> searchHits.indexOfFirst { it.itemId == searchSelected }.takeIf { it >= 0 } ?: searchHits.lastIndex
     }
     val activeSearchHit = searchHits.getOrNull(searchCurrent)
+
     // Шаг поиска читает находки ЗАНОВО в момент нажатия, а не берёт их из замыкания:
     // Compose мемоизирует лямбды кнопок, и захваченный список находок застывал на
     // состоянии «находок ещё нет» — стрелки считали шаг от пустого списка и молча
@@ -669,7 +669,19 @@ fun ChatScreen(
                         }
                     },
                     top = {
-                        DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, visible = visible, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText, onToggleTrace = { session.setLifecycleTracing(it) })
+                        DeliveryDiagnostics(
+                            state = state,
+                            info = sessionListState.info,
+                            catalog = screenCatalog,
+                            platform = platform,
+                            visible = visible,
+                            actions = DiagnosticsActions(
+                                nowMillis = graph::nowMillis,
+                                onRefresh = session::reconnectNow,
+                                onCopy = platform::copyText,
+                                onToggleTrace = { session.setLifecycleTracing(it) },
+                            ),
+                        )
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
                             QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
                         }
@@ -1255,116 +1267,116 @@ internal fun MessageList(
         return
     }
     CompositionLocalProvider(LocalChatListState provides listState, LocalChatSearch provides search) {
-    LazyColumn(
-        state = listState,
-        reverseLayout = true,
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.Bottom),
-    ) {
-        // Stable keys and reverseLayout own the streaming position. Do not compensate
-        // growing answers with dispatchRawDelta here: nested with an expanded block's
-        // Pinned scroll it re-enters LazyListState and crashes Android.
-        items(reversed, key = { it.id }, contentType = { it::class.simpleName }) { item ->
-            // Сообщение, которое рисуется: по нему подсветка находит свои совпадения
-            // и отличает ведущее сообщение поиска от остальных. Держатель прокрутки
-            // свой на элемент — первый найденный блок сообщения доводит себя до экрана.
-            CompositionLocalProvider(
-                LocalSearchItemId provides item.id,
-                LocalSearchBringIntoView provides remember(item.id) { SearchBringIntoView() },
-            ) {
-            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-                Box(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
-                    when (item) {
-                        is ChatItem.User -> {
-                            val turnId = item.turnId
-                            UserBubble(
-                                item = item,
-                                time = parseIsoMillis(item.at)?.let { platform.formatClock(it) }.orEmpty(),
-                                source = sourceLabel(item.clientId, ownClient),
-                                actions = MessageActions(
-                                    copy = { onCopyMessage(item.copyText()) },
-                                    onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
-                                    selected = selectedIds[item.id] == true,
-                                    edit = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.EditMessage(it, item.text)) } },
-                                    fork = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = false)) } },
-                                    forkFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = true)) } },
-                                    deleteFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.DeleteFrom(it)) } },
-                                ),
-                                onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
-                                loadFile = { session.readFile(it) },
-                                desktop = platform.kind == "desktop",
-                            )
-                        }
-                        is ChatItem.Assistant -> {
-                            val actionId = item.canonicalId.takeIf { item.segmentActions }
-                            // Токены и деньги за ответ; модель — та, которой он сгенерирован.
-                            val usage = remember(item.usage, item.usageModel, item.usageIsLocal, item.at, pricing, item.turnMetrics) {
-                                usageDetails(item.usage, item.usageModel, item.at, pricing, item.turnMetrics, item.usageIsLocal)
+        LazyColumn(
+            state = listState,
+            reverseLayout = true,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp, Alignment.Bottom),
+        ) {
+            // Stable keys and reverseLayout own the streaming position. Do not compensate
+            // growing answers with dispatchRawDelta here: nested with an expanded block's
+            // Pinned scroll it re-enters LazyListState and crashes Android.
+            items(reversed, key = { it.id }, contentType = { it::class.simpleName }) { item ->
+                // Сообщение, которое рисуется: по нему подсветка находит свои совпадения
+                // и отличает ведущее сообщение поиска от остальных. Держатель прокрутки
+                // свой на элемент — первый найденный блок сообщения доводит себя до экрана.
+                CompositionLocalProvider(
+                    LocalSearchItemId provides item.id,
+                    LocalSearchBringIntoView provides remember(item.id) { SearchBringIntoView() },
+                ) {
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
+                        Box(Modifier.widthIn(max = 860.dp).fillMaxWidth()) {
+                            when (item) {
+                                is ChatItem.User -> {
+                                    val turnId = item.turnId
+                                    UserBubble(
+                                        item = item,
+                                        time = parseIsoMillis(item.at)?.let { platform.formatClock(it) }.orEmpty(),
+                                        source = sourceLabel(item.clientId, ownClient),
+                                        actions = MessageActions(
+                                            copy = { onCopyMessage(item.copyText()) },
+                                            onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                                            selected = selectedIds[item.id] == true,
+                                            edit = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.EditMessage(it, item.text)) } },
+                                            fork = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = false)) } },
+                                            forkFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = true)) } },
+                                            deleteFrom = turnId?.takeIf { !historyLocked }?.let { { onDialog(ChatDialog.DeleteFrom(it)) } },
+                                        ),
+                                        onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
+                                        loadFile = { session.readFile(it) },
+                                        desktop = platform.kind == "desktop",
+                                    )
+                                }
+                                is ChatItem.Assistant -> {
+                                    val actionId = item.canonicalId.takeIf { item.segmentActions }
+                                    // Токены и деньги за ответ; модель — та, которой он сгенерирован.
+                                    val usage = remember(item.usage, item.usageModel, item.usageIsLocal, item.at, pricing, item.turnMetrics) {
+                                        usageDetails(item.usage, item.usageModel, item.at, pricing, item.turnMetrics, item.usageIsLocal)
+                                    }
+                                    val newest = actionId == state.chat.newestAnswerId && actionId != null && !historyLocked && item.final
+                                    AssistantMessage(
+                                        item = item,
+                                        time = timeRange(platform, item.at, item.endedAt),
+                                        actions = MessageActions(
+                                            copy = { onCopyMessage(item.copyText()) },
+                                            onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                                            selected = selectedIds[item.id] == true,
+                                            edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.canonicalId, item.canonicalText)) }) else null,
+                                            fork = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = false)) } },
+                                            forkFrom = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = true)) } },
+                                            regenerate = if (newest) ({ onDialog(ChatDialog.ConfirmRegenerate(item.canonicalId)) }) else null,
+                                            // «Повторить с параметрами» убрано из меню сообщения: выбор модели
+                                            // есть в меню сессии (оператор 2026-10-29).
+                                            continueAnswer = if (newest && (item.canonicalText.isNotBlank() || item.tools.isNotEmpty())) ({ onDialog(ChatDialog.ConfirmContinue(item.canonicalId)) }) else null,
+                                            deleteFrom = actionId?.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
+                                        ),
+                                        onCopyText = { platform.copyText(it) },
+                                        loadToolOutput = { session.toolOutput(it) },
+                                        onOpenPath = { link -> onViewFile(FileTarget.Workspace(link.path, link.line, link.endLine)) },
+                                        onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
+                                        loadFile = { session.readFile(it) },
+                                        loadWorkspaceFile = { session.readWorkspaceFile(it) },
+                                        desktop = platform.kind == "desktop",
+                                        continuePending = continuePendingId == item.canonicalId && !item.active,
+                                        usageDetails = usage,
+                                        usageExpanded = expandedUsageId == item.canonicalId,
+                                        turnState = state.task?.turnState,
+                                        onToggleUsage = { expandedUsageId = if (expandedUsageId == item.canonicalId) null else item.canonicalId },
+                                        onSelectVariant = { position ->
+                                            val variants = item.variants
+                                            val variantId = variants?.variantIdAt(position)
+                                            if (variants != null && variantId != null) session.selectVariant(variants.turnSeq, variantId)
+                                        },
+                                    )
+                                }
+                                is ChatItem.Note -> {
+                                    val group = timeline.groups[item.id]
+                                    NoteRow(
+                                        item = if (group != null) item.copy(text = group.raw) else item,
+                                        onCopy = { onCopyMessage(group?.raw ?: item.copyText()) },
+                                        selected = selectedIds[item.id] == true,
+                                        onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
+                                        noticeCount = group?.notes?.size ?: 1,
+                                        noticeRetrying = group?.retrying ?: false,
+                                        noticeRecovered = group?.recovered ?: false,
+                                    )
+                                }
                             }
-                            val newest = actionId == state.chat.newestAnswerId && actionId != null && !historyLocked && item.final
-                            AssistantMessage(
-                                item = item,
-                                time = timeRange(platform, item.at, item.endedAt),
-                                actions = MessageActions(
-                                    copy = { onCopyMessage(item.copyText()) },
-                                    onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
-                                    selected = selectedIds[item.id] == true,
-                                    edit = if (newest) ({ onDialog(ChatDialog.EditAnswer(item.canonicalId, item.canonicalText)) }) else null,
-                                    fork = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = false)) } },
-                                    forkFrom = actionId?.takeIf { !historyLocked && Regex("^assistant-(\\d+|initial)$").matches(it) }?.let { { onDialog(ChatDialog.ConfirmFork(it, from = true)) } },
-                                    regenerate = if (newest) ({ onDialog(ChatDialog.ConfirmRegenerate(item.canonicalId)) }) else null,
-                                    // «Повторить с параметрами» убрано из меню сообщения: выбор модели
-                                    // есть в меню сессии (оператор 2026-10-29).
-                                    continueAnswer = if (newest && (item.canonicalText.isNotBlank() || item.tools.isNotEmpty())) ({ onDialog(ChatDialog.ConfirmContinue(item.canonicalId)) }) else null,
-                                    deleteFrom = actionId?.takeIf { !historyLocked && !item.active && Regex("^assistant-(initial|\\d+)$").matches(it) }?.let { { onDialog(ChatDialog.DeleteFrom(it, withAnswer = true)) } },
-                                ),
-                                onCopyText = { platform.copyText(it) },
-                                loadToolOutput = { session.toolOutput(it) },
-                                onOpenPath = { link -> onViewFile(FileTarget.Workspace(link.path, link.line, link.endLine)) },
-                                onOpenFile = { id, name -> onViewFile(FileTarget.Attachment(id, name)) },
-                                loadFile = { session.readFile(it) },
-                                loadWorkspaceFile = { session.readWorkspaceFile(it) },
-                                desktop = platform.kind == "desktop",
-                                continuePending = continuePendingId == item.canonicalId && !item.active,
-                                usageDetails = usage,
-                                usageExpanded = expandedUsageId == item.canonicalId,
-                                turnState = state.task?.turnState,
-                                onToggleUsage = { expandedUsageId = if (expandedUsageId == item.canonicalId) null else item.canonicalId },
-                                onSelectVariant = { position ->
-                                    val variants = item.variants
-                                    val variantId = variants?.variantIdAt(position)
-                                    if (variants != null && variantId != null) session.selectVariant(variants.turnSeq, variantId)
-                                },
-                            )
-                        }
-                        is ChatItem.Note -> {
-                            val group = timeline.groups[item.id]
-                            NoteRow(
-                                item = if (group != null) item.copy(text = group.raw) else item,
-                                onCopy = { onCopyMessage(group?.raw ?: item.copyText()) },
-                                selected = selectedIds[item.id] == true,
-                                onToggleSelect = if (selectionMode) ({ onToggleSelect(item.id) }) else null,
-                                noticeCount = group?.notes?.size ?: 1,
-                                noticeRetrying = group?.retrying ?: false,
-                                noticeRecovered = group?.recovered ?: false,
-                            )
                         }
                     }
                 }
             }
-            }
-        }
-        item(key = "history-start") {
-            Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
-                when {
-                    state.loadingOlder -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
-                    !state.reachedStart -> TextButton(onClick = { session.loadOlder() }) { Text("Показать более раннюю историю") }
-                    else -> Text("Начало сессии", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            item(key = "history-start") {
+                Box(Modifier.fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
+                    when {
+                        state.loadingOlder -> CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                        !state.reachedStart -> TextButton(onClick = { session.loadOlder() }) { Text("Показать более раннюю историю") }
+                        else -> Text("Начало сессии", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
-    }
     }
 }
 
@@ -1475,6 +1487,14 @@ private fun QueueLine(
     }
 }
 
+/** Callbacks of the diagnostics sheet: one holder keeps the composable under the parameter limit. */
+private class DiagnosticsActions(
+    val nowMillis: () -> Long,
+    val onRefresh: () -> Unit,
+    val onCopy: (String) -> Unit,
+    val onToggleTrace: (Boolean) -> Unit,
+)
+
 @Composable
 private fun DeliveryDiagnostics(
     state: ChatSessionState,
@@ -1482,15 +1502,12 @@ private fun DeliveryDiagnostics(
     catalog: ModelCatalog?,
     platform: PlatformServices,
     visible: Boolean,
-    nowMillis: () -> Long,
-    onRefresh: () -> Unit,
-    onCopy: (String) -> Unit,
-    onToggleTrace: (Boolean) -> Unit,
+    actions: DiagnosticsActions,
 ) {
     var open by remember(state.taskId) { mutableStateOf(false) }
     // Возраст событий и длительность сессии в диагностике должны идти, пока панель
     // открыта, — иначе «12 с назад» застыло бы на моменте открытия.
-    val openTick = rememberVisibleClock(active = open, visible = visible, nowMillis = nowMillis)
+    val openTick = rememberVisibleClock(active = open, visible = visible, nowMillis = actions.nowMillis)
     val answer = state.chat.items.filterIsInstance<ChatItem.Assistant>().lastOrNull()
     // Live engine PP (llama.cpp reports it in /api/info before the first token)
     // makes «Модель читает промпт» work for a local session even on its first
@@ -1539,13 +1556,13 @@ private fun DeliveryDiagnostics(
         }
         val sample = ppSample
         when {
-            sample == null -> ppSample = nowMillis() to read
+            sample == null -> ppSample = actions.nowMillis() to read
             read > sample.second -> {
-                val seconds = (nowMillis() - sample.first) / 1000.0
+                val seconds = (actions.nowMillis() - sample.first) / 1000.0
                 if (seconds > 0) ppTimer = (read - sample.second) / seconds
-                ppSample = nowMillis() to read
+                ppSample = actions.nowMillis() to read
             }
-            read < sample.second -> { ppSample = nowMillis() to read; ppTimer = null }
+            read < sample.second -> { ppSample = actions.nowMillis() to read; ppTimer = null }
         }
     }
     val readingDetail = buildList {
@@ -1561,7 +1578,7 @@ private fun DeliveryDiagnostics(
     val compactTick = rememberVisibleClock(
         active = compactingSince != null && compactingSince > 0,
         visible = visible,
-        nowMillis = nowMillis,
+        nowMillis = actions.nowMillis,
     )
     val compactElapsed = compactingSince?.takeIf { it > 0 }?.let { (compactTick - it).coerceAtLeast(0) }
     val compactingDetail = compactElapsed?.let { " · ${elapsedClock(it)}" }.orEmpty()
@@ -1587,7 +1604,7 @@ private fun DeliveryDiagnostics(
     LaunchedEffect(state.taskId, state.task?.status, lastUserAt) {
         startedAt = turnStartedAt(state.task?.status, startedAt, lastUserAt)
     }
-    val tick = rememberVisibleClock(active = startedAt != null, visible = visible, nowMillis = nowMillis)
+    val tick = rememberVisibleClock(active = startedAt != null, visible = visible, nowMillis = actions.nowMillis)
     val elapsed = startedAt?.let { (tick - it).coerceAtLeast(0) }
     // Подпись состояния — после счётчика: «повтор через 1 ч 31 мин» идёт по секундам
     // клиента (`tick`), и с застывшим «сейчас» она показывала бы уже прошедший повтор.
@@ -1669,9 +1686,11 @@ private fun DeliveryDiagnostics(
             subtitle = phase,
             onDismiss = { open = false },
             footer = {
-                TextButton(onClick = onRefresh) { Text("Проверить связь") }
-                TextButton(onClick = { onToggleTrace(!state.lifecycleTracing) }) { Text(if (state.lifecycleTracing) "Выключить трассу" else "Трасса STOP") }
-                TextButton(onClick = { onCopy(details) }) { Text("Копировать") }
+                TextButton(onClick = actions.onRefresh) { Text("Проверить связь") }
+                TextButton(onClick = { actions.onToggleTrace(!state.lifecycleTracing) }) {
+                    Text(if (state.lifecycleTracing) "Выключить трассу" else "Трасса STOP")
+                }
+                TextButton(onClick = { actions.onCopy(details) }) { Text("Копировать") }
             },
         ) {
             Text(details, style = MaterialTheme.typography.bodySmall)
@@ -1829,7 +1848,7 @@ private fun ChatDialogs(dialog: ChatDialog?, state: ChatSessionState, session: C
             title = "Остановить агента?",
             text = "Грокнут все процессы сессии (Pi и его дочерние) — даже если модель читает промпт. " +
                 "Текущий ответ и запущенные команды прервутся" + (state.task?.pendingPrompts?.size?.takeIf { it > 0 }
-                ?.let { ", а также уберутся из очереди $it сообщ." } ?: ".") +
+                    ?.let { ", а также уберутся из очереди $it сообщ." } ?: ".") +
                 // Оператор 2026-10-14: «сообщение не отправляется, и я не могу никак
                 // перезапустить». Поэтому STOP снимает и незавершённые отправки —
                 // текст возвращается в поле ввода, ничего не теряется молча.
@@ -2435,6 +2454,23 @@ private fun isNameFamily(candidate: String, wanted: String): Boolean {
  * Диагностику читает человек: вместо сырых ISO-моментов («2026-10-09T06:53:56.9Z»)
  * — местное время [moment] и возраст события (секунды/минуты назад).
  */
+/**
+ * Опциональная трасса STOP — по нажатию «Трасса STOP» в диагностике. Локальные
+ * миллисекунды процесса: их нельзя вычитать из часов сервера или телефона.
+ * `null` — трассы нет, строки в диагностике тоже.
+ */
+internal fun lifecycleTraceLine(state: ChatSessionState): String? {
+    if (!state.lifecycleTracing || state.lifecycleTrace.isEmpty()) return null
+    val lines = state.lifecycleTrace.joinToString("\n") { sample ->
+        "  ${sample.elapsedMs} мс · ${sample.phase}" +
+            (sample.commandId?.let { " · cmd ${it.take(8)}" } ?: "") +
+            (sample.eventSeq?.let { " · seq $it" } ?: "") +
+            (sample.status?.let { " · $it" } ?: "") +
+            (if (sample.activeAnswers > 0) " · активных ответов: ${sample.activeAnswers}" else "")
+    }
+    return "Трасса STOP (локальные мс):\n$lines"
+}
+
 internal fun buildDiagnosticsDetails(
     state: ChatSessionState,
     info: ApiInfo?,
@@ -2486,15 +2522,7 @@ internal fun buildDiagnosticsDetails(
         *sessionDiagnosticsLines(task, info, moment).toTypedArray(),
         externalMetrics?.let(::strataPpLine),
         "Событий получено от сервера: ${state.chat.cursor} · сообщений в очереди: ${pendingPrompts.size}",
-        // Опциональная трасса STOP: по нажатию «Трасса STOP» в диагностике, без текстов.
-        state.lifecycleTrace.takeIf { state.lifecycleTracing && it.isNotEmpty() }?.let { samples ->
-            "Трасса STOP (локальные мс):\n" + samples.joinToString("\n") { sample ->
-                "  ${sample.elapsedMs} мс · ${sample.phase}" + (sample.commandId?.let { " · cmd ${it.take(8)}" } ?: "") +
-                    (sample.eventSeq?.let { " · seq $it" } ?: "") +
-                    (sample.status?.let { " · $it" } ?: "") +
-                    (if (sample.activeAnswers > 0) " · активных ответов: ${sample.activeAnswers}" else "")
-            }
-        },
+        lifecycleTraceLine(state),
         task?.errorCode?.let { "Код ошибки: $it" },
         task?.error,
         "Подтверждение агента не означает ответ провайдера. Пока нет событий модели, источник задержки неизвестен."
@@ -2875,9 +2903,10 @@ internal const val PAGE_WAIT_MS = 5_000L
 internal const val CONTINUE_FEEDBACK_MS = 20_000L
 
 internal fun canStop(status: String?, pendingSends: Int = 0): Boolean =
-    pendingSends > 0 || status in setOf(
-        "QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING",
-    )
+    pendingSends > 0 ||
+        status in setOf(
+            "QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING",
+        )
 
 /** Что делает Esc в чате: закрывает то, что открыто последним. */
 internal enum class ChatEscape { DIALOG, SEARCH, FILE, STOP, NOTHING }
@@ -2914,7 +2943,8 @@ data class SilenceState(val totalMs: Long, val stage: String?, val waitingModelM
 
 internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceState? {
     // A quiet tool/compaction/provider retry is a known activity, not a silent model.
-    if (task?.status != "RUNNING" || task.providerWait != null ||
+    if (task?.status != "RUNNING" ||
+        task.providerWait != null ||
         task.runtime?.activity in setOf("tool", "compacting", "waiting_model")) return null
     val silent = task?.turnState?.silentMs?.takeIf { it >= thresholdMs } ?: return null
     return SilenceState(silent, task.turnState?.stage?.takeIf { it.isNotBlank() }, task.turnState?.waitingModelMs)

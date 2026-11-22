@@ -1,37 +1,37 @@
 package ru.arny.taskbridge.ui.chat
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onFirst
-import androidx.compose.ui.test.performScrollToIndex
-import androidx.compose.ui.test.performTextInput
-import ru.arny.taskbridge.core.client.chat.ChatItem
-import ru.arny.taskbridge.core.client.chat.ToolCall
-import ru.arny.taskbridge.core.client.chat.ToolState
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.width
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.v2.runComposeUiTest
 import androidx.compose.ui.unit.dp
 import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import ru.arny.taskbridge.core.client.chat.ChatItem
+import ru.arny.taskbridge.core.client.chat.ToolCall
+import ru.arny.taskbridge.core.client.chat.ToolState
 
 @OptIn(ExperimentalTestApi::class)
 class HeavyReasoningCopyTest {
@@ -108,7 +108,7 @@ class HeavyReasoningCopyTest {
         onNodeWithText(grown.chunk(grown.count - 1)).assertExists()
 
         // Начало достижимо внутренним скроллом, а не только хвост.
-        onNodeWithTag(ThinkingScrollTag).performScrollToIndex(0)
+        onNodeWithTag(THINKING_SCROLL_TAG).performScrollToIndex(0)
         onNodeWithText(grown.chunk(0)).assertExists()
 
         // Читателя, ушедшего вверх, поток не тащит за собой.

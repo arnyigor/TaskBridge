@@ -5,25 +5,28 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
-import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,18 +42,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.staticCompositionLocalOf
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.key
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -507,7 +507,7 @@ private fun ThinkingText(text: String, color: Color) {
     // it streams, so a delta does not copy the whole reasoning again.
     val chunks = remember { ThinkingChunker() }
     val count = chunks.update(text)
-    if (count <= ThinkingChunksBeforeScroll) {
+    if (count <= THINKING_CHUNKS_BEFORE_SCROLL) {
         SecondaryPane {
             SelectionContainer {
                 if (count > 0) ThinkingChunk(chunks.chunk(0), color)
@@ -534,7 +534,7 @@ private fun ThinkingText(text: String, color: Color) {
             if (wasAtEnd && count > 0) state.scrollToItem(count - 1)
         }
         SelectionContainer {
-            LazyColumn(state = state, modifier = Modifier.fillMaxWidth().testTag(ThinkingScrollTag)) {
+            LazyColumn(state = state, modifier = Modifier.fillMaxWidth().testTag(THINKING_SCROLL_TAG)) {
                 items(count = count, key = { it }) { index ->
                     ThinkingChunk(chunks.chunk(index), color)
                 }
@@ -549,7 +549,7 @@ private fun ThinkingChunk(text: String, color: Color) {
 }
 
 /** Test tag of the reasoning pane's own scroll, see [ThinkingText]. */
-internal const val ThinkingScrollTag = "thinking-scroll"
+internal const val THINKING_SCROLL_TAG = "thinking-scroll"
 
 /**
  * Cuts reasoning into pieces of at most [maxChars] so that the unfolded block can lay out
@@ -560,7 +560,7 @@ internal const val ThinkingScrollTag = "thinking-scroll"
  * characters that cannot change any more. A text that is not an extension of the previous one
  * (a restored message, another variant, an edited turn) is cut from scratch once.
  */
-internal class ThinkingChunker(private val maxChars: Int = ThinkingChunkChars) {
+internal class ThinkingChunker(private val maxChars: Int = THINKING_CHUNK_CHARS) {
     private val pieces = ArrayList<String>()
     private var source: String = ""
 
@@ -619,10 +619,10 @@ internal class ThinkingChunker(private val maxChars: Int = ThinkingChunkChars) {
     }
 }
 
-private const val ThinkingChunkChars = 1_200
+private const val THINKING_CHUNK_CHARS = 1_200
 
 /** One piece still fits the width of an answer; more than one gets the pane and its scroll. */
-private const val ThinkingChunksBeforeScroll = 1
+private const val THINKING_CHUNKS_BEFORE_SCROLL = 1
 
 private val ThinkingPaneHeight = 280.dp
 
@@ -659,9 +659,11 @@ private fun ToolList(
         if (tools.size <= 3) {
             for (tool in tools) key(tool.id) { ToolRow(tool, loadOutput, onCopy, onOpenPath) }
         } else {
-            for (group in groupTools(tools)) key(group.tools.first().id) {
-                if (group.tools.size == 1) ToolRow(group.tools.single(), loadOutput, onCopy, onOpenPath)
-                else ToolGroupRow(group, loadOutput, onCopy, onOpenPath)
+            for (group in groupTools(tools)) {
+                key(group.tools.first().id) {
+                    if (group.tools.size == 1) ToolRow(group.tools.single(), loadOutput, onCopy, onOpenPath)
+                    else ToolGroupRow(group, loadOutput, onCopy, onOpenPath)
+                }
             }
         }
     }

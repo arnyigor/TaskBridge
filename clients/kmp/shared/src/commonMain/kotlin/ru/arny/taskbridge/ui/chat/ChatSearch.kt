@@ -272,7 +272,7 @@ internal fun ChatSearchBar(
     // «кликаешь на стрелки и ничего» (оператор, десктоп, 2026-10-30).
     val step by rememberUpdatedState(onStep)
     val close by rememberUpdatedState(onClose)
-    val query_ by rememberUpdatedState(onQuery)
+    val latestQuery by rememberUpdatedState(onQuery)
     // Панель появляется по нажатию «Поиск»: без автофокуса первым делом нужно было бы
     // ещё раз попасть в поле, а на телефоне — ещё и открыть клавиатуру.
     LaunchedEffect(Unit) { runCatching { focus.requestFocus() } }
@@ -285,7 +285,7 @@ internal fun ChatSearchBar(
         ) {
             OutlinedTextField(
                 value = query,
-                onValueChange = { query_(it) },
+                onValueChange = { latestQuery(it) },
                 singleLine = true,
                 textStyle = MaterialTheme.typography.bodyMedium,
                 // Подсказка в поле говорит, по чему идёт поиск: история листается

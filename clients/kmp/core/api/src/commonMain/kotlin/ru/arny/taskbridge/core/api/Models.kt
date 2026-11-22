@@ -374,7 +374,9 @@ data class ProviderStatus(
 )
 
 @Serializable data class ProviderBalance(val cny: Double? = null, val usd: Double? = null)
+
 @Serializable data class ProviderRubBalance(val cny: Double? = null, val usd: Double? = null, val total: Double? = null)
+
 @Serializable data class ProviderPace(
     val recentPerDay: Double? = null,
     val historyPerDay: Double? = null,
@@ -382,7 +384,9 @@ data class ProviderStatus(
     val historyPerDayRub: Double? = null,
     val monthlyRub: Double? = null,
 )
+
 @Serializable data class ProviderRunway(val recentDays: Int? = null, val historyDays: Int? = null)
+
 @Serializable data class ProviderSubscription(
     val plan: String? = null,
     val remaining: Double? = null,
@@ -396,6 +400,7 @@ data class ProviderStatus(
     val rateLimitSeconds: Double? = null,
     val concurrentRequests: Double? = null,
 )
+
 @Serializable data class ProviderUsage(
     val firstSeenAt: String? = null,
     val windowStartAt: String? = null,
@@ -403,12 +408,14 @@ data class ProviderStatus(
     val projectedEmptyAt: String? = null,
     val perDay: Double? = null,
 )
+
 @Serializable data class ProviderLimit(
     val usedPercent: Double? = null,
     val remainingPercent: Double? = null,
     val windowSeconds: Double? = null,
     val resetAt: String? = null,
 )
+
 @Serializable data class ProviderResetCredits(
     val available: Int? = null,
     val total: Int? = null,
@@ -555,6 +562,7 @@ data class McpStatus(
 )
 
 @Serializable data class McpCollision(val tool: String, val servers: List<String> = emptyList())
+
 @Serializable data class McpHealth(val state: String, val latencyMs: Long? = null, val checkedAt: String? = null, val statusCode: Int? = null, val error: String? = null)
 
 @Serializable
@@ -1366,7 +1374,12 @@ data class CompactionLast(
 )
 
 @Serializable
-data class RuntimeInfo(val state: String? = null, val activity: String? = null, /** Epoch ms when the current compaction started; only present while activity == "compacting". */ val compactingSince: Long? = null)
+data class RuntimeInfo(
+    val state: String? = null,
+    val activity: String? = null,
+    /** Epoch ms when the current compaction started; only present while activity == "compacting". */
+    val compactingSince: Long? = null,
+)
 
 /**
  * Почему сессия стоит, хотя Pi жив: провайдер не принял запрос и Pi ждёт повтора

@@ -1,7 +1,7 @@
 package ru.arny.taskbridge
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.ComposeFoundationFlags
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -13,7 +13,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import org.jetbrains.skia.Image
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -21,23 +20,24 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 import androidx.compose.ui.window.Tray
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberTrayState
 import androidx.compose.ui.window.rememberWindowState
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import org.jetbrains.skia.Image
 import ru.arny.taskbridge.core.client.sessions.SessionAlert
 import ru.arny.taskbridge.core.client.sessions.SessionListState
 import ru.arny.taskbridge.platform.DesktopPlatformServices
 import ru.arny.taskbridge.ui.Navigator
 import ru.arny.taskbridge.ui.notice.noticesAfter
 import ru.arny.taskbridge.ui.theme.AppIcons
-import java.awt.event.WindowAdapter
-import java.awt.event.WindowEvent
 
 @OptIn(ExperimentalFoundationApi::class)
 fun main() {
@@ -53,12 +53,12 @@ fun main() {
     // Первая ступень маркера готовности (BUG-04C): процесс захватил SingleInstance-лок.
     // Обновлятор после запуска нового EXE ждёт именно этот маркер, а не «жив 4 секунды».
     DesktopUpdater.StartupMarker.write(DesktopUpdater.installDir(), packagedVersion, windowShown = false)
-        // Compose в режиме выделения прокручивает каждый скролл-контейнер над курсором
-        // (SelectionManager.bringDraggedPositionIntoView). В reverseLayout-ленте чата это
-        // рывком уводит её к последнему сообщению, как только начинаешь выделять текст,
-        // поэтому на десктопе автопрокрутка выделения выключена: колесо мыши при
-        // зажатой кнопке продолжает работать, а лента сама не двигается.
-        ComposeFoundationFlags.isSelectionAutoScrollEnabled = false
+    // Compose в режиме выделения прокручивает каждый скролл-контейнер над курсором
+    // (SelectionManager.bringDraggedPositionIntoView). В reverseLayout-ленте чата это
+    // рывком уводит её к последнему сообщению, как только начинаешь выделять текст,
+    // поэтому на десктопе автопрокрутка выделения выключена: колесо мыши при
+    // зажатой кнопке продолжает работать, а лента сама не двигается.
+    ComposeFoundationFlags.isSelectionAutoScrollEnabled = false
     val platform = DesktopPlatformServices(appVersion = packagedVersion)
     val graph = AppGraph(platform)
 
@@ -115,8 +115,12 @@ fun main() {
             if (listState.workingCount > 0) add("работают: ${listState.workingCount}")
         }.joinToString(", ").ifEmpty { "агент свободен" }
 
-        // The brand mark (web/icon.svg, rendered by icons/make-icon.ps1): the old line icon was black on a dark taskbar.
-        val appIcon = remember { BitmapPainter(Image.makeFromEncoded(object {}.javaClass.getResourceAsStream("/icon.png")!!.readBytes()).toComposeImageBitmap()) }
+        // The brand mark (web/icon.svg, rendered by icons/make-icon.ps1): the old line icon was black
+        // on a dark taskbar.
+        val appIcon = remember {
+            val bytes = object {}.javaClass.getResourceAsStream("/icon.png")!!.readBytes()
+            BitmapPainter(Image.makeFromEncoded(bytes).toComposeImageBitmap())
+        }
         Tray(
             icon = if (listState.waitingCount > 0) rememberVectorPainter(AppIcons.Alert) else appIcon,
             state = trayState,
