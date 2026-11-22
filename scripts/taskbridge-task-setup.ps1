@@ -16,11 +16,11 @@ $log = Join-Path $data 'watchdog.log'
 
 # The watchdog is hidden: an InteractiveToken task with cmd.exe would flash a
 # console every three minutes. wscript runs the same `ensure` with window 0.
-$vbsText =
-  'Set sh = CreateObject("WScript.Shell")' + "`r`n" +
-  'sh.CurrentDirectory = "' + $root + '"' + "`r`n" +
-  'sh.Run "cmd /c ""' + $node + '"" bin\taskbridge.mjs ensure >> ""' + $log + '"" 2>&1", 0, True' + "`r`n"
-Set-Content -LiteralPath $watchdog -Value $vbsText -Encoding ASCII
+# The command line is rendered by scripts/watchdog-vbs.mjs, whose exact output is
+# executed by tests/watchdog-vbs.test.mjs: the old inline template was silently
+# broken by cmd /c quote stripping (2026-11-22 outage).
+& $Node (Join-Path $root 'scripts\watchdog-vbs.mjs') --root $root --node $node --log $log --out $watchdog
+if ($LASTEXITCODE -ne 0) { throw 'Не удалось сгенерировать watchdog VBS.' }
 
 # The UI launcher only waits for the privileged server and opens the window;
 # it never starts the server itself, so the UI stays non-elevated (drag&drop).
