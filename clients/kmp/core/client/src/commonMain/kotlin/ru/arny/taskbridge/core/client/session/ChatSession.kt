@@ -213,7 +213,7 @@ class ChatSession(
             )).takeLast(128))
         }
     }
-    private val commandDelivery = CommandDelivery(api, taskId, ::backoff)
+    private val commandDelivery = CommandDelivery(api, taskId, retryDelay = ::backoff)
     private var reducer: ChatReducer? = null
     private var oldestSeq: Long? = null
     private var startupJob: Job? = null

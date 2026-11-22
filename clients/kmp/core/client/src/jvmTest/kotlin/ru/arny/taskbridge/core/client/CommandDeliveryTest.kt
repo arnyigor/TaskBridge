@@ -67,4 +67,22 @@ class CommandDeliveryTest {
             }
         } finally { http.close() }
     }
+
+    @Test
+    fun aTransientOutageIsRetriedByTimeNotBySixAttempts() = runBlocking<Unit> {
+        // S2: 30 s outage. The old policy stopped after six attempts (~25 s), so a
+        // message typed during a normal reconnect window became Failed. Eight
+        // Unreachable failures must still end in Delivered once the server is back.
+        val http = HttpClient(MockEngine { respond("{}", HttpStatusCode.OK) })
+        try {
+            val delivery = CommandDelivery(TaskBridgeApi(http, SimpleConnection("http://pc")), "t", 10_000) { _, _ -> 1L }
+            var calls = 0
+            val result = delivery.run<Unit>("c", { _, _ -> }) {
+                calls += 1
+                if (calls <= 8) throw ApiException(ApiError.Unreachable("down"))
+            }
+            assertEquals(DeliveryOutcome.Delivered(Unit), result)
+            assertEquals(9, calls)
+        } finally { http.close() }
+    }
 }

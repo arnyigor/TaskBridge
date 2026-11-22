@@ -2,6 +2,7 @@ package ru.arny.taskbridge.core.client.session
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlin.time.TimeSource
 import ru.arny.taskbridge.core.api.ApiError
 import ru.arny.taskbridge.core.api.ApiException
 import ru.arny.taskbridge.core.api.TaskBridgeApi
@@ -17,6 +18,10 @@ internal sealed interface DeliveryOutcome<out T> {
 internal class CommandDelivery(
     private val api: TaskBridgeApi,
     private val taskId: String,
+    // S2: a transient outage may last 30–180 s. Six attempts with a 5 s cap gave
+    // up after ~25 s, so a message typed during a normal reconnect window became
+    // Failed and required a manual retry. Budget by time, not by attempt count.
+    private val transientBudgetMillis: Long = 180_000,
     private val retryDelay: (Int, Long) -> Long,
 ) {
     suspend fun <T> run(
@@ -26,6 +31,7 @@ internal class CommandDelivery(
     ): DeliveryOutcome<T> {
         var attempt = 0
         var inFlightChecks = 0
+        val startedAt = TimeSource.Monotonic.markNow()
         while (true) {
             try {
                 return DeliveryOutcome.Delivered(block())
@@ -48,7 +54,7 @@ internal class CommandDelivery(
                         } == true
                         return if (landed) DeliveryOutcome.Confirmed else DeliveryOutcome.Unknown
                     }
-                    error.transient && attempt < 6 -> {
+                    error.transient && startedAt.elapsedNow().inWholeMilliseconds < transientBudgetMillis -> {
                         attempt += 1
                         onRetry(attempt, error.message)
                         delay(retryDelay(attempt + 1, 1_000))
