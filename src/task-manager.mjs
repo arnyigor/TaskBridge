@@ -7014,6 +7014,22 @@ export class TaskManager extends EventEmitter {
   async #fail(task, error, turn = task._turn ?? null, { requeuePrompt = true } = {}) {
     if (this.closing) return; // like #setStatus: nothing reaches a closed store
     if (task.status === 'CANCELLED' || this.deleted.has(task.id)) return;
+    // REL-01C: STOP уже принят для активного хода. Шум остановки (RPC доставки
+    // отклонён, потому что killTree закрыл процесс) — ожидаемая форма, а не сбой
+    // провайдера; терминал этого хода публикует #writeCancelled. Настоящий отказ,
+    // зафиксированный ДО команды STOP, сюда не попадает: #cancel на терминальном
+    // статусе выходит раньше и FAILED остаётся на месте.
+    const failingRuntime = this.runtimes.get(task.id);
+    if (failingRuntime?.cancelRequested === true) {
+      if (task.inFlightPrompt) task.inFlightPrompt = null;
+      return;
+    }
+    if (task.status === 'CANCELLING') {
+      // Между setStatus(CANCELLING) и публикацией CANCELLED: вторая терминальная
+      // запись была бы двойным исходом одного хода. Финализатор уже в пути.
+      if (task.inFlightPrompt) task.inFlightPrompt = null;
+      return;
+    }
     // A message Pi accepted into its own queue (a steer) but died before
     // consuming is otherwise lost silently: the chat kept showing «ожидание
     // события агента» while nothing would ever deliver it (observed 2026-09-30,
