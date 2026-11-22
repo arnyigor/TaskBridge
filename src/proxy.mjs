@@ -86,6 +86,10 @@ export function createReverseProxy({ upstreamHost = '127.0.0.1', upstreamPort, p
   const handle = (req, res) => {
     const requestId = requestIdOf(req.headers);
     res.setHeader('x-taskbridge-request-id', requestId);
+    // Identity of the upstream this proxy is actually forwarding to. Recovery
+    // uses it to distinguish «proxy dead» from «proxy alive but stale» without
+    // guessing from lan.json.
+    res.setHeader('x-taskbridge-upstream', `${upstreamHost}:${upstreamPort}`);
     const upstream = http.request({
       host: upstreamHost,
       port: upstreamPort,

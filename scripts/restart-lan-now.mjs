@@ -45,9 +45,12 @@ async function acquireRestartLock() {
     } catch (error) {
       if (error.code !== 'EEXIST') throw error;
       const holder = await readJson(RESTART_LOCK).catch(() => null);
-      const ownership = processOwnership(Number(holder?.pid), 'restart-lan-now.mjs');
-      // Unknown is not stale: an elevated restart worker's command line is
-      // unreadable here, and breaking its lock would start a rival pair.
+      const pid = Number(holder?.pid);
+      const ownership = processOwnership(pid, 'restart-lan-now.mjs') === OWNERSHIP.OURS
+        ? OWNERSHIP.OURS
+        : processOwnership(pid, 'start-lan.mjs');
+      // Unknown is not stale: an elevated restart/recover worker's command line
+      // is unreadable here, and breaking its lock would start a rival pair.
       if (ownership === OWNERSHIP.OURS || ownership === OWNERSHIP.UNKNOWN) return false;
       await fs.rm(RESTART_LOCK, { force: true });
     }

@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { lanAllowed } from '../src/auth.mjs';
 import { loadConfig } from '../src/config.mjs';
 import { isTaskBridgeProcess, processOwnership, OWNERSHIP } from '../src/instance-lock.mjs';
-import { freeTaskBridgePort, pidOwnsPort, portProblemText, taskBridgeProxyOn } from '../src/lan-ports.mjs';
+import { freeTaskBridgePort, listeningPids, pidOwnsPort, portProblemText, proxyUpstreamPort, taskBridgeProxyOn } from '../src/lan-ports.mjs';
 
 // Where the proxy really listens (R1.1): without auth it stays on loopback.
 const proxyHost = config => {
@@ -38,6 +38,7 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 // keeps the live one untouched).
 const DATA = process.env.TASKBRIDGE_DATA_DIR ? path.resolve(process.env.TASKBRIDGE_DATA_DIR) : path.join(ROOT, 'data');
 const STATE = path.join(DATA, 'lan.json');
+const RESTART_LOCK = path.join(DATA, 'lan-restart.lock');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function readState() {
@@ -332,6 +333,205 @@ async function start() {
   }
 }
 
+async function launchApp(internalPort, publicPort, label = 'start-lan app') {
+  const appLog = path.join(DATA, 'lan-app.log');
+  fs.mkdirSync(DATA, { recursive: true });
+  const appMarker = markLog(appLog, label);
+  const app = spawnDetached({
+    file: process.execPath,
+    args: ['src/server.mjs'],
+    log: appLog,
+    env: {
+      TASKBRIDGE_BIND_HOST: '127.0.0.1',
+      TASKBRIDGE_PORT: String(internalPort),
+      TASKBRIDGE_PUBLIC_PORT: String(publicPort),
+      TASKBRIDGE_DISABLE_TLS: '1',
+    },
+  });
+  const startedAt = Date.now();
+  const up = await waitForHealth(internalPort, { timeoutMs: APP_START_TIMEOUT_MS, onFail: () => app.exitCode !== null });
+  if (up) return app;
+  killTree(app.pid);
+  console.error(`[lan] the app did not come up in ${Math.round((Date.now() - startedAt) / 1000)} s. Its log says:`);
+  console.error(meaningfulTail(tailSince(appLog, appMarker)) || '  (empty)');
+  if (app.exitCode !== null) {
+    const lockPid = readLock()?.pid;
+    console.error(lockPid
+      ? `[lan] каталог данных ${DATA} занят другим экземпляром TaskBridge (PID ${lockPid}) — остановите его и повторите.`
+      : '[lan] is another TaskBridge already running on this data directory?');
+  }
+  return null;
+}
+
+async function recover() {
+  const dataDirOverride = process.env.TASKBRIDGE_DATA_DIR
+    && path.resolve(process.env.TASKBRIDGE_DATA_DIR) !== path.join(ROOT, 'data');
+  if (dataDirOverride && !process.env.LAN_PORT) {
+    console.error('[lan] изолированный каталог данных (TASKBRIDGE_DATA_DIR) требует LAN_PORT.');
+    return 1;
+  }
+  if (!(await acquireRecoverLock())) {
+    console.log('[lan] recovery already in progress — пропускаю');
+    return 0;
+  }
+  try {
+    return await recoverInner();
+  } finally {
+    const holder = readJsonSafe(RESTART_LOCK);
+    if (holder?.pid === process.pid) {
+      try { fs.unlinkSync(RESTART_LOCK); } catch { /* gone */ }
+    }
+  }
+}
+
+async function acquireRecoverLock() {
+  fs.mkdirSync(DATA, { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.writeFileSync(RESTART_LOCK, JSON.stringify({ pid: process.pid, action: 'recover', startedAt: new Date().toISOString() }), { flag: 'wx' });
+      return true;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      const holder = readJsonSafe(RESTART_LOCK);
+      const pid = Number(holder?.pid);
+      const ownership = processOwnership(pid, 'restart-lan-now.mjs') === OWNERSHIP.OURS
+        ? OWNERSHIP.OURS
+        : processOwnership(pid, 'start-lan.mjs');
+      // A live/unknown owner is not stale: never race it. Unknown includes an
+      // elevated watchdog start-lan, whose command line a normal shell cannot read.
+      if (ownership === OWNERSHIP.OURS || ownership === OWNERSHIP.UNKNOWN) return false;
+      try { fs.unlinkSync(RESTART_LOCK); } catch { /* gone */ }
+    }
+  }
+  return false;
+}
+
+async function appComponent(state, lock) {
+  const pid = Number(state?.appPid || lock?.pid || 0);
+  const internalPort = Number(state?.internalPort || lock?.internalPort || 0);
+  if (!pid || !internalPort) return { pid, internalPort, proven: false, owns: false, answers: false, alive: false };
+  const proven = isTaskBridgeProcess(pid, 'server.mjs');
+  const owns = await pidOwnsPort(pid, internalPort);
+  const answers = await health(internalPort);
+  return { pid, internalPort, proven, owns, answers, alive: proven || (owns && answers) };
+}
+
+async function proxyComponent(state) {
+  const pid = Number(state?.proxyPid || 0);
+  const publicPort = Number(state?.publicPort || 0);
+  if (!pid || !publicPort) return { pid, publicPort, proven: false, owns: false, answers: false, upstream: null, alive: false };
+  const proven = isTaskBridgeProcess(pid, 'proxy.mjs');
+  const owns = await pidOwnsPort(pid, publicPort);
+  const answers = await taskBridgeProxyOn(publicPort);
+  const upstream = await proxyUpstreamPort(publicPort);
+  return { pid, publicPort, proven, owns, answers, upstream, alive: proven || (owns && answers) };
+}
+
+function writePair(appPid, proxyPid, internalPort, publicPort) {
+  fs.writeFileSync(STATE, JSON.stringify({
+    appPid, proxyPid, internalPort, publicPort, startedAt: new Date().toISOString(),
+  }, null, 2));
+}
+
+async function waitPortFree(port, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await listeningPids(port)).length) return true;
+    await sleep(200);
+  }
+  return !(await listeningPids(port)).length;
+}
+
+async function recoverInner() {
+  const state = readState();
+  const lock = readLock();
+  const config = await loadConfig(ROOT);
+  const lanHost = proxyHost(config);
+  const publicPort = Number(process.env.LAN_PORT || state?.publicPort || lock?.publicPort || config.server?.port || 8787);
+  const app = await appComponent(state, lock);
+  const proxy = await proxyComponent(state);
+  const internalPort = app.internalPort || state?.internalPort || lock?.internalPort;
+  if (!internalPort || !publicPort) {
+    console.error('[lan] recovery needs both internalPort and publicPort; state is incomplete');
+    return 1;
+  }
+  const upstreamStale = proxy.upstream !== null && internalPort && proxy.upstream !== internalPort;
+
+  if (!state && !lock) {
+    console.log('[lan] no pair state — starting a fresh pair');
+    return await startPair();
+  }
+
+  if (app.alive && app.answers && proxy.alive && proxy.answers && !upstreamStale) {
+    console.log(`[lan] healthy: app ${app.pid}, proxy ${proxy.pid}`);
+    ensureSupervisor();
+    return 0;
+  }
+
+  // Proxy is the only broken half: keep the app process and its sessions.
+  if (app.alive && app.answers && (!proxy.alive || !proxy.answers || upstreamStale)) {
+    if (proxy.pid && !proxy.proven && proxy.owns) {
+      console.error(`[lan] proxy ${proxy.pid}: владение не подтверждено — не завершаю; восстановление остановлено`);
+      return 1;
+    }
+    if (proxy.pid && proxy.proven) killTree(proxy.pid);
+    if (!(await reclaimPublicPort(publicPort))) return 1;
+    const nextProxy = await launchProxy(internalPort, publicPort, lanHost, 'recover proxy');
+    if (!nextProxy) return 1;
+    writePair(app.pid, nextProxy.pid, internalPort, publicPort);
+    ensureSupervisor();
+    console.log(`[lan] recovered proxy ${nextProxy.pid}; app ${app.pid} untouched`);
+    return 0;
+  }
+
+  // App is the only broken half. Prefer the same internal port so the live
+  // proxy's upstream stays valid and clients do not see a 502 window.
+  if (!app.alive && proxy.alive && !upstreamStale) {
+    if (app.pid && !app.proven && app.owns) {
+      console.error(`[lan] app ${app.pid}: владение не подтверждено — не завершаю; восстановление остановлено`);
+      return 1;
+    }
+    if (app.pid && app.proven) killTree(app.pid);
+    if (!(await waitPortFree(internalPort))) {
+      console.error(`[lan] internal port ${internalPort} is still occupied — app recovery stopped`);
+      return 1;
+    }
+    const nextApp = await launchApp(internalPort, publicPort, 'recover app');
+    if (nextApp) {
+      writePair(nextApp.pid, proxy.pid, internalPort, publicPort);
+      ensureSupervisor();
+      console.log(`[lan] recovered app ${nextApp.pid}; proxy ${proxy.pid} untouched`);
+      return 0;
+    }
+    console.error('[lan] same-port app recovery failed — replacing the proxy upstream');
+  }
+
+  // Last resort: app needs a new port, so the proxy must follow. The app itself
+  // is dead in this branch; the proxy is the only healthy process that changes.
+  const newInternal = await freePort();
+  const nextApp = await launchApp(newInternal, publicPort, 'recover app (new port)');
+  if (!nextApp) return 1;
+  if (proxy.pid && !proxy.proven && proxy.owns) {
+    console.error(`[lan] proxy ${proxy.pid}: владение не подтверждено — новый app оставлен, proxy не тронут`);
+    killTree(nextApp.pid);
+    return 1;
+  }
+  if (proxy.pid && proxy.proven) killTree(proxy.pid);
+  if (!(await reclaimPublicPort(publicPort))) {
+    killTree(nextApp.pid);
+    return 1;
+  }
+  const nextProxy = await launchProxy(newInternal, publicPort, lanHost, 'recover proxy (new upstream)');
+  if (!nextProxy) {
+    killTree(nextApp.pid);
+    return 1;
+  }
+  writePair(nextApp.pid, nextProxy.pid, newInternal, publicPort);
+  ensureSupervisor();
+  console.log(`[lan] recovered app ${nextApp.pid} and proxy ${nextProxy.pid}`);
+  return 0;
+}
+
 async function startPair() {
 
   // P0 изоляция (инцидент 2026-11-20): тестовый экземпляр с собственным
@@ -351,40 +551,12 @@ async function startPair() {
   const publicPort = Number(process.env.LAN_PORT || config.server?.port || 8787);
   const lanHost = proxyHost(config);
   const internalPort = await freePort();
-  const appLog = path.join(DATA, 'lan-app.log');
-  fs.mkdirSync(DATA, { recursive: true });
   if (!(await reclaimPublicPort(publicPort))) return 1;
 
   // The app: full TaskBridge, loopback only, TLS left to the proxy, and told the
   // public port so the links it prints (and /api/info) point at the proxy.
-  const appMarker = markLog(appLog, 'start-lan app');
-  const app = spawnDetached({
-    file: process.execPath,
-    args: ['src/server.mjs'],
-    log: appLog,
-    env: {
-      TASKBRIDGE_BIND_HOST: '127.0.0.1',
-      TASKBRIDGE_PORT: String(internalPort),
-      TASKBRIDGE_PUBLIC_PORT: String(publicPort),
-      TASKBRIDGE_DISABLE_TLS: '1',
-    },
-  });
-
-  const appStartedAt = Date.now();
-  const appUp = await waitForHealth(internalPort, { timeoutMs: APP_START_TIMEOUT_MS, onFail: () => app.exitCode !== null });
-  if (!appUp) {
-    killTree(app.pid);
-    console.error(`[lan] the app did not come up in ${Math.round((Date.now() - appStartedAt) / 1000)} s. Its log says:`);
-    console.error(meaningfulTail(tailSince(appLog, appMarker)) || '  (empty)');
-    if (app.exitCode !== null) {
-      const lockPid = readLock()?.pid;
-      console.error(lockPid
-        ? `[lan] каталог данных ${DATA} занят другим экземпляром TaskBridge (PID ${lockPid}) — остановите его и повторите. ` +
-          'Если этот процесс уже не работает, запустите ещё раз: блокировка от мёртвого процесса перехватывается.'
-        : '[lan] is another TaskBridge already running on this data directory?');
-    }
-    return 1;
-  }
+  const app = await launchApp(internalPort, publicPort);
+  if (!app) return 1;
 
   const proxy = await launchProxy(internalPort, publicPort, lanHost);
   if (!proxy) {
@@ -553,9 +725,9 @@ async function stop() {
 }
 
 const command = (process.argv[2] || 'run').toLowerCase();
-const handler = { run: runForeground, start, status, stop }[command];
+const handler = { run: runForeground, start, status, stop, recover }[command];
 if (!handler) {
-  console.error(`[lan] unknown command: ${command} (run | start | status | stop)`);
+  console.error(`[lan] unknown command: ${command} (run | start | recover | status | stop)`);
   process.exit(2);
 }
 /* exitCode, not exit(): exiting while a detached child handle is still closing

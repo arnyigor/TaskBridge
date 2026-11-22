@@ -73,6 +73,19 @@ export async function pidOwnsPort(pid, port) {
   return (await listeningPids(wantedPort)).includes(wanted);
 }
 
+/** Upstream port advertised by a live proxy, or null when no proxy answers. */
+export async function proxyUpstreamPort(port, timeoutMs = 1500) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const match = /:(\d+)$/u.exec(response.headers.get('x-taskbridge-upstream') || '');
+    return match ? Number(match[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 /** True when the port answers as a TaskBridge proxy (any response carries the id). */
 export async function taskBridgeProxyOn(port, timeoutMs = 1500) {
   try {

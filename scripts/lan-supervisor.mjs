@@ -152,7 +152,7 @@ async function main() {
           // (проверено в песочнице 2026-11-19).
           // Изолированный harness (тесты) подменяет команду рестарта: минимальная пара
           // вместо полного TaskBridge (детерминизм, см. tests/isolation).
-          const restartCmd = process.env.LAN_SUPERVISOR_RESTART_CMD || 'scripts/restart-lan-now.mjs --delay-ms=0';
+          const restartCmd = process.env.LAN_SUPERVISOR_RESTART_CMD || 'scripts/start-lan.mjs recover';
           const restartParts = restartCmd.split(' ');
           const worker = spawn(process.execPath, [path.join(root, restartParts[0]), ...restartParts.slice(1)], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
@@ -188,7 +188,7 @@ async function main() {
           restarting = true;
           restartSeenStartedAt = state.startedAt;
           log(`app ${state.appPid} answers nothing on ${state.internalPort} for ${unhealthyTicks * (TICK_MS / 1000)} s — restarting the pair`);
-          const restartCmd = process.env.LAN_SUPERVISOR_RESTART_CMD || 'scripts/restart-lan-now.mjs --delay-ms=0';
+          const restartCmd = process.env.LAN_SUPERVISOR_RESTART_CMD || 'scripts/start-lan.mjs recover';
           const restartParts = restartCmd.split(' ');
           const worker = spawn(process.execPath, [path.join(root, restartParts[0]), ...restartParts.slice(1)], {
             cwd: root, detached: true, windowsHide: true, stdio: 'ignore',
