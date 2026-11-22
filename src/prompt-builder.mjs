@@ -101,6 +101,7 @@ export function turnInstructions(profile = EXPLORE, { files = [] } = {}) {
 }
 
 // Keep the marker and path lines compatible with old journal entries and both chat clients.
+export const ATTACHMENT_READ_HINT = "\n\nUse Pi's built-in `read` tool with the exact workspace-relative paths above. Do not use `taskbridge_external_open` for chat attachments.";
 export function attachmentNote(paths) {
   return paths.length
     ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${paths.map(file => `- ${file}`).join('\n')}`
@@ -113,9 +114,7 @@ export function attachmentNote(paths) {
  */
 export function buildTurnPrompt({ text, profile = EXPLORE, files = [] } = {}) {
   const list = Array.isArray(files) ? files.filter(Boolean) : [];
-  const note = list.length
-    ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${list.map(file => `- ${file}`).join('\n')}`
-    : '';
+  const note = list.length ? attachmentNote(list) + ATTACHMENT_READ_HINT : '';
   return `${String(text ?? '').trimEnd()}${note}\n\n${turnInstructions(profile, { files: list })}`;
 }
 
