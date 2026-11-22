@@ -11,6 +11,7 @@ import path from 'node:path';
 import { resolvePiCommand } from './pi-command.mjs';
 import { PiRpcSession } from './pi-rpc.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
+import { beginStopTrace, recordStopTrace, endStopTrace, stopTraceCommandId } from './lifecycle-trace.mjs';
 import { prepareProjectWorkspace, createScratchWorkspace, collectGitState, collectGitStateForCompletion, runVerification, applyTaskPatch, removeWorktree, git } from './git.mjs';
 import { RuntimeManager } from './runtime-manager.mjs';
 import { restoreSessionFile, sessionContainsUserMessage } from './session-history.mjs';
@@ -40,7 +41,7 @@ import { classifyToolCall, resolveApprovalConfig } from './approvals/policy.mjs'
 import { deriveRuntimeState, transitionAllowed } from './runtime-state.mjs';
 import { listProcesses, processesUsingFile, sameProcess } from './process-info.mjs';
 import { piAgentDir } from './pi-settings.mjs';
-import { attachmentNote, buildTurnPrompt, detectProfile, resolveTurnInstructionsMode, turnInstructions } from './prompt-builder.mjs';
+import { attachmentNote, ATTACHMENT_READ_HINT, buildTurnPrompt, detectProfile, resolveTurnInstructionsMode, turnInstructions } from './prompt-builder.mjs';
 import { deriveRecap, readSavedRecap, writeRecap, removeRecap, reconcileVerification, RECAP_MD } from './resume/recap.mjs';
 import { buildResumeContext, sessionSummary, WORKSPACE_STRATEGIES, MEMORY_MODES } from './resume/resume-builder.mjs';
 import { buildResumePreview } from './resume/resume-preview.mjs';
@@ -3236,12 +3237,9 @@ export class TaskManager extends EventEmitter {
     if (String(task.prompt || '').trimStart().startsWith('/')) return task.prompt;
     const files = (task.files || []).map((f) => f.path || `.taskbridge-input/${f.name}`);
     if (this.turnInstructionsMode === 'hook') {
-      // The instructions go through Pi's `before_agent_start` for every turn; the
-      // operator's message is delivered as typed (§CORE-02). The attachment note
-      // stays: it is not an instruction, it is the path list the model needs.
-      const note = files.length
-        ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${files.map(file => `- ${file}`).join('\n')}`
-        : '';
+      // General instructions go through Pi's `before_agent_start`; keep only
+      // the attachment paths and their read hint next to the operator's text.
+      const note = files.length ? attachmentNote(files) + ATTACHMENT_READ_HINT : '';
       return `${String(task.prompt ?? '').trimEnd()}${note}`;
     }
     return buildTurnPrompt({
@@ -5446,6 +5444,7 @@ export class TaskManager extends EventEmitter {
     // Правка ждёт этот промис с начала STOP. Жёсткий STOP убивает процессы
     // до записи CANCELLING, так что одного статуса для проверки недостаточно.
     const task = this.tasks.get(id);
+    const stopTrace = beginStopTrace(id, commandId, task?._turn);
     let settle = null;
     if (task && !task._stopSettled) {
       task._stopSettled = new Promise(resolve => { settle = resolve; });
@@ -5455,6 +5454,7 @@ export class TaskManager extends EventEmitter {
       return await this.#withCommand(commandId, opts && opts.clientId ? String(opts.clientId) : null, () => this.#payloadHash(id, 'cancel'), () => this.#cancel(id, { hard }));
     } finally {
       if (settle) { settle(); delete task._stopSettled; }
+      endStopTrace(id, stopTrace);
     }
   }
 
@@ -6083,6 +6083,7 @@ export class TaskManager extends EventEmitter {
     // любой записи в store: под нагрузкой (поток кадров инструмента, занятая
     // БД) статус и разбор очереди отодвигали убийство на секунды, и STOP
     // выглядел как зависание (2026-10-14, blender-команда, телефон и десктоп).
+    if (runtime) recordStopTrace(id, 'pi-stop-started');
     if (runtime && hard) {
       try {
         await runtime.pi.killTree();
@@ -6104,6 +6105,7 @@ export class TaskManager extends EventEmitter {
         }
       }
     }
+    if (runtime) recordStopTrace(id, 'pi-stop-returned');
     // Открытый диалог расширения закрывается сам: Pi уже убит, но состояние
     // задачи обязано быть очищено (иначе кнопки подтверждения останутся на экране).
     if (runtime && task.pendingUiRequest) {
@@ -6130,7 +6132,9 @@ export class TaskManager extends EventEmitter {
       await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
       return this.#publicTask(task);
     }
+    recordStopTrace(id, 'eventchain-wait-started');
     await runtime.eventChain.catch(() => {});
+    recordStopTrace(id, 'eventchain-drained');
     this.#resolveSettle(id);
     await this.#finalizeCancelled(task);
     this.#releaseSlot(id);
@@ -6484,12 +6488,10 @@ export class TaskManager extends EventEmitter {
       ? await this.#isPiExtensionCommand(runtime, userText)
       : false;
     const effectiveMode = extendableCommand ? 'prompt' : requestedMode;
-    // The queued text already carries the note about its files. The task
-    // instructions are NOT re-added here: they come with the turn that started the
-    // session and stay in Pi's transcript (§4.3 of the 1.3 plan), while the text
-    // delivered for a follow-up stays exactly what the operator typed — the queue,
-    // the restart recovery and the extension-command rule all read it verbatim.
-    const message = userText + (attached.length && !staged.length ? `\n\nAdditional files from the phone are in .taskbridge-input/:\n${attached.map(f => `- ${f.path}`).join('\n')}` : '');
+    // Queued text already carries the paths of staged files. Add only the read
+    // hint at delivery; never duplicate the path list or the general instructions.
+    const note = staged.length ? '' : attachmentNote(attached.map(f => f.path));
+    const message = userText + note + (attached.length ? ATTACHMENT_READ_HINT : '');
     // Hold incoming frames until the RPC acknowledgement and USER_MESSAGE record
     // are persisted. A rejected RPC must not create a phantom user turn.
     await runtime.eventChain.catch(() => {});
@@ -7083,6 +7085,8 @@ export class TaskManager extends EventEmitter {
       const change = this.#runtimeChange(task);
       if (change) await this.#recordEvent(task, 'RUNTIME_STATE', `${change.from || '—'} → ${change.to}`, { ...change, reason: type }, false);
     }
+    const stopCommandId = type === 'TASK_CANCELLED' ? stopTraceCommandId(task.id) : null;
+    if (stopCommandId) data = { ...data, stopCommandId };
     const event = { at: now(), taskId: task.id, type, message, data };
     // Терминальные события несут номер поколения и на конверте: клиенты и тесты
     // сверяют envelope.turn с data.turn — два источника одного факта недопустимы.
@@ -7097,6 +7101,7 @@ export class TaskManager extends EventEmitter {
       const run = this.runCoordinator.terminal(task.id, type.slice(5), event.at);
       await this.store.appendEventWithTask(task.id, event, { ...this.#publicTask(task, true), updatedAt: event.at }, run);
       if (run) this.runCoordinator.committed(task.id, run.id);
+      recordStopTrace(task.id, 'terminal-committed', { eventSeq: event.seq, runId: run?.id, status: type.slice(5) });
     } else if (seq === null) await this.store.appendEvent(task.id, event);
     else await this.store.appendEventAt(task.id, seq, event);
     if (['TASK_SUCCEEDED', 'TASK_FAILED', 'TASK_CANCELLED'].includes(type)) this.#terminalPublication.release(task);

@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
+import { recordStopTrace, lifecycleTraceSnapshot } from './lifecycle-trace.mjs';
 import { memoryMetrics } from './memory/memory-metrics.mjs';
 import { SseWriter } from './sse-writer.mjs';
 import { sessionStorage, warnSessionBytes } from './session-storage.mjs';
@@ -374,6 +375,7 @@ manager.on('task-event', (event) => {
     if (client.replaying) client.pending.push(event);
     else try { deliver(client, event); } catch {}
   }
+  if (event.type === 'TASK_CANCELLED') recordStopTrace(event.taskId, 'sse-enqueued', { eventSeq: event.seq, status: 'CANCELLED' });
   // Sample after a completed Pi turn (initial prompt AND follow-ups), so the
   // remainder includes that request's usage. Fire-and-forget; rapid turns
   // share the provider cache (at most one read per minute).
@@ -1065,6 +1067,11 @@ async function handleRequest(req, res) {
       access.require(req);
       if (!cloudWorker) return json(res, 200, { enabled: false, reason: cloudCheck.ok ? 'Cloud transport is disabled by configuration.' : cloudCheck.problems });
       return json(res, 200, await cloudWorker.status());
+    }
+
+    if (req.method === 'GET' && pathname === '/api/diagnostics/lifecycle') {
+      access.require(req);
+      return json(res, 200, { bootId, ...lifecycleTraceSnapshot() });
     }
 
     if (req.method === 'GET' && pathname === '/api/metrics') {
