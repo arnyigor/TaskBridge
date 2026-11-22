@@ -19,6 +19,7 @@ import io.ktor.http.headersOf
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import ru.arny.taskbridge.AppGraph
 import ru.arny.taskbridge.core.client.settings.KeyValueStore
@@ -78,6 +79,47 @@ class SessionsStoreMismatchTest {
         onNodeWithText("Пока ни одной сессии").assertDoesNotExist()
         // Кэш-настройка не подменена чужим storeId.
         assertEquals("production-store-1111", store.get("storeId"))
+    }
+
+    @Test
+    fun theSameStoreIdKeepsTheCachedListAndDoesNotWarn() = runComposeUiTest {
+        val knownStore = "production-store-1111"
+        val store = MemorySettings().apply { put("storeId", knownStore) }
+        var infoCalls = 0
+        val engine = MockEngine { request ->
+            val path = request.url.encodedPath
+            val body = when {
+                path.endsWith("/api/info") -> {
+                    infoCalls++
+                    """{"name":"TaskBridge","storeId":"$knownStore","apiVersion":1,"addresses":[]}"""
+                }
+                path.endsWith("/api/tasks") ->
+                    """[{"id":"t1","title":"Kept session","projectId":"fixture","status":"SUCCEEDED","createdAt":"2026-11-01T00:00:00Z","updatedAt":"2026-11-01T00:00:00Z"}]"""
+                path.endsWith("/api/projects/overview") -> """{"projects":[],"unassignedSessions":1,"totals":{}}"""
+                path.endsWith("/api/projects") -> "[]"
+                else -> "{}"
+            }
+            respond(body, HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        val platform = object : PlatformServices by DesktopPlatformServices(store = store) {
+            override fun httpClient(baseUrl: String?): HttpClient = HttpClient(engine)
+        }
+        val graph = AppGraph(platform)
+        val connection = graph.connect("http://pc:8787")
+
+        setContent {
+            MaterialTheme {
+                Box(Modifier.size(420.dp, 800.dp)) {
+                    SessionsScreen(graph = graph, connection = connection, selectedTaskId = null, onOpen = {}, onDraft = {}, onSettings = {})
+                }
+            }
+        }
+
+        waitUntil(timeoutMillis = 10_000) { infoCalls > 0 && connection.sessions.state.value.tasks.isNotEmpty() }
+        assertFalse(connection.storeMismatch.value, "the same store must not be treated as a foreign instance")
+        assertEquals(knownStore, store.get("storeId"))
+        assertTrue(connection.sessions.state.value.tasks.any { it.id == "t1" }, "cached session disappeared under the same storeId")
+        onNodeWithText("Подключён другой экземпляр TaskBridge").assertDoesNotExist()
     }
 }
 

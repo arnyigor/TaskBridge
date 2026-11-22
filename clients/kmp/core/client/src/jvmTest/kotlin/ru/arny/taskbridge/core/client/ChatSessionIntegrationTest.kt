@@ -11,6 +11,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -185,6 +186,63 @@ class ChatSessionIntegrationTest {
         withTimeout(30_000) { while (output.readLine() != "up") Unit }
         val back = chat.await("live again after the outage", 40_000) { it.link == LinkState.Live }
         assertTrue(back.chat.items.isNotEmpty(), "история на месте после обрыва")
+        chat.close()
+    }
+
+    @Test
+    fun aThirtySecondOutageKeepsHistoryAndDeliversTheQueuedMessageOnce() = runBlocking<Unit> {
+        if (!nodeAvailable) return@runBlocking
+        val api = api()
+        val task = api.createTask(CreateTaskRequest(projectId = "fixture", prompt = "Прочитай example.txt"))
+        val chat = session(task.id)
+        chat.start()
+        val before = chat.await("ready", 30_000) { it.link == LinkState.Live && it.idle() && it.users().size == 1 }
+        val beforeIds = before.chat.items.map { it.id }
+
+        // 30 s is the lower bound from the S2 contract (server unavailable 30–180 s):
+        // history stays readable and a new message waits in the outbox instead of
+        // being lost or duplicated.
+        input.write("down 30000\n")
+        input.flush()
+        chat.await("the link is reconnecting", 20_000) { it.link !is LinkState.Live }
+        chat.send("during the outage")
+        val during = chat.state.value
+        assertTrue(during.chat.items.isNotEmpty(), "history disappeared during the outage")
+        assertTrue(during.outbox.any { it.text == "during the outage" }, "outbox did not retain the message: ${during.outbox}")
+
+        withTimeout(60_000) { while (output.readLine() != "up") Unit }
+        chat.await("live again", 45_000) { it.link == LinkState.Live }
+        val after = chat.await("delivered exactly once", 90_000) {
+            it.idle() && it.users().size == 2 && it.outbox.isEmpty()
+        }
+        assertEquals(1, after.users().count { it.text == "during the outage" }, "the message was duplicated after reconnect")
+        assertEquals(beforeIds, after.chat.items.map { it.id }.take(beforeIds.size), "old history was not preserved in order")
+        assertTrue(after.chat.items.map { it.id }.distinct().size == after.chat.items.size, "duplicate history items after reconnect")
+        chat.close()
+    }
+
+    @Test
+    fun aRestartReconnectsTheStreamWithoutAReconnectKickAndChangesBootId() = runBlocking<Unit> {
+        if (!nodeAvailable) return@runBlocking
+        val api = api()
+        val task = api.createTask(CreateTaskRequest(projectId = "fixture", prompt = "Прочитай example.txt"))
+        val chat = session(task.id)
+        chat.start()
+        val before = chat.await("ready", 30_000) { it.link == LinkState.Live && it.idle() }
+        val bootBefore = api.info().bootId
+        val idsBefore = before.chat.items.map { it.id }
+
+        input.write("restart\n")
+        input.flush()
+        withTimeout(30_000) { while (output.readLine() != "restarted") Unit }
+
+        // Deliberately NO chat.reconnectNow(): the stream loop itself must notice the
+        // closed connection, reconnect and pick up the new bootId.
+        chat.await("reconnected without a manual kick", 60_000) { it.link == LinkState.Live }
+        val bootAfter = api.info().bootId
+        assertNotEquals(bootBefore, bootAfter, "the server restarted but bootId did not change")
+        val back = chat.state.value
+        assertEquals(idsBefore, back.chat.items.map { it.id }.take(idsBefore.size), "history changed across the restart")
         chat.close()
     }
 
