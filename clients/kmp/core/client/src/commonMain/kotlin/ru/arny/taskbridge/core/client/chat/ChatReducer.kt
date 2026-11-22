@@ -122,6 +122,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
 
     val taskId: String = task.id
 
+    /** Verdict for the latest TASK_* event, shared with the session's controls. */
+    internal var terminalAffectsCurrent: Boolean = false
+        private set
+
     /** The newest seq applied; events at or below it are ignored. */
     var cursor: Long = 0
         private set
@@ -351,7 +355,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         variants[key] = Variants(mutableListOf("assistant-$id"), "assistant-$id")
     }
 
-    private fun finish(status: String, error: String? = null, at: String? = null, turnNo: Long? = null) {
+    private fun finish(status: String, error: String? = null, at: String? = null, turnNo: Long? = null): Boolean {
         val humanError = error?.let { humanizeError(it) }?.takeIf { it.isNotEmpty() }
         // Legacy terminal events/polls may contain only the generic wrapper.
         // Keep the concrete cause already recovered from Pi's message_end.
@@ -388,7 +392,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 previous.final = true
                 for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
             }
-            return
+            return false
         }
         val currentNo = current.turnNo
         if (turnNo != null && currentNo != null && turnNo < currentNo) {
@@ -401,7 +405,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 previous.final = true
                 for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
             }
-            return
+            return false
         }
         // A late settle that predates the CURRENT prompt belongs to the previous answer.
         val currentStart = current.at ?: current.userAt
@@ -415,7 +419,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 previous.final = true
                 for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
             }
-            return
+            return false
         }
 
         val running = turns.filter { it.role == Role.ASSISTANT && (it.active || it.status.isEmpty()) }
@@ -449,6 +453,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             turn.endedAt = turn.endedAt ?: at
         }
         for (answer in turns.filter { it.role == Role.ASSISTANT && it.final }) updateUserDelivery(answer)
+        return true
     }
 
     private fun updateUserDelivery(answer: Turn) {
@@ -620,7 +625,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 mergeTurnMetrics(metrics)
             }
             "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
-                finish(
+                terminalAffectsCurrent = finish(
                     event.type.removePrefix("TASK_"),
                     if (event.type == "TASK_FAILED") event.message else null,
                     event.at,

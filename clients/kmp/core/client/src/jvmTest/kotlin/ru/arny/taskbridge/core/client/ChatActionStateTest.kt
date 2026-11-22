@@ -21,6 +21,33 @@ class ChatActionStateTest {
     private fun ChatSession.answer() = state.value.chat.items.filterIsInstance<ChatItem.Assistant>().last()
     private suspend fun until(condition: () -> Boolean) = withTimeout(5000) { while (!condition()) delay(5) }
 
+    @Test fun lateTerminalFromPreviousTurnCannotGreyButtonsWhileNewAnswerIsActive() = runBlocking<Unit> {
+        val task = """{"id":"t","prompt":"new","status":"RUNNING","snapshotSeq":1,"turnState":{"turn":2,"phase":"PROGRESS"}}"""
+        val events = """{"events":[{"seq":1,"type":"USER_MESSAGE","data":{"text":"new","turn":2}}],"reachedStart":true}"""
+        var reads = 0
+        val http = HttpClient(MockEngine { request ->
+            when {
+                request.url.encodedPath.endsWith("/stream") -> respond(
+                    "id: 2\ndata: {\"seq\":2,\"type\":\"TASK_CANCELLED\",\"data\":{\"turn\":1}}\n\n",
+                    HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/event-stream"),
+                )
+                request.url.encodedPath.endsWith("/events") -> respond(events, HttpStatusCode.OK, headers)
+                request.url.encodedPath.endsWith("/approvals") -> respond("[]", HttpStatusCode.OK, headers)
+                else -> {
+                    if (reads++ > 0) kotlinx.coroutines.awaitCancellation()
+                    respond(task, HttpStatusCode.OK, headers)
+                }
+            }
+        })
+        val session = ChatSession(TaskBridgeApi(http, SimpleConnection("http://pc:8787")), "t", this, ids = { "c" }, now = { "2026-11-21T00:00:00Z" })
+        try {
+            session.start()
+            until { session.state.value.chat.cursor == 2L }
+            assertTrue(session.answer().active, "the terminal belongs to the old answer")
+            assertEquals("RUNNING", session.state.value.task?.status, "task controls and answer must use the same generation verdict")
+        } finally { session.close(); http.close() }
+    }
+
     @Test fun editHidesOldErrorWhileWaitingRejectsDoubleTapAndRestoresErrorOnRefusal() = runBlocking<Unit> {
         val editing = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

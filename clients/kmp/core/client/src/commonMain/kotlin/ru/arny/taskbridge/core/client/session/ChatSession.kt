@@ -3,6 +3,7 @@ package ru.arny.taskbridge.core.client.session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlin.time.TimeSource
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
@@ -131,6 +132,18 @@ data class ChatSessionState(
     val lastEventAt: String? = null,
     val lastEventType: String? = null,
     val lastContactAt: String? = null,
+    val lifecycleTracing: Boolean = false,
+    val lifecycleTrace: List<ChatLifecycleSample> = emptyList(),
+)
+
+/** Local monotonic elapsedMs; never subtract across devices. Prompts are not recorded. */
+data class ChatLifecycleSample(
+    val phase: String,
+    val commandId: String? = null,
+    val eventSeq: Long? = null,
+    val elapsedMs: Long,
+    val status: String? = null,
+    val activeAnswers: Int = 0,
 )
 
 /** One-shot things the screen reacts to (a snackbar, text back into the composer, navigation). */
@@ -173,6 +186,35 @@ class ChatSession(
     private val delivering = mutableSetOf<String>()
     private val deliveryJobs = MutableStateFlow<Map<String, Job>>(emptyMap())
     private val outgoingFiles = MutableStateFlow<Map<String, List<UploadFile>>>(emptyMap())
+
+    // Opt-in STOP diagnostics: monotonic to this process, never a cross-device clock.
+    private val lifecycleClock = TimeSource.Monotonic.markNow()
+
+    fun setLifecycleTracing(enabled: Boolean) {
+        _state.update { it.copy(lifecycleTracing = enabled, lifecycleTrace = if (enabled) emptyList() else it.lifecycleTrace) }
+    }
+
+    private fun recordLifecycle(phase: String, commandId: String? = null, event: TaskEvent? = null) {
+        if (!_state.value.lifecycleTracing) return
+        _state.update { state ->
+            val sample = ChatLifecycleSample(
+                phase, commandId ?: event?.string("stopCommandId"), event?.seq ?: state.chat.cursor,
+                lifecycleClock.elapsedNow().inWholeMilliseconds, state.task?.status,
+                state.chat.items.filterIsInstance<ru.arny.taskbridge.core.client.chat.ChatItem.Assistant>().count { it.active },
+            )
+            state.copy(lifecycleTrace = (state.lifecycleTrace + sample).takeLast(128))
+        }
+    }
+
+    /** Called after a Compose frame-clock boundary; not proof of a physical display refresh. */
+    fun recordLifecycleFrame(eventSeq: Long, status: String?, activeCount: Int) {
+        if (!_state.value.lifecycleTracing) return
+        _state.update { state ->
+            state.copy(lifecycleTrace = (state.lifecycleTrace + ChatLifecycleSample(
+                "ui-frame-boundary", null, eventSeq, lifecycleClock.elapsedNow().inWholeMilliseconds, status, activeCount,
+            )).takeLast(128))
+        }
+    }
     private val commandDelivery = CommandDelivery(api, taskId, ::backoff)
     private var reducer: ChatReducer? = null
     private var oldestSeq: Long? = null
@@ -192,6 +234,11 @@ class ChatSession(
     )
     private var started = false
     private var closed = false
+
+    private companion object {
+        val TERMINAL_EVENTS = setOf("TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED")
+        val TERMINAL_TASK_STATUSES = setOf("SUCCEEDED", "FAILED", "CANCELLED")
+    }
     private var streamingEnabled = initialStreamingEnabled
     private val cachedEvents = mutableListOf<TaskEvent>()
 
@@ -521,10 +568,12 @@ class ChatSession(
             val status = when (event.type) {
                 "USER_MESSAGE" -> "RUNNING"
                 "STATUS" -> event.string("status")
-                "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" -> event.type.removePrefix("TASK_")
+                "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
+                    event.type.removePrefix("TASK_").takeIf { chat.terminalAffectsCurrent }
                 else -> null
             }
             _state.update { it.copy(task = if (status != null) it.task?.copy(status = status) else it.task, chat = chat.snapshot(), lastEventAt = event.at ?: now(), lastEventType = kind) }
+            if (event.type in TERMINAL_EVENTS) recordLifecycle(if (chat.terminalAffectsCurrent) "terminal-applied" else "terminal-ignored", event = event)
         }
         if (outboxChanged) saveOutbox()
         scheduleCachePersist(immediate = event.shouldFlushCacheImmediately())
@@ -543,6 +592,7 @@ class ChatSession(
         try {
             val cursor = mutex.withLock { reducer?.cursor ?: 0L }
             val fetched = api.task(taskId)
+            if (fetched.status in TERMINAL_TASK_STATUSES) recordLifecycle("terminal-snapshot-received")
             // A heartbeat can be the only frame after a lost tail. Metadata alone
             // cannot restore missing messages: repair up to the server's event
             // version even when no later SSE event arrives to expose the gap.
@@ -556,6 +606,7 @@ class ChatSession(
                 loadInitial()
                 return
             }
+            recordLifecycle("terminal-poll-applied")
             mutex.withLock {
                 val chat = reducer
                 // A response started before a new SSE event cannot settle that newer turn.
@@ -891,25 +942,32 @@ class ChatSession(
      * чата — нажать ещё раз. Сервер к повторной отмене терпим: на терминальном
      * статусе он отвечает сразу, а на живом — повторяет остановку.
      */
-    fun cancel(hard: Boolean = false) = act("cancel", concurrent = true) {
-        mutex.withLock {
-            reducer?.setStopping(true)
-            _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
-        }
-        val cursor = mutex.withLock { reducer?.cursor ?: 0L }
-        try {
-            val stopped = api.cancel(taskId, ids(), hard = hard)
+    fun cancel(hard: Boolean = false): Unit {
+        val commandId = ids()
+        recordLifecycle("stop-clicked", commandId)
+        return act("cancel", concurrent = true) {
             mutex.withLock {
-                val chat = reducer
-                if (chat != null && chat.cursor != cursor) return@withLock
-                val merged = mergeTaskSnapshot(_state.value.task, stopped, chat?.cursor ?: cursor)
-                chat?.syncTask(merged)
-                _state.update { it.copy(task = merged) }
-            }
-        } finally {
-            mutex.withLock {
-                reducer?.setStopping(false)
+                reducer?.setStopping(true)
                 _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
+            }
+            recordLifecycle("stopping-shown", commandId)
+            val cursor = mutex.withLock { reducer?.cursor ?: 0L }
+            try {
+                recordLifecycle("http-stop-started", commandId)
+                val stopped = api.cancel(taskId, commandId, hard = hard)
+                recordLifecycle("http-stop-returned", commandId)
+                mutex.withLock {
+                    val chat = reducer
+                    if (chat != null && chat.cursor != cursor) return@withLock
+                    val merged = mergeTaskSnapshot(_state.value.task, stopped, chat?.cursor ?: cursor)
+                    chat?.syncTask(merged)
+                    _state.update { it.copy(task = merged) }
+                }
+            } finally {
+                mutex.withLock {
+                    reducer?.setStopping(false)
+                    _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
+                }
             }
         }
     }

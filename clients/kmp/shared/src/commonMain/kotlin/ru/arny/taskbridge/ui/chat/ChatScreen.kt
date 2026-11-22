@@ -669,7 +669,7 @@ fun ChatScreen(
                         }
                     },
                     top = {
-                        DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, visible = visible, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText)
+                        DeliveryDiagnostics(state, info = sessionListState.info, catalog = screenCatalog, platform = platform, visible = visible, nowMillis = graph::nowMillis, onRefresh = session::reconnectNow, onCopy = platform::copyText, onToggleTrace = { session.setLifecycleTracing(it) })
                         if (task != null && task.pendingPrompts.isNotEmpty()) {
                             QueueLine(task.pendingPrompts, working = working, busy = state.busy, onSendNow = { session.sendPendingNow(it) }, onDrop = { session.dropPending(it) })
                         }
@@ -1485,6 +1485,7 @@ private fun DeliveryDiagnostics(
     nowMillis: () -> Long,
     onRefresh: () -> Unit,
     onCopy: (String) -> Unit,
+    onToggleTrace: (Boolean) -> Unit,
 ) {
     var open by remember(state.taskId) { mutableStateOf(false) }
     // Возраст событий и длительность сессии в диагностике должны идти, пока панель
@@ -1669,6 +1670,7 @@ private fun DeliveryDiagnostics(
             onDismiss = { open = false },
             footer = {
                 TextButton(onClick = onRefresh) { Text("Проверить связь") }
+                TextButton(onClick = { onToggleTrace(!state.lifecycleTracing) }) { Text(if (state.lifecycleTracing) "Выключить трассу" else "Трасса STOP") }
                 TextButton(onClick = { onCopy(details) }) { Text("Копировать") }
             },
         ) {
@@ -2484,6 +2486,15 @@ internal fun buildDiagnosticsDetails(
         *sessionDiagnosticsLines(task, info, moment).toTypedArray(),
         externalMetrics?.let(::strataPpLine),
         "Событий получено от сервера: ${state.chat.cursor} · сообщений в очереди: ${pendingPrompts.size}",
+        // Опциональная трасса STOP: по нажатию «Трасса STOP» в диагностике, без текстов.
+        state.lifecycleTrace.takeIf { state.lifecycleTracing && it.isNotEmpty() }?.let { samples ->
+            "Трасса STOP (локальные мс):\n" + samples.joinToString("\n") { sample ->
+                "  ${sample.elapsedMs} мс · ${sample.phase}" + (sample.commandId?.let { " · cmd ${it.take(8)}" } ?: "") +
+                    (sample.eventSeq?.let { " · seq $it" } ?: "") +
+                    (sample.status?.let { " · $it" } ?: "") +
+                    (if (sample.activeAnswers > 0) " · активных ответов: ${sample.activeAnswers}" else "")
+            }
+        },
         task?.errorCode?.let { "Код ошибки: $it" },
         task?.error,
         "Подтверждение агента не означает ответ провайдера. Пока нет событий модели, источник задержки неизвестен."
