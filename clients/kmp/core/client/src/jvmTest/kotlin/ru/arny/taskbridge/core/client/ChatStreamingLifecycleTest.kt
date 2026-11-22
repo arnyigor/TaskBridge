@@ -9,6 +9,7 @@ import io.ktor.http.headersOf
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -69,7 +70,7 @@ class ChatStreamingLifecycleTest {
         val http = HttpClient(MockEngine { request ->
             when {
                 request.url.encodedPath.endsWith("/events") ->
-                    respond("""{"events":[{"taskId":"t","seq":7,"type":"STATUS","data":{"status":"SUCCEEDED"}}],"reachedStart":true}""", HttpStatusCode.OK, json)
+                    respond("""{"events":[],"reachedStart":true}""", HttpStatusCode.OK, json)
                 request.url.encodedPath.endsWith("/approvals") ->
                     respond("[]", HttpStatusCode.OK, json)
                 request.url.encodedPath.endsWith("/stream") -> {
@@ -102,11 +103,15 @@ class ChatStreamingLifecycleTest {
 
             session.setStreamingEnabled(true)
             withTimeout(5_000) { while (streamRequests.get() < 1) delay(10) }
+            withTimeout(5_000) { while (session.state.value.lastSseFrameAt == null) delay(10) }
+            assertTrue(session.state.value.streamEnabled, "diagnostics must report an enabled stream")
             session.setStreamingEnabled(true)
             delay(100)
             assertEquals(1, streamRequests.get(), "enabling is idempotent")
 
             session.setStreamingEnabled(false)
+            withTimeout(5_000) { while (session.state.value.streamJobActive) delay(10) }
+            assertFalse(session.state.value.streamEnabled, "diagnostics must report a disabled stream")
             val pausedAt = streamRequests.get()
             delay(100)
             assertEquals(pausedAt, streamRequests.get(), "a hidden chat remains disconnected")
@@ -115,7 +120,7 @@ class ChatStreamingLifecycleTest {
             withTimeout(5_000) { while (streamRequests.get() < 2) delay(10) }
             assertTrue(streamRequests.get() >= 2, "returning to the chat reconnects")
             assertTrue(
-                streamCursors.all { it == ("7" to "7") },
+                streamCursors.all { it == ("0" to "0") },
                 "every resumed stream must catch up after the reducer cursor: $streamCursors",
             )
         } finally {

@@ -2500,6 +2500,12 @@ internal fun buildDiagnosticsDetails(
             sessionDuration?.let { if (sessionActive) " · идёт $it" else " · длительность $it" }.orEmpty(),
         "Связь: ${linkLabel(state.link)}",
         "Последний контакт: ${sinceLabel(state.lastContactAt, now, moment) ?: "ещё нет"}",
+        "SSE: ${if (state.streamEnabled) "включён" else "выключен"}" +
+            " · job ${if (state.streamJobActive) "активен" else "нет"}" +
+            " · кадр ${sinceLabel(state.lastSseFrameAt, now, moment) ?: "ещё нет"}" +
+            " · reconnect ${state.reconnectAttempt}" +
+            (state.lastDisconnectReason?.let { " · причина: $it" } ?: ""),
+        info?.bootId?.let { "BootId сервера: $it" },
         "Последнее событие: ${lastEventLabel(state.lastEventType) ?: "ещё нет"} · ${sinceLabel(state.lastEventAt, now, moment) ?: "—"}",
         "Pi: ${task?.let { if (displayStateOf(it).active) stageLabel(it.status) else displayStateOf(it).label } ?: "—"}",
         "Статус сервера: ${task?.status ?: "—"} · ${task?.runtime?.state ?: "—"}",

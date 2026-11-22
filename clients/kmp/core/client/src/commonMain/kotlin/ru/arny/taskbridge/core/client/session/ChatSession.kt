@@ -129,6 +129,12 @@ data class ChatSessionState(
     val lastEventAt: String? = null,
     val lastEventType: String? = null,
     val lastContactAt: String? = null,
+    /** S2-03: observable SSE lifecycle, not proof that the socket is healthy. */
+    val streamEnabled: Boolean = false,
+    val streamJobActive: Boolean = false,
+    val lastSseFrameAt: String? = null,
+    val reconnectAttempt: Int = 0,
+    val lastDisconnectReason: String? = null,
     val lifecycleTracing: Boolean = false,
     val lifecycleTrace: List<ChatLifecycleSample> = emptyList(),
 )
@@ -269,6 +275,7 @@ class ChatSession(
         // Terminal before cancellation: startup/actor races can no longer reopen SSE.
         closed = true
         streamingEnabled = false
+        _state.update { it.copy(streamEnabled = false, streamJobActive = false) }
         startupJob?.cancel()
         // Keep the reference after cancel: the stream actor calls
         // setStreamingEnabled(false) and cancelAndJoin()s this exact job before
@@ -293,6 +300,7 @@ class ChatSession(
     suspend fun setStreamingEnabled(enabled: Boolean) {
         streamLifecycleMutex.withLock {
             streamingEnabled = enabled && !closed
+            _state.update { it.copy(streamEnabled = streamingEnabled, streamJobActive = if (streamingEnabled) it.streamJobActive else false) }
             if (!streamingEnabled) {
                 val previous = streamJob
                 streamJob = null
@@ -314,6 +322,7 @@ class ChatSession(
 
     private fun startStreamIfReadyLocked() {
         if (closed || !started || !streamingEnabled || reducer == null || streamJob?.isActive == true) return
+        _state.update { it.copy(streamEnabled = true) }
         streamJob = scope.launch { streamLoop() }
     }
 
@@ -361,7 +370,13 @@ class ChatSession(
             startStreamIfReady()
         } catch (error: ApiException) {
             val restored = if (reducer == null) hydrateCache() else false
-            _state.update { it.copy(loading = false, link = if (error.error.transient) LinkState.Reconnecting(1, 2000, error.message.orEmpty()) else LinkState.Failed(error.error)) }
+            _state.update {
+                it.copy(
+                    loading = false,
+                    link = if (error.error.transient) LinkState.Reconnecting(1, 2000, error.message.orEmpty())
+                    else LinkState.Failed(error.error),
+                )
+            }
             if (error.error.transient) {
                 if (restored) startStreamIfReady()
                 else { delay(2000); loadInitial() }
@@ -446,12 +461,20 @@ class ChatSession(
         var attempt = 0
         var serverRetry = 1500L
         while (true) {
-            _state.update { it.copy(link = if (attempt == 0) LinkState.Connecting else it.link) }
+            _state.update {
+                it.copy(
+                    link = if (attempt == 0) LinkState.Connecting else it.link,
+                    streamEnabled = streamingEnabled,
+                    streamJobActive = true,
+                    reconnectAttempt = attempt,
+                    lastDisconnectReason = null,
+                )
+            }
             var gotSomething = false
             val error: ApiError? = try {
                 val cursor = mutex.withLock { reducer?.cursor ?: 0 }
                 api.stream(taskId, cursor).collect { item ->
-                    _state.update { it.copy(lastContactAt = now()) }
+                    _state.update { it.copy(lastContactAt = now(), lastSseFrameAt = now()) }
                     when (item) {
                         is StreamItem.Retry -> serverRetry = item.millis
                         is StreamItem.Event -> onEvent(item.event)
@@ -465,14 +488,22 @@ class ChatSession(
                 }
                 null // the server closed the stream: reconnect after a short pause
             } catch (cancel: CancellationException) {
+                _state.update { it.copy(streamJobActive = false) }
                 throw cancel
             } catch (failure: ApiException) {
                 failure.error
             }
             if (error != null && !error.transient && error !is ApiError.Other) {
-                _state.update { it.copy(link = LinkState.Failed(error)) }
+                _state.update {
+                    it.copy(
+                        link = LinkState.Failed(error),
+                        streamJobActive = false,
+                        lastDisconnectReason = error.message,
+                    )
+                }
                 return
             }
+            _state.update { it.copy(streamJobActive = false, lastDisconnectReason = error?.message ?: "Соединение закрыто") }
             if (gotSomething) {
                 // A connection that worked and then dropped: catch up at once.
                 attempt = 0
@@ -570,7 +601,14 @@ class ChatSession(
                     event.type.removePrefix("TASK_").takeIf { chat.terminalAffectsCurrent }
                 else -> null
             }
-            _state.update { it.copy(task = if (status != null) it.task?.copy(status = status) else it.task, chat = chat.snapshot(), lastEventAt = event.at ?: now(), lastEventType = kind) }
+            _state.update {
+                it.copy(
+                    task = if (status != null) it.task?.copy(status = status) else it.task,
+                    chat = chat.snapshot(),
+                    lastEventAt = event.at ?: now(),
+                    lastEventType = kind,
+                )
+            }
             if (event.type in TERMINAL_EVENTS) recordLifecycle(if (chat.terminalAffectsCurrent) "terminal-applied" else "terminal-ignored", event = event)
         }
         if (outboxChanged) saveOutbox()
@@ -621,7 +659,9 @@ class ChatSession(
     }
 
     private suspend fun loadApprovals() {
-        runCatching { api.approvals(taskId) }.onSuccess { list -> _state.update { it.copy(approvals = list.filter { a -> a.status == null || a.status == "PENDING" }) } }
+        runCatching { api.approvals(taskId) }.onSuccess { list ->
+            _state.update { it.copy(approvals = list.filter { a -> a.status == null || a.status == "PENDING" }) }
+        }
     }
 
     // --- sending ------------------------------------------------------------------
@@ -635,7 +675,10 @@ class ChatSession(
         val clean = text.trim()
         if (clean.isEmpty() && files.isEmpty()) return
         val commandId = ids()
-        val message = OutgoingMessage(commandId, clean, files.map { it.name }, mode, if (files.isEmpty()) OutgoingMessage.Status.Sending else OutgoingMessage.Status.Uploading)
+        val message = OutgoingMessage(
+            commandId, clean, files.map { it.name }, mode,
+            if (files.isEmpty()) OutgoingMessage.Status.Sending else OutgoingMessage.Status.Uploading,
+        )
         outgoingFiles.update { it + (commandId to files) }
         _state.update { it.copy(outbox = it.outbox + message) }
         launchDelivery(message, files)
@@ -647,7 +690,14 @@ class ChatSession(
             saveOutbox()
             mutex.withLock {
                 reducer?.let { chat ->
-                    if (!chat.hasOptimistic(message.commandId)) chat.addOptimistic(message.commandId, message.text.ifEmpty { "Прикреплённые файлы" }, files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) }, now())
+                    if (!chat.hasOptimistic(message.commandId)) {
+                        chat.addOptimistic(
+                            message.commandId,
+                            message.text.ifEmpty { "Прикреплённые файлы" },
+                            files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) },
+                            now(),
+                        )
+                    }
                     _state.update { s -> s.copy(chat = chat.snapshot()) }
                 }
             }
