@@ -158,6 +158,7 @@ let tailAfterAbort = false;
 // answering `get_state`. That is the shape seen on 2026-11-17 — the switch
 // worked, the next prompt went into a process that answered nothing.
 let muteState = false;
+let silenceFirstState = Number(process.env.FAKE_PI_STATE_SILENCE_MS || 0);
 // `mute`: the process acks the prompt and then emits NOTHING — not even
 // agent_start. That is the shape that left a turn RUNNING until the operator
 // cancelled by hand (2026-11-17). Every delivery is mute, so the test also
@@ -464,6 +465,15 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
   const respond = (data = {}, success = true) => send({ type: 'response', id: command.id, command: command.type, success, data, ...(!success ? { error: 'Fixture rejected prompt' } : {}) });
   // Mutism is sticky and answers nothing at all: a timeout is what the server sees.
   if (command.type === 'get_state' && muteState) return;
+  // FAKE_PI_STATE_SILENCE_MS: the FIRST get_state answers only after this delay
+  // with no output at all — the cold-start shape of Pi 1.5.2 (2026-11-22), which
+  // keeps stdout silent ~15 s before its first RPC response.
+  if (command.type === 'get_state' && silenceFirstState > 0) {
+    const ms = silenceFirstState;
+    silenceFirstState = 0;
+    setTimeout(() => send({ type: 'response', id: command.id, command: 'get_state', success: true, data: state() }), ms);
+    return;
+  }
   if (command.type === 'get_state') return respond(state());
   // Pi's own context estimate. FAKE_PI_CONTEXT_TOKENS pins it so a test can put
   // the session over a context limit on purpose; otherwise it is derived from

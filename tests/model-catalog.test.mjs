@@ -181,3 +181,16 @@ test('медленная проба, пережившая invalidate(), не в�
   assert.ok(catalog.cache, 'свежая проба закэширована');
   assert.notEqual(stale, fresh, 'старый и новый ответы — разные объекты');
 });
+
+// Pi 1.5.2 (2026-11-22) keeps stdout silent for ~15 s before answering its very
+// first get_state. The catalog owns a probe budget (timeoutMs, 90 s default) —
+// but its first RPC used the PiRpcSession default (15 s) and every cold start
+// died with PI_RPC_HUNG, so the model picker spun forever.
+test('холодная проба: молчаливый первый get_state живёт в рамках бюджета каталога', async () => {
+  const catalog = await fixtureCatalog({ ttlMs: 60_000 }, {
+    env: { ...process.env, FAKE_PI_STATE_SILENCE_MS: '16000' },
+  });
+  const result = await catalog.list();
+  assert.ok(result.models.length > 0, 'проба пережила молчание холодного старта');
+  assert.ok(catalog.cache, 'результат закэширован');
+}, { timeout: 60_000 });

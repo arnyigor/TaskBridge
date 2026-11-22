@@ -171,7 +171,10 @@ export class ModelCatalog {
     const deadline = setTimeout(() => { pi.killTree().catch(() => {}); }, this.timeoutMs);
     try {
       await pi.start();
-      const state = await pi.getState();
+      // Pi 1.5.2 stays stdout-silent for ~15 s before its first response; the
+      // RPC default (15 s) classified every cold start as PI_RPC_HUNG and the
+      // picker spun forever. The catalog owns the probe budget — use it.
+      const state = await pi.getState(this.timeoutMs);
       const models = await pi.getAvailableModels();
       let thinkingLevels = [];
       try { thinkingLevels = await pi.getAvailableThinkingLevels(); } catch { thinkingLevels = []; }
