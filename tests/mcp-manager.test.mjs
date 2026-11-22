@@ -15,6 +15,7 @@ test('normalizeServer classifies stdio/http and disabled', () => {
   assert.deepEqual(normalizeServer('s', { command: 'python', args: ['x'] }), { name: 's', url: null, command: 'python', args: ['x'], transport: 'stdio', disabled: false, excludeTools: [], auth: 'none', scopes: [] });
   assert.deepEqual(normalizeServer('h', { url: 'https://x/mcp', disabled: true }), { name: 'h', url: 'https://x/mcp', command: null, args: [], transport: 'http', disabled: true, excludeTools: [], auth: 'none', scopes: [] });
   assert.equal(normalizeServer('e', null).transport, null);
+  assert.equal(normalizeServer('d', { command: 'node', enabled: false }).disabled, true);
 });
 
 test('managed definitions are validated, editable, removable and audited', async t => {
@@ -192,7 +193,7 @@ test('per-task mode wins over the global one and reaches args, env and fingerpri
   const inheritGlobal = new McpManager({ mcp: { mode: 'inherit' } }, dataRoot);
   const managedTask = await inheritGlobal.launchFor({ mode: 'managed' }, { taskDir });
   assert.equal(managedTask.mode, 'managed');
-  assert.deepEqual(managedTask.args, ['--mcp-config', inheritGlobal.path]);
+  assert.deepEqual(managedTask.args, ['--mcp-config', path.join(taskDir, 'mcp.json')]);
   assert.equal(managedTask.env.PI_MCP_CONFIG_MODE, 'exclusive');
   assert.match(managedTask.fingerprint, /^[a-f0-9]{16}$/);
 
@@ -231,7 +232,7 @@ test('managed per-task override writes a derived copy with the pinned settings',
   assert.equal(launch.scope, 'task');
   assert.deepEqual(launch.args, ['--mcp-config', path.join(taskDir, 'mcp.json')]);
   const written = JSON.parse(await fs.readFile(path.join(taskDir, 'mcp.json'), 'utf8'));
-  assert.equal(written.mcpServers.drop.disabled, true);
+  assert.equal(written.mcpServers.drop, undefined);
   assert.equal(written.mcpServers.keep.disabled, undefined);
   assert.equal(written.settings.warnOnLargeDirectTools, false);
   assert.equal(written.settings.collapsedResultLines, 3);

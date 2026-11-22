@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { piAgentDir } from './pi-settings.mjs';
 
 // MCP for Pi is configured by the `pi-mcp-adapter` extension. TaskBridge does
@@ -30,10 +31,81 @@ const EMPTY_CONFIG = { mcpServers: {} };
 // never touched, so an interactive session is unaffected by this pin.
 const PINNED_SETTINGS = { warnOnLargeDirectTools: false };
 
+// Pi 1.5's `--mcp-config` parser only accepts the standard MCP fields. The
+// adapter-owned keys stay in TaskBridge's shared config (and in the UI), but a
+// single unknown key makes Pi reject the whole file and report every server as
+// «must configure exactly one of command, url, or socket».
+const PI_ENTRY_FIELDS = ['command', 'args', 'env', 'cwd', 'url', 'headers'];
+function forPiLauncher(entry) {
+  const out = {};
+  for (const key of PI_ENTRY_FIELDS) if (entry && entry[key] !== undefined) out[key] = entry[key];
+  return out;
+}
+
 function withPinnedSettings(config) {
   const source = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
   const settings = isMcpConfig(source.settings) ? { ...source.settings } : {};
   return { ...source, settings: { ...settings, ...PINNED_SETTINGS } };
+}
+
+// A real initialize + tools/list over stdio. A path that exists is not a working
+// MCP: the server can still miss a dependency, crash before handshake, or hang.
+export function probeMcpHandshake(entry, { timeoutMs = 5000 } = {}) {
+  return new Promise(resolve => {
+    const started = Date.now();
+    let child;
+    try {
+      child = spawn(entry.command, entry.args || [], {
+        cwd: entry.cwd || undefined,
+        env: { ...process.env, ...(entry.env || {}) },
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      resolve({ ok: false, error: error.message, latencyMs: Date.now() - started });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    let stage = 'initialize';
+    let settled = false;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { child.kill(); } catch { /* already gone */ }
+      resolve({ ...result, latencyMs: Date.now() - started, stderr: stderr.trim().slice(-1500) });
+    };
+    const timer = setTimeout(() => finish({ ok: false, error: `timeout after ${timeoutMs} ms` }), timeoutMs);
+    const send = message => {
+      try { child.stdin.write(`${JSON.stringify(message)}\n`); } catch (error) { finish({ ok: false, error: error.message }); }
+    };
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      for (const line of stdout.split(/\r?\n/)) {
+        if (!line.trim().startsWith('{')) continue;
+        let message;
+        try { message = JSON.parse(line); } catch { continue; }
+        if (message.id === 1 && stage === 'initialize') {
+          if (message.error) { finish({ ok: false, error: JSON.stringify(message.error) }); return; }
+          stage = 'tools';
+          send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+          send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+        } else if (message.id === 2) {
+          if (message.error) { finish({ ok: false, error: JSON.stringify(message.error) }); return; }
+          const tools = Array.isArray(message.result?.tools) ? message.result.tools : [];
+          finish({ ok: true, toolCount: tools.length, tools: tools.map(tool => tool.name).filter(Boolean) });
+        }
+      }
+    });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => finish({ ok: false, error: error.message }));
+    child.on('exit', code => finish({ ok: false, error: `exited before handshake (code ${code})` }));
+    send({
+      jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'taskbridge', version: '1' } },
+    });
+  });
 }
 
 export function normalizeServer(name, entry) {
@@ -46,7 +118,7 @@ export function normalizeServer(name, entry) {
     command,
     args: Array.isArray(value.args) ? value.args.filter(arg => typeof arg === 'string') : [],
     transport: url ? 'http' : command ? 'stdio' : null,
-    disabled: value.disabled === true,
+    disabled: value.disabled === true || value.enabled === false,
     excludeTools: Array.isArray(value.excludeTools) ? value.excludeTools.filter(t => typeof t === 'string') : [],
     auth: value.oauth ? 'oauth' : value.headers?.Authorization || value.headers?.authorization ? 'configured' : 'none',
     scopes: Array.isArray(value.oauth?.scopes) ? value.oauth.scopes.filter(scope => typeof scope === 'string') : []
@@ -218,6 +290,8 @@ export class McpManager {
   async probe(name = null, { timeoutMs = 5000 } = {}) {
     const servers = (this.mode === 'inherit' ? await this.piServers() : await this.servers()).filter(server => !name || server.name === name);
     if (name && servers.length === 0) throw Object.assign(new Error(`MCP-сервер не найден: ${name}`), { code: 'NOT_FOUND' });
+    const rawConfig = this.mode === 'inherit' ? {} : await this.read();
+    const rawServers = isMcpConfig(rawConfig.mcpServers) ? rawConfig.mcpServers : {};
     await Promise.all(servers.map(async server => {
       const started = Date.now();
       let result;
@@ -229,12 +303,13 @@ export class McpManager {
         } catch (error) {
           result = { state: 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), error: error.message };
         }
-      } else if (server.command && path.isAbsolute(server.command)) {
-        result = await fs.access(server.command).then(
-          () => ({ state: 'configured', latencyMs: Date.now() - started, checkedAt: new Date().toISOString() }),
-          () => ({ state: 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), error: 'Команда не найдена' })
-        );
-      } else result = { state: 'configured', latencyMs: null, checkedAt: new Date().toISOString() };
+      } else if (server.command) {
+        const entry = isMcpConfig(rawServers[server.name]) ? rawServers[server.name] : { command: server.command, args: server.args };
+        const handshake = await probeMcpHandshake(entry, { timeoutMs });
+        result = handshake.ok
+          ? { state: 'ready', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), toolCount: handshake.toolCount }
+          : { state: 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), error: handshake.error };
+      } else result = { state: 'error', latencyMs: Date.now() - started, checkedAt: new Date().toISOString(), error: 'Не задана команда или URL' };
       this.health.set(server.name, result);
     }));
     return this.status();
@@ -308,26 +383,25 @@ export class McpManager {
     }
     const config = await this.read();
     const servers = isMcpConfig(config.mcpServers) ? { ...config.mcpServers } : {};
-    const disabledServers = Array.isArray(taskMcp?.disabledServers) ? taskMcp.disabledServers : [];
-    let file = basePath;
-    let scope = 'global';
-    for (const name of disabledServers) {
-      // A name the config does not know cannot be disabled: say it, do not hide it.
-      if (servers[name]) servers[name] = { ...servers[name], disabled: true };
-    }
-    if (disabledServers.length && taskDir) {
-      file = path.join(taskDir, 'mcp.json');
-      scope = 'task';
-      // `write: false` is for comparisons only (has this change reached a running
-      // process?): a status read must not touch the filesystem.
-      if (write) {
-        await fs.mkdir(path.dirname(file), { recursive: true });
-        await fs.writeFile(file, `${JSON.stringify(withPinnedSettings({ ...config, mcpServers: servers }), null, 2)}\n`, 'utf8');
-      }
+    const disabledServers = Array.isArray(taskMcp?.disabledServers) ? taskMcp.disabledServers.filter(name => typeof name === 'string') : [];
+    // Pi 1.5 rejects the whole `--mcp-config` when any entry carries the
+    // TaskBridge-only `disabled` marker; it then reports every server as
+    // «must configure exactly one of command, url, or socket». Disabled
+    // servers therefore do not belong in the file Pi reads at all.
+    const active = Object.fromEntries(Object.entries(servers)
+      .filter(([name, entry]) => entry?.disabled !== true && entry?.enabled !== false && !disabledServers.includes(name))
+      .map(([name, entry]) => [name, forPiLauncher(entry)]));
+    const file = taskDir ? path.join(taskDir, 'mcp.json') : path.join(path.dirname(this.path), 'mcp-active.json');
+    const scope = taskDir ? 'task' : 'global';
+    // `write: false` is for comparisons only (has this change reached a running
+    // process?): a status read must not touch the filesystem.
+    if (write) {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, `${JSON.stringify(withPinnedSettings({ ...config, mcpServers: active }), null, 2)}\n`, 'utf8');
     }
     return {
       mode: 'managed', scope, args: ['--mcp-config', file], env, path: file,
-      fingerprint: fingerprintOf(servers), ignored: null
+      fingerprint: fingerprintOf(active), ignored: null
     };
   }
 
@@ -339,7 +413,10 @@ export class McpManager {
     if (this.mode === 'inherit') return 'inherit';
     if (this.mode === 'off') return 'off';
     const config = await this.read();
-    return fingerprintOf(isMcpConfig(config.mcpServers) ? config.mcpServers : {});
+    const servers = isMcpConfig(config.mcpServers) ? config.mcpServers : {};
+    return fingerprintOf(Object.fromEntries(Object.entries(servers)
+      .filter(([, entry]) => entry?.disabled !== true && entry?.enabled !== false)
+      .map(([name, entry]) => [name, forPiLauncher(entry)])));
   }
 
   async status(env = process.env) {

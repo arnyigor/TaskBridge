@@ -52,6 +52,10 @@ export const SECTIONS = {
       'tests/process-protection.test.mjs',
       'tests/instance-lock.test.mjs',
       'tests/turn-state.test.mjs',
+      // MCP-01: a broken server must not disable the others; probe is a real
+      // initialize/tools/list, and Pi never receives disabled entries.
+      'tests/mcp-manager.test.mjs',
+      'tests/mcp-handshake.test.mjs',
       // Запрошенный объём работы и сохранение найденного при ошибке модели
       // (§4, §7 плана 1.3): инструкции хода, доказательства инструментов.
       'tests/prompt-builder.test.mjs',
