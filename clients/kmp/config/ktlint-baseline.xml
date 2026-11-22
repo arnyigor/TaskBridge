@@ -91,31 +91,30 @@
         <error line="660" column="161" source="standard:max-line-length" />
         <error line="661" column="161" source="standard:max-line-length" />
         <error line="662" column="161" source="standard:max-line-length" />
-        <error line="672" column="161" source="standard:max-line-length" />
-        <error line="674" column="161" source="standard:max-line-length" />
-        <error line="705" column="161" source="standard:max-line-length" />
-        <error line="716" column="160" source="standard:max-line-length" />
-        <error line="751" column="161" source="standard:max-line-length" />
-        <error line="801" column="161" source="standard:max-line-length" />
-        <error line="802" column="161" source="standard:max-line-length" />
-        <error line="803" column="161" source="standard:max-line-length" />
-        <error line="804" column="161" source="standard:max-line-length" />
-        <error line="1231" column="161" source="standard:max-line-length" />
-        <error line="1253" column="161" source="standard:max-line-length" />
-        <error line="1254" column="161" source="standard:max-line-length" />
-        <error line="1314" column="161" source="standard:max-line-length" />
-        <error line="1315" column="161" source="standard:max-line-length" />
-        <error line="1319" column="161" source="standard:max-line-length" />
-        <error line="1320" column="161" source="standard:max-line-length" />
-        <error line="1400" column="161" source="standard:max-line-length" />
-        <error line="1466" column="161" source="standard:max-line-length" />
-        <error line="1661" column="161" source="standard:max-line-length" />
-        <error line="1728" column="161" source="standard:max-line-length" />
-        <error line="1769" column="161" source="standard:max-line-length" />
-        <error line="1980" column="161" source="standard:max-line-length" />
-        <error line="2006" column="161" source="standard:max-line-length" />
-        <error line="2051" column="161" source="standard:max-line-length" />
-        <error line="2076" column="161" source="standard:max-line-length" />
+        <error line="686" column="161" source="standard:max-line-length" />
+        <error line="717" column="161" source="standard:max-line-length" />
+        <error line="728" column="160" source="standard:max-line-length" />
+        <error line="763" column="161" source="standard:max-line-length" />
+        <error line="813" column="161" source="standard:max-line-length" />
+        <error line="814" column="161" source="standard:max-line-length" />
+        <error line="815" column="161" source="standard:max-line-length" />
+        <error line="816" column="161" source="standard:max-line-length" />
+        <error line="1243" column="161" source="standard:max-line-length" />
+        <error line="1265" column="161" source="standard:max-line-length" />
+        <error line="1266" column="161" source="standard:max-line-length" />
+        <error line="1326" column="161" source="standard:max-line-length" />
+        <error line="1327" column="161" source="standard:max-line-length" />
+        <error line="1331" column="161" source="standard:max-line-length" />
+        <error line="1332" column="161" source="standard:max-line-length" />
+        <error line="1412" column="161" source="standard:max-line-length" />
+        <error line="1478" column="161" source="standard:max-line-length" />
+        <error line="1678" column="161" source="standard:max-line-length" />
+        <error line="1747" column="161" source="standard:max-line-length" />
+        <error line="1788" column="161" source="standard:max-line-length" />
+        <error line="1999" column="161" source="standard:max-line-length" />
+        <error line="2025" column="161" source="standard:max-line-length" />
+        <error line="2070" column="161" source="standard:max-line-length" />
+        <error line="2095" column="161" source="standard:max-line-length" />
     </file>
     <file name="src/commonMain/kotlin/ru/arny/taskbridge/ui/chat/CodeHighlight.kt">
         <error line="42" column="160" source="standard:max-line-length" />
