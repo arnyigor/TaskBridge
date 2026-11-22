@@ -59,6 +59,23 @@ so an existing clone must be re-fetched, not pulled.
 - Before any broad command, list what it will hit:
   `Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Select ProcessId,CommandLine`.
 
+### Reliability rules for agents
+
+- **Never stop the production LAN pair while any `runs.status = 'RUNNING'`.** Check
+  `data/taskbridge.db` (read-only) or `/api/tasks` first. A watchdog drill that stops a
+  live run is a test-fixture violation, not a resilience proof.
+- Fault injection runs only through `npm run test:reliability` with its own
+  `TASKBRIDGE_DATA_DIR`, `LAN_PORT`, `LAN_HOST=127.0.0.1`, `LAN_TLS=off` and exact-PID kills
+  after `processOwnership(pid, entrypoint) === 'ours'`. Never `taskkill /IM node.exe`,
+  `pkill node`, `killall node` or `Stop-Process -Name node`; `tests/process-kill-policy.test.mjs`
+  is the static gate.
+- Read `LastTaskResult` together with `data/watchdog-state.json` (`lastCheckAt`,
+  `lastHealthyAt`, `lastRecoveryAt`, `lastError`). A zero exit code from `wscript` alone
+  is not evidence that TaskBridge answered (2026-11-22: result 0, watchdog inert).
+- "Unknown owner" is not "ours" and is not "stale": no kill, no lock deletion. Port
+  ownership plus a successful health/info probe may prove liveness for status, never
+  for termination.
+
 ## Desktop portable update procedure
 
 When the user asks to update the Windows `TaskBridge.exe`:

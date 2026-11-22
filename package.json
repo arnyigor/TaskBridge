@@ -39,6 +39,7 @@
     "check:policy": "node scripts/repo-policy.mjs",
     "bench:agent": "node bench/agent-behavior/run.mjs",
     "test:isolation": "node --test --test-concurrency=1 --test-force-exit tests/isolation/*.test.mjs",
+  "test:reliability": "node scripts/reliability-gate.mjs",
     "lint:js": "eslint web/*.js web/sw.js --no-config-lookup --config scripts/eslint.config.mjs"
   },
   "devDependencies": {
