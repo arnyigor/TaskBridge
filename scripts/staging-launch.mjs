@@ -19,6 +19,8 @@ const PRODUCTION_KEYS = [
   'TASKBRIDGE_MEDIA_KEEP_IMAGES', 'TASKBRIDGE_MEDIA_NOTIFY',
   'TASKBRIDGE_CONTEXT_BUDGET', 'TASKBRIDGE_CONTEXT_KEEP_TOKENS', 'TASKBRIDGE_CONTEXT_LOG',
   'TASKBRIDGE_DISABLE_TLS', 'TASKBRIDGE_LIFECYCLE_OWNER', 'TASKBRIDGE_LIFECYCLE_SUPERVISOR',
+  // The diagnostics flag is opt-in staging plumbing, not production wiring.
+  // TASKBRIDGE_LIFECYCLE_TRACE is deliberately absent from this list.
   'TASKBRIDGE_RESTART_ORPHAN', 'PI_SESSION_FILE', 'PROJECT_DIR',
 ];
 // Child allowlist: plumbing a Node child needs, plus the explicit staging
@@ -27,7 +29,8 @@ const ALLOWED_KEYS = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC',
   'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'PROCESSOR_ARCHITECTURE',
   'NUMBER_OF_PROCESSORS', 'OS', 'WINDIR', 'LANG', 'TERM', 'ProgramFiles', 'ProgramFiles(x86)',
   'PROGRAMDATA', 'ALLUSERSPROFILE', 'COMPUTERNAME', 'USERNAME', 'USERDOMAIN', 'PUBLIC',
-  'NODE_OPTIONS', 'NO_COLOR', 'FORCE_COLOR', 'FAKE_PI_GATE_DIR', 'FAKE_PI_VERSION', 'FAKE_PI_DUMP_ARGS'];
+  'NODE_OPTIONS', 'NO_COLOR', 'FORCE_COLOR', 'FAKE_PI_GATE_DIR', 'FAKE_PI_VERSION', 'FAKE_PI_DUMP_ARGS',
+  'TASKBRIDGE_LIFECYCLE_TRACE'];
 
 /**
  * Pure, so the refusal is testable without spawning anything.
@@ -56,10 +59,16 @@ export function buildStagingEnv(parentEnv, { dataDir, port, extraEnv = {} } = {}
   return { ok: true, env, dataDir: target, port };
 }
 
-/** CLI: `node scripts/staging-launch.mjs <dataDir> <port> [-- server args…]`. */
+/** CLI: `node scripts/staging-launch.mjs <dataDir> <port> [--cwd <dir>] [-- server args…]`. */
 export async function main(argv, { spawn: launch = spawn } = {}) {
   const [dataDir, portArg, ...rest] = argv;
-  const serverArgs = rest[0] === '--' ? rest.slice(1) : ['src/server.mjs'];
+  let cwd = path.resolve();
+  const serverArgs = [];
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === '--cwd') { cwd = path.resolve(rest[++i]); continue; }
+    if (rest[i] === '--') { serverArgs.push(...rest.slice(i + 1)); break; }
+    serverArgs.push(rest[i]);
+  }
   const plan = buildStagingEnv(process.env, { dataDir, port: Number(portArg) });
   if (!plan.ok) {
     process.stderr.write(`staging refused: ${plan.reason}\n`);
@@ -67,7 +76,7 @@ export async function main(argv, { spawn: launch = spawn } = {}) {
   }
   await fs.mkdir(plan.dataDir, { recursive: true });
   const child = launch(process.execPath, serverArgs, {
-    cwd: path.resolve(import.meta.dirname, '..'),
+    cwd,
     env: plan.env,
     stdio: 'inherit',
   });
