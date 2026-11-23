@@ -137,7 +137,11 @@ test('initial edits keep stable file ownership across repeated edits and cancell
     assert.match(pending.text, /initial\.txt/);
     assert.doesNotMatch(pending.text, /queued\.txt/);
     await f.manager.cancel('a', { hard: true });
-    // A fresh runtime may be started after STOP; keep it busy for the next edit.
+    // A fresh runtime is started after STOP; the retired one is never reused, so the
+    // stand-in must be live again (retired/cancelRequested cleared) and keep streaming
+    // so the next edit is queued for inspection.
+    f.runtime.retired = false;
+    f.runtime.cancelRequested = false;
     f.pi.closed = false;
     f.manager.runtimes.set('a', f.runtime);
   }

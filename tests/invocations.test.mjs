@@ -434,7 +434,9 @@ test('два тика не создают два запуска одного р�
   // создавался дубль.
   let release;
   const held = new Promise(resolve => { release = resolve; });
-  manager.runRecipe = async () => { await held; return { task: { id: 'sess-lock' } }; };
+  // Тик держим на старте сессии: сам запуск рецепта живёт в сервисе автоматизаций,
+  // поэтому подменяем его метод (точка подмены — та же, что вызывает тик).
+  manager.automation.runRecipe = async () => { await held; return { task: { id: 'sess-lock' } }; };
 
   const first = manager.schedulerTick({ nowIso: '2026-10-11T12:00:00.000Z' });
   await new Promise(resolve => setTimeout(resolve, 50));

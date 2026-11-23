@@ -1312,17 +1312,28 @@ test('an answer can be edited in place or branched into another variant', async 
 test('a cancel that overlaps a new delivery does not mark the running answer as stopped', async t => {
   const f = await fixture(t, true); // RUNNING session, Pi streaming
   // The interleaving that used to corrupt the turn: while the cancel is still
-  // finalizing, the delivery of the next message starts a new run and resets
-  // the cancel flag. A terminal TASK_CANCELLED written after that would mark the
-  // fresh answer as «прервано».
-  f.pi.abort = async () => {
-    f.runtime.cancelRequested = false;
+  // finalizing, the delivery of the next message starts a new run with a NEW
+  // runtime of its own. A terminal TASK_CANCELLED written after that would mark
+  // the fresh answer as «прервано». STOP is hard by default, so the new run is
+  // simulated where it really appears — a fresh runtime in the map.
+  f.pi.killTree = async () => {
+    f.pi.closed = true;
+    f.manager.runtimes.set('a', {
+      pi: { ...f.pi, closed: false },
+      eventChain: Promise.resolve(),
+      settleResolvers: [],
+      cancelRequested: false,
+      retired: false,
+    });
     f.manager.tasks.get('a').status = 'RUNNING';
   };
   await f.manager.cancel('a');
   const types = (await f.store.readEvents('a', 0)).map(event => event.type);
   assert.equal(types.includes('TASK_CANCELLED'), false, `отмена не должна перебить новый запуск: ${types.join(',')}`);
-  assert.equal(f.manager.getTask('a').status, 'RUNNING');
+  // Новый владелец сессии не получает терминал отмены. Статус при этом может быть
+  // CANCELLING: STOP уже перевёл ход в «останавливаю», а новый запуск объявит себя
+  // сам (в жизни — первым STATUS из #deliverMessage). Терминала CANCELLED тут нет.
+  assert.notEqual(f.manager.getTask('a').status, 'CANCELLED');
 });
 
 test('a plain cancel still records TASK_CANCELLED', async t => {
@@ -1466,19 +1477,25 @@ test('pending prompt files survive TaskBridge restart without being dropped', as
 });
 
 
-test('a hung RPC releases the session and model slot without restarting the server', async t => {
+test('a hung RPC is replaced transparently instead of failing the operator message', async t => {
   const f = await fixture(t, true);
   f.manager.activeTaskId = 'a';
   let killed = 0;
   f.pi.getState = async () => { throw Object.assign(new Error('Pi is silent'), { code: 'PI_RPC_HUNG' }); };
   f.pi.killTree = async () => { killed++; f.pi.closed = true; };
-  await assert.rejects(() => f.manager.message('a', 'next'), { code: 'PI_RPC_HUNG' });
-  assert.equal(killed, 1);
-  assert.equal(f.manager.runtimes.has('a'), false);
-  assert.equal(f.manager.activeTaskId, null);
-  assert.equal(f.manager.admitting, false);
-  assert.equal(f.manager.getTask('a').status, 'FAILED');
-  assert.equal(f.manager.getTask('a').errorCode, 'PI_RPC_HUNG');
+  // A hung Pi is retired at the probe and the message continues on a fresh session:
+  // the operator gets an answer attempt, not a 500. The retired process must be
+  // gone from the map so nothing may write into it again.
+  const result = await f.manager.message('a', 'next');
+  assert.ok(result, 'сообщение не отвергнуто из-за зависшего Pi');
+  assert.equal(killed, 1, 'зависший Pi должен быть убит ровно один раз');
+  assert.notEqual(f.manager.runtimes.get('a'), f.runtime, 'списанный runtime не возвращается в работу');
+  assert.equal(f.manager.admitting, false, 'слот admits освобождён');
+  // Let the new turn settle so the fixture does not leave a 12h timer behind.
+  for (const waiter of (f.manager.runtimes.get('a')?.settleResolvers || []).splice(0)) {
+    clearTimeout(waiter.timer);
+    waiter.resolve();
+  }
 });
 
 test('a slow but live RPC is not killed on send failure', async t => {

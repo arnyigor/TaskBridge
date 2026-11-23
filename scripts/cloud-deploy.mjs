@@ -244,6 +244,12 @@ async function main() {
   // 3. Execute --------------------------------------------------------------
   const total = plan.steps.length;
   let deployedUrl = null;
+  // Дополнительные шаги идут ПОСЛЕ плана: проверка здоровья и запись конфига.
+  // Счётчик объявлен здесь: `++done` на необъявленной переменной — ReferenceError
+  // ровно на первом успешном деплое (ESM работает в strict mode).
+  const extraSteps = (options.skipVerify ? 0 : 1) + (options.writeConfig ? 1 : 0);
+  const allSteps = total + extraSteps;
+  let done = total;
 
   for (let index = 0; index < plan.steps.length; index++) {
     const item = plan.steps[index];
@@ -266,7 +272,7 @@ async function main() {
   // 4. Verify ---------------------------------------------------------------
   let health = null;
   if (!options.skipVerify) {
-    step(++done, total + 1, `Verifying ${url}/api/health`);
+    step(++done, allSteps, `Verifying ${url}/api/health`);
     for (let attempt = 1; attempt <= 6; attempt++) {
       try {
         const response = await fetch(`${url}/api/health`, { headers: { accept: 'application/json' } });
@@ -292,7 +298,7 @@ async function main() {
 
   // 5. Local config ---------------------------------------------------------
   if (options.writeConfig) {
-    step(++done, total + 1, 'Writing config.json');
+    step(++done, allSteps, 'Writing config.json');
     await writeLocalConfig({ cloud: { ...credentials.cloudConfig, url } });
   }
 

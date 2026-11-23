@@ -9,6 +9,9 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig } from './config.mjs';
+// Роутер с обязательной политикой доступа на каждом маршруте (см. src/http/router.mjs).
+import { Router } from './http/router.mjs';
+import { registerAutomationRoutes } from './routes/automation.mjs';
 import { deliveryMetrics } from './delivery-metrics.mjs';
 import { recordStopTrace, lifecycleTraceSnapshot } from './lifecycle-trace.mjs';
 import { memoryMetrics } from './memory/memory-metrics.mjs';
@@ -150,7 +153,7 @@ const piCommand = resolvePiCommand({ config });
 const piVersion = new PiVersionProbe({ command: piCommand.command, env: config.pi?.env || null });
 piVersion.refresh().catch(() => {});
 // The Pi approval extension needs a loopback endpoint and its absolute path.
-manager.approvalBaseUrl = `http://127.0.0.1:${Number(config.server?.port || 8787)}`;
+manager.approvalBaseUrl = `http://127.0.0.1:${portOverride || Number(config.server?.port || 8787)}`;
 manager.approvalExtensionPath = path.join(rootDir, 'pi-extension', 'taskbridge-approval.js');
 // Turn instructions in `hook` mode (CORE-02): the same extension directory the
 // approval gate uses. A missing file fails the task loudly instead of sending a
@@ -408,6 +411,11 @@ manager.on('task-event', (event) => {
 // сверка перевела инвокацию в терминальное состояние. Решение и дедупликация — в
 // src/automation/invocation-notifier.mjs (её проверяет приёмка AUTO-03E).
 const notifyFinishedInvocations = createInvocationNotifier({ manager, push });
+
+// Маршруты автоматизаций живут в src/routes/: у каждого объявлена политика доступа,
+// поэтому обойти access.require «порядком в цепочке if» больше нельзя.
+const apiRouter = new Router();
+registerAutomationRoutes(apiRouter, { manager, notifyFinishedInvocations });
 
 const schedulerConfig = config.schedules || {};
 if (schedulerConfig.enabled !== false) {
@@ -882,7 +890,15 @@ async function handleRequest(req, res) {
       }
     }
     // --- cloud settings screen (§91) -----------------------------------------
+    // Настройки облака живут ДО общего `access.require` для /api/, поэтому
+    // проверка доступа обязана стоять здесь сама: иначе любой в LAN читал и
+    // менял привязку машины к облаку без пейринга. Менять транспорт машины
+    // можно только с самого компьютера сервера.
     if (req.method === 'GET' && pathname === '/api/cloud/config') {
+      access.require(req);
+      if (access.enabled && !access.local(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Настройки облака доступны только на компьютере сервера.'), { code: 'FORBIDDEN' }));
+      }
       const saved = config.cloud || {};
       const envLocked = ['TASKBRIDGE_CLOUD_ENABLED', 'TASKBRIDGE_CLOUD_URL', 'TASKBRIDGE_MACHINE_ID', 'TASKBRIDGE_MACHINE_SECRET']
         .filter(key => process.env[key]);
@@ -915,6 +931,10 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === 'POST' && pathname === '/api/cloud/config') {
+      access.require(req);
+      if (access.enabled && !access.local(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Настройки облака доступны только на компьютере сервера.'), { code: 'FORBIDDEN' }));
+      }
       const body = await readJson(req);
       const next = { ...(config.cloud || {}) };
       if ('enabled' in body) next.enabled = Boolean(body.enabled);
@@ -940,6 +960,10 @@ async function handleRequest(req, res) {
     }
 
     if (req.method === 'POST' && pathname === '/api/cloud/test') {
+      access.require(req);
+      if (access.enabled && !access.local(req)) {
+        return errorJson(res, 403, Object.assign(new Error('Проверка облака доступна только на компьютере сервера.'), { code: 'FORBIDDEN' }));
+      }
       const body = await readJson(req);
       const saved = config.cloud || {};
       const candidate = resolveCloudConfig({
@@ -1911,97 +1935,9 @@ async function handleRequest(req, res) {
       }
     }
 
-    // Run recipes (MR-05): HOW the work is done, reusable by hand, by the
-    // scheduler (MR-06), from the phone or by an event. The run itself is a
-    // session — there is no second table about the same fact.
-    if (req.method === 'GET' && pathname === '/api/recipes') {
-      return json(res, 200, { items: manager.listRecipes({ projectId: url.searchParams.get('projectId') }) });
-    }
-    if (req.method === 'POST' && pathname === '/api/recipes') {
-      return json(res, 201, manager.createRecipe(await readJson(req)));
-    }
-    const recipeRunRoute = pathname.match(/^\/api\/recipes\/([^/]+)\/run$/);
-    if (req.method === 'POST' && recipeRunRoute) {
-      const body = await readJson(req).catch(() => ({}));
-      const started = await manager.runRecipe(decodeURIComponent(recipeRunRoute[1]), {
-        parameters: body.parameters ?? {},
-        trigger: body.trigger === 'schedule' ? 'schedule' : 'manual',
-        clientId: body.clientId ?? null,
-        deviceId: access.device(req)?.deviceId,
-      });
-      return json(res, 201, started);
-    }
-    const recipeRoute = pathname.match(/^\/api\/recipes\/([^/]+)$/);
-    if (recipeRoute) {
-      const id = decodeURIComponent(recipeRoute[1]);
-      if (req.method === 'GET') return json(res, 200, manager.getRecipe(id));
-      if (req.method === 'PATCH') return json(res, 200, manager.updateRecipe(id, await readJson(req).catch(() => ({}))));
-      if (req.method === 'DELETE') return json(res, 200, { ok: true, removed: manager.deleteRecipe(id) });
-    }
-
-    // Schedules and their invocations (MR-06): the scheduler runs HERE, on the
-    // machine, so a phone that is off changes nothing about whether 09:00 happens.
-    if (req.method === 'GET' && pathname === '/api/schedules') {
-      return json(res, 200, { items: manager.listSchedules({ recipeId: url.searchParams.get('recipeId') }) });
-    }
-    if (req.method === 'POST' && pathname === '/api/schedules') {
-      return json(res, 201, manager.createSchedule(await readJson(req)));
-    }
-    const scheduleRunRoute = pathname.match(/^\/api\/schedules\/([^/]+)\/run$/);
-    if (req.method === 'POST' && scheduleRunRoute) {
-      const body = await readJson(req).catch(() => ({}));
-      const invocation = await manager.runScheduleNow(decodeURIComponent(scheduleRunRoute[1]), {
-        clientId: body.clientId ?? null,
-        deviceId: access.device(req)?.deviceId,
-      });
-      return json(res, 201, invocation);
-    }
-    const scheduleRoute = pathname.match(/^\/api\/schedules\/([^/]+)$/);
-    if (scheduleRoute) {
-      const id = decodeURIComponent(scheduleRoute[1]);
-      if (req.method === 'GET') return json(res, 200, manager.getSchedule(id));
-      if (req.method === 'PATCH') return json(res, 200, manager.updateSchedule(id, await readJson(req).catch(() => ({}))));
-      if (req.method === 'DELETE') return json(res, 200, { ok: true, removed: manager.deleteSchedule(id) });
-    }
-
-    // «Выполнить тик сейчас»: диагностика расписаний, не дожидаясь 09:00, и то, чем
-    // проверяются политики пропусков. Только на самой машине: это операция над
-    // всеми расписаниями сразу, а не над одним из них (для одного есть
-    // POST /api/schedules/:id/run).
-    if (req.method === 'POST' && pathname === '/api/scheduler/tick') {
-      if (!access.local(req)) return errorJson(res, 403, Object.assign(new Error('Тик планировщика можно запустить только на компьютере сервера.'), { code: 'FORBIDDEN' }));
-      const body = await readJson(req).catch(() => ({}));
-      const nowIso = typeof body.now === 'string' && !Number.isNaN(Date.parse(body.now)) ? new Date(body.now).toISOString() : undefined;
-      const result = await manager.schedulerTick(nowIso ? { nowIso } : {});
-      await notifyFinishedInvocations(result?.reconciled ?? []);
-      return json(res, 200, result);
-    }
-
-    if (req.method === 'GET' && pathname === '/api/invocations') {
-      return json(res, 200, {
-        items: manager.listInvocations({
-          recipeId: url.searchParams.get('recipeId'),
-          scheduleId: url.searchParams.get('scheduleId'),
-          status: url.searchParams.get('status'),
-          limit: Number(url.searchParams.get('limit')) || 50,
-          // История автоматизаций листается страницами (AUTO-03D).
-          offset: Math.max(Number(url.searchParams.get('offset')) || 0, 0)
-        })
-      });
-    }
-    // Компактная сводка запуска (AUTO-03B): отдельный запрос, чтобы история не
-    // тянула детали при каждом обновлении списка.
-    const invocationSummaryRoute = pathname.match(/^\/api\/invocations\/([^/]+)\/summary$/);
-    if (invocationSummaryRoute) {
-      if (req.method !== 'GET') {
-        return errorJson(res, 405, Object.assign(new Error('Метод не поддерживается.'), { code: 'METHOD_NOT_ALLOWED' }));
-      }
-      return json(res, 200, manager.invocationSummary(decodeURIComponent(invocationSummaryRoute[1])));
-    }
-    const invocationRoute = pathname.match(/^\/api\/invocations\/([^/]+)$/);
-    if (req.method === 'GET' && invocationRoute) {
-      return json(res, 200, manager.getInvocation(decodeURIComponent(invocationRoute[1])));
-    }
+    // Автоматизации (рецепты, расписания, запуски) — в src/routes/automation.mjs:
+    // политика доступа объявлена рядом с каждым обработчиком, а не «выше по цепочке».
+    if (await apiRouter.dispatch(req, res, { url, pathname, access, json, readJson })) return;
 
     const workItemRoute = pathname.match(/^\/api\/work-items\/([^/]+)$/);
     if (workItemRoute) {
@@ -2312,7 +2248,10 @@ async function handleRequest(req, res) {
     match = pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && match) {
       const c = await readJson(req);
-      return json(res, 200, await manager.cancel(match[1], { commandId: c.commandId, clientId: c.clientId, hard: c.hard === true }));
+      // STOP по умолчанию жёсткий: даже старая сборка клиента, не присылающая
+      // `hard`, обязана останавливать Pi мгновенно, а не ждать abortTimeoutMs.
+      // Мягкая остановка остаётся только при явном hard: false.
+      return json(res, 200, await manager.cancel(match[1], { commandId: c.commandId, clientId: c.clientId, hard: c.hard !== false }));
     }
 
     // Erase every message of a session, keeping the session itself. Destructive,

@@ -55,9 +55,9 @@ import { WakeChannel } from './wake-channel.mjs';
 import { apiKey as providerApiKey } from './provider-models.mjs';
 import { listProposals, createProposal, acceptProposal, rejectProposal, validateProposal, proposalCounts } from './memory/memory-proposals.mjs';
 import { projectFileIndex } from './memory/path-patterns.mjs';
-import { validateRecipe, renderRecipe } from './recipes/recipe.mjs';
-import { normalizeSchedule, nextRunAfter, resolveMisfire, describeSchedule } from './scheduler/schedule.mjs';
-import { invocationSummary } from './automation/invocation-summary.mjs';
+// Автоматизации (рецепты, расписания, инвокации) вынесены в отдельный сервис:
+// правки планировщика больше не касаются файла, где живут чат, STOP и очередь.
+import { AutomationService } from './services/automation-service.mjs';
 import { trustProjectDirectory } from './project-trust.mjs';
 import {
   assertContextLimit, buildContextReport, collectContextSources, estimateTokens, readCompactionSettings,
@@ -105,17 +105,6 @@ const INTERRUPTED_STATUSES = Object.freeze(['FAILED', 'CANCELLED']);
 // write, edit, инструменты MCP) считается способным изменить мир — такой ход
 // автоматически не продолжаем, решает оператор (MEDIA-09D).
 const READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'taskbridge_media_open']);
-
-// Сколько проверка рецепта может висеть в `RUNNING`, прежде чем сверка закроет запуск
-// как «итог неизвестен». Проверка запускается после `SUCCEEDED` и не переживает
-// перезапуск сервера: без срока такой запуск остался бы `RUNNING` навсегда.
-// Переопределяется через `config.verification.staleAfterMs` — тестам нужен короткий срок.
-const DEFAULT_STALE_VERIFICATION_MS = 10 * 60_000;
-
-// Сколько инвокация может оставаться `RUNNING` без `sessionId`, прежде чем сверка
-// признает её брошенной: между записью инвокации и стартом сессии процесс мог умереть.
-// Молодые записи не трогаем — обычный `#invoke` проставляет `sessionId` в том же вызове.
-const DEFAULT_ORPHAN_INVOCATION_MS = 5 * 60_000;
 
 /** Одна формулировка для предпросмотра и для инспектора: почему памяти нет. */
 export function ambiguousMemoryWarning(collisions = []) {
@@ -176,7 +165,10 @@ function originOf(commandId, clientId, deviceId) {
 // until a client answers; the rest are fire-and-forget.
 const UI_DIALOGS = new Set(['select', 'confirm', 'input', 'editor']);
 const uiText = (value, max = 4000) => (typeof value === 'string' ? value.slice(0, max) : undefined);
-import { RETRY_IN_PROGRESS_NOTICE, GIVE_UP_NOTICE, parseProviderWait, parseProviderWaitStatus, parseProviderGiveUp, providerGiveUpMessage, noteProviderWait, clearProviderWait, sameProviderWait } from './provider-wait.mjs';
+import { RETRY_IN_PROGRESS_NOTICE, GIVE_UP_NOTICE, PROVIDER_WAIT_CURRENT, parseProviderWait, parseProviderWaitStatus, parseProviderGiveUp, providerGiveUpMessage, noteProviderWait, clearProviderWait, sameProviderWait } from './provider-wait.mjs';
+// Единый жизненный цикл хода: сброс флагов runtime, безопасное списание Pi,
+// защита от воскрешения отменённого хода и контракт `ui` для всех клиентов.
+import { canAcceptPiFrame, deriveChatUiContract, resetTaskRuntimeFlags, retireTaskRuntime } from './chat-lifecycle.mjs';
 // Kill a whole process tree by pid (an orphan from a previous TaskBridge run).
 /**
  * Принадлежит ли записанный Pi ЭТОМУ каталогу данных.
@@ -522,8 +514,19 @@ export class TaskManager extends EventEmitter {
     // Одновременные пробы одной модели: второй запрос получает COOLDOWN, а не
     // свою платную попытку (см. probeModel).
     this.probeInFlight = new Set();
-    // Защита тика от наложения (AUTO-01C): один тик на машину в момент времени.
-    this.schedulerTickInFlight = false;
+    // Защита тика от наложения (AUTO-01C) живёт внутри сервиса автоматизаций:
+    // это его инвариант, а не свойство чата.
+    this.automation = new AutomationService({
+      store,
+      config,
+      hasProject: id => this.projects.has(id),
+      getTaskRaw: id => this.tasks.get(id),
+      publicTask: task => this.#publicTask(task),
+      createTask: (input, opts) => this.createTask(input, opts),
+      cancelTask: (id, opts) => this.cancel(id, opts),
+      recordEvent: (task, type, message, data) => this.#event(task, type, message, data),
+      linkWorkItemSession: (workItemId, sessionId, relation) => this.linkWorkItemSession(workItemId, sessionId, relation),
+    });
     // Свой push в локальной сети (4.3): завершение хода будит телефон, вместо
     // того чтобы тот опрашивал список каждые N секунд.
     this.wakeChannel = new WakeChannel();
@@ -1729,15 +1732,6 @@ export class TaskManager extends EventEmitter {
     return task.checkpoint;
   }
 
-  /** `provider/id` or a bare id, as a recipe stores it. */
-  #parseModelSelection(value) {
-    const text = String(value ?? '').trim();
-    if (!text) return null;
-    const slash = text.indexOf('/');
-    if (slash <= 0) return { provider: null, id: text };
-    return { provider: text.slice(0, slash), id: text.slice(slash + 1) };
-  }
-
   async #headOf(dir) {
     try {
       const { stdout } = await git(['rev-parse', '--verify', 'HEAD'], dir);
@@ -1943,497 +1937,27 @@ export class TaskManager extends EventEmitter {
   // A recipe is HOW to do a recurring piece of work: its parameters, the agent and
   // model, the context profile, the workspace strategy and the verification. WHEN
   // it runs is a schedule (MR-06); the fact that it ran is the session it created.
-
-  listRecipes({ projectId = null } = {}) {
-    return this.store.listRecipes(projectId);
-  }
-
-  getRecipe(id) {
-    const recipe = this.store.getRecipe(id);
-    if (!recipe) throw Object.assign(new Error('Рецепт не найден.'), { code: 'NOT_FOUND' });
-    return recipe;
-  }
-
-  createRecipe(input = {}) {
-    const validated = validateRecipe(input);
-    if (!validated.projectId) throw Object.assign(new Error('Укажите проект.'), { code: 'INPUT_INVALID' });
-    if (!this.projects.has(validated.projectId)) {
-      throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
-    }
-    // A recipe that names a work item must name a real one: a run has to be
-    // attachable to something the operator can open.
-    if (validated.workItemId && !this.store.getWorkItem(validated.workItemId)) {
-      throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
-    }
-    const at = now();
-    return this.store.createRecipe({ id: `rc-${shortId()}`, ...validated, createdAt: at, updatedAt: at });
-  }
-
-  updateRecipe(id, patch = {}) {
-    const current = this.getRecipe(id);
-    const validated = validateRecipe({
-      ...current,
-      ...patch,
-      parameters: patch.parameters === undefined ? current.parameters : patch.parameters,
-      runtime: { ...current.runtime, ...(patch.runtime ?? {}) },
-      context: { ...current.context, ...(patch.context ?? {}) },
-      workspace: { ...current.workspace, ...(patch.workspace ?? {}) },
-      verification: { ...current.verification, ...(patch.verification ?? {}) },
-      limits: { ...current.limits, ...(patch.limits ?? {}) },
-    });
-    if (!this.projects.has(validated.projectId)) {
-      throw Object.assign(new Error('Проект не найден.'), { code: 'PROJECT_NOT_FOUND' });
-    }
-    if (validated.workItemId && !this.store.getWorkItem(validated.workItemId)) {
-      throw Object.assign(new Error('Задача не найдена.'), { code: 'NOT_FOUND' });
-    }
-    return this.store.updateRecipe(id, { ...validated, updatedAt: now() });
-  }
-
-  deleteRecipe(id) {
-    const removed = this.store.deleteRecipe(id);
-    if (!removed) throw Object.assign(new Error('Рецепт не найден.'), { code: 'NOT_FOUND' });
-    return removed;
-  }
-
-  /**
-   * The recipe as it would run right now: parameters resolved, substitutable
-   * fields rendered. The preview and the run use the same function, so a phone
-   * cannot show one thing and the machine run another.
-   */
-  previewRecipe(id, { parameters = {} } = {}) {
-    return renderRecipe(this.getRecipe(id), parameters);
-  }
-
-  /**
-   * Runs a recipe: creates a session from the rendered prompt. The invocation IS
-   * that session — the roadmap is explicit that a separate `scheduled_runs` table
-   * would be a second source of truth about the same thing.
-   */
-  async runRecipe(id, { parameters = {}, clientId = null, deviceId = null, trigger = 'manual', invocationId = null } = {}) {
-    const recipe = this.getRecipe(id);
-    const rendered = renderRecipe(recipe, parameters);
-    if (recipe.workItemId && !this.store.getWorkItem(recipe.workItemId)) {
-      throw Object.assign(new Error('Задача рецепта не найдена.'), { code: 'NOT_FOUND' });
-    }
-    const model = rendered.runtime?.model
-      ? this.#parseModelSelection(rendered.runtime.model)
-      : null;
-    const task = await this.createTask({
-      projectId: rendered.projectId,
-      prompt: rendered.prompt,
-      title: `${rendered.name}`,
-      model,
-      thinkingLevel: rendered.runtime?.thinking ?? null,
-    }, { clientId, deviceId });
-    const stored = this.tasks.get(task.id);
-    if (stored) {
-      // Which recipe produced this session, with which parameters: the only durable
-      // trace of the invocation, and what «run again with parameters» reads back.
-      stored.recipeRun = {
-        recipeId: recipe.id,
-        recipeName: recipe.name,
-        trigger,
-        invocationId,
-        parameters: rendered.parameters,
-        at: now(),
-      };
-      // A verification profile is a NAME the project owns, so the prompt never
-      // carries shell commands (ROADMAP_FULL.md, «Verification profiles»).
-      const profile = rendered.verification?.command ? String(rendered.verification.command) : null;
-      if (profile && this.config.verificationProfiles?.[profile]) {
-        stored.verificationCommands = [...this.config.verificationProfiles[profile]];
-      } else if (profile) {
-        stored.verificationCommands = [profile];
-      }
-      stored.updatedAt = now();
-      await this.store.save(this.#publicTask(stored)).catch(() => {});
-      try {
-        await this.#event(stored, 'RECIPE_RUN', `Запуск рецепта «${recipe.name}»`, {
-          recipeId: recipe.id,
-          trigger,
-          parameters: rendered.parameters,
-        });
-      } catch { /* the session is what matters */ }
-    }
-    // A recipe tied to a work item makes its run part of that work.
-    if (recipe.workItemId) {
-      try {
-        this.linkWorkItemSession(recipe.workItemId, task.id, 'implementation');
-      } catch { /* see above */ }
-    }
-    return { task: stored ? this.#publicTask(stored) : task, invocation: stored?.recipeRun ?? null, rendered };
-  }
-
-  // --- schedules and the scheduler tick (MR-06) --------------------------------
   //
-  // The scheduler lives on the PC, not on the phone and not in the relay: a phone
-  // that is off changes nothing about whether 09:00 happens. Every tick is one
-  // decision per due schedule, and each decision is recorded as an invocation —
-  // including the ones that were skipped, because «no run» is information too.
-
-  listSchedules({ recipeId = null } = {}) {
-    return this.store.listSchedules(recipeId);
-  }
-
-  getSchedule(id) {
-    const schedule = this.store.getSchedule(id);
-    if (!schedule) throw Object.assign(new Error('Расписание не найдено.'), { code: 'NOT_FOUND' });
-    return schedule;
-  }
-
-  createSchedule(input = {}) {
-    const recipeId = String(input.recipeId ?? '').trim();
-    if (!recipeId) throw Object.assign(new Error('Укажите рецепт.'), { code: 'INPUT_INVALID' });
-    const recipe = this.getRecipe(recipeId);
-    const normalized = normalizeSchedule(input, { recipe });
-    const at = now();
-    // The first moment is computed from the spec, not from the client: two clients
-    // computing «09:00» differently is how a job runs twice.
-    const anchor = normalized.spec.kind === 'interval' ? at : null;
-    return this.store.createSchedule({
-      id: `sc-${shortId()}`,
-      ...normalized,
-      nextRunAt: nextRunAfter(normalized.spec, at, { anchor }),
-      lastRunAt: null,
-      createdAt: at,
-      updatedAt: at,
-    });
-  }
-
-  updateSchedule(id, patch = {}) {
-    const current = this.getSchedule(id);
-    const merged = normalizeSchedule({
-      ...current,
-      ...patch,
-      spec: patch.spec === undefined ? current.spec : patch.spec,
-      parameters: patch.parameters === undefined ? current.parameters : patch.parameters,
-    }, { recipe: this.getRecipe(current.recipeId) });
-    // A changed schedule gets its next moment recomputed; a pause keeps it, so
-    // resuming does not silently skip to tomorrow.
-    const specChanged = JSON.stringify(merged.spec) !== JSON.stringify(current.spec);
-    const resumed = merged.enabled && !current.enabled;
-    const at = now();
-    // One anchor for the whole life of a schedule: an interval must stay on ITS grid,
-    // or `nextRunAt` stops being one of its own occurrences and the tick sees a due
-    // moment that no occurrence matches (the missed run then silently disappears).
-    const nextRunAt = (specChanged || resumed)
-      ? nextRunAfter(merged.spec, at, { anchor: merged.spec.kind === 'interval' ? current.createdAt : null })
-      : current.nextRunAt;
-    return this.store.updateSchedule(id, { ...merged, nextRunAt, updatedAt: at });
-  }
-
-  deleteSchedule(id) {
-    const removed = this.store.deleteSchedule(id);
-    if (!removed) throw Object.assign(new Error('Расписание не найдено.'), { code: 'NOT_FOUND' });
-    return removed;
-  }
-
-  /** «Запустить сейчас»: тот же путь, что у расписания, только повод — оператор. */
-  async runScheduleNow(id, { clientId = null, deviceId = null } = {}) {
-    const schedule = this.getSchedule(id);
-    const recipe = this.getRecipe(schedule.recipeId);
-    const invocation = await this.#invoke(recipe, {
-      schedule,
-      scheduledAt: now(),
-      trigger: 'manual',
-      misfire: false,
-      parameters: schedule.parameters,
-      clientId,
-      deviceId,
-    });
-    // Running by hand does not move the schedule's own clock.
-    await this.store.updateSchedule(id, { ...schedule, lastRunAt: invocation.startedAt, updatedAt: now() });
-    return invocation;
-  }
-
-  listInvocations(options = {}) {
-    return this.store.listInvocations(options);
-  }
-
-  getInvocation(id) {
-    const invocation = this.store.getInvocation(id);
-    if (!invocation) throw Object.assign(new Error('Запуск не найден.'), { code: 'NOT_FOUND' });
-    return invocation;
-  }
-
-  /**
-   * One scheduler tick. [opts.dryRun] answers what WOULD happen without creating
-   * anything — the same decision code, so a test can ask instead of waiting.
-   */
-  async schedulerTick({ nowIso = now(), dryRun = false } = {}) {
-    // Два тика не должны работать над одним и тем же моментом: расписание сдвигается
-    // только в конце своей обработки, поэтому наложившийся тик увидел бы его снова и
-    // создал вторую сессию (QUEUE и PARALLEL сами по себе не дедуплицируют).
-    // Пробный тик (`dryRun`) ничего не создаёт и блокировку не берёт.
-    if (!dryRun && this.schedulerTickInFlight) {
-      return { at: nowIso, decisions: [], reconciled: [], skipped: 'busy' };
-    }
-    if (!dryRun) this.schedulerTickInFlight = true;
-    try {
-      return await this.#schedulerTickLocked({ nowIso, dryRun });
-    } finally {
-      if (!dryRun) this.schedulerTickInFlight = false;
-    }
-  }
-
-  async #schedulerTickLocked({ nowIso, dryRun }) {
-    const decisions = [];
-    for (const schedule of this.store.dueSchedules(nowIso)) {
-      const recipe = this.store.getRecipe(schedule.recipeId);
-      if (!recipe) {
-        decisions.push({ scheduleId: schedule.id, action: 'recipe-gone' });
-        if (!dryRun) {
-          await this.store.updateSchedule(schedule.id, {
-            ...schedule,
-            enabled: false,
-            nextRunAt: null,
-            updatedAt: nowIso,
-          });
-        }
-        continue;
-      }
-      const misfire = resolveMisfire(schedule, nowIso, {
-        anchor: schedule.spec?.kind === 'interval' ? schedule.createdAt : null,
-      });
-      // `lastRunAt` moves with the runs this tick created, so it is kept here and
-      // not read back from the schedule object captured before the loop — that
-      // object is stale by the second write and would erase the mark.
-      let lastRunAt = schedule.lastRunAt;
-      const advance = async () => {
-        if (dryRun) return;
-        await this.store.updateSchedule(schedule.id, { ...schedule, nextRunAt: misfire.nextRunAt, lastRunAt, updatedAt: nowIso });
-      };
-
-      if (!misfire.runs.length) {
-        // SKIP (or nothing actually missed): the moment is consumed and recorded, so
-        // the operator sees «пропущено», not a silent gap.
-        decisions.push({ scheduleId: schedule.id, action: 'skipped', missed: misfire.missed, reason: misfire.policy });
-        if (!dryRun && misfire.missed > 0) {
-          await this.store.createInvocation({
-            id: `inv-${shortId()}`,
-            recipeId: recipe.id,
-            scheduleId: schedule.id,
-            trigger: 'schedule',
-            scheduledAt: schedule.nextRunAt,
-            startedAt: nowIso,
-            finishedAt: nowIso,
-            status: 'SKIPPED',
-            reason: `пропущено по политике ${misfire.policy}`,
-            misfire: true,
-            parameters: schedule.parameters,
-          });
-        }
-        await advance();
-        continue;
-      }
-
-      for (const moment of misfire.runs) {
-        const running = this.store.runningInvocations(schedule.id);
-        if (running.length && schedule.concurrencyPolicy === 'SKIP_IF_RUNNING') {
-          decisions.push({ scheduleId: schedule.id, action: 'busy', reason: schedule.concurrencyPolicy });
-          if (!dryRun) {
-            await this.store.createInvocation({
-              id: `inv-${shortId()}`,
-              recipeId: recipe.id,
-              scheduleId: schedule.id,
-              trigger: 'schedule',
-              scheduledAt: moment,
-              startedAt: nowIso,
-              finishedAt: nowIso,
-              status: 'SKIPPED',
-              reason: 'предыдущий запуск ещё идёт (SKIP_IF_RUNNING)',
-              misfire: moment !== schedule.nextRunAt,
-              parameters: schedule.parameters,
-            });
-          }
-          continue;
-        }
-        if (running.length && schedule.concurrencyPolicy === 'REPLACE') {
-          decisions.push({ scheduleId: schedule.id, action: 'replace', replaced: running.map(item => item.id) });
-          if (!dryRun) {
-            for (const previous of running) {
-              if (previous.sessionId && this.tasks.has(previous.sessionId)) {
-                await this.cancel(previous.sessionId, {}).catch(() => {});
-              }
-              await this.store.updateInvocation(previous.id, {
-                status: 'FAILED',
-                reason: 'заменён новым запуском (REPLACE)',
-                finishedAt: nowIso,
-              });
-            }
-          }
-        }
-        // QUEUE and PARALLEL both create the session: TaskBridge's own queue
-        // serialises what the machine cannot run at once, and PARALLEL is only safe
-        // with independent worktrees (the workspace strategy decides that).
-        if (dryRun) {
-          decisions.push({ scheduleId: schedule.id, action: 'run', scheduledAt: moment, policy: schedule.concurrencyPolicy });
-          continue;
-        }
-        const invocation = await this.#invoke(recipe, {
-          schedule,
-          scheduledAt: moment,
-          trigger: 'schedule',
-          misfire: moment !== schedule.nextRunAt || misfire.missed > 0,
-          parameters: schedule.parameters,
-        });
-        decisions.push({ scheduleId: schedule.id, action: 'run', invocationId: invocation.id, sessionId: invocation.sessionId, scheduledAt: moment });
-        lastRunAt = invocation.startedAt;
-      }
-      await advance();
-    }
-    // Sessions that finished while an invocation was still marked RUNNING: the
-    // invocation follows its session, even across a restart of the server.
-    const reconciled = dryRun ? [] : await this.#reconcileInvocations(nowIso);
-    return { at: nowIso, decisions, reconciled };
-  }
-
-  /** Creates the invocation and the session it describes. */
-  async #invoke(recipe, { schedule = null, scheduledAt = null, trigger = 'manual', misfire = false, parameters = {}, clientId = null, deviceId = null } = {}) {
-    const at = now();
-    const draft = {
-      id: `inv-${shortId()}`,
-      recipeId: recipe.id,
-      scheduleId: schedule?.id ?? null,
-      trigger,
-      scheduledAt,
-      startedAt: at,
-      finishedAt: null,
-      status: 'RUNNING',
-      reason: null,
-      misfire: misfire === true,
-      parameters,
-      sessionId: null,
-      verification: null,
-      workspaceRef: null,
-      resultArtifact: null,
-    };
-    await this.store.createInvocation(draft);
-    try {
-      const started = await this.runRecipe(recipe.id, { parameters, clientId, deviceId, trigger, invocationId: draft.id });
-      const session = started.task;
-      await this.store.updateInvocation(draft.id, { sessionId: session.id });
-      const stored = this.tasks.get(session.id);
-      // The notification policy of the SCHEDULE decides whether this run is worth
-      // waking anyone up for: the session carries the answer into the push path, and
-      // it is saved so a restart does not lose the policy mid-run.
-      if (stored && schedule) {
-        stored.scheduleNotify = schedule.notify;
-        await this.store.save(this.#publicTask(stored)).catch(() => {});
-      }
-      return this.store.getInvocation(draft.id);
-    } catch (failure) {
-      // A recipe that cannot start (unknown project, bad parameters) is a finished
-      // invocation with a reason, not a missing one.
-      return this.store.updateInvocation(draft.id, {
-        status: 'FAILED',
-        reason: String(failure?.message ?? failure).slice(0, 500),
-        finishedAt: now(),
-      });
-    }
-  }
-
-  /**
-   * Copies the outcome of finished sessions into their invocations: the status,
-   * the verification result and the artifact a human would open. `verification
-   * required` turns a session that ran but did not pass into a failed invocation —
-   * otherwise «запустилось» would read as «получилось».
-   */
-  async #reconcileInvocations(nowIso = now()) {
-    const finished = [];
-    for (const invocation of this.store.runningInvocations()) {
-      const session = invocation.sessionId ? this.tasks.get(invocation.sessionId) : null;
-      if (!session) {
-        if (invocation.sessionId) {
-          // The session is gone (deleted by hand, wiped data dir): say so instead of
-          // leaving a run that is «in progress» forever.
-          await this.store.updateInvocation(invocation.id, {
-            status: 'FAILED',
-            reason: 'сессия запуска больше не существует',
-            finishedAt: nowIso,
-          });
-          finished.push(invocation.id);
-          continue;
-        }
-        // Падение между созданием инвокации и стартом сессии: исход неизвестен.
-        // Молодую запись не трогаем — `#invoke` вот-вот проставит `sessionId`;
-        // старую закрываем как неизвестную и НЕ переисполняем автоматически.
-        const startedAt = Date.parse(invocation.startedAt ?? '');
-        const age = Number.isFinite(startedAt) ? Date.now() - startedAt : Number.POSITIVE_INFINITY;
-        if (age < this.#orphanInvocationMs()) continue;
-        await this.store.updateInvocation(invocation.id, {
-          status: 'FAILED',
-          reason: 'сессия не была создана: исход запуска неизвестен, повтор не выполнялся',
-          finishedAt: nowIso,
-        });
-        finished.push(invocation.id);
-        continue;
-      }
-      if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(session.status)) continue;
-      const recipe = this.store.getRecipe(invocation.recipeId);
-      const verification = session.verificationStatus ?? null;
-      const requiresVerification = recipe?.verification?.required === true;
-      // Проверка запускается ОТДЕЛЬНО после публикации `SUCCEEDED` (см. `#runVerification`):
-      // между этими моментами `verificationStatus === 'RUNNING'`, и считать это
-      // провалом значило бы записывать `FAILED` успешному прогону, у которого тесты
-      // ещё идут. Ждём следующего тика; зависшая проверка (сервер перезапустили
-      // посреди неё) не может держать запуск вечно — её закрывает срок ниже.
-      if (requiresVerification && verification === 'RUNNING') {
-        // Возраст считается по реальным часам, а не по `nowIso` тика: в тестах «сейчас»
-        // намеренно уезжает вперёд, и проверка, идущая секунду, выглядела бы зависшей.
-        const staleAfterMs = this.#staleVerificationMs();
-        const since = Date.parse(session.updatedAt ?? '');
-        const waited = Number.isFinite(since) ? Date.now() - since : staleAfterMs;
-        if (!Number.isFinite(waited) || waited < staleAfterMs) continue;
-        await this.store.updateInvocation(invocation.id, {
-          status: 'FAILED',
-          reason: `проверка не завершилась за ${Math.round(staleAfterMs / 60_000) || 1} мин: итог неизвестен`,
-          verification,
-          finishedAt: nowIso,
-          workspaceRef: session.workspacePath ?? invocation.workspaceRef,
-          resultArtifact: null,
-        });
-        finished.push(invocation.id);
-        continue;
-      }
-      // Остановка оператором — это остановка, а не провал проверки: иначе STOP
-      // читался бы в истории как «тесты не прошли» (AUTO-03A).
-      const cancelled = session.status === 'CANCELLED';
-      const failedVerification = !cancelled && requiresVerification && verification !== 'PASSED';
-      const status = cancelled ? 'CANCELLED' : (failedVerification ? 'FAILED' : session.status);
-      const reason = cancelled
-        ? (session.error ? String(session.error).slice(0, 300) : 'остановлено оператором')
-        : failedVerification
-          ? `проверка не пройдена (${verification ?? 'не запускалась'}), хотя рецепт её требует`
-          : (session.error ? String(session.error).slice(0, 300) : null);
-      await this.store.updateInvocation(invocation.id, {
-        status,
-        reason,
-        verification,
-        finishedAt: session.updatedAt ?? nowIso,
-        // Where the work happened is only known once the session actually ran.
-        workspaceRef: session.workspacePath ?? invocation.workspaceRef,
-        resultArtifact: session.status === 'SUCCEEDED' ? 'result.md' : null,
-      });
-      finished.push(invocation.id);
-    }
-    return finished;
-  }
-
-  /** Через сколько «инвокация без сессии» считается брошенной, а не начинающейся. */
-  #orphanInvocationMs() {
-    const configured = Number(this.config.schedules?.orphanMs);
-    if (Number.isFinite(configured) && configured >= 0) return configured;
-    return DEFAULT_ORPHAN_INVOCATION_MS;
-  }
-
-  /** Срок, после которого зависшая проверка считается неизвестным исходом. */
-  #staleVerificationMs() {
-    const configured = Number(this.config.verification?.staleAfterMs);
-    if (Number.isFinite(configured) && configured >= 0) return configured;
-    return DEFAULT_STALE_VERIFICATION_MS;
-  }
+  // Вся эта логика живёт в src/services/automation-service.mjs: правки планировщика
+  // больше не касаются файла, где живёт чат и STOP. Здесь — тонкие делегаты, поэтому
+  // существующие вызовы и маршруты не меняются.
+  listRecipes(opts) { return this.automation.listRecipes(opts); }
+  getRecipe(id) { return this.automation.getRecipe(id); }
+  createRecipe(input) { return this.automation.createRecipe(input); }
+  updateRecipe(id, patch) { return this.automation.updateRecipe(id, patch); }
+  deleteRecipe(id) { return this.automation.deleteRecipe(id); }
+  previewRecipe(id, opts) { return this.automation.previewRecipe(id, opts); }
+  runRecipe(id, opts) { return this.automation.runRecipe(id, opts); }
+  listSchedules(opts) { return this.automation.listSchedules(opts); }
+  getSchedule(id) { return this.automation.getSchedule(id); }
+  createSchedule(input) { return this.automation.createSchedule(input); }
+  updateSchedule(id, patch) { return this.automation.updateSchedule(id, patch); }
+  deleteSchedule(id) { return this.automation.deleteSchedule(id); }
+  runScheduleNow(id, opts) { return this.automation.runScheduleNow(id, opts); }
+  listInvocations(opts) { return this.automation.listInvocations(opts); }
+  getInvocation(id) { return this.automation.getInvocation(id); }
+  invocationSummary(id) { return this.automation.invocationSummary(id); }
+  schedulerTick(opts) { return this.automation.schedulerTick(opts); }
 
   /** Work items a session belongs to — the chat screen shows this. */
   workItemsOfSession(sessionId) {
@@ -2829,6 +2353,9 @@ export class TaskManager extends EventEmitter {
       _turnStartedAt, _turnStartedMono, _turnFirstTokenAt, _turnFirstTokenMono, _turnStartSeq, _turnMessageSeq, _turnMeasuredTg, _turnMessageCount,
       _runtimeState, _starting, _sleeping, _sessionLost, _compacting, _compactingSince, _toolsRunning, _uiTimer, _lastPiExitAt, _snapshotSeq, ...safe } = task;
     const runtime = this.runtimes.get(task.id);
+    // «Живой» — процесс, который ещё владеет сессией: retired уже списан, и его
+    // флаги (compacting, toolsRunning, providerWait) больше не факты о работе.
+    const liveRuntime = Boolean(runtime && !runtime.retired && !runtime.pi.closed);
     return {
       ...safe,
       turnMetrics: task.turnMetrics || null,
@@ -2842,12 +2369,19 @@ export class TaskManager extends EventEmitter {
       runId: this.runCoordinator ? this.runCoordinator.current(task.id) : null,
       runtime: this.#runtimeFacts(task),
       turnState: this.#turnState(task),
+      // Единый UI-контракт: кнопки SEND/STOP/Edit и анимации всех клиентов
+      // читают эти поля, а не угадывают состояние по status/runtime/turnState.
+      ui: deriveChatUiContract(task, {
+        liveRuntime,
+        hasPendingWork: Boolean(task.pendingPrompts?.length),
+        seq: Number(_snapshotSeq || 0),
+      }),
       // Ожидание провайдера существует только пока живёт процесс, который его
       // объявил: после падения TaskBridge сохранённое значение — уже история.
-      providerWait: runtime && !runtime.pi.closed ? safe.providerWait || null : null,
+      providerWait: liveRuntime ? safe.providerWait || null : null,
       assistantText: tailText(safe.assistantText, TEXT_TAIL),
       thinkingText: tailText(safe.thinkingText, THINKING_TAIL),
-      sessionAvailable: Boolean(task.workspacePath || (runtime && !runtime.pi.closed))
+      sessionAvailable: Boolean(task.workspacePath || liveRuntime)
     };
   }
 
@@ -3488,16 +3022,6 @@ export class TaskManager extends EventEmitter {
     } finally {
       this.probeInFlight.delete(key);
     }
-  }
-
-  /**
-   * Компактная сводка запуска (AUTO-03B): читает инвокацию и её сессию, ничего не
-   * пишет. Отдаётся отдельным запросом, чтобы история не тянула тяжёлые детали.
-   */
-  invocationSummary(id) {
-    const invocation = this.getInvocation(id);
-    const session = invocation?.sessionId ? this.tasks.get(invocation.sessionId) ?? null : null;
-    return invocationSummary(invocation, session);
   }
 
   /**
@@ -4743,6 +4267,16 @@ export class TaskManager extends EventEmitter {
       // `compaction.last.estimatedTokensAfter` и подписана как оценка.
     }
     if (frame.type === 'agent_start') {
+      // Не даём позднему кадру от Pi воскресить остановленный или завершённый ход:
+      // STOP мог снять runtime с Map, а кадр `agent_start` из сокета прийти уже после.
+      // `retired`/`cancelRequested` и CANCELLING/CANCELLED — граница владения ходом.
+      if (!canAcceptPiFrame(task, stopped) || task.status === 'CANCELLED') return;
+      if (task.status !== 'RUNNING') {
+        task.statusChangedAt = now();
+        // Прогон открывается здесь же: прямое присваивание статуса обходит
+        // #setStatus, и без этого `/api/tasks/:id/runs` терял начало хода.
+        this.runCoordinator.start(task.id);
+      }
       task.status = 'RUNNING';
       task.current = 'Pi is working';
       task._promptStartedAt = Date.now();
@@ -4976,12 +4510,20 @@ export class TaskManager extends EventEmitter {
   // хода модели: Pi отвечает `handled`, а `agent_settled` для такого промпта не
   // приходит. Ход закрывается здесь, иначе задача висела бы в RUNNING, а слот
   // машины не освободился бы до STOP.
-  async #closeCommandOnlyTurn(task, id) {
+  async #closeCommandOnlyTurn(task, id, turn = null, baseline = null) {
     task.inFlightPrompt = null;
+    // Команда расширения исполнена без хода модели: Pi не пришлёт ни agent_settled,
+    // ни TASK_*. Ход обязан закрыть сервер. Раньше метод только снимал слот и
+    // публиковал фазу, а «закрытым» ход выглядел лишь потому, что статус не
+    // успевали перевести в RUNNING; с честным RUNNING до RPC задача повисала.
+    if (!['CANCELLED', 'FAILED'].includes(task.status)) {
+      await this.#verifyAndFinalize(task, { turn, baseline });
+    }
     await this.#turnStateEvent(task, 'SETTLED');
     await this.store.save(this.#publicTask(task)).catch(() => {});
     this.#resolveSettle(id);
     this.#releaseSlot(id);
+    this.#pump();
   }
 
   // Шаг C-A: публикация фазы хода. Лёгкое аддитивное событие TURN_STATE идёт
@@ -5440,7 +4982,9 @@ export class TaskManager extends EventEmitter {
 
   async cancel(id, opts = {}) {
     const commandId = opts && opts.commandId ? String(opts.commandId) : null;
-    const hard = opts?.hard === true;
+    // STOP по умолчанию жёсткий: оператор ждёт «остановилось сразу», а не
+    // десятисекундный `pi.abort()`. Мягкий путь остаётся только при явном hard:false.
+    const hard = opts?.hard !== false;
     // Правка ждёт этот промис с начала STOP. Жёсткий STOP убивает процессы
     // до записи CANCELLING, так что одного статуса для проверки недостаточно.
     const task = this.tasks.get(id);
@@ -6060,7 +5604,7 @@ export class TaskManager extends EventEmitter {
     return task;
   }
 
-  async #cancel(id, { keepPending = false, hard = false } = {}) {
+  async #cancel(id, { keepPending = false, hard = true } = {}) {
     const task = this.tasks.get(id);
     const runtime = this.runtimes.get(id);
     if (!task) throw Object.assign(new Error('Session not found'), { code: 'NOT_FOUND' });
@@ -6069,7 +5613,16 @@ export class TaskManager extends EventEmitter {
     // никому не нужно (MEDIA-10). Счётчик живёт в объекте задачи и сравнивается
     // в ветке восстановления.
     task._cancelEpoch = (task._cancelEpoch || 0) + 1;
-    if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status)) return this.#publicTask(task);
+    // STOP на терминальном статусе — опоздавшая команда: ход уже закрыт, и второй
+    // терминал (CANCELLED) переписал бы зафиксированный исход (2026-10-14: поздний
+    // STOP превращал FAILED в CANCELLED). Исключение одно — доставка, которая ещё
+    // в полёте (inFlightPrompt): именно этот случай ломался раньше, пока промпт
+    // летел в Pi, статус ещё был SUCCEEDED прошлого хода, и STOP выходил, ничего
+    // не остановив (STAB-02A). Очередь терминальной задачи сама по себе не повод
+    // писать второй терминал: её снимает отдельное действие над очередью.
+    if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(task.status) && !task.inFlightPrompt) {
+      return this.#publicTask(task);
+    }
     // Retire the runtime before touching Pi.  The abort response is not an
     // ownership boundary: Pi may acknowledge it while already queued frames
     // are still in flight.  Retiring here makes both the event handler and
@@ -6104,6 +5657,14 @@ export class TaskManager extends EventEmitter {
           // The process may already be gone. Ownership still has to be released.
         }
       }
+      // Мягкий abort — просьба, а не граница владения: после `retired` процесс
+      // всё равно не переиспользуется (#ensureSession создаст новый), поэтому
+      // закрываем его чисто, чтобы не держать зомби-Pi рядом с живой сессией.
+      try {
+        await runtime.pi.killTree();
+      } catch {
+        // The process may already be gone.
+      }
     }
     if (runtime) recordStopTrace(id, 'pi-stop-returned');
     // Открытый диалог расширения закрывается сам: Pi уже убит, но состояние
@@ -6112,6 +5673,19 @@ export class TaskManager extends EventEmitter {
       try { runtime.pi.send({ type: 'extension_ui_response', id: task.pendingUiRequest.id, cancelled: true }); } catch {}
       await this.#closeUiRequest(task, task.pendingUiRequest.id, { cancelled: true, reason: 'stopped' });
     }
+    // Единственная точка уборки. Раньше её делал `pi.on('close')`, но у
+    // retired-процесса обработчик обязан молчать (иначе он «оживит» отменённый
+    // ход) — и `_compacting`/`_toolsRunning`/`providerWait` оставались навсегда:
+    // чат навсегда показывал «сжимается контекст…» и живой runtime.
+    // kill:false — процесс уже убит выше (hard) или после abort'а (soft).
+    await retireTaskRuntime({
+      task,
+      runtimes: this.runtimes,
+      resolveSettle: taskId => this.#resolveSettle(taskId),
+      kill: false,
+      // Именно ЭТОТ процесс: за время остановки сессию мог забрать новый runtime.
+      runtime,
+    });
     // A queued prompt is dropped with the task, on either cancel path — unless
     // the cancel is only interrupting a generation (Ctrl+Enter / «Отправить
     // сейчас»), where the operator's queue must survive. Делается после остановки:
@@ -6125,15 +5699,30 @@ export class TaskManager extends EventEmitter {
       this.#removeQueued(id);
     }
     if (!runtime) {
-      this.#terminalPublication.hold(task, this.#publicTask(task));
-      task.status = 'CANCELLED';
-      task.current = 'Cancelled';
-      await this.store.save(this.#publicTask(task));
-      await this.#event(task, 'TASK_CANCELLED', 'Task cancelled');
+      // Сессия ещё не успела поднять Pi (QUEUED/PREPARING/PREFLIGHT): хода нет,
+      // но терминальный статус и освобождение слота обязательны — иначе STOP в
+      // самом начале оставлял слот занятым и очередь не двигалась.
+      recordStopTrace(id, 'eventchain-wait-started');
+      recordStopTrace(id, 'eventchain-drained');
+      await this.#finalizeCancelled(task);
+      this.#releaseSlot(id);
+      this.#pump();
       return this.#publicTask(task);
     }
     recordStopTrace(id, 'eventchain-wait-started');
-    await runtime.eventChain.catch(() => {});
+    // Ограниченное ожидание: застрявший RPC-gate не должен вешать STOP навсегда.
+    let drainTimer = null;
+    try {
+      await Promise.race([
+        runtime.eventChain.catch(() => {}),
+        new Promise(resolve => {
+          drainTimer = setTimeout(resolve, 1500);
+          drainTimer.unref?.();
+        }),
+      ]);
+    } finally {
+      if (drainTimer) clearTimeout(drainTimer);
+    }
     recordStopTrace(id, 'eventchain-drained');
     this.#resolveSettle(id);
     await this.#finalizeCancelled(task);
@@ -6367,11 +5956,26 @@ export class TaskManager extends EventEmitter {
     // A probe, not a command. A session whose Pi pipe is already gone has no live
     // state to read — and failing the probe here is what made every message from
     // the phone answer "Pi RPC session is not writable" instead of the prompt
-    // restarting the session (see #ensureSession). Other failures keep
-    // propagating: a hung Pi is a different diagnosis and must stay visible.
-    const liveState = live && !live.pi.closed && live.pi.canSend?.() !== false
-      ? await live.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(error => {
-        if (error?.code === 'PI_RPC_NOT_WRITABLE') return null;
+    // restarting the session (see #ensureSession).
+    //
+    // A retired runtime is equally unusable: after a soft STOP the process is
+    // already written off, and probing it answered for a Pi nobody may send to.
+    //
+    // A HUNG or EXITED Pi is NOT a reason to fail the operator's message either.
+    // The probe used to rethrow those, so the 500 reached the chat while the very
+    // next branch (#ensureSession below) already knew how to replace the process.
+    // Retire it here and let the normal path start a fresh one.
+    const liveUsable = Boolean(live && !live.retired && !live.cancelRequested && !live.pi.closed && live.pi.canSend?.() !== false);
+    const liveState = liveUsable
+      ? await live.pi.getState(PiRpcSession.PROBE_TIMEOUT_MS).catch(async error => {
+        if (['PI_RPC_NOT_WRITABLE', 'PI_RPC_HUNG', 'PI_RPC_EXITED'].includes(error?.code)) {
+          await retireTaskRuntime({
+            task,
+            runtimes: this.runtimes,
+            resolveSettle: taskId => this.#resolveSettle(taskId),
+          });
+          return null;
+        }
         throw error;
       })
       : null;
@@ -6539,7 +6143,15 @@ export class TaskManager extends EventEmitter {
     // otherwise a mute Pi would replay the text for ever.
     if (announce && !fromQueue) task._stallRecoveries = 0;
     await this.store.save(this.#publicTask(task)).catch(() => {});
-    if (!streaming) await this.#turnStateEvent(task, 'DISPATCHING');
+    // Статус RUNNING выставляется ДО `pi.prompt()`. Пока RPC летит, STOP обязан
+    // видеть активный ход: иначе задача ещё числилась SUCCEEDED от прошлого хода,
+    // #cancel выходил по терминальному статусу, Pi успевал начать стримить — и
+    // `agent_start` воскрешал только что отменённый ход. Здесь же открывается
+    // прогон (runCoordinator.start внутри #setStatus).
+    if (!streaming) {
+      await this.#setStatus(task, 'RUNNING', 'Отправка запроса в Pi…');
+      await this.#turnStateEvent(task, 'DISPATCHING');
+    }
     const dispatchedAt = Date.now();
     let ackError = null;
     // Slash-команда расширения Pi (например `/plannotator-annotate`) исполняется без
@@ -6584,15 +6196,20 @@ export class TaskManager extends EventEmitter {
         });
       }
       if (commandOnly) {
-        await this.#closeCommandOnlyTurn(task, id);
+        await this.#closeCommandOnlyTurn(task, id, turn, baseline);
       } else {
-        if (!streaming) await this.#setStatus(task, 'RUNNING', 'Follow-up sent to Pi');
-        else await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
-        if (!streaming) await this.#turnStateEvent(task, 'ACKED');
-        // Вклинивание не начинает новый ход: фаза остаётся за живыми кадрами Pi.
-        // Сброс нужен только чтобы снятый ранее терминальный ранг (Стоп → CANCELLED)
-        // не блокировал PROGRESS, если Pi ещё стримит.
-        else task._turnPhase = null;
+        // Для prompt статус уже RUNNING (выставлен до RPC) — здесь только ACK.
+        // Для steer ход уже шёл: обновляем подпись, новый ход не открывается, и
+        // фазу оставляем живым кадрам Pi (сброс ранга, чтобы PROGRESS не блокировался).
+        if (streaming) {
+          await this.#setStatus(task, 'RUNNING', 'Сообщение вклинилось в текущий ответ');
+          // Вклинивание не начинает новый ход: фаза остаётся за живыми кадрами Pi.
+          // Сброс нужен только чтобы снятый ранее терминальный ранг (Стоп → CANCELLED)
+          // не блокировал PROGRESS, если Pi ещё стримит.
+          task._turnPhase = null;
+        } else {
+          await this.#turnStateEvent(task, 'ACKED');
+        }
       }
       // Release gate immediately after USER_MESSAGE is safely persisted so the
       // HTTP response returns to client without waiting for subsequent background ticks.
@@ -6808,9 +6425,13 @@ export class TaskManager extends EventEmitter {
       current.retired = true;
       current.cancelRequested = true;
       task._turn = (task._turn || 0) + 1;
-      await current.pi.killTree().catch(() => {});
-      this.#resolveSettle(task.id);
-      if (this.runtimes.get(task.id) === current) this.runtimes.delete(task.id);
+      // Та же уборка, что у STOP: флаги задачи снимаются здесь, а не в close
+      // (retired-процесс его обработчик игнорирует), runtime уходит из Map до kill.
+      await retireTaskRuntime({
+        task,
+        runtimes: this.runtimes,
+        resolveSettle: taskId => this.#resolveSettle(taskId),
+      });
     }
     // The model the session is about to run, normalized against the live
     // catalog: Pi names providers/models its own way (strata-iq3s → strata,
@@ -6921,11 +6542,13 @@ export class TaskManager extends EventEmitter {
     runtime.retired = true;
     runtime.cancelRequested = true;
     task._turn = (task._turn || 0) + 1;
-    await runtime.pi.killTree().catch(() => {});
-    this.#resolveSettle(task.id);
-    if (this.runtimes.get(task.id) === runtime) this.runtimes.delete(task.id);
-    task.piPid = null;
-    task.piStartedAt = null;
+    // Уборка одна на все пути: флаги, Map, kill. Иначе у dead Pi оставался
+    // `_compacting` от прошлого хода и свежая сессия выглядела сжимающейся.
+    await retireTaskRuntime({
+      task,
+      runtimes: this.runtimes,
+      resolveSettle: taskId => this.#resolveSettle(taskId),
+    });
   }
 
   #stallSettings() {
@@ -7152,16 +6775,19 @@ export class TaskManager extends EventEmitter {
   // --- runtime state (R3.1) --------------------------------------------------
   #runtimeFacts(task) {
     const runtime = this.runtimes.get(task.id);
+    // retired-процесс уже не хозяин сессии: его activity не должна показываться
+    // клиенту как «работает» (иначе после STOP висит «сжимается контекст»).
+    const live = Boolean(runtime && !runtime.retired && !runtime.pi.closed);
     return deriveRuntimeState({
       status: task.status,
-      live: Boolean(runtime && !runtime.pi.closed),
+      live,
       starting: Boolean(task._starting),
       sleeping: Boolean(task._sleeping),
       hasSession: Boolean(task.piSessionFile || task.workspacePath) && !task._sessionLost,
-      compacting: Boolean(task._compacting),
-      compactingSince: task._compactingSince || 0,
-      toolsRunning: task._toolsRunning || 0,
-      waitingModel: Boolean(task.providerWait),
+      compacting: live && Boolean(task._compacting),
+      compactingSince: live ? (task._compactingSince || 0) : 0,
+      toolsRunning: live ? (task._toolsRunning || 0) : 0,
+      waitingModel: live && Boolean(task.providerWait),
     });
   }
 
