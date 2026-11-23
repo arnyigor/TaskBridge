@@ -893,6 +893,9 @@ fun mergeTaskSnapshot(previous: Task?, next: Task, appliedCursor: Long): Task {
         current = previous.current,
         turnState = previous.turnState ?: next.turnState,
         runtime = previous.runtime ?: next.runtime,
+        // Контракт кнопок — часть «лица» хода: старый снимок не вправе вернуть
+        // зажжённый STOP на уже отменённой сессии.
+        ui = previous.ui ?: next.ui,
     )
 }
 
@@ -1601,6 +1604,33 @@ data class TurnState(
     val waitingModelMs: Long? = null,
 )
 
+/**
+ * Единый UI-контракт хода, вычисляемый сервером (`src/chat-lifecycle.mjs`).
+ *
+ * Клиент (Android / Desktop / Web) биндит анимации, STOP, SEND и действия истории
+ * к этим полям, а не угадывает состояние по шести разрозненным флагам
+ * (`status`, `runtime.activity`, `turnState.phase`, `pendingPrompts`, ...).
+ * Все поля с дефолтами: сервер без `ui` (старый сбор) читается без ошибок, и
+ * тогда клиент считает то же самое локально (`chat/ChatUiState.kt`).
+ */
+@Serializable
+data class TaskUiState(
+    /** idle | queued | preparing | preflight | dispatching | waiting_model |
+     *  provider_wait | streaming | tool | compacting | waiting_user | verifying | cancelling */
+    val phase: String = "idle",
+    val busy: Boolean = false,
+    val typing: Boolean = false,
+    val canStop: Boolean = false,
+    val canSend: Boolean = true,
+    /** send | queue | disabled */
+    val sendAction: String = "send",
+    val canEditHistory: Boolean = true,
+    val pendingCount: Int = 0,
+    val label: String = "",
+    /** `snapshotSeq`, на котором вычислен контракт: более старый не перетирает новый. */
+    val seq: Long = 0,
+)
+
 @Serializable
 data class Task(
     val id: String,
@@ -1608,6 +1638,8 @@ data class Task(
     val prompt: String? = null,
     val projectId: String? = null,
     val turnState: TurnState? = null,
+    /** Единый контракт кнопок и анимаций (см. [TaskUiState]); null — сервер старый. */
+    val ui: TaskUiState? = null,
     /** Шаг C-B: seq последнего события сессии на момент снимка (0 — старый сервер). */
     val snapshotSeq: Long = 0,
     val status: String = "QUEUED",

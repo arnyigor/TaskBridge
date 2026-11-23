@@ -117,6 +117,7 @@ import ru.arny.taskbridge.core.client.session.SendMode
 import ru.arny.taskbridge.core.client.session.describe
 import ru.arny.taskbridge.core.client.sessions.DisplayState
 import ru.arny.taskbridge.core.client.sessions.SessionListState
+import ru.arny.taskbridge.core.client.chat.deriveChatUiState
 import ru.arny.taskbridge.core.client.sessions.displayStateOf
 import ru.arny.taskbridge.core.client.sessions.stageLabel
 import ru.arny.taskbridge.platform.PlatformServices
@@ -351,9 +352,13 @@ fun ChatScreen(
     }
 
     val task = state.task
-    val displayState = task?.let { displayStateOf(it) } ?: DisplayState.UNKNOWN
-    val working = displayState == DisplayState.WORKING || displayState == DisplayState.WAITING_USER
-    val historyLocked = working || displayState == DisplayState.QUEUED
+    // Одна проекция управления чатом: кнопки, анимации и блокировки читают один
+    // объект (chat/ChatUiState.kt), поэтому «точки крутятся, а STOP отключён» или
+    // «ответ Готово, а Edit отвечает "Сессия сейчас работает"» невозможны.
+    val ui = remember(state) { deriveChatUiState(state) }
+    val displayState = ui.displayState
+    val working = ui.busy
+    val historyLocked = !ui.canEditHistory
 
     fun send(mode: SendMode) {
         val text = draft.text
@@ -482,7 +487,7 @@ fun ChatScreen(
                 dialogOpen = dialog != null,
                 searchOpen = searchOpen,
                 filesOpen = fileTabs.items.isNotEmpty(),
-                canStop = canStop(task?.status, state.outbox.size),
+                canStop = ui.canStop,
             )) {
                 // Открытый диалог — отдельное окно и обрабатывает Esc сам.
                 ChatEscape.DIALOG, ChatEscape.NOTHING -> false
@@ -578,10 +583,9 @@ fun ChatScreen(
                 }
                 // Один таймер фаз «агент пишет» на ленту: точки читают его из LocalTypingPhase
                 // и не заводят собственных анимаций. Пока генерации нет, active = false
-                // и лишних кадров не запрашивается вовсе.
-                val generating = remember(state.chat.items) {
-                    state.chat.items.any { it is ChatItem.Assistant && it.active }
-                }
+                // и лишних кадров не запрашивается вовсе. Источник — тот же ui.showTyping,
+                // что гасит точки в VERIFYING/CANCELLING/WAITING_USER.
+                val generating = ui.showTyping
                 Box(Modifier.weight(1f).fillMaxWidth().nestedScroll(scrollIntent)) {
                     // «Пользователь у низа» решается ДО отрисовки ленты: от этого флага
                     // зависят обе стороны поведения — держать низ или не давать ленте
@@ -715,11 +719,12 @@ fun ChatScreen(
                     onRemoveFile = { files = files - it },
                     onAttach = { fileSourcesOpen = true },
                     onPaste = { pasted -> if (pasted.isEmpty()) scope.launch { snackbar.showSnackbar("В буфере нет картинки или файлов") } else files = files + pasted },
-                    working = working,
+                    working = ui.canSteer,
+                    stopping = ui.stopping,
                     enterSends = graph.settings.enterSends && platform.kind == "desktop",
-                    enabled = state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound,
+                    enabled = (state.link !is LinkState.Failed || (state.link as LinkState.Failed).error !is ApiError.NotFound) && ui.canSend,
                     onSend = { send(it) },
-                    onStop = if (canStop(task?.status, state.outbox.size)) ({ dialog = ChatDialog.ConfirmStop }) else null,
+                    onStop = if (ui.canStop) ({ dialog = ChatDialog.ConfirmStop }) else null,
                 )
             }
         }

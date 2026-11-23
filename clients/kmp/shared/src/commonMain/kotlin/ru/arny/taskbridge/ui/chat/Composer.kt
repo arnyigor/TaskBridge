@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.InputChip
 import androidx.compose.material3.MaterialTheme
@@ -80,6 +81,8 @@ fun Composer(
     enabled: Boolean,
     onSend: (SendMode) -> Unit,
     onStop: (() -> Unit)? = null,
+    /** Идёт остановка: в кнопке STOP крутится спиннер, но нажатие остаётся возможным. */
+    stopping: Boolean = false,
     modifier: Modifier = Modifier,
     /** Above the input: the queue line, outbox problems. */
     top: @Composable () -> Unit = {},
@@ -304,11 +307,14 @@ fun Composer(
                             onClick = { onSend(SendMode.QUEUE) },
                         )
                         // Stop is always in place: a button that appears and disappears
-                        // confuses more than a disabled one.
+                        // confuses more than a disabled one. Пока остановка идёт, в кнопке
+                        // крутится спиннер, а нажатие остаётся: залипшую остановку
+                        // оператор повторяет тем же нажатием.
                         SquareButton(
                             icon = AppIcons.Stop,
                             description = "Остановить агента",
                             enabled = canStop,
+                            busy = stopping,
                             background = MaterialTheme.colorScheme.errorContainer,
                             content = MaterialTheme.colorScheme.error,
                             onClick = { onStop?.invoke() },
@@ -510,6 +516,7 @@ private fun SquareButton(
     enabled: Boolean,
     background: Color,
     content: Color,
+    busy: Boolean = false,
     onClick: () -> Unit,
 ) {
     Box(
@@ -520,11 +527,19 @@ private fun SquareButton(
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            icon,
-            description,
-            Modifier.size(20.dp),
-            tint = if (enabled) content else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
-        )
+        if (busy) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = if (enabled) content else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            )
+        } else {
+            Icon(
+                icon,
+                description,
+                Modifier.size(20.dp),
+                tint = if (enabled) content else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
+            )
+        }
     }
 }

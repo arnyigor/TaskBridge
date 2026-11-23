@@ -39,6 +39,7 @@ import ru.arny.taskbridge.core.api.Task
 import ru.arny.taskbridge.core.api.TaskBridgeApi
 import ru.arny.taskbridge.core.api.TaskEvent
 import ru.arny.taskbridge.core.api.ToolOutput
+import ru.arny.taskbridge.core.api.TurnState
 import ru.arny.taskbridge.core.api.UploadFile
 import ru.arny.taskbridge.core.api.WorkspaceFileListing
 import ru.arny.taskbridge.core.api.mergeTaskSnapshot
@@ -242,6 +243,8 @@ class ChatSession(
     private companion object {
         val TERMINAL_EVENTS = setOf("TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED")
         val TERMINAL_TASK_STATUSES = setOf("SUCCEEDED", "FAILED", "CANCELLED")
+        /** Рабочие статусы: в них Enter ставит сообщение в очередь, а не рисует пузырь. */
+        val ACTIVE_TASK_STATUSES = setOf("QUEUED", "PREPARING", "PREFLIGHT", "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING")
     }
     private var streamingEnabled = initialStreamingEnabled
     private val cachedEvents = mutableListOf<TaskEvent>()
@@ -346,40 +349,48 @@ class ChatSession(
     // --- loading ----------------------------------------------------------------
 
     private suspend fun loadInitial() {
-        try {
-            val window = api.eventWindow(taskId, pageTurns)
-            val task = api.task(taskId)
-            mutex.withLock {
-                val chat = ChatReducer(task, seedInitial = window.reachedStart)
-                for (event in window.events) chat.apply(event)
-                window.events.firstOrNull()?.let { chat.revealWindowStart(it.seq) }
-                chat.syncTask(task, initial = true)
-                reducer = chat
-                oldestSeq = window.events.firstOrNull()?.seq
-                _state.update { it.copy(task = task, chat = chat.snapshot(), loading = false, reachedStart = window.reachedStart) }
-                cachedEvents.clear()
-                cachedEvents.addAll(window.events.map(::lightenEvent))
-                // The first window can be large by itself (a page cut by the server's
-                // byte cap): the budget applies to it as well, not only to pages added
-                // later.
-                trimCachedEvents()
-            }
-            persistCache()
-            fillEmptyWindow()
-            loadApprovals()
-            startStreamIfReady()
-        } catch (error: ApiException) {
-            val restored = if (reducer == null) hydrateCache() else false
-            _state.update {
-                it.copy(
-                    loading = false,
-                    link = if (error.error.transient) LinkState.Reconnecting(1, 2000, error.message.orEmpty())
-                    else LinkState.Failed(error.error),
-                )
-            }
-            if (error.error.transient) {
-                if (restored) startStreamIfReady()
-                else { delay(2000); loadInitial() }
+        // Повтор транзиентной ошибки — циклом, а не рекурсией: рекурсивный
+        // `delay(2000); loadInitial()` накапливал цепочку продолжений в куче,
+        // пока сервер был недоступен (телефон в лифте оставлял её навсегда).
+        while (!closed) {
+            try {
+                val window = api.eventWindow(taskId, pageTurns)
+                val task = api.task(taskId)
+                mutex.withLock {
+                    val chat = ChatReducer(task, seedInitial = window.reachedStart)
+                    for (event in window.events) chat.apply(event)
+                    window.events.firstOrNull()?.let { chat.revealWindowStart(it.seq) }
+                    chat.syncTask(task, initial = true)
+                    reducer = chat
+                    oldestSeq = window.events.firstOrNull()?.seq
+                    _state.update { it.copy(task = task, chat = chat.snapshot(), loading = false, reachedStart = window.reachedStart) }
+                    cachedEvents.clear()
+                    cachedEvents.addAll(window.events.map(::lightenEvent))
+                    // The first window can be large by itself (a page cut by the server's
+                    // byte cap): the budget applies to it as well, not only to pages added
+                    // later.
+                    trimCachedEvents()
+                }
+                persistCache()
+                fillEmptyWindow()
+                loadApprovals()
+                startStreamIfReady()
+                return
+            } catch (error: ApiException) {
+                val restored = if (reducer == null) hydrateCache() else false
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        link = if (error.error.transient) LinkState.Reconnecting(1, 2000, error.message.orEmpty())
+                        else LinkState.Failed(error.error),
+                    )
+                }
+                if (!error.error.transient) return
+                if (restored) {
+                    startStreamIfReady()
+                    return
+                }
+                delay(2000)
             }
         }
     }
@@ -594,16 +605,45 @@ class ChatSession(
                 trimCachedEvents()
             }
             val kind = event.piFrame?.get("type")?.toString()?.trim('"') ?: event.type
+            // Доставленное из очереди сообщение больше не ждёт: сервер прислал
+            // pendingId в USER_MESSAGE — строка очереди обязана исчезнуть сразу,
+            // иначе сообщение висело и в ленте, и в плашке «В очереди» до опроса.
+            val deliveredPendingId = if (event.type == "USER_MESSAGE") event.string("pendingId") else null
             val status = when (event.type) {
-                "USER_MESSAGE" -> "RUNNING"
+                // USER_MESSAGE больше НЕ форсирует RUNNING: историческая догрузка
+                // (backfill/старые страницы) и slash-команды без хода модели
+                // возвращали сессию в «работает» на пустом месте.
                 "STATUS" -> event.string("status")
                 "TASK_SUCCEEDED", "TASK_FAILED", "TASK_CANCELLED" ->
                     event.type.removePrefix("TASK_").takeIf { chat.terminalAffectsCurrent }
                 else -> null
             }
-            _state.update {
-                it.copy(
-                    task = if (status != null) it.task?.copy(status = status) else it.task,
+            _state.update { current ->
+                var nextTask = current.task
+                if (nextTask != null) {
+                    if (deliveredPendingId != null) {
+                        nextTask = nextTask.copy(
+                            pendingPrompts = nextTask.pendingPrompts.filterNot { it.id == deliveredPendingId },
+                        )
+                    }
+                    val phase = if (event.type == "TURN_STATE") event.string("phase") else null
+                    when {
+                        status != null -> nextTask = nextTask.copy(
+                            status = status,
+                            snapshotSeq = maxOf(nextTask.snapshotSeq, event.seq),
+                        )
+                        phase != null -> nextTask = nextTask.copy(
+                            turnState = (nextTask.turnState ?: TurnState()).copy(
+                                phase = phase,
+                                stage = event.string("stage") ?: nextTask.turnState?.stage,
+                                lastProgressAt = event.string("lastProgressAt") ?: event.at ?: nextTask.turnState?.lastProgressAt,
+                            ),
+                            snapshotSeq = maxOf(nextTask.snapshotSeq, event.seq),
+                        )
+                    }
+                }
+                current.copy(
+                    task = nextTask,
                     chat = chat.snapshot(),
                     lastEventAt = event.at ?: now(),
                     lastEventType = kind,
@@ -626,15 +666,15 @@ class ChatSession(
 
     private suspend fun refreshTask() {
         try {
-            val cursor = mutex.withLock { reducer?.cursor ?: 0L }
             val fetched = api.task(taskId)
             if (fetched.status in TERMINAL_TASK_STATUSES) recordLifecycle("terminal-snapshot-received")
             // A heartbeat can be the only frame after a lost tail. Metadata alone
             // cannot restore missing messages: repair up to the server's event
             // version even when no later SSE event arrives to expose the gap.
-            if (fetched.snapshotSeq > cursor && fetched.snapshotSeq < Long.MAX_VALUE) {
+            val cursorBeforeGap = mutex.withLock { reducer?.cursor ?: 0L }
+            if (fetched.snapshotSeq > cursorBeforeGap && fetched.snapshotSeq < Long.MAX_VALUE) {
                 repairGap(fetched.snapshotSeq + 1)
-            } else if (fetched.snapshotSeq in 1 until cursor && mutex.withLock { reducer?.cursor == cursor }) {
+            } else if (fetched.snapshotSeq in 1 until cursorBeforeGap && mutex.withLock { reducer?.cursor == cursorBeforeGap }) {
                 // Версия сервера НИЖЕ курсора: историю переписали (удалили/правили ходы,
                 // восстановили стор). После курсора не придёт уже ничего — это состояние
                 // не лечится ожиданием, и чат оставался замороженным, пока процесс жив.
@@ -645,11 +685,16 @@ class ChatSession(
             recordLifecycle("terminal-poll-applied")
             mutex.withLock {
                 val chat = reducer
-                // A response started before a new SSE event cannot settle that newer turn.
-                if (chat != null && chat.cursor != cursor) return@withLock
+                val currentCursor = chat?.cursor ?: 0L
+                // Отбрасываем снимок ТОЛЬКО если после него пришли ещё более свежие
+                // события. Раньше здесь сравнивался курсор с до-запросным значением:
+                // repairGap() выше двигал курсор — и только что полученный `fetched`
+                // отбрасывался КАЖДЫЙ раз, поэтому после STOP/завершения состояние
+                // задачи (статус, очередь, runtime) не обновлялось вообще.
+                if (fetched.snapshotSeq > 0 && currentCursor > fetched.snapshotSeq) return@withLock
                 // Шаг C-B: снимок версионирован (snapshotSeq); ответ с меньшей версией
                 // не откатывает «лицо» хода — фазу, стадию, статус и runtime.
-                val task = mergeTaskSnapshot(_state.value.task, fetched, chat?.cursor ?: cursor)
+                val task = mergeTaskSnapshot(_state.value.task, fetched, currentCursor)
                 if (chat != null) chat.syncTask(task)
                 _state.update { it.copy(task = task, chat = chat?.snapshot() ?: it.chat) }
             }
@@ -657,6 +702,9 @@ class ChatSession(
             if (error.error is ApiError.NotFound) _state.update { it.copy(link = LinkState.Failed(error.error)) }
         }
     }
+
+    /** Шов для тестов: опрос состояния без поднятия SSE. */
+    internal suspend fun refreshNowForTest() = refreshTask()
 
     private suspend fun loadApprovals() {
         runCatching { api.approvals(taskId) }.onSuccess { list ->
@@ -689,16 +737,24 @@ class ChatSession(
             // Durable before network: a process death cannot lose an accepted tap.
             saveOutbox()
             mutex.withLock {
-                reducer?.let { chat ->
-                    if (!chat.hasOptimistic(message.commandId)) {
-                        chat.addOptimistic(
-                            message.commandId,
-                            message.text.ifEmpty { "Прикреплённые файлы" },
-                            files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) },
-                            now(),
-                        )
+                val taskStatus = _state.value.task?.status
+                val willParkInQueue = message.mode == SendMode.QUEUE && taskStatus in ACTIVE_TASK_STATUSES
+                // Если агент занят и сообщение уходит В ОЧЕРЕДЬ — показываем его только
+                // в Outbox/QueueLine. Оптимистичный пузырь с точками жил в ленте ~300 мс,
+                // потом сервер возвращал pendingPrompts и он «перепрыгивал» в плашку:
+                // сообщение мигало и появлялось дважды (баг №5).
+                if (!willParkInQueue) {
+                    reducer?.let { chat ->
+                        if (!chat.hasOptimistic(message.commandId)) {
+                            chat.addOptimistic(
+                                message.commandId,
+                                message.text.ifEmpty { "Прикреплённые файлы" },
+                                files.map { FileRef(name = it.name, size = it.bytes.size.toLong(), mimeType = it.mimeType) },
+                                now(),
+                            )
+                        }
+                        _state.update { s -> s.copy(chat = chat.snapshot()) }
                     }
-                    _state.update { s -> s.copy(chat = chat.snapshot()) }
                 }
             }
             deliverIfIdle(message, files)
@@ -988,7 +1044,7 @@ class ChatSession(
      * чата — нажать ещё раз. Сервер к повторной отмене терпим: на терминальном
      * статусе он отвечает сразу, а на живом — повторяет остановку.
      */
-    fun cancel(hard: Boolean = false) {
+    fun cancel(hard: Boolean = true) {
         val commandId = ids()
         recordLifecycle("stop-clicked", commandId)
         return act("cancel", concurrent = true) {
@@ -997,17 +1053,33 @@ class ChatSession(
                 _state.update { it.copy(chat = reducer?.snapshot() ?: it.chat) }
             }
             recordLifecycle("stopping-shown", commandId)
-            val cursor = mutex.withLock { reducer?.cursor ?: 0L }
             try {
+                // Если сервер уже в терминальном статусе и очередь пуста — лишний
+                // POST /cancel не нужен: ответ всё равно ничего не изменит.
+                val localTask = _state.value.task
+                val needRemoteCancel = localTask == null ||
+                    localTask.status !in TERMINAL_TASK_STATUSES ||
+                    localTask.pendingPrompts.isNotEmpty() ||
+                    localTask.runtime?.activity == "compacting"
+                if (!needRemoteCancel) return@act
+
                 recordLifecycle("http-stop-started", commandId)
                 val stopped = api.cancel(taskId, commandId, hard = hard)
                 recordLifecycle("http-stop-returned", commandId)
                 mutex.withLock {
                     val chat = reducer
-                    if (chat != null && chat.cursor != cursor) return@withLock
-                    val merged = mergeTaskSnapshot(_state.value.task, stopped, chat?.cursor ?: cursor)
-                    chat?.syncTask(merged)
-                    _state.update { it.copy(task = merged) }
+                    val currentCursor = chat?.cursor ?: 0L
+                    // Ответ /cancel принимаем, если поверх него не пришёл более новый
+                    // ход. Раньше здесь сравнивался курсор с до-запросным значением:
+                    // поток за время POST присылал STATUS: CANCELLING и HARD_STOP,
+                    // курсор двигался — и финальный `CANCELLED` отбрасывался. Чат
+                    // оставался в CANCELLING с горящей кнопкой STOP.
+                    val stale = stopped.snapshotSeq > 0 && currentCursor > stopped.snapshotSeq
+                    if (!stale) {
+                        val merged = mergeTaskSnapshot(_state.value.task, stopped, currentCursor)
+                        chat?.syncTask(merged)
+                        _state.update { it.copy(task = merged, chat = chat?.snapshot() ?: it.chat) }
+                    }
                 }
             } finally {
                 mutex.withLock {

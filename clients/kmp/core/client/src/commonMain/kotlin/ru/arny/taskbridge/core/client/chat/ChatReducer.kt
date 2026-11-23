@@ -113,6 +113,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val usageEventSeqs: MutableSet<Long> = mutableSetOf(),
         val metricSegmentIds: MutableSet<String> = mutableSetOf(),
         var generatingToolCall: Boolean = false,
+        /**
+         * Поколение, к которому относится эта заглушка: наибольший номер хода,
+         * виденный к моменту её создания. Терминал с номером не выше этого —
+         * поздний хвост прежнего поколения, он не вправе её закрывать (BUG-P0).
+         * null у обычных ходов: любая отмена/отказ относится к ним.
+         */
+        var generationFloor: Long? = null,
     )
 
     internal class CompactionBoundary(val seq: Long, val text: Int, val thinking: Int, val tools: Int, val notes: List<Turn>, val key: String = seq.toString())
@@ -151,6 +158,17 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     private var textSeparator = ""
     private var separatorApplied = false
     private var initialPromptAccepted = false
+
+    /**
+     * Наибольший известный номер поколения хода.
+     *
+     * Заглушка без номера (первый ход, регенерация, правка до message_start) —
+     * НЕ «чужой ход»: из-за этого STOP на первой секунде отбрасывался. Но и
+     * терминал, чей номер не выше уже виденного, закрывать её не вправе — это
+     * поздний хвост прежнего поколения после правки (BUG-P0 2026-11-19).
+     * Водяной знак и различает эти два случая.
+     */
+    private var lastTurnNo: Long? = null
 
     /** Pi may accept several steers before answering any of them. Its user frame
      * identifies which accepted prompt the following assistant frame belongs to. */
@@ -352,6 +370,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             delivery = if (preservePrevious) "Принято Pi · ждёт применения" else "Принято Pi · ждём ответ модели",
         )
         val key = if (id == "initial") 0L else id.toLong()
+        noteTurnNo(turnNo)
         current = Turn(id = "assistant-$id", role = Role.ASSISTANT, variantKey = key, userAt = at, turnNo = turnNo)
         turns += current
         variants[key] = Variants(mutableListOf("assistant-$id"), "assistant-$id")
@@ -376,27 +395,15 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             }
         }
 
-        // Привязка по поколению хода надёжнее времени: терминал чужого поколения
-        // (STOP/SUCCEEDED, дошедший после TURN_TRUNCATED) не имеет права закрывать
-        // новый ход (живой отчёт 2026-11-19: правка → повтор → ложная ошибка).
-        // 1) Свежая заглушка после правки (без доставки) и терминал другого
-        //    поколения: номер заглушки неизвестен/иной — чужой терминал закрывает
-        //    предыдущий ответ.
-        // 2) Известны оба номера и они совпали — терминал своего поколения.
-        val freshPlaceholder = current.at == null && current.userAt == null && current.status.isEmpty()
-        val generationMismatch = if (current.turnNo != null) turnNo != current.turnNo else freshPlaceholder
-        if (turnNo != null && generationMismatch) {
-            val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current && it.turnNo == turnNo }
-            if (previous != null) {
-                previous.status = if (humanError != null) "FAILED" else labelFor(previous)
-                previous.active = false
-                if (humanError != null) previous.error = errorFor(previous)
-                previous.endedAt = previous.endedAt ?: at
-                previous.final = true
-                for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
-            }
-            return false
-        }
+        // Привязка терминала к ходу. Номер поколения (data.turn) надёжнее времени:
+        // терминал чужого хода (STOP/SUCCEEDED, дошедший после правки или повторной
+        // доставки) не имеет права закрывать новый ход.
+        //
+        // Решающее правило — сравнивать номера, когда известны ОБА. Заглушка без
+        // номера (первый ход сессии, регенерация, правка до message_start) — НЕ
+        // «чужой ход»: старое правило считало её таковой, и STOP на первой секунде
+        // (а также отказ до первого ответа модели) молча отбрасывался — чат
+        // продолжал крутиться после нажатия «Стоп».
         val currentNo = current.turnNo
         if (turnNo != null && currentNo != null && turnNo < currentNo) {
             val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current && it.turnNo == turnNo }
@@ -410,9 +417,31 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             }
             return false
         }
-        // A late settle that predates the CURRENT prompt belongs to the previous answer.
+        // Номер у терминала есть, а у текущего ответа ещё нет: поздний хвост чужого
+        // хода узнаётся только по уже существующему ответу с тем же номером.
+        if (turnNo != null && currentNo == null) {
+            val olderOwner = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current && it.turnNo == turnNo }
+            if (olderOwner != null) {
+                olderOwner.status = if (humanError != null) "FAILED" else labelFor(olderOwner)
+                olderOwner.active = false
+                if (humanError != null) olderOwner.error = errorFor(olderOwner)
+                olderOwner.endedAt = olderOwner.endedAt ?: at
+                olderOwner.final = true
+                for (tool in olderOwner.tools) if (tool.state == "run") tool.state = "interrupted"
+                return false
+            }
+            // Ответа с этим номером уже нет (его сняла правка), но заглушка
+            // создана ПОСЛЕ этого поколения — значит это хвост прежнего хода,
+            // а не новая доставка. Заглушка после правки остаётся ждущей (BUG-P0),
+            // иначе старый CANCELLED/SUCCEEDED закрывает только что начатый ход.
+            val floor = current.generationFloor
+            if (floor != null && turnNo <= floor) return false
+        }
+        // Без номера — запасное правило по времени. STOP ему не подчиняется: отмена
+        // относится к текущему ходу даже при метке времени раньше старта хода
+        // (сервер ставит `at` уже после убийства процесса).
         val currentStart = current.at ?: current.userAt
-        if (turnNo == null && at != null && currentStart != null && before(at, currentStart)) {
+        if (turnNo == null && status != "CANCELLED" && at != null && currentStart != null && before(at, currentStart)) {
             val previous = turns.lastOrNull { it.role == Role.ASSISTANT && it !== current }
             if (previous != null) {
                 previous.status = if (humanError != null) "FAILED" else labelFor(previous)
@@ -435,10 +464,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 // при постановке в очередь или отказ доставки в ChatSession.
                 continue
             }
-            // DONE (from agent_settled) is interim: the run's real terminal
-            // event (cancelled, failed) replaces it.
+            // DONE (agent_settled) и VERIFYING — промежуточные подписи: настоящий
+            // терминал (отмена, отказ) обязан их заменить, иначе «Готово»/«Собираю
+            // результат» висит поверх уже остановленного хода.
             if (turn.turnNo != null && turnNo != null && turn.turnNo != turnNo) continue
-            val interim = turn.status.isEmpty() || turn.status == "DONE"
+            val interim = turn.status.isEmpty() || turn.status == "DONE" || turn.status == "VERIFYING"
             if (turn.active || (interim && !turn.superseded)) turn.status = labelFor(turn)
             turn.active = false
             turn.final = true
@@ -450,6 +480,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         // Терминнал новее последнего известного номера — события были пропущены:
         // усыновляем номер, чтобы следующие терминалы сверялись корректно.
         if (turnNo != null && current.turnNo == null) current.turnNo = turnNo
+        noteTurnNo(turnNo)
         if (humanError != null) current.error = errorFor(current)
         if (at != null) for (turn in running.ifEmpty { listOf(current) }) {
             if (before(at, turn.at)) continue
@@ -521,6 +552,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             while (turns.isNotEmpty() && turns.last().role != Role.USER) forget(turns.removeAt(turns.lastIndex))
             val seed = turns.lastOrNull()?.let { seqOf(it)?.toString() } ?: "initial"
             current = Turn(id = "assistant-$seed", role = Role.ASSISTANT, active = !deleting, variantKey = seed.toLongOrNull() ?: 0L, turnNo = null)
+            // Заглушка относится к поколению ПОСЛЕ всего, что уже видели: поздний
+            // терминал с номером не выше этого её не закрывает (BUG-P0 2026-11-19).
+            current.generationFloor = lastTurnNo
             // Повторная доставка после правки нумерует ход позже (announce:false):
             // пока номер неизвестен, чужие терминалы не вправе закрывать ход.
             if (!deleting) turns += current
@@ -614,9 +648,11 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             "STATUS" -> {
                 val status = data.str("status")
                 if (status != null && status in ACTIVE_STATUSES) {
-                    // Verification follows agent_settled: it must not restart typing.
+                    // VERIFYING — не «модель отвечает»: ответ уже получен, сервер
+                    // собирает diff/outputs. Повторное включение active вернуло бы
+                    // точки набора на уже готовом ответе.
                     if (!current.final) {
-                        current.active = true
+                        current.active = status != "VERIFYING"
                         current.status = status
                     }
                 } else finish(status ?: "DONE")
@@ -857,7 +893,40 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 tool.state = if (frame.bool("isError") == true) "error" else "done"
                 if (tool.name == "subagent") subagentProgress(frame.obj("result"), null)?.let { tool.progress = it }
             }
-            "agent_settled" -> finish("DONE", null, event.at)
+            "agent_settled" -> {
+                // НЕ finish("DONE")! После agent_settled сервер ещё выполняет
+                // VERIFYING (git diff, сборка outputs, enforceContextLimit).
+                // Точки гасл, появлялись Edit/Regen — а сервер ещё работал, и
+                // нажатие Edit отвечало «Сессия сейчас работает». Финальным ход
+                // делает TASK_SUCCEEDED / TASK_FAILED / TASK_CANCELLED.
+                current.generatingToolCall = false
+                // Поздний settle прежнего хода (его `at` раньше старта текущего)
+                // не вправе трогать новый ответ: тот ещё стримится.
+                val currentStart = current.at ?: current.userAt
+                val lateSettle = event.at != null && currentStart != null && before(event.at, currentStart)
+                if (!lateSettle) {
+                    if (current.error != null) {
+                        // Оборванный/сломанный ответ уже несёт причину: settle закрывает
+                        // его как FAILED сразу. VERIFYING — только для здорового хода.
+                        finish("FAILED", current.error, event.at)
+                    } else {
+                        // Ответы, вытесненные вклиниванием: у них нет своего TASK_*, и без
+                        // подписи они навсегда остаются «ещё пишет». Меняется подпись
+                        // только ТЕКУЩЕГО хода — прочие закрываются, как и раньше.
+                        for (turn in turns) {
+                            if (turn === current || turn.role != Role.ASSISTANT) continue
+                            if (turn.final && turn.status.isNotEmpty()) continue
+                            turn.status = if (turn.error != null) "FAILED" else "DONE"
+                            turn.active = false
+                            turn.final = true
+                            for (tool in turn.tools) if (tool.state == "run") tool.state = "interrupted"
+                        }
+                        current.active = false
+                        val interim = current.status.isEmpty() || current.status == "DONE" || current.status == "VERIFYING"
+                        if (!current.final && interim) current.status = "VERIFYING"
+                    }
+                }
+            }
             "compaction_start", "auto_compaction_start" -> {
                 compactionStartNote = addNote(event, "Контекст сжимается…", beforeEmptyCurrentAnswer = true, uniqueText = false)
             }
@@ -982,8 +1051,16 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
     /** Нумерация текущего хода без USER_MESSAGE (announce:false после правки):
      *  снимок/snapshot сообщает номер поколения, с которым сверяются терминалы. */
     internal fun renumberCurrentTurn(turnNo: Long?) {
+        noteTurnNo(turnNo)
         if (current.turnNo == null) current.turnNo = turnNo
         version++
+    }
+
+    /** Поднимает водяной знак номера хода; понижать его нельзя. */
+    private fun noteTurnNo(turnNo: Long?) {
+        if (turnNo == null) return
+        val known = lastTurnNo
+        if (known == null || turnNo > known) lastTurnNo = turnNo
     }
 
     /** Folds the task's own status in (it arrives with the task, not as an event). */
@@ -1009,7 +1086,8 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         }
         if (task.status in ACTIVE_STATUSES) {
             renumberCurrentTurn(task.turnState?.turn)
-            if (!current.final) current.active = true
+            // VERIFYING — сбор результата, а не генерация: точки набора не крутятся.
+            if (!current.final) current.active = task.status != "VERIFYING"
         } else {
             finish(task.status, task.error, null, task.turnState?.turn)
         }
@@ -1122,7 +1200,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val visible = turns.filter { !it.hidden }
         val hiddenNotes = turns.filter { it.hidden }.flatMap { turn -> turn.compactionBoundaries.flatMap { it.notes } }.toSet()
         val attachedNotes = if (detailed) turns.flatMap { turn -> turn.compactionBoundaries.flatMap { it.notes } }.toSet() else hiddenNotes
-        val items = visible.filter { it !in attachedNotes }.flatMap { turn ->
+        val built = visible.filter { it !in attachedNotes }.flatMap { turn ->
             val canonical = when (turn.role) {
                 Role.USER -> ChatItem.User(
                     id = turn.id, text = turn.text, files = turn.files, at = turn.at,
@@ -1154,9 +1232,37 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             if (!detailed || canonical !is ChatItem.Assistant || (turn.compactionBoundaries.isEmpty() && turn.activityBoundaries.isEmpty())) listOf(canonical)
             else projectSegments(turn, canonical, visible)
         }
+        // Подпись доставки — производная от ВИДИМОЙ пары «строка оператора → ответ».
+        // Считать её только в момент закрытия хода нельзя: склеенная из страниц
+        // история закрывала ответ раньше, чем приезжала его user-строка, и одна и
+        // та же лента показывала то «Ответ получен», то «Модель начала ответ».
+        val items = withDeliveryLabels(built)
         // Use the canonical response, never a visual segment's LazyColumn key.
         val newestAnswerId = visible.lastOrNull { it.role == Role.ASSISTANT && !it.id.startsWith("assistant-pending-") }?.id?.takeUnless { it.startsWith("assistant-partial-") }
         return ChatSnapshot(items = items, cursor = cursor, version = version, mcpNotice = mcpNotice, newestAnswerId = newestAnswerId)
+    }
+
+    /**
+     * Итог хода для строки оператора: «Ответ получен» / «Ошибка ответа» /
+     * «Обработано Pi · без текста». Считается по видимой ленте, поэтому не
+     * зависит от того, в каком порядке страницы истории попали в редьюсер.
+     */
+    private fun withDeliveryLabels(items: List<ChatItem>): List<ChatItem> {
+        val out = ArrayList<ChatItem>(items.size)
+        for (item in items) {
+            val previous = out.lastOrNull()
+            if (item is ChatItem.Assistant && item.final && previous is ChatItem.User) {
+                val delivery = when {
+                    item.text.isNotBlank() -> "Ответ получен"
+                    item.error != null || item.status == "FAILED" -> "Ошибка ответа"
+                    item.tools.isNotEmpty() -> "Обработано Pi · без текста"
+                    else -> previous.delivery
+                }
+                if (delivery != previous.delivery) out[out.lastIndex] = previous.copy(delivery = delivery)
+            }
+            out += item
+        }
+        return out
     }
 }
 
