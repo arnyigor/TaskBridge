@@ -3,12 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
-import { ACTIVE_STATUSES } from '../web/chat-state.mjs';
+import { deriveChatUiState } from '../web/chat-ui-state.mjs';
 
 // Оператор 2026-10-14: «сообщение не отправляется, и я не могу никак перезапустить».
 // STOP обязана отменять ЛЮБОЕ действие: у зависшей отправки статус сессии может быть
 // уже терминальным, и тогда «есть что останавливать» по статусу не выводится.
-// Тест выполняет НАСТОЯЩИЕ функции панели (stopTarget/stuckSendTarget), а не их копию.
+// Тест выполняет НАСТОЯЩУЮ функцию панели (stopTarget), а решение о том, что
+// останавливать, принимает та же deriveChatUiState, что зажигает кнопку.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const appSource = fs.readFileSync(path.join(root, 'web', 'app.js'), 'utf8');
 
@@ -30,7 +31,7 @@ function extractFunction(source, name) {
   throw new Error(`не найдена закрывающая скобка для ${name}`);
 }
 
-/** Стенд: реальные функции панели + состояние, которым они управляют. */
+/** Стенд: реальная функция панели + состояние, которым она управляет. */
 function stand() {
   const lines = [
     'let lastTasks = [];',
@@ -38,11 +39,11 @@ function stand() {
     'let currentTask = null;',
     'let locallyQueuedPrompts = [];',
     'let lastPrompt = null;',
-    'const ACTIVE_STATUSES = arguments[0];',
+    'let isSendingPrompt = false;',
+    'const deriveChatUiState = arguments[0];',
     // chatState нужен только для «активен ли текущий ход»: в стенде хода нет.
     'let chatState = null;',
     extractFunction(appSource, 'stopTarget'),
-    extractFunction(appSource, 'stuckSendTarget'),
     `return {
       setTasks: value => { lastTasks = value; },
       select: (id, task = null) => { selectedTaskId = id; currentTask = task ?? lastTasks.find(t => t.id === id) ?? null; },
@@ -52,7 +53,7 @@ function stand() {
       stopTargetId: () => stopTarget()?.id ?? null,
     };`,
   ].join('\n');
-  return new Function(lines)(ACTIVE_STATUSES);
+  return new Function(lines)(deriveChatUiState);
 }
 
 test('a stuck send makes STOP available even in a finished session', () => {

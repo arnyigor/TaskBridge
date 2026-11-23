@@ -3,6 +3,9 @@ import { availableCapabilities, describeCount, describeEmpty, hasActiveFilters, 
 import { catalogStateText, renderCapabilityChips, renderEmptyState, renderGroupHeader, renderModelRow, renderProviderOptions, modelGroupLabel } from './model-picker-view.mjs';
 import { ComposerDraftStore } from './composer-drafts.mjs';
 import { ChatState, ACTIVE_STATUSES } from './chat-state.mjs';
+// Единая проекция контролов чата: одна функция решает, горят ли STOP и SEND,
+// крутятся ли точки и доступны ли кнопки истории — для всех сразу.
+import { applyEventToTaskSnapshot, deriveChatUiState, mergeTaskSnapshot } from './chat-ui-state.mjs';
 import { selectTransport } from './transport.mjs';
 import { createCommandClient } from './command-client.mjs';
 import { buildDiagnosticsBundle } from './diagnostics.mjs';
@@ -2598,38 +2601,20 @@ function maybeNotify(t) {
   try { new Notification(`TaskBridge: ${title}`, { body: (t.title || t.prompt || '').slice(0, 120), tag: t.id }); } catch { /* notifications are optional */ }
 }
 
-// One generation runs at a time, so "Стоп" must reach the session that actually
-// works — not only the one that happens to be selected. Also considers active
-// assistant streaming in the chat even if a stale terminal status landed earlier.
+// Одна генерация идёт за раз, поэтому «Стоп» обязан попадать в ту сессию, которая
+// действительно работает, — не только в выбранную. Решение принимает та же
+// deriveChatUiState, что обновляет кнопку: второй источник правды здесь недопустим
+// (кнопка горела по currentTask, а нажатие уходило в устаревший lastTasks).
 function stopTarget() {
-  const isWorking = (task) => {
-    if (!task) return false;
-    // CANCELLING — тоже рабочее состояние: если остановка залипла, повторное
-    // нажатие — единственный выход, а исчезающая кнопка запирает оператора
-    // в зависшем чате (2026-10-14).
-    if (task.status === 'CANCELLING') return true;
-    if (ACTIVE_STATUSES.has(task.status)) return true;
-    if (task.id === selectedTaskId && chatState?.current?.active) return true;
-    return false;
-  };
-  const selected = lastTasks.find(task => task.id === selectedTaskId) || currentTask;
-  if (isWorking(selected)) return selected;
-  // Зависшая отправка — независимый повод, как в KMP: сообщение не уходит, сессия
-  // уже терминальна, и без этого оператору нечем разблокироваться (2026-10-14).
-  if (stuckSendTarget()) return stuckSendTarget();
-  return lastTasks.find(task => task.status === 'RUNNING') || lastTasks.find(isWorking) || null;
-}
-
-/**
- * Сессия, у которой висит незавершённая отправка: локальная очередь или текст,
- * оставшийся от неудачной отправки. Возвращает ту же форму, что [stopTarget].
- */
-function stuckSendTarget() {
-  const hasLocal = locallyQueuedPrompts.length > 0;
-  const failed = lastPrompt?.failedSend === true && lastPrompt?.text;
-  if (!hasLocal && !failed) return null;
-  const id = (hasLocal ? currentTask?.id : lastPrompt?.id) || selectedTaskId;
-  return lastTasks.find(task => task.id === id) || currentTask || { id, title: id };
+  return deriveChatUiState({
+    selectedTaskId,
+    currentTask,
+    allTasks: lastTasks,
+    chatState,
+    sending: isSendingPrompt,
+    locallyQueuedCount: locallyQueuedPrompts.length,
+    hasFailedSend: Boolean(lastPrompt?.failedSend && lastPrompt?.text),
+  }).stopTarget;
 }
 
 // Ключ сравнения имён Pi и конфига TaskBridge: `strata` против `strata-iq3s`,
@@ -2829,12 +2814,48 @@ function renderActivity(task = currentTask) {
   host.classList.toggle('waiting', status !== 'RUNNING');
 }
 
-function updateStopButton() {
-  const target = stopTarget();
-  $('stopButton').disabled = !target;
-  $('stopButton').title = target
-    ? `Остановить сессию «${target.title || target.id}»`
+// Идёт POST /message: SEND заблокирован до ответа сервера, но STOP — нет.
+let isSendingPrompt = false;
+// Опрос, пропущенный из-за уже идущего refreshTask, обязан выполниться сразу после
+// него: иначе пришедшее по SSE STATUS/TASK_* не подтягивает метаданные, и чат
+// «залипает» до следующего двухсекундного тика.
+let refreshAgain = false;
+
+/**
+ * Одна точка обновления контролов чата: SEND, STOP и (по желанию) полоса активности.
+ * Кнопки и анимации читают ОДИН результат deriveChatUiState, поэтому разойтись
+ * («точки крутятся, а STOP отключён») больше не могут.
+ *
+ * `activity` передаётся явно: при перерисовке выбранной сессии и по SSE полосу надо
+ * перекрасить, а плановый опрос списка не должен трогать плашку молчания.
+ */
+function syncChatControls(activity = undefined) {
+  const ui = deriveChatUiState({
+    selectedTaskId,
+    currentTask,
+    allTasks: lastTasks,
+    chatState,
+    sending: isSendingPrompt,
+    locallyQueuedCount: locallyQueuedPrompts.length,
+    hasFailedSend: Boolean(lastPrompt?.failedSend && lastPrompt?.text),
+  });
+  if ($('sendButton')) $('sendButton').disabled = !ui.canSend;
+  $('stopButton').disabled = !ui.canStop;
+  $('stopButton').title = ui.stopTarget
+    ? `Остановить сессию «${ui.stopTarget.title || ui.stopTarget.id}»`
     : 'Сейчас нечего останавливать';
+  if (activity !== undefined) renderActivity(activity);
+  return ui;
+}
+
+// Оставлено именем ради существующих вызовов: STOP, SEND и активность — один объект.
+function updateStopButton() { return syncChatControls(); }
+
+/** Refresh, который не теряется, если в этот момент уже идёт другой опрос. */
+function requestRefreshTask() {
+  if (!selectedTaskId || !chatState) return;
+  if (refreshingVersion === selectionVersion) { refreshAgain = true; return; }
+  refreshTask();
 }
 
 function renderTaskDetails(t) {
@@ -2869,8 +2890,8 @@ function renderTaskDetails(t) {
     $('compaction').textContent = String(c.count || 0);
     $('compaction').title = 'Сжатий: ' + (c.count || 0) + '. Текущий размер — в панели «Откуда контекст».';
   }
-  updateStopButton();
-  renderActivity(t);
+  // STOP, SEND и полоса активности — из одного deriveChatUiState.
+  syncChatControls(t);
   $('compact').disabled = ACTIVE_STATUSES.has(t.status) || t.sessionAvailable === false;
   $('trustWorkspace').textContent = t.workspaceTrusted ? 'Папка доверенная' : 'Доверять папке';
   $('trustWorkspace').disabled = !t.workspacePath || t.workspaceTrusted === true;
@@ -2973,12 +2994,27 @@ async function selectTask(id) {
       after: chatState.cursor,
       onEvent: event => {
         if (version !== selectionVersion) return;
-        if (chatState.apply(event)) {
-          if (!textUpdateTimer) textUpdateTimer = setTimeout(() => { textUpdateTimer = null; if (version === selectionVersion) renderChat(); }, 80);
-          if (event.type === 'STATUS' || event.type.startsWith('TASK_') || event.type === 'TURN_STATE') refreshTask();
+        const applied = chatState.apply(event);
+        // Снимок задачи правится СРАЗУ по событию: кнопка STOP и полоса активности
+        // не должны ждать двухсекундного опроса (иначе после TASK_CANCELLED они
+        // ещё секунды показывали «работает»).
+        if (currentTask) currentTask = applyEventToTaskSnapshot(currentTask, event);
+        if (applied) {
+          syncChatControls(currentTask);
+          if (!textUpdateTimer) {
+            textUpdateTimer = setTimeout(() => {
+              textUpdateTimer = null;
+              if (version !== selectionVersion) return;
+              renderChat();
+              syncChatControls(currentTask);
+            }, 80);
+          }
+          if (event.type === 'STATUS' || event.type.startsWith('TASK_') || event.type === 'TURN_STATE') {
+            requestRefreshTask();
+          }
         }
       },
-      onStatus: value => { if (value === 'reconnecting' && version === selectionVersion) refreshTask(); }
+      onStatus: value => { if (value === 'reconnecting' && version === selectionVersion) requestRefreshTask(); }
     });
     refreshTimer = setInterval(refreshTask, 2000);
     await loadArtifacts();
@@ -3009,8 +3045,9 @@ async function refreshTask() {
     applyEvents(events);
     // Шаг C-B: снимок задачи версионирован (snapshotSeq = seq последнего события).
     // Метаданные, прочитанные до свежего события, не должны откатывать «лицо»
-    // хода (фазу, стадию, статус, runtime) — их уже принесло SSE.
-    const fresh = mergeSnapshot(currentTask, t);
+    // хода (фазу, стадию, статус, runtime) — их уже принесло SSE. Курсор чата
+    // входит в сравнение: опоздавший GET не перетирает уже доставленный TASK_*.
+    const fresh = mergeTaskSnapshot(currentTask, t, chatState.cursor);
     // A stale metadata response must not stop a newer streaming event.
     if (chatState.cursor === initialCursor) chatState.snapshot(fresh);
     renderChat();
@@ -3020,7 +3057,14 @@ async function refreshTask() {
   } catch (error) {
     if (version === selectionVersion) $('createError').textContent = `Связь прервана: ${error.message}`;
   } finally {
-    if (refreshingVersion === version) refreshingVersion = null;
+    if (refreshingVersion === version) {
+      refreshingVersion = null;
+      // Событие, пришедшее во время этого опроса, раньше просто терялось.
+      if (refreshAgain && version === selectionVersion) {
+        refreshAgain = false;
+        refreshTask();
+      }
+    }
   }
 }
 
@@ -3775,27 +3819,10 @@ const UI_WIDTHS = {
 let uiSettings = { scale: 1, width: 'normal' };
 
 /**
- * Шаг C-B: снимок задачи версионирован (snapshotSeq = seq последнего события
- * сессии). Ответ с меньшей версией не откатывает «лицо» хода — фазу, стадию,
- * статус и runtime: их уже принесло SSE. Остальные поля (файлы, метрики, очередь)
- * берутся из ответа: они не описывают живое состояние хода.
- * Старшинство сохраняется по максимуму, иначе следующий такой ответ прошёл бы.
+ * Слияние снимка задачи живёт в web/chat-ui-state.mjs (mergeTaskSnapshot):
+ * там же, где SSE-проекция и проекция контролов, — один источник правды на все
+ * три вопроса «что показывать», «что можно нажать» и «не откатилось ли состояние».
  */
-function mergeSnapshot(prev, next) {
-  if (!prev || !next) return next;
-  const prevSeq = Number(prev.snapshotSeq) || 0;
-  const nextSeq = Number(next.snapshotSeq) || 0;
-  // Сервер без версии (старый сбор) — прежнее поведение.
-  if (!prevSeq || !nextSeq || nextSeq >= prevSeq) return next;
-  return {
-    ...next,
-    snapshotSeq: prevSeq,
-    status: prev.status,
-    current: prev.current,
-    turnState: prev.turnState ?? next.turnState,
-    runtime: prev.runtime ?? next.runtime
-  };
-}
 
 // Never-saved defaults follow the screen: a desktop has the room for larger text
 // and a wider column, a phone does not. A saved choice always wins.
@@ -4102,6 +4129,10 @@ $('form').addEventListener('submit', async (e) => {
   $('createError').textContent = '';
   $('createError').classList.remove('error');
   setBusy(true);
+  // SEND блокируется на время запроса, STOP — нет: остановить можно и во время
+  // отправки. Обе кнопки обновляет одна функция.
+  isSendingPrompt = true;
+  syncChatControls();
   // A send can legitimately wait minutes for a model to load: after two seconds
   // the operator must see WHY the composer is quiet, not just a disabled button.
   let slowTimer = setTimeout(() => showNotice('Отправляю… ждём модель. Это может занять минуту-другую.'), 2000);
@@ -4139,13 +4170,17 @@ $('form').addEventListener('submit', async (e) => {
       };
       // «В очередь»: сообщение попадает в очередь сразу (локальная строка), а не только
       // после ответа сервера — раньше очередь появлялась через некоторое время после
-      // того, как текст уже нарисовался в ленте (2026-10-12). Пузырь при этом остаётся:
-      // 0 мс отклика на нажатие, а если сервер отдал сообщение агенту — он и есть беседа.
-      if (!sendNow && ACTIVE_STATUSES.has(currentTask?.status) && prompt) {
+      // того, как текст уже нарисовался в ленте (2026-10-12).
+      const willParkInQueue = !sendNow && ACTIVE_STATUSES.has(currentTask?.status) && Boolean(prompt);
+      if (willParkInQueue) {
         locallyQueuedPrompts.push({ local: true, text: prompt });
         renderQueuedPrompt();
       }
-      if (chatState && prompt) {
+      // Пузырь с точками в ленту НЕ добавляем, если сообщение уйдёт в очередь:
+      // сервер через ~300 мс вернёт pendingPrompts, пузырь исчезнет и «перепрыгнет»
+      // в плашку очереди — это и было мигание «туда-сюда». Очередь видна в
+      // #queuedPrompt, а пузырь появится ровно тогда, когда сервер доставит текст.
+      if (chatState && prompt && !willParkInQueue) {
         chatState.addUser(prompt, files, pendingId, null, true);
         chatState.current.active = true;
         renderChat();
@@ -4156,6 +4191,12 @@ $('form').addEventListener('submit', async (e) => {
       try {
         sent = await sendContinueMessage(taskId, prompt, { files, uploadToken, now: sendNow, queue: !sendNow });
       } catch (error) {
+        if (version !== selectionVersion) {
+          // Пока POST летел, оператор открыл другой чат: чужую сессию не трогаем,
+          // но текст не теряем — его можно повторить кнопкой «Повторить последнее».
+          lastPrompt = { id: taskId, text: prompt, failedSend: true };
+          return;
+        }
         // An unconfirmed send is NOT a failed one: the server may have accepted
         // the message, so the optimistic turn stays on screen and the operator
         // is told what to do instead of losing text.
@@ -4178,18 +4219,24 @@ $('form').addEventListener('submit', async (e) => {
       // badge, with «Отправить сейчас» / «Убрать». Showing it in both places read
       // as the same message appearing twice. When the queue delivers it, the
       // USER_MESSAGE event draws its bubble as usual.
-      const parked = (sent?.pendingPrompts || []).some(entry => String(entry?.text || '').startsWith(prompt));
-      if (parked) {
-        dropOptimistic();
-        // Сервер подтвердил очередь — показываем его список сразу: иначе между локальной
-        // строкой и следующим опросом был бы провал, когда очереди не видно вообще.
-        if (currentTask) currentTask.pendingPrompts = sent.pendingPrompts;
+      //
+      // Всё это правит ТОЛЬКО ту сессию, из которой отправляли: за время POST
+      // оператор мог переключить чат, и раньше ответ мутировал уже открытую чужую.
+      if (version === selectionVersion) {
+        const parked = (sent?.pendingPrompts || []).some(entry => String(entry?.text || '').startsWith(prompt));
+        if (parked) {
+          dropOptimistic();
+          // Сервер подтвердил очередь — показываем его список сразу: иначе между локальной
+          // строкой и следующим опросом был бы провал, когда очереди не видно вообще.
+          if (currentTask) currentTask.pendingPrompts = sent.pendingPrompts;
+        }
+        // Локальная строка больше не нужна: место в очереди заняла запись сервера.
+        if (dropLocallyQueued(prompt)) renderQueuedPrompt();
+        renderQueuedPrompt();
+        syncChatControls();
       }
-      // Локальная строка больше не нужна: место в очереди заняла запись сервера.
-      if (dropLocallyQueued(prompt)) renderQueuedPrompt();
       lastPrompt = { id: taskId, text: prompt, failedSend: false };
-      renderQueuedPrompt();
-      if (sent?.queueReason) showNotice(queueNotice(sent.queueReason));
+      if (version === selectionVersion && sent?.queueReason) showNotice(queueNotice(sent.queueReason));
     } else {
       const task = await commandApi('/api/tasks', { projectId: $('project').value, prompt, files, uploadToken, model: pendingModel, thinkingLevel: pendingThinking });
       // Clear before selectTask() runs resetSelection(), which would
@@ -4212,6 +4259,9 @@ $('form').addEventListener('submit', async (e) => {
     lastPrompt = { id: selectedTaskId, text: prompt, failedSend: true };
   } finally {
     setBusy(false);
+    // Отправка закончилась — SEND снова доступен, STOP пересчитан по факту.
+    isSendingPrompt = false;
+    syncChatControls();
     clearTimeout(slowTimer);
     // The "Отправляю…" notice is cleared once the send is over — unless an
     // error replaced it or a queued prompt notice took its place.

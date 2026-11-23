@@ -401,11 +401,11 @@ export class ChatState {
     const running = this.turns.filter(turn => turn.role === 'assistant' && (turn.active || !turn.status));
     for (const turn of this.turns) {
       if (turn.role !== 'assistant') continue;
-      // `DONE` (from agent_settled) is an INTERIM label: when the run's real
-      // terminal event arrives afterwards — cancelled by the operator, failed —
-      // it must replace it. Otherwise a stop showed DONE, because Pi settles
-      // before TaskBridge records TASK_CANCELLED.
-      const interim = !turn.status || turn.status === 'DONE';
+      // `DONE` (from agent_settled) и `VERIFYING` — ПРОМЕЖУТОЧНЫЕ подписи: когда
+      // приходит настоящий терминал (оператор остановил, модель отказала), он
+      // обязан их заменить. Иначе остановка показывала DONE, а «ответ Готово»
+      // висело поверх уже отменённого хода.
+      const interim = !turn.status || turn.status === 'DONE' || turn.status === 'VERIFYING';
       if (turn.active || (interim && !turn.superseded)) {
         turn.status = labelFor(turn);
         if (proofs && turn.status === 'FAILED') turn.toolEvidence = proofs;
@@ -802,7 +802,40 @@ export class ChatState {
       tool.state = frame.isError ? 'error' : 'done';
       if (tool.name === 'subagent') tool.progress = subagentProgress(frame.result, null) || tool.progress;
     }
-    if (frame.type === 'agent_settled') this.finish('DONE', null, event.at);
+    if (frame.type === 'agent_settled') {
+      // Текст модели закончен, но сервер ещё выполняет VERIFYING (git diff,
+      // сборку outputs, enforceContextLimit). Раньше здесь ставился `DONE`:
+      // точки гасл, появлялись кнопки Edit/Regen — а сервер ещё работал, и
+      // нажатие Edit отвечало «Сессия сейчас работает». Финальным ход делает
+      // TASK_SUCCEEDED / TASK_FAILED / TASK_CANCELLED (см. apply/snapshot).
+      //
+      // Поздний settle прежнего хода (его `at` раньше старта текущего) не вправе
+      // трогать новый ответ: тот ещё стримится, и статус ему ставит свой ход.
+      const currentStart = this.current.at || this.current.userAt;
+      const lateSettle = Boolean(event.at && currentStart && Date.parse(event.at) < Date.parse(currentStart));
+      if (!lateSettle) {
+        if (this.current.error) {
+          // Оборванный/сломанный ответ уже несёт причину: settle закрывает его
+          // как FAILED сразу. VERIFYING относится только к здоровому ходу.
+          this.finish('FAILED', this.current.error, event.at);
+        } else {
+          // Ответы, вытесненные вклиниванием: у них нет своего TASK_*, и без подписи
+          // они навсегда остаются «ещё пишет». Склейка была закрыта settle'ом и
+          // раньше — здесь меняется подпись только ТЕКУЩЕГО хода.
+          for (const turn of this.turns) {
+            if (turn === this.current || turn.role !== 'assistant') continue;
+            if (turn.final && turn.status) continue;
+            turn.status = turn.error ? 'FAILED' : 'DONE';
+            turn.active = false;
+            turn.final = true;
+            for (const tool of turn.tools) if (tool.state === 'run') tool.state = 'interrupted';
+          }
+          this.current.active = false;
+          const interim = !this.current.status || this.current.status === 'DONE' || this.current.status === 'VERIFYING';
+          if (!this.current.final && interim) this.current.status = 'VERIFYING';
+        }
+      }
+    }
     if (['compaction_end', 'auto_compaction_end'].includes(frame.type)) {
       const summary = typeof frame.result?.summary === 'string' ? frame.result.summary.trim() : '';
       const successful = Boolean(frame.result && !frame.errorMessage && !frame.aborted && !frame.cancelled);

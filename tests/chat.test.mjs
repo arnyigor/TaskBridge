@@ -59,7 +59,9 @@ test('steering preserves the in-flight assistant and tool until Pi completes the
   assert.equal(previous.tools[0].state, 'done');
   assert.equal(previous.status, 'DONE');
   assert.equal(state.current.text, 'Уточнённый результат');
-  assert.equal(state.current.status, 'DONE');
+  // После agent_settled сервер ещё собирает результат: ход не «Готово», а VERIFYING,
+  // и финальным его делает TASK_SUCCEEDED / TASK_FAILED / TASK_CANCELLED.
+  assert.equal(state.current.status, 'VERIFYING');
 });
 
 test('optimistic input does not cancel an answer before the server accepts it', () => {
@@ -261,22 +263,6 @@ function resolveImports(source, modules) {
   }
   return names;
 }
-class TestWebSocket {
-  static OPEN = 1;
-  constructor(url) {
-    this.url = url;
-    this.readyState = 0;
-    this.sent = [];
-    this.listeners = {};
-    sockets.push(this);
-  }
-  addEventListener(type, handler) { this.listeners[type] = handler; }
-  send(text) { this.sent.push(JSON.parse(text)); }
-  close() { this.readyState = 3; }
-  open() { this.readyState = 1; this.listeners.open?.(); }
-  deliver(frame) { this.listeners.message?.({ data: JSON.stringify(frame) }); }
-  drop() { this.readyState = 3; this.listeners.close?.(); }
-}
 
 async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, initialStorage = null } = {}) {
   const { document, window } = parseHTML(await fs.readFile(new URL('../web/index.html', import.meta.url), 'utf8'));
@@ -298,6 +284,24 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, 
   const streams = [];
   const copied = [];
   const sockets = [];
+  // The page's WebSocket, defined where its registry lives: a class at module
+  // scope pushed into here and threw `sockets is not defined` in strict mode.
+  class TestWebSocket {
+    static OPEN = 1;
+    constructor(url) {
+      this.url = url;
+      this.readyState = 0;
+      this.sent = [];
+      this.listeners = {};
+      sockets.push(this);
+    }
+    addEventListener(type, handler) { this.listeners[type] = handler; }
+    send(text) { this.sent.push(JSON.parse(text)); }
+    close() { this.readyState = 3; }
+    open() { this.readyState = 1; this.listeners.open?.(); }
+    deliver(frame) { this.listeners.message?.({ data: JSON.stringify(frame) }); }
+    drop() { this.readyState = 3; this.listeners.close?.(); }
+  }
   const tasks = { a: task('a'), b: { ...task('b'), prompt: 'Другой чат' } };
   let fetchHook;
   // A spy for window.confirm so a test can assert that a destructive control
@@ -321,6 +325,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, 
   const appSource = await fs.readFile(new URL('../web/app.js', import.meta.url), 'utf8');
   const imported = resolveImports(appSource, {
     './chat-state.mjs': chatStateModule,
+    './chat-ui-state.mjs': await import('../web/chat-ui-state.mjs'),
     './transport.mjs': transportModule,
     './command-client.mjs': await import('../web/command-client.mjs'),
     './diagnostics.mjs': await import('../web/diagnostics.mjs'),
@@ -370,7 +375,7 @@ async function ui({ coarsePointer = false, cloud = false, viewportWidth = null, 
     }, alert() {}, confirm: (message) => { confirms.push(message); return confirmAnswer; },
   });
   const app = appSource.replace(/^import [^\n]*\n/gm, '').replace(/init\(\);\s*$/, '');
-  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, loadContextReport, probeResultText, renderModelList, renderModelFilters, resetModelFilters, openModelPicker, toggleModelFavorite, getFavorites: () => favoriteModels, setModelFilters: (patch) => { Object.assign(modelFilters, patch); renderModelFilters(); renderModelList(); }, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
+  vm.runInContext(app + '\nthis.testing = {selectTask, refreshTask, startNewTask, sendContinueMessage, loadOlderHistory, openImport, routeFromLocation, openSessionFromLocation, loadTasks, renderTaskList, setTaskSort: (value) => { taskSort = value; renderTaskList(); }, copySessionLink, transport, cloudMode, stopTarget, updateStopButton, renderActivity, renderTaskDetails, mergeTaskSnapshot, scrollBottom, isPinnedToBottom, renderNewBelow, renderChat, loadContextReport, probeResultText, renderModelList, renderModelFilters, resetModelFilters, openModelPicker, toggleModelFavorite, getFavorites: () => favoriteModels, setModelFilters: (patch) => { Object.assign(modelFilters, patch); renderModelFilters(); renderModelList(); }, rewriteMarkdownLinks, renderMarkdown, wrapTables, addCodeCopyButtons, highlightCode, openFileViewer, closeFileViewer, viewerKind, machineAction, machineOpenPath, runShellCommand, saveDraft, restoreDraft, setServerLocal: (value) => { serverIsLocal = Boolean(value); canExecute = Boolean(value); }, checkPcState, setExecute: (value) => { canExecute = Boolean(value); }, applyUiSettings, loadUiSettings, getUiSettings: () => uiSettings, setUiSettings: (patch) => { uiSettings = { ...uiSettings, ...patch }; applyUiSettings({ persist: true }); }, setLastTasks: (list) => { lastTasks = list; }, updateModelChip, commandApi};', context);
   return { ...context.testing, document, window, streams, sockets, tasks, urls, copied, reloads, intervals, location: locationStub, confirms, localStorage: localStorageStub, setConfirmAnswer: value => { confirmAnswer = value; }, setFetchHook: hook => { fetchHook = hook; } };
 }
 
@@ -2219,7 +2224,7 @@ test('DOM: activity timer paints newest snapshot and silence actions target the 
 
 test('DOM: an older metadata snapshot cannot roll the turn face back (C-B)', async () => {
   const app = await ui();
-  const merged = app.mergeSnapshot(
+  const merged = app.mergeTaskSnapshot(
     { id: 'a', status: 'RUNNING', current: 'модель отвечает', snapshotSeq: 12, turnState: { phase: 'PROGRESS', turn: 2 }, runtime: { activity: 'working' } },
     { id: 'a', status: 'RUNNING', current: 'Pi starting', snapshotSeq: 5, turnState: { phase: 'DISPATCHING', turn: 2 }, runtime: { activity: 'idle' }, workspace: 'G:\\p' }
   );
@@ -2228,9 +2233,9 @@ test('DOM: an older metadata snapshot cannot roll the turn face back (C-B)', asy
   assert.equal(merged.snapshotSeq, 12, 'старшинство остаётся по максимуму');
   assert.equal(merged.workspace, 'G:\\p', 'остальные поля берутся из ответа');
   // Свежий ответ применяется целиком; старый сервер без версии — как раньше.
-  assert.equal(app.mergeSnapshot({ snapshotSeq: 5 }, { snapshotSeq: 9, current: 'x' }).current, 'x');
-  assert.equal(app.mergeSnapshot({ snapshotSeq: 9, current: 'x' }, { current: 'y' }).current, 'y');
-  assert.equal(app.mergeSnapshot(null, { current: 'y' }).current, 'y');
+  assert.equal(app.mergeTaskSnapshot({ snapshotSeq: 5 }, { snapshotSeq: 9, current: 'x' }).current, 'x');
+  assert.equal(app.mergeTaskSnapshot({ snapshotSeq: 9, current: 'x' }, { current: 'y' }).current, 'y');
+  assert.equal(app.mergeTaskSnapshot(null, { current: 'y' }).current, 'y');
 });
 
 test('DOM: the memory panel lists notes with usage, budget and the proposal gate', async () => {
@@ -3439,21 +3444,25 @@ test('DOM: an empty settled turn never turns into the typing animation', async (
   assert.match(empty.textContent, /Запрос прерван|Ответ не был получен/, 'пустой ход остаётся пустым, а не показывает анимацию');
   assert.equal(empty.querySelector('.typing'), null, 'никакой анимации на завершённом пустом ходе');
 
-  // A new message (steered into the running turn) shows its own animation…
+  // A new message (Enter into a running session) goes to the QUEUE, not into the
+  // timeline: no bubble with dots that jumps into the queue line a poll later.
+  // The old empty turn keeps its honest «не получен», and no animation appears.
+  const bubbles = [...app.document.querySelectorAll('.turn:not(.me) .md')];
   const form = app.document.getElementById('form');
   form.requestSubmit = () => form.dispatchEvent(new app.window.Event('submit', { cancelable: true }));
   const prompt = app.document.getElementById('prompt');
   prompt.value = 'новое';
   form.requestSubmit();
   for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
-  const bubbles = [...app.document.querySelectorAll('.turn:not(.me) .md')];
-  assert.match(bubbles.at(-2).textContent, /Запрос прерван|Ответ не был получен/, 'старый пустой ход не подменяется анимацией');
-  assert.ok(bubbles.at(-1).querySelector('.typing'), 'новое сообщение показывает анимацию');
+  const afterSend = [...app.document.querySelectorAll('.turn:not(.me) .md')];
+  assert.equal(afterSend.length, bubbles.length, 'сообщение в очередь не рисуется пузырём в ленте');
+  assert.match(afterSend.at(-1).textContent, /Запрос прерван|Ответ не был получен/, 'старый пустой ход не подменяется анимацией');
+  assert.equal(afterSend.at(-1).querySelector('.typing'), null, 'анимации на завершённом пустом ходе нет');
 
   // …and a refresh (same events, still non-terminal) must not flip anything.
   await app.refreshTask();
   const after = [...app.document.querySelectorAll('.turn:not(.me) .md')];
-  assert.match(after.at(-2).textContent, /Запрос прерван|Ответ не был получен/, 'после обновления ничего не перескочило');
+  assert.match(after.at(-1).textContent, /Запрос прерван|Ответ не был получен/, 'после обновления ничего не перескочило');
 });
 
 
@@ -3565,13 +3574,15 @@ test('an aborted answer is not labelled DONE, and its range is never inverted', 
   assert.equal(Date.parse(next.at) <= Date.parse(next.endedAt || next.at), true, 'диапазон не переворачивается');
 });
 
-test('a stop after the answer settles shows CANCELLED, not the interim DONE', () => {
+test('a stop after the answer settles shows CANCELLED, not the interim VERIFYING', () => {
   const state = new ChatState(task());
   state.apply({ taskId: 'a', seq: 1, type: 'USER_MESSAGE', at: '2026-09-15T10:50:45.000Z', message: 'вопрос', data: { text: 'вопрос' } });
   state.apply({ taskId: 'a', seq: 2, at: '2026-09-15T10:50:48.000Z', type: 'PI_EVENT', data: { pi: { type: 'message_start', message: { role: 'assistant' } } } });
   // Pi settles first (its own event order), the operator's stop is recorded after.
   state.apply({ taskId: 'a', seq: 3, at: '2026-09-15T10:50:49.300Z', type: 'PI_EVENT', data: { pi: { type: 'agent_settled' } } });
-  assert.equal(state.current.status, 'DONE', 'сначала промежуточный DONE');
+  // После agent_settled сервер ещё собирает результат (VERIFYING): ход не финальный,
+  // но и «Готово» до TASK_SUCCEEDED показывать нельзя.
+  assert.equal(state.current.status, 'VERIFYING', 'сначала промежуточный VERIFYING');
   state.apply({ taskId: 'a', seq: 4, at: '2026-09-15T10:50:49.380Z', type: 'TASK_CANCELLED', message: 'Task cancelled', data: {} });
   assert.equal(state.current.status, 'FAILED', 'остановка без единого слова — FAILED (ответа нет)');
 

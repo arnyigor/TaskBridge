@@ -821,8 +821,8 @@ body.selectingMessages .turn.selected .body::before { content: '✓'; order: -1;
   border-top: 1px solid var(--border);
 }
 
-// Спойлер для нескольких картинок в одном сообщении: свёрнут по умолчанию,
-// один тап по summary раскрывает/прячет все превью сразу (см. appendUserTurn).
+/* Спойлер для нескольких картинок в одном сообщении: свёрнут по умолчанию,
+   один тап по summary раскрывает/прячет все превью сразу (см. appendUserTurn). */
 .imageSpoiler {
   margin: 4px 0;
 }
