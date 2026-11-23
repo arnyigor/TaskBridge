@@ -126,6 +126,32 @@ test('REC-05: сбой записи не оставляет FAILED без соб
     'события тоже нет');
 });
 
+// R1.1/B4: восстановительный терминал несёт идентичность хода. Номер поколения
+// сохранён в снимке (turnState.turn), restoreSessions обязан восстановить его ДО
+// публикации TASK_FAILED: envelope.turn === data.turn === turnState.turn, а фаза
+// хода не остаётся RUNNING у уже FAILED задачи. runId здесь не восстанавливается
+// сознательно: он не персистится, придумывать его нельзя.
+test('REC-07: восстановительный TASK_FAILED несёт номер хода и терминальную фазу', { timeout: 30000 }, async t => {
+  const { root, store } = await fixture(t);
+  await store.create(base({
+    id: 'lost-turn-identity',
+    piSessionFile: path.join(root, 'pi-sessions', 'lost.jsonl'),
+    turnState: { phase: 'RUNNING', turn: 7, stage: 'Генерация' },
+  }));
+
+  await restore(store, { enqueued: [] });
+
+  const [task] = await store.list();
+  assert.equal(task.status, 'FAILED');
+  const terminal = (await eventsOf(store, task.id)).filter(event => event.type === 'TASK_FAILED');
+  assert.equal(terminal.length, 1);
+  const event = terminal[0];
+  assert.equal(event.turn, 7, `envelope.turn=${event.turn}`);
+  assert.equal(event.data.turn, 7, `data.turn=${event.data.turn}`);
+  assert.equal(task.turnState?.turn, 7, `snapshot turnState.turn=${task.turnState?.turn}`);
+  assert.equal(task.turnState?.phase, 'FAILED', `snapshot turnState.phase=${task.turnState?.phase}`);
+});
+
 test('REC-06: queued-сессия восстанавливается по прежним правилам', { timeout: 30000 }, async t => {
   const { store, enqueued } = await fixture(t);
   await store.create(base({ id: 'queued-session', status: 'QUEUED', workspacePath: null }));

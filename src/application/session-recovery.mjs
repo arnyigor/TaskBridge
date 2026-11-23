@@ -137,6 +137,15 @@ export async function restoreSessions(previous, { store, enqueue, restorePending
           // (REC-05). Сам ход не перезапускается — Pi здесь не поднимается.
           const at = now();
           const errorCode = intact ? 'FAILED_RECOVERY' : 'SESSION_LOST';
+          // R1.1: номер поколения хода сохранён в снимке (turnState.turn), но
+          // task._turn восстанавливается позже — в onRestored менеджера. Без
+          // восстановления здесь терминальное событие уходило бы с turn=null,
+          // а фаза хода оставалась бы RUNNING у уже FAILED задачи. runId не
+          // восстанавливается сознательно: он не персистится.
+          const restoredTurn = Number.isFinite(task.turnState?.turn)
+            ? task.turnState.turn
+            : (Number.isFinite(task._turn) ? task._turn : null);
+          if (Number.isFinite(restoredTurn)) task._turn = Math.max(task._turn || 0, restoredTurn);
           const error = intact
             ? 'TaskBridge перезапустился во время ответа. Следующее сообщение продолжит сессию.'
             : 'TaskBridge перезапустился во время ответа, а файл сессии Pi не сохранился.';
@@ -147,6 +156,7 @@ export async function restoreSessions(previous, { store, enqueue, restorePending
             error,
             current: 'Failed',
             updatedAt: at,
+            turnState: { ...(task.turnState || {}), phase: 'FAILED', turn: restoredTurn ?? null },
             ...(intact ? {} : { _sessionLost: true })
           };
           await store.appendEventWithTask(task.id, {
@@ -154,7 +164,10 @@ export async function restoreSessions(previous, { store, enqueue, restorePending
             taskId: task.id,
             type: 'TASK_FAILED',
             message: error,
-            data: { errorCode, recovered: true, turn: Number.isFinite(task._turn) ? task._turn : null }
+            // Терминальные события несут номер поколения и на конверте, и в data
+            // (контракт #recordEvent); клиенты сверяют оба источника.
+            turn: restoredTurn ?? null,
+            data: { errorCode, recovered: true, turn: restoredTurn ?? null }
           }, terminal);
           Object.assign(task, terminal);
         }
