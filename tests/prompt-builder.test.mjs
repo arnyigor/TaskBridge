@@ -114,6 +114,8 @@ test('текст пользователя не переписывается, в�
   const prompt = buildTurnPrompt({ text, profile: QUICK, files: ['.taskbridge-input/a.txt'] });
   assert.ok(prompt.startsWith(text), 'запрос идёт первым и дословно');
   assert.match(prompt, /Additional files from the phone are in \.taskbridge-input\/:\n- \.taskbridge-input\/a\.txt/);
+  assert.match(prompt, /Use Pi's built-in `read` tool with the exact workspace-relative paths above\./);
+  assert.match(prompt, /Do not use `taskbridge_external_open` for chat attachments\./);
   assert.match(prompt, /Read attached files as needed\./);
   assert.doesNotMatch(buildTurnPrompt({ text: 'x', profile: QUICK }), /Read attached files/);
 });

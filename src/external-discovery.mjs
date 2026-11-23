@@ -106,6 +106,66 @@ export function readServerConfigs(dir, pattern = 'strata-*.json') {
  * discovery      — localRuntime.externalDiscovery: { dir, python, server, engine, configGlob, pattern }
  * configured     — уже настроенные записи: их baseUrl/provider имеют приоритет
  */
+/** Конфиг Basalt (`basalt_config.json`): порт в server.port, контекст в engine["max-context"]. */
+export function readBasaltConfig(file) {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const port = Number(cfg && cfg.server && cfg.server.port);
+    if (!Number.isFinite(port) || port <= 0) return null;
+    const engine = (cfg && cfg.engine) || {};
+    const ctx = Number(engine['max-context']);
+    return {
+      file,
+      name: path.basename(file),
+      port,
+      contextWindow: Number.isFinite(ctx) && ctx > 0 ? ctx : null,
+      model: Array.isArray(cfg.models) && cfg.models[0] ? String(cfg.models[0].model || '') : ''
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Источники обнаружения: `sources` из localRuntime.externalDiscovery, иначе старый одиночный dir/glob. */
+export function discoverySources(discovery = {}) {
+  const list = Array.isArray(discovery.sources) ? discovery.sources.filter(Boolean) : [];
+  const sources = list.map(src => ({
+    dir: src.dir ? String(src.dir) : null,
+    engine: src.engine || 'strata',
+    kind: src.kind || (src.configFile ? 'basalt' : 'strata'),
+    configGlob: src.configGlob || 'strata-*.json',
+    configFile: src.configFile || null,
+    python: src.python || null,
+    server: src.server || null,
+    // Команда запуска: массив с {config} и {port}; без неё — старая Strata-команда.
+    command: Array.isArray(src.command) ? src.command.map(String) : null
+  }));
+  if (discovery.dir && !sources.some(src => src.dir === String(discovery.dir))) {
+    sources.unshift({
+      dir: String(discovery.dir),
+      engine: discovery.engine || 'strata',
+      kind: 'strata',
+      configGlob: discovery.configGlob || 'strata-*.json',
+      configFile: null,
+      python: discovery.python || null,
+      server: discovery.server || null,
+      command: null
+    });
+  }
+  return sources;
+}
+
+/** Конфиги одного источника в том же виде, что readServerConfigs: {file, name, port, contextWindow}. */
+export function readSourceConfigs(source) {
+  if (!source || !source.dir) return [];
+  if (source.kind === 'basalt') {
+    const file = source.configFile ? path.join(source.dir, source.configFile) : null;
+    const one = file ? readBasaltConfig(file) : null;
+    return one ? [one] : [];
+  }
+  return readServerConfigs(source.dir, source.configGlob);
+}
+
 export function discoverExternalServers({ agentDir, discovery = {}, configured = [], exclude = [] } = {}) {
   const modelsPath = agentDir ? path.join(agentDir, 'models.json') : null;
   if (!modelsPath || !fs.existsSync(modelsPath)) return [];
@@ -132,12 +192,15 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
       .filter(Boolean)
   );
 
-  const dir = discovery.dir ? String(discovery.dir) : null;
-  const configs = dir ? readServerConfigs(dir, discovery.configGlob) : [];
+  // Несколько источников: папка Strata (configGlob) и папки других движков (Basalt: один конфиг).
+  const sources = discoverySources(discovery);
+  const byPort = new Map();       // порт -> {cfg, source}
+  for (const source of sources) {
+    for (const cfg of readSourceConfigs(source)) {
+      if (!byPort.has(cfg.port)) byPort.set(cfg.port, { cfg, source });
+    }
+  }
   const routerPort = portOfBaseUrl(discovery.healthUrl);
-  const python = discovery.python || path.join('.venv', 'Scripts', 'python.exe');
-  const server = discovery.server || path.join('serve', 'server.py');
-  const engine = discovery.engine || 'strata';
 
   const found = [];
   for (const [provider, block] of Object.entries(providers)) {
@@ -159,8 +222,30 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
     // Главный признак «наш сервер»: в каталоге установки есть его конфиг с этим
     // портом. Иначе мы не знаем ни команды запуска, ни контекста — и не выдаём
     // чужой локальный эндпоинт (прокси, релей) за модель Strata.
-    const cfg = configs.find(item => item.port === port);
-    if (!dir || !cfg) continue;
+    const hit = byPort.get(port);
+    if (!hit) continue;
+    const cfg = hit.cfg;
+    const source = hit.source;
+    const dir = source.dir;
+    const python = source.python || path.join('.venv', 'Scripts', 'python.exe');
+    const server = source.server || path.join('serve', 'server.py');
+    const engine = source.engine || 'strata';
+    // Команда запуска: своя у источника (Basalt: bin/basalt.exe serve --config ...),
+    // иначе прежняя Strata-команда через serve/server.py.
+    const startCommand = Array.isArray(source.command) && source.command.length
+      ? source.command.map(token => {
+          const text = String(token)
+            .replace('{config}', cfg.file)
+            .replace('{port}', String(port))
+            .replace('{dir}', dir);
+          // Относительный путь из команды источника (bin/basalt.exe, .venv/Scripts/python.exe)
+          // разворачиваем от папки источника: spawn получает cwd, но ищет exe не в нём.
+          return !text.startsWith('-') && /[\/]/u.test(text) && !path.isAbsolute(text)
+            ? path.join(dir, text)
+            : text;
+        })
+      : [path.join(dir, python), path.join(dir, server), '--engine', engine,
+         '--config', cfg.file, '--port', String(port)];
 
     const first = (Array.isArray(block.models) ? block.models : [])[0] || {};
     const entry = {
@@ -178,13 +263,7 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
       apiKey: block.apiKey ?? null,
       loadTimeoutMs: 600000,
       discovered: true,
-      start: [
-        path.join(dir, python),
-        path.join(dir, server),
-        '--engine', engine,
-        '--config', cfg.file,
-        '--port', String(port)
-      ],
+      start: startCommand,
       cwd: dir
     };
     // Контекст берём из конфига движка (что реально поднято), если он там есть.
