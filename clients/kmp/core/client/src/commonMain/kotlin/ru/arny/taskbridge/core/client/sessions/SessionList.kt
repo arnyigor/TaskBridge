@@ -290,7 +290,10 @@ class SessionList(
      * ответ агента» (STAB-STATUS-01).
      */
     suspend fun refreshInfo() {
-        runCatching { api.info() }.onSuccess { info -> _state.update { it.copy(info = info) } }
+        runCatching { api.info() }.onSuccess { info ->
+            noteInfo(info)
+            _state.update { it.copy(info = info) }
+        }
     }
 
     fun refresh() {
@@ -330,6 +333,7 @@ class SessionList(
             val active = tasks.any { displayStateOf(it).active }
             val info = if (_state.value.info == null || active || infoTick % 5 == 0) api.info() else _state.value.info
             infoTick += 1
+            noteInfo(info)
             _state.update {
                 it.copy(
                     loading = false, refreshing = false, tasks = tasks, projects = projects,
@@ -416,6 +420,25 @@ class SessionList(
 
     private var cachedModels: ModelCatalog? = null
     private var cachedVisibility: ModelVisibility? = null
+
+    /** Последний виденный bootId сервера: смена означает перезапуск процесса. */
+    private var lastBootId: String? = null
+
+    /**
+     * Сервер перезапустился (новый bootId) — каталог моделей и скрытия прошлого
+     * процесса устарели. Кэш нужен только как моментальный снимок для пикеров
+     * ([peekModels]): без инвалидации телефон после перезапуска сервера показывал
+     * прежний список провайдеров, пока загрузка не удастся, — а при неудачной
+     * загрузке и вовсе молча оставался на устаревшем снимке.
+     */
+    private fun noteInfo(info: ApiInfo?) {
+        val boot = info?.bootId ?: return
+        if (lastBootId != null && boot != lastBootId) {
+            cachedModels = null
+            cachedVisibility = null
+        }
+        lastBootId = boot
+    }
 
     /** Show the last catalogue immediately while the server refreshes it. */
     fun peekModels(): ModelCatalog? = cachedModels

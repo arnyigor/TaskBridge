@@ -420,7 +420,7 @@ internal fun modelGroups(models: List<ModelRef>, pinnedFirst: Set<String>): List
 }
 
 @Composable
-fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit, pendingKey: String? = null, info: ApiInfo? = null) {
+fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettings, onPick: (ModelRef) -> Unit, onDismiss: () -> Unit, pendingKey: String? = null, info: ApiInfo? = null, error: String? = null) {
     var query by remember { mutableStateOf("") }
     var favorites by remember { mutableStateOf(settings.favoriteModels) }
     var expanded by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -462,6 +462,16 @@ fun ModelChooser(catalog: ModelCatalog, selected: ModelRef?, settings: AppSettin
         // each star tap and search keystroke. The lazyContent slot gives the list
         // the remaining sheet height and only the visible rows compose.
         lazyContent = {
+            if (error != null) {
+                item(key = "load-error") {
+                    Text(
+                        "Список мог устареть: $error",
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(vertical = 8.dp),
+                    )
+                }
+            }
             if (filteredModels.isEmpty()) {
                 item(key = "empty") {
                     Text(

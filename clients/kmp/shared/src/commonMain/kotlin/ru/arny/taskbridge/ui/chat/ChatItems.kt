@@ -157,8 +157,13 @@ fun UserBubble(
 ) {
     val colors = LocalStatusColors.current
     val deliveryIcon = when {
+        item.delivery.startsWith("Отменено") || item.delivery.startsWith("Ответ прерван") -> AppIcons.Stop
         item.delivery.startsWith("Подтверждение") || item.delivery.startsWith("Ошибка") -> AppIcons.Alert
-        item.pending || item.delivery.startsWith("В очереди") || item.delivery.startsWith("Сервер готовит") || item.delivery.startsWith("Ожидает") -> AppIcons.Clock
+        item.pending ||
+            item.delivery.startsWith("В очереди") ||
+            item.delivery.startsWith("Сервер готовит") ||
+            item.delivery.startsWith("Ожидает") ||
+            item.delivery.startsWith("Останавливается") -> AppIcons.Clock
         else -> AppIcons.Check
     }
     var buttonMenu by remember { mutableStateOf(false) }

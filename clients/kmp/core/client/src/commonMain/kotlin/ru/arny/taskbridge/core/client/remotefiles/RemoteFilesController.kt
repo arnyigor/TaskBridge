@@ -55,6 +55,8 @@ class RemoteFilesController(
     rootId: String? = null,
     path: String = "",
     private val ids: () -> String = { Uuid.random().toString() },
+    /** Как часто перечитываются настройки, пока висит необработанный запрос. */
+    private val pollIntervalMillis: Long = 5_000,
 ) {
     private val mutable = MutableStateFlow(RemoteFilesState(projectId, taskId, rootId, path))
     val state = mutable.asStateFlow()
@@ -94,7 +96,7 @@ class RemoteFilesController(
         val epoch = generation
         polling = scope.launch {
             while (allowed() && epoch == generation) {
-                delay(5000)
+                delay(pollIntervalMillis)
                 try {
                     val settings = api.externalRead(state.value.projectId)
                     if (epoch != generation || !allowed()) return@launch

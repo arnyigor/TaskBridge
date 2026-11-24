@@ -67,6 +67,30 @@ class ChatStabilizationTest {
         assertFalse(answer.active)
         assertTrue(answer.final)
         assertEquals("CANCELLED", answer.status)
+        val user = reducer.snapshot().items.filterIsInstance<ChatItem.User>().single()
+        assertEquals("Отменено", user.delivery)
+    }
+
+    @Test
+    fun stopUpdatesUserDeliveryLabelOnFollowUp() {
+        val task = Task(id = "t1", prompt = "Первый", status = "SUCCEEDED")
+        val reducer = ChatReducer(task, seedInitial = true)
+        reducer.apply(TaskEvent("t1", 1, "2026-11-23T10:00:01Z", "TASK_SUCCEEDED", data = buildJsonObject { put("turn", 1L) }))
+        reducer.apply(
+            TaskEvent(
+                "t1", 2, "2026-11-23T10:00:02Z", "USER_MESSAGE",
+                data = buildJsonObject { put("text", "Второй"); put("turn", 2L) },
+            ),
+        )
+        reducer.apply(
+            TaskEvent(
+                "t1", 3, "2026-11-23T10:00:03Z", "TASK_CANCELLED",
+                data = buildJsonObject { put("turn", 2L) },
+            ),
+        )
+
+        val followUpUser = reducer.snapshot().items.filterIsInstance<ChatItem.User>().last()
+        assertEquals("Отменено", followUpUser.delivery)
     }
 
     @Test

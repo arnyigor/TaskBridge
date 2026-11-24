@@ -208,6 +208,10 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             turns.firstOrNull { it.id == "user-initial" }?.delivery = when (task.status) {
                 "QUEUED" -> "В очереди на сервере"
                 "PREPARING", "PREFLIGHT" -> "Сервер готовит сессию"
+                "CANCELLING" -> "Останавливается…"
+                "CANCELLED" -> "Отменено"
+                "FAILED" -> "Подтверждение Pi не получено"
+                "SUCCEEDED" -> "Обработано Pi"
                 else -> "Ожидает подтверждения Pi"
             }
             current.at = null
@@ -414,6 +418,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 previous.endedAt = previous.endedAt ?: at
                 previous.final = true
                 for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
+                updateUserDelivery(previous)
             }
             return false
         }
@@ -428,6 +433,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 olderOwner.endedAt = olderOwner.endedAt ?: at
                 olderOwner.final = true
                 for (tool in olderOwner.tools) if (tool.state == "run") tool.state = "interrupted"
+                updateUserDelivery(olderOwner)
                 return false
             }
             // Ответа с этим номером уже нет (его сняла правка), но заглушка
@@ -450,6 +456,7 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 previous.endedAt = previous.endedAt ?: at
                 previous.final = true
                 for (tool in previous.tools) if (tool.state == "run") tool.state = "interrupted"
+                updateUserDelivery(previous)
             }
             return false
         }
@@ -494,9 +501,14 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
         val index = turns.indexOf(answer)
         val user = turns.getOrNull(index - 1)?.takeIf { it.role == Role.USER } ?: return
         user.delivery = when {
+            answer.status == "CANCELLED" || answer.stopReason == "aborted" ->
+                if (answer.text.isNotBlank()) "Ответ прерван" else "Отменено"
             answer.text.isNotBlank() -> "Ответ получен"
-            answer.error != null || answer.status == "FAILED" -> "Ошибка ответа"
+            answer.error != null || answer.status == "FAILED" ->
+                if (user.id == "user-initial" && !initialPromptAccepted && answer.tools.isEmpty()) "Подтверждение Pi не получено"
+                else "Ошибка ответа"
             answer.tools.isNotEmpty() -> "Обработано Pi · без текста"
+            answer.superseded -> "Отменено"
             else -> user.delivery
         }
     }
@@ -922,8 +934,13 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                             for (tool in turn.tools) if (tool.state == "run") tool.state = "interrupted"
                         }
                         current.active = false
-                        val interim = current.status.isEmpty() || current.status == "DONE" || current.status == "VERIFYING"
-                        if (!current.final && interim) current.status = "VERIFYING"
+                        // Живой ход в этот момент несёт статус RUNNING (его ставит
+                        // markAnswerRunning), и прежняя проверка interim пропускала
+                        // ровно этот случай: подпись оставалась RUNNING при
+                        // погашенных точках. Терминал сюда не доходит — он либо
+                        // пришёл через finish() (final = true), либо превратился в
+                        // FAILED строкой выше.
+                        if (!current.final) current.status = "VERIFYING"
                     }
                 }
             }
@@ -1070,7 +1087,9 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
                 first.delivery = when (task.status) {
                     "QUEUED" -> "В очереди на сервере"
                     "PREPARING", "PREFLIGHT" -> "Сервер готовит сессию"
-                    "RUNNING", "WAITING_USER", "VERIFYING", "CANCELLING" -> "Ожидает подтверждения Pi"
+                    "RUNNING", "WAITING_USER", "VERIFYING" -> "Ожидает подтверждения Pi"
+                    "CANCELLING" -> "Останавливается…"
+                    "CANCELLED" -> "Отменено"
                     "FAILED" -> "Подтверждение Pi не получено"
                     "SUCCEEDED" -> "Обработано Pi"
                     else -> first.delivery
@@ -1253,9 +1272,12 @@ class ChatReducer(task: Task, seedInitial: Boolean = true) {
             val previous = out.lastOrNull()
             if (item is ChatItem.Assistant && item.final && previous is ChatItem.User) {
                 val delivery = when {
+                    item.status == "CANCELLED" || item.stopReason == "aborted" ->
+                        if (item.text.isNotBlank()) "Ответ прерван" else "Отменено"
                     item.text.isNotBlank() -> "Ответ получен"
                     item.error != null || item.status == "FAILED" -> "Ошибка ответа"
                     item.tools.isNotEmpty() -> "Обработано Pi · без текста"
+                    item.superseded -> "Отменено"
                     else -> previous.delivery
                 }
                 if (delivery != previous.delivery) out[out.lastIndex] = previous.copy(delivery = delivery)

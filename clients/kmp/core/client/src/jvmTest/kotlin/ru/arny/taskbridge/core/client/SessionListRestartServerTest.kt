@@ -48,6 +48,10 @@ class SessionListRestartServerTest {
                     restartCalled += 1
                     respond("""{"restarting":true}""", HttpStatusCode.Accepted, json)
                 }
+                request.url.encodedPath == "/api/models" ->
+                    respond("""{"models":[{"provider":"strata","id":"m1","name":"M1"}]}""", HttpStatusCode.OK, json)
+                request.url.encodedPath == "/api/model-visibility" ->
+                    respond("""{"revision":"r","hiddenProviders":[],"hiddenModels":[]}""", HttpStatusCode.OK, json)
                 request.url.encodedPath == "/api/tasks" -> respond("[]", HttpStatusCode.OK, json)
                 request.url.encodedPath == "/api/projects" -> respond("[]", HttpStatusCode.OK, json)
                 else -> respond("""{"version":1}""", HttpStatusCode.OK, json)
@@ -104,6 +108,26 @@ class SessionListRestartServerTest {
         assertTrue(result.isSuccess, "${result.exceptionOrNull()}")
         assertEquals("boot-2", boot, "успех возможен только после появления нового процесса")
         assertEquals(0, unchangedInfoResponsesAfterRestart, "старый bootId нельзя принять за завершённый перезапуск")
+        scope.cancel()
+    }
+
+    @Test
+    fun aRestartedServerInvalidatesTheCachedModelCatalog() = runBlocking {
+        val sessionList = sessions(null)
+        sessionList.refreshInfo() // первый bootId — базовый, инвалидации ещё нет
+        assertEquals(1, sessionList.models().getOrThrow().models.size)
+        assertEquals(1, sessionList.peekModels()?.models?.size, "кэш подмешивается в пикеры, пока сервер жив")
+
+        boot = "boot-2" // сервер перезапустился
+        sessionList.refreshInfo()
+        assertEquals(
+            null,
+            sessionList.peekModels(),
+            "после смены bootId устаревший каталог прошлого процесса не показывается",
+        )
+        // Свежая загрузка снова наполняет кэш, пикер не остаётся пустым.
+        assertEquals(1, sessionList.models().getOrThrow().models.size)
+        assertEquals(1, sessionList.peekModels()?.models?.size)
         scope.cancel()
     }
 

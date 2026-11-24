@@ -297,7 +297,7 @@ class AppGraph(val platform: PlatformServices) {
                             // сервер отвечает, ссылка жива.
                             val recovered = !_online.value
                             _online.value = true
-                            if (recovered) chats.values.forEach { it.reconnectNow() }
+                            if (recovered) chats.values.forEach { it.reconnectNow(forceResetStream = true) }
                         }
                     }
                 }
@@ -457,8 +457,9 @@ class AppGraph(val platform: PlatformServices) {
             syncChatStreaming()
             sessions.refresh()
             // reconnectNow gates stream/refresh by streamingEnabled, while delivery is
-            // intentionally visibility-independent.
-            chats.values.forEach { it.reconnectNow() }
+            // intentionally visibility-independent. После сна и смены сети старый
+            // сокет может быть полуоткрыт — его переоткрываем, а не просто будим.
+            chats.values.forEach { it.reconnectNow(forceResetStream = true) }
         }
 
         fun close() {

@@ -124,11 +124,9 @@ import ru.arny.taskbridge.platform.PlatformServices
 import ru.arny.taskbridge.platform.rememberFilePicker
 import ru.arny.taskbridge.ui.common.AdaptiveSheet
 import ru.arny.taskbridge.ui.common.AppSnackbarHost
-import ru.arny.taskbridge.ui.common.Banner
 import ru.arny.taskbridge.ui.common.EmptyState
 import ru.arny.taskbridge.ui.common.StatusDot
 import ru.arny.taskbridge.ui.common.TypingPhase
-import ru.arny.taskbridge.ui.common.formatBytes
 import ru.arny.taskbridge.ui.common.formatMoment
 import ru.arny.taskbridge.ui.common.humanDuration
 import ru.arny.taskbridge.ui.common.parseIsoMillis
@@ -202,6 +200,9 @@ fun ChatScreen(
         )
     }
     val online by connection.online.collectAsState()
+    // storeMismatch — StateFlow: .value в композиции не подписывает на обновления,
+    // и баннер «чужой экземпляр» появлялся только при случайной рекомпозиции.
+    val storeMismatch by connection.storeMismatch.collectAsState()
     val platform = graph.platform
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -525,18 +526,17 @@ fun ChatScreen(
 
                 Modifier.padding(padding).fillMaxSize().imePadding(),
             ) {
-                if (!online) Banner("Устройство offline — показана сохранённая история, команды останутся в outbox", AppIcons.Alert, LocalStatusColors.current.waiting)
-                if (connection.storeMismatch.value) Banner(
-                    text = "Подключён другой экземпляр TaskBridge — эта история не с этого компьютера",
-                    icon = AppIcons.Offline,
-                    color = LocalStatusColors.current.failed,
+                // Полоса состояния: состав и порядок баннеров решает чистая
+                // statusBanners (ChatStatusBanners.kt), экран только собирает.
+                ChatStatusBanners(
+                    banners = statusBanners(
+                        online = online,
+                        storeMismatch = storeMismatch,
+                        link = state.link,
+                        storage = storage,
+                    ),
+                    onRetryLink = { session.reconnectNow() },
                 )
-                LinkBanner(state.link, onRetry = { session.reconnectNow() })
-                // Сессия хранит журнал кадров (вывод инструментов) и вложения: гигабайты
-                // набираются незаметно. Предупреждение — только текст, ничего не удаляется.
-                sessionStorageWarning(storage)?.let { warning ->
-                    Banner(warning, AppIcons.Layers, LocalStatusColors.current.waiting)
-                }
                 // Шаг C-A: таймер молчания. Сервер считает silentMs у себя (клиент не
                 // вычитает часы другого устройства); «Подождать» прячет баннер до нового
                 // хода, STOP идёт через уже существующее подтверждение.
@@ -934,37 +934,6 @@ internal fun selectedMessages(items: List<ChatItem>, selected: Set<String>): Lis
 internal fun selectedMessagesText(items: List<ChatItem>, selected: Set<String>): String =
     selectedMessages(items, selected).joinToString("\n\n")
 
-@Composable
-private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
-    when (link) {
-        is LinkState.Reconnecting -> Banner(
-            text = "Нет связи с компьютером — переподключение через ${(link.inMillis / 1000).coerceAtLeast(1)} с",
-            icon = AppIcons.Offline,
-            color = LocalStatusColors.current.waiting,
-            action = "Сейчас",
-            onAction = onRetry,
-        )
-        // Сервер отвечает, поток оборван: это другая поломка, чем «нет связи», и
-        // лечится ожиданием, а не проверкой сети на компьютере (план 4.2).
-        is LinkState.Degraded -> Banner(
-            text = "Компьютер отвечает, но поток событий оборван — переподключаюсь через ${(link.inMillis / 1000).coerceAtLeast(1)} с",
-            icon = AppIcons.Alert,
-            color = LocalStatusColors.current.waiting,
-            action = "Сейчас",
-            onAction = onRetry,
-        )
-        is LinkState.Failed -> Banner(
-            text = when (link.error) {
-                is ApiError.NotFound -> "Сессия удалена на компьютере."
-                else -> describe(link.error)
-            },
-            icon = AppIcons.Alert,
-            color = MaterialTheme.colorScheme.error,
-        )
-        else -> Unit
-    }
-}
-
 /**
  * Состояние связи словами для панели «Диагностика» (и любого другого места).
  *
@@ -972,20 +941,6 @@ private fun LinkBanner(link: LinkState, onRetry: () -> Unit) {
  * (двухуровневый health, план 4.2) оператор увидел бы
  * «Degraded(attempt=2, inMillis=2000, reason=…)» — то, по чему нельзя решать.
  */
-/**
- * Предупреждение о размере сессии на диске компьютера; null — предупреждать не о чем.
- *
- * Порог считает сервер (`storage.warnSessionMb`), клиент договаривает следствие:
- * место занимают журнал кадров (вывод инструментов) и вложения сессии, освободить
- * его можно удалением сессии. Автоматически ничего не удаляется и не ограничивается.
- */
-internal fun sessionStorageWarning(storage: SessionStorage?): String? {
-    if (storage?.warn != true) return null
-    val atLeast = if (storage.partial) "не менее " else ""
-    return "Сессия занимает $atLeast${formatBytes(storage.bytes)} на диске компьютера — это её журнал и вложения. " +
-        "Освободить место можно удалением сессии"
-}
-
 internal fun linkLabel(link: LinkState): String = when (link) {
     LinkState.Connecting -> "подключаюсь"
     LinkState.Live -> "поток подключён"
@@ -994,152 +949,6 @@ internal fun linkLabel(link: LinkState): String = when (link) {
     is LinkState.Reconnecting ->
         "нет связи с компьютером (попытка ${link.attempt}, через ${link.inMillis / 1000} с)"
     is LinkState.Failed -> describe(link.error)
-}
-
-/**
- * Нужно ли вернуть ленте позицию чтения после прихода контента.
- *
- * Отдельная функция, потому что именно охрана здесь и ошибается: вернуть ленту в
- * момент, когда палец ею двигает, — это лишний скролл поверх жеста (а на
- * desktop это уже приводило к аварийному завершению), а возврат к тому же месту,
- * где пользователь и стоит, — бессмысленная работа на каждый дельта-чанк.
- */
-/**
- * Якорь чтения: элемент, на котором стоит оператор, вместе со смещением внутри него.
- *
- * Почему отдельным объектом, а не двумя `remember` в композабле: инвариант здесь
- * ровно один и его нужно уметь проверять — «пришёл контент, а позиция чтения та же».
- * Элемент адресуется КЛЮЧОМ, а не индексом: при новой дельте или при догрузке
- * старой страницы индексы сдвигаются, а ключ — нет (2026-10-14).
- */
-internal class ReadingAnchor {
-    var key: String? = null
-        private set
-    var offset: Int = 0
-        private set
-
-    /**
-     * Позиция ленты изменилась: запоминаем, где оператор остановился.
-     *
-     * Раньше запоминание шло только при `isScrollInProgress` (то есть при жесте или
-     * анимации). Колесо мыши и мгновенные переходы этот флаг не поднимают, якорь
-     * оставался от прошлого жеста — и первая же дельта возвращала ленту туда: «скролл
-     * в самый низ при получении чанков» и «скролл вверх при добавлении элемента»
-     * (оператор 2026-10-17). Поэтому теперь запоминается любая позиция, которую
-     * сдвинул не приход контента, а сам оператор — любым способом.
-     */
-    fun record(contentArrived: Boolean, index: Int, offset: Int, keyOf: (Int) -> String?) {
-        if (contentArrived) return
-        keyOf(index)?.let { key = it }
-        this.offset = offset
-    }
-
-    /**
-     * Куда вернуть ленту, если она уехала от якоря; null — возвращать нечего
-     * (нет якоря, элемент исчез из ленты, оператор внизу или двигает ленту сам).
-     */
-    fun target(
-        following: Boolean,
-        scrolling: Boolean,
-        currentIndex: Int,
-        currentOffset: Int,
-        indexOf: (String) -> Int,
-    ): Pair<Int, Int>? {
-        val anchorKey = key ?: return null
-        val index = indexOf(anchorKey)
-        if (!needsReadingRestore(following, scrolling, currentIndex, currentOffset, index, offset)) return null
-        return index to offset
-    }
-}
-
-/**
- * «Оператор у низа ленты» — защёлка, а не мгновенный замер.
- *
- * Замер `firstVisibleItemIndex == 0` ошибается ровно в тот момент, когда решается
- * судьба ленты: новый элемент встаёт нулевым, прежний низ уезжает на индекс 1, и
- * лента, которую никто не трогал, считается прокрученной вверх — новый элемент
- * остаётся за нижней границей, а «Новое» загорается на пустом месте. Поэтому уход
- * от низа засчитывается только тогда, когда позиция изменилась БЕЗ прихода
- * контента: значит, это жест, колесо или программный переход.
- */
-internal class BottomLatch(private val nearBottomPx: Int = 80) {
-    var following: Boolean = true
-        private set
-    private var seenCount: Int = -1
-    private var seenNewest: String? = null
-    private var pausedByUser = false
-    private var returningToBottom = false
-
-    // reverseLayout: положительная дельта жеста/колеса ведёт к старым сообщениям.
-    // Намерение важнее порога «рядом с низом» и прихода контента в том же кадре.
-    fun userScroll(deltaY: Float) {
-        if (deltaY > 0f) {
-            pausedByUser = true
-            returningToBottom = false
-            following = false
-        } else if (deltaY < 0f) {
-            returningToBottom = true
-        }
-    }
-
-    fun resume() {
-        pausedByUser = false
-        returningToBottom = false
-        following = true
-    }
-
-    private fun keepPaused(index: Int, offset: Int): Boolean {
-        if (!pausedByUser) return false
-        if (returningToBottom && index == 0 && offset == 0) {
-            resume()
-            return false
-        }
-        following = false
-        return true
-    }
-
-    fun observe(index: Int, offset: Int, count: Int, newestId: String?) {
-        val contentChanged = count != seenCount || newestId != seenNewest
-        seenCount = count
-        seenNewest = newestId
-        if (keepPaused(index, offset)) return
-        following = when {
-            index == 0 && offset <= nearBottomPx -> true
-            // Индекс сдвинула вставка (или удаление), а не жест: низ остаётся низом.
-            contentChanged -> following
-            else -> false
-        }
-    }
-
-    /**
-     * Прокрутка закончилась (жест, флинг, колесо) — решение по тому, где лента встала.
-     *
-     * Это главный сигнал: `isScrollInProgress` поднимается и от касания, и от колеса
-     * (замерено), а на приход контента не реагирует вовсе. В отличие от [observe],
-     * здесь нечему сбиться: переокно истории или переподключение в момент жеста больше
-     * не могут «защитать» уход от низа как приход контента (жалоба 2026-10-17:
-     * «на телефоне при получении сообщения идёт автоскролл вниз»).
-     */
-    fun settle(index: Int, offset: Int) {
-        if (keepPaused(index, offset)) return
-        following = index == 0 && offset <= nearBottomPx
-    }
-}
-
-/** Насколько близко к нижней границе считается «у низа», в dp. */
-internal const val NEAR_BOTTOM_DP = 40
-
-internal fun needsReadingRestore(
-    following: Boolean,
-    scrolling: Boolean,
-    currentIndex: Int,
-    currentOffset: Int,
-    targetIndex: Int,
-    targetOffset: Int,
-): Boolean {
-    if (following || scrolling) return false
-    if (targetIndex < 0) return false
-    return currentIndex != targetIndex || currentOffset != targetOffset
 }
 
 @Composable
@@ -1935,7 +1744,9 @@ private fun QuickModelChooser(state: ChatSessionState, session: ChatSession, gra
         // Живой статус локальных моделей: в каталоге Pi у локального провайдера
         // записан статический размер окна, и после загрузки с другим он врёт.
         val sessionListState by connection.sessions.state.collectAsState()
-        ModelChooser(catalog!!, state.task?.model, graph.settings, info = sessionListState.info, onPick = { model ->
+        // Провал фоновой загрузки не оставляем безмолвным: пока peekModels() держит
+        // список прошлого запуска сервера, без баннера он выглядит актуальным.
+        ModelChooser(catalog!!, state.task?.model, graph.settings, info = sessionListState.info, error = loadError, onPick = { model ->
             if (model.key == state.task?.model?.key) onClose()
             else if (pendingKey == null) {
                 pendingKey = model.key
@@ -1986,6 +1797,7 @@ private fun QuickRerunChooser(
             selected = state.task?.model,
             settings = graph.settings,
             info = sessionListState.info,
+            error = loadError,
             pendingKey = chosen,
             onPick = { model ->
                 if (chosen == null) {
@@ -2163,154 +1975,6 @@ private fun ModelSheet(state: ChatSessionState, session: ChatSession, graph: App
         }
     }
 }
-
-/**
- * Живое окно контекста локальной модели из статуса TaskBridge (конфиг движка и
- * `/health` его сервера), или null — для облачной модели такого числа нет.
- */
-internal fun liveLocalContextWindow(model: ModelRef?, info: ApiInfo?): Long? =
-    model?.let { ref ->
-        info?.local?.models?.firstOrNull { entry ->
-            (ref.id != null && entry.id == ref.id) || (ref.provider != null && entry.provider == ref.provider)
-        }
-    }?.contextWindow
-
-/**
- * Окно контекста сессии. У локальной модели каталожное число — это статическая
- * запись провайдера в Pi (262K из models.json): после загрузки с другим окном она
- * остаётся прежней, и шкала показывала «30K/262K», хотя движок поднят на 131K.
- * Поэтому для местных моделей берём живое число TaskBridge, а каталог Pi остаётся
- * фолбэком — для облачных моделей он и есть единственный источник.
- */
-internal fun sessionContextWindow(task: Task?, info: ApiInfo?): Long? {
-    val model = task?.model ?: task?.requestedModel
-    return liveLocalContextWindow(model, info) ?: model?.contextWindow
-}
-
-/**
- * Размер промпта, который движок (Strata) обрабатывает прямо сейчас для этой модели,
- * или null если он не занят.
- *
- * Пока движок занят, важен именно этот размер: панель иначе показывает `usage`
- * прошлого хода — в замере 2026-09-30 рядом стояли «читает 41.0K / 63.7K» от
- * движка и «55% (143.9K/262.1K)» от Pi, и это читалось как баг. Свежий запрос
- * всегда последний в счётчиках движка, поэтому число относится к текущему ходу.
- */
-internal fun liveEnginePrompt(model: ModelRef?, info: ApiInfo?): Long? {
-    val entry = model?.let { ref ->
-        info?.local?.models?.firstOrNull { item ->
-            (ref.id != null && item.id == ref.id) || (ref.provider != null && item.provider == ref.provider)
-        }
-    } ?: return null
-    val metrics = entry.metrics ?: return null
-    if (metrics.busy != true) return null
-    // Во время чтения промпта движок знает точный размер, после — счётчик запроса.
-    return entry.promptTotal?.takeIf { it > 0 } ?: metrics.promptTokens?.takeIf { it > 0 }
-}
-
-/**
- * Сколько токенов занимает контекст сессии по числам Pi — то же число, что в
- * настройках сессии («Текущий размер контекста (Pi)» из `get_session_stats.contextUsage`).
- *
- * Размер промпта, который движок обрабатывает прямо сейчас (`liveEnginePrompt`), сюда
- * не подставляется: 2026-10-08 панель показывала «Контекст 25% (50.4K/204.8K)» (живой
- * запрос движка), а настройки — «Всего в запросе: 99K из 204K · 48%», и один и тот же
- * контекст читался двумя разными числами. Живое число движка показывается отдельной
- * строкой с подписью «Движок обрабатывает промпт».
- */
-internal fun sessionContextUsed(task: Task?): Long? =
-    if (sessionMeasurementCurrent(task)) task?.lastUsage?.totalTokens
-    else task?.compaction?.last?.estimatedTokensAfter
-
-/**
- * Относится ли `lastUsage` к тому контексту, который в сессии сейчас.
- *
- * После успешного сжатия `lastUsage` остаётся прежним намеренно: это измерение
- * прошлого запроса, а не оценка нового размера. Без времени съёма отличить его от
- * свежего невозможно — и панель показывала 455007 ток. (ровно `tokensBefore`), когда
- * в контексте было ≈35K (живой отчёт 2026-11-15).
- *
- * Старая задача без `lastUsageAt` считается измеренной: времени съёма в ней нет,
- * и подменять последнее известное число догадкой нельзя.
- */
-internal fun sessionMeasurementCurrent(task: Task?): Boolean {
-    val usage = task?.lastUsage ?: return false
-    if ((usage.totalTokens ?: 0L) <= 0) return false
-    val measuredAt = parseIsoMillis(task.lastUsageAt) ?: return true
-    val compactedAt = parseIsoMillis(task.compaction?.last?.at) ?: return true
-    return measuredAt >= compactedAt
-}
-
-/** Число в `sessionContextUsed` — оценка Pi после сжатия, а не измерение. */
-internal fun sessionContextEstimated(task: Task?): Boolean =
-    !sessionMeasurementCurrent(task) && task?.compaction?.last?.estimatedTokensAfter != null
-
-/**
- * История с резервом ответа не влезает в окно модели, или null если влезает (или
- * одного из чисел нет).
- *
- * Это тот случай, когда «сессия подвисла» на самом деле ждёт: движок (Strata и
- * llama.cpp) НЕ обрезает промпт, а отвечает 400 `prompt (N tokens) + max tokens
- * (M) exceeds the context (K); requests are never truncated`, а Pi повторяет такие
- * запросы с паузой. В логе сессии это видно как `limits-wait` с `retries_total`,
- * в панели — как «streaming · Pi is working» без событий модели.
- *
- * Правило движка — промпт + резерв ответа + 8 ≤ окно, поэтому одного сравнения
- * истории с окном мало: 2026-09-30 при истории 99.4K и окне 131072 всё выглядело
- * «76% заполнено», а запрос всё равно отклонялся: 99465 + 32768 + 8 = 132241.
- *
- * Резерв берётся не из каталога, а из того, что провайдер действительно отправляет
- * (см. answerReserveTokens): у Codex его нет вовсе, и там правило сводится к
- * «история против окна».
- */
-internal fun contextOverflow(task: Task?, info: ApiInfo?): Pair<Long, Long>? {
-    val window = sessionContextWindow(task, info)?.takeIf { it > 0 } ?: return null
-    val tokens = sessionContextUsed(task) ?: return null
-    val reserve = answerReserveTokens(task)
-    return if (tokens + reserve > window) tokens to window else null
-}
-
-/**
- * Отправляет ли провайдер лимит вывода полем запроса.
- *
- * Лимит вывода есть у всех адаптеров Pi, кроме Codex: `openai-codex-responses`
- * собирает тело запроса из model/store/stream/instructions/input/text/include/
- * prompt_cache_key/tool_choice/parallel_tool_calls, и поля лимита вывода там нет
- * ни одного (проверено по установленному пакету 2026-10-12). У остальных — есть:
- * openai-responses (`max_output_tokens`), openai-completions (`max_completion_tokens`/
- * `max_tokens`), anthropic и mistral (`max_tokens`), google (`maxOutputTokens`).
- */
-internal fun providerSendsOutputLimit(provider: String?): Boolean = provider != "openai-codex"
-
-/**
- * Резерв ответа — сколько токенов провайдер держит под ответ в том же запросе.
- *
- * Число в каталоге модели — это её потолок вывода, а не обязательство провайдера:
- * Codex лимит вывода не отправляет, поэтому `maxTokens` 128000 у gpt-5.5 в окне
- * 272000 не занимает ничего, и вычитать его из окна нельзя.
- *
- * Проверено на живой сессии 8855fa011534 (openai-codex/gpt-5.5, окно 272000):
- * промпт 217571 токен прошёл и ответ получен, а сравнение с резервом объявляло
- * именно эту сессию «не влезает в окно» (217767 + 128000 > 272000) и советовало
- * поднять окно до 345775.
- */
-internal fun answerReserveTokens(task: Task?): Long {
-    val model = task?.model ?: task?.requestedModel ?: return 0
-    if (!providerSendsOutputLimit(model.provider)) return 0
-    return model.maxTokens ?: 0
-}
-
-/**
- * Идёт ли чтение промпта прямо сейчас.
- *
- * Признаки только живые: фаза движка (Strata отдаёт «reading the prompt») или его PP
- * из `/api/info`. PP прошлого хода (`task.metrics.pp`) сюда не попадает: он не
- * гаснет после ответа, и с ним «Модель читает промпт» висела над уже идущими
- * размышлениями — пока в ответе не появится текст, то есть всё время работы think-
- * блока. Пока модель выдала что-то видимое ([answerSilent] == false), чтения нет.
- */
-internal fun readsPromptNow(readingPrompt: Boolean, livePp: Double?, answerSilent: Boolean): Boolean =
-    answerSilent && (readingPrompt || livePp != null)
 
 /**
  * Список сессий для экранов чата: обновления применяются только на видимом экране.
@@ -2936,58 +2600,4 @@ internal fun chatEscape(dialogOpen: Boolean, searchOpen: Boolean, filesOpen: Boo
     filesOpen -> ChatEscape.FILE
     canStop -> ChatEscape.STOP
     else -> ChatEscape.NOTHING
-}
-
-/**
- * Шаг C-A: состояние молчания хода для баннера.
- *
- * silentMs считает сервер (клиент не вычитает часы другого устройства),
- * порог по умолчанию — 120 с (как в web). Молчание сообщается только для
- * живого хода: терминальная сессия молчать не может.
- */
-data class SilenceState(val totalMs: Long, val stage: String?, val waitingModelMs: Long? = null) {
-    // waitingModelMs != null — запрос ещё не начал отвечать потоком (нет ни одного
-    // кадра ответа); подпись одна в обоих случаях, таймер общий — молчание хода.
-    val label: String
-        get() = "Модель молчит ${mmss(totalMs)}"
-}
-
-internal fun silenceState(task: Task?, thresholdMs: Long = 120_000L): SilenceState? {
-    // A quiet tool/compaction/provider retry is a known activity, not a silent model.
-    if (task?.status != "RUNNING" ||
-        task.providerWait != null ||
-        task.runtime?.activity in setOf("tool", "compacting", "waiting_model")) return null
-    val silent = task?.turnState?.silentMs?.takeIf { it >= thresholdMs } ?: return null
-    return SilenceState(silent, task.turnState?.stage?.takeIf { it.isNotBlank() }, task.turnState?.waitingModelMs)
-}
-
-// Служебные стадии не про модель: «Pi is working» — заглушка agent_start.
-private val SilenceStageNoise = setOf("Pi is working", "Pi starting")
-
-@Composable
-private fun SilenceBanner(silence: SilenceState, onWait: () -> Unit, onStop: () -> Unit, onRestart: () -> Unit) {
-    val colors = LocalStatusColors.current
-    // На узком экране кнопки в Row вытесняли текст до одного слова на строку:
-    // заголовок и пояснение идут во всю ширину, действия — отдельной строкой.
-    Surface(Modifier.fillMaxWidth(), color = colors.waiting.copy(alpha = 0.12f)) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(AppIcons.Alert, null, tint = colors.waiting, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(10.dp))
-                Text(silence.label, style = MaterialTheme.typography.labelLarge, color = colors.waiting)
-            }
-            val stage = silence.stage?.takeIf { it.isNotBlank() && it !in SilenceStageNoise }
-            Text(
-                "Последний прогресс: ${stage ?: "стадия неизвестна"}. Ход может быть просто долгим.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                TextButton(onClick = onWait) { Text("Подождать") }
-                // Перезапуск — не «повторить»: промпт сам не переотправится (план 4.2/C-A).
-                TextButton(onClick = onRestart) { Text("Перезапустить") }
-                TextButton(onClick = onStop) { Text("STOP", color = MaterialTheme.colorScheme.error) }
-            }
-        }
-    }
 }

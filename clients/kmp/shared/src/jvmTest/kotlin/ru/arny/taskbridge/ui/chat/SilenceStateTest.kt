@@ -37,6 +37,14 @@ class SilenceStateTest {
     }
 
     @Test
+    fun `service stages are not named as the last progress`() {
+        // Правило отсева служебных стадий переехало из баннера в состояние (ChatSilenceBanner.kt).
+        assertNull(silenceState(task(stage = "Pi is working"))!!.displayStage)
+        assertNull(silenceState(task(stage = "Pi starting"))!!.displayStage)
+        assertEquals("bash: npm test", silenceState(task())!!.displayStage)
+    }
+
+    @Test
     fun `quiet long tools and known runtime waits are not model silence`() {
         for (activity in listOf("tool", "compacting", "waiting_model")) {
             assertNull(silenceState(task(silentMs = 600_000L).copy(

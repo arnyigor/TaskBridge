@@ -329,12 +329,25 @@ class ChatSession(
         streamJob = scope.launch { streamLoop() }
     }
 
-    /** The network came back or the app returned to the foreground: skip the backoff wait. */
-    fun reconnectNow() {
+    /**
+     * The network came back or the app returned to the foreground: skip the backoff wait.
+     *
+     * [forceResetStream] закрывает текущее SSE-соединение и открывает новое. Это нужно
+     * после сна и смены Wi-Fi: полуоткрытый TCP-сокет не доставляет кадры, и цикл висит
+     * в `readUTF8Line()` до idle-таймаута (45 с), поэтому «разбудить» его недостаточно —
+     * сокет надо переоткрыть. Курсор отдаётся серверу при новом подключении, так что
+     * реплей продолжает историю без дырок.
+     */
+    fun reconnectNow(forceResetStream: Boolean = false) {
         if (closed) return
         scope.launch {
             streamLifecycleMutex.withLock {
                 if (!closed && streamingEnabled) {
+                    if (forceResetStream) {
+                        val previous = streamJob
+                        streamJob = null
+                        previous?.cancelAndJoin()
+                    }
                     startStreamIfReadyLocked()
                     wake.trySend(Unit)
                     refreshRequests.trySend(Unit)
