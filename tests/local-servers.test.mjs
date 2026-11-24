@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +84,19 @@ test('killMarker(): the --config value, or the explicit one', () => {
   assert.equal(new ExternalLocalServers({}).killMarker({ start: ['a.exe', '--port', '1'] }), null);
 });
 
+async function waitFor(check, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise(resolve => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+function netstatOutput() {
+  return execFileSync('netstat.exe', ['-ano'], { windowsHide: true, encoding: 'utf8' });
+}
+
 test('start() + stop(): a spawned detached server answers /health and is stopped again', async () => {
   const port = 19000 + Math.floor(Math.random() * 1000);
   const config = {
@@ -111,6 +124,43 @@ test('start() + stop(): a spawned detached server answers /health and is stopped
   assert.equal(stopped.status, 'unloaded');
   const down = await servers.status({ fresh: true });
   assert.equal(down.models[0].status, 'unloaded');
+});
+
+test('stop() kills a server started outside TaskBridge: no tracked pid, no marker match', async () => {
+  // The real case: the Strata panel starts `serve/server.py`, which re-executes
+  // itself as another python and owns the engine. Nothing in its command line is
+  // the server's `--config` (the panel hands the engine a resolved copy), so the
+  // marker finds nobody — the port is the only link left. A wrapper + child here
+  // mirrors that shape: the wrapper holds no config, the child serves /health.
+  const port = 21000 + Math.floor(Math.random() * 1000);
+  const child = `const http=require('http');const s=http.createServer((q,r)=>{if(q.url==='/health'){r.writeHead(200);r.end('{"status":"ok"}');return}r.writeHead(404);r.end()});s.listen(${port},'127.0.0.1',()=>{});setInterval(()=>{},1000)`;
+  const wrapper = `require('child_process').spawn(process.execPath,['-e',${JSON.stringify(child)}],{stdio:'ignore'});setInterval(()=>{},1000)`;
+  const started = spawn(process.execPath, ['-e', wrapper], { detached: true, stdio: 'ignore', windowsHide: true });
+  started.unref();
+  const config = {
+    externalServers: [{
+      provider: 'strata-panel', model: 'test-model',
+      baseUrl: `http://127.0.0.1:${port}`,
+      // A config file no process has on its command line — exactly what the
+      // discovered Strata row points at.
+      start: ['python.exe', 'server.py', '--config', 'G:\nowhere\strata-absent.json', '--port', String(port)],
+      loadTimeoutMs: 5000
+    }]
+  };
+  const servers = new ExternalLocalServers(config);
+  try {
+    // Wait for the child to answer before stopping: the port safety net needs a
+    // listener to find.
+    await waitFor(async () => (await servers.status({ fresh: true })).models[0]?.status === 'loaded', 10000);
+    assert.equal((await servers.status({ fresh: true })).models[0].status, 'loaded');
+    const stopped = await servers.stop(config.externalServers[0]);
+    assert.equal(stopped.status, 'unloaded');
+    assert.equal((await servers.status({ fresh: true })).models[0].status, 'unloaded');
+    assert.deepEqual(parseListeningPids(netstatOutput(), port), [], 'порт должен быть свободен');
+  } finally {
+    try { process.kill(-started.pid); } catch { /* уже мёртв */ }
+    try { started.kill('SIGKILL'); } catch { /* уже мёртв */ }
+  }
 });
 
 test('start() refuses a second launch while one is already loading', async () => {

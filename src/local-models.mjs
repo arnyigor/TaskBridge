@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { listProcesses, processesUsingFile } from './process-info.mjs';
+import { descendantsOf, listProcesses, processesUsingFile } from './process-info.mjs';
 import { discoverExternalServers } from './external-discovery.mjs';
 import { CONTEXT_FLAG, missingModelPaths, readEngineArg, writeContextFile } from './engine-context.mjs';
 
@@ -27,6 +27,21 @@ function killTree(proc) {
       resolve();
     }
   });
+}
+
+// Kill a pid: taskkill /T /F first (it takes the children with it), then
+// TerminateProcess directly (`process.kill` on Windows is exactly that).
+//
+// The second path is not redundant: on the processes the Strata panel starts
+// (pythonw → python → the engine) taskkill answers «Отказано в доступе» and exits
+// with code 1, while TerminateProcess of the same pid succeeds. Without this the
+// stop reported «процесс не остановился» and the server kept answering /health,
+// even though the port safety net had "killed" it.
+async function forceKill(pid) {
+  const id = Number(pid);
+  if (!Number.isSafeInteger(id) || id <= 0) return;
+  await killTree({ pid: id }).catch(() => {});
+  try { process.kill(id, 'SIGKILL'); } catch { /* already gone */ }
 }
 
 // The pid the orphan launcher printed for the server it started, or null when
@@ -752,14 +767,14 @@ export class LocalModelService extends EventEmitter {
 
   // Starts the router if it is not already listening, then (optionally) loads a
   // specific model with progress. Safe to call for every task.
-  async ensureRunning(onLog = () => {}, modelId) {
+  async ensureRunning(onLog = () => {}, modelId, { signal } = {}) {
     if (this.managed && !(await this.isReady())) {
       await this.#spawnRouter(onLog);
     } else if (await this.isReady()) {
       this.state = this.proc ? 'MANAGED_RUNNING' : 'EXTERNAL_RUNNING';
     }
     if (await this.isReady()) this.startWatching();
-    if (modelId && await this.isReady()) await this.loadModel(modelId);
+    if (modelId && await this.isReady()) await this.loadModel(modelId, { signal });
     return { state: this.state, pid: this.proc?.pid ?? null, modelId: modelId || null };
   }
 
@@ -1346,6 +1361,7 @@ export class ExternalLocalServers {
     const tracked = this.procs.get(server.provider);
     if (tracked) {
       await killTree(tracked.proc).catch(() => {});
+      await forceKill(tracked.proc?.pid);
       this.procs.delete(server.provider);
       stopped = true;
     } else {
@@ -1364,7 +1380,7 @@ export class ExternalLocalServers {
         for (const item of (await processesUsingFile(marker, { list })) || []) pids.add(item.pid);
       }
       for (const pid of pids) {
-        await killTree({ pid }).catch(() => {});
+        await forceKill(pid);
         stopped = true;
       }
     }
@@ -1374,11 +1390,22 @@ export class ExternalLocalServers {
     // port is still our server — the config says which port it listens on.
     const port = portOf(server.baseUrl);
     if (up && port) {
-      for (const pid of await pidsListeningOnPort(port)) {
-        await killTree({ pid }).catch(() => {});
-        stopped = true;
+      // Three rounds instead of one: a wrapper that respawns its child between
+      // our kill and the next /health poll is still ours to stop, and the
+      // children (the engine holding VRAM) are killed before the listener so a
+      // dead listener cannot orphan them.
+      for (let round = 0; round < 3 && up; round += 1) {
+        const listeners = await pidsListeningOnPort(port);
+        if (!listeners.length) break;
+        const list = await listProcesses({ fresh: true });
+        for (const pid of listeners) {
+          for (const child of (list ? descendantsOf(pid, list) : []).reverse()) await forceKill(child.pid);
+          await forceKill(pid);
+          stopped = true;
+        }
+        await sleep(400);
+        up = await this.alive(server, 1000);
       }
-      up = await this.alive(server, 1000);
     }
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline && up) {
@@ -1388,7 +1415,7 @@ export class ExternalLocalServers {
     // Silent «выгружено» while the server keeps answering was the bug: say so.
     if (up) {
       throw failure('LOCAL_UNLOAD_FAILED',
-        `${server.provider} всё ещё отвечает на ${server.baseUrl}/health${stopped ? ' — процесс не остановился' : ' — процесс не найден (маркеры: ' + this.processMarkers(server).join(', ') + ')'}.`);
+        `${server.provider} всё ещё отвечает на ${server.baseUrl}/health${stopped ? ' — процесс не остановился (не хватило прав: запусти TaskBridge от имени администратора или останови сервер там, откуда он запущен)' : ' — процесс не найден (маркеры: ' + this.processMarkers(server).join(', ') + ')'}.`);
     }
     return { provider: server.provider, status: 'unloaded' };
   }
