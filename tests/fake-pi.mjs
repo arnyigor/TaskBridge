@@ -651,8 +651,12 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     send({ type: 'message_end', message: user });
     send({ type: 'message_start', message: { role: 'assistant', content: [] } });
     const gate = command.message.includes('approve-me');
-    send({ type: 'tool_execution_start', toolCallId: `call-${turn}`, toolName: gate ? 'bash' : 'read', args: gate ? { command: 'rm -rf /tmp/example' } : { path: 'example.txt' } });
-    if (gate) {
+    // `no-tools` — тот же ключ, что и в startTurn: ход без единого инструмента.
+    // Нужен сценариям, где внутри сообщения нет границы инструмента (INT-07: у
+    // закрытого сообщения без границы промежуточные дельты обязаны исчезнуть).
+    const withTools = !command.message.includes('no-tools');
+    if (withTools) send({ type: 'tool_execution_start', toolCallId: `call-${turn}`, toolName: gate ? 'bash' : 'read', args: gate ? { command: 'rm -rf /tmp/example' } : { path: 'example.txt' } });
+    if (withTools && gate) {
       approvalGate(`call-${turn}`, 'bash', { command: 'rm -rf /tmp/example' }).then(decision => {
         if (streaming) {
           send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'bash', isError: decision !== 'ALLOW_ONCE', ...(decision !== 'ALLOW_ONCE' ? { errorMessage: `blocked: ${decision}` } : {}) });
@@ -671,8 +675,10 @@ readline.createInterface({ input: process.stdin }).on('line', async line => {
     // Shaped like real Pi: the update carries the output so far as an object,
     // the end carries the whole result (content parts).
     const readResult = { content: [{ type: 'text', text: 'hello from example.txt' }] };
-    send({ type: 'tool_execution_update', toolCallId: `call-${turn}`, toolName: 'read', args: { path: 'example.txt' }, partialResult: readResult });
-    send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false, result: readResult });
+    if (withTools) {
+      send({ type: 'tool_execution_update', toolCallId: `call-${turn}`, toolName: 'read', args: { path: 'example.txt' }, partialResult: readResult });
+      send({ type: 'tool_execution_end', toolCallId: `call-${turn}`, toolName: 'read', isError: false, result: readResult });
+    }
     // `many-tools`: more successes than the evidence list keeps (bounded at 10),
     // `huge-output`: one result far larger than an excerpt (bounded at 240 chars).
     // Both are keyed off the prompt text like every other fixture mode.

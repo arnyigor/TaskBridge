@@ -2688,7 +2688,7 @@ async function handleRequest(req, res) {
       // They are answers about that command, not server faults: a 5xx would make
       // a retrying client treat them as an outage. ACCEPTED (still in flight) is
       // the one worth repeating later — the repeat returns the saved result.
-      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED', 'REVISION_CONFLICT'].includes(error.code) ? 409
+      : ['BUSY', 'MODEL_BUSY', 'SESSION_UNAVAILABLE', 'SESSION_INVALID', 'SOURCE_MOVED', 'NOTHING_TO_APPLY', 'CONFLICT', 'UNKNOWN_AFTER_CRASH', 'ACCEPTED', 'NOT_ALLOWED', 'CONTEXT_CHANGED', 'REVISION_CONFLICT', 'ALREADY_QUEUED'].includes(error.code) ? 409
       : error.code === 'AUTH_REQUIRED' ? 401
       : ['FILE_FORBIDDEN', 'ORIGIN_FORBIDDEN', 'FILE_OPEN_LOCAL_ONLY', 'MACHINE_ACTION_FORBIDDEN'].includes(error.code) ? 403
       : error.code === 'RATE_LIMITED' ? 429

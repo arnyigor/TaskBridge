@@ -257,10 +257,12 @@ test('the media policy really reaches the Pi that TaskBridge spawns', { timeout:
   await settle(fixture.api, created.id);
 
   const spawned = JSON.parse(await fs.readFile(dump, 'utf8'));
-  const extensionIndex = spawned.argv.indexOf('-e');
-  assert.ok(extensionIndex >= 0, `Pi got -e: ${spawned.argv.join(' ')}`);
-  assert.ok(spawned.argv[extensionIndex + 1].endsWith(path.join('pi-extension', 'taskbridge-media.js')),
-    `Pi got the media extension: ${spawned.argv[extensionIndex + 1]}`);
+  // Pi gets several `-e` extensions (external files first, then the media one), so
+  // the media extension is looked up among all of them instead of assuming the first.
+  const extensions = spawned.argv.reduce((acc, value, index) => (index > 0 && spawned.argv[index - 1] === '-e' ? [...acc, value] : acc), []);
+  assert.ok(extensions.length > 0, `Pi got -e: ${spawned.argv.join(' ')}`);
+  assert.ok(extensions.some(value => value.endsWith(path.join('pi-extension', 'taskbridge-media.js'))),
+    `Pi got the media extension: ${extensions.join(', ')}`);
   assert.equal(spawned.env.TASKBRIDGE_MEDIA_KEEP_IMAGES, '2');
   assert.equal(spawned.env.TASKBRIDGE_MEDIA_IMAGE_BUDGET_MB, '2');
   assert.equal(spawned.env.TASKBRIDGE_MEDIA_REQUEST_BUDGET_MB, '40');

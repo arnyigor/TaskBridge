@@ -26,7 +26,11 @@ export async function startFixture(port, overrides = {}) {
   if (!port) port = await allocatePort();
   const fixtureConfig = {
     server: { host: '127.0.0.1', port, ...(overrides.server || {}) },
-    pi: { command, projectTrust: 'deny' },
+    // Native Pi sessions are scanned inside the fixture root only. The default
+    // roots include <home>/.pi/agent/sessions — the operator's real archive (912
+    // sessions on the dev machine, ~1 s of realpath/walk per listing), which made
+    // route probes slow and non-deterministic instead of hermetic.
+    pi: { command, projectTrust: 'deny', sessionRoots: [path.join(root, 'data', 'pi-sessions')] },
     localRuntime: {},
     projects: [{ id: 'fixture', name: 'Тестовая сессия', path: root, useWorktree: false }],
     ...(overrides.root || {})

@@ -247,7 +247,10 @@ test('MCP endpoints switch mode, import from Pi and toggle servers', { timeout: 
   assert.equal(reimported.servers.every(s => !s.disabled), true);
 });
 
-test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compact, cancel, deletion', { timeout: 20000 }, async t => {
+// Two server restarts plus a dozen sequential round-trips: ~20 s alone on a dev
+// machine, so the 20 s cap only worked when the suite ran it first. Same headroom
+// as its long siblings instead of a flaky limit.
+test('HTTP + Pi RPC: follow-up, history replay, SSE cursor, rejected send, compact, cancel, deletion', { timeout: 60000 }, async t => {
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api, base } = fixture;

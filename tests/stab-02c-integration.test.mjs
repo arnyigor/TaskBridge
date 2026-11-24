@@ -174,12 +174,19 @@ test('INT-07: после удаления промежуточных message_upd
   const fixture = await startFixture();
   t.after(() => fixture.close());
   const { api, base } = fixture;
-  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первый ход' });
+  // Оба хода без инструментов: с вызовом инструмента внутри сообщения дельты
+  // сохраняются намеренно (см. комментарий к prompt ниже), и «0 дельт» переставало
+  // бы что-либо проверять.
+  const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'первый ход no-tools' });
   const id = created.id;
   assert.equal((await settle(api, id)).status, 'SUCCEEDED');
 
   // Один дельта-кадр на символ: строк message_update заведомо больше десятка.
-  const prompt = 'stream-many подробный ответ';
+  // `no-tools` — ключ фикстуры: ход без вызова инструмента. Внутри сообщения нет
+  // границы инструмента, поэтому дельты этого хода ничем не оправданы и обязаны
+  // исчезнуть (с границей инструмента они сохраняются намеренно — см.
+  // trimStreamingDeltas и store.pruneStreamingDeltas).
+  const prompt = 'stream-many no-tools подробный ответ';
   await api(`/api/tasks/${id}/message`, { text: prompt });
   const finished = await settle(api, id);
   assert.equal(finished.status, 'SUCCEEDED', finished.error || '');

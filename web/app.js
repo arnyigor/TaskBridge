@@ -350,6 +350,12 @@ function selectedMessages(texts) {
   return texts.map(text => String(text ?? '').trim()).filter(Boolean);
 }
 
+// One projection for what the clipboard receives: the same non-empty texts the
+// counter shows, joined the way they leave the selection.
+function selectedMessagesText(texts) {
+  return selectedMessages(texts).join('\n\n');
+}
+
 function messageCopyButton(turn) {
   return [...turn.querySelectorAll('.copyBtn')].find(btn => MESSAGE_COPY_TITLES.includes(btn.title)) || null;
 }
@@ -399,7 +405,7 @@ function stopSelectingMessages() {
 async function copySelectedMessages() {
   const texts = selectedMessages(selectedTurnTexts());
   if (!texts.length) return;
-  const ok = await copyText(texts.join('\n\n'));
+  const ok = await copyText(selectedMessagesText(texts));
   stopSelectingMessages();
   showNotice(ok
     ? (texts.length === 1 ? 'Сообщение скопировано' : `Скопировано сообщений: ${texts.length}`)

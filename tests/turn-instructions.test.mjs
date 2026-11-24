@@ -153,8 +153,10 @@ test('режим hook: сообщение оператора дословно, �
   assert.equal(delivered.message, prompt, 'в hook-режиме сообщение уходит без блока Task instructions');
 
   const argv = JSON.parse(fs.readFileSync(dump, 'utf8')).argv;
-  const extension = argv[argv.indexOf('-e') + 1];
-  assert.match(extension, /taskbridge-turn-instructions\.js$/, JSON.stringify(argv));
+  // `-e` идёт несколько раз (external files, media, turn instructions): ищем свою
+  // расширение среди всех значений, а не на фиксированной позиции.
+  const extensions = argv.reduce((acc, value, index) => (index > 0 && argv[index - 1] === '-e' ? [...acc, value] : acc), []);
+  assert.ok(extensions.some(value => /taskbridge-turn-instructions\.js$/.test(value)), JSON.stringify(argv));
 });
 
 test('режим hook: follow-up тоже дословен, вложения остаются в тексте', { timeout: 40000 }, async t => {

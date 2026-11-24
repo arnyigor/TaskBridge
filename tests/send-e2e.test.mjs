@@ -36,7 +36,9 @@ test('HTTP pending actions target IDs and send-now steers into the active run', 
   const { api } = fixture;
   const created = await api('/api/tasks', { projectId: 'fixture', prompt: 'slow initial' });
   await waitFor(async () => (await api(`/api/tasks/${created.id}/state`)).state?.isStreaming, 'Pi streaming');
-  for (let i = 0; i < 3; i++) await api(`/api/tasks/${created.id}/message`, { text: 'slow identical', queue: true });
+  // Три РАЗНЫХ текста: одинаковый текст теперь отклоняется штатным ALREADY_QUEUED
+  // (tests/queue-dedupe.test.mjs), а здесь проверяется адресация pending по id.
+  for (let i = 0; i < 3; i++) await api(`/api/tasks/${created.id}/message`, { text: `slow identical ${i}`, queue: true });
   const [first, second, third] = (await api(`/api/tasks/${created.id}`)).pendingPrompts;
   for (let i = 0; i < 2; i++) await api(`/api/tasks/${created.id}/pending?pendingId=${second.id}`, null, 'DELETE');
   assert.deepEqual((await api(`/api/tasks/${created.id}`)).pendingPrompts.map(p => p.id), [first.id, third.id]);
