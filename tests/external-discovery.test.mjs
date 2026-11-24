@@ -8,6 +8,7 @@ import {
   endpointKey,
   isLocalBaseUrl,
   portOfBaseUrl,
+  pickConfigForPort,
   readServerConfigs,
   discoverExternalServers
 } from '../src/external-discovery.mjs';
@@ -15,6 +16,45 @@ import {
 function tmpdir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'tb-discovery-'));
 }
+
+test('pickConfigForPort() takes the config that belongs to the model, not the first alphabetically', () => {
+  // Оба профиля Strata слушают один порт (они взаимоисключающие). Раньше побеждал
+  // первый по алфавиту — maxq, — и «Контекст» в TaskBridge правил не тот файл.
+  const maxq = { cfg: { name: 'strata-maxq.json', port: 8086 } };
+  const base = { cfg: { name: 'strata-ud-iq4xs-v31.json', port: 8086 } };
+  assert.equal(pickConfigForPort([maxq, base], 'qwen3.8-flash-next-ud-iq4xs-v31').cfg.name, 'strata-ud-iq4xs-v31.json');
+  assert.equal(pickConfigForPort([base, maxq], 'qwen3.8-flash-next-ud-iq4xs-v31').cfg.name, 'strata-ud-iq4xs-v31.json');
+  // Самое длинное совпадение выигрывает: `ud-iq4xs-v31` точнее, чем `ud`.
+  const short = { cfg: { name: 'strata-ud.json' } };
+  assert.equal(pickConfigForPort([short, base], 'qwen3.8-flash-next-ud-iq4xs-v31').cfg.name, 'strata-ud-iq4xs-v31.json');
+  // Ничего не совпало — прежнее поведение (первый), чтобы сервер не терялся.
+  assert.equal(pickConfigForPort([maxq, base], 'unknown-model').cfg.name, 'strata-maxq.json');
+  assert.equal(pickConfigForPort([base], 'x').cfg.name, 'strata-ud-iq4xs-v31.json');
+  assert.equal(pickConfigForPort([], 'x'), null);
+});
+
+test('readServerConfigs skips a config that belongs to another engine', () => {
+  // Панель кладёт профиль Basalt рядом с конфигами Strata, и он подходит под
+  // glob `strata-*.json`. Пока он попадал в источник Strata, кнопка «Контекст»
+  // писала в него флаги Strata и портила профиль (--kv int8 + значение vision
+  // вместо --vision, --max-context чужой модели).
+  const dir = tmpdir();
+  fs.writeFileSync(path.join(dir, 'strata-ud-iq4xs-v31.json'),
+    JSON.stringify({ port: 8086, args: ['--max-context', '204800'] }));
+  fs.writeFileSync(path.join(dir, 'strata-basalt.json'),
+    JSON.stringify({ engine: 'basalt', port: 8081, exe: 'basalt.exe', args: ['serve', '--max-context', '262144'] }));
+  fs.writeFileSync(path.join(dir, 'strata-foreign-vision.json'),
+    JSON.stringify({ engine: 'Strata', port: 8087, args: [] }));
+  const found = readServerConfigs(dir, 'strata-*.json');
+  assert.deepEqual(found.map(cfg => cfg.name), ['strata-foreign-vision.json', 'strata-ud-iq4xs-v31.json']);
+  // Явный engine источника (Basalt) берёт только свои конфиги.
+  fs.writeFileSync(path.join(dir, 'strata-basalt-profile.json'),
+    JSON.stringify({ engine: 'basalt', port: 8082 }));
+  assert.deepEqual(
+    readServerConfigs(dir, 'strata-*.json', { engine: 'basalt' }).map(cfg => cfg.name),
+    ['strata-basalt-profile.json', 'strata-basalt.json']
+  );
+});
 
 test('isLocalBaseUrl takes only this machine', () => {
   assert.equal(isLocalBaseUrl('http://127.0.0.1:8083/v1'), true);

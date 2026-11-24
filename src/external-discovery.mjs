@@ -67,7 +67,7 @@ function maxContextFromArgs(args) {
  * Читается по одному JSON на файл; битый файл просто пропускается — обнаружение
  * не должно ронять статус из-за чужого мусора в каталоге.
  */
-export function readServerConfigs(dir, pattern = 'strata-*.json') {
+export function readServerConfigs(dir, pattern = 'strata-*.json', { engine = 'strata' } = {}) {
   if (!dir || !fs.existsSync(dir)) return [];
   const mask = String(pattern || 'strata-*.json');
   const prefix = mask.split('*')[0];
@@ -84,6 +84,14 @@ export function readServerConfigs(dir, pattern = 'strata-*.json') {
     const file = path.join(dir, name);
     try {
       const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      // Конфиг чужого движка не наш, хотя имя подходит под Strata-glob: панель
+      // кладёт в профиль Basalt поле `engine` и другую схему (exe/args/cwd).
+      // Пока он попадал в источник Strata, кнопка «Контекст» в TaskBridge писала
+      // в него флаги Strata и портила профиль (--kv int8 + значение vision на
+      // месте --vision, --max-context из чужой модели).
+      // Конфиг без поля `engine` — исторический конфиг Strata, чужому движку он не принадлежит.
+      const declared = cfg.engine ? String(cfg.engine).toLowerCase() : 'strata';
+      if (declared !== String(engine).toLowerCase()) continue;
       const port = Number(cfg.port);
       if (!Number.isFinite(port) || port <= 0) continue;
       out.push({
@@ -163,7 +171,26 @@ export function readSourceConfigs(source) {
     const one = file ? readBasaltConfig(file) : null;
     return one ? [one] : [];
   }
-  return readServerConfigs(source.dir, source.configGlob);
+  return readServerConfigs(source.dir, source.configGlob, { engine: source.engine || 'strata' });
+}
+
+/**
+ * Какой из конфигов на этом порту относится к модели. Признак — имя файла без
+ * префикса `strata-` входит в id модели (`ud-iq4xs-v31` ⊂
+ * `qwen3.8-flash-next-ud-iq4xs-v31`); из подходящих берём самое длинное
+ * совпадение. Ничего не совпало (или совпало несколько одинаково длинных) —
+ * первый по порядку, как раньше, чтобы обнаружение не теряло сервер.
+ */
+export function pickConfigForPort(hits, modelId) {
+  const list = Array.isArray(hits) ? hits.filter(Boolean) : [];
+  if (list.length <= 1) return list[0] || null;
+  const needle = String(modelId || '').toLowerCase();
+  if (!needle) return list[0];
+  const scored = list
+    .map(hit => ({ hit, stem: String(hit.cfg && hit.cfg.name || '').replace(/\.json$/iu, '').replace(/^strata-/iu, '').toLowerCase() }))
+    .filter(item => item.stem && needle.includes(item.stem))
+    .sort((a, b) => b.stem.length - a.stem.length);
+  return scored.length ? scored[0].hit : list[0];
 }
 
 export function discoverExternalServers({ agentDir, discovery = {}, configured = [], exclude = [] } = {}) {
@@ -194,10 +221,16 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
 
   // Несколько источников: папка Strata (configGlob) и папки других движков (Basalt: один конфиг).
   const sources = discoverySources(discovery);
-  const byPort = new Map();       // порт -> {cfg, source}
+  // На один порт может приходиться несколько конфигов одного движка: у Strata это
+  // взаимоисключающие профили одной модели (базовый и «максимум качества»), оба на
+  // 8086. Раньше побеждал первый по алфавиту, и строка модели привязывалась к
+  // чужому профилю — «Контекст» правил не тот файл. Теперь кандидаты собираются
+  // списком и выбираются по модели.
+  const byPort = new Map();       // порт -> [{cfg, source}]
   for (const source of sources) {
     for (const cfg of readSourceConfigs(source)) {
-      if (!byPort.has(cfg.port)) byPort.set(cfg.port, { cfg, source });
+      if (!byPort.has(cfg.port)) byPort.set(cfg.port, []);
+      byPort.get(cfg.port).push({ cfg, source });
     }
   }
   const routerPort = portOfBaseUrl(discovery.healthUrl);
@@ -222,7 +255,8 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
     // Главный признак «наш сервер»: в каталоге установки есть его конфиг с этим
     // портом. Иначе мы не знаем ни команды запуска, ни контекста — и не выдаём
     // чужой локальный эндпоинт (прокси, релей) за модель Strata.
-    const hit = byPort.get(port);
+    const first = (Array.isArray(block.models) ? block.models : [])[0] || {};
+    const hit = pickConfigForPort(byPort.get(port), first.id || provider);
     if (!hit) continue;
     const cfg = hit.cfg;
     const source = hit.source;
@@ -247,7 +281,6 @@ export function discoverExternalServers({ agentDir, discovery = {}, configured =
       : [path.join(dir, python), path.join(dir, server), '--engine', engine,
          '--config', cfg.file, '--port', String(port)];
 
-    const first = (Array.isArray(block.models) ? block.models : [])[0] || {};
     const entry = {
       provider,
       model: first.id || provider,
